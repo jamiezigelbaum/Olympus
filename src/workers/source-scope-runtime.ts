@@ -25,6 +25,7 @@ import {
   assertMailSourceScopeApproved,
   compileGmailMailScope,
   defaultMailSourceScopeStatePath,
+  mailScopeOwnerTierRules,
   readMailSourceScopeApproval,
   type MailScopeSelection,
   type MailSourceScopeApprovalSnapshot,
@@ -381,7 +382,7 @@ export function gmailConnectorScopeFromApproval(approval: { mailScope: MailScope
     ...(compiled.skippedLabelIds.length > 0 ? { skippedLabelIds: compiled.skippedLabelIds } : {}),
     ...(approval.mailScope.skipSenders.length > 0 ? { skipSenders: approval.mailScope.skipSenders } : {}),
     ...(approval.mailScope.alwaysPrivateSenders.length > 0
-      ? { alwaysPrivateSenders: approval.mailScope.alwaysPrivateSenders }
+      ? { ownerTierRules: mailScopeOwnerTierRules(approval.mailScope) }
       : {}),
   };
 }

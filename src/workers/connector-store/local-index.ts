@@ -31,6 +31,7 @@ import { dirname } from 'node:path';
 import { Database } from 'bun:sqlite';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
@@ -50,7 +51,7 @@ import {
 import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { classifyItemTier, type ClassifyItemTierInput } from '../classification/engine.ts';
 import { TierLedger, tierLedgerPathForStore } from '../classification/tier-ledger.ts';
-import { classifyContentTier } from '../classification/tier-classifier.ts';
+import { classifyContentTier, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -705,10 +706,13 @@ export interface ConnectorStoreClassificationOptions {
   baselineTrustDomain?: SourceTrustDomain;
   sensitivityMap?: SensitivityMap;
   /**
-   * Owner-flagged senders (substring match on the sender field) the shared
-   * engine raises to S4 as a detector; clean rules never lower them.
+   * Owner tier rules this lane's placement honours. Only RAISING rules
+   * (Private, Secrets) move placement: an item a rule makes Private is placed
+   * in the secure_local store, never in a store that embeds with a cloud
+   * model. The same rules go to the recorded decision (tierClassification),
+   * so the ledger names the rule as the reason.
    */
-  sensitiveSenderPatterns?: readonly string[];
+  ownerRules?: readonly OwnerTierRule[];
 }
 
 export interface ConnectorStoreFullSnapshotScope {
@@ -8151,7 +8155,7 @@ interface NormalizedConnectorStoreClassification {
   baselineTrustTier: SourceTrustTier;
   baselineTrustDomain: SourceTrustDomain;
   sensitivityMap?: SensitivityMap;
-  sensitiveSenderPatterns?: readonly string[];
+  ownerRules?: readonly OwnerTierRule[];
 }
 
 function normalizeClassificationOptions(
@@ -8162,9 +8166,7 @@ function normalizeClassificationOptions(
     baselineTrustTier: options.baselineTrustTier ?? 'S3',
     baselineTrustDomain: options.baselineTrustDomain ?? 'internal',
     ...(options.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}),
-    ...(options.sensitiveSenderPatterns?.length
-      ? { sensitiveSenderPatterns: [...options.sensitiveSenderPatterns] }
-      : {}),
+    ...(options.ownerRules?.length ? { ownerRules: [...options.ownerRules] } : {}),
   };
 }
 
@@ -8207,10 +8209,19 @@ function classifyConnectorStoreItem(
   // this changes for a map that was already configured.
   const classified = classifyItemTier(classificationInputFromRawItem(item), {
     ...(classification.sensitivityMap ? { sensitivityMap: classification.sensitivityMap } : {}),
-    ...(classification.sensitiveSenderPatterns
-      ? { sensitiveSenderPatterns: classification.sensitiveSenderPatterns }
-      : {}),
   });
+  // The S5 floor outranks every rule: a secret is tombstoned, never placed.
+  if (classified.tier === 'S5') {
+    return buildSourceSensitivity({ trustTier: 'S5', trustDomain: 'secure_local' });
+  }
+  // A raising owner rule (e.g. the mail scope's "always Private" senders)
+  // places the item in the secure_local store, through the same matcher the
+  // recorded decision uses. Never a lowering: that is phase P1b's routing.
+  if (classification.ownerRules?.some((rule) =>
+    (rule.tier === 'secure' || rule.tier === 'secrets')
+    && ownerRuleMatches(rule, placementSignalsFromRawItem(item), item.identity.provider))) {
+    return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+  }
   if (classified.decidedBy === 'sensitivity_map') {
     return buildSourceSensitivity({
       trustTier: classified.tier,
@@ -8243,6 +8254,16 @@ function classifyConnectorStoreItem(
 /** Ordinal position in the declared tier ladder; `S4+` sorts above `S4`. */
 function trustTierRank(tier: SourceTrustTier): number {
   return SOURCE_TRUST_TIERS.indexOf(tier);
+}
+
+/** The name-level facts an owner rule can match, read from the stored item. */
+function placementSignalsFromRawItem(item: RawItem): SourceClassificationSignals {
+  const sender = metadataString(item.metadata, 'sender') ?? metadataString(item.metadata, 'from');
+  const labels = item.metadata['labels'];
+  return {
+    ...(sender ? { sender } : {}),
+    ...(Array.isArray(labels) ? { labels: labels.filter((label): label is string => typeof label === 'string') } : {}),
+  };
 }
 
 function classificationInputFromRawItem(item: RawItem): ClassifyItemTierInput {

@@ -15,6 +15,7 @@ import {
 import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { gmailAfterBound, gmailBeforeBound } from '../../core/mail-source-scope.ts';
 import { senderMatchesRule } from '../../core/sender-rules.ts';
+import type { OwnerTierRule } from '../classification/tier-classifier.ts';
 import {
   createEnvCredentialBroker,
   requireBearerTokenCredentialSession,
@@ -124,11 +125,12 @@ export interface GmailConnectorScope {
   /** Skip-list senders; re-checked on every fetched message (domain rules cover subdomains). */
   skipSenders?: readonly string[];
   /**
-   * Addresses or @domains the owner marked "always Private". Their mail is
-   * raised to S4, so it lands in the secure_local store with private
-   * embeddings and never reaches the internal (cloud-embedded) store.
+   * The owner's "always Private" senders as owner tier rules (sender kind,
+   * tier Private, force). The lane places matching mail only in the
+   * secure_local store (private embeddings) and records the rule as the
+   * ledger reason.
    */
-  alwaysPrivateSenders?: readonly string[];
+  ownerTierRules?: readonly OwnerTierRule[];
   /**
    * Whether Olympus already holds this message (in either Gmail store). Held
    * mail is never re-observed under a scope; see listItems.
@@ -606,15 +608,15 @@ export class GoogleGmailSourceConnector implements SourceConnector {
 
 export function gmailConnectorStoreClassification(
   sensitivityMap: SensitivityMap | undefined,
-  alwaysPrivateSenders: readonly string[] = [],
+  ownerRules: readonly OwnerTierRule[] = [],
 ): ConnectorStoreClassificationOptions {
   return {
     baselineTrustTier: 'S3',
     baselineTrustDomain: 'internal',
     ...(sensitivityMap ? { sensitivityMap } : {}),
-    // The owner's "always Private" senders, through the engine's existing
-    // sensitive-sender raise: S4, secure_local, private embeddings only.
-    ...(alwaysPrivateSenders.length > 0 ? { sensitiveSenderPatterns: [...alwaysPrivateSenders] } : {}),
+    // Owner rules that raise (the mail scope's "always Private" senders) place
+    // matching mail in the secure_local store only: private embeddings.
+    ...(ownerRules.length > 0 ? { ownerRules: [...ownerRules] } : {}),
   };
 }
 

@@ -19,6 +19,8 @@ const MODULES = [
   'src/workers/classification/tier-ledger-path.ts',
   'src/workers/connector-store/tier-placement.ts',
   'src/core/classification-signals.ts',
+  // The one sender matcher owner sender rules use; scanned like the rest.
+  'src/core/sender-rules.ts',
 ];
 
 // Everything these modules may import. A new import has to be added here on
@@ -28,6 +30,7 @@ const IMPORT_ALLOWLIST = new Set([
   'node:path',
   'bun:sqlite',
   '../../core/contracts.ts',
+  '../../core/sender-rules.ts',
   '../../core/sensitivity-map.ts',
   '../../core/source-index/types.ts',
   '../../core/sqlite-migrations.ts',

@@ -38,7 +38,9 @@ import { GoogleDailyRequestBudget } from '../src/workers/google-connectors/reque
 import { gmailConnectorScopeFromApproval } from '../src/workers/source-scope-runtime.ts';
 import { promotedWatermark } from '../src/workers/google-connectors/gmail.ts';
 import { senderMatchesRule } from '../src/core/sender-rules.ts';
-import { classifyItemTier } from '../src/workers/classification/engine.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
+import { mailScopeOwnerTierRules } from '../src/core/mail-source-scope.ts';
+import { closeSqliteStore } from '../src/core/sqlite-store.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const NOW = new Date('2026-09-23T12:00:00.000Z');
@@ -89,7 +91,7 @@ function readDb<T>(path: string, read: (db: Database) => T): T {
   try {
     return read(db);
   } finally {
-    db.close();
+    closeSqliteStore(db, { checkpoint: false });
   }
 }
 
@@ -217,7 +219,8 @@ describe('"always Private" is enforced', () => {
     const cloudInputs: string[] = [];
     const privateInputs: string[] = [];
     const scope = gmailConnectorScopeFromApproval({ mailScope: withCutoff({ alwaysPrivateSenders: ['@clinic.example'] }) });
-    expect(scope.alwaysPrivateSenders).toEqual(['@clinic.example']);
+    expect(scope.ownerTierRules).toMatchObject([{ match: { kind: 'sender', value: '@clinic.example' }, tier: 'secure', strength: 'force' }]);
+    const ruleId = scope.ownerTierRules![0]!.id;
     const outcome = await laneFor(stores, client, {
       scope, internal: recordingProvider('cloud', cloudInputs), secure: recordingProvider('local', privateInputs),
     }).pull({ max_items: 50 });
@@ -229,11 +232,11 @@ describe('"always Private" is enforced', () => {
     expect(cloudInputs.join('\n')).not.toContain('Body of clinic');
     expect(privateInputs.join('\n')).toContain('Body of clinic');
 
-    // The connector's own classify (used on the fetched-content path) agrees.
-    const connector = new GoogleGmailSourceConnector({ apiClient: client, account: 'personal', env: {}, scope });
-    const page = await collect(connector.listItems({ limit: 50 }));
-    expect(connector.classify(page.items.find((item) => item.identity.providerItemId === 'clinic')!))
-      .toMatchObject({ trustTier: 'S4', trustDomain: 'secure_local' });
+    // The four-tier ledger records the owner rule as the reason, Private both layers.
+    const recorded = stores.secureStore.tierLedger()?.getCurrent(identity('clinic'));
+    expect(recorded).toMatchObject({ metadataTier: 'secure', contentTier: 'secure', decidedBy: 'owner_rule' });
+    expect(recorded!.reasons).toContain(`metadata:owner_rule:sender:${ruleId}:force`);
+    expect(recorded!.reasons.join(' ')).not.toContain('clinic');
   });
 });
 
@@ -352,14 +355,25 @@ describe('re-review at 537f909b', () => {
     expect(senderMatchesRule('evildr@therapist.example', 'dr@therapist.example')).toBe(false);
   });
 
-  test('"always Private" @domain raises subdomain senders and not look-alike domains', () => {
-    const classify = (sender: string) => classifyItemTier({ sender, subject: 'Hello', text: 'See you Tuesday.' }, {
-      sensitiveSenderPatterns: ['@therapist.example'],
+  test('"always Private" @domain raises subdomain senders and not look-alikes or display-name addresses', () => {
+    const rules = mailScopeOwnerTierRules({ alwaysPrivateSenders: ['@therapist.example'] });
+    const decide = (sender: string) => classifyItemTiers({ signals: { sender, title: 'Hello' }, provider: 'gmail' }, { rules });
+    expect(decide('Appointments <appointments@mail.therapist.example>')).toMatchObject({ metadataTier: 'secure', decidedBy: 'owner_rule' });
+    expect(decide('x@evil-therapist.example').decidedBy).not.toBe('owner_rule');
+    // An address inside the display name is not the sender.
+    expect(decide('"dr@therapist.example" <spam@evil.example>').decidedBy).not.toBe('owner_rule');
+    // A bare fragment is honoured by substring only for a raising rule.
+    const fragment = (tier: 'secure' | 'public') => classifyItemTiers({ signals: { sender: 'x@clinic.example' }, provider: 'gmail' }, {
+      rules: [{ id: 'fragment', match: { kind: 'sender', value: 'clinic' }, tier, strength: 'force' }],
     });
-    expect(classify('Appointments <appointments@mail.therapist.example>')).toMatchObject({
-      tier: 'S4', trustDomain: 'secure_local', signals: ['sensitive_sender_override'],
-    });
-    expect(classify('x@evil-therapist.example').signals).not.toContain('sensitive_sender_override');
+    expect(fragment('secure').decidedBy).toBe('owner_rule');
+    expect(fragment('public').decidedBy).not.toBe('owner_rule');
+  });
+
+  test('skip and private rules match the actual sender address only', () => {
+    expect(senderMatchesRule('"news@shop.example" <spam@evil.example>', '@shop.example')).toBe(false);
+    expect(senderMatchesRule('Shop <news@shop.example>', '@shop.example')).toBe(true);
+    expect(senderMatchesRule('news@shop.example', '@shop.example')).toBe(true);
   });
 
   test('"always Private" subdomain mail goes to the secure store, never the cloud embedder', async () => {

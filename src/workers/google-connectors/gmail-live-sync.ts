@@ -204,10 +204,15 @@ export function createGmailConnectorStoreSyncHandler(
   if (options.secureEmbeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.secureEmbeddingProvider)) {
     throw new Error('Gmail secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
-  const classification = gmailConnectorStoreClassification(
-    options.sensitivityMap ?? loadGoogleSensitivityMap(env),
-    options.scope?.alwaysPrivateSenders ?? [],
-  );
+  const sensitivityMap = options.sensitivityMap ?? loadGoogleSensitivityMap(env);
+  const ownerRules = options.scope?.ownerTierRules ?? [];
+  const classification = gmailConnectorStoreClassification(sensitivityMap, ownerRules);
+  // The recorded four-tier decision sees the same owner rules, so the ledger
+  // names the rule (metadata:owner_rule:sender:<id>:force) as the reason.
+  const tierClassification = {
+    ...(sensitivityMap ? { sensitivityMap } : {}),
+    ...(ownerRules.length > 0 ? { rules: ownerRules } : {}),
+  };
   // Under a scope, mail either store already holds is never re-observed: a
   // re-read could only swap a stored body for a metadata-only row or re-tier
   // an item whose vectors exist, and both would discard existing chunks and
@@ -250,6 +255,7 @@ export function createGmailConnectorStoreSyncHandler(
     const sync = {
       fetchContent: true,
       classification,
+      tierClassification,
       ...(input.maxItems !== undefined ? { maxItems: input.maxItems } : {}),
       ...(input.cursor ? { cursor: input.cursor } : {}),
       ...(input.reconcile

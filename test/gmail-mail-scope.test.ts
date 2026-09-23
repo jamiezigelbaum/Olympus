@@ -112,11 +112,13 @@ describe('mail scope approval', () => {
     });
     expect(first.status).toBe('approved');
     expect(first.mailScope?.contentAfter).toBe('2024-09-23T00:00:00.000Z');
-    // "Always Private" is stored as owner tier rules in the design's §2.4 shape.
+    // "Always Private" is stored as P1a owner tier rules (sender, Private, force)
+    // with content-free ids.
     expect(first.ownerTierRules).toEqual([
-      { source: 'gmail.email', match: { sender: '@bank.example' }, tier: 'secure', strength: 'force', origin: 'mail_scope_picker' },
-      { source: 'gmail.email', match: { sender: 'doctor@clinic.example' }, tier: 'secure', strength: 'force', origin: 'mail_scope_picker' },
+      { id: expect.stringMatching(/^mail-scope-always-private-[0-9a-f]{12}$/), source: 'gmail', match: { kind: 'sender', value: '@bank.example' }, tier: 'secure', strength: 'force' },
+      { id: expect.stringMatching(/^mail-scope-always-private-[0-9a-f]{12}$/), source: 'gmail', match: { kind: 'sender', value: 'doctor@clinic.example' }, tier: 'secure', strength: 'force' },
     ]);
+    expect(JSON.stringify(first.ownerTierRules!.map((rule) => rule.id))).not.toContain('clinic');
     expect(readMailSourceScopeApproval({ registry: gmailRegistry(), statePath })).toMatchObject({
       status: 'approved', revision: first.revision,
     });

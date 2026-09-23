@@ -24,6 +24,7 @@ import {
   type SourceScopeConnectedHandleRegistry,
 } from './source-scope-approval.ts';
 import type { OlympusMailScopeDraft } from '../control-ui-contract.ts';
+import type { OwnerTierRule } from '../workers/classification/tier-classifier.ts';
 
 /**
  * The picker's bounded provider cost. One load spends at most
@@ -115,26 +116,21 @@ export interface MailScopeSelection {
 }
 
 /**
- * Owner tier rule in the design's §2.4 shape. The four-tier classifier (P1a)
- * is being built in parallel and its rule file (`~/.olympus/tier-rules.json`)
- * is not on main yet, so the picker stores its rules here, inside the scope
- * approval, in exactly the shape that file will hold.
+ * The picker's "always Private" list as P1a owner tier rules (design §2.4,
+ * `OwnerTierRule` in workers/classification/tier-classifier.ts): one `sender`
+ * rule per address or @domain, tier Private (`secure`), strength `force`.
+ * The Gmail lane hands them to its store placement (secure_local only) and to
+ * the recorded four-tier decision, whose reason then reads
+ * `metadata:owner_rule:sender:<id>:force`. The id is a content-free digest of
+ * the sender, so a reason never names who wrote.
  *
- * TODO(P2, tier rules): when P1a's rule loader lands, have it read these rules
- * from the mail scope approval (or migrate them into tier-rules.json) so the
- * classifier raises every matching message to Private. Until then they are
- * recorded and shown, and the existing sensitive-sender list remains the only
- * live sender raise.
+ * TODO(P2, tier rules): when the rule file (`~/.olympus/tier-rules.json`)
+ * loader lands, load these alongside it (or migrate them into it).
  */
-export interface MailScopeOwnerTierRule {
-  source: MailSourceScopeId;
-  match: { sender: string };
-  /** Schema-v1 key for the Private tier (TRUST_MODEL "Product tier names"). */
-  tier: 'secure';
-  /** "Always" is an explicit hard rule; item-level raises (Secrets) still apply. */
-  strength: 'force';
-  origin: 'mail_scope_picker';
-}
+export type MailScopeOwnerTierRule = OwnerTierRule;
+
+/** The provider the rules name, matched as data against item identity. */
+const MAIL_SCOPE_RULE_SOURCE = 'gmail';
 
 export interface MailSourceScopeApprovalSnapshot {
   sourceId: MailSourceScopeId;
@@ -304,11 +300,11 @@ export function assertMailSourceScopeApproved(input: {
 /** The design's §2.4 rules the picker's "always Private" list becomes. */
 export function mailScopeOwnerTierRules(scope: Pick<MailScopeSelection, 'alwaysPrivateSenders'>): MailScopeOwnerTierRule[] {
   return scope.alwaysPrivateSenders.map((sender) => ({
-    source: MAIL_SOURCE_SCOPE_ID,
-    match: { sender },
+    id: `mail-scope-always-private-${createHash('sha256').update(sender).digest('hex').slice(0, 12)}`,
+    source: MAIL_SCOPE_RULE_SOURCE,
+    match: { kind: 'sender' as const, value: sender },
     tier: 'secure' as const,
     strength: 'force' as const,
-    origin: 'mail_scope_picker' as const,
   }));
 }
 
