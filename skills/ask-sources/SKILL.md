@@ -39,9 +39,11 @@ Use Olympus source tools, not raw stores.
   corpora by default whenever the sovereignty policy approves a private
   analyst (Argus: a local model or Venice Private) for them. Only Argus reads
   that evidence; you receive the Argus-derived answer plus citation labels
-  (title, path, source, author), secret-scanned and released because item
-  metadata defaults to Personal. You never receive Private source text. When the policy approves no private analyst, or it is
-  down, Olympus leaves Private corpora out and says so in the coverage notes.
+  (title, locator path or link, source, conversation, author),
+  secret-scanned and released because item metadata defaults to Personal.
+  You never receive Private source text. When the policy approves no private
+  analyst, or it is down, Olympus leaves Private corpora out and says so in
+  the coverage notes.
   Omit `corpus_id` so Olympus can search every eligible corpus in one pass.
 - Name `corpus_id` or `corpus_ids` only to intentionally force-narrow because
   the user named a source, a prior result selected a source, or a diagnostic

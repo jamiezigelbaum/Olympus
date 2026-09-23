@@ -408,8 +408,8 @@ Rules:
   model or Venice Private, per preset). That evidence is reasoned over only by
   the approved route. For Private evidence Castor receives the Argus-derived
   answer, which passes the OPSEC release gate, and one citation per cited
-  item: its identifiers plus its labels (title, path, source, conversation,
-  author). The labels are scanned for secret-like text and withheld on a
+  item: its identifiers plus its labels (title, locator such as a path or
+  link, source, conversation, author). The labels are scanned for secret-like text and withheld on a
   match, and are released because item metadata defaults to Personal. Castor
   never receives Private source text. Once the per-item four-tier ledger
   lands, an item whose metadata tier is Private will be cited by opaque

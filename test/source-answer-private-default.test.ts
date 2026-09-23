@@ -174,18 +174,65 @@ describe('a private analyst outage never costs an ordinary answer', () => {
     expect(world.calls['cloud-openclaw-infer']).toHaveLength(0);
   });
 
-  test('a hung local model is bounded for default-included private evidence', async () => {
+  test('a slow but working private leg returns the private answer, and later explicit requests still work', async () => {
+    const calls: EvidencePack[] = [];
+    const inner = recordingAnalyst(calls);
+    const slow: Analyst = {
+      async analyze(pack, analyzeOptions) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return inner.analyze(pack, analyzeOptions);
+      },
+    };
+    const world = answerWorld('local-only', { analystOverrides: { 'local-source-answer': slow } });
+    for (let call = 1; call <= 3; call += 1) {
+      const result = await world.handler.answer({ question: 'What was my LDL?' });
+      expect({ call, backend: result.audit.answer_synthesis.analyst_backend }).toEqual({ call, backend: 'local' });
+      expect(result.audit.answer_synthesis.secure_local_items_consulted).toBeGreaterThan(0);
+    }
+    const explicit = await world.handler.answer({ question: 'What was my LDL?', include_secure_local: true });
+    expect(explicit.audit.answer_synthesis.analyst_backend).toBe('local');
+    expect(explicit.answer).toContain('92 mg/dL');
+  });
+
+  test('a private leg that fails under its configured budget falls back for default requests', async () => {
     const hung: Analyst = { analyze: () => new Promise(() => {}) };
     const world = answerWorld('local-only', {
       analystOverrides: { 'local-source-answer': hung },
-      defaultIncludedPrivateLegTimeoutMs: 50,
+      // The operator's own last-leg budget, not a default-path cap.
+      secureAnalystPoolLastLegTimeoutMs: 50,
     });
-    const startedAt = Date.now();
     const result = await world.handler.answer({ question: 'What was my LDL?' });
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(result.audit.answer_synthesis.analyst_backend).toBe('cloud');
     expect(result.audit.skipped_corpora.find((skip) => skip.corpus_id === SECURE)?.reason)
       .toBe('private_analyst_unavailable');
+    // The first build's skips survive the rebuild.
+    expect(result.audit.skipped_corpora.filter((skip) => skip.corpus_id === SECURE)).toHaveLength(1);
+  });
+
+  test('a caller-side cancellation never opens the private breaker', async () => {
+    let cancellations = 3;
+    const calls: EvidencePack[] = [];
+    const inner = recordingAnalyst(calls);
+    const cancelling: Analyst = {
+      async analyze(pack, analyzeOptions) {
+        if (cancellations > 0) {
+          cancellations -= 1;
+          const error = new Error('caller went away');
+          error.name = 'AbortError';
+          throw error;
+        }
+        return inner.analyze(pack, analyzeOptions);
+      },
+    };
+    const world = answerWorld('private-cloud-only', { analystOverrides: { 'venice-private': cancelling } });
+    for (let call = 1; call <= 3; call += 1) {
+      await expect(world.handler.answer({ question: 'What was my LDL?', include_secure_local: true }))
+        .rejects.toThrow('caller went away');
+    }
+    // Three cancellations exceed the breaker threshold (2); had they counted,
+    // this explicit request would meet an empty route.
+    const result = await world.handler.answer({ question: 'What was my LDL?', include_secure_local: true });
+    expect(result.audit.answer_synthesis.analyst_backend).toBe('venice');
   });
 
   test('a gated e2ee analyst model excludes default private evidence instead of throwing', async () => {
@@ -237,7 +284,7 @@ function answerWorld(preset: Preset, options: {
   omitProfiles?: readonly string[];
   analystOverrides?: Readonly<Record<string, Analyst>>;
   secureTitle?: string;
-  defaultIncludedPrivateLegTimeoutMs?: number;
+  secureAnalystPoolLastLegTimeoutMs?: number;
 } = {}) {
   const engine = createSovereigntyEngine(presetConfig(preset));
   const calls: Record<string, EvidencePack[]> = {};
@@ -255,8 +302,8 @@ function answerWorld(preset: Preset, options: {
   const handler = createAnalystSourceIndexAnswerHandler({
     analyst: fallbackLocal,
     lanes: () => lanes(options.secureTitle),
-    ...(options.defaultIncludedPrivateLegTimeoutMs !== undefined
-      ? { defaultIncludedPrivateLegTimeoutMs: options.defaultIncludedPrivateLegTimeoutMs }
+    ...(options.secureAnalystPoolLastLegTimeoutMs !== undefined
+      ? { secureAnalystPool: { lastLegTimeoutMs: options.secureAnalystPoolLastLegTimeoutMs } }
       : {}),
     sovereigntyAnalystRoute: ({ pack, localOnly, requestedProvider }) => {
       const trustDomain: SourceTrustDomain = localOnly || pack.candidates.some((c) => c.trustDomain === 'secure_local')

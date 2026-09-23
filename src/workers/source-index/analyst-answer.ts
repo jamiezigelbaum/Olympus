@@ -173,9 +173,6 @@ export interface AnalystSourceIndexAnswerHandlerOptions {
   secureLocalAnalystRoute?: (input: {
     requestedProvider: SourceAnswerAnalystProvider;
   }) => SecureLocalAnalystRouteStatus;
-  // Ceiling on the local and last private legs when secure_local was included
-  // by default; see DEFAULT_INCLUDED_PRIVATE_LEG_TIMEOUT_MS.
-  defaultIncludedPrivateLegTimeoutMs?: number;
   secureAnalystPool?: SecureAnalystPoolStateOptions & {
     sloMs?: number;
     reserveMs?: number;
@@ -193,12 +190,6 @@ type SecureLocalDefaultExclusion =
   | 'no_private_analyst_route'
   | 'bulk_secure_local_release_requires_approval'
   | 'private_analyst_unavailable';
-
-// A private leg that is down must not stall an answer the caller never asked
-// to include private material in: default-included secure evidence gets this
-// ceiling on its local and last legs instead of the 600 s local ceiling, then
-// the answer falls back to the ordinary route without the private corpora.
-const DEFAULT_INCLUDED_PRIVATE_LEG_TIMEOUT_MS = 90_000;
 
 export interface SourceAnswerSelfHealResult {
   audit: SourceIndexAnswerSelfHealAudit;
@@ -415,8 +406,10 @@ export function createAnalystSourceIndexAnswerHandler(
       const localAnalystTimeoutMs = options.localAnalystTimeoutMs ?? DEFAULT_LOCAL_ANALYST_TIMEOUT_MS;
       const lastLegTimeoutMs = options.secureAnalystPool?.lastLegTimeoutMs
         ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS;
-      const privateLegCapMs = options.defaultIncludedPrivateLegTimeoutMs ?? DEFAULT_INCLUDED_PRIVATE_LEG_TIMEOUT_MS;
-      const analyze = (analysisPack: EvidencePack, analysisLocalOnly: boolean, capPrivateLegs: boolean) => routeAnalysis({
+      // Private legs keep the operator's configured budgets whether secure_local
+      // was included by default or explicitly: slow-but-working private answers
+      // are the product posture, so no default-path cap cuts them short.
+      const analyze = (analysisPack: EvidencePack, analysisLocalOnly: boolean) => routeAnalysis({
         pack: analysisPack,
         localOnly: analysisLocalOnly,
         requestedProvider: requestedAnalystProvider,
@@ -428,9 +421,7 @@ export function createAnalystSourceIndexAnswerHandler(
         // it must never inflate this bound, or a ~20s Venice attempt silently
         // becomes a 10-minute one. (2026-07-15 answer-latency WO.)
         trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
-        localAnalystTimeoutMs: capPrivateLegs
-          ? Math.min(localAnalystTimeoutMs, privateLegCapMs)
-          : localAnalystTimeoutMs,
+        localAnalystTimeoutMs,
         cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
         ...(options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: options.sovereigntyAnalystRoute } : {}),
         secureAnalystPoolState,
@@ -440,9 +431,7 @@ export function createAnalystSourceIndexAnswerHandler(
         ...(options.secureAnalystPool?.reserveMs !== undefined
           ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs }
           : {}),
-        secureAnalystPoolLastLegTimeoutMs: capPrivateLegs
-          ? Math.min(lastLegTimeoutMs, privateLegCapMs)
-          : lastLegTimeoutMs,
+        secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs,
       });
       const analystStartedAt = Date.now();
       let routedAnalysis: RoutedAnalysis;
@@ -451,13 +440,14 @@ export function createAnalystSourceIndexAnswerHandler(
       } else {
         // Private material the caller did not ask for must not cost them the
         // answer. When secure_local was included by default and the private
-        // route is unavailable (every breaker open, or every leg failed), the
-        // pack is rebuilt WITHOUT secure_local and answered on the ordinary
-        // route. The secure evidence itself never reaches that route. An
-        // explicit opt-in keeps the hard failure.
+        // route is genuinely unavailable (every breaker open, or every leg
+        // failed under its configured budget), the pack is rebuilt WITHOUT
+        // secure_local and answered on the ordinary route. The secure evidence
+        // itself never reaches that route. An explicit opt-in keeps the hard
+        // failure.
         const privateDefaulted = secureLocalChoice.defaulted === true && localOnly;
         try {
-          routedAnalysis = await analyze(pack, localOnly, privateDefaulted);
+          routedAnalysis = await analyze(pack, localOnly);
         } catch (error) {
           if (!privateDefaulted || !isPrivateRouteUnavailable(error)) throw error;
           const secureIndex = allowedTrustDomains.indexOf('secure_local');
@@ -465,13 +455,15 @@ export function createAnalystSourceIndexAnswerHandler(
           const rebuilt = await buildDetail(lanes, initialAttempt);
           detail = withSecureLocalExclusionReason({
             ...rebuilt,
+            skippedCorpora: mergeSkippedCorpora(detail, rebuilt),
+            degradations: mergeRetrievalDegradations(detail.degradations, rebuilt.degradations),
             laneAudits: [...detail.laneAudits, ...rebuilt.laneAudits],
           }, 'private_analyst_unavailable');
           pack = detail.pack;
           assertEvidencePackModelEligible(pack);
           localOnly = pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local');
           if (localOnly) throw error;
-          routedAnalysis = await analyze(pack, false, false);
+          routedAnalysis = await analyze(pack, false);
         }
       }
       const secureCandidates = pack.candidates.filter((c) => c.trustDomain === 'secure_local');
@@ -1252,6 +1244,12 @@ function secureMetadataOnlyGapResult(error: unknown, pack: EvidencePack): Analys
   };
 }
 
+function isCallerCancellation(error: unknown): boolean {
+  return error instanceof Error
+    && error.name === 'AbortError'
+    && !(error instanceof TrustedAnalystTimeoutError);
+}
+
 const EMPTY_ROUTE_MESSAGE = 'Sovereignty analyst route is empty';
 const EXHAUSTED_ROUTE_MESSAGE = 'Sovereignty analyst fallback chain exhausted';
 
@@ -1389,6 +1387,11 @@ async function routeAnalysisThroughSovereignty(input: {
       return { result, backend: step.backend, ...(lastFallback ? { fallback: lastFallback } : {}) };
     } catch (error) {
       if (isAnalystPolicyRefusal(error)) throw error;
+      // A cancellation from the caller's side is not the member's failure:
+      // it must never open the shared breaker, and there is no one left to
+      // answer, so it ends the route. The handler's own budget expiry arrives
+      // as TrustedAnalystTimeoutError and still counts.
+      if (isCallerCancellation(error)) throw error;
       if (input.trustDomain === 'secure_local') {
         input.secureAnalystPoolState.recordFailure(input.poolId, step.profile.id);
       }

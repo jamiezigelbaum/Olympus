@@ -22026,8 +22026,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
       const veniceAnalyst = policyDeniedEmptyPack ? undefined : createOptionalVeniceAnalyst(options, request).analyst;
       const localAnalystTimeoutMs = options.localAnalystTimeoutMs ?? DEFAULT_LOCAL_ANALYST_TIMEOUT_MS;
       const lastLegTimeoutMs = options.secureAnalystPool?.lastLegTimeoutMs ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS;
-      const privateLegCapMs = options.defaultIncludedPrivateLegTimeoutMs ?? DEFAULT_INCLUDED_PRIVATE_LEG_TIMEOUT_MS;
-      const analyze = (analysisPack, analysisLocalOnly, capPrivateLegs) => routeAnalysis({
+      const analyze = (analysisPack, analysisLocalOnly) => routeAnalysis({
         pack: analysisPack,
         localOnly: analysisLocalOnly,
         requestedProvider: requestedAnalystProvider,
@@ -22035,13 +22034,13 @@ function createAnalystSourceIndexAnswerHandler(options) {
         ...options.cloudAnalyst ? { cloud: options.cloudAnalyst } : {},
         ...veniceAnalyst ? { venice: veniceAnalyst } : {},
         trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
-        localAnalystTimeoutMs: capPrivateLegs ? Math.min(localAnalystTimeoutMs, privateLegCapMs) : localAnalystTimeoutMs,
+        localAnalystTimeoutMs,
         cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
         ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: options.sovereigntyAnalystRoute } : {},
         secureAnalystPoolState,
         ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
         ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
-        secureAnalystPoolLastLegTimeoutMs: capPrivateLegs ? Math.min(lastLegTimeoutMs, privateLegCapMs) : lastLegTimeoutMs
+        secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs
       });
       const analystStartedAt = Date.now();
       let routedAnalysis;
@@ -22050,7 +22049,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
       } else {
         const privateDefaulted = secureLocalChoice.defaulted === true && localOnly;
         try {
-          routedAnalysis = await analyze(pack, localOnly, privateDefaulted);
+          routedAnalysis = await analyze(pack, localOnly);
         } catch (error) {
           if (!privateDefaulted || !isPrivateRouteUnavailable(error))
             throw error;
@@ -22060,6 +22059,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
           const rebuilt = await buildDetail(lanes, initialAttempt);
           detail = withSecureLocalExclusionReason({
             ...rebuilt,
+            skippedCorpora: mergeSkippedCorpora(detail, rebuilt),
+            degradations: mergeRetrievalDegradations(detail.degradations, rebuilt.degradations),
             laneAudits: [...detail.laneAudits, ...rebuilt.laneAudits]
           }, "private_analyst_unavailable");
           pack = detail.pack;
@@ -22067,7 +22068,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
           localOnly = pack.candidates.some((candidate) => candidate.trustDomain === "secure_local");
           if (localOnly)
             throw error;
-          routedAnalysis = await analyze(pack, false, false);
+          routedAnalysis = await analyze(pack, false);
         }
       }
       const secureCandidates = pack.candidates.filter((c) => c.trustDomain === "secure_local");
@@ -22590,6 +22591,9 @@ function secureMetadataOnlyGapResult(error, pack) {
     ]
   };
 }
+function isCallerCancellation(error) {
+  return error instanceof Error && error.name === "AbortError" && !(error instanceof TrustedAnalystTimeoutError);
+}
 async function routeAnalysisThroughSovereignty(input) {
   if (input.route.length === 0) {
     throw new Error(`${EMPTY_ROUTE_MESSAGE}; refusing to fall through to another trust class.`);
@@ -22650,6 +22654,8 @@ async function routeAnalysisThroughSovereignty(input) {
       return { result, backend: step.backend, ...lastFallback ? { fallback: lastFallback } : {} };
     } catch (error) {
       if (isAnalystPolicyRefusal(error))
+        throw error;
+      if (isCallerCancellation(error))
         throw error;
       if (input.trustDomain === "secure_local") {
         input.secureAnalystPoolState.recordFailure(input.poolId, step.profile.id);
@@ -23116,7 +23122,7 @@ function provenanceCorpusId(provenance) {
 function sourceItemsEqual(left, right) {
   return left.family === right.family && left.provider === right.provider && left.accountScope === right.accountScope && left.providerItemId === right.providerItemId && left.providerThreadId === right.providerThreadId && left.providerConversationId === right.providerConversationId && left.providerFileId === right.providerFileId && left.providerEventId === right.providerEventId && left.localItemId === right.localItemId && left.sourceVersion === right.sourceVersion;
 }
-var DEFAULT_INCLUDED_PRIVATE_LEG_TIMEOUT_MS = 90000, DEFAULT_MAX_RESULTS = 3, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS;
+var DEFAULT_MAX_RESULTS = 3, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS;
 var init_analyst_answer = __esm(() => {
   init_analyst();
   init_analyst_openclaw_infer();
@@ -42795,7 +42801,7 @@ var init_operations = __esm(() => {
     analyst_provider: { type: "string", enum: ["default", "local", "venice", "cloud"], description: "Optional analyst constraint. Leave default; set local or venice only when {{ownerName}} explicitly asks. Presets: local-first = local then Venice; private-cloud-only = Venice only." },
     analyst_model: { type: "string", description: "Optional Venice model id for an explicit Venice request. e2ee-* ids are refused; defaults kimi-k3 (strong), inkling (normal)." },
     max_results: { type: "number", description: "Max results; worker-capped." },
-    include_secure_local: { type: "boolean", description: "Whether to search secure-local (Private) corpora. Omit to search them whenever the sovereignty policy approves a private analyst (Argus) for them; only Argus reads that evidence, and you receive its derived answer plus citation labels (title, path, source, author), which are secret-scanned and released because item metadata defaults to Personal; never Private source text. Set false to opt out." },
+    include_secure_local: { type: "boolean", description: "Whether to search secure-local (Private) corpora. Omit to search them whenever the sovereignty policy approves a private analyst (Argus) for them; only Argus reads that evidence, and you receive its derived answer plus citation labels (title, locator path or link, source, conversation, author), which are secret-scanned and released because item metadata defaults to Personal; never Private source text. Set false to opt out." },
     include_secure_local_content: { type: "boolean", description: "Whether secure-local answers may return OPSEC-scanned derivative content. Defaults true." },
     include_internal: { type: "boolean", description: "Whether the bridge may search internal corpora. Defaults true." },
     include_internal_content: { type: "boolean", description: "Whether internal corpora may return context passages for {{assistantName}} summarization. Defaults true." },
