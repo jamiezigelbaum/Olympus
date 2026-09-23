@@ -11466,6 +11466,9 @@ function workerAuthTokenFromConfig(config, options = {}) {
     return;
   return optionalToken(config.worker.authToken) ?? optionalToken((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
 }
+function workerAuthTokenProvider(config, options = {}) {
+  return () => workerAuthTokenFromConfig(config, options);
+}
 function withWorkerAuthHeader(init, authToken) {
   const token = optionalToken(authToken);
   if (!token)
@@ -11498,14 +11501,21 @@ function applyWorkerSetupEnv(options = {}) {
 function readWorkerSetupEnv(options = {}) {
   const path = workerSetupEnvPath(options);
   try {
-    const stat2 = statSync2(path);
-    if (!stat2.isFile() || (stat2.mode & 63) !== 0)
+    const stat2 = statSync2(path, { bigint: true });
+    if (!stat2.isFile() || (stat2.mode & 0o077n) !== 0n)
       return;
-    return parseWorkerSetupEnv(readFileSync5(path, "utf8"));
+    const key = `${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeNs}:${stat2.ctimeNs}:${stat2.mode}`;
+    const cached = setupEnvCache.get(path);
+    if (cached?.key === key)
+      return { ...cached.env };
+    const env = parseWorkerSetupEnv(readFileSync5(path, "utf8"));
+    setupEnvCache.set(path, { key, env });
+    return { ...env };
   } catch {
     return;
   }
 }
+var setupEnvCache = new Map;
 function environmentWithWorkerSetupEnv(options = {}) {
   const env = options.env ?? process.env;
   if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim())
@@ -11775,7 +11785,7 @@ function createEmailTransport(config) {
       }
     };
   }
-  return new DirectHttpEmailTransport(fetch, workerAuthTokenFromConfig(config), config.email.requestTimeoutSeconds * 1000);
+  return new DirectHttpEmailTransport(fetch, workerAuthTokenProvider(config), config.email.requestTimeoutSeconds * 1000);
 }
 var MAX_EMAIL_REQUEST_TIMEOUT_MS = 600000;
 function effectiveEmailRequestTimeoutMs(configuredMs, requestedMs) {
@@ -11799,7 +11809,8 @@ class DirectHttpEmailTransport {
     const timeoutMs = effectiveEmailRequestTimeoutMs(this.timeoutMs, options?.timeoutMs);
     let response;
     try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), timeoutMs);
+      const authToken = typeof this.authToken === "function" ? this.authToken() : this.authToken;
+      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, authToken), timeoutMs);
     } catch (error) {
       if (isAbortError2(error)) {
         throw new OperationError("email_unreachable", `Private email lane timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
@@ -16848,7 +16859,7 @@ async function handleSourceWatchDeliveryGatewayRequest(input) {
 function registerSourceWatchDeliveryRoute(api, config) {
   if (!api.registerHttpRoute || !api.config)
     return;
-  const authToken = workerAuthTokenFromConfig(config);
+  const currentAuthToken = workerAuthTokenProvider(config);
   api.registerHttpRoute({
     path: SOURCE_WATCH_DELIVERY_ROUTE,
     auth: "plugin",
@@ -16863,6 +16874,7 @@ function registerSourceWatchDeliveryRoute(api, config) {
         response.end(JSON.stringify({ status: "failed", error_kind: "invalid_request_body" }));
         return;
       }
+      const authToken = currentAuthToken();
       const result = await handleSourceWatchDeliveryGatewayRequest({
         method: request.method ?? "",
         authorization: typeof request.headers.authorization === "string" ? request.headers.authorization : null,

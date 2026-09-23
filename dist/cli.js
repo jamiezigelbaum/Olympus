@@ -1343,6 +1343,9 @@ function workerAuthTokenFromConfig(config, options = {}) {
     return;
   return optionalToken(config.worker.authToken) ?? optionalToken((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
 }
+function workerAuthTokenProvider(config, options = {}) {
+  return () => workerAuthTokenFromConfig(config, options);
+}
 function withWorkerAuthHeader(init, authToken) {
   const token = optionalToken(authToken);
   if (!token)
@@ -1381,10 +1384,16 @@ function applyWorkerSetupEnv(options = {}) {
 function readWorkerSetupEnv(options = {}) {
   const path = workerSetupEnvPath(options);
   try {
-    const stat2 = statSync2(path);
-    if (!stat2.isFile() || (stat2.mode & 63) !== 0)
+    const stat2 = statSync2(path, { bigint: true });
+    if (!stat2.isFile() || (stat2.mode & 0o077n) !== 0n)
       return;
-    return parseWorkerSetupEnv(readFileSync4(path, "utf8"));
+    const key = `${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeNs}:${stat2.ctimeNs}:${stat2.mode}`;
+    const cached = setupEnvCache.get(path);
+    if (cached?.key === key)
+      return { ...cached.env };
+    const env = parseWorkerSetupEnv(readFileSync4(path, "utf8"));
+    setupEnvCache.set(path, { key, env });
+    return { ...env };
   } catch {
     return;
   }
@@ -1442,7 +1451,10 @@ function unquoteEnvValue(value) {
   }
   return trimmed;
 }
-var init_worker_auth = () => {};
+var setupEnvCache;
+var init_worker_auth = __esm(() => {
+  setupEnvCache = new Map;
+});
 
 // src/core/worker-service.ts
 import { chmodSync, closeSync as closeSync4, existsSync as existsSync4, lstatSync as lstatSync2, mkdirSync as mkdirSync4, openSync as openSync4, readFileSync as readFileSync5, readSync, statSync as statSync3 } from "node:fs";
@@ -35614,7 +35626,7 @@ function createEmailTransport(config) {
       }
     };
   }
-  return new DirectHttpEmailTransport(fetch, workerAuthTokenFromConfig(config), config.email.requestTimeoutSeconds * 1000);
+  return new DirectHttpEmailTransport(fetch, workerAuthTokenProvider(config), config.email.requestTimeoutSeconds * 1000);
 }
 function effectiveEmailRequestTimeoutMs(configuredMs, requestedMs) {
   if (!(configuredMs > 0))
@@ -35637,7 +35649,8 @@ class DirectHttpEmailTransport {
     const timeoutMs = effectiveEmailRequestTimeoutMs(this.timeoutMs, options?.timeoutMs);
     let response;
     try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), timeoutMs);
+      const authToken = typeof this.authToken === "function" ? this.authToken() : this.authToken;
+      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, authToken), timeoutMs);
     } catch (error) {
       if (isAbortError(error)) {
         throw new OperationError("email_unreachable", `Private email lane timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
@@ -72535,7 +72548,7 @@ function createEmailSourceWorker(options = {}) {
   const sourceAnswer = options.sourceAnswer;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
-  const readwiseConnectorStoreSync = options.readwiseConnectorStoreSync;
+  const currentReadwiseSync = options.currentReadwiseSync ?? (() => options.readwiseConnectorStoreSync);
   const xBookmarksConnectorStoreSync = options.xBookmarksConnectorStoreSync;
   const xBookmarksContentRecovery = options.xBookmarksContentRecovery;
   const currentXBookmarksRuntime = options.currentXBookmarksRuntime ?? (() => {
@@ -73536,6 +73549,7 @@ function createEmailSourceWorker(options = {}) {
             if (mode !== undefined && mode !== "connector_store") {
               throw new EmailSourceWorkerError(400, "invalid_request", "mode must be connector_store for Readwise sync.");
             }
+            const readwiseConnectorStoreSync = currentReadwiseSync();
             if (!readwiseConnectorStoreSync) {
               throw new EmailSourceWorkerError(501, "source_index_sync_not_supported", "Readwise connector-store sync is not configured.");
             }
@@ -73949,8 +73963,9 @@ function createEmailSourceWorker(options = {}) {
         return request.reason === "manual" ? sourceScheduler.runSource(schedulerSourceId, undefined, "operator") : sourceScheduler.runSource(schedulerSourceId);
       }
     }
-    if (request.source === "readwise" && readwiseConnectorStoreSync) {
-      return readwiseConnectorStoreSync.sync();
+    const readwiseSync = request.source === "readwise" ? currentReadwiseSync() : undefined;
+    if (readwiseSync) {
+      return readwiseSync.sync();
     }
     const xSync = request.source === "x" ? currentXBookmarksRuntime()?.sync : undefined;
     if (request.source === "x" && xSync) {
@@ -74046,7 +74061,7 @@ function createEmailSourceWorker(options = {}) {
       return schedulerStatus?.sources.some((candidate) => candidate.source_id === "google_drive.docs" || candidate.corpus_id === GOOGLE_DRIVE_DOCS_CORPUS_ID) === true || dashboardSyncHookServes(source);
     }
     if (source === "readwise")
-      return readwiseConnectorStoreSync !== undefined || dashboardSyncHookServes(source);
+      return currentReadwiseSync() !== undefined || dashboardSyncHookServes(source);
     if (source === "x")
       return currentXBookmarksRuntime()?.sync !== undefined || dashboardSyncHookServes(source);
     if (source === "dropbox") {
@@ -78529,6 +78544,7 @@ __export(exports_server2, {
   createSourceIndexEmbeddingProviderFromSovereignty: () => createSourceIndexEmbeddingProviderFromSovereignty,
   createSourceIndexEmbeddingProviderFromEnv: () => createSourceIndexEmbeddingProviderFromEnv,
   createRefreshableXBookmarksConnectorStoreRuntime: () => createRefreshableXBookmarksConnectorStoreRuntime,
+  createRefreshableReadwiseConnectorStoreRuntime: () => createRefreshableReadwiseConnectorStoreRuntime,
   createReadwiseConnectorStoreRuntime: () => createReadwiseConnectorStoreRuntime,
   createEmailSourceConnectorFromEnv: () => createEmailSourceConnectorFromEnv,
   createCloudSourceIndexEmbeddingProviderFromEnv: () => createCloudSourceIndexEmbeddingProviderFromEnv,
@@ -79321,14 +79337,6 @@ async function main() {
     capability: "dropbox.files.sync",
     handles: connectedHandles
   });
-  const readwiseCredentialHandle = selectedSourceCredentialHandle({
-    env: process.env,
-    pinEnvName: "OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE",
-    provider: "readwise",
-    capability: "readwise.sync",
-    handles: connectedHandles
-  });
-  const readwiseHandle = sourceIndexLaneEnabled(process.env, "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED", readwiseCredentialHandle !== undefined) ? readwiseCredentialHandle : undefined;
   const xBookmarksCredentialHandle = selectedSourceCredentialHandle({
     env: process.env,
     pinEnvName: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CREDENTIAL_HANDLE",
@@ -79447,15 +79455,14 @@ async function main() {
   }) : undefined;
   const telegramMessagesAccount = sourceIndexTelegramAccountFromEnv(process.env);
   const telegramConnectorAccountScope = telegramMessagesAccount ?? TELEGRAM_PERSONAL_ACCOUNT_SCOPE;
-  const readwiseConnectorStoreRuntime = createReadwiseConnectorStoreRuntime({
-    enabled: readwiseHandle !== undefined,
-    ...readwiseHandle ? { handle: readwiseHandle } : {},
+  const readwiseConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled);
+  const refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
+    enabled: readwiseConnectorStoreLane.enabled,
     ...readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {},
     ...sourceIndexAccount ? { account: sourceIndexAccount } : {},
     env: process.env
   });
-  const readwiseConnectorStore = readwiseConnectorStoreRuntime?.store;
-  const readwiseConnectorStoreSync = readwiseConnectorStoreRuntime?.sync;
+  const readwiseConnectorStore = refreshableReadwiseRuntime?.store;
   const xBookmarksConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled);
   const refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
     enabled: xBookmarksConnectorStoreLane.enabled,
@@ -79777,8 +79784,7 @@ async function main() {
       connectorStoreAccountScopes.set(xBookmarksConnectorStore.corpusId, principalXAccount);
   }
   if (readwiseConnectorStore) {
-    const principalReadwiseAccount = sourceIndexAccount?.trim() || readwiseHandle?.accountRole?.trim() || "personal";
-    connectorStoreAccountScopes.set(readwiseConnectorStore.corpusId, principalReadwiseAccount);
+    connectorStoreAccountScopes.set(readwiseConnectorStore.corpusId, sourceIndexAccount?.trim() || "personal");
   }
   const createGmailConnectorStoreSyncForHandle = (handle) => handle && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget ? createGmailConnectorStoreSyncHandler({
     internalStore: gmailInternalConnectorStore,
@@ -79999,6 +80005,21 @@ async function main() {
     }
     return runtime;
   };
+  const readwiseSyncForHandle = (handle) => {
+    const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
+    if (sync && readwiseConnectorStore) {
+      connectorStoreAccountScopes.set(readwiseConnectorStore.corpusId, sourceIndexAccount?.trim() || handle?.accountRole?.trim() || "personal");
+    }
+    return sync;
+  };
+  const currentReadwiseSync = () => readwiseSyncForHandle(connectorStoreLaneHandle({
+    env: process.env,
+    laneEnvName: "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED",
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE",
+    provider: "readwise",
+    capability: "readwise.sync",
+    handles: readActiveConnectedHandles(process.env)
+  }));
   const schedulerSourcesForHandles = (handles) => {
     const decisions = [];
     const recordLane = (expectedSourceId, skipReason, build) => {
@@ -80088,7 +80109,7 @@ async function main() {
       selections: [],
       wholeAccount: false
     });
-    const readwiseStoreLaneEnabled = currentReadwiseHandle !== undefined && currentReadwiseHandle.handle === readwiseHandle?.handle && readwiseConnectorStoreSync !== undefined;
+    const currentReadwiseConnectorStoreSync = readwiseSyncForHandle(currentReadwiseHandle);
     const xBookmarksSkipReason = !currentXBookmarksHandle ? "no_handle" : !currentXBookmarksConnectorStoreRuntime ? "no_store_sync" : undefined;
     const sources = [
       recordLane(SCHEDULER_SOURCE_IDS.gmail, currentGmailHandle ? undefined : "no_handle", () => createGmailConnectorStoreSchedulerSource({
@@ -80117,9 +80138,9 @@ async function main() {
         });
         return source && currentDropboxScopeRef && fileSourceScopeAuthority ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentDropboxScopeRef }) : undefined;
       }),
-      recordLane(SCHEDULER_SOURCE_IDS.readwise, readwiseStoreLaneEnabled ? undefined : "lane_disabled", () => createReadwiseSchedulerSource({
+      recordLane(SCHEDULER_SOURCE_IDS.readwise, !currentReadwiseHandle ? "no_handle" : !currentReadwiseConnectorStoreSync ? "no_store_sync" : undefined, () => createReadwiseSchedulerSource({
         config: olympusConfig,
-        ...readwiseStoreLaneEnabled && readwiseConnectorStoreSync ? { liveSync: readwiseConnectorStoreSync } : {},
+        ...currentReadwiseConnectorStoreSync ? { liveSync: currentReadwiseConnectorStoreSync } : {},
         ...sourceIndexAccount ? { account: sourceIndexAccount } : currentReadwiseHandle?.accountRole ? { account: currentReadwiseHandle.accountRole } : {}
       })),
       recordLane(SCHEDULER_SOURCE_IDS.xBookmarks, xBookmarksSkipReason, () => currentXBookmarksConnectorStoreRuntime ? createXBookmarksSchedulerSource({
@@ -80292,7 +80313,7 @@ async function main() {
     ...sourceAnswer ? { sourceAnswer } : {},
     ...sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {},
     ...sourceIndexStatus ? { sourceIndexStatus } : {},
-    ...readwiseConnectorStoreSync ? { readwiseConnectorStoreSync } : {},
+    currentReadwiseSync,
     currentXBookmarksRuntime,
     dropboxIngestionPolicy,
     ...sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {},
@@ -80491,27 +80512,55 @@ function createReadwiseConnectorStoreRuntime(options) {
   if (!options.enabled || !options.embeddingProvider)
     return;
   const handle = options.handle;
-  if (handle && (handle.provider !== "readwise" || !handle.allowedCapabilities.includes("readwise.sync") || handle.backendState?.status === "reauth_required")) {
+  if (handle && !readwiseHandleUsable(handle))
     return;
-  }
+  const lane = createRefreshableReadwiseConnectorStoreRuntime(options);
+  if (!lane)
+    return;
+  return { store: lane.store, sync: lane.syncFor(handle) };
+}
+function createRefreshableReadwiseConnectorStoreRuntime(options) {
+  const embeddingProvider = options.embeddingProvider;
+  if (!options.enabled || !embeddingProvider)
+    return;
   const env = options.env ?? process.env;
-  const account = options.account?.trim() || handle?.accountRole?.trim() || "personal";
   const requestBudget = options.requestBudget ?? createReadwiseDailyRequestBudget({
     env,
     ...options.requestBudgetStatePath ? { statePath: options.requestBudgetStatePath } : {}
   });
   const store = createReadwiseConnectorStore(options.dbPath ?? defaultReadwiseConnectorStoreDbPath(env));
-  const sync = createReadwiseConnectorStoreSyncHandler({
+  const buildSync = (handle) => createReadwiseConnectorStoreSyncHandler({
     store,
-    embeddingProvider: options.embeddingProvider,
-    account,
+    embeddingProvider,
+    account: options.account?.trim() || handle?.accountRole?.trim() || "personal",
     requestBudget,
     ...env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE?.trim() ? { credentialHandle: env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE.trim() } : handle?.handle ? { credentialHandle: handle.handle } : {},
     ...env.OLYMPUS_SOURCE_INDEX_READWISE_API_V2_BASE_URL?.trim() ? { apiV2BaseUrl: env.OLYMPUS_SOURCE_INDEX_READWISE_API_V2_BASE_URL.trim() } : {},
     ...env.OLYMPUS_SOURCE_INDEX_READWISE_READER_API_V3_BASE_URL?.trim() ? { readerApiV3BaseUrl: env.OLYMPUS_SOURCE_INDEX_READWISE_READER_API_V3_BASE_URL.trim() } : {},
     env
   });
-  return { store, sync };
+  let cachedKey;
+  let cachedSync;
+  return {
+    store,
+    syncFor: buildSync,
+    syncForHandle(handle) {
+      if (!handle || !readwiseHandleUsable(handle)) {
+        cachedKey = undefined;
+        cachedSync = undefined;
+        return;
+      }
+      const key = [handle.handle, handle.accountRole ?? ""].join("\x00");
+      if (cachedKey === key && cachedSync)
+        return cachedSync;
+      cachedSync = buildSync(handle);
+      cachedKey = key;
+      return cachedSync;
+    }
+  };
+}
+function readwiseHandleUsable(handle) {
+  return handle.provider === "readwise" && handle.allowedCapabilities.includes("readwise.sync") && handle.backendState?.status !== "reauth_required";
 }
 function createXBookmarksConnectorStoreRuntime(options) {
   if (!xBookmarksRuntimeBinding(options))

@@ -15464,14 +15464,21 @@ function workerAuthTokenFromSetupEnv(options = {}) {
 function readWorkerSetupEnv(options = {}) {
   const path = workerSetupEnvPath(options);
   try {
-    const stat2 = statSync2(path);
-    if (!stat2.isFile() || (stat2.mode & 63) !== 0)
+    const stat2 = statSync2(path, { bigint: true });
+    if (!stat2.isFile() || (stat2.mode & 0o077n) !== 0n)
       return;
-    return parseWorkerSetupEnv(readFileSync5(path, "utf8"));
+    const key = `${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeNs}:${stat2.ctimeNs}:${stat2.mode}`;
+    const cached = setupEnvCache.get(path);
+    if (cached?.key === key)
+      return { ...cached.env };
+    const env = parseWorkerSetupEnv(readFileSync5(path, "utf8"));
+    setupEnvCache.set(path, { key, env });
+    return { ...env };
   } catch {
     return;
   }
 }
+var setupEnvCache = new Map;
 function workerSetupEnvPath(options = {}) {
   const env = options.env ?? process.env;
   return options.workerEnvPath ?? join4(options.homeDir ?? optionalToken(env.HOME) ?? homedir4(), ".config", "olympus", "worker.env");

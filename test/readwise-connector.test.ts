@@ -19,7 +19,11 @@ import {
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import {
   createReadwiseConnectorStoreRuntime,
+  createRefreshableReadwiseConnectorStoreRuntime,
 } from '../src/workers/email-source/server.ts';
+import { defaultConfig } from '../src/core/config.ts';
+import type { ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
+import { createReadwiseSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { DeterministicSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const ACCOUNT = 'person@example.com';
@@ -311,6 +315,54 @@ describe('Readwise thin connector and canonical store', () => {
       });
     } finally {
       store.close();
+    }
+  });
+
+  test('a Readwise key connected after boot builds the scheduler lane without a restart', () => {
+    // First install, 2026-09-23: the worker booted with no Readwise handle, the
+    // key was connected from the dashboard eleven minutes later, and the lane
+    // logged lane_disabled on every pass until a manual worker restart.
+    const root = mkdtempSync(join(tmpdir(), 'olympus-readwise-hot-connect-'));
+    const lane = createRefreshableReadwiseConnectorStoreRuntime({
+      enabled: true,
+      embeddingProvider: new DeterministicSourceEmbeddingProvider(),
+      dbPath: join(root, 'readwise.sqlite'),
+      requestBudgetStatePath: join(root, 'budget.json'),
+      env: {},
+    });
+    if (!lane) throw new Error('fixture lane should be configured');
+    const handle: ConnectedCredentialHandle = {
+      handle: 'readwise.personal',
+      provider: 'readwise',
+      accountRole: 'personal',
+      allowedCapabilities: ['readwise.sync'],
+      scopes: ['readwise.reader:read', 'readwise.export:read'],
+      connectedAt: '2026-09-23T15:35:00.000Z',
+    };
+    const expired: ConnectedCredentialHandle = {
+      ...handle,
+      backendState: { kind: 'oauth2_refresh', status: 'reauth_required' },
+    };
+    // Each call is one scheduler pass over the registry as it stands then.
+    const sourceFor = (current: ConnectedCredentialHandle | undefined) => {
+      const liveSync = lane.syncForHandle(current);
+      return liveSync ? createReadwiseSchedulerSource({ config: defaultConfig(), liveSync }) : undefined;
+    };
+    try {
+      expect(lane.store.corpusId).toBe(READWISE_LIBRARY_CORPUS_ID);
+      expect(sourceFor(undefined)).toBeUndefined();
+      expect(sourceFor(handle)?.tasks.map((task) => task.id)).toEqual([
+        'readwise.library_store_pull',
+        expect.any(String),
+      ]);
+      const sync = lane.syncForHandle(handle);
+      expect(lane.syncForHandle(handle)).toBe(sync);
+      expect(sourceFor(expired)).toBeUndefined();
+      expect(sourceFor(undefined)).toBeUndefined();
+      expect(sourceFor(handle)).toBeDefined();
+    } finally {
+      lane.store.close();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

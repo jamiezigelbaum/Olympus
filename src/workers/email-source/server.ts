@@ -1460,22 +1460,10 @@ export async function main(): Promise<void> {
     capability: 'dropbox.files.sync',
     handles: connectedHandles,
   });
-  const readwiseCredentialHandle = selectedSourceCredentialHandle({
-    env: process.env,
-    pinEnvName: 'OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE',
-    provider: 'readwise',
-    capability: 'readwise.sync',
-    handles: connectedHandles,
-  });
-  const readwiseHandle = sourceIndexLaneEnabled(
-    process.env,
-    'OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED',
-    readwiseCredentialHandle !== undefined,
-  ) ? readwiseCredentialHandle : undefined;
   // Gmail and Drive deliberately have no boot-time handle binding: their lanes
-  // select a handle per scheduler build. X follows the same rule below: its
-  // canonical store exists independently, while provider reads bind only to a
-  // currently usable handle. Readwise still binds its runtime at boot.
+  // select a handle per scheduler build. X and Readwise follow the same rule
+  // below: their canonical stores exist independently, while provider reads
+  // bind only to a currently usable handle.
   const xBookmarksCredentialHandle = selectedSourceCredentialHandle({
     env: process.env,
     pinEnvName: 'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CREDENTIAL_HANDLE',
@@ -1686,15 +1674,18 @@ export async function main(): Promise<void> {
     : undefined;
   const telegramMessagesAccount = sourceIndexTelegramAccountFromEnv(process.env);
   const telegramConnectorAccountScope = telegramMessagesAccount ?? TELEGRAM_PERSONAL_ACCOUNT_SCOPE;
-  const readwiseConnectorStoreRuntime = createReadwiseConnectorStoreRuntime({
-    enabled: readwiseHandle !== undefined,
-    ...(readwiseHandle ? { handle: readwiseHandle } : {}),
+  const readwiseConnectorStoreLane = sourceIndexLaneStorageDecision(
+    process.env,
+    'OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED',
+    sourceIndexReadEnabled,
+  );
+  const refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
+    enabled: readwiseConnectorStoreLane.enabled,
     ...(readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {}),
     ...(sourceIndexAccount ? { account: sourceIndexAccount } : {}),
     env: process.env,
   });
-  const readwiseConnectorStore = readwiseConnectorStoreRuntime?.store;
-  const readwiseConnectorStoreSync = readwiseConnectorStoreRuntime?.sync;
+  const readwiseConnectorStore = refreshableReadwiseRuntime?.store;
   const xBookmarksConnectorStoreLane = sourceIndexLaneStorageDecision(
     process.env,
     'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED',
@@ -2196,11 +2187,11 @@ export async function main(): Promise<void> {
     if (principalXAccount) connectorStoreAccountScopes.set(xBookmarksConnectorStore.corpusId, principalXAccount);
   }
   if (readwiseConnectorStore) {
-    const principalReadwiseAccount =
-      sourceIndexAccount?.trim() || readwiseHandle?.accountRole?.trim() || 'personal';
+    // The handle's own account role, when it has one, replaces this default on
+    // every scheduler build (first one below, before the worker serves).
     connectorStoreAccountScopes.set(
       readwiseConnectorStore.corpusId,
-      principalReadwiseAccount,
+      sourceIndexAccount?.trim() || 'personal',
     );
   }
   // No handle, no handler. The stores and the budget exist at boot whatever the
@@ -2599,6 +2590,24 @@ export async function main(): Promise<void> {
     }
     return runtime;
   };
+  const readwiseSyncForHandle = (handle: ConnectedCredentialHandle | undefined) => {
+    const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
+    if (sync && readwiseConnectorStore) {
+      connectorStoreAccountScopes.set(
+        readwiseConnectorStore.corpusId,
+        sourceIndexAccount?.trim() || handle?.accountRole?.trim() || 'personal',
+      );
+    }
+    return sync;
+  };
+  const currentReadwiseSync = () => readwiseSyncForHandle(connectorStoreLaneHandle({
+    env: process.env,
+    laneEnvName: 'OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED',
+    pinEnvName: 'OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE',
+    provider: 'readwise',
+    capability: 'readwise.sync',
+    handles: readActiveConnectedHandles(process.env),
+  }));
   const schedulerSourcesForHandles = (handles: readonly ConnectedCredentialHandle[]): {
     sources: SourceSchedulerSource[];
     decisions: SourceSchedulerConstructionDecision[];
@@ -2728,11 +2737,9 @@ export async function main(): Promise<void> {
           selections: [],
           wholeAccount: false,
         });
-    // The canonical store lane rides the same source id and is bound to the
-    // handle its runtime selected at boot.
-    const readwiseStoreLaneEnabled = currentReadwiseHandle !== undefined
-      && currentReadwiseHandle.handle === readwiseHandle?.handle
-      && readwiseConnectorStoreSync !== undefined;
+    // Bound to the handle current on THIS build, so a key connected after boot
+    // constructs the lane on the next scheduler pass without a restart.
+    const currentReadwiseConnectorStoreSync = readwiseSyncForHandle(currentReadwiseHandle);
     const xBookmarksSkipReason = !currentXBookmarksHandle
       ? 'no_handle' as const
       : !currentXBookmarksConnectorStoreRuntime
@@ -2792,10 +2799,14 @@ export async function main(): Promise<void> {
       ),
       recordLane(
         SCHEDULER_SOURCE_IDS.readwise,
-        readwiseStoreLaneEnabled ? undefined : 'lane_disabled',
+        !currentReadwiseHandle
+          ? 'no_handle'
+          : !currentReadwiseConnectorStoreSync
+            ? 'no_store_sync'
+            : undefined,
         () => createReadwiseSchedulerSource({
           config: olympusConfig,
-          ...(readwiseStoreLaneEnabled && readwiseConnectorStoreSync ? { liveSync: readwiseConnectorStoreSync } : {}),
+          ...(currentReadwiseConnectorStoreSync ? { liveSync: currentReadwiseConnectorStoreSync } : {}),
           ...(sourceIndexAccount ? { account: sourceIndexAccount } : currentReadwiseHandle?.accountRole ? { account: currentReadwiseHandle.accountRole } : {}),
         }),
       ),
@@ -3035,7 +3046,7 @@ export async function main(): Promise<void> {
     ...(sourceAnswer ? { sourceAnswer } : {}),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
-    ...(readwiseConnectorStoreSync ? { readwiseConnectorStoreSync } : {}),
+    currentReadwiseSync,
     currentXBookmarksRuntime,
     dropboxIngestionPolicy,
     ...(sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {}),
@@ -3421,6 +3432,14 @@ export interface ReadwiseConnectorStoreRuntime {
   sync: ReadwiseConnectorStoreSyncHandler;
 }
 
+export interface RefreshableReadwiseConnectorStoreRuntime {
+  store: LocalConnectorStore;
+  /** The handler for the current usable handle; undefined without one. */
+  syncForHandle(handle: ConnectedCredentialHandle | undefined): ReadwiseConnectorStoreSyncHandler | undefined;
+  /** Unconditional build, kept for the boot-bound compatibility constructor. */
+  syncFor(handle: ConnectedCredentialHandle | undefined): ReadwiseConnectorStoreSyncHandler;
+}
+
 export function createReadwiseConnectorStoreRuntime(options: {
   enabled: boolean;
   handle?: ConnectedCredentialHandle;
@@ -3434,18 +3453,36 @@ export function createReadwiseConnectorStoreRuntime(options: {
 }): ReadwiseConnectorStoreRuntime | undefined {
   if (!options.enabled || !options.embeddingProvider) return undefined;
   const handle = options.handle;
-  if (
-    handle
-    && (
-      handle.provider !== 'readwise'
-      || !handle.allowedCapabilities.includes('readwise.sync')
-      || handle.backendState?.status === 'reauth_required'
-    )
-  ) {
-    return undefined;
-  }
+  if (handle && !readwiseHandleUsable(handle)) return undefined;
+  const lane = createRefreshableReadwiseConnectorStoreRuntime(options);
+  if (!lane) return undefined;
+  return { store: lane.store, sync: lane.syncFor(handle) };
+}
+
+/**
+ * Keep the canonical Readwise store mounted independently of the API-key
+ * grant, and bind the sync handler to whichever handle is current.
+ *
+ * The runtime used to be built once at boot from the handle registered then,
+ * and the scheduler lane was enabled only while that boot handle was still
+ * the current one, so a Readwise key connected after the worker started
+ * logged `lane_disabled` on every pass until a restart (first install,
+ * 2026-09-23). The scheduler now asks for the current handle's handler on
+ * each registry refresh, as X does; the store and the durable day counter
+ * stay singular across rebinds.
+ */
+export function createRefreshableReadwiseConnectorStoreRuntime(options: {
+  enabled: boolean;
+  embeddingProvider?: SourceEmbeddingProvider;
+  account?: string;
+  dbPath?: string;
+  requestBudget?: ReadwiseDailyRequestBudget;
+  requestBudgetStatePath?: string;
+  env?: Record<string, string | undefined>;
+}): RefreshableReadwiseConnectorStoreRuntime | undefined {
+  const embeddingProvider = options.embeddingProvider;
+  if (!options.enabled || !embeddingProvider) return undefined;
   const env = options.env ?? process.env;
-  const account = options.account?.trim() || handle?.accountRole?.trim() || 'personal';
   // Exactly one day counter per runtime, durable across restart. Constructing
   // it here (before the store) also keeps an invalid budget env from creating
   // the store file at all.
@@ -3457,25 +3494,49 @@ export function createReadwiseConnectorStoreRuntime(options: {
   const store = createReadwiseConnectorStore(
     options.dbPath ?? defaultReadwiseConnectorStoreDbPath(env),
   );
-  const sync = createReadwiseConnectorStoreSyncHandler({
-    store,
-    embeddingProvider: options.embeddingProvider,
-    account,
-    requestBudget,
-    ...(env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE?.trim()
-      ? { credentialHandle: env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE.trim() }
-      : handle?.handle
-        ? { credentialHandle: handle.handle }
+  const buildSync = (handle: ConnectedCredentialHandle | undefined): ReadwiseConnectorStoreSyncHandler =>
+    createReadwiseConnectorStoreSyncHandler({
+      store,
+      embeddingProvider,
+      account: options.account?.trim() || handle?.accountRole?.trim() || 'personal',
+      requestBudget,
+      ...(env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE?.trim()
+        ? { credentialHandle: env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE.trim() }
+        : handle?.handle
+          ? { credentialHandle: handle.handle }
+          : {}),
+      ...(env.OLYMPUS_SOURCE_INDEX_READWISE_API_V2_BASE_URL?.trim()
+        ? { apiV2BaseUrl: env.OLYMPUS_SOURCE_INDEX_READWISE_API_V2_BASE_URL.trim() }
         : {}),
-    ...(env.OLYMPUS_SOURCE_INDEX_READWISE_API_V2_BASE_URL?.trim()
-      ? { apiV2BaseUrl: env.OLYMPUS_SOURCE_INDEX_READWISE_API_V2_BASE_URL.trim() }
-      : {}),
-    ...(env.OLYMPUS_SOURCE_INDEX_READWISE_READER_API_V3_BASE_URL?.trim()
-      ? { readerApiV3BaseUrl: env.OLYMPUS_SOURCE_INDEX_READWISE_READER_API_V3_BASE_URL.trim() }
-      : {}),
-    env,
-  });
-  return { store, sync };
+      ...(env.OLYMPUS_SOURCE_INDEX_READWISE_READER_API_V3_BASE_URL?.trim()
+        ? { readerApiV3BaseUrl: env.OLYMPUS_SOURCE_INDEX_READWISE_READER_API_V3_BASE_URL.trim() }
+        : {}),
+      env,
+    });
+  let cachedKey: string | undefined;
+  let cachedSync: ReadwiseConnectorStoreSyncHandler | undefined;
+  return {
+    store,
+    syncFor: buildSync,
+    syncForHandle(handle) {
+      if (!handle || !readwiseHandleUsable(handle)) {
+        cachedKey = undefined;
+        cachedSync = undefined;
+        return undefined;
+      }
+      const key = [handle.handle, handle.accountRole ?? ''].join('\0');
+      if (cachedKey === key && cachedSync) return cachedSync;
+      cachedSync = buildSync(handle);
+      cachedKey = key;
+      return cachedSync;
+    },
+  };
+}
+
+function readwiseHandleUsable(handle: ConnectedCredentialHandle): boolean {
+  return handle.provider === 'readwise'
+    && handle.allowedCapabilities.includes('readwise.sync')
+    && handle.backendState?.status !== 'reauth_required';
 }
 
 export function createXBookmarksConnectorStoreRuntime(options: {

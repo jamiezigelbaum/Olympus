@@ -28,6 +28,25 @@ export function workerAuthTokenFromConfig(
   );
 }
 
+/**
+ * The worker bearer token, resolved at each call instead of captured once.
+ *
+ * A token that comes only from worker.env can change while the Gateway runs:
+ * the plugin registers when OpenClaw loads it — on a first install that is
+ * before `olympus setup` has minted any token — and a token captured then made
+ * every tool call fail 401 against the worker setup started, until a manual
+ * Gateway restart (first install on a clean Linux user, 2026-09-23). Resolving
+ * per call keeps the precedence and the unresolved-SecretRef refusal of
+ * `workerAuthTokenFromConfig`; only the worker.env layer can move, and its read
+ * is cached on the file's stat.
+ */
+export function workerAuthTokenProvider(
+  config: OlympusConfig,
+  options: WorkerAuthTokenLookupOptions = {},
+): () => string | undefined {
+  return () => workerAuthTokenFromConfig(config, options);
+}
+
 export function withWorkerAuthHeader(init: RequestInit, authToken: string | undefined): RequestInit {
   const token = optionalToken(authToken);
   if (!token) return init;
@@ -68,13 +87,22 @@ export function applyWorkerSetupEnv(options: WorkerAuthTokenLookupOptions = {}):
 export function readWorkerSetupEnv(options: WorkerAuthTokenLookupOptions = {}): Record<string, string> | undefined {
   const path = workerSetupEnvPath(options);
   try {
-    const stat = statSync(path);
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0) return undefined;
-    return parseWorkerSetupEnv(readFileSync(path, 'utf8'));
+    const stat = statSync(path, { bigint: true });
+    if (!stat.isFile() || (stat.mode & 0o077n) !== 0n) return undefined;
+    // Long-lived Gateway callers read this per request; the key changes on any
+    // rewrite, in place (mtime/ctime/size) or by atomic rename (inode).
+    const key = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.mode}`;
+    const cached = setupEnvCache.get(path);
+    if (cached?.key === key) return { ...cached.env };
+    const env = parseWorkerSetupEnv(readFileSync(path, 'utf8'));
+    setupEnvCache.set(path, { key, env });
+    return { ...env };
   } catch {
     return undefined;
   }
 }
+
+const setupEnvCache = new Map<string, { key: string; env: Record<string, string> }>();
 
 /**
  * The environment a managed Olympus install actually runs with: the process
