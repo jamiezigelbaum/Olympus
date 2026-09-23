@@ -86,6 +86,26 @@ export interface GoogleGmailSourceConnectorOptions {
   sleep?: (ms: number) => Promise<void>;
   env?: Record<string, string | undefined>;
   ingestFilterOptions?: EmailIngestFilterOptions;
+  /**
+   * The owner-approved mail scope this traversal is bound to. Absent means the
+   * legacy unscoped traversal (tests and one-shot tooling); the runtime lane
+   * never constructs a connector without one.
+   */
+  scope?: GmailConnectorScope;
+}
+
+/**
+ * An approved mail scope, compiled (src/core/mail-source-scope.ts). The
+ * connector only ANDs it with the operator's hidden query override and splits
+ * the first traversal at the full-content cutoff.
+ */
+export interface GmailConnectorScope {
+  /** Every filter except the date bound; Gmail search syntax. */
+  baseQuery?: string;
+  /** Mail older than this is indexed metadata-only (no body, no snippet). */
+  contentAfterMs?: number;
+  /** Category label ids the scope skips, for the post-fetch ingest filter. */
+  skippedCategoryLabelIds?: readonly string[];
 }
 
 /**
@@ -103,6 +123,12 @@ interface GmailCursor {
   watermarkMs?: number;
   highWaterMs?: number;
   pageToken?: string;
+  /**
+   * Present while a scoped first traversal walks the mail older than the
+   * full-content cutoff. `highWaterMs` then carries the content leg's newest
+   * internalDate, promoted to the watermark when this leg completes.
+   */
+  phase?: 'metadata';
 }
 
 export interface GmailSourceConnectorTraversalStatus {
@@ -122,7 +148,24 @@ export interface GmailSourceConnectorTraversalStatus {
 
 export interface GmailApiClient {
   listMessages(request: GmailListMessagesRequest): Promise<GmailListMessagesResponse>;
-  getMessage(id: string): Promise<GmailMessage>;
+  /** `metadata` returns headers and labels only; the body never leaves Gmail. */
+  getMessage(id: string, options?: GmailGetMessageOptions): Promise<GmailMessage>;
+  /** Scope-picker tooling only; the traversal never lists labels. */
+  listLabels?(): Promise<GmailLabel[]>;
+  getLabel?(id: string): Promise<GmailLabel>;
+}
+
+export interface GmailGetMessageOptions {
+  format?: 'full' | 'metadata';
+  /** With `metadata`: restrict the returned headers. */
+  metadataHeaders?: readonly string[];
+}
+
+export interface GmailLabel {
+  id: string;
+  name: string;
+  type?: 'system' | 'user';
+  messagesTotal?: number;
 }
 
 export interface GmailListMessagesRequest {
@@ -134,6 +177,8 @@ export interface GmailListMessagesRequest {
 export interface GmailListMessagesResponse {
   messages: Array<{ id: string; threadId?: string }>;
   nextPageToken?: string;
+  /** Gmail's own rough count of matching messages. An estimate, never a total. */
+  resultSizeEstimate?: number;
 }
 
 export interface GmailMessage {
@@ -164,6 +209,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   private readonly apiBaseUrl: string;
   private readonly defaultMaxMessages: number;
   private readonly query: string | undefined;
+  private readonly scope: GmailConnectorScope | undefined;
   private readonly requestBudget: GoogleDailyRequestBudget | undefined;
   private readonly provenance: SourceInvocationProvenance;
   private readonly maxRetries: number | undefined;
@@ -199,7 +245,14 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     this.maxRetries = options.maxRetries;
     this.sleepImpl = options.sleep;
     this.injectedClient = options.apiClient;
-    this.ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
+    this.scope = options.scope;
+    const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
+    // The approved scope says which categories are skipped. An explicit
+    // operator setting still wins; otherwise the scope replaces the built-in
+    // Promotions default, so a category the owner chose to include is read.
+    this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined
+      ? { ...ingestFilterOptions, skipCategories: [...(this.scope.skippedCategoryLabelIds ?? [])] }
+      : ingestFilterOptions;
   }
 
   async authenticate(): Promise<void> {
@@ -210,10 +263,18 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     const client = await this.clientForRequest();
     let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
-    const watermarkMs = resume.watermarkMs;
-    const query = this.queryForWatermark(watermarkMs);
-    let highWaterMs = resume.highWaterMs;
-    let pageToken = resume.pageToken;
+    const cutoffMs = this.scope?.contentAfterMs;
+    // The metadata leg exists only under a scope with a cutoff; a phase marker
+    // arriving without one is a stale cursor and restarts the content leg.
+    const metadataLeg = resume.phase === 'metadata' && cutoffMs !== undefined;
+    const staleLeg = resume.phase === 'metadata' && !metadataLeg;
+    const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
+    const query = metadataLeg ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
+    // A scoped first traversal is two legs: full content after the cutoff,
+    // then metadata-only before it. Incremental passes read only new mail.
+    const splitsAtCutoff = !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
+    let pageToken = staleLeg ? undefined : resume.pageToken;
     const requestedPageTokens = new Set<string>();
     while (remaining > 0) {
       if (pageToken) assertNewProviderPage(requestedPageTokens, pageToken);
@@ -230,12 +291,24 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         if (messagesExamined >= remaining) break;
         messagesExamined += 1;
         this.providerRequests += 1;
-        const item = rawItemFromGmailMessage(await client.getMessage(message.id), this.account);
+        const fetched = await client.getMessage(
+          message.id,
+          metadataLeg ? { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS } : undefined,
+        );
+        const fetchedDateMs = internalDateNumber({ internalDate: fetched.internalDate });
+        const beforeCutoff = cutoffMs !== undefined && fetchedDateMs !== undefined && fetchedDateMs < cutoffMs;
+        // The content leg owns everything at or after the cutoff. Gmail's date
+        // operators are second-granular, so a boundary message the metadata
+        // leg also lists is left to the leg that reads it in full.
+        if (metadataLeg && !beforeCutoff) continue;
+        const item = rawItemFromGmailMessage(fetched, this.account, { metadataOnly: metadataLeg || beforeCutoff });
         this.attachmentsDeclared += metadataCount(item.metadata, 'attachmentCount');
         this.attachmentBytesDeclared += metadataCount(item.metadata, 'attachmentBytesDeclared');
         this.attachmentsNotIngested += metadataCount(item.metadata, 'attachmentsNotIngested');
         const internalDateMs = internalDateNumber(item.metadata);
-        if (internalDateMs !== undefined && (highWaterMs === undefined || internalDateMs > highWaterMs)) {
+        // The metadata leg walks older mail; only the content leg moves the
+        // high-water mark the next incremental pass starts from.
+        if (!metadataLeg && internalDateMs !== undefined && (highWaterMs === undefined || internalDateMs > highWaterMs)) {
           highWaterMs = internalDateMs;
         }
         const subject = metadataString(item.metadata, 'subject') ?? metadataString(item.metadata, 'title');
@@ -265,17 +338,24 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       // every bounded slice done, which told the spine that a partial window
       // was a full traversal.
       const pageTruncated = messagesExamined < listed.length;
-      const done = !pageToken && !pageTruncated;
+      const legDone = !pageToken && !pageTruncated;
+      // The content leg finishing hands over to the metadata leg instead of
+      // ending the traversal; the watermark waits until both legs are read.
+      const enterMetadataLeg = legDone && splitsAtCutoff;
+      const done = legDone && !enterMetadataLeg;
       const promoted = highWaterMs ?? watermarkMs;
       const nextCursor = done
         // A completed traversal hands forward only the promoted watermark, so
         // the next run asks Gmail for new mail instead of for the mailbox.
         ? encodeGmailCursor(promoted !== undefined ? { watermarkMs: promoted } : {})
-        : encodeGmailCursor({
-          ...(watermarkMs !== undefined ? { watermarkMs } : {}),
-          ...(highWaterMs !== undefined ? { highWaterMs } : {}),
-          ...(pageToken ? { pageToken } : {}),
-        });
+        : enterMetadataLeg
+          ? encodeGmailCursor({ phase: 'metadata', ...(highWaterMs !== undefined ? { highWaterMs } : {}) })
+          : encodeGmailCursor({
+            ...(watermarkMs !== undefined ? { watermarkMs } : {}),
+            ...(highWaterMs !== undefined ? { highWaterMs } : {}),
+            ...(pageToken ? { pageToken } : {}),
+            ...(metadataLeg ? { phase: 'metadata' as const } : {}),
+          });
       yield {
         items,
         ...(nextCursor ? { nextCursor } : {}),
@@ -317,6 +397,14 @@ export class GoogleGmailSourceConnector implements SourceConnector {
 
   requestBudgetStatus(): GoogleRequestBudgetStatus | undefined {
     return this.requestBudget?.status();
+  }
+
+  /**
+   * The budgeted, retrying client, for owner-initiated tooling such as the
+   * mail scope picker. Every request it makes is counted like a traversal's.
+   */
+  async apiClientForTooling(): Promise<GmailApiClient> {
+    return this.clientForRequest();
   }
 
   /**
@@ -376,9 +464,36 @@ export class GoogleGmailSourceConnector implements SourceConnector {
    * deliberately.
    */
   private queryForWatermark(watermarkMs: number | undefined): string | undefined {
+    if (this.scope) {
+      const cutoffSeconds = this.scope.contentAfterMs !== undefined
+        ? Math.floor(this.scope.contentAfterMs / 1_000) - 1
+        : undefined;
+      // Never ask for less than the approved window: a watermark older than
+      // the cutoff (a quiet mailbox) is still bounded at the cutoff.
+      const boundSeconds = watermarkMs !== undefined
+        ? Math.max(Math.floor(watermarkMs / 1_000), cutoffSeconds ?? 0)
+        : cutoffSeconds;
+      return this.scopedQuery(boundSeconds !== undefined && boundSeconds > 0 ? `after:${boundSeconds}` : undefined);
+    }
     if (watermarkMs === undefined) return this.query;
     const after = `after:${Math.floor(watermarkMs / 1_000)}`;
     return this.query ? `${after} (${this.query})` : after;
+  }
+
+  private metadataLegQuery(cutoffMs: number): string | undefined {
+    return this.scopedQuery(`before:${Math.floor(cutoffMs / 1_000)}`);
+  }
+
+  /**
+   * The approved scope's filters ANDed with the operator's hidden
+   * OLYMPUS_SOURCE_INDEX_GMAIL_QUERY override. Gmail ANDs space-separated
+   * terms; the override is parenthesised so an OR inside it cannot escape
+   * across the picker's terms.
+   */
+  private scopedQuery(bound: string | undefined): string | undefined {
+    const parts = [bound, this.scope?.baseQuery, this.query ? `(${this.query})` : undefined]
+      .filter((part): part is string => Boolean(part?.trim()));
+    return parts.length > 0 ? parts.join(' ') : undefined;
   }
 }
 
@@ -417,7 +532,8 @@ export function isGmailConnectorCursor(value: string | undefined): boolean {
 export function gmailCursorIsMidTraversal(value: string | undefined): boolean {
   if (!value) return false;
   try {
-    return decodeGmailCursor(value).pageToken !== undefined;
+    const cursor = decodeGmailCursor(value);
+    return cursor.pageToken !== undefined || cursor.phase === 'metadata';
   } catch {
     return false;
   }
@@ -470,15 +586,31 @@ function budgetedGmailApiClient(
       budget.reserve(provenance);
       return inner.listMessages(request);
     },
-    getMessage(id) {
+    getMessage(id, options) {
       budget.reserve(provenance);
-      return inner.getMessage(id);
+      return inner.getMessage(id, options);
     },
+    ...(inner.listLabels
+      ? {
+        listLabels() {
+          budget.reserve(provenance);
+          return inner.listLabels!();
+        },
+      }
+      : {}),
+    ...(inner.getLabel
+      ? {
+        getLabel(id: string) {
+          budget.reserve(provenance);
+          return inner.getLabel!(id);
+        },
+      }
+      : {}),
   };
 }
 
 function encodeGmailCursor(cursor: GmailCursor): string | undefined {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase) {
     return undefined;
   }
   return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString('base64url')}`;
@@ -492,7 +624,7 @@ function decodeGmailCursor(value: string | undefined): GmailCursor {
   try {
     const parsed = JSON.parse(
       Buffer.from(value.slice(GMAIL_CURSOR_PREFIX.length), 'base64url').toString('utf8'),
-    ) as { watermarkMs?: unknown; highWaterMs?: unknown; pageToken?: unknown };
+    ) as { watermarkMs?: unknown; highWaterMs?: unknown; pageToken?: unknown; phase?: unknown };
     const watermarkMs = decodeCursorEpochMs(parsed.watermarkMs);
     const highWaterMs = decodeCursorEpochMs(parsed.highWaterMs);
     if (
@@ -505,10 +637,12 @@ function decodeGmailCursor(value: string | undefined): GmailCursor {
     ) {
       throw new Error('invalid');
     }
+    if (parsed.phase !== undefined && parsed.phase !== 'metadata') throw new Error('invalid');
     return {
       ...(watermarkMs !== undefined ? { watermarkMs } : {}),
       ...(highWaterMs !== undefined ? { highWaterMs } : {}),
       ...(typeof parsed.pageToken === 'string' ? { pageToken: parsed.pageToken.trim() } : {}),
+      ...(parsed.phase === 'metadata' ? { phase: 'metadata' as const } : {}),
     };
   } catch {
     throw new TypeError('Gmail connector cursor is invalid.');
@@ -595,13 +729,33 @@ class RestGmailApiClient implements GmailApiClient {
           })).filter((item) => item.id)
         : [],
       ...optionalStringProp(record, 'nextPageToken'),
+      ...(typeof record.resultSizeEstimate === 'number' && Number.isFinite(record.resultSizeEstimate)
+        ? { resultSizeEstimate: Math.max(0, Math.floor(record.resultSizeEstimate)) }
+        : {}),
     };
   }
 
-  async getMessage(id: string): Promise<GmailMessage> {
-    const params = new URLSearchParams({ format: 'full' });
+  async getMessage(id: string, options: GmailGetMessageOptions = {}): Promise<GmailMessage> {
+    const params = new URLSearchParams({ format: options.format ?? 'full' });
+    if (options.format === 'metadata') {
+      for (const header of options.metadataHeaders ?? []) params.append('metadataHeaders', header);
+    }
     const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
     return json as GmailMessage;
+  }
+
+  async listLabels(): Promise<GmailLabel[]> {
+    const record = asRecord(await this.getJson('users/me/labels'), 'Gmail labels list response');
+    return Array.isArray(record.labels)
+      ? record.labels.map((item) => gmailLabelFromJson(asRecord(item, 'Gmail label'))).filter((label) => label.id)
+      : [];
+  }
+
+  async getLabel(id: string): Promise<GmailLabel> {
+    return gmailLabelFromJson(asRecord(
+      await this.getJson(`users/me/labels/${encodeURIComponent(id)}`),
+      'Gmail label',
+    ));
   }
 
   /**
@@ -655,12 +809,34 @@ function gmailRetryDelayMs(response: Response, attempt: number): number {
   return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5_000);
 }
 
-function rawItemFromGmailMessage(message: GmailMessage, account: string): RawItem {
+const GMAIL_METADATA_HEADERS = ['Subject', 'From', 'To', 'Date'] as const;
+
+function gmailLabelFromJson(record: Record<string, unknown>): GmailLabel {
+  const type = record.type === 'system' || record.type === 'user' ? record.type : undefined;
+  return {
+    id: stringValue(record.id),
+    name: stringValue(record.name),
+    ...(type ? { type } : {}),
+    ...(typeof record.messagesTotal === 'number' && Number.isFinite(record.messagesTotal)
+      ? { messagesTotal: Math.max(0, Math.floor(record.messagesTotal)) }
+      : {}),
+  };
+}
+
+function rawItemFromGmailMessage(
+  message: GmailMessage,
+  account: string,
+  options: { metadataOnly?: boolean } = {},
+): RawItem {
   const headers = headersFromPart(message.payload);
   const subject = headers.get('subject') ?? '(no subject)';
   const from = headers.get('from') ?? '';
   const date = parsedDate(headers.get('date')) ?? internalDateIso(message.internalDate);
-  const text = extractMessageText(message);
+  // Mail older than the approved window: subject, sender, date and labels
+  // only. No body and no snippet (the snippet is body text), so the item stays
+  // findable by name and can be upgraded to full content later.
+  const metadataOnly = options.metadataOnly === true;
+  const text = metadataOnly ? '' : extractMessageText(message);
   const attachments = gmailAttachmentInventory(message.payload);
   const fetchedAt = new Date().toISOString();
   return {
@@ -674,7 +850,7 @@ function rawItemFromGmailMessage(message: GmailMessage, account: string): RawIte
       ...(message.historyId ? { sourceVersion: message.historyId } : {}),
     },
     mimeType: 'message/rfc822',
-    content: text.trim() ? { kind: 'text', text } : { kind: 'metadata_only' },
+    content: !metadataOnly && text.trim() ? { kind: 'text', text } : { kind: 'metadata_only' },
     metadata: Object.freeze({
       title: subject,
       subject,
@@ -684,7 +860,10 @@ function rawItemFromGmailMessage(message: GmailMessage, account: string): RawIte
       // Gmail's `after:` operator speaks the same clock.
       ...(message.internalDate ? { internalDate: message.internalDate } : {}),
       ...(message.historyId ? { historyId: message.historyId } : {}),
-      ...(message.snippet ? { snippet: message.snippet } : {}),
+      ...(message.snippet && !metadataOnly ? { snippet: message.snippet } : {}),
+      // Marks mail read by name only under the approved window, so a later
+      // upgrade can find exactly these items.
+      ...(metadataOnly ? { mailScopeContent: 'metadata_only' } : {}),
       labels: message.labelIds ?? [],
       attachmentCount: attachments.count,
       attachmentBytesDeclared: attachments.bytes,
@@ -692,7 +871,7 @@ function rawItemFromGmailMessage(message: GmailMessage, account: string): RawIte
       // body means the message was fully covered.
       attachmentsNotIngested: attachments.count,
       locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message.id)}`,
-      contentHash: hashString(`${message.historyId ?? ''}:${text}`),
+      contentHash: hashString(`${message.historyId ?? ''}:${metadataOnly ? 'metadata_only' : text}`),
     }),
     fetchedAt,
   };

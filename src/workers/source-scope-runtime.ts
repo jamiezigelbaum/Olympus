@@ -20,6 +20,23 @@ import type { DropboxContentScope } from './dropbox-files/connector.ts';
 import type { SourceEmbeddingProvider } from './source-index/embeddings.ts';
 import type { SourceSchedulerSource } from './source-scheduler.ts';
 import type { SourceIngestionPolicy } from '../core/source-ingestion-policy.ts';
+import {
+  approveMailSourceScope,
+  assertMailSourceScopeApproved,
+  compileGmailMailScope,
+  defaultMailScopeSelection,
+  defaultMailSourceScopeStatePath,
+  GMAIL_SCOPE_CATEGORIES,
+  isGmailScopeCategory,
+  isMailScopeWindow,
+  readMailSourceScopeApproval,
+  type MailScopeSelection,
+  type MailSourceScopeApprovalSnapshot,
+  type MailSourceScopeId,
+} from '../core/mail-source-scope.ts';
+import type { GmailConnectorScope } from './google-connectors/gmail.ts';
+import type { OlympusMailScopeDraft } from '../control-ui-contract.ts';
+import { OperationError } from '../core/operation-error.ts';
 
 export interface FileSourceScopePolicyRef {
   sourceId: FileSourceScopeId;
@@ -27,19 +44,86 @@ export interface FileSourceScopePolicyRef {
   revision: string;
 }
 
+export interface MailSourceScopePolicyRef {
+  sourceId: MailSourceScopeId;
+  accountGeneration: string;
+  revision: string;
+}
+
+/** Any approval a lane can be bound to: a folder scope or a mail scope. */
+export type SourceScopePolicyRef = FileSourceScopePolicyRef | MailSourceScopePolicyRef;
+
+/**
+ * The one scope authority for every scope-gated source. Folder sources
+ * (Drive, Dropbox) and the mail source (Gmail) share the grant generation,
+ * revision, pending state and the scheduler/embedding binding below; each
+ * keeps its own state file.
+ */
 export class FileSourceScopeAuthority {
   readonly registryPath: string;
   readonly statePath: string;
+  readonly mailStatePath: string;
   private readonly readRegistry: () => ConnectedHandleRegistry;
+  private readonly mailPinnedHandle: () => string | undefined;
 
   constructor(options: {
     registryPath?: string;
     statePath?: string;
+    mailStatePath?: string;
     readRegistry?: () => ConnectedHandleRegistry;
+    /** The handle the Gmail lane is pinned to, when more than one is registered. */
+    mailPinnedHandle?: () => string | undefined;
   } = {}) {
     this.registryPath = options.registryPath ?? defaultHandleRegistryPath();
     this.statePath = options.statePath ?? defaultFileSourceScopeStatePath(this.registryPath);
+    this.mailStatePath = options.mailStatePath ?? defaultMailSourceScopeStatePath(this.registryPath);
     this.readRegistry = options.readRegistry ?? (() => readConnectedHandleRegistry(this.registryPath));
+    this.mailPinnedHandle = options.mailPinnedHandle ?? (() => undefined);
+  }
+
+  mailSnapshot(): MailSourceScopeApprovalSnapshot {
+    try {
+      return readMailSourceScopeApproval(this.mailInput());
+    } catch {
+      return { sourceId: 'gmail.email', status: 'scope_pending', revision: 'unreadable', reason: 'malformed' };
+    }
+  }
+
+  approveMail(input: {
+    accountGeneration: string;
+    expectedRevision: string;
+    scope: Omit<MailScopeSelection, 'contentAfter'>;
+  }): MailSourceScopeApprovalSnapshot {
+    return approveMailSourceScope({ ...this.mailInput(), ...input });
+  }
+
+  mailPolicyRef(): MailSourceScopePolicyRef | undefined {
+    const snapshot = this.mailSnapshot();
+    if (snapshot.status !== 'approved' || !snapshot.accountGeneration) return undefined;
+    return { sourceId: 'gmail.email', accountGeneration: snapshot.accountGeneration, revision: snapshot.revision };
+  }
+
+  assertCurrentMail(ref: MailSourceScopePolicyRef): ReturnType<typeof assertMailSourceScopeApproved> {
+    return assertMailSourceScopeApproved({
+      ...this.mailInput(),
+      expectedAccountGeneration: ref.accountGeneration,
+      expectedRevision: ref.revision,
+    });
+  }
+
+  /** Throws unless the approval `ref` names is still the current one. */
+  assertRefCurrent(ref: SourceScopePolicyRef): void {
+    if (ref.sourceId === 'gmail.email') this.assertCurrentMail(ref);
+    else this.assertCurrent(ref);
+  }
+
+  private mailInput(): { registry: ConnectedHandleRegistry; statePath: string; pinnedHandle?: string } {
+    const pinnedHandle = this.mailPinnedHandle()?.trim();
+    return {
+      registry: this.readRegistry(),
+      statePath: this.mailStatePath,
+      ...(pinnedHandle ? { pinnedHandle } : {}),
+    };
   }
 
   snapshot(sourceId: FileSourceScopeId): FileSourceScopeApprovalSnapshot {
@@ -278,21 +362,94 @@ function normalizeDropboxScopePath(path: string): string {
 export function scopeBoundEmbeddingProvider(
   provider: SourceEmbeddingProvider,
   authority: FileSourceScopeAuthority,
-  ref: FileSourceScopePolicyRef,
+  ref: SourceScopePolicyRef,
 ): SourceEmbeddingProvider {
   return {
     ...provider,
     async embed(inputs, options) {
-      authority.assertCurrent(ref);
+      authority.assertRefCurrent(ref);
       return provider.embed(inputs, options);
     },
+  };
+}
+
+/**
+ * The approved mail scope as the Gmail connector's query binding. The
+ * operator's hidden OLYMPUS_SOURCE_INDEX_GMAIL_QUERY override is not folded in
+ * here: the connector reads it and ANDs it with this.
+ */
+export function gmailConnectorScopeFromApproval(approval: { mailScope: MailScopeSelection }): GmailConnectorScope {
+  const compiled = compileGmailMailScope(approval.mailScope);
+  return {
+    ...(compiled.baseQuery ? { baseQuery: compiled.baseQuery } : {}),
+    ...(compiled.contentAfterMs !== undefined ? { contentAfterMs: compiled.contentAfterMs } : {}),
+    skippedCategoryLabelIds: compiled.skippedCategoryLabelIds,
+  };
+}
+
+/** The picker's view of a saved scope, or of the defaults when none is saved. */
+export function mailScopeDraftView(scope: MailScopeSelection | undefined): OlympusMailScopeDraft {
+  const source = scope ?? defaultMailScopeSelection();
+  return {
+    window: source.window,
+    skipped_categories: [...source.skippedCategories],
+    skipped_labels: source.skippedLabels.map((label) => ({ id: label.id, name: label.name })),
+    always_private_senders: [...source.alwaysPrivateSenders],
+    skip_senders: [...source.skipSenders],
+  };
+}
+
+export function mailScopeFromDraft(draft: OlympusMailScopeDraft): Omit<MailScopeSelection, 'contentAfter'> {
+  return {
+    window: draft.window,
+    skippedCategories: [...draft.skipped_categories],
+    skippedLabels: draft.skipped_labels.map((label) => ({ id: label.id, name: label.name })),
+    alwaysPrivateSenders: [...draft.always_private_senders],
+    skipSenders: [...draft.skip_senders],
+  };
+}
+
+/**
+ * Untrusted request JSON to a draft. Shape only; the approval re-validates
+ * every value (senders, categories, window) before anything is written.
+ */
+export function parseMailScopeDraft(value: unknown): OlympusMailScopeDraft {
+  const invalid = (message: string): never => {
+    throw new OperationError('invalid_request', message);
+  };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('The mail scope draft must be an object.');
+  const record = value as Record<string, unknown>;
+  if (!isMailScopeWindow(record.window)) invalid('Choose a valid mail time window.');
+  const strings = (field: string, max: number): string[] => {
+    const list = record[field];
+    if (!Array.isArray(list) || list.length > max || list.some((entry) => typeof entry !== 'string' || entry.length > 320)) {
+      invalid(`${field} must be a list of at most ${max} strings.`);
+    }
+    return list as string[];
+  };
+  const categories = strings('skipped_categories', GMAIL_SCOPE_CATEGORIES.length);
+  if (categories.some((category) => !isGmailScopeCategory(category))) invalid('Every skipped category must be a Gmail category.');
+  const labels = record.skipped_labels;
+  if (!Array.isArray(labels) || labels.length > 500) invalid('skipped_labels must be a list of at most 500 labels.');
+  return {
+    window: record.window as OlympusMailScopeDraft['window'],
+    skipped_categories: categories as OlympusMailScopeDraft['skipped_categories'],
+    skipped_labels: (labels as unknown[]).map((label) => {
+      const entry = label && typeof label === 'object' && !Array.isArray(label) ? label as Record<string, unknown> : {};
+      if (typeof entry.id !== 'string' || typeof entry.name !== 'string' || entry.id.length > 256 || entry.name.length > 256) {
+        return invalid('Every skipped label needs its Gmail id and name.');
+      }
+      return { id: entry.id, name: entry.name };
+    }),
+    always_private_senders: strings('always_private_senders', 500),
+    skip_senders: strings('skip_senders', 500),
   };
 }
 
 export function scopeBoundSchedulerSource(input: {
   source: SourceSchedulerSource;
   authority: FileSourceScopeAuthority;
-  ref: FileSourceScopePolicyRef;
+  ref: SourceScopePolicyRef;
 }): SourceSchedulerSource {
   const suffix = input.ref.revision.replaceAll('-', '').slice(0, 16);
   return {
@@ -301,7 +458,7 @@ export function scopeBoundSchedulerSource(input: {
       ...task,
       id: `${task.id}:scope:${suffix}`,
       async run(context) {
-        input.authority.assertCurrent(input.ref);
+        input.authority.assertRefCurrent(input.ref);
         return task.run(context);
       },
     })),

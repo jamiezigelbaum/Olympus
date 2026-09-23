@@ -99,12 +99,28 @@ export function connectedFileSourceAccountGeneration(
   sourceId: FileSourceScopeId,
   registry: SourceScopeConnectedHandleRegistry,
 ): { generation: string; handle: SourceScopeConnectedHandle } | undefined {
-  const capability = FILE_SOURCE_SCOPE_CAPABILITIES[sourceId];
-  const handles = registry.handles.filter((handle) =>
+  return connectedSourceScopeAccountGeneration(sourceId, FILE_SOURCE_SCOPE_CAPABILITIES[sourceId], registry);
+}
+
+/**
+ * The same opaque grant generation for any scope-gated source (folders or
+ * mail). Without a pin exactly one eligible handle must exist; a pin names the
+ * one handle the source's lane reads, so a second registered account can
+ * never silently inherit the first one's approval.
+ */
+export function connectedSourceScopeAccountGeneration(
+  sourceId: string,
+  capability: { provider: string; credentialCapability: string },
+  registry: SourceScopeConnectedHandleRegistry,
+  pinnedHandle?: string,
+): { generation: string; handle: SourceScopeConnectedHandle } | undefined {
+  const eligible = registry.handles.filter((handle) =>
     handle.provider === capability.provider
     && handle.allowedCapabilities.includes(capability.credentialCapability)
     && handle.backendState?.status !== 'reauth_required'
   );
+  const pin = pinnedHandle?.trim();
+  const handles = pin ? eligible.filter((handle) => handle.handle === pin) : eligible;
   if (handles.length !== 1) return undefined;
   const handle = handles[0]!;
   const generation = createHash('sha256').update(JSON.stringify([
