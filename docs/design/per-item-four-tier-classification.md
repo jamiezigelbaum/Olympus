@@ -1,8 +1,8 @@
 # Design: per-item four-tier classification for every Olympus source
 
-Status: proposal, needs owner decisions (§8)
+Status: proposal, revised 2026-09-23 after owner review (§8). Scope: the plugin only. Work on the owner's own installations is tracked separately, outside this repository.
 Date: 2026-09-23
-Risk class: **Critical**. It changes source contracts, trust routing and destructive data behavior. The migration on an existing install is **Live**.
+Risk class: **Critical**. It changes source contracts, trust routing and destructive data behavior.
 Authority: the owner's ruling of 2026-09-23: every item from every source is judged individually into Public, Personal, Private or Secrets. Private material is still searched; Argus (the private analyst) handles it, and Castor receives only OPSEC-scanned derivatives. No embedding change may throw away existing embeddings, and every embedding/re-embed decision needs advance owner approval plus a ledger entry.
 
 Terms used below. The product tiers map to stored keys like this (TRUST_MODEL.md, "Product tier names"):
@@ -96,7 +96,7 @@ It never calls a model. The model seam, `DelphiItemTierScorer`, only chooses bet
 
 1. No source can produce Public.
 2. Dropbox, WhatsApp, Readwise, X and Telegram judge nothing per item.
-3. Gmail and Drive send undecided items to Personal, the unsafe side.
+3. No privacy-safe check looks at items whose names suggest they might be private before they are embedded.
 4. Classification reasons are not stored.
 5. There are no owner tier overrides.
 6. No privacy-safe model judgment is wired.
@@ -115,41 +115,47 @@ It never calls a model. The model seam, `DelphiItemTierScorer`, only chooses bet
 
 ### 2.2 Classification pipeline (source-agnostic, runs once per item)
 
+The owner's rule (2026-09-23): **the default tier is Personal.** Things are raised to Private or Secrets on evidence. A quick private "sniffer" pass looks at anything whose names or metadata suggest it might be private, **before** full ingestion and embedding. Two passes:
+
+**Pass 1: metadata** (names, folder path, sender, labels, chat; runs for every item, including metadata-only ones)
+
 ```
-RawItem + connector signals
-  [0] extraction, in the private lane if the tier is still unknown
   [1] per-item owner override (sticky) .............................. final
-  [2] secret detector (deterministic: text + title + path) .......... → Secrets
+  [2] secret detector on title + path ............................... → Secrets
   [3] owner folder / label / sender / chat rules
   [4] source floor (provider facts, e.g. Telegram Secret Chat → Private)
-  [5] sensitivity map v2 (owner's own words → categories, all four tiers)
-  [6] deterministic sensitive detectors ............................. → Private
-  [7] deterministic public/personal evidence (public share link, published path, …)
-  [8] source prior (e.g. Readwise → Personal), if declared
-  [9] model judgment, privacy-safe lane only, for anything still undecided
-  [10] default: Private, reason `default:undecided`
+  [5] sensitivity map v2 on names/metadata (owner's own words → categories, all four tiers)
+  [6] deterministic public evidence (public share link, published post, …) → Public
+  [7] SNIFFER, only for items whose metadata looks possibly private (a map term,
+      a sensitive-name pattern such as "medical", "tax", "bank", "therapy", a
+      person's name in a family folder, …): a privacy-safe model reads the
+      metadata and returns Personal or Private
+  [8] default ........................................................ → Personal
 ```
+
+**Pass 2: content** (only for items approved for full ingestion, before chunks are embedded)
+
+```
+  [9]  secret detector on the full extracted text ................... → Secrets
+  [10] deterministic sensitive detectors on text (financial, health, identity) → Private
+  [11] sensitivity map v2 on text
+  [12] SNIFFER on a short text excerpt, only when pass 1 flagged the item or [10]/[11] are borderline
+```
+
+Content can only **raise** the tier that pass 1 set, never lower it, unless the owner overrides the item. Embedding happens only after pass 2, so each chunk is embedded once, in its final tier's model.
+
+**The sniffer.** It is a small, fast classifier call on the privacy-safe lane: a local model where the preset has one, otherwise Venice Private. It never runs on an ordinary cloud model, because you cannot send possibly-private material to one to find out whether it is private. It sees only metadata in pass 1 and only a short excerpt in pass 2, and never anything the secret detector caught. It returns strict JSON `{tier: personal|private, category, confidence}`, and its verdicts are cached by `(content or metadata hash, model, prompt version, map revision)`, so unchanged items are never re-asked. On failure it fails safe: an item it was asked about goes to Private.
 
 **Precedence rules:**
 
-- **Raises beat lowers.** Among steps [3]–[8], the most sensitive positive verdict wins. A lowering signal never rescues an item that a raising signal has flagged.
-- **Secrets outrank everything except an explicit per-item owner override.** Even that override cannot send content straight to Personal: "not a secret" removes the detector verdict for that content hash, and the item then goes back through [3]–[10].
-- **Public needs positive evidence.** That means a public share link, a published location, a public post, or an owner rule or map category. The model alone can choose only Personal or Private.
+- **Raises beat lowers.** The most sensitive positive verdict wins; a lowering signal never rescues an item a raising signal has flagged.
+- **Secrets outrank everything except an explicit per-item owner override.** "Not a secret" clears the detector verdict for that content and sends the item back through normal classification; it never jumps straight to a tier.
+- **Public needs positive evidence** (a public share link, a published post, an owner rule or map category). The sniffer chooses only Personal or Private.
 - **Folder and label rules default to `prior` strength.** The rule sets the resting tier, and item-level raises still apply, so a bank statement in a "Personal" folder still becomes Private. `force` strength is opt-in per rule.
 
-**Model judgment [9] must be privacy-safe.** Undecided content cannot go to an ordinary cloud model to find out whether it is private. The classifier:
+A classifier model change is an owner-approved, ledgered event.
 
-- runs only on the sovereignty private pool (local model, or Venice Private or above);
-- is refused before any dispatch for `standard_cloud`;
-- sees only items that already passed the secret detector.
-
-Other properties:
-
-- **Output** is strict JSON: `{tier: personal|private, category, confidence}`.
-- **Failures** leave the item at the default.
-- **Verdict cache.** Verdicts are cached by `(content_hash, model, prompt version, map revision)`, so an unchanged re-sync never re-asks the model. A classifier model change is an owner-approved, ledgered event.
-
-**Undecided items** are stored in the source's Private store, so they are **searchable by keyword from the first sync**. They are held back from embedding until their tier is final, so nothing is embedded twice, and the dashboard shows them as "pending classification".
+**Items waiting for the sniffer** are stored in the source's Private store, so they are **searchable by keyword from the first sync**. They are held back from embedding until their tier is final, and the dashboard shows them as "pending classification".
 
 **Reasons** are stored as content-free codes in a tier ledger (§3.3), for example:
 
@@ -158,8 +164,8 @@ Other properties:
 - `sensitivity_map:therapy`
 - `detector:financial:iban`
 - `evidence:public_link`
-- `model:venice/inkling:v1:health:0.83`
-- `default:undecided`
+- `sniffer:local:v1:health:0.83`
+- `default:personal`
 
 ### 2.3 Secret detection and location-only handling
 
@@ -216,7 +222,7 @@ Retrieval drops any hit whose store tier does not equal the ledger's current tie
 
 1. Write the destination copy while the source copy remains current.
 2. Flip the ledger row. This single write makes the destination copy visible and the source copy invisible.
-3. Mark the source copy **superseded**, which means kept but never searched, served or counted, or purge it.
+3. Mark the source copy **superseded**: kept, but never searched, served or counted.
 
 This guarantees **never searchable in two tiers at once**, and makes **rollback a ledger flip, with no re-embed**.
 
@@ -250,7 +256,7 @@ When an item changes tier, it gets vectors from the destination tier's model:
 | Move | New vectors | Old vectors | Privacy note |
 |---|---|---|---|
 | Public ↔ Personal | **Copied** (same Gemini identity and input hash) | Source copy purged after the flip (same vector) | none |
-| Personal/Public → Private (raise) | Destination Private model (local or Venice) | **Deleted** from the Gemini-backed store at the flip, with a ledger entry | Gemini already saw the text; that cannot be undone. Delete and log it. |
+| Personal/Public → Private (raise) | Destination Private model (local or Venice) | **Kept, hidden** (superseded: never searched or served) | Gemini already saw the text, so deleting its vectors gains little. Owner ruling: keep them. They can be purged later on request. |
 | Private → Personal/Public (lower) | Gemini, in the destination store | **Retained as superseded** (hidden, not served) until the owner approves a purge | Gemini now sees text the policy has ruled Personal. This is consistent with policy. |
 | Any → Secrets | none | Tombstoned; vectors deleted (today's S5 behavior) | Mandatory |
 | Tier unchanged | none | kept, byte-identical | none. This is the core guarantee. |
@@ -260,7 +266,7 @@ When an item changes tier, it gets vectors from the destination tier's model:
 1. A tier move never rebinds embedding write authority, and can never reach the whole-corpus `invalidateEmbeddingModelCurrency` path. The first embed into a new store is a first mint.
 2. No new embedding model, epoch or dimension is introduced. Each store uses its existing canonical identity.
 3. Pending items are embedded only after their tier is final.
-4. Every raise that deletes vectors writes a scoped `invalidation` ledger entry with a chunk count.
+4. Every tier move writes a ledger entry with a chunk count.
 
 ### 4.3 Epochs and parity
 
@@ -279,13 +285,7 @@ These are formulas. M0 (§4.6) measures the real counts before anything is appro
 
 **First install:** classification runs before embedding, so each chunk is embedded once, in the right model. For example, 300k chunks with 70% Personal or Public comes to about $32 (Gemini) plus about $1 (Venice), plus classifier tokens on undecided items only.
 
-**Reclassifying Sparta** (all of Dropbox is Private and Venice-embedded today):
-
-- Nothing needs fetching from Dropbox again.
-- The deterministic pass is CPU only: minutes.
-- Model judgment on the remainder takes hours: roughly 3 hours on Venice for 100k items, longer locally.
-- Only **moving** chunks are embedded, in Gemini. For example, 250k moving chunks cost about $38 and take about 1–2 hours.
-- Moved items' Venice vectors are **kept** (superseded). Items that stay Private cost nothing.
+**Reclassifying an existing install:** nothing is fetched from the provider again. The metadata pass is CPU-only (minutes). The sniffer runs only on flagged items. Only **moving** chunks are embedded, in the destination tier's model; items whose tier doesn't change cost nothing. The dry run (M0) reports the exact counts, tokens, cost and time before anything is approved.
 
 ### 4.5 Approval and ledger
 
@@ -300,11 +300,11 @@ These are formulas. M0 (§4.6) measures the real counts before anything is appro
 | M1 | Owner reviews the patterns, writes rules and overrides, then re-runs M0. | owner |
 | M2 | **Approval 1:** the distribution plus the cost and time estimate. | **owner** |
 | M3 | Batched copies into destination stores, with vectors copied or embedded. The source copy stays current. | approved scope |
-| M4 | Per batch: ledger flip. Lowered items' source copies become superseded; raised items' lower copies are deleted with a ledger entry. | approved scope |
+| M4 | Per batch: ledger flip. The previous copy of every moved item becomes superseded (hidden, kept). | approved scope |
 | M5 | Soak. Rollback of any batch is a ledger flip back, with no re-embed. | owner |
-| M6 | **Approval 2:** purge superseded Private copies, or keep them. | **owner** |
+| M6 | **Approval 2 (optional):** purge superseded copies, or keep them. | **owner** |
 
-**Transitional rule for Gmail and Drive:** Personal items that are undecided today stay where they are until migration gives their final verdict. Flipping the default to Private first would re-embed items that may come straight back to Personal. Running M3–M6 on Sparta is a Live change under the OpenClaw change protocol.
+This tooling ships in the plugin for every existing install. Running it on any live installation is a separate, owner-approved operation.
 
 ---
 
@@ -335,7 +335,7 @@ These are formulas. M0 (§4.6) measures the real counts before anything is appro
   - TRUST_MODEL.md (the Dropbox-as-S4-vault default, the tier ledger, Secret locations);
   - SOVEREIGNTY_CONFIG.md (classifier lane per preset);
   - corpus registry declarations.
-- **Risk:** Critical for the repository change; Live for the Sparta migration.
+- **Risk:** Critical.
 
 ---
 
@@ -345,19 +345,18 @@ These are formulas. M0 (§4.6) measures the real counts before anything is appro
 |---|---|---|---|
 | P0 | Owner decisions; docs; contract 2.0.0 types, fingerprint and review | 2 | beta 4 |
 | P1 | Shared tier classifier (four tiers, reason codes); sensitivity map v2; tier ledger; `TieredStoreSet` with the superseded state and visibility filter; secret-locations index; all 7 public connectors emit signals; new Public and Personal stores | 10–14 | beta 4 |
-| P2 | Privacy-safe model judgment with verdict cache and classification ledger; `tier-rules.json` plus the `olympus tier set/explain` CLI; embedding drain holds back pending items; Gemini vector copy between Public and Personal | 5–7 | beta 4 |
-| P3 | Migration tooling M0–M6 with ledger integration; dashboard tier counts | 4–6 | beta 4 (running on Sparta is a separate Live change) |
+| P2 | Privacy-safe sniffer (metadata pass + excerpt pass) with verdict cache and classification ledger; `tier-rules.json` plus the `olympus tier set/explain` CLI; embedding drain holds back pending items; Gemini vector copy between Public and Personal | 5–7 | beta 4 |
+| P3 | Migration tooling M0–M6 with ledger integration; dashboard tier counts | 4–6 | beta 4 |
 | P4 | Owner tier-review page; split-leg answers; redacted-remainder Secrets; non-public sources | 8–12 | later |
 
 **Test and eval plan:**
 
-- **Unit:** the precedence matrix; Public only on positive evidence; the undecided default; the classifier refused on standard cloud; secret content never reaches the classifier.
+- **Unit:** the precedence matrix; Public only on positive evidence; the Personal default; content can only raise; the sniffer refused on standard cloud; secret content never reaches the sniffer.
 - **Store and embedding:**
   - unchanged items keep byte-identical vectors;
   - a tier move never rebinds or invalidates;
   - Public↔Personal copies vectors with zero provider calls;
-  - a raise deletes lower vectors and writes a ledger entry;
-  - a lower keeps superseded vectors;
+  - every move keeps the previous copy's vectors, hidden;
   - rollback works with no embed;
   - an item never appears in two tiers.
 - **Classification eval** (new):
@@ -365,23 +364,29 @@ These are formulas. M0 (§4.6) measures the real counts before anything is appro
   - 0 hard-category Private items classified below Private;
   - ≤ 1% Private→Personal leakage on the ambiguous set.
 - **Held-out eval** passes unchanged.
-- **Migration rehearsal** on a synthetic secure-only Dropbox store.
+- **Migration rehearsal** on a synthetic single-tier store.
 
 ---
 
-## 8. Owner decisions needed (each with a recommendation)
+## 8. Owner decisions (revised after owner review, 2026-09-23)
 
-1. **Source priors.** Recommendation: **yes**. Sources of published third-party reading (Readwise, X) may declare a Personal prior; every item still passes the secret detector, map, detectors and model-on-ambiguous.
-2. **Default for undecided items.** Recommendation: **Private for all sources**, including Gmail and Drive (today those default to Personal). Existing items stay put until migration gives their final verdict.
-3. **Model judgment.** Recommendation: **enabled**, private or local lane only. It may lower an item to Personal only at confidence ≥ 0.9, and it never assigns Public.
-4. **Folder and label rule strength.** Recommendation: default `prior` (item-level raises still apply); `force` opt-in per rule.
-5. **Secret false positives.** Recommendation: per-item "not a secret" clears the detector verdict for that content, and the item goes back through normal classification; it never jumps straight to a tier.
-6. **Secret unit.** Recommendation: the whole item in beta 4; redacted remainders later.
-7. **What Castor sees of a Secret location.** Recommendation: source plus path or title (secret-scanned) plus finding kind; no content.
-8. **Raised items' cloud vectors.** Recommendation: **delete the Gemini vectors at cutover**, with a ledger entry, under standing approval.
-9. **Standing approval for steady-state tier moves.** Recommendation: **yes**, capped at 5,000 chunks and $1 per day per source; above the cap, queue for approval.
-10. **Lowered items' Private copies.** Recommendation: **retain until you approve a purge**, with a reminder after 30 days.
-11. **Pending items.** Recommendation: keyword-only in Private until decided; embed in the Private model only if still pending after 24 hours.
-12. **Retire the `public_safe.readwise.library` alias** so the canonical Public Readwise corpus can use that id. Recommendation: **yes**.
-13. **Answer assembly.** Recommendation: keep "highest tier routes the whole pack" in beta 4; split legs later if needed.
-14. **Sparta migration.** Recommendation: run M0 (dry run) as soon as P3 ships; M2 (cost) and M6 (purge) are separate approvals.
+Decided by the owner:
+
+- **Default tier is Personal.** Metadata-only items are Personal unless something raises them.
+- **Sniffer:** a quick private/local model pass on anything whose names or metadata look possibly private, before full ingestion and embedding.
+- **Keep cloud vectors** when an item moves up to Private: hidden, not deleted.
+- **One query searches all tiers**, with Argus handling Private evidence.
+
+Remaining, each with a recommendation:
+
+1. **Sniffer lane:** local model where the preset has one, otherwise Venice Private; never an ordinary cloud model. **Yes.**
+2. **Content can only raise** the tier set from metadata; only an owner override lowers. **Yes.**
+3. **Sniffer on content:** read a short excerpt only when metadata flagged the item or the content detectors are borderline. **Yes.**
+4. **Folder and label rules** set a default that item-level raises can still override; hard overrides are opt-in per rule. **Yes.**
+5. **"Not a secret"** sends the item back through normal classification. **Yes.**
+6. **A file containing a secret** is a Secret as a whole, for now. **Yes.**
+7. **What Castor sees of a secret:** source, path or title and finding kind; never content. **Yes.**
+8. **Standing approval for everyday tier moves:** up to 5,000 chunks and $1 per day per source; more waits for approval. **Yes.**
+9. **Superseded copies** are kept until the owner approves a purge. **Yes.**
+10. **Retire the `public_safe.readwise.library` alias** so the Public Readwise store can use that id. **Yes.**
+11. **In beta 4, any Private evidence** routes the whole answer through Argus; split handling later if needed. **Yes.**
