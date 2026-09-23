@@ -35,8 +35,10 @@ import {
   clipChunksToUtf8Bytes,
   utf8ByteLength,
   hasTemporalIntent,
+  type ClassificationCoverageNote,
   type EvidencePackBuildDetail,
   type LocalContentProviderMap,
+  type SecretLocationNote,
   type SelectedEvidenceItem,
 } from '../../core/evidence-pack.ts';
 import {
@@ -54,6 +56,7 @@ import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.t
 import type {
   SourceIndexRouterAdapterMap,
   SourceIndexSkippedCorpus,
+  SourceIndexVisibilityGate,
 } from '../../core/source-index/router.ts';
 import { mergeRetrievalDegradations } from '../../core/source-index/retrieval.ts';
 import {
@@ -105,6 +108,15 @@ export interface AnalystAnswerLanes {
   registry: SourceIndexCorpusRegistry;
   adapters: SourceIndexRouterAdapterMap;
   contentProviders: LocalContentProviderMap;
+  /**
+   * Four-tier classification (P1b). Every tier of every source is searched;
+   * the gate judges all hits against one tier-ledger snapshot, Secrets are
+   * matched by location only and pending counts become coverage notes. None of
+   * them enters the pack, so the routing to Argus is unchanged in shape.
+   */
+  visibilityGate?: SourceIndexVisibilityGate;
+  secretLocations?: (query: string) => readonly SecretLocationNote[];
+  classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
 }
 
 export interface AnalystSourceIndexAnswerHandlerOptions {
@@ -383,6 +395,9 @@ export function createAnalystSourceIndexAnswerHandler(
           maxCharsPerCandidate,
           evidenceByteBudget,
           ...(options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {}),
+          ...(activeLanes.visibilityGate ? { visibilityGate: activeLanes.visibilityGate } : {}),
+          ...(activeLanes.secretLocations ? { secretLocations: activeLanes.secretLocations } : {}),
+          ...(activeLanes.classificationCoverage ? { classificationCoverage: activeLanes.classificationCoverage } : {}),
         }));
       const initialAttempt = request.selected_items?.length
         ? 'selected'
@@ -563,6 +578,18 @@ export function createAnalystSourceIndexAnswerHandler(
         evidence: released
           ? releasedEvidence(analystResult.citations, detail, releaseSecureContent)
           : [],
+        ...((detail.secretLocations ?? []).length > 0
+          ? {
+              // Location only, beside the answer: never content, never a
+              // model input (the Analyst saw only the pack).
+              secret_locations: (detail.secretLocations ?? []).map((location) => ({
+                source: location.source,
+                ...(location.locator ? { locator: location.locator } : {}),
+                ...(location.title ? { title: location.title } : {}),
+                finding_kinds: [...location.findingKinds],
+              })),
+            }
+          : {}),
         audit: {
           searched_corpora: [...pack.coverage.searchedCorpora],
           skipped_corpora: detail.skippedCorpora.map((skip) => ({
@@ -584,6 +611,14 @@ export function createAnalystSourceIndexAnswerHandler(
               }
             : {}),
           ...(selfHealAudit ? { self_heal: selfHealAudit } : {}),
+          ...((detail.classificationCoverage ?? []).length > 0
+            ? {
+                classification_coverage: (detail.classificationCoverage ?? []).map((note) => ({
+                  corpus_id: note.corpusId,
+                  pending_classification_items: note.pendingClassificationItems,
+                })),
+              }
+            : {}),
           answer_synthesis: {
             private_context_used: localOnly,
             secure_local_items_consulted: secureCandidates.length,
@@ -1834,6 +1869,8 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
         ? corpusReadabilityCoverageNotes(input.detail)
         : []),
       ...secureLocalExclusionCoverageNotes(input.detail),
+      ...classificationCoverageNotes(input.detail),
+      ...secretLocationCoverageNotes(input.detail),
     ],
   );
   const safeUnsupportedAnswer = 'I found matching source material, but I could not extract a cited bounded answer from it in this pass.';
@@ -1941,6 +1978,34 @@ function releaseDecisionWithReason(decision: ReleaseDecision, reason: string): R
       ? [...decision.reasons]
       : [reason, ...decision.reasons],
   };
+}
+
+/**
+ * Counts and corpus ids only, like every other released coverage note: items
+ * whose tier is not final are stored and searched by keyword, but are not
+ * embedded yet, so a semantic miss over them is not evidence of absence.
+ */
+function classificationCoverageNotes(detail: EvidencePackBuildDetail): string[] {
+  const notes = (detail.classificationCoverage ?? []).filter((note) => note.pendingClassificationItems > 0);
+  if (notes.length === 0) return [];
+  const total = notes.reduce((sum, note) => sum + note.pendingClassificationItems, 0);
+  const corpora = [...new Set(notes.map((note) => note.corpusId))].sort();
+  return [
+    `${total} item(s) pending classification in ${corpora.join(', ')} were searched by keyword only.`,
+  ];
+}
+
+/**
+ * Secrets are matched by location only (design section 2.3). The note says
+ * how many; the locations themselves ride the result's `secret_locations`
+ * field, never the answer text and never the Analyst prompt.
+ */
+function secretLocationCoverageNotes(detail: EvidencePackBuildDetail): string[] {
+  const count = detail.secretLocations?.length ?? 0;
+  if (count === 0) return [];
+  return [
+    `${count} Secret(s) matched by location only; their contents are never read into an answer.`,
+  ];
 }
 
 function composeReleasedAnswer(answer: string, unanswered: readonly string[]): string {
