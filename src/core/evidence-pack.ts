@@ -38,6 +38,7 @@ import {
   type SourceIndexRouterAdapterMap,
   type SourceIndexSearchContext,
   type SourceIndexSkippedCorpus,
+  type SourceIndexVisibilityGate,
 } from './source-index/router.ts';
 import {
   buildSourceSensitivity,
@@ -149,7 +150,31 @@ export interface BuildEvidencePackInput {
   // caller that knows its own wall-clock budget can set one rather than reach
   // for a process-wide env var (see RouteSourceIndexSearchOptions.laneTimeoutMs).
   laneTimeoutMs?: number;
+  /** See SourceIndexVisibilityGate: one tier-ledger snapshot over every routed run's hits. */
+  visibilityGate?: SourceIndexVisibilityGate;
+  /**
+   * Location-only lookup of Secrets matching the question (design section
+   * 2.3). Its results ride BESIDE the pack in the build detail; they never
+   * enter the pack, so no model ever sees them.
+   */
+  secretLocations?: (query: string) => readonly SecretLocationNote[];
+  /** Counts of items still pending classification in the searched corpora. */
+  classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
   now?: () => Date;
+}
+
+/** Where a Secret lives. Location only: never content. */
+export interface SecretLocationNote {
+  source: string;
+  locator: string | null;
+  title: string | null;
+  findingKinds: readonly string[];
+}
+
+/** Items stored and keyword-searchable but not yet final (not embedded). */
+export interface ClassificationCoverageNote {
+  corpusId: string;
+  pendingClassificationItems: number;
 }
 
 export interface SelectedEvidenceItem {
@@ -186,6 +211,12 @@ export interface EvidencePackBuildDetail {
   // answer. Empty when every searched corpus is fully readable, or when no
   // provider can report it cheaply.
   corpusReadabilityGaps?: readonly CorpusReadabilityGap[];
+  // Four-tier classification (P1b), beside the pack by the same precedent:
+  // Secrets that matched the question, by location only, and counts of
+  // searched items whose tier is not final yet. Neither enters the pack, so
+  // neither reaches the Analyst.
+  secretLocations?: readonly SecretLocationNote[];
+  classificationCoverage?: readonly ClassificationCoverageNote[];
 }
 
 export async function buildEvidencePack(input: BuildEvidencePackInput): Promise<EvidencePack> {
@@ -307,6 +338,10 @@ export async function buildEvidencePackDetailed(
     ? await corpusReadabilityGapsFor(routed.searchedCorpora, input.contentProviders)
     : [];
 
+  const secretLocations = input.secretLocations?.(input.searchQuery ?? input.question) ?? [];
+  const classificationCoverage = (input.classificationCoverage?.(routed.searchedCorpora) ?? [])
+    .filter((note) => note.pendingClassificationItems > 0);
+
   const builtAt = (input.now ?? (() => new Date()))().toISOString();
   return {
     pack: { question: input.question, candidates, coverage, builtAt },
@@ -322,6 +357,8 @@ export async function buildEvidencePackDetailed(
     policyDeniedCandidates,
     policyDeniedCoverageGaps,
     corpusReadabilityGaps,
+    ...(secretLocations.length > 0 ? { secretLocations } : {}),
+    ...(classificationCoverage.length > 0 ? { classificationCoverage } : {}),
   };
 }
 
@@ -665,6 +702,7 @@ function runRoutedSearch(
         context: input.searchContext,
       },
       ...(input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}),
+      ...(input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}),
     }));
 }
 
