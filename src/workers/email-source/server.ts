@@ -2042,9 +2042,9 @@ export async function main(): Promise<void> {
         }),
       })
     : undefined;
-  // Dropbox product state. One corpus, secure_local only: Dropbox has never
-  // had an internal band. Provider sync, generic extraction, local embeddings,
-  // and reads all use this store.
+  // Dropbox product state: the lane's original store, secure_local. Every
+  // file stored before per-item routing stays here; the lane's tier set
+  // (below) adds Personal and Public stores on first need.
   const dropboxConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
   const dropboxConnectorStore = dropboxConnectorStoreLane.enabled
     ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy })

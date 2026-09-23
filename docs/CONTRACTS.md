@@ -476,6 +476,15 @@ see both change logs.
   None of these is reachable from the three contract types, so the
   fingerprint is unchanged (`bun run contracts:check`); no stored data
   migrates.
+- 2026-09-23 (four-tier P1c, no version change): Dropbox, Readwise, X and
+  WhatsApp move onto per-tier stores. Dropbox's text arrives after listing,
+  so a new file's names are routed at listing and its content where the
+  extraction factory's text puts it; Readwise and X items can be raised to
+  Private or Secrets; WhatsApp stays Private unless an owner chat rule sets a
+  chat Personal. The source ingestion policy no longer pins Dropbox to
+  `secure_local` (its `corpusId` names the lane). None of this is reachable
+  from the three contract types, so the fingerprint is unchanged; no stored
+  data migrates.
 - 2026-09-23 (v1.1.0): `EvidenceCoverage` gains optional `matchCounts`, per
   searched corpus: matched items, how many carry readable content, whether the
   count hit its probe ceiling, and how many are in the evidence. Source answers

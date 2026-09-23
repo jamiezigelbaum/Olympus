@@ -199,10 +199,15 @@ the user wants one coherent cognitive workspace.
 
 ### Evidence Vaults
 
-Use evidence vaults such as Dropbox for raw `S4` materials and `S4`
-derivatives that remain too specific to lower.
+Evidence vaults such as Dropbox hold raw `S4` materials and `S4` derivatives
+that remain too specific to lower, beside everything else the owner keeps
+there. The vault is not one tier: Olympus judges each file on its own
+(per-item four-tier classification, below). Reference material such as a
+book chapter or a public paper is Personal; the kinds of file below are
+Private because of what their text says, not because of where they are
+stored.
 
-Examples:
+Examples of Private vault content:
 
 - raw health documents
 - prescriptions
@@ -241,7 +246,8 @@ examples include:
 
 - 1Password as a cloud secure-record and credential store
 - evidence vaults such as Dropbox for raw `S4` documents when the user chooses
-  that custody surface
+  that custody surface (custody only: each file's tier in Olympus is judged
+  per item)
 - native provider OAuth, delegated service-account, or local credential lanes
   when approved for the source family, account, scopes, logs, and payload path
 
@@ -436,6 +442,29 @@ Rules:
   to Private are kept that way, hidden, until the owner approves a purge.
   Everything stored before P1b stays exactly where it is until the
   owner-approved migration.
+- Per-tier stores for Dropbox, Readwise, X and WhatsApp (phase P1c).
+  - Dropbox is no longer a Private-only vault in Olympus. Every file already
+    stored stays in `secure_local.dropbox.files`, untouched. A NEW file's
+    names (file name and path) go to its metadata tier's store when it is
+    listed, Personal by default (`internal.dropbox.files`); its text, read
+    later by the shared extraction factory, goes to the store its content
+    tier decides: Personal for reference material, Private
+    (`secure_local.dropbox.files`) when the text says so. Names that look
+    private keep the whole file Private until the privacy-safe sniffer
+    answers, and an unread file is never sent to an extractor at less than
+    Private. `public_safe.dropbox.files` receives a file only on positive
+    public evidence. The folder-scope approval filters reads in every one of
+    these stores.
+  - Readwise and X keep their `internal.*` store at S1; a new item whose text
+    is private (a private highlight, say) is raised to a Private store
+    created on first need (`secure_local.readwise.library`,
+    `secure_local.x.bookmarks`), or to Secrets.
+  - WhatsApp fails closed. Its store stays `secure_local.whatsapp.messages`
+    and every message rests Private there by default. A chat is a prior no
+    message is lowered below: only an explicit OWNER chat rule that sets a
+    chat to Personal (or a per-item owner override) lets a message whose own
+    text stays Personal go to `internal.whatsapp.messages`. Owner rules load
+    in phase P2, so until then no WhatsApp message leaves the Private store.
 
 Current email implication: until Olympus has row/chunk sensitivity
 classification for the local Gmail index, treat the entire email index as
