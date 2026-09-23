@@ -141,6 +141,89 @@ describe('source_answer searches private material by default through Argus', () 
   });
 });
 
+describe('a private analyst outage never costs an ordinary answer', () => {
+  const failing = (): Analyst => ({
+    async analyze() {
+      throw new Error('upstream 503');
+    },
+  });
+
+  test('default-included private evidence falls back to the ordinary route without it, call after call', async () => {
+    const world = answerWorld('private-cloud-only', { analystOverrides: { 'venice-private': failing() } });
+    // Enough calls to open the member's breaker: later calls meet an empty
+    // route instead of a failing leg, and must fall back the same way.
+    for (let call = 1; call <= 5; call += 1) {
+      const result = await world.handler.answer({ question: 'What was my LDL?' });
+      expect({ call, backend: result.audit.answer_synthesis.analyst_backend }).toEqual({ call, backend: 'cloud' });
+      expect(result.audit.skipped_corpora.find((skip) => skip.corpus_id === SECURE)?.reason)
+        .toBe('private_analyst_unavailable');
+      expect(result.audit.answer_synthesis.secure_local_items_consulted).toBe(0);
+      expect(result.answer).toContain('the private analyst is unavailable right now');
+      expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
+    }
+    // The ordinary analyst never saw a secure candidate.
+    expect(world.calls['cloud-openclaw-infer']!.every((pack) => (
+      pack.candidates.every((candidate) => candidate.trustDomain !== 'secure_local')
+    ))).toBe(true);
+  });
+
+  test('an explicit private request keeps the hard failure', async () => {
+    const world = answerWorld('private-cloud-only', { analystOverrides: { 'venice-private': failing() } });
+    await expect(world.handler.answer({ question: 'What was my LDL?', include_secure_local: true }))
+      .rejects.toThrow('Sovereignty analyst fallback chain exhausted');
+    expect(world.calls['cloud-openclaw-infer']).toHaveLength(0);
+  });
+
+  test('a hung local model is bounded for default-included private evidence', async () => {
+    const hung: Analyst = { analyze: () => new Promise(() => {}) };
+    const world = answerWorld('local-only', {
+      analystOverrides: { 'local-source-answer': hung },
+      defaultIncludedPrivateLegTimeoutMs: 50,
+    });
+    const startedAt = Date.now();
+    const result = await world.handler.answer({ question: 'What was my LDL?' });
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(result.audit.answer_synthesis.analyst_backend).toBe('cloud');
+    expect(result.audit.skipped_corpora.find((skip) => skip.corpus_id === SECURE)?.reason)
+      .toBe('private_analyst_unavailable');
+  });
+
+  test('a gated e2ee analyst model excludes default private evidence instead of throwing', async () => {
+    const world = answerWorld('private-cloud-only');
+    // The secure gate no longer throws; what remains is this preset's own
+    // ordinary-route answer to a Venice request (no Venice member for
+    // internal), which is unchanged by this default.
+    const outcome = await world.handler.answer({ question: 'What was my LDL?', analyst_model: 'e2ee-glm-5-2-p' })
+      .then(() => undefined, (error: unknown) => error);
+    expect(outcome).not.toMatchObject({ code: 'source_index_policy_violation' });
+    expect(world.calls['venice-private']).toHaveLength(0);
+    // The same model on an explicit private request is still refused outright.
+    await expect(world.handler.answer({
+      question: 'What was my LDL?',
+      analyst_model: 'e2ee-glm-5-2-p',
+      include_secure_local: true,
+    })).rejects.toMatchObject({ code: 'source_index_policy_violation' });
+  });
+});
+
+describe('released citation labels are secret-scanned', () => {
+  test('a secret-like secure title is withheld from the released evidence', async () => {
+    const world = answerWorld('private-cloud-only', { secureTitle: 'Bank login password: hunter2hunter2 statement' });
+    const result = await world.handler.answer({ question: 'What was my LDL?' });
+    const secure = result.evidence.find((item) => item.corpus_id === SECURE);
+    expect(secure).toBeDefined();
+    expect(secure!.title).toBeUndefined();
+    expect(secure!.provider_item_id).toBe('lab-1');
+    expect(JSON.stringify(result)).not.toContain('hunter2hunter2');
+  });
+
+  test('an ordinary secure title is still released', async () => {
+    const world = answerWorld('private-cloud-only');
+    const result = await world.handler.answer({ question: 'What was my LDL?' });
+    expect(result.evidence.find((item) => item.corpus_id === SECURE)?.title).toBe('lab-1.pdf');
+  });
+});
+
 // --- Fixtures -------------------------------------------------------------------
 
 function presetConfig(preset: Preset): SovereigntyConfig {
@@ -150,7 +233,12 @@ function presetConfig(preset: Preset): SovereigntyConfig {
   )) as SovereigntyConfig;
 }
 
-function answerWorld(preset: Preset, options: { omitProfiles?: readonly string[] } = {}) {
+function answerWorld(preset: Preset, options: {
+  omitProfiles?: readonly string[];
+  analystOverrides?: Readonly<Record<string, Analyst>>;
+  secureTitle?: string;
+  defaultIncludedPrivateLegTimeoutMs?: number;
+} = {}) {
   const engine = createSovereigntyEngine(presetConfig(preset));
   const calls: Record<string, EvidencePack[]> = {};
   const analysts = new Map<string, SovereigntyAnalystRouteStep>();
@@ -160,13 +248,16 @@ function answerWorld(preset: Preset, options: { omitProfiles?: readonly string[]
     analysts.set(id, {
       profile: { id, profile },
       backend: backendFor(profile.provider, profile.trust),
-      analyst: recordingAnalyst(calls[id]!),
+      analyst: options.analystOverrides?.[id] ?? recordingAnalyst(calls[id]!),
     });
   }
   const fallbackLocal = recordingAnalyst([]);
   const handler = createAnalystSourceIndexAnswerHandler({
     analyst: fallbackLocal,
-    lanes: () => lanes(),
+    lanes: () => lanes(options.secureTitle),
+    ...(options.defaultIncludedPrivateLegTimeoutMs !== undefined
+      ? { defaultIncludedPrivateLegTimeoutMs: options.defaultIncludedPrivateLegTimeoutMs }
+      : {}),
     sovereigntyAnalystRoute: ({ pack, localOnly, requestedProvider }) => {
       const trustDomain: SourceTrustDomain = localOnly || pack.candidates.some((c) => c.trustDomain === 'secure_local')
         ? 'secure_local'
@@ -208,12 +299,12 @@ function recordingAnalyst(calls: EvidencePack[]): Analyst {
   };
 }
 
-function lanes() {
+function lanes(secureTitle?: string) {
   const registry = buildSourceIndexCorpusRegistry([
     defineSourceIndexCorpus({ corpusId: INTERNAL, family: 'note', trustDomain: 'internal' }),
     defineSourceIndexCorpus({ corpusId: SECURE, family: 'file', trustDomain: 'secure_local' }),
   ]);
-  const adapter = (id: string) => () => ({
+  const adapter = (id: string, title = `${id}.pdf`) => () => ({
     hits: [{
       sourceItem: {
         family: 'file' as const,
@@ -230,7 +321,7 @@ function lanes() {
           providerItemId: id,
           localItemId: `personal:${id}`,
         },
-        citation: { title: `${id}.pdf` },
+        citation: { title },
       },
       score: 1,
       rawExposed: false as const,
@@ -250,7 +341,7 @@ function lanes() {
     registry,
     adapters: {
       [INTERNAL]: adapter('note-1'),
-      [SECURE]: adapter('lab-1'),
+      [SECURE]: adapter('lab-1', secureTitle),
     } as SourceIndexRouterAdapterMap,
     contentProviders: {
       [INTERNAL]: provider('internal', INTERNAL_RAW),

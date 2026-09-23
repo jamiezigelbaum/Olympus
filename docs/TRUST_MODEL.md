@@ -402,11 +402,15 @@ Rules:
 - `source_answer` searches `secure_local` corpora by default when the active
   sovereignty policy approves a private analyst route for them (Argus: a local
   model or Venice Private, per preset). That evidence is reasoned over only by
-  the approved route, and Castor receives only the OPSEC-scanned derived answer
-  and citations. With no approved route (for example `no-sensitive`) the
-  corpora are left out and the answer's coverage notes say so. Callers opt out
-  with `include_secure_local: false`; the bulk release approval gate applies to
-  every explicit `secure_local` request.
+  the approved route. Castor receives the derived answer, which passes the
+  OPSEC release gate, and one citation per cited item: its identifiers plus
+  its title, source, conversation, and author labels and its locator, each
+  scanned for secret-like text and withheld on a match. It never receives
+  source text. With no approved route (for example `no-sensitive`), or when
+  the private analyst is down, the corpora are left out and the answer's
+  coverage notes say so. Callers opt out with `include_secure_local: false`;
+  the bulk release approval gate applies to every explicit `secure_local`
+  request.
 
 Current email implication: until Olympus has row/chunk sensitivity
 classification for the local Gmail index, treat the entire email index as

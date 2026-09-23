@@ -121,11 +121,14 @@ export type SourceIndexSkippedCorpusReason =
   | 'cloud_query_not_allowed'
   | 'no_adapter'
   | 'lane_timeout'
-  // Set by the answer handler, not the router: secure_local was left out by
-  // default because no private analyst route is approved, or because the
-  // request is bulk-shaped and did not opt in.
+  // The next three are never produced by routeSourceIndexSearch. The answer
+  // handler rewrites a secure_local corpus's trust_domain_not_allowed skip to
+  // one of them when the caller did not decide include_secure_local:
+  // no approved private analyst route before retrieval, a bulk-shaped request
+  // that did not opt in, or a private route that failed at analysis time.
   | 'no_private_analyst_route'
-  | 'bulk_secure_local_release_requires_approval';
+  | 'bulk_secure_local_release_requires_approval'
+  | 'private_analyst_unavailable';
 
 export interface SourceIndexRoutedSearchResponse {
   hits: readonly SourceIndexRoutedSearchHit[];

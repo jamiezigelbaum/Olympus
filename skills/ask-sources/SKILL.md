@@ -37,10 +37,11 @@ Use Olympus source tools, not raw stores.
 - Use one unified `source_answer` call for ordinary source questions and
   leave `include_secure_local` unset. Olympus searches Private (secure-local)
   corpora by default whenever the sovereignty policy approves a private
-  analyst (Argus: a local model or Venice Private) for them; Argus reasons over
-  that evidence and you receive only the OPSEC-scanned answer and citations,
-  never raw Private text. When the policy approves no private analyst,
-  Olympus leaves Private corpora out and says so in the coverage notes.
+  analyst (Argus: a local model or Venice Private) for them. Only Argus reads
+  that evidence; you receive the OPSEC-gated answer and its citations
+  (identifiers plus titles, labels, and locators scanned for secrets), never
+  Private source text. When the policy approves no private analyst, or it is
+  down, Olympus leaves Private corpora out and says so in the coverage notes.
   Omit `corpus_id` so Olympus can search every eligible corpus in one pass.
 - Name `corpus_id` or `corpus_ids` only to intentionally force-narrow because
   the user named a source, a prior result selected a source, or a diagnostic
