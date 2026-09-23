@@ -85,7 +85,7 @@ It never calls a model. The model seam, `DelphiItemTierScorer`, only chooses bet
 
 **The whole-corpus risk.** A provider rebind runs `invalidateEmbeddingModelCurrency`, which is `DELETE FROM chunk_embeddings WHERE model_id = ?` for the **whole corpus** (`local-index.ts:6071-6074`). A tier move must never reach that path.
 
-**Ledger.** `embedding-ledger.jsonl` is append-only. Only `approved_by: 'jamie'` counts as approval. It was created after the 2026-08-20 incident, in which about 250k vectors were wiped.
+**Ledger.** `embedding-ledger.jsonl` is append-only. Only an entry approved by the owner counts as approval. It was created after the 2026-08-20 incident, in which about 250k vectors were wiped.
 
 ### 1.5 How answers are routed across tiers today
 
