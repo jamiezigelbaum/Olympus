@@ -186,7 +186,6 @@ describe('Roam SourceConnector (Contract 1)', () => {
     const olympus = items[0] as RawItem;
 
     expect(olympus.metadata).toEqual({
-      ownerAuthored: true,
       title: 'Project Olympus',
       blockCount: 5,
       createdAt: new Date(1_717_100_000_000).toISOString(),
@@ -243,7 +242,7 @@ describe('Roam SourceConnector (Contract 1)', () => {
 
     expect(items).toHaveLength(4);
     expect(empty.content).toEqual({ kind: 'metadata_only' });
-    expect(empty.metadata).toEqual({ ownerAuthored: true, title: 'Empty Page', blockCount: 0 });
+    expect(empty.metadata).toEqual({ title: 'Empty Page', blockCount: 0 });
     expect(empty.identity.sourceVersion).toBeUndefined();
     expect(stub.content).toEqual({ kind: 'metadata_only' });
     expect(stub.identity.providerItemId).toBe('stub-page');

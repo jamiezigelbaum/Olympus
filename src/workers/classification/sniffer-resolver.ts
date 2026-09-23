@@ -27,11 +27,8 @@ import { dirname } from 'node:path';
 import type { AnalystModel } from '../../core/analyst.ts';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import {
-  SNIFFER_CONTENT_BATCH_SIZE,
   SNIFFER_INJECTION_CATEGORY,
-  SNIFFER_LOCAL_METADATA_BATCH_SIZE,
   SNIFFER_MAX_ATTEMPTS,
-  SNIFFER_METADATA_BATCH_SIZE,
   SNIFFER_PROMPT_VERSION,
   SNIFFER_SYSTEM_PROMPT,
   buildSnifferBatchPrompt,
@@ -56,7 +53,7 @@ import type { TierLedger, TierLedgerRecord, TierPlacementPlan } from './tier-led
 export const DEFAULT_SNIFFER_MAX_CALLS_PER_PASS = 10;
 export const DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 2_000;
 const MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
-/** Output budget per item in a batch: one short JSON verdict. */
+/** Output budget per item: one short JSON verdict. */
 const OUTPUT_CHARS_PER_ITEM = 110;
 
 export interface SnifferTarget {
@@ -140,8 +137,6 @@ export interface SnifferPassOptions {
   maxCallsPerPass?: number;
   /** Pending ledger rows read per store per pass. */
   pendingPageSize?: number;
-  metadataBatchSize?: number;
-  contentBatchSize?: number;
   /** True when an answer needs the private pool (or its breaker is open): stop before the next call. */
   shouldYield?: () => boolean;
   signal?: AbortSignal;
@@ -311,7 +306,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     }
   }
 
-  // 2. Ask the model, one batch of distinct materials at a time.
+  // 2. Ask the model, one distinct material (one item's) per call.
   let consecutiveTransportFailures = 0;
   for (const pass of ['metadata', 'content'] as const) {
     // Names are asked first. A names verdict of Private settles the content
@@ -323,12 +318,9 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       report.staleDropped += 1;
       return false;
     });
-    const batchSize = pass === 'metadata'
-      ? options.metadataBatchSize ?? (options.lane.kind === 'local' ? SNIFFER_LOCAL_METADATA_BATCH_SIZE : SNIFFER_METADATA_BATCH_SIZE)
-      : options.contentBatchSize ?? SNIFFER_CONTENT_BATCH_SIZE;
-    // Third-party material (a sender's subject, chat text, any excerpt) is
-    // asked on its own: it can never steer the verdict on another item.
-    const batches = batchGroups(groupByMaterial(open), batchSize);
+    // One item per call (sniffer.ts): identical material is asked once for
+    // every item that carries it, never alongside anything else.
+    const batches = groupByMaterial(open).map((group) => [group]);
     for (const batch of batches) {
       const stop = stopReason(options, report, maxCallsPerPass);
       if (stop) {
@@ -407,25 +399,6 @@ function openPasses(row: TierLedgerRecord): SnifferPass[] {
   // a sniffer question.
   if (row.contentPending && row.contentRead) passes.push('content');
   return passes;
-}
-
-/** Batches of at most `size` groups; a group whose material is third-party is a batch of one. */
-function batchGroups(groups: readonly WorkItem[][], size: number): WorkItem[][][] {
-  const batches: WorkItem[][][] = [];
-  let shared: WorkItem[][] = [];
-  for (const group of groups) {
-    if (group.some((item) => item.question.solo)) {
-      batches.push([group]);
-      continue;
-    }
-    shared.push(group);
-    if (shared.length >= size) {
-      batches.push(shared);
-      shared = [];
-    }
-  }
-  if (shared.length > 0) batches.push(shared);
-  return batches;
 }
 
 /** Items sharing names (or an excerpt) under one map revision are asked once. */

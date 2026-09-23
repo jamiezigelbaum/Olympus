@@ -467,20 +467,23 @@ function metadataEntryFromDropboxJson(value: unknown): DropboxMetadataEntry | un
   };
 }
 
-function sharingInfoFromDropboxJson(record: Record<string, unknown>): DropboxSharingInfo | undefined {
+export function sharingInfoFromDropboxJson(record: Record<string, unknown>): DropboxSharingInfo | undefined {
   const value = record.sharing_info ?? record.sharingInfo;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const sharing = value as Record<string, unknown>;
   const sharedFolderId = stringValue(sharing.shared_folder_id) ?? stringValue(sharing.sharedFolderId);
   const parentSharedFolderId = stringValue(sharing.parent_shared_folder_id) ?? stringValue(sharing.parentSharedFolderId);
   const namespaceId = stringValue(sharing.namespace_id) ?? stringValue(sharing.namespaceId);
-  return sharedFolderId || parentSharedFolderId || namespaceId
-    ? {
-        ...(sharedFolderId ? { sharedFolderId } : {}),
-        ...(parentSharedFolderId ? { parentSharedFolderId } : {}),
-        ...(namespaceId ? { namespaceId } : {}),
-      }
-    : undefined;
+  // Any non-empty sharing_info means the entry is shared, whatever fields it
+  // carries (Dropbox adds fields over time; read_only, modified_by and
+  // no_access are sharing facts too). Only an absent or empty object is "not
+  // shared": the safe direction for anything that treats sharing as a signal.
+  if (Object.keys(sharing).length === 0) return undefined;
+  return {
+    ...(sharedFolderId ? { sharedFolderId } : {}),
+    ...(parentSharedFolderId ? { parentSharedFolderId } : {}),
+    ...(namespaceId ? { namespaceId } : {}),
+  };
 }
 
 function dropboxDownloadArg(job: DropboxContentDownloadRequest['job']): Record<string, string> {

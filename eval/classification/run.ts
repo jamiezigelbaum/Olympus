@@ -87,7 +87,6 @@ export async function runClassificationEval(options: {
           provider: `eval-${entry.family}`,
           ...(entry.text !== undefined ? { text: entry.text } : {}),
           subject: subjectOf(entry),
-          ownerAuthored: entry.ownerAuthored === true,
         },
         { sniffer },
       );

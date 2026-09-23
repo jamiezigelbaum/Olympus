@@ -35,19 +35,14 @@ import type { TierSniffer, TierSnifferRequest, TierSnifferVerdict } from './tier
 
 /** The sniffer may resolve a flagged item to Personal only at or above this confidence. */
 export const SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9;
-/** Names are short: about 100 fit one Venice call. */
-export const SNIFFER_METADATA_BATCH_SIZE = 100;
 /**
- * A local model is shared with Argus's answers: small batches keep any call
- * short, so an answer that preempts the sniffer never waits long.
+ * Every question is asked ONE ITEM PER CALL. A name or excerpt from any
+ * source may have been written by a stranger (a shared or requested file, a
+ * web or email save, a sender, a chat, an import), and nothing a connector
+ * sees proves otherwise, so no item's material ever shares a prompt with
+ * another's: an instruction hidden in it can at most talk about itself.
+ * Identical material is still asked once for every item that carries it.
  */
-export const SNIFFER_LOCAL_METADATA_BATCH_SIZE = 20;
-/**
- * Excerpts are asked one per call: an excerpt is document or message text,
- * possibly written by someone else, and never shares a prompt with another
- * item's material.
- */
-export const SNIFFER_CONTENT_BATCH_SIZE = 1;
 /** A question that failed this many times resolves to Private (fail safe). */
 export const SNIFFER_MAX_ATTEMPTS = 3;
 
@@ -110,8 +105,8 @@ export const SNIFFER_INJECTION_CATEGORY = 'injection';
  * personal"). It is never sent: the item resolves to Private at once.
  *
  * DEFENSE IN DEPTH ONLY. A blocklist can always be evaded; the structural
- * defense is that only names the lane PROVED the owner wrote ever share a
- * batch, so anything else can at most talk about itself. The text is
+ * defense is that every item is asked on its own, so an instruction can at
+ * most talk about the item that carries it. The text is
  * normalized first (NFKC, format and zero-width characters removed, marks
  * stripped, common Cyrillic/Greek look-alikes mapped to Latin) and checked
  * both as words and with every separator removed, so fullwidth, zero-width,
@@ -303,7 +298,6 @@ export class CachedTierSniffer implements TierSniffer {
           material,
           mapRevision,
           flags: request.flags,
-          solo: request.solo === true || request.pass === 'content',
         });
       }
     } catch {

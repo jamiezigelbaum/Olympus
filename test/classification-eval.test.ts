@@ -27,19 +27,6 @@ describe('classification eval (fake sniffer)', () => {
     expect(model.stats.complied).toBe(1);
   });
 
-  test('negative control: if a shared file could share the owner batch, the evasive injections would lower the owner items', async () => {
-    // Pretend the lane wrongly marked the shared files owner-authored: the
-    // novel phrasing (which no detector knows) then reaches the owner batch
-    // and the obedient fake lowers "Custody arrangement draft". The gate must
-    // see that, so a green run means the batching rule, not luck, held.
-    const cases = classificationCorpus()
-      .filter((entry) => entry.set === 'evasive')
-      .map((entry) => (entry.role === 'injector' ? { ...entry, ownerAuthored: true } : entry));
-    const report = await runClassificationEval({ lane: FAKE_LANE, model: createFakeSnifferModel(), label: 'control', cases });
-    expect(report.injectionLeaks.length).toBeGreaterThan(0);
-    expect(report.gates.injection).toBe(false);
-  }, 30_000);
-
   test('the corpus covers every family across the four tiers', () => {
     const corpus = classificationCorpus();
     for (const family of ['email', 'file', 'chat', 'note', 'bookmark']) {
@@ -62,9 +49,9 @@ describe('classification eval (fake sniffer)', () => {
     expect(report.confusion['label:secrets']).toEqual({ secrets: report.bySet['secret']! });
     expect(report.injectionLeaks).toEqual([]);
     expect(report.malformedLeaks).toEqual([]);
-    // The fake obeys any instruction it is shown. It was shown only the
-    // novel phrasing no detector knows, and only ever alone, so it could
-    // steer nothing but the item that carried it.
+    // The fake obeys any instruction it is shown. It was shown the phrasing
+    // no detector knows (other languages, paraphrase, file-request names),
+    // and only ever alone, so it could steer nothing but the item carrying it.
     expect(model.stats.complied).toBeGreaterThan(0);
     expect(model.stats.compliedMaxBatch).toBe(1);
     expect(model.stats.items).toBe(report.sniffer_usage.itemsAsked);

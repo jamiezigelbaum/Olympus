@@ -124,12 +124,6 @@ export interface TierSnifferRequest {
   material?: string;
   /** The sensitivity map revision the question is asked under (a cache-key part). */
   mapRevision?: string;
-  /**
-   * The material may be written by a third party (a sender, a chat, a
-   * document's text): it must be asked about on its own, never in a batch
-   * with other items' material.
-   */
-  solo?: boolean;
   subject?: TierSnifferSubject;
 }
 
@@ -173,12 +167,6 @@ export interface TierClassificationInput {
   text?: string;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
-  /**
-   * The lane PROVED the owner wrote these names (their own notes, their own
-   * Drive files, their own Dropbox namespace). Only such names share a
-   * sniffer batch; anything else is asked about on its own.
-   */
-  ownerAuthored?: boolean;
 }
 
 export interface TierClassificationOptions {
@@ -299,7 +287,6 @@ export function classifyItemTiers(
     sniffer,
     mapRevision: base.mapRevision,
     ...(input.subject ? { subject: input.subject } : {}),
-    ownerAuthored: input.ownerAuthored === true,
   });
 
   // ---------------------------------------------------------------- pass 2 --
@@ -435,7 +422,6 @@ function metadataPass(args: {
   sniffer: TierSniffer;
   mapRevision: string;
   subject?: TierSnifferSubject;
-  ownerAuthored?: boolean;
 }): PassResult {
   const { signals, names, options } = args;
 
@@ -553,9 +539,6 @@ function metadataPass(args: {
       flags,
       material: snifferNames(signals),
       mapRevision: args.mapRevision,
-      // An allow list: batched only when the lane proved the owner wrote the
-      // names. A sender, a chat, a shared file, or anything unknown: alone.
-      solo: args.ownerAuthored !== true,
       ...(args.subject ? { subject: args.subject } : {}),
     });
     if (verdict.verdict === 'decided') {
@@ -674,7 +657,6 @@ function contentPass(args: {
       flags,
       material: snifferExcerpt(text),
       mapRevision: args.mapRevision,
-      solo: true,
       ...(args.subject ? { subject: args.subject } : {}),
     });
     if (verdict.verdict === 'decided') {

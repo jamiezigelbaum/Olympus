@@ -87,8 +87,7 @@ function subject(n: number) {
 /** Record a flagged, metadata-only item through the real classifier + cached sniffer. */
 function recordFlagged(ledger: TierLedger, store: TierSnifferStore, n: number, title: string): void {
   const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
-  // The owner's own file names: the only names that may share a batch.
-  const decision = classifyItemTiers({ signals: { title }, subject: subject(n), ownerAuthored: true }, { sniffer });
+  const decision = classifyItemTiers({ signals: { title }, subject: subject(n) }, { sniffer });
   ledger.recordDecision(subject(n), decision);
 }
 
@@ -179,17 +178,17 @@ describe('secrets are never sent', () => {
 });
 
 describe('batching, cache and threshold', () => {
-  test('250 flagged names take calls of at most 100 names on Venice, with localOnly set', async () => {
+  test('every flagged name is asked on its own call, with localOnly set', async () => {
     const ledger = new TierLedger({ dbPath: ':memory:' });
     const store = new TierSnifferStore({ dbPath: ':memory:' });
     try {
-      for (let n = 0; n < 250; n += 1) recordFlagged(ledger, store, n, `bank statement ${n}`);
+      for (let n = 0; n < 25; n += 1) recordFlagged(ledger, store, n, `bank statement ${n}`);
       const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'financial', confidence: 0.97 }));
-      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: VENICE_LANE, model, maxCallsPerPass: 10 });
-      expect(model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{')).length)).toEqual([100, 100, 50]);
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: VENICE_LANE, model, maxCallsPerPass: 100 });
+      expect(model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{')).length)).toEqual(Array(25).fill(1));
       expect(model.requests.every((request) => request.localOnly === true)).toBe(true);
-      expect(report).toMatchObject({ calls: 3, verdictsApplied: 250, resolvedPrivate: 250 });
-      expect(ledger.counts().byState.pending).toBe(250); // content still unread: that is not a sniffer question
+      expect(report).toMatchObject({ calls: 25, verdictsApplied: 25, resolvedPrivate: 25 });
+      expect(ledger.counts().byState.pending).toBe(25); // content still unread: that is not a sniffer question
       const record = ledger.getCurrent(subject(7))!;
       expect(record.metadataPending).toBe(false);
       expect(record.metadataTier).toBe('secure');

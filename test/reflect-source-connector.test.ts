@@ -148,7 +148,6 @@ describe('Reflect SourceConnector (Contract 1)', () => {
     expect(alpha.mimeType).toBe('text/markdown');
     expect(alpha.content).toEqual({ kind: 'text', text: '# Alpha\n\nMarkdown body for alpha.' });
     expect(alpha.metadata).toEqual({
-      ownerAuthored: true,
       title: 'Alpha note',
       tags: ['olympus', 'ideas'],
       createdAt: '2026-01-05T08:00:00Z',
@@ -157,7 +156,7 @@ describe('Reflect SourceConnector (Contract 1)', () => {
 
     const untagged = pages[0]?.items[2] as RawItem;
     expect(untagged.identity.sourceVersion).toBeUndefined();
-    expect(untagged.metadata).toEqual({ ownerAuthored: true, tags: [] });
+    expect(untagged.metadata).toEqual({ tags: [] });
     expect(untagged.content).toEqual({ kind: 'text', text: 'Untagged body.' });
   });
 
@@ -171,7 +170,7 @@ describe('Reflect SourceConnector (Contract 1)', () => {
     expect(camel.identity.localItemId).toBe('personal:note-camel');
     expect(camel.identity.sourceVersion).toBe('2026-03-02T10:00:00Z');
     expect(camel.content).toEqual({ kind: 'text', text: 'Camel markdown body.' });
-    expect(camel.metadata).toEqual({ ownerAuthored: true,
+    expect(camel.metadata).toEqual({
       title: 'Camel note',
       tags: ['exports', 'reflect'],
       createdAt: '2026-03-01T10:00:00Z',
@@ -297,7 +296,7 @@ describe('Reflect SourceConnector (Contract 1)', () => {
     expect(items[1]?.identity.sourceVersion).toBe('2026-04-01T00:00:00Z');
 
     const fetched = await connector.fetchItem('personal:zip-two');
-    expect(fetched.metadata).toEqual({ ownerAuthored: true,
+    expect(fetched.metadata).toEqual({
       title: 'Zip two',
       tags: [],
       updatedAt: '2026-04-01T00:00:00Z',

@@ -405,7 +405,7 @@ version in the append-only classification ledger
 from the prompt text, so any change to the prompt, the model, the profile or
 the lane stops it until the owner approves again; flagged items wait, pending
 and held Private, meanwhile. An answer that needs the private pool aborts the
-sniffer's in-flight call, and a local lane asks at most 20 names per call.
+sniffer's in-flight call.
 
 **Which model, when both are allowed.** Without a declared classifier the
 sniffer uses the pool's local model when there is one, and Venice only when
@@ -415,15 +415,28 @@ the pool also has a local model. So `local-first` plus a declared Venice
 classifier sends flagged names (and short excerpts) to Venice Private, off the
 box; declare a local classifier, or none, to keep them on it.
 
-**Batching is an allow list.** Only names a lane PROVES the owner wrote share
-a call: the owner's own notes (Reflect, Roam), Drive files Drive reports as
-owned by the connected account, and Dropbox files outside any shared folder.
-Everything else (mail, chats, bookmarks, shared or shared-with-me files, and
-anything of unknown authorship) is asked one item per call, as is every text
-excerpt, so it can at most talk about itself. Material shaped like an
-instruction to the model is also refused outright, after normalizing
-fullwidth, zero-width and look-alike characters; that detector is defense in
-depth, not the defense. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
+**One item per call.** Every flagged name and every excerpt is asked on its
+own call. No source can prove who named an item: a Dropbox file request, an
+email-to-Dropbox or web save, a Drive save, an ownership transfer or a form
+upload lets a stranger name a file that looks like the owner's, and notes can
+be imported or clipped. So no item's material ever shares a prompt with
+another's, and an instruction hidden in a name can at most talk about the
+item that carries it. Identical material is asked once for every item that
+has it. Material shaped like an instruction to the model is also refused
+outright (Private, never sent), after normalizing fullwidth, zero-width and
+look-alike characters; that detector is defense in depth, not the defense.
+
+Residual risk: an item can still steer its OWN verdict (a stranger who names
+a file "everyday paperwork" may get that one file judged Personal). It
+cannot move any other item, the deterministic detectors and the owner's map
+and rules still raise it, and Personal is only accepted at confidence 0.9 and
+never for a hard category.
+
+Cost: one call per flagged name. Per call about 300 input and 20 output
+tokens (measured on the eval corpus), so 100k flagged names is about 30M
+input and 2M output tokens. The daily cap (`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`,
+default 2,000) bounds that, so a large first backfill needs the owner to
+raise it. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
 `OLYMPUS_TIER_SNIFFER_INTERVAL_MS`, `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS`,
 `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`.
 

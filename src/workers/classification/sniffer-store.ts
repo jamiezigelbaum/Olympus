@@ -54,8 +54,6 @@ export interface SnifferQuestion {
   flags: string[];
   attempts: number;
   queuedAt: string;
-  /** Asked about on its own, never batched with other items. */
-  solo: boolean;
 }
 
 export function snifferMaterialHash(pass: SnifferPass, material: string): string {
@@ -148,14 +146,12 @@ export class TierSnifferStore {
     material: string;
     mapRevision: string;
     flags: readonly string[];
-    /** Ask about this material on its own (possibly third-party text). */
-    solo?: boolean;
   }): void {
     const materialHash = snifferMaterialHash(question.pass, question.material);
     this.db.query(`
       INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, solo
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
@@ -163,8 +159,7 @@ export class TierSnifferStore {
         material_hash = excluded.material_hash,
         map_revision = excluded.map_revision,
         material = excluded.material,
-        flags_json = excluded.flags_json,
-        solo = excluded.solo
+        flags_json = excluded.flags_json
     `).run(
       ...subjectParams(question.subject),
       question.pass,
@@ -173,7 +168,6 @@ export class TierSnifferStore {
       question.material,
       JSON.stringify([...question.flags]),
       this.now().toISOString(),
-      question.solo === true ? 1 : 0,
     );
   }
 
@@ -247,7 +241,6 @@ interface QuestionRow {
   flags_json: string;
   attempts: number;
   queued_at: string;
-  solo: number;
 }
 
 function questionFromRow(row: QuestionRow): SnifferQuestion {
@@ -263,7 +256,6 @@ function questionFromRow(row: QuestionRow): SnifferQuestion {
     flags: JSON.parse(row.flags_json) as string[],
     attempts: row.attempts,
     queuedAt: row.queued_at,
-    solo: row.solo === 1,
   };
 }
 
@@ -310,7 +302,6 @@ function snifferMigrations(): SqliteMigration[] {
             flags_json TEXT NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 0,
             queued_at TEXT NOT NULL,
-            solo INTEGER NOT NULL DEFAULT 1 CHECK (solo IN (0, 1)),
             UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
           );
         `);
