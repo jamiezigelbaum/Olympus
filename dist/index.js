@@ -6238,10 +6238,19 @@ var init_mail_source_scope = __esm(() => {
 });
 
 // src/core/sender-rules.ts
-function stripComments(value) {
+function validDomain(raw) {
+  const domain = raw.toLowerCase().replace(/[.-]+$/, "");
+  const labels = domain.split(".");
+  if (labels.length < 2 || labels.some((label) => !label || label.startsWith("-") || label.endsWith("-")))
+    return;
+  return domain;
+}
+function scanHeader(value) {
   let out = "";
   let depth = 0;
   let quoted = false;
+  let angleOpens = 0;
+  let comma = false;
   for (let index = 0;index < value.length; index += 1) {
     const char = value[index];
     if (char === "\\" && index + 1 < value.length) {
@@ -6260,21 +6269,60 @@ function stripComments(value) {
       depth -= 1;
       continue;
     }
-    if (depth === 0)
-      out += char;
+    if (depth > 0)
+      continue;
+    if (!quoted && char === "<")
+      angleOpens += 1;
+    if (!quoted && char === ",")
+      comma = true;
+    out += char;
   }
-  return out;
+  return { text: out, angleOpens, comma };
+}
+function parseAddrSpec(value) {
+  const spec = value.trim();
+  let local;
+  let rest;
+  if (spec.startsWith('"')) {
+    let index = 1;
+    while (index < spec.length && spec[index] !== '"')
+      index += spec[index] === "\\" ? 2 : 1;
+    if (index >= spec.length || spec[index + 1] !== "@")
+      return;
+    local = spec.slice(0, index + 1);
+    rest = spec.slice(index + 2);
+  } else {
+    const at = spec.indexOf("@");
+    if (at <= 0)
+      return;
+    local = spec.slice(0, at);
+    rest = spec.slice(at + 1);
+    for (const char of local)
+      if (!LOCAL_CHAR.test(char))
+        return;
+  }
+  for (const char of rest)
+    if (!DOMAIN_CHAR.test(char))
+      return;
+  const domain = validDomain(rest);
+  if (!domain || domain !== rest.toLowerCase())
+    return;
+  return { address: `${local.toLowerCase()}@${domain}`, domain };
 }
 function senderAddress(from) {
-  if (!from)
+  if (!from || from.length > MAX_FROM_HEADER_CHARS)
     return;
-  const cleaned = stripComments(from);
-  const bracketed = [...cleaned.matchAll(/<([^<>]*)>/g)].at(-1)?.[1];
-  const candidate = (bracketed ?? cleaned).trim();
-  const match = ADDRESS.exec(candidate);
-  if (!match)
+  const scanned = scanHeader(from);
+  if (scanned.angleOpens > 1 || scanned.comma)
     return;
-  return { address: `${match[1].toLowerCase()}@${match[2].toLowerCase()}`, domain: match[2].toLowerCase() };
+  if (scanned.angleOpens === 1) {
+    const open3 = scanned.text.indexOf("<");
+    const close = scanned.text.indexOf(">", open3 + 1);
+    if (close < 0 || scanned.text.slice(close + 1).trim() !== "")
+      return;
+    return parseAddrSpec(scanned.text.slice(open3 + 1, close));
+  }
+  return parseAddrSpec(scanned.text);
 }
 function addressMatches(sender, normalizedRule) {
   if (normalizedRule.startsWith("@")) {
@@ -6290,9 +6338,10 @@ function senderMatchesRule(from, rule) {
   const sender = senderAddress(from);
   return sender !== undefined && addressMatches(sender, normalized);
 }
-var ADDRESS;
+var MAX_FROM_HEADER_CHARS = 4096, LOCAL_CHAR, DOMAIN_CHAR;
 var init_sender_rules = __esm(() => {
-  ADDRESS = /^((?:"(?:[^"\\]|\\.)*")|(?:[^\s<>"(),;:@]+))@([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/i;
+  LOCAL_CHAR = /[^\s<>"(),;:@[\]\\]/;
+  DOMAIN_CHAR = /[a-z0-9.-]/i;
 });
 
 // src/workers/email-source/ingest-filter.ts
@@ -6858,7 +6907,7 @@ function gmailLabelFromJson(record) {
 function rawItemFromGmailMessage(message, account, options = {}) {
   const headers = headersFromPart(message.payload);
   const subject = headers.get("subject") ?? "(no subject)";
-  const from = headers.get("from") ?? "";
+  const from = (headers.get("from") ?? "").slice(0, MAX_FROM_HEADER_CHARS);
   const date = parsedDate(headers.get("date")) ?? internalDateIso(message.internalDate);
   const metadataOnly = options.metadataOnly === true;
   const text = metadataOnly ? "" : extractMessageText(message);
