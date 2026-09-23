@@ -63,6 +63,7 @@ import {
   type SovereigntyPresetName,
 } from './core/sovereignty.ts';
 import { validateSensitivityMapFile } from './core/sensitivity-map.ts';
+import { TIER_CLI_USAGE, runTierCommand } from './workers/classification/tier-cli.ts';
 import {
   runSetupWizard,
   type SetupCloudLane,
@@ -115,6 +116,7 @@ const PUBLIC_CLI_HELP_GROUPS = new Set([
   'worker',
   'connect',
   'data',
+  'tier',
 ]);
 
 async function main(): Promise<void> {
@@ -433,6 +435,20 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === 'tier') {
+    try {
+      console.log(JSON.stringify(await runTierCommand(args.slice(1)), null, 2));
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
   if (args[0] === 'data') {
     try {
       const result = await runDataCommand(args.slice(1));
@@ -610,6 +626,7 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
     || group === 'worker'
     || group === 'connect'
     || group === 'data'
+    || group === 'tier'
   ) {
     return command ? `${group} ${command}` : undefined;
   }
@@ -1046,6 +1063,7 @@ function printHelp(): void {
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
+  for (const usage of Object.values(TIER_CLI_USAGE)) console.log(`  ${usage}`);
   console.log('  olympus serve');
   console.log('  olympus --tools-json');
 }
@@ -1077,6 +1095,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
+  ...TIER_CLI_USAGE,
   serve: 'olympus serve',
 };
 
@@ -1146,6 +1165,14 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus data export --output <dir> [--source <id>]',
     '  olympus data verify --input <dir>',
     '  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]',
+  ],
+  tier: [
+    'Usage: olympus tier <command>',
+    'Commands:',
+    `  ${TIER_CLI_USAGE['tier set']}`,
+    `  ${TIER_CLI_USAGE['tier explain']}`,
+    `  ${TIER_CLI_USAGE['tier rules']}`,
+    `  ${TIER_CLI_USAGE['tier classifier']}`,
   ],
 };
 

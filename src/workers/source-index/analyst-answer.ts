@@ -196,6 +196,9 @@ export interface AnalystSourceIndexAnswerHandlerOptions {
     reserveMs?: number;
     lastLegTimeoutMs?: number;
   };
+  // A pool state shared with background work on the same private pool (the
+  // tier sniffer reads its breakers). Absent, the handler owns a fresh one.
+  secureAnalystPoolState?: SecureAnalystPoolState;
 }
 
 export type SecureLocalAnalystRouteStatus =
@@ -262,7 +265,8 @@ const DEFAULT_SELF_HEAL_MAX_MS = 20_000;
 export function createAnalystSourceIndexAnswerHandler(
   options: AnalystSourceIndexAnswerHandlerOptions,
 ): SourceIndexAnswerHandler {
-  const secureAnalystPoolState = new SecureAnalystPoolState(options.secureAnalystPool);
+  const secureAnalystPoolState = options.secureAnalystPoolState
+    ?? new SecureAnalystPoolState(options.secureAnalystPool);
   return {
     async answer(request: SourceIndexAnswerRequest): Promise<SourceIndexAnswerResult> {
       const startedAt = Date.now();
