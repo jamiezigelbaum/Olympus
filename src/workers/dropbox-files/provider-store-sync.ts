@@ -16,7 +16,13 @@ import {
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
 import type { CredentialBroker, CredentialBrokerFetch } from '../credential-broker/index.ts';
-import type { LocalConnectorStore } from '../connector-store/index.ts';
+import type { ConnectorStoreSyncSummary, LocalConnectorStore } from '../connector-store/index.ts';
+import {
+  tieredLaneReceiptCounts,
+  TIER_DOMAIN_ORDER,
+  type TieredLaneReceiptCounts,
+  type TieredStoreSet,
+} from '../connector-store/tiered-store-set.ts';
 import { DROPBOX_STORE_PLACEMENT } from './connector-store.ts';
 import {
   createDropboxSourceConnector,
@@ -61,7 +67,7 @@ export interface DropboxProviderStoreReceipt {
      * unknown warning tokens, and a wedged cursor must stay legible in status.
      */
     resume_cursor_reset: number;
-  };
+  } & TieredLaneReceiptCounts;
   warnings?: string[];
   policy: {
     counts_only: true;
@@ -98,6 +104,11 @@ export interface DropboxProviderStoreSyncHandlerOptions {
   /** Kept here so construction rejects an unsafe secure-lane provider early. */
   embeddingProvider?: SourceEmbeddingProvider;
   scope?: DropboxContentScope;
+  /**
+   * The lane's per-tier stores (tier-set.ts), whose secure leg is `store`.
+   * Absent: the single-store lane exactly as before per-item routing.
+   */
+  tierSet?: TieredStoreSet;
 }
 
 export function createDropboxProviderStoreSyncHandler(
@@ -110,6 +121,22 @@ export function createDropboxProviderStoreSyncHandler(
 
   const connectorIdForScope = (approvedScopeKey: string): string =>
     dropboxConnectorIdForScope(account, approvedScopeKey, options.scope);
+  const tierSet = options.tierSet;
+  if (tierSet && tierSet.legSpec('secure_local')?.store !== options.store) {
+    throw new Error('The Dropbox tier set\'s secure leg must be the lane\'s own store.');
+  }
+  // A deleted entry names a path; the file's row may sit in any tier store.
+  const deletedItemIdentityResolver = tierSet
+    ? {
+        activeIdentityForLocatorIfIndexed(input: Parameters<LocalConnectorStore['activeIdentityForLocatorIfIndexed']>[0]) {
+          for (const domain of ['secure_local', 'internal', 'public_safe'] as const) {
+            const identity = tierSet.store(domain)?.activeIdentityForLocatorIfIndexed(input);
+            if (identity) return identity;
+          }
+          return undefined;
+        },
+      }
+    : options.store;
 
   return {
     connectorIdForScope,
@@ -117,7 +144,11 @@ export function createDropboxProviderStoreSyncHandler(
     async pull(request): Promise<DropboxProviderStoreTaskOutcome> {
       const approvedScopeKey = required(request.approved_scope_key, 'Dropbox approved scope key');
       const connectorId = connectorIdForScope(approvedScopeKey);
-      const candidate = options.store.lastCompletedSyncRun(connectorId)?.cursor
+      // The tier set's committed resume point first: it is written only after
+      // every tier store committed, so a run that died between stores resumes
+      // behind the item it had not finished placing.
+      const candidate = tierSet?.committedCursor(connectorId)?.cursor
+        ?? options.store.lastCompletedSyncRun(connectorId)?.cursor
         ?? dropboxCheckpointCursor(request.checkpoint, connectorId, options.scope !== undefined)
         ?? undefined;
       const maxItems = request.max_items === undefined
@@ -138,12 +169,12 @@ export function createDropboxProviderStoreSyncHandler(
           ...(options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {}),
           ...(options.contentBaseUrl ? { contentBaseUrl: options.contentBaseUrl } : {}),
           ...(options.scope ? { scope: options.scope } : {}),
-          deletedItemIdentityResolver: options.store,
+          deletedItemIdentityResolver,
           onPageDigestRestart: () => {
             pageDigestRestarts += 1;
           },
         }));
-        const sync = await options.store.syncFromConnector(observed.connector, {
+        const syncOptions = {
           placement: DROPBOX_STORE_PLACEMENT,
           fetchContent: false,
           ...(options.scope
@@ -157,8 +188,26 @@ export function createDropboxProviderStoreSyncHandler(
             : {}),
           ...(maxItems !== undefined ? { maxItems } : {}),
           ...(cursor ? { cursor } : {}),
-        });
-        return { sync, completed: observed.completed(), pageDigestRestarts };
+        };
+        if (!tierSet) {
+          const sync = await options.store.syncFromConnector(observed.connector, syncOptions);
+          return { sync, legs: [sync], completed: observed.completed(), pageDigestRestarts };
+        }
+        // One traversal feeds every tier store. Existing files keep the lane
+        // placement above; a new file's names are routed by its metadata tier.
+        const run = await tierSet.sync(observed.connector, syncOptions);
+        const secure = run.byDomain.secure_local;
+        if (!secure) throw new Error('The Dropbox secure store did not run.');
+        return {
+          sync: secure.sync,
+          legs: TIER_DOMAIN_ORDER.flatMap((domain) => run.byDomain[domain] ? [run.byDomain[domain]!.sync] : []),
+          tiered: tieredLaneReceiptCounts({
+            ...(run.byDomain.public_safe ? { public: run.byDomain.public_safe } : {}),
+            routing: run.routing,
+          }),
+          completed: observed.completed(),
+          pageDigestRestarts,
+        };
       };
 
       let resumed = candidate !== undefined;
@@ -180,9 +229,12 @@ export function createDropboxProviderStoreSyncHandler(
       }
 
       const sync = run.sync;
-      const changed = sync.itemsChanged > 0 || sync.itemsTombstoned > 0;
+      // Every tier store saw the same listing; what each one wrote is summed.
+      const sum = (pick: (leg: ConnectorStoreSyncSummary) => number): number =>
+        run.legs.reduce((total, leg) => total + pick(leg), 0);
+      const changed = sum((leg) => leg.itemsChanged) > 0 || sum((leg) => leg.itemsTombstoned) > 0;
       const warnings = [...new Set([
-        ...sync.gaps,
+        ...run.legs.flatMap((leg) => leg.gaps),
         ...(run.pageDigestRestarts > 0
           ? ['provider_page_digest_changed: bounded resume restarted at the changed page boundary.']
           : []),
@@ -193,17 +245,18 @@ export function createDropboxProviderStoreSyncHandler(
         status: changed ? 'progress' : 'idle',
         counts: {
           items_seen: sync.itemsSeen,
-          items_indexed: sync.itemsIndexed,
-          items_changed: sync.itemsChanged,
-          items_tombstoned: sync.itemsTombstoned,
-          deleted_events_applied: sync.deletedEventItemsTombstoned ?? 0,
-          items_rejected: sync.itemsRejected,
+          items_indexed: sum((leg) => leg.itemsIndexed),
+          items_changed: sum((leg) => leg.itemsChanged),
+          items_tombstoned: sum((leg) => leg.itemsTombstoned),
+          deleted_events_applied: sum((leg) => leg.deletedEventItemsTombstoned ?? 0),
+          items_rejected: sum((leg) => leg.itemsRejected),
           items_excluded: sync.itemsExcluded,
           metadata_only_items: sync.itemsMetadataOnly,
           traversal_complete: Number(run.completed),
           resumed_from_checkpoint: Number(resumed),
           page_digest_restarts: run.pageDigestRestarts,
           resume_cursor_reset: Number(cursorReset),
+          ...(run.tiered ?? {}),
         },
         ...(warnings.length > 0 ? { warnings } : {}),
         policy: {
@@ -277,7 +330,11 @@ function dropboxCheckpointCursor(
 }
 
 interface DropboxTraversalRun {
-  sync: Awaited<ReturnType<LocalConnectorStore['syncFromConnector']>>;
+  /** The lane's original (secure) store's run: listing-level counts and the cursor. */
+  sync: ConnectorStoreSyncSummary;
+  /** Every tier store's run, for the counts each one wrote. */
+  legs: ConnectorStoreSyncSummary[];
+  tiered?: TieredLaneReceiptCounts;
   completed: boolean;
   pageDigestRestarts: number;
 }
