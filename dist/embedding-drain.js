@@ -7680,6 +7680,12 @@ var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX
 import { Database } from "bun:sqlite";
 import { chmodSync as chmodSync2, closeSync as closeSync3, existsSync as existsSync6, mkdirSync as mkdirSync6, openSync as openSync3 } from "node:fs";
 import { dirname as dirname7 } from "node:path";
+function tierLedgerConversationKey(identity) {
+  return identity.providerConversationId ?? "";
+}
+function idParams(identity) {
+  return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
+}
 
 class TierLedger {
   dbPath;
@@ -7778,7 +7784,7 @@ class TierLedger {
     if (!existing) {
       this.db.query(`
         INSERT INTO tier_items (
-          provider, account_scope, provider_item_id, family,
+          provider, account_scope, conversation_key, provider_item_id, family,
           metadata_tier, content_tier, generation, decided_by, reasons_json,
           engine_version, map_revision, model_id,
           previous_metadata_tier, previous_content_tier, state,
@@ -7786,8 +7792,8 @@ class TierLedger {
           stored_trust_domain, stored_trust_tier,
           content_read, metadata_pending, content_pending, metadata_forced, metadata_flagged,
           decided_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(identity.provider, identity.accountScope, identity.providerItemId, identity.family ?? "unknown", next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, next.engineVersion, next.mapRevision, state, stored?.trustDomain ?? null, stored?.trustTier ?? null, ...flags, decidedAt);
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(...idParams(identity), identity.family ?? "unknown", next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, next.engineVersion, next.mapRevision, state, stored?.trustDomain ?? null, stored?.trustTier ?? null, ...flags, decidedAt);
       this.appendHistory(identity, 1, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, state, decidedAt);
       return "inserted";
     }
@@ -7805,8 +7811,8 @@ class TierLedger {
         stored_trust_tier = COALESCE(?, stored_trust_tier),
         content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
         decided_at = ?
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-    `).run(next.metadataTier, next.contentTier, generation, next.decidedBy, reasonsJson, next.engineVersion, next.mapRevision, tiersChanged ? existing.metadataTier : existing.previousMetadataTier, tiersChanged ? existing.contentTier : existing.previousContentTier, state, stored?.trustDomain ?? null, stored?.trustTier ?? null, ...flags, decidedAt, identity.provider, identity.accountScope, identity.providerItemId);
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(next.metadataTier, next.contentTier, generation, next.decidedBy, reasonsJson, next.engineVersion, next.mapRevision, tiersChanged ? existing.metadataTier : existing.previousMetadataTier, tiersChanged ? existing.contentTier : existing.previousContentTier, state, stored?.trustDomain ?? null, stored?.trustTier ?? null, ...flags, decidedAt, ...idParams(identity));
     this.appendHistory(identity, generation, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, state, decidedAt);
     return "updated";
   }
@@ -7818,9 +7824,9 @@ class TierLedger {
     assertTier(target.contentTier);
     const result = this.db.query(`
       UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND generation = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
         AND state != 'moving'
-    `).run(target.metadataTier, target.contentTier, identity.provider, identity.accountScope, identity.providerItemId, expectedGeneration);
+    `).run(target.metadataTier, target.contentTier, ...idParams(identity), expectedGeneration);
     if (result.changes !== 1)
       throw new TierLedgerGenerationConflictError;
     return this.getCurrent(identity);
@@ -7851,8 +7857,8 @@ class TierLedger {
           stored_trust_domain = COALESCE(?, stored_trust_domain),
           stored_trust_tier = COALESCE(?, stored_trust_tier),
           decided_at = ?
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND generation = ?
-      `).run(metadataTier, contentTier, generation, decidedBy, reasonsJson, existing.metadataTier, existing.contentTier, options.stored?.trustDomain ?? null, options.stored?.trustTier ?? null, decidedAt, identity.provider, identity.accountScope, identity.providerItemId, options.expectedGeneration);
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
+      `).run(metadataTier, contentTier, generation, decidedBy, reasonsJson, existing.metadataTier, existing.contentTier, options.stored?.trustDomain ?? null, options.stored?.trustTier ?? null, decidedAt, ...idParams(identity), options.expectedGeneration);
       this.appendHistory(identity, generation, metadataTier, contentTier, decidedBy, reasonsJson, "current", decidedAt);
       flipped = this.readRow(identity);
     })();
@@ -7863,12 +7869,12 @@ class TierLedger {
     const rows = options.after ? this.db.query(`
           SELECT * FROM tier_items
           WHERE state = 'pending'
-            AND (provider, account_scope, provider_item_id) > (?, ?, ?)
-          ORDER BY provider, account_scope, provider_item_id
+            AND (provider, account_scope, provider_item_id, conversation_key) > (?, ?, ?, ?)
+          ORDER BY provider, account_scope, provider_item_id, conversation_key
           LIMIT ?
-        `).all(options.after.provider, options.after.accountScope, options.after.providerItemId, limit) : this.db.query(`
+        `).all(options.after.provider, options.after.accountScope, options.after.providerItemId, tierLedgerConversationKey(options.after), limit) : this.db.query(`
           SELECT * FROM tier_items WHERE state = 'pending'
-          ORDER BY provider, account_scope, provider_item_id
+          ORDER BY provider, account_scope, provider_item_id, conversation_key
           LIMIT ?
         `).all(limit);
     return rows.map(recordFromRow);
@@ -7888,9 +7894,9 @@ class TierLedger {
     return this.db.query(`
       SELECT generation, metadata_tier, content_tier, decided_by, state, decided_at
       FROM tier_history
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       ORDER BY history_pk
-    `).all(identity.provider, identity.accountScope, identity.providerItemId).map((row) => ({
+    `).all(...idParams(identity)).map((row) => ({
       generation: row.generation,
       metadataTier: row.metadata_tier,
       contentTier: row.content_tier,
@@ -7903,17 +7909,17 @@ class TierLedger {
     if (override.kind === "tier")
       assertTier(override.tier);
     this.db.query(`
-      INSERT INTO tier_overrides (provider, account_scope, provider_item_id, override_json, set_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT (provider, account_scope, provider_item_id)
+      INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
       DO UPDATE SET override_json = excluded.override_json, set_at = excluded.set_at
-    `).run(identity.provider, identity.accountScope, identity.providerItemId, JSON.stringify(override), this.now().toISOString());
+    `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
   }
   getOverride(identity) {
     const row = this.db.query(`
       SELECT override_json FROM tier_overrides
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-    `).get(identity.provider, identity.accountScope, identity.providerItemId);
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
     if (!row)
       return;
     const parsed = JSON.parse(row.override_json);
@@ -7925,8 +7931,14 @@ class TierLedger {
   }
   clearOverride(identity) {
     return this.db.query(`
-      DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-    `).run(identity.provider, identity.accountScope, identity.providerItemId).changes > 0;
+      DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(identity)).changes > 0;
+  }
+  ledgerId() {
+    const row = this.db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
+    if (!row)
+      throw new Error("Tier ledger has no identity.");
+    return row.value;
   }
   isRouted(identity) {
     return this.readRow(identity)?.routed === true;
@@ -7934,9 +7946,9 @@ class TierLedger {
   copies(identity) {
     return this.db.query(`
       SELECT * FROM tier_copies
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       ORDER BY corpus_id
-    `).all(identity.provider, identity.accountScope, identity.providerItemId).map(copyFromRow);
+    `).all(...idParams(identity)).map(copyFromRow);
   }
   copiesForMany(identities) {
     const result = new Map;
@@ -7951,15 +7963,11 @@ class TierLedger {
         const batch = list.slice(offset, offset + 200);
         const rows = this.db.query(`
           SELECT * FROM tier_copies
-          WHERE (provider, account_scope, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?)").join(", ")})
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
           ORDER BY corpus_id
-        `).all(...batch.flatMap((identity) => [identity.provider, identity.accountScope, identity.providerItemId]));
+        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
         for (const row of rows) {
-          const key = tierLedgerIdentityKey({
-            provider: row.provider,
-            accountScope: row.account_scope,
-            providerItemId: row.provider_item_id
-          });
+          const key = tierLedgerIdentityKey(identityFromRow(row));
           const existing = result.get(key);
           if (existing)
             existing.push(copyFromRow(row));
@@ -7988,7 +7996,7 @@ class TierLedger {
       if (!existing) {
         this.db.query(`
           INSERT INTO tier_items (
-            provider, account_scope, provider_item_id, family,
+            provider, account_scope, conversation_key, provider_item_id, family,
             metadata_tier, content_tier, generation, decided_by, reasons_json,
             engine_version, map_revision, model_id,
             previous_metadata_tier, previous_content_tier, state,
@@ -7996,12 +8004,29 @@ class TierLedger {
             stored_trust_domain, stored_trust_tier,
             content_read, metadata_pending, content_pending, metadata_forced, metadata_flagged,
             decided_at, routed
-          ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-        `).run(identity.provider, identity.accountScope, identity.providerItemId, identity.family ?? "unknown", decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, decision.state, plan.stored?.trustDomain ?? null, plan.stored?.trustTier ?? null, ...decisionFlags(decision), decidedAt);
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        `).run(...idParams(identity), identity.family ?? "unknown", decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, decision.state, plan.stored?.trustDomain ?? null, plan.stored?.trustTier ?? null, ...decisionFlags(decision), decidedAt);
         this.appendHistory(identity, 1, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, decidedAt);
         if (!secrets)
           this.insertCopies(identity, plan, "current", 1, decidedAt);
         outcome = secrets ? "secrets" : "inserted";
+        return;
+      }
+      if (existing.state === "moving" && secrets && existing.routed) {
+        const generation = existing.generation + 1;
+        this.db.query(`
+          UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        `).run(generation, decidedAt, ...idParams(identity));
+        this.flipTiers(identity, existing, {
+          metadataTier: decision.metadataTier,
+          contentTier: decision.contentTier,
+          generation,
+          decidedBy: decision.decidedBy,
+          reasons: decision.reasons,
+          decidedAt
+        });
+        outcome = "secrets";
         return;
       }
       if (existing.state === "moving") {
@@ -8025,8 +8050,8 @@ class TierLedger {
               stored_trust_tier = COALESCE(?, stored_trust_tier),
               content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
               decided_at = ?, routed = 1
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-          `).run(decision.metadataTier, decision.contentTier, generation, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, tiersChanged ? existing.metadataTier : existing.previousMetadataTier, tiersChanged ? existing.contentTier : existing.previousContentTier, decision.state, plan.stored?.trustDomain ?? null, plan.stored?.trustTier ?? null, ...decisionFlags(decision), decidedAt, identity.provider, identity.accountScope, identity.providerItemId);
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          `).run(decision.metadataTier, decision.contentTier, generation, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, tiersChanged ? existing.metadataTier : existing.previousMetadataTier, tiersChanged ? existing.contentTier : existing.previousContentTier, decision.state, plan.stored?.trustDomain ?? null, plan.stored?.trustTier ?? null, ...decisionFlags(decision), decidedAt, ...idParams(identity));
           this.appendHistory(identity, generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, decidedAt);
         }
         if (secrets) {
@@ -8044,8 +8069,8 @@ class TierLedger {
         if (holdChanged) {
           this.db.query(`
             UPDATE tier_copies SET embed_hold = ?, updated_at = ?
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND copy_state = 'current'
-          `).run(plan.embedHold ? 1 : 0, decidedAt, identity.provider, identity.accountScope, identity.providerItemId);
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'
+          `).run(plan.embedHold ? 1 : 0, decidedAt, ...idParams(identity));
         }
         outcome = detailChanged || holdChanged ? "updated" : "unchanged";
         return;
@@ -8054,8 +8079,8 @@ class TierLedger {
       this.db.query(`
         UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?,
           decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-      `).run(decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, decidedAt, identity.provider, identity.accountScope, identity.providerItemId);
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, decidedAt, ...idParams(identity));
       this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, "moving", decidedAt);
       if (raise)
         this.supersedeCurrentCopies(identity, existing.generation + 1, decidedAt);
@@ -8075,8 +8100,8 @@ class TierLedger {
         throw new Error("This item is already routed.");
       this.db.query(`
         UPDATE tier_items SET routed = 1
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-      `).run(identity.provider, identity.accountScope, identity.providerItemId);
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(identity));
       this.deleteCopies(identity);
       this.insertCopies(identity, { copies, embedHold: false }, "current", existing.generation, now);
     })();
@@ -8104,16 +8129,16 @@ class TierLedger {
       const sources = this.moveSources(identity, nextGeneration);
       this.db.query(`
         UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-      `).run(options.target.metadataTier, options.target.contentTier, identity.provider, identity.accountScope, identity.providerItemId);
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(options.target.metadataTier, options.target.contentTier, ...idParams(identity));
       if (options.hideSource)
         this.supersedeCurrentCopies(identity, nextGeneration, now);
       const staged = options.destination.filter((copy) => !sources.some((source) => source.corpusId === copy.corpusId));
       for (const destination of staged) {
         this.db.query(`
           DELETE FROM tier_copies
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
-        `).run(identity.provider, identity.accountScope, identity.providerItemId, destination.corpusId);
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(...idParams(identity), destination.corpusId);
       }
       this.insertCopies(identity, { copies: staged, embedHold: options.embedHold === true }, "staged", nextGeneration, now);
     })();
@@ -8142,14 +8167,14 @@ class TierLedger {
           this.db.query(`
             UPDATE tier_copies SET copy_state = 'current', layers = ?, generation = ?,
               superseded_by_generation = NULL, previous_layers = NULL, updated_at = ?
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
-          `).run(planned.layers, generation, now, identity.provider, identity.accountScope, identity.providerItemId, planned.corpusId);
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(planned.layers, generation, now, ...idParams(identity), planned.corpusId);
         } else if (sources.some((source) => source.corpusId === planned.corpusId)) {
           this.db.query(`
             UPDATE tier_copies SET copy_state = 'current', layers = ?, generation = ?,
               superseded_by_generation = NULL, previous_layers = ?, updated_at = ?
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
-          `).run(planned.layers, generation, row.layers, now, identity.provider, identity.accountScope, identity.providerItemId, planned.corpusId);
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(planned.layers, generation, row.layers, now, ...idParams(identity), planned.corpusId);
         } else {
           throw new Error("A move destination must be staged or be one of the item's source copies.");
         }
@@ -8159,8 +8184,8 @@ class TierLedger {
           continue;
         this.db.query(`
           UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, previous_layers = NULL, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
-        `).run(generation, now, identity.provider, identity.accountScope, identity.providerItemId, source.corpusId);
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(generation, now, ...idParams(identity), source.corpusId);
       }
       this.flipTiers(identity, existing, {
         metadataTier: existing.targetMetadataTier,
@@ -8194,20 +8219,20 @@ class TierLedger {
         if (copy.previousLayers !== null) {
           this.db.query(`
             UPDATE tier_copies SET layers = ?, previous_layers = NULL, generation = ?, updated_at = ?
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
-          `).run(copy.previousLayers, generation, now, identity.provider, identity.accountScope, identity.providerItemId, copy.corpusId);
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(copy.previousLayers, generation, now, ...idParams(identity), copy.corpusId);
         } else {
           this.db.query(`
             UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
-          `).run(generation, now, identity.provider, identity.accountScope, identity.providerItemId, copy.corpusId);
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(generation, now, ...idParams(identity), copy.corpusId);
         }
       }
       for (const copy of restore) {
         this.db.query(`
           UPDATE tier_copies SET copy_state = 'current', generation = ?, superseded_by_generation = NULL, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
-        `).run(generation, now, identity.provider, identity.accountScope, identity.providerItemId, copy.corpusId);
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(generation, now, ...idParams(identity), copy.corpusId);
       }
       this.flipTiers(identity, existing, {
         metadataTier: existing.previousMetadataTier,
@@ -8255,14 +8280,27 @@ class TierLedger {
   corpusHasCopies(corpusId) {
     return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
-  corpusCopyIdentities(corpusId, filter, limit = 1e5) {
+  corpusCopyIdentities(corpusId, filter) {
     const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
-    return this.db.query(`
-      SELECT provider, account_scope, provider_item_id FROM tier_copies
+    const page = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
       WHERE corpus_id = ? AND ${where}
-      ORDER BY provider, account_scope, provider_item_id
-      LIMIT ?
-    `).all(corpusId, Math.max(1, Math.floor(limit))).map((row) => ({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id }));
+        AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT 5000
+    `);
+    const identities = [];
+    let after = ["", "", "", ""];
+    for (;; ) {
+      const rows = page.all(corpusId, ...after);
+      for (const row of rows)
+        identities.push(identityFromRow(row));
+      if (rows.length < 5000)
+        break;
+      const last = rows[rows.length - 1];
+      after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
+    }
+    return identities;
   }
   corpusCopyCounts(corpusId) {
     const row = this.db.query(`
@@ -8274,7 +8312,8 @@ class TierLedger {
         SUM(CASE WHEN t.state = 'moving' THEN 1 ELSE 0 END) AS moving
       FROM tier_copies c
       JOIN tier_items t
-        ON t.provider = c.provider AND t.account_scope = c.account_scope AND t.provider_item_id = c.provider_item_id
+        ON t.provider = c.provider AND t.account_scope = c.account_scope
+          AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
       WHERE c.corpus_id = ?
     `).get(corpusId);
     return {
@@ -8302,24 +8341,24 @@ class TierLedger {
   insertCopies(identity, plan, state, generation, now) {
     const insert = this.db.query(`
       INSERT INTO tier_copies (
-        provider, account_scope, provider_item_id, corpus_id, trust_domain,
+        provider, account_scope, conversation_key, provider_item_id, corpus_id, trust_domain,
         layers, copy_state, embed_hold, generation, superseded_by_generation, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
     `);
     for (const copy of plan.copies) {
-      insert.run(identity.provider, identity.accountScope, identity.providerItemId, copy.corpusId, copy.trustDomain, copy.layers, state, plan.embedHold ? 1 : 0, generation, now);
+      insert.run(...idParams(identity), copy.corpusId, copy.trustDomain, copy.layers, state, plan.embedHold ? 1 : 0, generation, now);
     }
   }
   deleteCopies(identity) {
     this.db.query(`
-      DELETE FROM tier_copies WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-    `).run(identity.provider, identity.accountScope, identity.providerItemId);
+      DELETE FROM tier_copies WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(identity));
   }
   supersedeCurrentCopies(identity, byGeneration, now) {
     this.db.query(`
       UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND copy_state = 'current'
-    `).run(byGeneration, now, identity.provider, identity.accountScope, identity.providerItemId);
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'
+    `).run(byGeneration, now, ...idParams(identity));
   }
   flipTiers(identity, existing, next) {
     const reasonsJson = JSON.stringify(next.reasons);
@@ -8328,24 +8367,32 @@ class TierLedger {
         metadata_tier = ?, content_tier = ?, generation = ?, decided_by = ?, reasons_json = ?,
         previous_metadata_tier = ?, previous_content_tier = ?, state = 'current',
         target_metadata_tier = NULL, target_content_tier = NULL, decided_at = ?
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-    `).run(next.metadataTier, next.contentTier, next.generation, next.decidedBy, reasonsJson, existing.metadataTier, existing.contentTier, next.decidedAt, identity.provider, identity.accountScope, identity.providerItemId);
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(next.metadataTier, next.contentTier, next.generation, next.decidedBy, reasonsJson, existing.metadataTier, existing.contentTier, next.decidedAt, ...idParams(identity));
     this.appendHistory(identity, next.generation, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, "current", next.decidedAt);
   }
   readRow(identity) {
     const row = this.db.query(`
-      SELECT * FROM tier_items WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-    `).get(identity.provider, identity.accountScope, identity.providerItemId);
+      SELECT * FROM tier_items WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
     return row ? recordFromRow(row) : undefined;
   }
   appendHistory(identity, generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt) {
     this.db.query(`
       INSERT INTO tier_history (
-        provider, account_scope, provider_item_id, generation,
+        provider, account_scope, conversation_key, provider_item_id, generation,
         metadata_tier, content_tier, decided_by, reasons_json, state, decided_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(identity.provider, identity.accountScope, identity.providerItemId, generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt);
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(...idParams(identity), generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt);
   }
+}
+function identityFromRow(row) {
+  return {
+    provider: row.provider,
+    accountScope: row.account_scope,
+    providerItemId: row.provider_item_id,
+    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+  };
 }
 function copyFromRow(row) {
   return {
@@ -8361,7 +8408,7 @@ function copyFromRow(row) {
   };
 }
 function tierLedgerIdentityKey(identity) {
-  return `${identity.provider}\x00${identity.accountScope}\x00${identity.providerItemId}`;
+  return `${identity.provider}\x00${identity.accountScope}\x00${tierLedgerConversationKey(identity)}\x00${identity.providerItemId}`;
 }
 function trustDomainRank(domain) {
   return TRUST_DOMAIN_RANK[domain] ?? Number.MAX_SAFE_INTEGER;
@@ -8398,6 +8445,7 @@ function recordFromRow(row) {
   return {
     provider: row.provider,
     accountScope: row.account_scope,
+    conversationKey: row.conversation_key,
     providerItemId: row.provider_item_id,
     family: row.family,
     metadataTier: row.metadata_tier,
@@ -8540,10 +8588,107 @@ function tierLedgerMigrations() {
       name: "tier_copies_and_set_cursors",
       up(db) {
         db.exec(`
-          ALTER TABLE tier_items ADD COLUMN routed INTEGER NOT NULL DEFAULT 0 CHECK (routed IN (0, 1));
+          ALTER TABLE tier_items RENAME TO tier_items_v1;
+          ALTER TABLE tier_history RENAME TO tier_history_v1;
+          ALTER TABLE tier_overrides RENAME TO tier_overrides_v1;
+          DROP INDEX IF EXISTS tier_items_state;
+          DROP INDEX IF EXISTS tier_history_item;
+          CREATE TABLE tier_items (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            family TEXT NOT NULL,
+            metadata_tier TEXT NOT NULL CHECK (metadata_tier ${TIER_CHECK}),
+            content_tier TEXT NOT NULL CHECK (content_tier ${TIER_CHECK}),
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            decided_by TEXT NOT NULL,
+            reasons_json TEXT NOT NULL,
+            engine_version TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            model_id TEXT,
+            previous_metadata_tier TEXT CHECK (previous_metadata_tier IS NULL OR previous_metadata_tier ${TIER_CHECK}),
+            previous_content_tier TEXT CHECK (previous_content_tier IS NULL OR previous_content_tier ${TIER_CHECK}),
+            state TEXT NOT NULL CHECK (state IN ('pending', 'current', 'moving')),
+            target_metadata_tier TEXT CHECK (target_metadata_tier IS NULL OR target_metadata_tier ${TIER_CHECK}),
+            target_content_tier TEXT CHECK (target_content_tier IS NULL OR target_content_tier ${TIER_CHECK}),
+            stored_trust_domain TEXT,
+            stored_trust_tier TEXT,
+            content_read INTEGER NOT NULL DEFAULT 0 CHECK (content_read IN (0, 1)),
+            metadata_pending INTEGER NOT NULL DEFAULT 0 CHECK (metadata_pending IN (0, 1)),
+            content_pending INTEGER NOT NULL DEFAULT 0 CHECK (content_pending IN (0, 1)),
+            metadata_forced INTEGER NOT NULL DEFAULT 0 CHECK (metadata_forced IN (0, 1)),
+            metadata_flagged INTEGER NOT NULL DEFAULT 0 CHECK (metadata_flagged IN (0, 1)),
+            decided_at TEXT NOT NULL,
+            routed INTEGER NOT NULL DEFAULT 0 CHECK (routed IN (0, 1)),
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          INSERT INTO tier_items (
+            provider, account_scope, conversation_key, provider_item_id, family,
+            metadata_tier, content_tier, generation, decided_by, reasons_json,
+            engine_version, map_revision, model_id,
+            previous_metadata_tier, previous_content_tier, state,
+            target_metadata_tier, target_content_tier,
+            stored_trust_domain, stored_trust_tier,
+            content_read, metadata_pending, content_pending, metadata_forced, metadata_flagged,
+            decided_at, routed
+          )
+          SELECT
+            provider, account_scope, '', provider_item_id, family,
+            metadata_tier, content_tier, generation, decided_by, reasons_json,
+            engine_version, map_revision, model_id,
+            previous_metadata_tier, previous_content_tier, state,
+            target_metadata_tier, target_content_tier,
+            stored_trust_domain, stored_trust_tier,
+            content_read, metadata_pending, content_pending, metadata_forced, metadata_flagged,
+            decided_at, 0
+          FROM tier_items_v1;
+          DROP TABLE tier_items_v1;
+          CREATE INDEX tier_items_state ON tier_items (state, provider, account_scope, provider_item_id, conversation_key);
+          CREATE TABLE tier_history (
+            history_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            metadata_tier TEXT NOT NULL,
+            content_tier TEXT NOT NULL,
+            decided_by TEXT NOT NULL,
+            reasons_json TEXT NOT NULL,
+            state TEXT NOT NULL,
+            decided_at TEXT NOT NULL
+          );
+          INSERT INTO tier_history (
+            history_pk, provider, account_scope, conversation_key, provider_item_id, generation,
+            metadata_tier, content_tier, decided_by, reasons_json, state, decided_at
+          )
+          SELECT history_pk, provider, account_scope, '', provider_item_id, generation,
+            metadata_tier, content_tier, decided_by, reasons_json, state, decided_at
+          FROM tier_history_v1;
+          DROP TABLE tier_history_v1;
+          CREATE INDEX tier_history_item ON tier_history (provider, account_scope, conversation_key, provider_item_id, history_pk);
+          CREATE TABLE tier_overrides (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            override_json TEXT NOT NULL,
+            set_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
+          SELECT provider, account_scope, '', provider_item_id, override_json, set_at FROM tier_overrides_v1;
+          DROP TABLE tier_overrides_v1;
+          CREATE TABLE IF NOT EXISTS tier_ledger_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          );
+          INSERT OR IGNORE INTO tier_ledger_meta (key, value) VALUES ('ledger_id', lower(hex(randomblob(16))));
           CREATE TABLE IF NOT EXISTS tier_copies (
             provider TEXT NOT NULL,
             account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
             provider_item_id TEXT NOT NULL,
             corpus_id TEXT NOT NULL,
             trust_domain TEXT NOT NULL CHECK (trust_domain IN ('public_safe', 'internal', 'secure_local')),
@@ -8554,7 +8699,7 @@ function tierLedgerMigrations() {
             superseded_by_generation INTEGER,
             previous_layers TEXT CHECK (previous_layers IS NULL OR previous_layers IN ('metadata', 'content', 'both')),
             updated_at TEXT NOT NULL,
-            PRIMARY KEY (provider, account_scope, provider_item_id, corpus_id)
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id, corpus_id)
           );
           CREATE INDEX IF NOT EXISTS tier_copies_corpus ON tier_copies (corpus_id, copy_state, embed_hold);
           CREATE TABLE IF NOT EXISTS tier_set_cursors (
@@ -10999,7 +11144,7 @@ function errorMessage2(error) {
 function nowIso() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -11072,6 +11217,12 @@ var init_local_index = __esm(() => {
       this.ruleId = ruleId;
     }
   };
+  TierLedgerUnavailableError = class TierLedgerUnavailableError extends Error {
+    constructor(corpusId) {
+      super(`The tier ledger governing ${corpusId} is missing or was replaced, so which copies are visible ` + "cannot be decided. Restore the set ledger (beside the source's secure_local store) before " + "syncing or reading this store.");
+      this.name = "TierLedgerUnavailableError";
+    }
+  };
   ConnectorStoreLocatorIdentityIndexNotReadyError = class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
     constructor() {
       super("Connector store locator identity index requires bounded backfill before path-only deletions can run.");
@@ -11092,6 +11243,7 @@ var init_local_index = __esm(() => {
     tierLedgerHandle;
     tierLedgerOwned;
     tierLedgerDisabled;
+    boundLedgerHandle;
     constructor(options) {
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
@@ -11144,6 +11296,8 @@ var init_local_index = __esm(() => {
       try {
         if (this.tierLedgerOwned === true)
           this.tierLedgerHandle?.close();
+        this.boundLedgerHandle?.close();
+        this.boundLedgerHandle = undefined;
       } finally {
         this.tierLedgerHandle = undefined;
         closeSqliteStore(this.db);
@@ -11191,6 +11345,20 @@ var init_local_index = __esm(() => {
       this.tierLedgerOwned = false;
     }
     visibilityLedger() {
+      const binding = this.tierSetBinding();
+      if (binding) {
+        const ledger = this.tierLedgerHandle?.dbPath === binding.ledgerPath ? this.tierLedgerHandle : this.boundTierLedger(binding.ledgerPath);
+        let ledgerId;
+        try {
+          ledgerId = ledger.ledgerId();
+        } catch {
+          ledgerId = undefined;
+        }
+        if (ledgerId !== binding.ledgerId) {
+          throw new TierLedgerUnavailableError(this.corpusId);
+        }
+        return ledger;
+      }
       if (this.tierLedgerHandle)
         return this.tierLedgerHandle;
       if (this.tierLedgerDisabled === true)
@@ -11199,6 +11367,55 @@ var init_local_index = __esm(() => {
       if (path === ":memory:" || !existsSync7(path))
         return;
       return this.tierLedger();
+    }
+    boundTierLedger(ledgerPath) {
+      if (this.boundLedgerHandle?.dbPath === ledgerPath)
+        return this.boundLedgerHandle;
+      if (ledgerPath !== ":memory:" && !existsSync7(ledgerPath))
+        throw new TierLedgerUnavailableError(this.corpusId);
+      this.boundLedgerHandle?.close();
+      this.boundLedgerHandle = new TierLedger({ dbPath: ledgerPath, now: this.now });
+      return this.boundLedgerHandle;
+    }
+    tierSetBinding() {
+      const row = this.db.query(`
+      SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?
+    `).get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
+      if (!row?.cursor)
+        return;
+      try {
+        const parsed = JSON.parse(row.cursor);
+        if (typeof parsed.ledgerId === "string" && typeof parsed.ledgerPath === "string") {
+          return { ledgerId: parsed.ledgerId, ledgerPath: parsed.ledgerPath };
+        }
+      } catch {}
+      throw new TierLedgerUnavailableError(this.corpusId);
+    }
+    bindTierSet(ledger) {
+      const ledgerId = ledger.ledgerId();
+      const existing = this.tierSetBinding();
+      if (existing) {
+        if (existing.ledgerId !== ledgerId)
+          throw new TierLedgerUnavailableError(this.corpusId);
+        return;
+      }
+      this.db.query(`
+      INSERT INTO sync_runs (
+        sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+        items_indexed, started_at, completed_at
+      ) VALUES (?, ?, ?, 'completed', ?, 0, 0, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z')
+    `).run(TIER_SET_BINDING_RUN_ID, this.corpusId, TIER_SET_BINDING_CONNECTOR_ID, JSON.stringify({ ledgerId, ledgerPath: ledger.dbPath }));
+    }
+    hiddenCopyKeys(identities) {
+      const ledger = this.visibilityLedger();
+      if (!ledger || identities.length === 0 || !ledger.corpusHasCopies(this.corpusId))
+        return new Set;
+      const hidden = new Set;
+      for (const [key, copies] of ledger.copiesForMany(identities)) {
+        if (copies.some((copy) => copy.corpusId === this.corpusId && copy.state !== "current"))
+          hidden.add(key);
+      }
+      return hidden;
     }
     tierVisibleRows(rows, identityOf, layerOf) {
       if (rows.length === 0)
@@ -11221,13 +11438,14 @@ var init_local_index = __esm(() => {
       const pksFor = (identities) => {
         const lookup2 = this.db.query(`
         SELECT item_pk FROM items
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND tombstoned = 0
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+          AND tombstoned = 0
       `);
         const pks = [];
         for (const identity of identities) {
-          for (const row of lookup2.all(identity.provider, identity.accountScope, identity.providerItemId)) {
+          const row = lookup2.get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+          if (row)
             pks.push(row.item_pk);
-          }
         }
         return pks;
       };
@@ -11571,10 +11789,11 @@ var init_local_index = __esm(() => {
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
       const selectedProvider = normalizeBoundedFilterString(provider, "provider");
       const rows = this.db.query(`
-      SELECT DISTINCT i.provider_conversation_id, i.title
+      SELECT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id, i.title
       FROM connector_store_fts
       JOIN items i ON i.item_pk = connector_store_fts.item_pk
       WHERE connector_store_fts MATCH ?
+        AND connector_store_fts.chunk_pk IS NULL
         AND i.tombstoned = 0
         AND i.provider_conversation_id IS NOT NULL
         AND i.provider_conversation_id <> ''
@@ -11583,13 +11802,23 @@ var init_local_index = __esm(() => {
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedProvider ? "AND i.provider = ?" : ""}
       LIMIT ?
-    `).all(titleQuery, ...selectedAccount ? [selectedAccount] : [], ...selectedProvider ? [selectedProvider] : [], MAX_CONVERSATION_TITLE_LOOKUP_ROWS + 1);
+    `).all(titleQuery, ...selectedAccount ? [selectedAccount] : [], ...selectedProvider ? [selectedProvider] : [], (MAX_CONVERSATION_TITLE_LOOKUP_ROWS + 1) * 8);
+      const visible = this.tierVisibleRows(rows, (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        providerConversationId: row.provider_conversation_id
+      }), () => "metadata");
+      const distinct = new Map;
+      for (const row of visible) {
+        const key = JSON.stringify([row.provider_conversation_id, row.title]);
+        if (!distinct.has(key))
+          distinct.set(key, { conversationId: row.provider_conversation_id, title: row.title });
+      }
+      const candidates = [...distinct.values()];
       return {
-        candidates: rows.slice(0, MAX_CONVERSATION_TITLE_LOOKUP_ROWS).map((row) => ({
-          conversationId: row.provider_conversation_id,
-          title: row.title
-        })),
-        truncated: rows.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS
+        candidates: candidates.slice(0, MAX_CONVERSATION_TITLE_LOOKUP_ROWS),
+        truncated: candidates.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS || rows.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS * 8
       };
     }
     senderAggregation(options) {
@@ -12371,11 +12600,14 @@ var init_local_index = __esm(() => {
           AND normalized_conversation = ? AND provider_item_id = ?
           AND tombstoned = 0
       `);
+        const hiddenCopies = this.hiddenCopyKeys(options.identities);
         for (const identity of options.identities) {
           const key = sourceItemIdentityKey(identity);
           if (considered.has(key))
             continue;
           considered.add(key);
+          if (hiddenCopies.has(tierLedgerIdentityKey(identity)))
+            continue;
           const row = findActive.get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
           if (row)
             doomed.push({ itemPk: row.item_pk, localItemId: identity.localItemId });
@@ -13208,7 +13440,8 @@ var init_local_index = __esm(() => {
               item: itemForStorage,
               legacy: legacySensitivity,
               metadataOnly,
-              contentFetchFailed
+              contentFetchFailed,
+              ...options?.sourceScopeObservation ? { sourceScope: normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) } : {}
             }) : { kind: "legacy" };
             if (route.kind === "elsewhere") {
               this.reobserveRoutedCopy(itemForStorage, connector.id, ownershipKind, syncRunId);
@@ -14491,7 +14724,12 @@ var init_local_index = __esm(() => {
         }
         selected = rows.filter((row) => (matchedGroups.get(row.item_pk) ?? 0) >= 2);
       }
-      selected = this.tierVisibleRows(selected, (row) => ({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
+      selected = this.tierVisibleRows(selected, (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
       const spanTerms = queryTermsForSpan(query);
       return {
         rows: selected.slice(0, limit).map((row) => {
@@ -14542,17 +14780,28 @@ var init_local_index = __esm(() => {
       ORDER BY COALESCE(i.authored_at, i.updated_at, i.indexed_at) DESC, i.item_pk DESC
       LIMIT ?
     `).all(...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, limit);
-      return this.tierVisibleRows(rows, (row) => ({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id }), () => "content").map((row) => searchRowFromItemRow(row));
+      return this.tierVisibleRows(rows, (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      }), () => "content").map((row) => searchRowFromItemRow(row));
     }
     localContent(localItemId, maxChars, passageFocus) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
+        provider_conversation_id,
         ${this.reactionsColumnPresent ? "reactions_json" : "NULL AS reactions_json"}
       FROM items WHERE local_item_id = ? AND tombstoned = 0
     `).get(localItemId);
       if (!row)
         return;
-      if (!this.copyServable({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id })) {
+      if (!this.copyServable({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      })) {
         return;
       }
       const chunkRows = this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk);
@@ -14619,7 +14868,7 @@ var init_local_index = __esm(() => {
             ${parityWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
-          WHERE connector_id <> 'connector_store_embedding_write_authority'
+          WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
         ) AS sync_runs,
         -- EXISTS rather than COUNT(DISTINCT ...) so the per-item probe stops at
         -- the first chunk row instead of walking every chunk of every item.
@@ -14695,7 +14944,7 @@ var init_local_index = __esm(() => {
         tierMoveInProgress: tier.moving
       } : undefined;
       const last = this.db.query(`SELECT * FROM sync_runs
-       WHERE connector_id <> 'connector_store_embedding_write_authority'
+       WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
        ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
       return {
         corpusId: this.corpusId,

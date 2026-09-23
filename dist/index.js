@@ -11745,13 +11745,14 @@ function parseSecretLocations(value) {
   }
   return value.map((entry) => {
     const record = asRecord7(entry);
-    const allowed = new Set(["source", "locator", "title", "finding_kinds"]);
+    const allowed = new Set(["source", "ref", "locator", "title", "finding_kinds"]);
     const extra = Object.keys(record).filter((key) => !allowed.has(key));
-    if (extra.length > 0 || typeof record.source !== "string" || !Array.isArray(record.finding_kinds) || record.locator !== undefined && typeof record.locator !== "string" || record.title !== undefined && typeof record.title !== "string" || record.finding_kinds.some((kind) => typeof kind !== "string")) {
+    if (extra.length > 0 || typeof record.source !== "string" || typeof record.ref !== "string" || !Array.isArray(record.finding_kinds) || record.locator !== undefined && typeof record.locator !== "string" || record.title !== undefined && typeof record.title !== "string" || record.finding_kinds.some((kind) => typeof kind !== "string")) {
       throw new OperationError("email_error", "secret_locations entries carry location only.");
     }
     return {
       source: record.source,
+      ref: record.ref,
       ...typeof record.locator === "string" ? { locator: record.locator } : {},
       ...typeof record.title === "string" ? { title: record.title } : {},
       finding_kinds: record.finding_kinds
@@ -11893,10 +11894,20 @@ function parseSourceIndexSearchResult(value, context) {
   if (corpusId !== context.requestedCorpusId) {
     throw new OperationError("email_error", "source index search returned a different corpus than requested.");
   }
-  const corpus = createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list("search").find((entry) => entry.corpusId === corpusId);
+  const searchCorpora = createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list("search");
+  const corpus = searchCorpora.find((entry) => entry.corpusId === corpusId);
   if (!corpus) {
     throw new OperationError("email_error", "source index search returned an unsupported corpus.");
   }
+  const auditRecord = asRecord7(value.audit);
+  const tierCorpora = Array.isArray(auditRecord.searched_corpora) ? auditRecord.searched_corpora.map((searchedId) => {
+    const entry = typeof searchedId === "string" ? createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list().find((candidate) => candidate.corpusId === searchedId) : undefined;
+    if (!entry || entry.sourceId !== corpus.sourceId) {
+      throw new OperationError("email_error", "source index search reported a corpus outside the requested source.");
+    }
+    return entry;
+  }) : [corpus];
+  const expectedTrustDomain = tierCorpora.some((entry) => entry.trustDomain === "secure_local") ? "secure_local" : tierCorpora.some((entry) => entry.trustDomain === "internal") ? "internal" : corpus.trustDomain;
   if (!Array.isArray(value.hits)) {
     throw new OperationError("email_error", "source index search hits must be an array.");
   }
@@ -11904,7 +11915,7 @@ function parseSourceIndexSearchResult(value, context) {
   const policy = asRecord7(value.policy);
   const sourceTextReturned = audit.source_text_returned === true || policy.source_text_returned === true;
   const sourceTextAllowed = sourceTextReturned === false || corpusId === "internal.x.bookmarks" && policy.trust_domain === "internal" && audit.raw_source_exposed === false && policy.raw_source_exposed === false;
-  if (audit.raw_source_exposed !== false || policy.raw_source_exposed !== false || audit.source_text_returned !== false && audit.source_text_returned !== true || policy.source_text_returned !== false && policy.source_text_returned !== true || !sourceTextAllowed || policy.source_packets_exposed !== false || typeof policy.local_only !== "boolean" || corpus.trustDomain === "secure_local" && policy.local_only !== true || policy.trust_domain !== corpus.trustDomain) {
+  if (audit.raw_source_exposed !== false || policy.raw_source_exposed !== false || audit.source_text_returned !== false && audit.source_text_returned !== true || policy.source_text_returned !== false && policy.source_text_returned !== true || !sourceTextAllowed || policy.source_packets_exposed !== false || typeof policy.local_only !== "boolean" || expectedTrustDomain === "secure_local" && policy.local_only !== true || policy.trust_domain !== expectedTrustDomain) {
     throw new OperationError("email_error", "source index search policy must describe a local safe result.");
   }
   const retrievalMode = optionalRetrievalMode(audit.retrieval_mode);
@@ -11974,7 +11985,7 @@ function parseSourceIndexSearchResult(value, context) {
       source_text_returned: sourceTextReturned,
       source_packets_exposed: false,
       local_only: policy.local_only,
-      trust_domain: corpus.trustDomain,
+      trust_domain: expectedTrustDomain,
       ...locatorsExposed ? { locators_exposed: true, locator_release: "explicit_request" } : {}
     }
   };
