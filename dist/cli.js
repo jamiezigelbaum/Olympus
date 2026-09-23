@@ -38735,7 +38735,8 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
       return { kind: "none" };
     const knownClientId = oauthClientIdForSource(definition.connect_action.source, oauthClientIds);
     const clientSecretRequired = definition.connect_action.source === "x";
-    const hasClientSecret = !clientSecretRequired || oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
+    const clientSecretOnFile = clientSecretRequired && oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
+    const hasClientSecret = !clientSecretRequired || clientSecretOnFile;
     const redirectUriToRegister = oauthRedirectUriToRegister(definition.connect_action.source, oauthRedirectBaseUrl);
     const redirectUriGuidance = oauthRedirectUriGuidance(definition.connect_action.source, oauthRedirectBaseUrl);
     const callbackRegistration = oauthCallbackRegistration(definition.connect_action.source, oauthRedirectBaseUrl, googleCloudProjectId, googlePilotClientConfigured);
@@ -38750,6 +38751,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
         source: definition.connect_action.source,
         label,
         publisher_client: true,
+        ...knownClientId && clientSecretOnFile ? { client_secret_on_file: true } : {},
         ...redirectFields,
         instructions: publisherOAuthSetupInstructions(definition.label, label, oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl)),
         ...pending ? { pending_attempt: true } : {}
@@ -38770,6 +38772,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
       source: definition.connect_action.source,
       label,
       ...knownClientId ? { known_client_id: knownClientId } : {},
+      ...clientSecretOnFile ? { client_secret_on_file: true } : {},
       ...redirectFields,
       instructions: oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
       ...pending ? { pending_attempt: true } : {}
@@ -39618,7 +39621,7 @@ function titleCase(value) {
 function round12(value) {
   return Math.round(value * 10) / 10;
 }
-var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_privacy_language();
   init_sqlite_migrations();
@@ -66998,7 +67001,7 @@ function connectSetupSheet(input) {
   const id = safeId2(input.id);
   const promptId = `${id}-prompt`;
   const inputs = input.fields.map((field) => {
-    const value = input.values?.[field.name];
+    const value = field.secret && input.savedSecrets?.includes(field.name) ? DASHBOARD_SAVED_SECRET_FIELD_VALUE : input.values?.[field.name];
     const placeholder = input.placeholders?.[field.name] ?? field.label;
     return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml(field.name)}"` + `${field.required ? " required" : ""}` + `${value === undefined ? "" : ` value="${escapeHtml(value)}"`}` + ` placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(field.label)}">`;
   }).join("");
@@ -67046,8 +67049,11 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
     return;
   const sheetId = `connect-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
   const byo = instructions.advanced_byo ?? instructions;
-  const fields = byo.fields.map((field) => field.name === "client_id" ? field : { ...field, required: false });
-  const secretPlaceholders = Object.fromEntries(byo.fields.filter((field) => field.name !== "client_id").map((field) => [field.name, `${field.label} — leave blank to keep the stored one`]));
+  const secretOnFile = action.client_secret_on_file === true;
+  const fields = byo.fields.map((field) => field.name === "client_id" || !secretOnFile ? field : { ...field, required: false });
+  const savedSecrets = secretOnFile ? byo.fields.filter((field) => field.secret).map((field) => field.name) : [];
+  const pendingNote = action.pending_attempt && action.redirect_uri_to_register ? `If ${source.label}'s page shows an error instead of asking you to approve, the callback URL below is not` + ` registered exactly on your app. Add it, press Cancel connection attempt, then Connect again.` : undefined;
+  const notice = options.notice ?? pendingNote;
   const sheet = connectSetupSheet({
     id: sheetId,
     heading: `${action.label} ${source.label}`,
@@ -67062,10 +67068,10 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
         byoSummary: instructions.diy_summary
       }
     } : {},
-    ...Object.keys(secretPlaceholders).length > 0 ? { placeholders: secretPlaceholders } : {},
+    ...savedSecrets.length > 0 ? { savedSecrets } : {},
     ...action.known_client_id ? { values: { client_id: action.known_client_id } } : {},
     ...action.pending_attempt ? { cancellable: true } : {},
-    ...options.notice === undefined ? {} : { notice: options.notice },
+    ...notice === undefined ? {} : { notice },
     ...redirectUriInput(action)
   });
   return { sheetId, sheet };
@@ -67179,6 +67185,7 @@ function standaloneDashboardControllerScript(input) {
 }
 var DONUT_CIRCUMFERENCE = 12.566, HEX_COLOR, DASHBOARD_CONTROL_GATE_ID = "dashboard-controls", DASHBOARD_WORKER_TOKEN_AGENT_PROMPT;
 var init_components = __esm(() => {
+  init_source_dashboard();
   init_phases();
   init_theme();
   HEX_COLOR = /^#[0-9A-Fa-f]{3,8}$/;
@@ -73008,7 +73015,9 @@ function createEmailSourceWorker(options = {}) {
             if (!clientId) {
               throw new EmailSourceWorkerError(409, "oauth_client_id_missing", `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
             }
-            const clientSecret = publisher && dashboardGoogleOAuthSource(source) ? undefined : await dashboardOAuthClientSecret(source, secretStore, asOptionalString(record3.client_secret), clientId);
+            const rawClientSecret = asOptionalString(record3.client_secret);
+            const submittedClientSecret = rawClientSecret === DASHBOARD_SAVED_SECRET_FIELD_VALUE ? undefined : rawClientSecret;
+            const clientSecret = publisher && dashboardGoogleOAuthSource(source) ? undefined : await dashboardOAuthClientSecret(source, secretStore, submittedClientSecret, clientId);
             if (dashboardOAuthClientSecretRequired(source) && !clientSecret) {
               throw new EmailSourceWorkerError(409, "oauth_client_secret_missing", `Missing OAuth client secret: ${dashboardOAuthClientSecretConfigKey(source)}.`);
             }
@@ -73016,7 +73025,6 @@ function createEmailSourceWorker(options = {}) {
               await secretStore.set(dashboardOAuthClientIdConfigKey(source), submittedClientId);
               await secretStore.set(dashboardOAuthClientIdSourceKey(source), "byo");
             }
-            const submittedClientSecret = asOptionalString(record3.client_secret);
             if (submittedClientSecret && dashboardOAuthClientSecretRequired(source)) {
               await secretStore.set(dashboardOAuthClientSecretConfigKey(source), submittedClientSecret);
             }

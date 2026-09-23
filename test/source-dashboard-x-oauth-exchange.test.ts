@@ -20,6 +20,7 @@ import type { OAuthFetch } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
+import { DASHBOARD_SAVED_SECRET_FIELD_VALUE } from '../src/workers/source-dashboard.ts';
 import {
   readConnectedHandleRegistry,
   writeConnectedHandleRegistry,
@@ -159,6 +160,31 @@ describe('dashboard X OAuth exchange', () => {
     ))).status).toBe(303);
     expect(fixture.exchanges).toHaveLength(1);
     expect(fixture.exchanges[0]!.authorization).toBe(expectedBasic);
+  });
+
+  test('the saved-secret field value submitted unchanged keeps the stored secret and is never stored or sent', async () => {
+    const fixture = xWorkerFixture({
+      'x.personal.oauth.client_id': 'x-client-id-fixture',
+      'x.personal.oauth.client_secret': 'x-client-secret-fixture',
+    });
+    const started = await startXConnect(fixture, {
+      client_id: 'x-client-id-fixture',
+      client_secret: DASHBOARD_SAVED_SECRET_FIELD_VALUE,
+    });
+    expect(started.status).toBe(200);
+    expect(await fixture.secretStore.get('x.personal.oauth.client_secret')).toBe('x-client-secret-fixture');
+    const state = new URL((await started.json()).authorization_url).searchParams.get('state')!;
+    expect((await fixture.fetch(new Request(
+      `http://worker.test/oauth/callback/x?code=x-code-3&state=${state}`,
+    ))).status).toBe(303);
+    expect(fixture.exchanges[0]!.authorization).toBe(expectedBasic);
+  });
+
+  test('the saved-secret field value with nothing stored refuses like a missing secret', async () => {
+    const fixture = xWorkerFixture({ 'x.personal.oauth.client_id': 'x-client-id-fixture' });
+    const started = await startXConnect(fixture, { client_secret: DASHBOARD_SAVED_SECRET_FIELD_VALUE });
+    expect(await started.text()).toContain('oauth_client_secret_missing');
+    expect(await fixture.secretStore.get('x.personal.oauth.client_secret')).toBeUndefined();
   });
 
   test('an expired-boot worker resolves every X HTTP consumer after reconnect and refuses them after disconnect', async () => {
