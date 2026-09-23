@@ -376,6 +376,32 @@ Rules:
   epoch
 - embeddings are derived data and inherit the corpus handling posture
 
+### Classifier (privacy sniffer) lane
+
+The four-tier classifier asks a privacy-safe model about items whose names or
+text look possibly private
+([design](design/per-item-four-tier-classification.md), section 2.2). That
+model is chosen from this policy, never from an ordinary cloud lane:
+
+- a model profile with `"purpose": "classification"` (a small, fast model
+  for this one job), local before Venice Private; otherwise
+- the `secure_local` analyst pool, local members before Venice members.
+
+| Preset | Sniffer lane |
+|---|---|
+| local-first | local model (`local-source-answer`) |
+| local-only | local model |
+| private-cloud-only | Venice Private (`venice-private`) |
+| no-sensitive | none: flagged items stay pending, held Private |
+
+A `standard_cloud` classification profile is refused with a typed error
+before anything is sent. The sniffer also waits for the owner to approve the
+exact model and prompt version in the append-only classification ledger
+(`olympus tier classifier approve --why ...`); a model or prompt change stops
+it until the owner approves again. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
+`OLYMPUS_TIER_SNIFFER_INTERVAL_MS`, `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS`,
+`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`.
+
 ## Active Shape
 
 Olympus v0.3 activates the sovereignty engine. The default location is
