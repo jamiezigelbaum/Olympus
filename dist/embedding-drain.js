@@ -21949,7 +21949,12 @@ class TierSnifferStore {
       questions += row.n;
     }
     const verdicts = this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
-    return { questions, byPass, verdicts };
+    const items = this.db.query(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
+      )
+    `).get().n;
+    return { questions, items, byPass, verdicts };
   }
 }
 function questionFromRow(row) {
@@ -22542,7 +22547,11 @@ init_atomic_file();
 import { mkdirSync as mkdirSync10, readFileSync as readFileSync9 } from "node:fs";
 import { dirname as dirname16 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_PASS = 10;
-var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 2000;
+var DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS = 30;
+var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
+function defaultSnifferMaxCallsPerPass(kind) {
+  return kind === "venice" ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
+}
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 var OUTPUT_CHARS_PER_ITEM = 110;
 
@@ -22855,6 +22864,23 @@ class TierSnifferService {
   preempt() {
     this.abort?.abort();
   }
+  backlog() {
+    let checkingItems = 0;
+    let remainingQuestions = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      try {
+        const counts = this.options.installed.snifferStoreForLedger(ledgerPath).counts();
+        checkingItems += counts.items;
+        remainingQuestions += counts.questions;
+      } catch {}
+    }
+    return {
+      checkingItems,
+      remainingQuestions,
+      summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.`,
+      awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval"
+    };
+  }
   status() {
     return {
       lane: this.options.lane.kind,
@@ -22949,7 +22975,7 @@ class TierSnifferService {
       lane,
       model: this.options.model,
       budget: this.budget,
-      maxCallsPerPass: this.options.maxCallsPerPass ?? DEFAULT_SNIFFER_MAX_CALLS_PER_PASS,
+      maxCallsPerPass: this.options.maxCallsPerPass ?? defaultSnifferMaxCallsPerPass(lane.kind),
       ...this.options.shouldYield ? { shouldYield: this.options.shouldYield } : {},
       signal
     });

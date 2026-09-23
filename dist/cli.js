@@ -43235,10 +43235,12 @@ function createSourceIndexStatusHandler(options = {}) {
           cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
       });
+      const tierClassification = options.tierClassification?.();
       const result = {
         kind: "source_index_status",
         generated_at: new Date().toISOString(),
         corpora: statuses,
+        ...tierClassification ? { tier_classification: tierClassification } : {},
         policy: {
           read_only: true,
           raw_source_exposed: false,
@@ -48678,7 +48680,12 @@ class TierSnifferStore {
       questions += row.n;
     }
     const verdicts = this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
-    return { questions, byPass, verdicts };
+    const items = this.db.query(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
+      )
+    `).get().n;
+    return { questions, items, byPass, verdicts };
   }
 }
 function questionFromRow(row) {
@@ -86096,6 +86103,9 @@ var init_installed_tier_classification = __esm(() => {
 // src/workers/classification/sniffer-resolver.ts
 import { mkdirSync as mkdirSync31, readFileSync as readFileSync36 } from "node:fs";
 import { dirname as dirname43 } from "node:path";
+function defaultSnifferMaxCallsPerPass(kind) {
+  return kind === "venice" ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
+}
 
 class SnifferCallBudget {
   maxCallsPerDay;
@@ -86363,7 +86373,7 @@ function finish(report) {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
   return report;
 }
-var DEFAULT_SNIFFER_MAX_CALLS_PER_PASS = 10, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 2000, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110;
+var DEFAULT_SNIFFER_MAX_CALLS_PER_PASS = 10, DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS = 30, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110;
 var init_sniffer_resolver = __esm(() => {
   init_atomic_file();
   init_sniffer();
@@ -86409,6 +86419,23 @@ class TierSnifferService {
   }
   preempt() {
     this.abort?.abort();
+  }
+  backlog() {
+    let checkingItems = 0;
+    let remainingQuestions = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      try {
+        const counts = this.options.installed.snifferStoreForLedger(ledgerPath).counts();
+        checkingItems += counts.items;
+        remainingQuestions += counts.questions;
+      } catch {}
+    }
+    return {
+      checkingItems,
+      remainingQuestions,
+      summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.`,
+      awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval"
+    };
   }
   status() {
     return {
@@ -86504,7 +86531,7 @@ class TierSnifferService {
       lane,
       model: this.options.model,
       budget: this.budget,
-      maxCallsPerPass: this.options.maxCallsPerPass ?? DEFAULT_SNIFFER_MAX_CALLS_PER_PASS,
+      maxCallsPerPass: this.options.maxCallsPerPass ?? defaultSnifferMaxCallsPerPass(lane.kind),
       ...this.options.shouldYield ? { shouldYield: this.options.shouldYield } : {},
       signal
     });
@@ -86519,7 +86546,7 @@ function tierSnifferServiceEnv(env) {
   return {
     enabled: !(enabledRaw === "0" || enabledRaw === "false" || enabledRaw === "no" || enabledRaw === "off"),
     intervalMs: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 5000),
-    maxCallsPerPass: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, DEFAULT_SNIFFER_MAX_CALLS_PER_PASS, 1),
+    ...env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim() ? { maxCallsPerPass: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) } : {},
     maxCallsPerDay: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0)
   };
 }
@@ -87395,6 +87422,7 @@ async function main() {
   const secureAnalystPoolState = new SecureAnalystPoolState;
   let sourceAnswersInFlight = 0;
   let preemptTierSniffer;
+  let tierSnifferBacklog;
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED, "OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED");
   const sourceIndexReadEnabled = olympusConfig.sourceIndex.enabled || sourceIndexAnswerEnabled;
@@ -88320,6 +88348,15 @@ async function main() {
     connectorStores,
     connectorStoreStatusScope,
     retrievalAvailability,
+    tierClassification: () => {
+      const backlog = tierSnifferBacklog?.();
+      return backlog ? {
+        checking_items: backlog.checkingItems,
+        remaining_questions: backlog.remainingQuestions,
+        summary: backlog.summary,
+        awaiting_owner_approval: backlog.awaitingOwnerApproval
+      } : undefined;
+    },
     ...fileExtractionRuntime ? {
       readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
         currentItem(ref) {
@@ -88900,12 +88937,13 @@ async function main() {
     classificationLedgerPath: resolveClassificationLedgerPath(process.env),
     budgetStatePath: join58(dirname44(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
-    maxCallsPerPass: snifferEnv.maxCallsPerPass,
+    ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
     shouldYield: () => sourceAnswersInFlight > 0 || secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line) => console.log(line)
   }) : undefined;
   preemptTierSniffer = tierSniffer ? () => tierSniffer.preempt() : undefined;
+  tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   tierSniffer?.start();
   let shuttingDown = false;
   const shutdown = (signal) => {
