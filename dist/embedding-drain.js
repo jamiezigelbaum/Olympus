@@ -7507,8 +7507,7 @@ function classifyItemTiers(input, options = {}) {
     secretsCleared,
     sniffer,
     mapRevision: base.mapRevision,
-    ...input.subject ? { subject: input.subject } : {},
-    ownerAuthored: input.ownerAuthored === true
+    ...input.subject ? { subject: input.subject } : {}
   });
   const content = contentPass({
     signals,
@@ -7664,7 +7663,6 @@ function metadataPass(args) {
       flags,
       material: snifferNames(signals),
       mapRevision: args.mapRevision,
-      solo: args.ownerAuthored !== true,
       ...args.subject ? { subject: args.subject } : {}
     });
     if (verdict.verdict === "decided") {
@@ -7753,7 +7751,6 @@ function contentPass(args) {
       flags,
       material: snifferExcerpt(text),
       mapRevision: args.mapRevision,
-      solo: true,
       ...args.subject ? { subject: args.subject } : {}
     });
     if (verdict.verdict === "decided") {
@@ -9349,8 +9346,7 @@ function decideItemTiers(connector, item, text, options, ledger) {
     signals: connector.classificationSignals(item),
     provider: item.identity.provider,
     ...text !== undefined ? { text } : {},
-    subject: item.identity,
-    ownerAuthored: item.metadata["ownerAuthored"] === true
+    subject: item.identity
   }, {
     ...options?.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {},
     ...options?.rules ? { rules: options.rules } : {},
@@ -16843,8 +16839,7 @@ class GoogleDriveSourceConnector {
       ...file.driveId ? { driveId: file.driveId } : {},
       ...file.parents ? { parents: file.parents } : {},
       ...folderAncestorIds ? { folderAncestorIds } : {},
-      ...file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {},
-      ...file.ownedByMe === true ? { ownerAuthored: true } : {}
+      ...file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {}
     });
     if (!folderAncestorIds && this.scope)
       return;
@@ -17102,7 +17097,7 @@ class RestGoogleDriveApiClient {
   async listFiles(request) {
     const params = new URLSearchParams({
       pageSize: String(request.pageSize),
-      fields: "nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,version,driveId,parents,owners(emailAddress),ownedByMe,webViewLink,size,md5Checksum)",
+      fields: "nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,version,driveId,parents,owners(emailAddress),webViewLink,size,md5Checksum)",
       includeItemsFromAllDrives: "true",
       supportsAllDrives: "true",
       q: request.query ?? "trashed = false"
@@ -17214,7 +17209,6 @@ function normalizeDriveFile(record) {
     ...optionalStringProp(record, "size"),
     ...optionalStringProp(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue).filter(Boolean) } : {},
-    ...record.ownedByMe === true ? { ownedByMe: true } : {},
     ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord5(owner, "Google Drive owner")).map((owner) => optionalStringProp(owner, "emailAddress")) } : {}
   };
 }
@@ -21904,8 +21898,8 @@ class TierSnifferStore {
     const materialHash = snifferMaterialHash(question.pass, question.material);
     this.db.query(`
       INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, solo
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
@@ -21913,9 +21907,8 @@ class TierSnifferStore {
         material_hash = excluded.material_hash,
         map_revision = excluded.map_revision,
         material = excluded.material,
-        flags_json = excluded.flags_json,
-        solo = excluded.solo
-    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), question.solo === true ? 1 : 0);
+        flags_json = excluded.flags_json
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString());
   }
   questionFor(subject, pass) {
     const row = this.db.query(`
@@ -21971,8 +21964,7 @@ function questionFromRow(row) {
     material: row.material,
     flags: JSON.parse(row.flags_json),
     attempts: row.attempts,
-    queuedAt: row.queued_at,
-    solo: row.solo === 1
+    queuedAt: row.queued_at
   };
 }
 function subjectParams(subject) {
@@ -22016,7 +22008,6 @@ function snifferMigrations() {
             flags_json TEXT NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 0,
             queued_at TEXT NOT NULL,
-            solo INTEGER NOT NULL DEFAULT 1 CHECK (solo IN (0, 1)),
             UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
           );
         `);
@@ -22027,9 +22018,6 @@ function snifferMigrations() {
 
 // src/workers/classification/sniffer.ts
 var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9;
-var SNIFFER_METADATA_BATCH_SIZE = 100;
-var SNIFFER_LOCAL_METADATA_BATCH_SIZE = 20;
-var SNIFFER_CONTENT_BATCH_SIZE = 1;
 var SNIFFER_MAX_ATTEMPTS = 3;
 var SNIFFER_CATEGORIES = [
   "health",
@@ -22205,8 +22193,7 @@ class CachedTierSniffer {
           pass: request.pass,
           material,
           mapRevision,
-          flags: request.flags,
-          solo: request.solo === true || request.pass === "content"
+          flags: request.flags
         });
       }
     } catch {}
@@ -22725,8 +22712,7 @@ async function runSnifferPass(options) {
       report.staleDropped += 1;
       return false;
     });
-    const batchSize = pass === "metadata" ? options.metadataBatchSize ?? (options.lane.kind === "local" ? SNIFFER_LOCAL_METADATA_BATCH_SIZE : SNIFFER_METADATA_BATCH_SIZE) : options.contentBatchSize ?? SNIFFER_CONTENT_BATCH_SIZE;
-    const batches = batchGroups(groupByMaterial(open5), batchSize);
+    const batches = groupByMaterial(open5).map((group) => [group]);
     for (const batch of batches) {
       const stop = stopReason(options, report, maxCallsPerPass);
       if (stop) {
@@ -22797,24 +22783,6 @@ function openPasses(row) {
   if (row.contentPending && row.contentRead)
     passes.push("content");
   return passes;
-}
-function batchGroups(groups, size) {
-  const batches = [];
-  let shared = [];
-  for (const group of groups) {
-    if (group.some((item) => item.question.solo)) {
-      batches.push([group]);
-      continue;
-    }
-    shared.push(group);
-    if (shared.length >= size) {
-      batches.push(shared);
-      shared = [];
-    }
-  }
-  if (shared.length > 0)
-    batches.push(shared);
-  return batches;
 }
 function groupByMaterial(items) {
   const groups = new Map;
