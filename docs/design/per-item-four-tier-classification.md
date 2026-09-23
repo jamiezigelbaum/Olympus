@@ -328,6 +328,23 @@ These are formulas. M0 (§4.6) measures the real counts before anything is appro
 
 This tooling ships in the plugin for every existing install. Running it on any live installation is a separate, owner-approved operation.
 
+**Tooling (P3).** `olympus tier migrate` runs the steps; nothing runs on its own.
+
+| Command | Step | Writes |
+|---|---|---|
+| `plan [--with-sniffer] [--top <n>]` | M0/M1 | Proposals in each lane's tier ledger (never current tiers), a 0600 report with estimates and the top folder/label/sender/chat patterns, one `note` ledger entry. Stores and vectors are not touched. A re-plan over unchanged data and inputs yields the same plan id. |
+| `approve --plan <id> [--why <reason>]` | M2 | One `model_decision` entry approved by the owner, id `tier-migration-approval:<plan>:<counts sha256>`. Refused when the plan is stale (rules, map, sniffer, overrides, or a planned item's stored text changed). |
+| `run --plan <id> [--batch source:…\|folder:…\|label:…\|sender:…\|chat:…] [--max-items <n>]` | M3/M4 | Per batch: `re_embed_started`, then the moves (legacy store bound to the set ledger, placement adopted, move primitive, flip, previous copies superseded), then `re_embed_completed` with the observed chunks handed to each destination's existing model (the drain embeds them). Stops before the approved chunks or cost would be exceeded (`note`, resumable). |
+| `rollback --batch <id>` | M5 | A ledger flip back per item; a `note`. Nothing is re-embedded or deleted. |
+| `purge [--plan <id>] [--approve --why <reason>]` | M6 | Without `--approve`, counts only. With it: an owner-approved `invalidation` entry (pending), the superseded copies tombstoned, then an `invalidation` entry with the deleted chunks per corpus. |
+| `status` | — | Nothing. |
+
+Notes from the build:
+- The dry run judges an item from what its store holds (title, a path-shaped locator, scope and chat keys, sender, and the stored text). Facts a store does not keep (labels, sharing state, provider floors) are applied at the item's next sync, which re-judges every routed item.
+- A move to Secrets during the migration **hides** every copy and records the location; it deletes nothing. Deletion waits for the M6 purge. The steady-state sync still tombstones a routed Secrets item when it re-lists it (§4.2).
+- Estimates read `sourceIndex.embeddingPriceEstimates` (USD per million tokens and chunks per minute, per model); a model without an entry uses an unverified built-in default, and the plan says which.
+- The owner-approval value is one constant (`EMBEDDING_LEDGER_OWNER_APPROVAL`): a source checkout keeps its ledger's existing value, and the public package spells it `owner`.
+
 ---
 
 ## 5. Search and answers across tiers
