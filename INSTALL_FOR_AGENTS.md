@@ -7,7 +7,7 @@ personal-data layer for OpenClaw: it ingests the operator's sources
 (email, files, chats), indexes them locally, and answers questions
 through model lanes the operator explicitly approves. Follow the steps in
 order. Where a step says **ASK THE OPERATOR**, stop and ask — do not pick a
-default. Complete base activation before offering optional source setup.
+default. Complete base activation before handing over source setup.
 Read the current step in full before carrying it out. Immediately before an
 operator-facing transition, read its required message block directly; do not
 use a remembered summary of this guide as the user-facing copy.
@@ -29,8 +29,10 @@ Every final installation reply, including a reply after a restart or a request
 such as "continue from Step 6", must include a clickable, operator-reachable
 Olympus dashboard link and instructions to connect and monitor sources there.
 Do not end with only "Step 6 is complete", health checks, CLI commands, or a
-statement that connecting sources is optional. Connecting sources is optional;
-the dashboard handoff is required. Follow Step 6 before declaring completion.
+statement that connecting sources is optional. Sources are the point of
+Olympus: which ones to connect is the operator's choice, and the dashboard
+handoff that lets them choose is required. Follow Step 6 before declaring
+completion.
 
 ## Rule zero — the residue gate binds EVERY Olympus-touching action
 
@@ -756,6 +758,15 @@ adding a lane they did not choose.
 
 ## Step 3 — Model setup in the dashboard
 
+**Model keys are entered in the dashboard, not collected by you.** In the
+normal browser flow do not ask for, fetch, or store a Venice or Gemini key —
+not in chat, not through OpenClaw's own secret prompt or store, and not
+through an Olympus terminal prompt. A missing model key at this point is
+expected and never blocks the handoff. The operator pastes each key into its
+**Models** card, which validates it and stores it privately. Use the headless
+fallback below only when the operator explicitly asks for a setup without the
+browser dashboard.
+
 For the normal browser flow, continue through base-worker and Gateway
 activation in Steps 4–5, then hand over the Setup link in Step 6. Do not require
 keys to be present before that link: the operator enters them in **Models**.
@@ -855,11 +866,13 @@ knowing where a credential lives never authorizes fetching it. Hard limits:
   field and built-in masked prompt remain the paste paths, and secrets never go
   through chat.
 
-Setup prints `unmet_prerequisites` with an exact remedy per item. Follow
-them. Typical items:
+Setup prints `unmet_prerequisites` with an exact remedy per item. In the
+normal browser flow a missing Gemini or Venice key there is expected: report
+it as "finished in the dashboard's Models section" and continue. Follow the
+key remedies below only in the headless fallback. Typical items:
 
-- Gemini API key (source embeddings, all presets): **ASK THE OPERATOR**
-  to obtain a key from https://aistudio.google.com and provide it (or
+- Gemini API key (source embeddings, all presets; headless fallback only):
+  ask the operator to obtain a key from https://aistudio.google.com and provide it (or
   source it per the credential-sourcing rule above). Connect it via
   stdin, exactly like the Venice key, so it never reaches shell history,
   a log, or a chat message (you run this; do not show it as a copy
@@ -906,7 +919,8 @@ printf '%s' "$KEY" | olympus connect gemini --api-key-stdin
   a single quote (`… value must not contain a single quote.`), whose
   remedy is the one the error gives — rotate the key at the provider and
   store one without a quote.
-- Venice API key (`local-first` or `private-cloud-only`): follow the
+- Venice API key (`local-first` or `private-cloud-only`; headless fallback
+  only): follow the
   [Venice account and API setup](docs/SOVEREIGNTY_CONFIG.md#venice-create-an-account-with-api-access)
   instructions. The operator needs a usable API balance and an Inference Only
   key with an agreed consumption limit; a chat subscription alone is not proof
@@ -1283,8 +1297,9 @@ missing. Do not invite a source Connect until Models is Ready. It proves that th
 model/provider wiring is usable by the worker; it does not choose a source,
 and it does not require any source to be connected yet.
 
-Use the provider-specific connect and readiness checks already documented in
-Step 3, then prove the worker consumes that wiring with the existing
+In the browser flow, model readiness means the operator's **Models** cards
+show Ready; in the headless fallback, use the provider-specific connect and
+readiness checks documented in Step 3. Then prove the worker consumes that wiring with the existing
 `olympus doctor` and `olympus worker status` checks. The receipt must name:
 
 - **Gemini — every posture.** Its wiring is for Public and Personal
@@ -1337,12 +1352,16 @@ send the placeholder, a host-only loopback URL, or only a terminal command.
 Then deliver this required user-facing handoff:
 
 > Olympus is installed. [Open your Olympus dashboard](<verified-dashboard-url>).
-> In **Setup**, finish any required **Models** cards at the top. Then connect
-> the sources you want below and choose their scope.
-> Use **Home** to see source readiness and anything needing attention, and
-> **Background** to monitor syncing, extraction, and embeddings.
-> You can add more sources whenever you like. Come back here if you have any
-> trouble connecting a source or understanding its progress.
+> Olympus is as useful as the sources you give it. Each one you connect —
+> email, files, chats, bookmarks, reading — becomes something I can search and
+> answer from with citations, handled under the privacy tiers you just chose.
+> In **Setup**, first finish the **Models** cards at the top; that is where
+> your model keys go. Then connect the sources you want and choose what each
+> one may read. Start with whichever holds what you most want answers from;
+> you can add more at any time.
+> **Home** shows each source's readiness and anything needing attention, and
+> **Background** shows syncing, extraction, and embeddings. Come back here if
+> a connection gets stuck or its progress is unclear.
 
 Source selection happens in the dashboard. Do not turn all supported providers
 into a checklist, choose Gmail to satisfy a health hint, or add a chat question

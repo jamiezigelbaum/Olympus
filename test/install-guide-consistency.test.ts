@@ -86,10 +86,23 @@ describe('pilot installation entry points', () => {
     expect(section).toContain('Skipped');
     expect(section).toContain('key being present');
     expect(section).toContain('keep source Connect unopened');
-    expect(document).toContain('Connecting sources is optional;');
-    expect(document).toContain('the dashboard handoff is required');
+    expect(document).toContain('Sources are the point of');
+    expect(document).toContain('dashboard\nhandoff that lets them choose is required');
     expect(document).toContain('/plugin?plugin=olympus&id=dashboard');
-    expect(document).toContain('**Background** to monitor syncing, extraction, and embeddings');
-    expect(document).toContain('Come back here if you have any');
+    expect(document).toContain('> Olympus is as useful as the sources you give it.');
+    expect(document).toContain('**Background** shows syncing, extraction, and embeddings');
+    expect(document).toContain('Come back here if');
+  });
+
+  test('the agent guide leaves model keys to the dashboard in the browser flow', () => {
+    const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const step3 = document.slice(
+      document.indexOf('## Step 3 — Model setup in the dashboard'),
+      document.indexOf('### Headless credential fallback'),
+    );
+    expect(step3).toContain('**Model keys are entered in the dashboard, not collected by you.**');
+    expect(step3).toContain("not through OpenClaw's own secret prompt or store");
+    expect(document).toContain('Gemini API key (source embeddings, all presets; headless fallback only)');
+    expect(document).toContain('report\nit as "finished in the dashboard\'s Models section" and continue');
   });
 });
