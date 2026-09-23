@@ -316,6 +316,14 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-09-23 — **Four-tier classification P2 (no contract shape change).** The
+  privacy-safe sniffer answers the classifier's open questions (a local model
+  or Venice Private only, owner-approved in the classification ledger, verdicts
+  cached per material hash, model, prompt version and map revision); owner tier
+  rules load from `~/.olympus/tier-rules.json`; `olympus tier set|explain|rules|classifier`.
+  Every lane now records decisions with the owner's map, rules and sniffer.
+  Decisions only: no storage, routing or embedding change.
+
 - 2026-09-23 — **SourceConnector 2.0.0 (breaking; owner-approved design
   [per-item four-tier classification](design/per-item-four-tier-classification.md)).**
   `classify(item): SourceSensitivity` is replaced by

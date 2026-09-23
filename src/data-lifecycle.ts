@@ -1,8 +1,10 @@
 import {
   SECRET_LOCATIONS_SQLITE_STORE_ID,
   TIER_LEDGER_SQLITE_STORE_ID,
+  TIER_SNIFFER_SQLITE_STORE_ID,
   secretLocationsPathForStore,
   tierLedgerPathForStore,
+  tierSnifferPathForStore,
 } from './workers/classification/tier-ledger-path.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -799,6 +801,11 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
       ...(storePath === ':memory:'
         ? []
         : sqliteDeleteTargets(secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID, context)),
+      // The sniffer's verdict cache and question queue sit beside it too; the
+      // queue holds names and short excerpts, so it goes with the source.
+      ...(storePath === ':memory:'
+        ? []
+        : sqliteDeleteTargets(tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID, context)),
     ]),
     ...(source.rawStatePaths?.(context) ?? []).map((path): DeleteTarget => ({
       path,

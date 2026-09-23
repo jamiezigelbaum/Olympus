@@ -62,6 +62,7 @@ import { classifyContentTier, ownerRuleMatches, type OwnerTierRule } from '../cl
 import {
   decideItemTiers,
   placeInExistingStore,
+  resolveStoreTierClassification,
   type ConnectorStorePlacement,
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
@@ -606,8 +607,8 @@ export class TierLedgerUnavailableError extends Error {
   }
 }
 
-const TIER_SET_BINDING_RUN_ID = 'tiered-store-set-binding';
-const TIER_SET_BINDING_CONNECTOR_ID = 'tiered_store_set_binding';
+export const TIER_SET_BINDING_RUN_ID = 'tiered-store-set-binding';
+export const TIER_SET_BINDING_CONNECTOR_ID = 'tiered_store_set_binding';
 
 export class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
   constructor() {
@@ -2012,6 +2013,15 @@ export class LocalConnectorStore {
     }
   }
 
+  /**
+   * The path of the ledger this store records decisions in: a tiered store
+   * set's (once it handed this store its ledger) or the store's own. The
+   * sniffer's cache and queue sit beside it.
+   */
+  tierLedgerPathInUse(): string {
+    return this.tierLedgerHandle?.dbPath ?? tierLedgerPathForStore(this.dbPath);
+  }
+
   /** The ledger this store records tier decisions in, opening the default one on first use. */
   tierLedger(): TierLedger | undefined {
     if (this.tierLedgerDisabled === true) return undefined;
@@ -2035,6 +2045,8 @@ export class LocalConnectorStore {
     tierClassification?: ConnectorStoreTierClassification,
   ): boolean {
     try {
+      const inputs = resolveStoreTierClassification(tierClassification, this.tierLedgerPathInUse(), undefined);
+      if (inputs?.unavailableReason) return false;
       const ledger = this.tierLedger();
       if (!ledger) return false;
       const existing = ledger.getCurrent(item.identity);
@@ -2046,10 +2058,11 @@ export class LocalConnectorStore {
           metadataTier: existing.metadataTier,
           metadataForced: existing.metadataForced,
           metadataFlagged: existing.metadataFlagged,
+          subject: item.identity,
         },
         {
-          ...(tierClassification?.sensitivityMap ? { sensitivityMap: tierClassification.sensitivityMap } : {}),
-          ...(tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {}),
+          ...(inputs?.sensitivityMap ? { sensitivityMap: inputs.sensitivityMap } : {}),
+          ...(inputs?.sniffer ? { sniffer: inputs.sniffer } : {}),
           ...(override ? { override } : {}),
         },
       );
@@ -2719,6 +2732,13 @@ export class LocalConnectorStore {
     run: { gaps: string[]; ledgerFailed: boolean },
   ): void {
     if (run.ledgerFailed) return;
+    if (tierClassification?.unavailableReason) {
+      // Fail safe: without the owner's rules a decision could be less private
+      // than the owner asked. Record nothing; storage is unaffected.
+      run.ledgerFailed = true;
+      run.gaps.push(`${tierClassification.unavailableReason}: four-tier decisions were not recorded this run; fix the owner tier rules file (olympus tier rules list validates it).`);
+      return;
+    }
     try {
       const ledger = this.tierLedger();
       if (!ledger) return;
@@ -5194,8 +5214,11 @@ export class LocalConnectorStore {
     const deferMetadataOnlyContent = options?.deferMetadataOnlyContent === true;
     const classification = normalizeClassificationOptions(options?.classification);
     const placement = options?.placement;
-    const tierClassification: ConnectorStoreTierClassification | undefined = options?.tierClassification
-      ?? (classification?.sensitivityMap ? { sensitivityMap: classification.sensitivityMap } : undefined);
+    const tierClassification = resolveStoreTierClassification(
+      options?.tierClassification,
+      this.tierLedgerPathInUse(),
+      classification?.sensitivityMap,
+    );
     const tierRouting = options?.tierRouting;
     let itemsRoutedElsewhere = 0;
     const ownershipKind = options?.ownershipKind ?? 'observed';

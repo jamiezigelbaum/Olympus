@@ -29,6 +29,7 @@ import {
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
+import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
 
 /**
  * How a lane places items into the store(s) it has TODAY. This replaces the
@@ -61,13 +62,51 @@ export type ConnectorStorePlacement =
   | ((item: RawItem) => SourceSensitivity);
 
 /**
- * Classifier configuration for recording tier decisions. Owner rules and the
- * sniffer are P2 inputs; they are accepted now so tests can pin precedence.
+ * Classifier configuration for recording tier decisions: the owner's map,
+ * the owner tier rules and the privacy-safe sniffer. A sync that brings none
+ * uses the installed inputs (installed-tier-classification.ts), so every lane
+ * records with the same ones.
  */
 export interface ConnectorStoreTierClassification {
   sensitivityMap?: SensitivityMap;
   rules?: readonly OwnerTierRule[];
   sniffer?: TierSniffer;
+  /** The inputs cannot be trusted (an invalid rules file): record no decisions. */
+  unavailableReason?: string;
+}
+
+/**
+ * The classification inputs for one sync. With the installed inputs
+ * configured (the worker), a lane's own inputs are merged into them: the
+ * owner's map as the file is NOW (re-read when edited, so every lane sees an
+ * edit at its next pass) replaces a copy the lane loaded at start, the lane's
+ * rules (the mail scope's always-Private senders, WhatsApp's chat rules)
+ * apply alongside the owner's rules file (also re-read when edited), and the
+ * installed sniffer answers unless the lane brought one. Unconfigured, the
+ * lane's inputs (or its map alone) are used as they are. Never throws.
+ */
+export function resolveStoreTierClassification(
+  explicit: ConnectorStoreTierClassification | undefined,
+  ledgerPath: string,
+  laneMap: SensitivityMap | undefined,
+): ConnectorStoreTierClassification | undefined {
+  const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath);
+  if (!installed) return explicit ?? (laneMap ? { sensitivityMap: laneMap } : undefined);
+  if (!explicit) return installed;
+  const rules = [...(explicit.rules ?? []), ...(installed.rules ?? [])];
+  const sniffer = explicit.sniffer ?? installed.sniffer;
+  // The owner's map as it is now (or, while the file is unusable, the last
+  // good one) wins over a copy a lane loaded at start, so an edit takes
+  // effect at the next pass on every lane — and a broken edit never drops a
+  // Private category: the inputs then carry `unavailableReason`.
+  const sensitivityMap = installed.sensitivityMap ?? (installed.unavailableReason ? explicit.sensitivityMap ?? laneMap : undefined);
+  const unavailableReason = installed.unavailableReason ?? explicit.unavailableReason;
+  return {
+    ...(sensitivityMap ? { sensitivityMap } : {}),
+    ...(rules.length > 0 ? { rules } : {}),
+    ...(sniffer ? { sniffer } : {}),
+    ...(unavailableReason ? { unavailableReason } : {}),
+  };
 }
 
 const DEFAULT_TIER_FOR_DOMAIN: Readonly<Record<SourceTrustDomain, SourceTrustTier>> = {
@@ -146,6 +185,7 @@ export function decideItemTiers(
       signals: connector.classificationSignals(item),
       provider: item.identity.provider,
       ...(text !== undefined ? { text } : {}),
+      subject: item.identity,
     },
     {
       ...(options?.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}),

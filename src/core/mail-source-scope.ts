@@ -124,8 +124,10 @@ export interface MailScopeSelection {
  * `metadata:owner_rule:sender:<id>:force`. The id is a content-free digest of
  * the sender, so a reason never names who wrote.
  *
- * TODO(P2, tier rules): when the rule file (`~/.olympus/tier-rules.json`)
- * loader lands, load these alongside it (or migrate them into it).
+ * They apply alongside the owner's rules file (`~/.olympus/tier-rules.json`):
+ * the connector store merges a lane's rules with the installed ones
+ * (resolveStoreTierClassification), and `olympus tier rules list` shows these
+ * read-only. The picker stays their only editor.
  */
 export type MailScopeOwnerTierRule = OwnerTierRule;
 

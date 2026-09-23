@@ -3,6 +3,7 @@ import { chmodSync, existsSync, lstatSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { OperationError } from './operation-error.ts';
+import { readOwnerConfigFile } from './owner-config-read.ts';
 import {
   SOURCE_TRUST_DOMAINS,
   SOURCE_TRUST_TIERS,
@@ -117,7 +118,33 @@ export function resolveSensitivityMapPath(options: Pick<SensitivityMapLoadOption
 export function loadOwnerSensitivityMap(
   env: Record<string, string | undefined> = process.env,
 ): SensitivityMap | undefined {
-  return loadSensitivityMap({ env, allowMissing: true, ignoreInvalid: true });
+  const read = readOwnerSensitivityMap(env);
+  return read.status === 'ok' ? read.map : undefined;
+}
+
+export type OwnerSensitivityMapRead =
+  | { status: 'missing' }
+  | { status: 'ok'; map: SensitivityMap; stamp: string }
+  | { status: 'invalid'; reason: 'unsafe_permissions' | 'torn_read' | 'unreadable' | 'invalid_map'; stamp: string };
+
+/**
+ * The same loader, telling "absent" from "present but unusable": a map that
+ * does not parse (a trailing comma, a partial write), changed while it was
+ * read, or is writable by anyone but its owner is `invalid`, which the tier
+ * classifiers treat as "hold items pending", never as "no map".
+ */
+export function readOwnerSensitivityMap(
+  env: Record<string, string | undefined> = process.env,
+): OwnerSensitivityMapRead {
+  const path = resolveSensitivityMapPath({ env });
+  const read = readOwnerConfigFile(path);
+  if (read.status === 'missing') return { status: 'missing' };
+  if (read.status === 'refused') return { status: 'invalid', reason: read.reason, stamp: read.stamp };
+  try {
+    return { status: 'ok', map: parseSensitivityMap(JSON.parse(read.text) as unknown, path), stamp: read.stamp };
+  } catch {
+    return { status: 'invalid', reason: 'invalid_map', stamp: read.stamp };
+  }
 }
 
 export function loadSensitivityMap(options: SensitivityMapLoadOptions = {}): SensitivityMap | undefined {

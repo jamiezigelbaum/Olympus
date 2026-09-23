@@ -85,7 +85,14 @@ import {
   type ConnectorStoreTierRouting,
   type LocalConnectorStore,
 } from './local-index.ts';
-import { decideItemTiers, defaultStoreTrustTier, type ConnectorStoreTierClassification } from './tier-placement.ts';
+import {
+  decideItemTiers,
+  defaultStoreTrustTier,
+  resolveStoreTierClassification,
+  type ConnectorStoreTierClassification,
+} from './tier-placement.ts';
+import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
+
 
 /** Legs run in this order, least private first. */
 export const TIER_DOMAIN_ORDER: readonly SourceTrustDomain[] = ['public_safe', 'internal', 'secure_local'];
@@ -243,6 +250,9 @@ export class TieredStoreSet {
     }
     // Private and pending items must always have somewhere to go.
     if (!this.legs.has('secure_local')) throw new Error('A tiered store set needs a secure_local leg.');
+    // The sniffer's background pass settles this set's routed items through
+    // this planner, so a verdict queues a move rather than rewriting placement.
+    registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
   }
 
   /** The leg's store, opening it when it is open, exists, or `create` is set. */
@@ -481,7 +491,11 @@ export class TieredStoreSet {
 
   /** @internal */
   classification(): ConnectorStoreTierClassification | undefined {
-    return this.tierClassification;
+    // The lane's own inputs merged with the owner's installed ones (the map
+    // and rules file re-read when edited, the sniffer), keyed by the set
+    // ledger the sniffer's queue sits beside. Resolved per call, so an edited
+    // map or rules file applies at the next pass.
+    return resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath, undefined);
   }
 
   /** @internal */
@@ -887,10 +901,13 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   private readonly copyRemovals: Map<string, SourceItemIdentity>;
   private readonly set: TieredStoreSet;
   private readonly mode: 'shared' | 'per_leg';
+  /** Resolved once per run: one read of the owner's map and rules, not one per item. */
+  private readonly classification: ConnectorStoreTierClassification | undefined;
 
   constructor(set: TieredStoreSet, mode: 'shared' | 'per_leg') {
     this.set = set;
     this.mode = mode;
+    this.classification = set.classification();
     this.routedDomains = new Set();
     this.legOptions = new Map();
     this.plans = new Map();
@@ -974,7 +991,17 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // metadata-only disposition means none ever arrives.
     const deferred = this.set.readsContentLater();
     const text = deferred && input.metadataOnly ? undefined : connectorStoreItemText(item);
-    let decision = decideItemTiers(connector, item, text, this.set.classification(), ledger);
+    // The owner's installed inputs (map, rules file, sniffer) merged with the
+    // set's own (TieredStoreSet.classification()), resolved once per run.
+    const classification = this.classification;
+    let decision = decideItemTiers(connector, item, text, classification, ledger);
+    // With the owner's rules file or map unusable, the decision (made with
+    // the last good ones) may not place anything below Private: hold it
+    // pending (secure_local, embedding held) until the file is fixed.
+    // Secrets still go nowhere.
+    if (classification?.unavailableReason && decision.contentTier !== 'secrets') {
+      decision = { ...decision, state: 'pending', metadataPending: true, reasons: [...decision.reasons, `metadata:${classification.unavailableReason}`] };
+    }
     this.recordSecretLocation(input, text, decision);
     const contentRead = decision.contentRead && !input.contentFetchFailed;
     if (!routed) {

@@ -210,3 +210,35 @@ The real authority flip, generalized deployment lock, and transaction rollback
 remain XE4 responsibilities. XE3 exposes only a failure contract: a red
 post-flip eval invokes an injected rollback callback and then requires
 `legacy_index` to be restored.
+
+## Classification eval (four-tier)
+
+`eval/classification/` holds a synthetic, labeled corpus (email, file, chat,
+note and bookmark items across Public, Personal, Private and Secrets) and runs
+it through the production path: the shared tier classifier, the cache-backed
+sniffer, the tier ledger and the sniffer's background pass
+(docs/design/per-item-four-tier-classification.md, section 7).
+
+```sh
+bun run eval:classification            # deterministic fake sniffer (CI runs this via test/classification-eval.test.ts)
+bun run eval:classification -- --real  # the configured private lane: a local model or Venice Private
+```
+
+Hard gates (exit 1 when any fails): 100% secret recall; no hard-category
+Private item (health, therapy, financial, legal, identity) below Private; at
+most 1% Private-to-Personal leakage on the ambiguous set; no injection-set item
+(or a batch-mate) below Private, against a fake sniffer that obeys any
+instruction it is shown; no owner item lowered by another item's instruction,
+including blocklist-evading shapes (fullwidth, zero-width, look-alikes,
+letter-spacing, plain English), Spanish and French, a paraphrase, novel
+phrasing and Dropbox file-request names beside the owner's ambiguous files
+(every item is asked on its own call); no item the model answered badly below
+Private. Also reported:
+Personal and Public precision, Personal recall, the pending rate, the
+`no_signal` set (Private items with no sensitive word anywhere, which the
+flag-then-ask pipeline does not sniff by design), and the sniffer's calls and
+estimated tokens.
+
+The fake sniffer proves the wiring, not a model's judgment: it has two
+deliberate error modes (under-confident Personal, and Personal paired with a
+hard category) that the threshold and the hard-category guard must absorb.

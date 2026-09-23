@@ -103,11 +103,6 @@
       "retire_when": "The script moves to the ops repository or is deleted."
     },
     {
-      "path": "src/workers/classification/delphi-scorer.ts",
-      "reason": "No runtime importer in src or scripts. Retained because the private-ops disposition ledger pins test/delphi-scorer.test.ts as retained_product_or_governance at an exact digest, and that test imports this subtree.",
-      "retire_when": "The disposition ledger releases test/delphi-scorer.test.ts, then the subtree is deleted."
-    },
-    {
       "path": "src/workers/classification/index.ts",
       "reason": "No runtime importer in src or scripts. Retained because the private-ops disposition ledger pins test/delphi-scorer.test.ts as retained_product_or_governance at an exact digest, and that test imports this subtree.",
       "retire_when": "The disposition ledger releases test/delphi-scorer.test.ts, then the subtree is deleted."

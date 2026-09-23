@@ -294,6 +294,115 @@ export class TierLedger {
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity)! };
   }
 
+  /**
+   * Apply a privacy-safe sniffer verdict that arrived after the item was
+   * recorded (the background pass, sniffer-resolver.ts). Only the question it
+   * answers changes: a metadata verdict can only raise the metadata tier (and
+   * with it the content floor), a content verdict can only raise the content
+   * tier. The open-question reasons are replaced by the verdict's reason code,
+   * and the model id is recorded. An override, a row mid-move, or a question
+   * that is no longer open is left alone.
+   *
+   * A ROUTED item (P1b) never has its placement rewritten here: the settled
+   * decision goes through `recordRoutedPlacement` with the plan the item's
+   * tiered store set computes (`placementFor`), so a verdict that needs other
+   * stores queues a move (hidden first on a raise) and one that keeps the
+   * item where it is releases its embedding hold. Without a planner a routed
+   * item is left pending (`needs_placement`): the question stays open.
+   */
+  applySnifferVerdict(
+    identity: TierLedgerIdentity,
+    verdict: {
+      pass: 'metadata' | 'content';
+      tier: 'private' | 'secure';
+      reason: string;
+      modelId: string;
+      /** The map revision the question was asked under; a different current one makes the verdict stale. */
+      mapRevision?: string;
+    },
+    options: { placementFor?: (decision: TierDecision) => TierPlacementPlan } = {},
+  ): { outcome: SnifferVerdictOutcome; record: TierLedgerRecord } | undefined {
+    assertTier(verdict.tier);
+    let outcome: SnifferVerdictOutcome | undefined;
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing) return;
+      if (existing.state === 'moving') {
+        outcome = 'held_moving';
+        return;
+      }
+      if (existing.decidedBy === 'override') {
+        outcome = 'unchanged';
+        return;
+      }
+      if (verdict.mapRevision !== undefined && verdict.mapRevision !== existing.mapRevision) {
+        // Asked under another map: the owner's categories may have changed
+        // what this item is. The next sync asks again under the current map.
+        outcome = 'stale_map';
+        return;
+      }
+      const metadataReasons = existing.reasons.filter((reason) => !reason.startsWith('content:'));
+      const contentReasons = existing.reasons.filter((reason) => reason.startsWith('content:'));
+      let next: EffectiveRow;
+      if (verdict.pass === 'metadata') {
+        if (!existing.metadataPending) {
+          outcome = 'unchanged';
+          return;
+        }
+        const metadataTier = maxTier(existing.metadataTier, verdict.tier);
+        const contentTier = maxTier(existing.contentTier, metadataTier);
+        // Names judged Private settle an open excerpt question: the classifier
+        // never asks the sniffer about content that is already Private.
+        const settlesContent = existing.contentRead && existing.contentPending && contentTier === 'secure';
+        next = {
+          ...rowOf(existing),
+          metadataTier,
+          contentTier,
+          decidedBy: contentTier !== existing.contentTier ? 'sniffer' : existing.decidedBy,
+          reasons: [
+            ...metadataReasons.filter((reason) => !isOpenSnifferReason(reason, 'metadata')),
+            verdict.reason,
+            ...(settlesContent ? contentReasons.filter((reason) => !isOpenSnifferReason(reason, 'content')) : contentReasons),
+          ],
+          metadataPending: false,
+          ...(settlesContent ? { contentPending: false } : {}),
+        };
+      } else {
+        if (!existing.contentPending || !existing.contentRead) {
+          outcome = 'unchanged';
+          return;
+        }
+        const contentTier = maxTier(existing.contentTier, verdict.tier);
+        next = {
+          ...rowOf(existing),
+          contentTier,
+          decidedBy: contentTier !== existing.contentTier ? 'sniffer' : existing.decidedBy,
+          reasons: [
+            ...metadataReasons,
+            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, 'content')),
+            verdict.reason,
+          ],
+          contentPending: false,
+        };
+      }
+      if (existing.routed) {
+        if (!options.placementFor) {
+          outcome = 'needs_placement';
+          return;
+        }
+        const decision = decisionOfRow(next);
+        outcome = this.recordRoutedPlacement(identity, decision, options.placementFor(decision)).outcome;
+      } else {
+        outcome = this.writeRow(identity, next, undefined, existing);
+      }
+      this.db.query(`
+        UPDATE tier_items SET model_id = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(verdict.modelId, ...idParams(identity));
+    })();
+    return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity)! };
+  }
+
   private writeRow(
     identity: TierLedgerIdentity,
     next: EffectiveRow,
@@ -1604,6 +1713,54 @@ interface EffectiveRow {
   contentPending: boolean;
   metadataForced: boolean;
   metadataFlagged: boolean;
+}
+
+/** What applying a sniffer verdict did: a P1a row update, a P1b routed outcome, or nothing yet. */
+export type SnifferVerdictOutcome = TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement' | 'stale_map';
+
+/** A settled row as the classifier decision the P1b router takes. */
+function decisionOfRow(row: EffectiveRow): TierDecision {
+  const pending = row.metadataPending || row.contentPending;
+  return {
+    metadataTier: row.metadataTier,
+    contentTier: row.contentTier,
+    decidedBy: row.decidedBy as TierDecidedBy,
+    reasons: row.reasons,
+    state: pending ? 'pending' : 'current',
+    contentRead: row.contentRead,
+    metadataPending: row.metadataPending,
+    contentPending: row.contentPending,
+    metadataForced: row.metadataForced,
+    metadataFlagged: row.metadataFlagged,
+    engineVersion: row.engineVersion,
+    mapRevision: row.mapRevision,
+    snifferId: 'sniffer',
+  };
+}
+
+function rowOf(record: TierLedgerRecord): EffectiveRow {
+  return {
+    metadataTier: record.metadataTier,
+    contentTier: record.contentTier,
+    decidedBy: record.decidedBy,
+    reasons: record.reasons,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    contentRead: record.contentRead,
+    metadataPending: record.metadataPending,
+    contentPending: record.contentPending,
+    metadataForced: record.metadataForced,
+    metadataFlagged: record.metadataFlagged,
+  };
+}
+
+/** The reasons that say a question is still open: the flags, the borderline families and `sniffer:<id>:undecided`. */
+function isOpenSnifferReason(reason: string, pass: 'metadata' | 'content'): boolean {
+  if (pass === 'metadata') {
+    return reason.startsWith('metadata:possibly_private:')
+      || (reason.startsWith('metadata:sniffer:') && reason.endsWith(':undecided'));
+  }
+  return reason.startsWith('content:sniffer:') && reason.endsWith(':undecided');
 }
 
 /**

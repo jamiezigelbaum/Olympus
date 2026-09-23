@@ -17,9 +17,11 @@
 //   an item came from; test/tier-classifier-source-agnostic.test.ts enforces it.
 // - Reasons are content-free codes: finding kinds, fixed vocabulary families,
 //   owner rule and map category ids. Never a title, path, sender or text.
-// - Deterministic. The privacy-safe sniffer is a seam (TierSniffer); the only
-//   implementation shipped in this phase answers "undecided", which leaves the
-//   tier where the deterministic steps put it and marks the item pending.
+// - Deterministic. The privacy-safe sniffer is a seam (TierSniffer). The
+//   shipped sniffer (sniffer.ts) answers synchronously from a verdict cache;
+//   a miss answers "undecided", which leaves the tier where the deterministic
+//   steps put it and marks the item pending until the background pass
+//   (sniffer-resolver.ts) asks the privacy-safe model.
 
 import type {
   SourceClassificationSignals,
@@ -39,7 +41,7 @@ import {
 import { ownerSenderRuleMatches } from '../../core/sender-rules.ts';
 
 export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
-export const TIER_CLASSIFIER_VERSION = '2026-09-23.p1a';
+export const TIER_CLASSIFIER_VERSION = '2026-09-23.p2';
 
 export type TierKey = SourceClassificationTier;
 
@@ -63,9 +65,8 @@ export function maxTier(a: TierKey, b: TierKey): TierKey {
 // --- Owner configuration ------------------------------------------------------
 
 /**
- * An owner folder / label / sender / chat rule (design section 2.4). Loading
- * rules from `~/.olympus/tier-rules.json` is phase P2; the classifier already
- * honours them so the precedence is fixed before any rule file exists.
+ * An owner folder / label / sender / chat rule (design section 2.4), loaded
+ * from `~/.olympus/tier-rules.json` by tier-rules.ts.
  *
  * `source` is matched as an opaque string against the item's provider, which
  * is data the owner wrote, not a branch in code. `chat` rules match a
@@ -98,17 +99,40 @@ export type ItemTierOverride =
 
 // --- Sniffer seam -------------------------------------------------------------
 
+/**
+ * Opaque identity of the item a sniffer question is about. The classifier
+ * never reads it; it is passed through so a sniffer that answers from a
+ * verdict cache can queue the unanswered question for the background pass.
+ */
+export interface TierSnifferSubject {
+  provider: string;
+  accountScope: string;
+  providerItemId: string;
+  /** The conversation, for chat items: part of the ledger identity. */
+  providerConversationId?: string;
+}
+
 export interface TierSnifferRequest {
   pass: 'metadata' | 'content';
   /** Content-free reason the item was flagged, e.g. `names:health`. */
   flags: readonly string[];
+  /**
+   * What the privacy-safe model may read: the item's names (pass 1) or a short
+   * excerpt of its text (pass 2). Never anything the secret detector caught:
+   * the classifier does not ask the sniffer about an item it found a secret in.
+   */
+  material?: string;
+  /** The sensitivity map revision the question is asked under (a cache-key part). */
+  mapRevision?: string;
+  subject?: TierSnifferSubject;
 }
 
 /**
- * The privacy-safe model seam (design section 2.2, steps 7 and 12). P2 plugs
- * in a local or Venice Private model here. It may answer only Personal or
- * Private, or `undecided`. It is never asked about an item the secret detector
- * caught, and never asked when the deterministic tier is already Private.
+ * The privacy-safe model seam (design section 2.2, steps 7 and 12). A local or
+ * Venice Private model answers here, through a verdict cache
+ * (sniffer.ts). It may answer only Personal or Private, or `undecided`. It is
+ * never asked about an item the secret detector caught, and never asked when
+ * the deterministic tier is already Private.
  */
 export type TierSnifferVerdict =
   | { verdict: 'undecided' }
@@ -119,11 +143,16 @@ export interface TierSniffer {
   judge(request: TierSnifferRequest): TierSnifferVerdict;
 }
 
-/** The only sniffer in this phase: it never decides, so flagged items stay pending. */
+/** A sniffer that never decides, so flagged items stay pending (no private lane configured). */
 export const UNDECIDED_TIER_SNIFFER: TierSniffer = Object.freeze({
   id: 'undecided',
   judge: (): TierSnifferVerdict => ({ verdict: 'undecided' }),
 });
+
+/** Longest names string handed to the sniffer (pass 1). */
+export const SNIFFER_NAMES_MAX_CHARS = 400;
+/** Longest text excerpt handed to the sniffer (pass 2): a short excerpt, never the document. */
+export const SNIFFER_EXCERPT_MAX_CHARS = 1_200;
 
 // --- Input / output -----------------------------------------------------------
 
@@ -136,6 +165,8 @@ export interface TierClassificationInput {
   provider?: string;
   /** Full extracted text for pass 2. Absent means pass 2 has nothing to read. */
   text?: string;
+  /** Passed through to the sniffer only; never read here. */
+  subject?: TierSnifferSubject;
 }
 
 export interface TierClassificationOptions {
@@ -246,7 +277,17 @@ export function classifyItemTiers(
   const matchInput = mapMatchInput(signals);
 
   // ---------------------------------------------------------------- pass 1 --
-  const metadata = metadataPass({ signals, provider: input.provider, names, matchInput, options, secretsCleared, sniffer });
+  const metadata = metadataPass({
+    signals,
+    provider: input.provider,
+    names,
+    matchInput,
+    options,
+    secretsCleared,
+    sniffer,
+    mapRevision: base.mapRevision,
+    ...(input.subject ? { subject: input.subject } : {}),
+  });
 
   // ---------------------------------------------------------------- pass 2 --
   const content = contentPass({
@@ -257,6 +298,8 @@ export function classifyItemTiers(
     options,
     secretsCleared,
     sniffer,
+    mapRevision: base.mapRevision,
+    ...(input.subject ? { subject: input.subject } : {}),
   });
 
   const contentRead = text !== undefined || metadata.tier === 'secrets';
@@ -297,6 +340,8 @@ export interface ContentTierInput {
   title?: string;
   path?: string;
   sender?: string;
+  /** Passed through to the sniffer only; never read here. */
+  subject?: TierSnifferSubject;
 }
 
 export interface ContentTierDecision {
@@ -342,6 +387,8 @@ export function classifyContentTier(
     options,
     secretsCleared: options.override?.kind === 'not_secret',
     sniffer,
+    mapRevision: base.mapRevision,
+    ...(input.subject ? { subject: input.subject } : {}),
   });
   return {
     ...base,
@@ -373,6 +420,8 @@ function metadataPass(args: {
   options: TierClassificationOptions;
   secretsCleared: boolean;
   sniffer: TierSniffer;
+  mapRevision: string;
+  subject?: TierSnifferSubject;
 }): PassResult {
   const { signals, names, options } = args;
 
@@ -485,9 +534,15 @@ function metadataPass(args: {
   const flags = ownerSaidPersonal ? [] : namesLookPossiblyPrivate(names).map((family) => `names:${family}`);
   let pending = false;
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
-    const verdict = args.sniffer.judge({ pass: 'metadata', flags });
+    const verdict = args.sniffer.judge({
+      pass: 'metadata',
+      flags,
+      material: snifferNames(signals),
+      mapRevision: args.mapRevision,
+      ...(args.subject ? { subject: args.subject } : {}),
+    });
     if (verdict.verdict === 'decided') {
-      decided = maxVerdict(decided, { tier: verdict.tier, decidedBy: 'sniffer', reason: `metadata:sniffer:${args.sniffer.id}:${verdict.code}` });
+      decided = withSnifferVerdict(decided, verdict.tier, `metadata:sniffer:${args.sniffer.id}:${verdict.code}`);
     } else {
       pending = true;
     }
@@ -519,6 +574,8 @@ function contentPass(args: {
   options: TierClassificationOptions;
   secretsCleared: boolean;
   sniffer: TierSniffer;
+  mapRevision: string;
+  subject?: TierSnifferSubject;
 }): { tier: TierKey; decidedBy: TierDecidedBy; reasons: string[]; pending: boolean } {
   const { metadata, text } = args;
   if (metadata.tier === 'secrets') {
@@ -595,9 +652,15 @@ function contentPass(args: {
   ];
   const reasons = [...decided.reasons];
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
-    const verdict = args.sniffer.judge({ pass: 'content', flags });
+    const verdict = args.sniffer.judge({
+      pass: 'content',
+      flags,
+      material: snifferExcerpt(text),
+      mapRevision: args.mapRevision,
+      ...(args.subject ? { subject: args.subject } : {}),
+    });
     if (verdict.verdict === 'decided') {
-      decided = maxVerdict(decided, { tier: verdict.tier, decidedBy: 'sniffer', reason: `content:sniffer:${args.sniffer.id}:${verdict.code}` });
+      decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
       reasons.splice(0, reasons.length, ...decided.reasons);
     } else {
       pending = true;
@@ -663,6 +726,19 @@ function maxVerdict(current: ResolvedVerdict, candidate: Verdict | ResolvedVerdi
     return { tier: candidate.tier, decidedBy: candidate.decidedBy, reasons: [...current.reasons, ...added] };
   }
   return current;
+}
+
+/**
+ * Apply a sniffer verdict. It can only raise (the sniffer answers Personal or
+ * Private, and the tier it is asked about is at least Personal), but its
+ * reason is recorded either way so `olympus tier explain` shows the question
+ * was answered.
+ */
+function withSnifferVerdict(current: ResolvedVerdict, tier: TierKey, reason: string): ResolvedVerdict {
+  if (tierRank(tier) > tierRank(current.tier)) {
+    return { tier, decidedBy: 'sniffer', reasons: [...current.reasons, reason] };
+  }
+  return { ...current, reasons: [...current.reasons, reason] };
 }
 
 function mostSensitive(rules: readonly OwnerTierRule[]): OwnerTierRule | undefined {
@@ -732,6 +808,25 @@ function mapMatchInput(signals: SourceClassificationSignals): MapMatchInput {
     ...(sender ? { sender } : {}),
     ...(path ? { path } : {}),
   };
+}
+
+/** The names the sniffer may read in pass 1, bounded. The sender is metadata too. */
+function snifferNames(signals: SourceClassificationSignals): string {
+  const joined = [
+    signals.title,
+    signals.path,
+    ...(signals.folderKeys ?? []),
+    ...(signals.labels ?? []),
+    signals.sender,
+  ].filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+    .map((part) => part.trim())
+    .join(' | ');
+  return joined.slice(0, SNIFFER_NAMES_MAX_CHARS);
+}
+
+/** A short excerpt of the text for pass 2: the start of the document, bounded. */
+function snifferExcerpt(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, SNIFFER_EXCERPT_MAX_CHARS);
 }
 
 function namesOf(signals: SourceClassificationSignals): string {

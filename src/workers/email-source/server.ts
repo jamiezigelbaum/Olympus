@@ -12,7 +12,7 @@ import { createModelKeyReload } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { existsSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import {
   createFileExtractionRuntime,
   fileExtractionCorporaRoster,
@@ -41,7 +41,7 @@ import {
   type SovereigntyAnalystRoutePlan,
   type SovereigntyAnalystRouteStep,
 } from '../source-index/analyst-answer.ts';
-import { parseSecureAnalystPoolLastLegTimeoutMs } from '../source-index/analyst-pool.ts';
+import { SecureAnalystPoolState, parseSecureAnalystPoolLastLegTimeoutMs } from '../source-index/analyst-pool.ts';
 import {
   createFileSourceAnswerLatencyLog,
   resolveSourceAnswerLatencyLogPath,
@@ -310,6 +310,11 @@ import {
   createGoogleDriveFolderScopeBrowser,
 } from '../source-scope-browser.ts';
 import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-sources.ts';
+import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
+import { resolveSnifferLane, SnifferLaneRefusedError, type SnifferLane } from '../classification/sniffer-lane.ts';
+import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
+import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
+import type { AnalystModel } from '../../core/analyst.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
@@ -1241,6 +1246,66 @@ export function createAnalystForSovereigntyProfile(input: {
   throw new Error(`Sovereignty analyst provider ${profile.provider} is not supported by this worker.`);
 }
 
+/**
+ * The completion model behind the privacy-safe tier sniffer. Only the two
+ * lanes the sniffer lane resolver admits are built here: a loopback local
+ * model, or catalog-gated Venice Private (every dispatch re-checks the model's
+ * privacy category). Short, cheap, no thinking: it answers one JSON verdict
+ * per item.
+ */
+function createTierSnifferModel(input: {
+  lane: SnifferLane;
+  olympusConfig: ReturnType<typeof loadConfig>;
+  env: Record<string, string | undefined>;
+  bootSecretResolver: WorkerBootSecretResolver;
+}): AnalystModel | undefined {
+  const { lane } = input;
+  const profile = lane.profile;
+  if (lane.kind === 'local' && profile.provider === 'local-openai-compatible') {
+    if (!profile.baseUrl?.trim()) return undefined;
+    const apiKey = profile.secretRef
+      ? resolveSecretRefSync(
+        profile.secretRef,
+        input.env,
+        'Tier sniffer local model profile',
+        bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile }),
+      )
+      : undefined;
+    if (profile.secretRef && !apiKey) return undefined;
+    const config = structuredClone(input.olympusConfig);
+    config.argus.modelProfiles.source_answer = {
+      ...config.argus.modelProfiles.source_answer,
+      baseUrl: profile.baseUrl,
+      model: profile.model,
+      ...(profile.secretRef ? { secretRef: profile.secretRef } : {}),
+      purpose: 'text_reasoning',
+    };
+    return createDelphiAnalystModel(new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey }), {
+      profile: 'source_answer',
+      preflightTimeoutMs: 5_000,
+    });
+  }
+  if (lane.kind === 'venice' && profile.provider === 'venice') {
+    const apiKey = resolveSecretRefSync(
+      profile.secretRef,
+      input.env,
+      'Tier sniffer Venice model profile',
+      bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile }),
+    );
+    if (!apiKey) return undefined;
+    return createVeniceAnalystModel({
+      apiKey,
+      model: profile.model,
+      ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
+      thinking: 'disabled',
+      reasoningEffort: 'low',
+      reasoningHeadroomTokens: 0,
+      timeoutMs: 60_000,
+    });
+  }
+  return undefined;
+}
+
 function analystRouteTrustDomain(pack: { candidates: readonly { trustDomain: SourceTrustDomain }[] }, localOnly: boolean): SourceTrustDomain {
   if (localOnly || pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local')) {
     return 'secure_local';
@@ -1499,6 +1564,28 @@ export async function main(): Promise<void> {
   const bootSecretResolver = new WorkerBootSecretResolver({
     resolveSecretRefValueSync: (secretRef, env) => resolveSecretRefValueSync(secretRef, { env }),
   });
+  // Four-tier classification inputs for every lane: the owner's map, tier
+  // rules and the privacy-safe sniffer. The sniffer only ever runs on a local
+  // model or Venice Private; without one, flagged items stay pending.
+  let snifferLane: SnifferLane | undefined;
+  try {
+    snifferLane = resolveSnifferLane(sovereigntyEngine);
+  } catch (error) {
+    if (!(error instanceof SnifferLaneRefusedError)) throw error;
+    console.warn(`Olympus tier sniffer is off (${error.reason}): flagged items stay pending, held Private.`);
+  }
+  const installedTierClassification = configureInstalledTierClassification({
+    env: process.env,
+    ...(snifferLane ? { lane: { kind: snifferLane.kind, modelId: snifferLane.modelId } } : {}),
+  });
+  // Shared with the answer handler so the sniffer reads the private pool's
+  // breakers, and counts answers in flight so it never competes with one.
+  const secureAnalystPoolState = new SecureAnalystPoolState();
+  let sourceAnswersInFlight = 0;
+  // Set once the sniffer runs: aborts its in-flight call when an answer starts.
+  let preemptTierSniffer: (() => void) | undefined;
+  // Set once the sniffer runs: its backlog, for the status surface.
+  let tierSnifferBacklog: (() => ReturnType<TierSnifferService['backlog']>) | undefined;
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(
     process.env.OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED,
@@ -2858,6 +2945,7 @@ export async function main(): Promise<void> {
         secureAnalystPool: {
           lastLegTimeoutMs: sourceAnswerLastLegTimeoutMs,
         },
+        secureAnalystPoolState,
         ...(secureDerivativeDefault !== undefined
           ? { secureDerivativeDefault }
           : {}),
@@ -2962,7 +3050,20 @@ export async function main(): Promise<void> {
       });
     })()
     : undefined;
-  const sourceAnswer = analystSourceAnswer;
+  const sourceAnswer = analystSourceAnswer
+    ? {
+        async answer(request: Parameters<typeof analystSourceAnswer.answer>[0]) {
+          // The sniffer shares the private pool: an answer takes it at once.
+          if (sourceAnswersInFlight === 0) preemptTierSniffer?.();
+          sourceAnswersInFlight += 1;
+          try {
+            return await analystSourceAnswer.answer(request);
+          } finally {
+            sourceAnswersInFlight -= 1;
+          }
+        },
+      }
+    : undefined;
   const sourceWatchStore = new LocalSourceWatchStore();
   const sourceWatchExecutor = createSourceWatchExecutorCapability({ executorId: 'source-watch-scheduler' });
   const sourceWatchSearch = sourceAnswerLanes
@@ -2990,6 +3091,17 @@ export async function main(): Promise<void> {
       connectorStores,
       connectorStoreStatusScope,
       retrievalAvailability,
+      tierClassification: () => {
+        const backlog = tierSnifferBacklog?.();
+        return backlog
+          ? {
+              checking_items: backlog.checkingItems,
+              remaining_questions: backlog.remainingQuestions,
+              summary: backlog.summary,
+              awaiting_owner_approval: backlog.awaitingOwnerApproval,
+            }
+          : undefined;
+      },
       // The policy and queue half of the readiness counts, from the shared
       // extraction queue rather than from any source's own index. Absent when
       // the factory is switched off, which leaves the coverage math on the
@@ -3776,6 +3888,31 @@ export async function main(): Promise<void> {
   const captureTick = setInterval(() => { void reconcileCaptures(); }, 10_000);
   captureTick.unref?.();
 
+  // The privacy-safe sniffer's bounded background pass over pending items.
+  const snifferEnv = tierSnifferServiceEnv(process.env);
+  const snifferModel = snifferLane && snifferEnv.enabled
+    ? createTierSnifferModel({ lane: snifferLane, olympusConfig, env: process.env, bootSecretResolver })
+    : undefined;
+  const tierSniffer = snifferLane && snifferModel
+    ? new TierSnifferService({
+        installed: installedTierClassification,
+        lane: snifferLane,
+        model: snifferModel,
+        stores: () => connectorStores,
+        classificationLedgerPath: resolveClassificationLedgerPath(process.env),
+        budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
+        intervalMs: snifferEnv.intervalMs,
+        ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
+        maxCallsPerDay: snifferEnv.maxCallsPerDay,
+        shouldYield: () => sourceAnswersInFlight > 0
+          || secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
+        log: (line) => console.log(line),
+      })
+    : undefined;
+  preemptTierSniffer = tierSniffer ? () => tierSniffer.preempt() : undefined;
+  tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
+  tierSniffer?.start();
+
   // The worker owns a background tick that outlives any request, so the process
   // needs a way to put it down. Without this the only shutdown was the process
   // dying, which is not a shutdown so much as an interruption.
@@ -3785,6 +3922,8 @@ export async function main(): Promise<void> {
     shuttingDown = true;
     capturesClosed = true;
     clearInterval(captureTick);
+    tierSniffer?.stop();
+    installedTierClassification.close();
     void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     worker.close();

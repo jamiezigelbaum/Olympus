@@ -376,6 +376,78 @@ Rules:
   epoch
 - embeddings are derived data and inherit the corpus handling posture
 
+### Classifier (privacy sniffer) lane
+
+The four-tier classifier asks a privacy-safe model about items whose names or
+text look possibly private
+([design](design/per-item-four-tier-classification.md), section 2.2). That
+model is chosen from this policy, never from an ordinary cloud lane:
+
+- a model profile with `"purpose": "classification"` (a small, fast model
+  for this one job), local before Venice Private; otherwise
+- the `secure_local` analyst pool, local members before Venice members.
+
+| Preset | Sniffer lane |
+|---|---|
+| local-first | local model (`local-source-answer`) |
+| local-only | local model |
+| private-cloud-only | Venice Private (`venice-private`) |
+| no-sensitive | none: flagged items stay pending, held Private |
+
+The sniffer uses only what the secure_local route already approves for
+Private data: a disabled route (no-sensitive) refuses outright, and a declared
+classification profile is accepted only for a provider kind the secure pool
+itself has, with the pool's model gate (no E2EE-gated ids). A `standard_cloud`
+profile is refused with a typed error before anything is sent. The sniffer
+also waits for the owner to approve the exact lane, profile, model and prompt
+version in the append-only classification ledger
+(`olympus tier classifier approve --why ...`). The prompt version is derived
+from the prompt text, so any change to the prompt, the model, the profile or
+the lane stops it until the owner approves again; flagged items wait, pending
+and held Private, meanwhile. An answer that needs the private pool aborts the
+sniffer's in-flight call.
+
+**Which model, when both are allowed.** Without a declared classifier the
+sniffer uses the pool's local model when there is one, and Venice only when
+there is none. A profile the owner declares with `"purpose":
+"classification"` is an explicit choice and is used as declared, even when
+the pool also has a local model. So `local-first` plus a declared Venice
+classifier sends flagged names (and short excerpts) to Venice Private, off the
+box; declare a local classifier, or none, to keep them on it.
+
+**One item per call.** Every flagged name and every excerpt is asked on its
+own call. No source can prove who named an item: a Dropbox file request, an
+email-to-Dropbox or web save, a Drive save, an ownership transfer or a form
+upload lets a stranger name a file that looks like the owner's, and notes can
+be imported or clipped. So no item's material ever shares a prompt with
+another's, and an instruction hidden in a name can at most talk about the
+item that carries it. Identical material is asked once for every item that
+has it. Material shaped like an instruction to the model is also refused
+outright (Private, never sent), after normalizing fullwidth, zero-width and
+look-alike characters; that detector is defense in depth, not the defense.
+
+Residual risk: an item can still steer its OWN verdict (a stranger who names
+a file "everyday paperwork" may get that one file judged Personal). It
+cannot move any other item, the deterministic detectors and the owner's map
+and rules still raise it, and Personal is only accepted at confidence 0.9 and
+never for a hard category.
+
+Cost: one call per flagged name. Per call about 300 input and 20 output
+tokens (measured on the eval corpus), so 100k flagged names is about 30M
+input and 2M output tokens. Pace: one pass a minute
+(`OLYMPUS_TIER_SNIFFER_INTERVAL_MS`), at most 10 calls a pass on a local model
+(it is shared with answers, which also preempt it at once) and 30 on Venice
+(`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS` overrides both). The daily cap
+(`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`, default 20,000) works through a
+100k-item backlog in about five days; on Venice that is at most about $1.10 a
+day at an assumed, unverified price, and a local model is bounded by its own
+throughput first. Source index status reports the backlog as counts only
+(`tier_classification`: "Checking N items, about X questions remaining"), and
+each store's `pending_classification_items`; there is deliberately no time
+estimate. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
+`OLYMPUS_TIER_SNIFFER_INTERVAL_MS`, `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS`,
+`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`.
+
 ## Active Shape
 
 Olympus v0.3 activates the sovereignty engine. The default location is

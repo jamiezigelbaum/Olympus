@@ -119,6 +119,18 @@ export class SecureAnalystPoolState {
     return { dispatch, breakerSkipped };
   }
 
+  /**
+   * Read-only breaker check for background work that shares the pool (the
+   * tier sniffer): it neither half-opens nor advances the tie-break cursor,
+   * so a background reader can never change how answers are dispatched.
+   */
+  isBreakerOpen(poolId: string, memberId: string): boolean {
+    const health = this.health.get(`${poolId}\u0000${memberId}`);
+    return health !== undefined
+      && health.consecutiveFailures >= this.failureThreshold
+      && this.now() < health.cooldownUntilMs;
+  }
+
   recordSuccess(poolId: string, memberId: string, elapsedMs: number): void {
     const health = this.memberHealth(poolId, memberId);
     health.consecutiveFailures = 0;

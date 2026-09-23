@@ -67,9 +67,10 @@ export interface TieredStoreExtractionSinkOptions {
 export function createTieredStoreExtractionSink(options: TieredStoreExtractionSinkOptions): ExtractionSink {
   const set = options.set;
   // The owner's map and sniffer judge the text exactly as they judged the
-  // names at listing: the set's own classification unless one is given.
-  const tierClassification = options.tierClassification ?? set.classification();
-  const sinkFor = (store: LocalConnectorStore, recordContentTier: boolean): ExtractionSink =>
+  // names at listing: the set's own classification unless one is given,
+  // resolved per landing so an edited map or rules file applies at once.
+  const classificationNow = (): ConnectorStoreTierClassification | undefined => options.tierClassification ?? set.classification();
+  const sinkFor = (store: LocalConnectorStore, recordContentTier: boolean, tierClassification: ConnectorStoreTierClassification | undefined): ExtractionSink =>
     createConnectorStoreExtractionSink({
       store,
       classify: (item: RawItem) => buildSourceSensitivity({
@@ -103,7 +104,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       if (!ledger.isRouted(identity)) {
         const legacy = legacyStoreFor(set, ref.localItemId);
         if (!legacy) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-        return sinkFor(legacy, true).accept(request);
+        return sinkFor(legacy, true, classificationNow()).accept(request);
       }
 
       const record = ledger.getCurrent(identity);
@@ -116,6 +117,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       const plan = planExtractionSinkWrite(anchorStore, request);
       if ('skippedReason' in plan) return skipped(plan.skippedReason);
 
+      const tierClassification = classificationNow();
       const override = ledger.getOverride(identity);
       const itemTitle = stringMetadata(plan.item, ['title', 'name', 'subject']);
       const itemPath = stringMetadata(plan.item, ['locatorUri', 'pathDisplay']);
@@ -127,6 +129,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           metadataFlagged: record.metadataFlagged,
           ...(itemTitle ? { title: itemTitle } : {}),
           ...(itemPath ? { path: itemPath } : {}),
+          subject: identity,
         },
         {
           ...(tierClassification?.sensitivityMap ? { sensitivityMap: tierClassification.sensitivityMap } : {}),
@@ -134,6 +137,10 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           ...(override ? { override } : {}),
         },
       );
+      // An unusable map or rules file: the content decision is held pending
+      // (Private, embedding held) rather than made without them.
+      const held = tierClassification?.unavailableReason !== undefined && content.contentTier !== 'secrets';
+      const contentPending = content.contentPending || held;
       const decision: TierDecision = {
         metadataTier: record.metadataTier,
         contentTier: maxTier(content.contentTier, record.metadataTier),
@@ -141,11 +148,12 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         reasons: [
           ...record.reasons.filter((reason) => !reason.startsWith('content:')),
           ...content.reasons,
+          ...(held ? [`content:${tierClassification!.unavailableReason}`] : []),
         ],
-        state: record.metadataPending || content.contentPending ? 'pending' : 'current',
+        state: record.metadataPending || contentPending ? 'pending' : 'current',
         contentRead: true,
         metadataPending: record.metadataPending,
-        contentPending: content.contentPending,
+        contentPending,
         metadataForced: record.metadataForced,
         metadataFlagged: record.metadataFlagged,
         engineVersion: content.engineVersion,
@@ -180,7 +188,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           ledger.recordRoutedPlacement(identity, decision, placement);
           return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
         }
-        const result = await sinkFor(contentStore, false).accept(request);
+        const result = await sinkFor(contentStore, false, tierClassification).accept(request);
         if (result.accepted) ledger.recordRoutedPlacement(identity, decision, placement);
         return result;
       }
@@ -224,7 +232,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           },
         );
       }
-      const result = await sinkFor(contentStore, false).accept(request);
+      const result = await sinkFor(contentStore, false, tierClassification).accept(request);
       if (!result.accepted) return result;
       ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: record.generation });
       return result;
