@@ -484,6 +484,17 @@ var init_source_corpus_registry = __esm(() => {
       description: "S1/internal Readwise saved library. The former public-safe corpus id resolves here as an input alias."
     },
     {
+      corpusId: "secure_local.readwise.library",
+      sourceId: "readwise.library",
+      provider: "readwise",
+      family: "readwise",
+      trustDomain: "secure_local",
+      activationMode: "lexical_only",
+      capabilities: ["answer", "status"],
+      createdOnDemand: true,
+      description: "Readwise items raised to Private by per-item four-tier classification (for example a private highlight)."
+    },
+    {
       corpusId: "internal.x.bookmarks",
       sourceId: "x.bookmarks",
       provider: "x",
@@ -493,6 +504,17 @@ var init_source_corpus_registry = __esm(() => {
       capabilities: ["answer", "status", "sync", "search"]
     },
     {
+      corpusId: "secure_local.x.bookmarks",
+      sourceId: "x.bookmarks",
+      provider: "x",
+      family: "x",
+      trustDomain: "secure_local",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "X bookmarks raised to Private by per-item four-tier classification."
+    },
+    {
       corpusId: "secure_local.dropbox.files",
       sourceId: "dropbox.files",
       provider: "dropbox",
@@ -500,6 +522,28 @@ var init_source_corpus_registry = __esm(() => {
       trustDomain: "secure_local",
       activationMode: "hybrid_shadow",
       capabilities: ["answer", "status", "sync", "search", "promotion_candidates"]
+    },
+    {
+      corpusId: "internal.dropbox.files",
+      sourceId: "dropbox.files",
+      provider: "dropbox",
+      family: "file",
+      trustDomain: "internal",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Personal Dropbox files (reference material and Personal names), routed here by per-item four-tier classification."
+    },
+    {
+      corpusId: "public_safe.dropbox.files",
+      sourceId: "dropbox.files",
+      provider: "dropbox",
+      family: "file",
+      trustDomain: "public_safe",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Public Dropbox files, routed here by per-item four-tier classification on positive public evidence."
     },
     {
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -519,6 +563,17 @@ var init_source_corpus_registry = __esm(() => {
       activationMode: "hybrid_shadow",
       capabilities: ["status", "sync", "search", "answer"],
       description: "WhatsApp live capture (thin whatsmeow bridge -> shared scheduler -> connector store), including locally transcribed voice notes."
+    },
+    {
+      corpusId: "internal.whatsapp.messages",
+      sourceId: "whatsapp.personal.messages",
+      provider: "whatsapp",
+      family: "chat",
+      trustDomain: "internal",
+      activationMode: "hybrid_shadow",
+      capabilities: ["status", "search", "answer"],
+      createdOnDemand: true,
+      description: "WhatsApp messages of chats the owner set to Personal, routed here per message. The default for every chat stays Private."
     }
   ];
   PUBLIC_SOURCE_IDS = new Set(V0_4_PUBLIC_SOURCE_IDS);
@@ -6440,105 +6495,6 @@ var init_embeddings = __esm(() => {
   };
 });
 
-// src/core/sqlite-migrations.ts
-function currentStoreMigrations() {
-  return [
-    {
-      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
-      name: "record_existing_v1_schema",
-      up() {}
-    }
-  ];
-}
-function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > knownVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-}
-function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
-  const ordered = validateMigrations(migrations);
-  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > targetVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
-  if (options.dryRun === true) {
-    return {
-      storeId,
-      currentVersion,
-      targetVersion,
-      dryRun: true,
-      applied: [],
-      pending
-    };
-  }
-  ensureSchemaVersionTable(db);
-  const applied = [];
-  db.transaction(() => {
-    for (const migration of ordered.filter((entry) => entry.version > currentVersion)) {
-      migration.up(db);
-      writeSqliteSchemaVersion(db, storeId, migration.version);
-      applied.push({ version: migration.version, name: migration.name });
-    }
-  })();
-  return {
-    storeId,
-    currentVersion,
-    targetVersion,
-    dryRun: false,
-    applied,
-    pending: applied
-  };
-}
-function readSqliteSchemaVersion(db, storeId) {
-  if (!schemaVersionTableExists(db))
-    return 0;
-  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
-  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
-}
-function ensureSchemaVersionTable(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
-      store_id TEXT PRIMARY KEY,
-      version INTEGER NOT NULL,
-      applied_at TEXT NOT NULL
-    );
-  `);
-}
-function writeSqliteSchemaVersion(db, storeId, version) {
-  db.query(`
-    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
-    VALUES (?, ?, ?)
-    ON CONFLICT(store_id) DO UPDATE SET
-      version = excluded.version,
-      applied_at = excluded.applied_at
-  `).run(storeId, version, new Date().toISOString());
-}
-function schemaVersionTableExists(db) {
-  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
-  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
-}
-function validateMigrations(migrations) {
-  const ordered = [...migrations].sort((left, right) => left.version - right.version);
-  let previous = 0;
-  for (const migration of ordered) {
-    if (!Number.isInteger(migration.version) || migration.version <= 0) {
-      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
-    }
-    if (migration.version === previous) {
-      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
-    }
-    previous = migration.version;
-  }
-  return ordered;
-}
-var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
-var init_sqlite_migrations = __esm(() => {
-  init_operation_error();
-});
-
 // src/workers/dropbox-files/content-policy.ts
 import { createHash as createHash3 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
@@ -7161,16 +7117,6 @@ var init_engine = __esm(() => {
   WORK_COORDINATION_PATTERN = /\b(?:project update|status update|roadmap|milestone|pull request|pr review|design review|launch plan|offsite agenda|meeting recap|action items|next steps)\b/i;
 });
 
-// src/core/sqlite-store.ts
-function closeSqliteStore(db, options = {}) {
-  if (options.checkpoint !== false) {
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-    } catch {}
-  }
-  db.close();
-}
-
 // src/core/sender-rules.ts
 function validDomain(raw) {
   let end = raw.length;
@@ -7370,7 +7316,8 @@ function classifyItemTiers(input, options = {}) {
     metadataPending: metadata.pending,
     contentPending,
     metadataForced: metadata.forced,
-    metadataFlagged: metadata.flags.length > 0
+    metadataFlagged: metadata.flags.length > 0,
+    ...metadata.ownerRule ? { metadataOwnerRule: metadata.ownerRule } : {}
   };
 }
 function classifyContentTier(input, options = {}) {
@@ -7430,7 +7377,7 @@ function metadataPass(args) {
   let restingIsConfigured = false;
   const matchedRules = (options.rules ?? []).filter((rule) => ownerRuleMatches(rule, signals, args.provider));
   const floorReason = signals.floor ? `metadata:floor:${slug(signals.floor.basis)}` : undefined;
-  const forced = (tier, decidedBy, reason) => {
+  const forced = (tier, decidedBy, reason, ownerRule) => {
     const floor = signals.floor;
     const flooredTier = floor && tierRank(floor.tier) > tierRank(tier) ? floor.tier : tier;
     return {
@@ -7439,12 +7386,13 @@ function metadataPass(args) {
       reasons: flooredTier === tier ? [reason] : [reason, floorReason],
       pending: false,
       forced: true,
-      flags: []
+      flags: [],
+      ...ownerRule ? { ownerRule } : {}
     };
   };
   const forceRule = mostSensitive(matchedRules.filter((rule) => rule.strength === "force"));
   if (forceRule) {
-    return forced(forceRule.tier, "owner_rule", `metadata:owner_rule:${forceRule.match.kind}:${slug(forceRule.id)}:force`);
+    return forced(forceRule.tier, "owner_rule", `metadata:owner_rule:${forceRule.match.kind}:${slug(forceRule.id)}:force`, { kind: forceRule.match.kind, tier: forceRule.tier, strength: "force" });
   }
   const priorRule = mostSensitive(matchedRules.filter((rule) => rule.strength === "prior"));
   if (signals.prior?.strength === "force" && !priorRule) {
@@ -7499,7 +7447,15 @@ function metadataPass(args) {
     ...pending ? flags.map((flag) => `metadata:possibly_private:${flag}`) : [],
     ...pending ? [`metadata:sniffer:${args.sniffer.id}:undecided`] : []
   ])];
-  return { tier: decided.tier, decidedBy: decided.decidedBy, reasons, pending, forced: false, flags };
+  return {
+    tier: decided.tier,
+    decidedBy: decided.decidedBy,
+    reasons,
+    pending,
+    forced: false,
+    flags,
+    ...priorRule ? { ownerRule: { kind: priorRule.match.kind, tier: priorRule.tier, strength: "prior" } } : {}
+  };
 }
 function contentPass(args) {
   const { metadata, text } = args;
@@ -7666,6 +7622,115 @@ var init_tier_classifier = __esm(() => {
   });
   SLUG = /^[a-z0-9][a-z0-9_.:-]{0,95}$/i;
 });
+
+// src/core/sqlite-migrations.ts
+function currentStoreMigrations() {
+  return [
+    {
+      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
+      name: "record_existing_v1_schema",
+      up() {}
+    }
+  ];
+}
+function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > knownVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+}
+function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
+  const ordered = validateMigrations(migrations);
+  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > targetVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
+  if (options.dryRun === true) {
+    return {
+      storeId,
+      currentVersion,
+      targetVersion,
+      dryRun: true,
+      applied: [],
+      pending
+    };
+  }
+  ensureSchemaVersionTable(db);
+  const applied = [];
+  db.transaction(() => {
+    for (const migration of ordered.filter((entry) => entry.version > currentVersion)) {
+      migration.up(db);
+      writeSqliteSchemaVersion(db, storeId, migration.version);
+      applied.push({ version: migration.version, name: migration.name });
+    }
+  })();
+  return {
+    storeId,
+    currentVersion,
+    targetVersion,
+    dryRun: false,
+    applied,
+    pending: applied
+  };
+}
+function readSqliteSchemaVersion(db, storeId) {
+  if (!schemaVersionTableExists(db))
+    return 0;
+  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
+  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
+}
+function ensureSchemaVersionTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
+      store_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+  `);
+}
+function writeSqliteSchemaVersion(db, storeId, version) {
+  db.query(`
+    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(store_id) DO UPDATE SET
+      version = excluded.version,
+      applied_at = excluded.applied_at
+  `).run(storeId, version, new Date().toISOString());
+}
+function schemaVersionTableExists(db) {
+  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
+  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
+}
+function validateMigrations(migrations) {
+  const ordered = [...migrations].sort((left, right) => left.version - right.version);
+  let previous = 0;
+  for (const migration of ordered) {
+    if (!Number.isInteger(migration.version) || migration.version <= 0) {
+      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
+    }
+    if (migration.version === previous) {
+      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
+    }
+    previous = migration.version;
+  }
+  return ordered;
+}
+var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
+var init_sqlite_migrations = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/sqlite-store.ts
+function closeSqliteStore(db, options = {}) {
+  if (options.checkpoint !== false) {
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {}
+  }
+  db.close();
+}
 
 // src/workers/classification/tier-ledger-path.ts
 function tierLedgerPathForStore(storeDbPath) {
@@ -7929,6 +7994,38 @@ class TierLedger {
       return parsed;
     return;
   }
+  conversationlessOverrides(provider) {
+    return this.db.query(`
+      SELECT provider, account_scope, provider_item_id FROM tier_overrides
+      WHERE provider = ? AND conversation_key = ''
+      ORDER BY account_scope, provider_item_id
+    `).all(provider).map((row) => ({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id }));
+  }
+  rehomeConversationlessOverrides(options) {
+    const orphaned = [];
+    let rehomed = 0;
+    for (const identity of this.conversationlessOverrides(options.provider)) {
+      const conversations = [...new Set(options.conversationsFor(identity).filter((key) => key.trim().length > 0))];
+      if (conversations.length !== 1) {
+        orphaned.push(identity);
+        continue;
+      }
+      this.db.transaction(() => {
+        this.db.query(`
+          INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
+          SELECT provider, account_scope, ?, provider_item_id, override_json, set_at FROM tier_overrides
+          WHERE provider = ? AND account_scope = ? AND conversation_key = '' AND provider_item_id = ?
+          ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO NOTHING
+        `).run(conversations[0], identity.provider, identity.accountScope, identity.providerItemId);
+        this.db.query(`
+          DELETE FROM tier_overrides
+          WHERE provider = ? AND account_scope = ? AND conversation_key = '' AND provider_item_id = ?
+        `).run(identity.provider, identity.accountScope, identity.providerItemId);
+      })();
+      rehomed += 1;
+    }
+    return { rehomed, orphaned };
+  }
   clearOverride(identity) {
     return this.db.query(`
       DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -8035,7 +8132,7 @@ class TierLedger {
       }
       const tiersChanged = existing.metadataTier !== decision.metadataTier || existing.contentTier !== decision.contentTier;
       const current = previousCopies.filter((copy) => copy.state === "current");
-      const staged = previousCopies.some((copy) => copy.state === "staged");
+      const staged = previousCopies.some((copy) => copy.state === "staged") && !(options.stagedLandingAllowed === true && !existing.contentRead);
       const firstPlacement = !existing.routed || options.staleCopiesGone === true;
       if (secrets || firstPlacement || samePlan(current, plan.copies) && !staged) {
         const generation = tiersChanged ? existing.generation + 1 : existing.generation;
@@ -8087,6 +8184,86 @@ class TierLedger {
       outcome = "queued_move";
     })();
     return { outcome, record: this.getCurrent(identity), previousCopies, raise };
+  }
+  stageLandingCopy(identity, copy, options) {
+    assertCopyPlan(copy);
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving") {
+        throw new TierLedgerGenerationConflictError;
+      }
+      if (!existing.routed || existing.contentRead) {
+        throw new Error("Only a routed item whose text has not landed stages a landing copy.");
+      }
+      const rows = this.copies(identity).filter((row) => row.corpusId === copy.corpusId);
+      if (rows.some((row) => row.state === "current"))
+        return;
+      this.db.query(`
+        DELETE FROM tier_copies
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+      `).run(...idParams(identity), copy.corpusId);
+      this.insertCopies(identity, { copies: [copy], embedHold: options.embedHold === true }, "staged", existing.generation, now);
+    })();
+  }
+  landExtractedContent(identity, decision, plan, options) {
+    for (const copy of plan.copies)
+      assertCopyPlan(copy);
+    if (!decision.contentRead)
+      throw new Error("Landing extracted content needs a decision made from that text.");
+    if (plan.copies.length === 0)
+      throw new Error("Landing extracted content needs at least one copy.");
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving") {
+        throw new TierLedgerGenerationConflictError;
+      }
+      if (!existing.routed)
+        throw new Error("Only a routed item lands content through the tier set.");
+      if (existing.contentRead) {
+        throw new Error("This item's text already landed; a new content decision is a re-judgment, not a first landing.");
+      }
+      const current = this.copies(identity).filter((copy) => copy.state === "current");
+      for (const copy of current) {
+        const planned = plan.copies.find((candidate) => candidate.corpusId === copy.corpusId);
+        const servesNames = copy.layers === "metadata" || copy.layers === "both";
+        if (!planned || servesNames && planned.layers === "content") {
+          throw new Error("Landing extracted content never moves or drops the copy that serves the names.");
+        }
+      }
+      const tiersChanged = existing.metadataTier !== decision.metadataTier || existing.contentTier !== decision.contentTier;
+      const generation = tiersChanged ? existing.generation + 1 : existing.generation;
+      const reasonsJson = JSON.stringify(decision.reasons);
+      this.db.query(`
+        UPDATE tier_items SET
+          metadata_tier = ?, content_tier = ?, generation = ?, decided_by = ?, reasons_json = ?,
+          engine_version = ?, map_revision = ?,
+          previous_metadata_tier = ?, previous_content_tier = ?, state = ?,
+          stored_trust_domain = COALESCE(?, stored_trust_domain),
+          stored_trust_tier = COALESCE(?, stored_trust_tier),
+          content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
+          decided_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(decision.metadataTier, decision.contentTier, generation, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, tiersChanged ? existing.metadataTier : existing.previousMetadataTier, tiersChanged ? existing.contentTier : existing.previousContentTier, decision.state, plan.stored?.trustDomain ?? null, plan.stored?.trustTier ?? null, ...decisionFlags(decision), now, ...idParams(identity));
+      this.appendHistory(identity, generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, now);
+      for (const planned of plan.copies) {
+        const row = current.find((copy) => copy.corpusId === planned.corpusId);
+        if (row) {
+          this.db.query(`
+            UPDATE tier_copies SET layers = ?, embed_hold = ?, generation = ?, updated_at = ?
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(planned.layers, plan.embedHold ? 1 : 0, generation, now, ...idParams(identity), planned.corpusId);
+          continue;
+        }
+        this.db.query(`
+          DELETE FROM tier_copies
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(...idParams(identity), planned.corpusId);
+        this.insertCopies(identity, { copies: [planned], embedHold: plan.embedHold }, "current", generation, now);
+      }
+    })();
+    return this.getCurrent(identity);
   }
   adoptLegacyPlacement(identity, copies) {
     for (const copy of copies)
@@ -11461,6 +11638,47 @@ var init_local_index = __esm(() => {
     }
     copyServable(identity) {
       return this.tierVisibleRows([identity], (entry) => entry, () => "metadata").length > 0 || this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
+    }
+    activeLocalItemRow(localItemId) {
+      const row = this.db.query(`
+      SELECT provider, account_scope, provider_item_id, provider_conversation_id, locator_uri, trust_tier,
+        source_scope_generation, source_scope_revision, source_scope_folder_keys_json
+      FROM items WHERE local_item_id = ? AND tombstoned = 0
+      LIMIT 1
+    `).get(localItemId);
+      if (!row)
+        return;
+      let folderKeys = [];
+      try {
+        const parsed = row.source_scope_folder_keys_json ? JSON.parse(row.source_scope_folder_keys_json) : [];
+        if (Array.isArray(parsed))
+          folderKeys = parsed.filter((key) => typeof key === "string");
+      } catch {
+        folderKeys = [];
+      }
+      return {
+        identity: {
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+        },
+        ...row.locator_uri ? { locatorUri: row.locator_uri } : {},
+        trustTier: trustTierFromRow(row.trust_tier),
+        ...row.source_scope_generation && row.source_scope_revision ? {
+          sourceScope: {
+            accountGeneration: row.source_scope_generation,
+            scopeRevision: row.source_scope_revision,
+            folderKeys
+          }
+        } : {}
+      };
+    }
+    conversationIdsForProviderItem(identity) {
+      return this.db.query(`
+      SELECT DISTINCT provider_conversation_id FROM items
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND provider_conversation_id IS NOT NULL
+    `).all(identity.provider, identity.accountScope, identity.providerItemId).map((row) => row.provider_conversation_id);
     }
     hasItemRow(identity) {
       return this.db.query(`
@@ -15161,6 +15379,16 @@ var init_local_index = __esm(() => {
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
 
+// src/workers/connector-store/tiered-store-set.ts
+var init_tiered_store_set = __esm(() => {
+  init_types();
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_local_index();
+  init_tier_placement();
+});
+
 // src/workers/connector-store/principal.ts
 function isCanonicalConnectorStoreProvider(provider) {
   return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
@@ -15265,12 +15493,17 @@ function defaultDropboxConnectorStoreDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join6(homedir6(), ".local", "share");
   return join6(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
 }
-var DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
+var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
 var init_connector_store2 = __esm(() => {
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
   init_connector_store();
   init_corpus_adapter();
+  DROPBOX_TIER_CORPUS_IDS = Object.freeze({
+    public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
+    internal: DROPBOX_INTERNAL_FILES_CORPUS_ID,
+    secure_local: DROPBOX_FILES_CORPUS_ID
+  });
   DROPBOX_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
     trustDomain: "secure_local",
@@ -15286,6 +15519,7 @@ var init_connector_store2 = __esm(() => {
 // src/workers/dropbox-files/provider-store-sync.ts
 var init_provider_store_sync = __esm(() => {
   init_embeddings();
+  init_tiered_store_set();
   init_connector_store2();
   init_connector();
   init_provider_client();
@@ -15954,6 +16188,14 @@ var init_qualification = __esm(() => {
   init_corpus_adapter();
 });
 
+// src/workers/dropbox-files/tier-set.ts
+var init_tier_set = __esm(() => {
+  init_tier_ledger();
+  init_tiered_store_set();
+  init_connector_store2();
+  init_corpus_adapter();
+});
+
 // src/workers/dropbox-files/index.ts
 var init_dropbox_files = __esm(() => {
   init_connector();
@@ -15967,6 +16209,7 @@ var init_dropbox_files = __esm(() => {
   init_dropbox2();
   init_corpus_adapter();
   init_qualification();
+  init_tier_set();
   init_connector_store2();
 });
 
@@ -16614,6 +16857,37 @@ var init_drive = __esm(() => {
     }
   };
   FOLDER_LOOKUP_FAILED = Symbol("google-drive-folder-lookup-failed");
+});
+
+// src/workers/whatsapp/reaction-index.ts
+var init_reaction_index = __esm(() => {
+  init_reactions();
+});
+
+// src/workers/whatsapp/live-connector.ts
+var init_live_connector = __esm(() => {
+  init_reaction_index();
+});
+
+// src/workers/whatsapp/store-sync.ts
+import { homedir as homedir8 } from "node:os";
+import { join as join9 } from "node:path";
+function defaultWhatsAppStateDir(env = process.env) {
+  const dataHome = env.XDG_DATA_HOME?.trim() || join9(env.HOME?.trim() || homedir8(), ".local", "share");
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join9(dataHome, "olympus", "whatsapp-live");
+}
+function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join9(defaultWhatsAppStateDir(env), "connector-store.db");
+}
+var WHATSAPP_STORE_PLACEMENT;
+var init_store_sync = __esm(() => {
+  init_connector_store();
+  init_tiered_store_set();
+  init_live_connector();
+  WHATSAPP_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local"
+  });
 });
 
 // src/workers/dashboard/answer-ready-coverage.ts
@@ -17381,6 +17655,7 @@ var init_live_control = __esm(() => {
 // src/workers/readwise/live-sync.ts
 var init_live_sync = __esm(() => {
   init_connector_store();
+  init_tiered_store_set();
   init_api();
   init_connector2();
   init_live_control();
@@ -17522,6 +17797,7 @@ var init_window_diagnostic = __esm(() => {
 // src/workers/x-bookmarks/live-sync.ts
 var init_live_sync2 = __esm(() => {
   init_connector_store();
+  init_tiered_store_set();
   init_api_connector();
   init_live_control2();
   init_reconcile_state();
@@ -17581,18 +17857,8 @@ var init_capture_spool_connector = __esm(() => {
   TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
 });
 
-// src/workers/connector-store/tiered-store-set.ts
-var init_tiered_store_set = __esm(() => {
-  init_types();
-  init_engine();
-  init_tier_classifier();
-  init_tier_ledger();
-  init_local_index();
-  init_tier_placement();
-});
-
 // src/workers/telegram-messages/store-sync.ts
-var init_store_sync = __esm(() => {
+var init_store_sync2 = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
   init_corpus_adapter4();
@@ -17603,7 +17869,7 @@ var init_store_sync = __esm(() => {
 var init_telegram_messages = __esm(() => {
   init_corpus_adapter4();
   init_capture_spool_connector();
-  init_store_sync();
+  init_store_sync2();
 });
 
 // src/workers/source-index/status.ts
@@ -17884,6 +18150,20 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
+// src/workers/readwise/tier-set.ts
+var init_tier_set2 = __esm(() => {
+  init_connector_store();
+  init_tiered_store_set();
+  init_connector2();
+});
+
+// src/workers/x-bookmarks/tier-set.ts
+var init_tier_set3 = __esm(() => {
+  init_connector_store();
+  init_tiered_store_set();
+  init_connector3();
+});
+
 // src/workers/source-ingestion-ledger.ts
 var SAMPLE_RETENTION_MS2;
 var init_source_ingestion_ledger = __esm(() => {
@@ -17896,7 +18176,10 @@ var init_source_ingestion_ledger = __esm(() => {
   init_google_connectors();
   init_connector_store();
   init_readwise();
+  init_tier_set2();
   init_x_bookmarks();
+  init_tier_set3();
+  init_store_sync();
   init_dropbox_files();
   init_telegram_messages();
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
@@ -18466,25 +18749,8 @@ var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
   "image/heif"
 ]);
 
-// src/workers/whatsapp/store-sync.ts
-init_connector_store();
-import { homedir as homedir8 } from "node:os";
-import { join as join9 } from "node:path";
-// src/workers/whatsapp/reaction-index.ts
-init_reactions();
-
-// src/workers/whatsapp/store-sync.ts
-var WHATSAPP_STORE_PLACEMENT = Object.freeze({
-  trustTier: "S4",
-  trustDomain: "secure_local"
-});
-function defaultWhatsAppStateDir(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join9(env.HOME?.trim() || homedir8(), ".local", "share");
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join9(dataHome, "olympus", "whatsapp-live");
-}
-function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join9(defaultWhatsAppStateDir(env), "connector-store.db");
-}
+// src/workers/email-source/file-extraction-runtime.ts
+init_store_sync();
 
 // src/workers/file-extraction/job-store.ts
 init_sqlite_migrations();
@@ -18597,6 +18863,16 @@ var SINK_SKIP_SETTLEMENTS = Object.freeze({
   [EXTRACTION_SINK_SKIPPED_EMPTY_TEXT]: "metadata_only",
   [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only"
 });
+
+// src/workers/file-extraction/tiered-store-sink.ts
+init_types();
+init_engine();
+init_tier_classifier();
+init_tiered_store_set();
+
+// src/workers/connector-store/tiered-extraction.ts
+init_tier_ledger();
+init_tiered_store_set();
 
 // src/workers/file-extraction/readiness-ledger.ts
 init_answer_ready_coverage();
@@ -19945,11 +20221,14 @@ init_readwise();
 init_x_bookmarks();
 init_dropbox_files();
 init_provider_store_sync();
+init_tier_set();
 init_source_ingestion_exclusions();
 init_telegram_messages();
 init_connector_store();
 init_principal();
 init_tiered_store_set();
+init_tier_set2();
+init_tier_set3();
 
 // src/workers/connector-store/tier-visibility.ts
 init_tier_ledger();
@@ -20223,6 +20502,11 @@ init_embeddings();
 init_x_bookmarks();
 init_live_control2();
 import { createHash as createHash13 } from "node:crypto";
+// src/workers/whatsapp/index.ts
+init_live_connector();
+init_store_sync();
+
+// src/workers/source-scheduler.ts
 init_telegram_messages();
 
 // src/workers/source-scheduler-state.ts
