@@ -129,7 +129,9 @@ export interface ConnectorStoreExtractionSinkOptions {
    * worker and the current holder's content.
    */
   claims?: ExtractionClaimReader;
-  /** Map and sniffer for the recorded content decision; optional. */
+  /**
+   * Map and sniffer for the recorded content decision. Optional.
+   */
   tierClassification?: ConnectorStoreTierClassification;
 }
 
