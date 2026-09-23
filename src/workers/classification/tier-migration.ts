@@ -411,6 +411,13 @@ function currentPlacement(copies: readonly TierCopy[]): TierCopyPlan[] {
     .map((copy) => ({ corpusId: copy.corpusId, trustDomain: copy.trustDomain, layers: copy.layers }));
 }
 
+/** A move's sources: the current copies, plus those a hide-first raise superseded for this very move. */
+function moveSourcePlacement(copies: readonly TierCopy[], generation: number): TierCopyPlan[] {
+  return copies.filter((copy) => copy.state === 'current'
+    || (copy.state === 'superseded' && copy.supersededByGeneration === generation + 1))
+    .map((copy) => ({ corpusId: copy.corpusId, trustDomain: copy.trustDomain, layers: copy.layers }));
+}
+
 /** A ledger row's queued-move decision, as the classifier would state it. */
 function decisionFromQueuedMove(record: TierLedgerRecord): TierDecision {
   return {
@@ -651,7 +658,9 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
             totals.itemsScanned += 1;
             const record = ledger.getCurrent(item.identity);
             if (record?.state === 'moving' && record.targetMetadataTier && record.targetContentTier) {
-              const from = currentPlacement(copies);
+              // A raise the sync queued already hid its source copies (hide
+              // first): they are the move's sources all the same.
+              const from = moveSourcePlacement(copies, record.generation);
               const contentFrom = copyServingLayer(from, 'content') ?? from[0];
               if (!contentFrom || contentFrom.corpusId !== store.corpusId) {
                 // Judged from the store that serves the content.
@@ -1512,11 +1521,7 @@ async function migrateOne(
   // The destination identities, and the exact chunks this move hands to a
   // destination model: checked against the approval BEFORE anything moves.
   const vectorIdentities: Partial<Record<SourceTrustDomain, TierMoveEmbeddingIdentity>> = {};
-  const from = currentPlacement(ledger.copies(proposal.identity));
-  const hideFirstSources = ledger.copies(proposal.identity)
-    .filter((copy) => copy.state === 'superseded' && copy.supersededByGeneration === (record?.generation ?? 0) + 1)
-    .map((copy) => ({ corpusId: copy.corpusId, trustDomain: copy.trustDomain, layers: copy.layers }));
-  const sources = [...from, ...hideFirstSources];
+  const sources = moveSourcePlacement(ledger.copies(proposal.identity), record?.generation ?? 0);
   const projected: Record<string, number> = {};
   const minted = exported.vectorAuthorities;
   for (const copy of placement) {

@@ -45,7 +45,20 @@ import {
   EMBEDDING_LEDGER_OWNER_APPROVAL,
   readEmbeddingLedger,
 } from '../src/workers/embedding-ledger.ts';
-import { cloudProvider, localProvider, snapshotStore, tempDir, type RecordingProvider } from './helpers/tier-fixtures.ts';
+import {
+  CORPORA,
+  FIXTURE_PLACEMENT,
+  cloudProvider,
+  fixtureConnector,
+  identityOf as identityOfFixture,
+  localProvider,
+  openTierFixture,
+  snapshotStore,
+  storePaths,
+  tempDir,
+  type FixtureSpec,
+  type RecordingProvider,
+} from './helpers/tier-fixtures.ts';
 
 const ACCOUNT = 'personal';
 // Runtime-built so no credential-shaped literal sits in the source.
@@ -743,6 +756,65 @@ describe('tier migration M2-M6', () => {
     const ran = await runTierMigrateCommand(['run', '--plan', planId, '--batch', 'folder:/Files'], cli);
     expect(ran).toMatchObject({ kind: 'olympus_tier_migration_run', state: 'done', moved: 2, secrets_hidden: 1 });
     expect(await runTierMigrateCommand(['rollback', '--batch', String(ran['batch_id'])], cli)).toMatchObject({ rolled_back: 3 });
+  });
+});
+
+describe('tier migration finishes moves a sync queued', () => {
+  test('a routed item a sync re-judged (hidden, queued) is moved by the approved run', async () => {
+    const { dir, cleanup } = tempDir('olympus-tier-p3-queued-');
+    cleanups.push(cleanup);
+    const fixture = openTierFixture(dir);
+    const specs: FixtureSpec[] = [{ id: 'new-garden', name: 'garden-plan.txt', text: 'Weekly notes about the vegetable garden and the compost bins.' }];
+    try {
+      await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      specs[0] = { ...specs[0]!, version: 'v2', text: 'Compost notes. IBAN GB82WEST12345698765432 for the seeds.' };
+      const queued = await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      expect(queued.routing.movesQueued).toBe(1);
+    } finally {
+      fixture.close();
+    }
+    const paths = storePaths(dir);
+    const laneSpecs: TierMigrationLaneSpec[] = [{
+      sourceId: 'fixture.files',
+      setId: 'fixture.personal',
+      legs: {
+        public_safe: { corpusId: CORPORA.public_safe!, dbPath: paths.public_safe, family: 'file' },
+        internal: { corpusId: CORPORA.internal!, dbPath: paths.internal, family: 'file', legacy: true },
+        secure_local: { corpusId: CORPORA.secure_local!, dbPath: paths.secure_local, family: 'file', legacy: true },
+      },
+    }];
+    const cloud = cloudProvider();
+    const local = localProvider();
+    const identities: Record<string, TierMoveEmbeddingIdentity> = {
+      public_safe: asMoveIdentity(cloud),
+      internal: asMoveIdentity(cloud),
+      secure_local: asMoveIdentity(local),
+    };
+    const cli = {
+      laneSpecs,
+      inputs: { revision: 'map:none;rules:none' },
+      domainIdentity: (domain: SourceTrustDomain) => identities[domain],
+      paths: {
+        statePath: join(dir, 'tier-migration', 'state.json'),
+        reportDir: join(dir, 'tier-migration', 'reports'),
+        embeddingLedgerPath: join(dir, 'embedding-ledger.jsonl'),
+      },
+      itemDelayMs: 0,
+    };
+    const planned = await runTierMigrateCommand(['plan'], cli);
+    expect(planned).toMatchObject({ totals: { proposed: 1, raises: 1 } });
+    const planId = String(planned['plan_id']);
+    await runTierMigrateCommand(['approve', '--plan', planId], cli);
+    const ran = await runTierMigrateCommand(['run', '--plan', planId], cli);
+    expect(ran).toMatchObject({ state: 'done', moved: 1 });
+    const reopened = openTierFixture(dir);
+    try {
+      expect(reopened.ledger.getCurrent(identityOfFixture('new-garden'))).toMatchObject({ state: 'current', contentTier: 'secure' });
+      expect(reopened.stores.internal!.searchItems('compost', 5)).toEqual([]);
+      expect(reopened.stores.secure_local!.searchItems('compost', 5)).toHaveLength(1);
+    } finally {
+      reopened.close();
+    }
   });
 });
 
