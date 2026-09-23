@@ -2238,7 +2238,7 @@
       "source_sha256": "ceb622518f5d69893ea72651f8cef96aa554fd3dc18f62266ef5833a52fc6808",
       "replacement_sha256": "4793bd4328e5e1a2aab7985a09310cd6c6069d9aef5279844df651c23c8c9657",
       "disposition": "retained_product_or_governance",
-      "public_sha256": "4793bd4328e5e1a2aab7985a09310cd6c6069d9aef5279844df651c23c8c9657"
+      "public_sha256": "18c5ee29d33d39fe991c16eac82409a5a6c85410981a79984af7632dd46bcd07"
     },
     {
       "path": "test/credential-broker-service-account.test.ts",
