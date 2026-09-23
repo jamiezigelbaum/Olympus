@@ -38,7 +38,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 2;
+export const TIER_LEDGER_SCHEMA_VERSION = 3;
 
 export type TierLedgerState = 'pending' | 'current' | 'moving';
 
@@ -715,6 +715,21 @@ export class TierLedger {
     return { rehomed, orphaned };
   }
 
+  /**
+   * Every per-item override in this ledger, canonically ordered, as one
+   * content-free string (identities and override kinds). A tier migration
+   * plan binds to its digest: an override set after planning makes the plan
+   * stale, because the owner's decision changed what the plan should say.
+   */
+  overridesCanonical(): string {
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id, override_json FROM tier_overrides
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+    `).all() as Array<Record<string, string>>;
+    return rows.map((row) => [row.provider, row.account_scope, row.conversation_key, row.provider_item_id, row.override_json]
+      .join('\u0000')).join('\n');
+  }
+
   clearOverride(identity: TierLedgerIdentity): boolean {
     return this.db.query(`
       DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -1103,11 +1118,37 @@ export class TierLedger {
    * store. The move primitive works on copy rows, so P3's migration adopts a
    * legacy item's existing placement first. P1b never calls this on its own.
    */
-  adoptLegacyPlacement(identity: TierLedgerIdentity, copies: readonly TierCopyPlan[]): TierLedgerRecord {
+  adoptLegacyPlacement(
+    identity: TierLedgerIdentity,
+    copies: readonly TierCopyPlan[],
+    options: {
+      /**
+       * An item stored before the ledger recorded anything has no row. The
+       * migration records its placement as it stands (these tiers, decided by
+       * `legacy_placement`), so a rollback flips back to exactly where it was.
+       */
+      whenMissing?: { family: string; metadataTier: TierKey; contentTier: TierKey };
+    } = {},
+  ): TierLedgerRecord {
     for (const copy of copies) assertCopyPlan(copy);
     const now = this.now().toISOString();
     this.db.transaction(() => {
-      const existing = this.readRow(identity);
+      let existing = this.readRow(identity);
+      if (!existing && options.whenMissing) {
+        const missing = options.whenMissing;
+        assertTier(missing.metadataTier);
+        assertTier(missing.contentTier);
+        const reasonsJson = JSON.stringify(['legacy_placement']);
+        this.db.query(`
+          INSERT INTO tier_items (
+            provider, account_scope, conversation_key, provider_item_id, family,
+            metadata_tier, content_tier, generation, decided_by, reasons_json,
+            engine_version, map_revision, state, content_read, decided_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'legacy_placement', ?, 'legacy', 'none', 'current', 0, ?)
+        `).run(...idParams(identity), missing.family, missing.metadataTier, missing.contentTier, reasonsJson, now);
+        this.appendHistory(identity, 1, missing.metadataTier, missing.contentTier, 'legacy_placement', reasonsJson, 'current', now);
+        existing = this.readRow(identity);
+      }
       if (!existing) throw new Error('Adopting a placement needs a recorded decision first.');
       if (existing.routed) throw new Error('This item is already routed.');
       this.db.query(`
@@ -1200,6 +1241,15 @@ export class TierLedger {
       destination: readonly TierCopyPlan[];
       decidedBy?: TierDecidedBy | 'move';
       reasons?: readonly string[];
+      /**
+       * The decision the move carries out (the migration's), recorded in the
+       * same write: whether its text was read, open questions, and the
+       * classifier versions. Omitted: the row's flags stay as they were.
+       */
+      decision?: Pick<
+        TierDecision,
+        'contentRead' | 'metadataPending' | 'contentPending' | 'metadataForced' | 'metadataFlagged' | 'engineVersion' | 'mapRevision'
+      >;
     },
   ): TierLedgerRecord {
     for (const copy of options.destination) assertCopyPlan(copy);
@@ -1247,6 +1297,26 @@ export class TierLedger {
         reasons: options.reasons ?? existing.reasons,
         decidedAt: now,
       });
+      if (options.decision) {
+        const decision = options.decision;
+        const pending = decision.metadataPending || decision.contentPending;
+        this.db.query(`
+          UPDATE tier_items SET
+            content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
+            engine_version = ?, map_revision = ?, state = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        `).run(
+          decision.contentRead ? 1 : 0,
+          decision.metadataPending ? 1 : 0,
+          decision.contentPending ? 1 : 0,
+          decision.metadataForced ? 1 : 0,
+          decision.metadataFlagged ? 1 : 0,
+          decision.engineVersion,
+          decision.mapRevision,
+          pending ? 'pending' : 'current',
+          ...idParams(identity),
+        );
+      }
     })();
     return this.getCurrent(identity)!;
   }
@@ -1261,7 +1331,9 @@ export class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
-      if (!existing || existing.generation !== options.expectedGeneration || existing.state !== 'current'
+      // A flip that carried an open question (pending) is rolled back too; only
+      // a row mid-move is refused.
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === 'moving'
         || existing.previousMetadataTier === null || existing.previousContentTier === null) {
         throw new TierLedgerGenerationConflictError();
       }
@@ -1350,6 +1422,125 @@ export class TierLedger {
       this.deleteCopies(identity);
     })();
     return removed;
+  }
+
+  /**
+   * Forget ONE superseded copy row, after the caller tombstoned that store's
+   * copy (the owner-approved purge, design section 4.6 M6). A current or
+   * staged copy is never removed here. Returns whether a row was removed.
+   */
+  removeSupersededCopy(identity: TierLedgerIdentity, corpusId: string): boolean {
+    return this.db.query(`
+      DELETE FROM tier_copies
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND corpus_id = ? AND copy_state = 'superseded'
+    `).run(...idParams(identity), corpusId).changes > 0;
+  }
+
+  // ---- P3: migration proposals (design section 4.6) ---------------------------
+
+  /**
+   * Record a plan's proposals, replacing any earlier rows for the same plan
+   * id in one transaction (a re-plan with unchanged data writes the same rows).
+   * Proposals are never current: nothing here touches tier_items or copies.
+   */
+  replaceMigrationProposals(planId: string, proposals: readonly TierMigrationProposalInput[]): void {
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      this.db.query('DELETE FROM tier_migration_proposals WHERE plan_id = ?').run(planId);
+      const insert = this.db.query(`
+        INSERT INTO tier_migration_proposals (
+          plan_id, provider, account_scope, conversation_key, provider_item_id, family,
+          from_corpus_id, from_trust_domain, kind, metadata_tier, content_tier, decision_json,
+          chunks, estimated_chunks_to_embed, estimated_tokens, item_fingerprint, expected_generation, batch_keys_json,
+          status, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+      `);
+      for (const proposal of proposals) {
+        assertTier(proposal.metadataTier);
+        assertTier(proposal.contentTier);
+        insert.run(
+          planId,
+          ...idParams(proposal.identity),
+          proposal.family,
+          proposal.fromCorpusId,
+          proposal.fromTrustDomain,
+          proposal.kind,
+          proposal.metadataTier,
+          proposal.contentTier,
+          JSON.stringify(proposal.decision),
+          proposal.chunks,
+          proposal.estimatedChunksToEmbed,
+          proposal.estimatedTokens,
+          proposal.itemFingerprint,
+          proposal.expectedGeneration ?? null,
+          JSON.stringify(proposal.batchKeys),
+          now,
+        );
+      }
+    })();
+  }
+
+  /** Remove a plan's proposals (a superseded plan that never ran). */
+  deleteMigrationProposals(planId: string): number {
+    return this.db.query('DELETE FROM tier_migration_proposals WHERE plan_id = ?').run(planId).changes;
+  }
+
+  migrationProposals(
+    planId: string,
+    filter: { status?: TierMigrationProposalStatus; batchId?: string } = {},
+  ): TierMigrationProposal[] {
+    const clauses = ['plan_id = ?'];
+    const params: string[] = [planId];
+    if (filter.status) {
+      clauses.push('status = ?');
+      params.push(filter.status);
+    }
+    if (filter.batchId) {
+      clauses.push('batch_id = ?');
+      params.push(filter.batchId);
+    }
+    return (this.db.query(`
+      SELECT * FROM tier_migration_proposals WHERE ${clauses.join(' AND ')}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+    `).all(...params) as TierMigrationProposalRow[]).map(proposalFromRow);
+  }
+
+  /** Content-free counts of one plan's proposals by status. */
+  migrationProposalCounts(planId: string): Record<TierMigrationProposalStatus, number> {
+    const counts: Record<TierMigrationProposalStatus, number> = { proposed: 0, moved: 0, rolled_back: 0, skipped: 0, purged: 0 };
+    for (const row of this.db.query(`
+      SELECT status, COUNT(*) AS n FROM tier_migration_proposals WHERE plan_id = ? GROUP BY status
+    `).all(planId) as Array<{ status: TierMigrationProposalStatus; n: number }>) {
+      counts[row.status] = row.n;
+    }
+    return counts;
+  }
+
+  markMigrationProposal(
+    planId: string,
+    identity: TierLedgerIdentity,
+    update: {
+      status: TierMigrationProposalStatus;
+      batchId?: string;
+      movedGeneration?: number;
+      outcome?: Record<string, unknown>;
+    },
+  ): void {
+    this.db.query(`
+      UPDATE tier_migration_proposals SET
+        status = ?, batch_id = COALESCE(?, batch_id), moved_generation = COALESCE(?, moved_generation),
+        outcome_json = COALESCE(?, outcome_json), updated_at = ?
+      WHERE plan_id = ? AND provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(
+      update.status,
+      update.batchId ?? null,
+      update.movedGeneration ?? null,
+      update.outcome ? JSON.stringify(update.outcome) : null,
+      this.now().toISOString(),
+      planId,
+      ...idParams(identity),
+    );
   }
 
   /**
@@ -1535,6 +1726,95 @@ export class TierLedger {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(...idParams(identity), generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt);
   }
+}
+
+export type TierMigrationProposalStatus = 'proposed' | 'moved' | 'rolled_back' | 'skipped' | 'purged';
+
+/** One item's PROPOSED tiers in a migration plan. Content-free: identities, tiers, codes, hashes, counts. */
+export interface TierMigrationProposalInput {
+  identity: TierLedgerIdentity;
+  family: string;
+  /** The store that serves the item today. */
+  fromCorpusId: string;
+  fromTrustDomain: SourceTrustDomain;
+  /** `legacy`: stored before routing. `queued_move`: a routed item a sync queued to move. */
+  kind: 'legacy' | 'queued_move';
+  metadataTier: TierKey;
+  contentTier: TierKey;
+  /** The classifier's decision (tiers, reason codes, flags, versions). */
+  decision: TierDecision;
+  /** Chunks the item holds today. */
+  chunks: number;
+  /** Chunks a destination store would embed with its own model (estimate: vectors that can be copied are not counted). */
+  estimatedChunksToEmbed: number;
+  /** Tokens of those chunks (estimate: characters / 4). */
+  estimatedTokens: number;
+  /** Hash of the stored content the decision was made from; a change makes the plan stale. */
+  itemFingerprint: string;
+  /** For a queued move: the ledger generation it was planned against. */
+  expectedGeneration?: number;
+  /** Hashed batch selectors (source, folder prefixes, labels, sender, chat). */
+  batchKeys: readonly string[];
+}
+
+export interface TierMigrationProposal extends TierMigrationProposalInput {
+  planId: string;
+  status: TierMigrationProposalStatus;
+  batchId: string | null;
+  movedGeneration: number | null;
+  outcome: Record<string, unknown> | null;
+  updatedAt: string;
+}
+
+interface TierMigrationProposalRow {
+  plan_id: string;
+  provider: string;
+  account_scope: string;
+  conversation_key: string;
+  provider_item_id: string;
+  family: string;
+  from_corpus_id: string;
+  from_trust_domain: SourceTrustDomain;
+  kind: 'legacy' | 'queued_move';
+  metadata_tier: TierKey;
+  content_tier: TierKey;
+  decision_json: string;
+  chunks: number;
+  estimated_chunks_to_embed: number;
+  estimated_tokens: number;
+  item_fingerprint: string;
+  expected_generation: number | null;
+  batch_keys_json: string;
+  status: TierMigrationProposalStatus;
+  batch_id: string | null;
+  moved_generation: number | null;
+  outcome_json: string | null;
+  updated_at: string;
+}
+
+function proposalFromRow(row: TierMigrationProposalRow): TierMigrationProposal {
+  return {
+    planId: row.plan_id,
+    identity: identityFromRow(row),
+    family: row.family,
+    fromCorpusId: row.from_corpus_id,
+    fromTrustDomain: row.from_trust_domain,
+    kind: row.kind,
+    metadataTier: row.metadata_tier,
+    contentTier: row.content_tier,
+    decision: JSON.parse(row.decision_json) as TierDecision,
+    chunks: row.chunks,
+    estimatedChunksToEmbed: row.estimated_chunks_to_embed,
+    estimatedTokens: row.estimated_tokens,
+    itemFingerprint: row.item_fingerprint,
+    ...(row.expected_generation !== null ? { expectedGeneration: row.expected_generation } : {}),
+    batchKeys: JSON.parse(row.batch_keys_json) as string[],
+    status: row.status,
+    batchId: row.batch_id,
+    movedGeneration: row.moved_generation,
+    outcome: row.outcome_json ? JSON.parse(row.outcome_json) as Record<string, unknown> : null,
+    updatedAt: row.updated_at,
+  };
 }
 
 interface TierItemRow {
@@ -1890,7 +2170,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // tiered-store-set resume points. Additive only: every P1a row keeps
       // routed = 0 and gains no copy rows, which is exactly "legacy item,
       // visible where it already is".
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 2,
       name: 'tier_copies_and_set_cursors',
       up(db) {
         // The conversation joins the identity: chat providers reuse message
@@ -2020,6 +2300,45 @@ function tierLedgerMigrations(): SqliteMigration[] {
             committed_at TEXT NOT NULL,
             PRIMARY KEY (set_id, connector_id)
           );
+        `);
+      },
+    },
+    {
+      // P3: the migration's PROPOSED tiers (design section 4.6, M0). A
+      // proposal never changes an item's current tiers or its copies; only an
+      // approved run (tier-migration.ts) acts on it. Additive only.
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'tier_migration_proposals',
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_migration_proposals (
+            plan_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            family TEXT NOT NULL,
+            from_corpus_id TEXT NOT NULL,
+            from_trust_domain TEXT NOT NULL CHECK (from_trust_domain IN ('public_safe', 'internal', 'secure_local')),
+            kind TEXT NOT NULL CHECK (kind IN ('legacy', 'queued_move')),
+            metadata_tier TEXT NOT NULL CHECK (metadata_tier ${TIER_CHECK}),
+            content_tier TEXT NOT NULL CHECK (content_tier ${TIER_CHECK}),
+            decision_json TEXT NOT NULL,
+            chunks INTEGER NOT NULL DEFAULT 0,
+            estimated_chunks_to_embed INTEGER NOT NULL DEFAULT 0,
+            estimated_tokens INTEGER NOT NULL DEFAULT 0,
+            item_fingerprint TEXT NOT NULL,
+            expected_generation INTEGER,
+            batch_keys_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('proposed', 'moved', 'rolled_back', 'skipped', 'purged')),
+            batch_id TEXT,
+            moved_generation INTEGER,
+            outcome_json TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (plan_id, provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE INDEX IF NOT EXISTS tier_migration_proposals_status
+            ON tier_migration_proposals (plan_id, status, batch_id);
         `);
       },
     },

@@ -26,7 +26,7 @@
 
 import type { SourceItemIdentity, SourceTrustDomain } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import type { TierKey } from '../classification/tier-classifier.ts';
+import type { TierDecision, TierKey } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
   placementIsRaise,
@@ -52,7 +52,15 @@ export type TierMoveEmbeddingIdentity = Pick<
 export interface TierMoveOptions {
   set: TieredStoreSet;
   identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId' | 'family' | 'localItemId'>;
-  target: { metadataTier: TierKey; contentTier: TierKey };
+  /** The tiers to move to. Required unless `decision` is given. */
+  target?: { metadataTier: TierKey; contentTier: TierKey };
+  /**
+   * The full classifier decision the move carries out (the migration's). Its
+   * tiers are the target; the placement is exactly what a sync would compute
+   * for it (`placementFor`, open questions included); and its flags and
+   * reason codes are recorded at the flip, in the same write.
+   */
+  decision?: TierDecision;
   /**
    * Each destination store's canonical embedding identity. Vectors are copied
    * only into a store whose identity is given here and matches the vectors'.
@@ -87,7 +95,11 @@ export interface TierMoveResult {
 }
 
 export async function moveTieredItem(options: TierMoveOptions): Promise<TierMoveResult> {
-  const { set, identity, target } = options;
+  const { set, identity, decision } = options;
+  const target = decision
+    ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier }
+    : options.target;
+  if (!target) throw new Error('A tier move needs target tiers or a decision.');
   const ledger = set.ledger;
   const record = ledger.getCurrent(identity);
   if (!record || !record.routed) throw new Error('Only a routed item can move; adopt a legacy placement first.');
@@ -96,12 +108,16 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     return moveToSecrets(options, record.generation);
   }
 
-  const placement = set.placementFor({
+  // Without a decision the move keeps what the ledger knows about the text:
+  // a lane whose content arrives later places an item whose text was never
+  // read by its names only, so a move must not forget text that was read.
+  const placement = set.placementFor(decision ?? {
     metadataTier: target.metadataTier,
     contentTier: target.contentTier,
     state: 'current',
     metadataPending: false,
     contentPending: false,
+    contentRead: record.contentRead,
   });
   const moveGeneration = record.generation + 1;
   const sources = ledger.copies(identity).filter((copy) => copy.state === 'current'
@@ -115,6 +131,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     target,
     destination: placement.copies,
     hideSource: raise,
+    ...(placement.embedHold ? { embedHold: true } : {}),
   });
 
   // 2. Write what each destination lacks, from the source stores.
@@ -175,6 +192,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   const flipped = ledger.completeMove(identity, {
     expectedGeneration: record.generation,
     destination: placement.copies,
+    ...(decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {}),
   });
   const supersededCorpora = ledger.copies(identity)
     .filter((copy) => copy.state === 'superseded' && copy.supersededByGeneration === flipped.generation)
