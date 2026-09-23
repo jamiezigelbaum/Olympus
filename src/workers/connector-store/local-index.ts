@@ -7388,8 +7388,9 @@ export class LocalConnectorStore {
     // tier is final (design section 4.2). Legacy items are never held.
     const tierExcluded = this.tierHiddenItemPks();
     const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
+    // One JSON parameter, however many items: no bound-parameter ceiling.
     const tierFilter = excludedPks.length > 0
-      ? ` AND i.item_pk NOT IN (${excludedPks.map(() => '?').join(', ')})`
+      ? ' AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
     return this.db.query(`
       SELECT
@@ -7412,7 +7413,7 @@ export class LocalConnectorStore {
       ORDER BY c.chunk_pk ASC
     `).all(
       ...(selectedLocalItemIds ?? []),
-      ...excludedPks,
+      ...(excludedPks.length > 0 ? [JSON.stringify(excludedPks)] : []),
       ...(selectedAccount ? [selectedAccount] : []),
       ...selectedFilters.params,
     ) as Array<{
@@ -7754,14 +7755,16 @@ export class LocalConnectorStore {
     // the parity denominator. A store without routed copies gets exactly the
     // pre-P1b queries (the fragments below are empty).
     const tier = this.tierHiddenItemPks();
+    // Each list is ONE JSON parameter, so no count of routed copies can hit
+    // SQLite's bound-parameter ceiling.
     const hiddenNotIn = tier.hidden.length > 0
-      ? `AND i.item_pk NOT IN (${tier.hidden.map(() => '?').join(', ')})`
+      ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
     const heldNotIn = tier.held.length > 0
-      ? `AND i.item_pk NOT IN (${tier.held.map(() => '?').join(', ')})`
+      ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
     const namesOnlyNotIn = tier.metadataLayer.length > 0
-      ? `AND i.item_pk NOT IN (${tier.metadataLayer.map(() => '?').join(', ')})`
+      ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
     const itemWhere = `${scope?.itemsAllowed === false ? 'AND 0' : ''}
       ${accountScope ? 'AND i.account_scope = ?' : ''}
@@ -7774,9 +7777,15 @@ export class LocalConnectorStore {
       ${namesOnlyNotIn}`;
     const parityWhere = `${contentWhere}
       ${heldNotIn}`;
-    const itemParams = [...(accountScope ? [accountScope] : []), ...itemFilters.params, ...tier.hidden];
-    const contentParams = [...(accountScope ? [accountScope] : []), ...contentFilters.params, ...tier.hidden, ...tier.metadataLayer];
-    const parityParams = [...contentParams, ...tier.held];
+    const jsonList = (pks: readonly number[]): string[] => (pks.length > 0 ? [JSON.stringify(pks)] : []);
+    const itemParams = [...(accountScope ? [accountScope] : []), ...itemFilters.params, ...jsonList(tier.hidden)];
+    const contentParams = [
+      ...(accountScope ? [accountScope] : []),
+      ...contentFilters.params,
+      ...jsonList(tier.hidden),
+      ...jsonList(tier.metadataLayer),
+    ];
+    const parityParams = [...contentParams, ...jsonList(tier.held)];
     const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
@@ -7898,8 +7907,8 @@ export class LocalConnectorStore {
           pendingClassificationItems: tier.held.length,
           supersededChunks: tier.hidden.length > 0
             ? (this.db.query(`
-                SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (${tier.hidden.map(() => '?').join(', ')})
-              `).get(...tier.hidden) as { n: number }).n
+                SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
+              `).get(JSON.stringify(tier.hidden)) as { n: number }).n
             : 0,
           tierMoveInProgress: tier.moving,
         }
