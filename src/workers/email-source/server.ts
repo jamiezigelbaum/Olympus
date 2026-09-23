@@ -159,6 +159,7 @@ import {
 } from '../dropbox-files/index.ts';
 import { createDropboxProviderStoreSyncHandler } from '../dropbox-files/provider-store-sync.ts';
 import { createDropboxTierLane } from '../dropbox-files/tier-set.ts';
+import { loadOwnerSensitivityMap } from '../../core/sensitivity-map.ts';
 import { tieredExtractionView } from '../connector-store/tiered-extraction.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
@@ -1844,6 +1845,9 @@ export async function main(): Promise<void> {
   // was actually searched — which is what include_secure_local, corpus
   // selection and a file source's scope approval decide — and only within the
   // account and filters that search ran under.
+  // The owner's sensitivity map, loaded once for every lane's tier set.
+  const ownerSensitivityMap = loadOwnerSensitivityMap(process.env);
+  const ownerTierClassification = ownerSensitivityMap ? { sensitivityMap: ownerSensitivityMap } : undefined;
   const tierSecretLocations = (
     query: string,
     searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
@@ -1912,6 +1916,7 @@ export async function main(): Promise<void> {
       return existingStoreTierSet(createReadwiseTierLane({
         store,
         env: process.env,
+        ...(ownerTierClassification ? { tierClassification: ownerTierClassification } : {}),
         ...(readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {}),
         ...(tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {}),
         ...(secrets ? { secretLocations: secrets } : {}),
@@ -1938,6 +1943,7 @@ export async function main(): Promise<void> {
       return existingStoreTierSet(createXBookmarksTierLane({
         store,
         env: process.env,
+        ...(ownerTierClassification ? { tierClassification: ownerTierClassification } : {}),
         ...(xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {}),
         ...(tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {}),
         ...(secrets ? { secretLocations: secrets } : {}),
@@ -2065,6 +2071,7 @@ export async function main(): Promise<void> {
         secureStore: dropboxConnectorStore,
         env: process.env,
         policy: dropboxIngestionPolicy,
+        ...(ownerTierClassification ? { tierClassification: ownerTierClassification } : {}),
         ...(dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {}),
         onStoreOpened: (store) => registerTierLegStore(
           store,
@@ -2124,6 +2131,7 @@ export async function main(): Promise<void> {
     ? existingStoreTierSet(createWhatsAppTierLane({
         store: whatsappConnectorStore,
         env: process.env,
+        ...(ownerTierClassification ? { tierClassification: ownerTierClassification } : {}),
         ...(sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {}),
         ...(whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {}),
         onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null),
@@ -4315,6 +4323,7 @@ function bindXBookmarksConnectorStoreRuntime(options: {
   });
   const contentRecovery = createXBookmarksContentRecoveryHandler({
     store: options.store,
+    ...(options.tierSet ? { tierLedger: options.tierSet.ledger } : {}),
     usageStore: options.usageStore,
     reconcileStateStore: options.reconcileStateStore,
     embeddingProvider: options.embeddingProvider,

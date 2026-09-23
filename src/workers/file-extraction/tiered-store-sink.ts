@@ -41,6 +41,8 @@ import {
 import {
   EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
   EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
+  EXTRACTION_SINK_SKIPPED_SECRETS,
+  EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED,
   createConnectorStoreExtractionSink,
   planExtractionSinkWrite,
 } from './store-sink.ts';
@@ -51,11 +53,7 @@ import type {
   ExtractionSinkResult,
 } from './types.ts';
 
-/**
- * The routed item's content decision needs different stores than it has:
- * the move is queued (hidden first on a raise) and this text is not written.
- */
-export const EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE;
+
 
 export interface TieredStoreExtractionSinkOptions {
   set: TieredStoreSet;
@@ -68,6 +66,9 @@ export interface TieredStoreExtractionSinkOptions {
 
 export function createTieredStoreExtractionSink(options: TieredStoreExtractionSinkOptions): ExtractionSink {
   const set = options.set;
+  // The owner's map and sniffer judge the text exactly as they judged the
+  // names at listing: the set's own classification unless one is given.
+  const tierClassification = options.tierClassification ?? set.classification();
   const sinkFor = (store: LocalConnectorStore, recordContentTier: boolean): ExtractionSink =>
     createConnectorStoreExtractionSink({
       store,
@@ -82,7 +83,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       ownerConnectorId: options.ownerConnectorId,
       ownershipKind: options.ownershipKind,
       ...(options.claims ? { claims: options.claims } : {}),
-      ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
+      ...(tierClassification ? { tierClassification } : {}),
       ...(recordContentTier ? {} : { recordContentTier: false }),
     });
 
@@ -116,16 +117,20 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       if ('skippedReason' in plan) return skipped(plan.skippedReason);
 
       const override = ledger.getOverride(identity);
+      const itemTitle = stringMetadata(plan.item, ['title', 'name', 'subject']);
+      const itemPath = stringMetadata(plan.item, ['locatorUri', 'pathDisplay']);
       const content = classifyContentTier(
         {
           text: request.text,
           metadataTier: record.metadataTier,
           metadataForced: record.metadataForced,
           metadataFlagged: record.metadataFlagged,
+          ...(itemTitle ? { title: itemTitle } : {}),
+          ...(itemPath ? { path: itemPath } : {}),
         },
         {
-          ...(options.tierClassification?.sensitivityMap ? { sensitivityMap: options.tierClassification.sensitivityMap } : {}),
-          ...(options.tierClassification?.sniffer ? { sniffer: options.tierClassification.sniffer } : {}),
+          ...(tierClassification?.sensitivityMap ? { sensitivityMap: tierClassification.sensitivityMap } : {}),
+          ...(tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {}),
           ...(override ? { override } : {}),
         },
       );
@@ -160,7 +165,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           store?.tombstoneCopy(plan.item.identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, trustTier: 'S5' });
         }
         ledger.removeCopies(identity);
-        return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
+        return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
       }
 
       const placement = set.placementFor(decision);

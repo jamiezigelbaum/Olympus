@@ -1,9 +1,9 @@
-import { loadSensitivityMap, type SensitivityMap } from '../../core/sensitivity-map.ts';
+import { loadOwnerSensitivityMap, type SensitivityMap } from '../../core/sensitivity-map.ts';
 
 export function loadGoogleSensitivityMap(
   env: Record<string, string | undefined> = process.env,
 ): SensitivityMap | undefined {
-  return loadSensitivityMap({ env, allowMissing: true, ignoreInvalid: true });
+  return loadOwnerSensitivityMap(env);
 }
 
 export function accountFromGoogleHandle(handle: string | undefined, fallback = 'personal'): string {

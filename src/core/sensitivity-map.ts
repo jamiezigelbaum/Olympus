@@ -109,6 +109,17 @@ export function resolveSensitivityMapPath(options: Pick<SensitivityMapLoadOption
     || defaultSensitivityMapPath();
 }
 
+/**
+ * The owner's installed sensitivity map, for any lane's tier classification:
+ * absent or invalid means none (the classifier then uses its defaults). One
+ * loader for every source, so no lane judges items without the owner's map.
+ */
+export function loadOwnerSensitivityMap(
+  env: Record<string, string | undefined> = process.env,
+): SensitivityMap | undefined {
+  return loadSensitivityMap({ env, allowMissing: true, ignoreInvalid: true });
+}
+
 export function loadSensitivityMap(options: SensitivityMapLoadOptions = {}): SensitivityMap | undefined {
   const path = resolveSensitivityMapPath(options);
   if (!existsSync(path)) {
