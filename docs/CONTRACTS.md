@@ -450,12 +450,17 @@ demo proof on a question the code was tuned against is gameable by a template;
 the held-out eval is not. This is the metric that keeps implementation honest.
 
 The initial versioned baseline is `1.0.0` (2026-08-29). It preserves the
-previously frozen shapes without a runtime or data migration. `2.0.0`
+previously frozen shapes without a runtime or data migration. `1.1.0`
+(2026-09-23) adds the optional EvidencePack `coverage.matchCounts`. `2.0.0`
 (2026-09-23) replaces `SourceConnector.classify` with `classificationSignals`;
-see the change log above.
+see both change logs.
 
 ## Change log
 
+- 2026-09-23 (v2.0.0): `SourceConnector.classify` is replaced by
+  `classificationSignals`; the shared tier classifier decides and the tier
+  ledger records. EvidencePack and Analyst shapes are unchanged. Full entry and
+  migration note under "Compatibility and change rule" above.
 - 2026-09-23 (v1.1.0): `EvidenceCoverage` gains optional `matchCounts`, per
   searched corpus: matched items, how many carry readable content, whether the
   count hit its probe ceiling, and how many are in the evidence. Source answers
