@@ -560,9 +560,7 @@ describe('a definitive refresh-token refusal latches reauth instead of retrying 
     });
     let refusing = true;
     let tokenEndpointCalls = 0;
-    // One long-lived broker, as the email-source server holds: its handle
-    // definitions are a construction-time snapshot, so only a live registry
-    // read can see the mark.
+    // One long-lived broker, as the email-source server holds.
     const broker = createEnvCredentialBroker({
       env: {},
       handleRegistryPath: registryPath,

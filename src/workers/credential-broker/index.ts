@@ -1287,7 +1287,12 @@ export class EnvCredentialBroker implements CredentialBroker {
     const refreshTokenPinnedInEnv = !!firstNonEmptyEnv(this.env, oauth2.refreshTokenEnvNames ?? []);
 
     if (!clientId) throw missingCredentialError(definition.handle, capability);
-    if (storedState?.status === 'reauth_required' || this.registryHandleReauthRequired(definition) || !refreshToken) {
+    // Installs run without a broker state store, so the registry mark is the
+    // only durable record of a refused refresh token; ignoring it re-presented
+    // a dead X token every minute for 59h (x.bookmarks.personal, 2026-09-22).
+    // Definitions are re-read from the registry per request, and a reconnect
+    // rewrites the entry without the mark, which is what clears it.
+    if (storedState?.status === 'reauth_required' || registryMarksReauthRequired(definition) || !refreshToken) {
       throw new CredentialBrokerError(
         'credential_reauth_required',
         `Credential handle ${definition.handle} requires OAuth reauthorization.`,
@@ -1644,29 +1649,6 @@ export class EnvCredentialBroker implements CredentialBroker {
       untilMs: this.now().getTime() + this.oauth2RefreshFailureBackoffMs,
       error,
     });
-  }
-
-  /**
-   * Whether the connected-handle registry already records this handle as dead.
-   *
-   * Installs run without a broker state path, so the registry mark is the only
-   * durable record of a refused refresh token. Read live rather than from the
-   * definition snapshot taken at construction: long-lived brokers would
-   * otherwise keep re-presenting a token the provider has already refused
-   * (x.bookmarks.personal, 2026-09-22: 1,600+ refusals over 59h). A reconnect
-   * rewrites the registry entry without the mark, which is what clears it.
-   */
-  private registryHandleReauthRequired(definition: EnvCredentialHandleDefinition): boolean {
-    if (this.connectedHandleRegistryPath) {
-      try {
-        const handle = readConnectedHandleRegistry(this.connectedHandleRegistryPath).handles
-          .find((candidate) => candidate.handle === definition.handle);
-        if (handle) return handle.backendState?.status === 'reauth_required';
-      } catch {
-        // An unreadable registry is not evidence of a dead grant.
-      }
-    }
-    return (definition.backendState as { status?: unknown } | undefined)?.status === 'reauth_required';
   }
 
   private markRegistryHandleReauthRequired(handle: string, now: Date): void {
@@ -2378,6 +2360,10 @@ function serviceAccountDelegationError(handle: string, capability: string): Cred
 }
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
+function registryMarksReauthRequired(definition: EnvCredentialHandleDefinition): boolean {
+  return (definition.backendState as { status?: unknown } | undefined)?.status === 'reauth_required';
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'unknown error';
 }
@@ -2412,8 +2398,9 @@ class OAuth2TokenEndpointError extends Error {
  * (x.bookmarks.personal, 2026-07-28). X has also answered with "the token"
  * rather than "the refresh token" (2026-09-22, 59h of retries); on this lane the
  * refresh token is the only token presented, so both wordings count. Only a
- * description that names the token counts: a request that really is malformed names something else, and
- * mistaking one for the other would latch a healthy handle into reauth.
+ * description that names the token counts: a request that really is malformed
+ * names something else, and mistaking one for the other would latch a healthy
+ * handle into reauth.
  *
  * The permanent client refusals join them for the same reason they are terminal
  * on the service-account lane: the grant cannot be exchanged until a human fixes

@@ -4348,7 +4348,7 @@ class EnvCredentialBroker {
     const refreshTokenPinnedInEnv = !!firstNonEmptyEnv2(this.env, oauth2.refreshTokenEnvNames ?? []);
     if (!clientId)
       throw missingCredentialError(definition.handle, capability);
-    if (storedState?.status === "reauth_required" || this.registryHandleReauthRequired(definition) || !refreshToken) {
+    if (storedState?.status === "reauth_required" || registryMarksReauthRequired(definition) || !refreshToken) {
       throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
     }
     await commitFileLease(lease, () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now));
@@ -4557,16 +4557,6 @@ class EnvCredentialBroker {
       untilMs: this.now().getTime() + this.oauth2RefreshFailureBackoffMs,
       error
     });
-  }
-  registryHandleReauthRequired(definition) {
-    if (this.connectedHandleRegistryPath) {
-      try {
-        const handle = readConnectedHandleRegistry(this.connectedHandleRegistryPath).handles.find((candidate) => candidate.handle === definition.handle);
-        if (handle)
-          return handle.backendState?.status === "reauth_required";
-      } catch {}
-    }
-    return definition.backendState?.status === "reauth_required";
   }
   markRegistryHandleReauthRequired(handle, now) {
     if (!this.connectedHandleRegistryPath)
@@ -4982,6 +4972,9 @@ function isPermanentOAuthClientError(providerError) {
 }
 function serviceAccountDelegationError(handle, capability) {
   return new CredentialBrokerError("credential_reauth_required", `Credential handle ${handle} service-account domain-wide delegation was refused; the impersonated account or one of its scopes is not delegated.`, { handle, capability });
+}
+function registryMarksReauthRequired(definition) {
+  return definition.backendState?.status === "reauth_required";
 }
 function errorMessage(error) {
   return error instanceof Error ? error.message : "unknown error";
