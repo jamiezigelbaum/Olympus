@@ -157,7 +157,9 @@ export interface BuildEvidencePackInput {
    * 2.3). Its results ride BESIDE the pack in the build detail; they never
    * enter the pack, so no model ever sees them.
    */
-  secretLocations?: (query: string) => readonly SecretLocationNote[];
+  // Scoped by the caller to the corpora this build actually searched (and the
+  // account and approved scope each was searched under).
+  secretLocations?: (query: string, searchedCorpora: readonly string[]) => readonly SecretLocationNote[];
   // Counts of items still pending classification in the searched corpora.
   classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
   now?: () => Date;
@@ -166,6 +168,8 @@ export interface BuildEvidencePackInput {
 // Where a Secret lives. Location only: never content.
 export interface SecretLocationNote {
   source: string;
+  // Opaque, stable reference; the only handle for an item whose metadata is Private.
+  ref: string;
   locator: string | null;
   title: string | null;
   findingKinds: readonly string[];
@@ -346,7 +350,7 @@ export async function buildEvidencePackDetailed(
     ? await corpusReadabilityGapsFor(routed.searchedCorpora, input.contentProviders)
     : [];
 
-  const secretLocations = input.secretLocations?.(input.searchQuery ?? input.question) ?? [];
+  const secretLocations = input.secretLocations?.(input.searchQuery ?? input.question, routed.searchedCorpora) ?? [];
   const classificationCoverage = (input.classificationCoverage?.(routed.searchedCorpora) ?? [])
     .filter((note) => note.pendingClassificationItems > 0);
 

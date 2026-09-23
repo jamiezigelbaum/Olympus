@@ -151,6 +151,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
       ? exported
       : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
     const store = set.store(planned.trustDomain, { create: true })!;
+    store.bindTierSet(ledger);
     const vectorIdentity = wantsContent ? options.vectorIdentities?.[planned.trustDomain] : undefined;
     const written = store.importItemCopy(payload, {
       trustTier: defaultStoreTrustTier(planned.trustDomain),
@@ -228,6 +229,9 @@ async function moveToSecrets(options: TierMoveOptions, expectedGeneration: numbe
       const title = exported.columns.title;
       set.secrets()?.record({
         identity,
+        // The names' tier before the item became Secrets decides whether its
+        // title may be released.
+        namesReleasable: record.previousMetadataTier === 'public' || record.previousMetadataTier === 'private',
         ...(typeof locator === 'string' ? { locator } : {}),
         ...(typeof title === 'string' ? { title } : {}),
         findingKinds: kinds.length > 0 ? kinds : ['owner_marked_secret'],

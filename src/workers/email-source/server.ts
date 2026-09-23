@@ -1736,6 +1736,7 @@ export async function main(): Promise<void> {
   // beside the same store.
   const tierLanes: Array<{
     ledger: TierLedger;
+    secureCorpusId: string;
     corpusIds: Set<string>;
     secrets?: SecretLocationsIndex;
     publicStore?: OnDemandTierStore;
@@ -1759,6 +1760,7 @@ export async function main(): Promise<void> {
     }
     const lane = {
       ledger,
+      secureCorpusId: input.secure.corpusId,
       corpusIds: new Set([
         input.internal.corpusId,
         input.secure.corpusId,
@@ -1770,6 +1772,25 @@ export async function main(): Promise<void> {
     tierLanes.push(lane);
     return lane;
   };
+  // A lane's Secrets are located only when its Private (secure_local) corpus
+  // was actually searched — which is what include_secure_local, corpus
+  // selection and a file source's scope approval decide — and only within the
+  // account and filters that search ran under.
+  const tierSecretLocations = (
+    query: string,
+    searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
+  ) => tierLanes.flatMap((lane) => {
+    const scope = searched.find((entry) => entry.corpusId === lane.secureCorpusId);
+    if (!scope || !lane.secrets) return [];
+    try {
+      return lane.secrets.search(query, {
+        ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
+        ...(scope.filters ? { filters: scope.filters } : {}),
+      }, { limit: 5 });
+    } catch {
+      return [];
+    }
+  });
   const tierVisibilityGate = createTierVisibilityGate(() => tierLanes.map((lane) => ({
     ledger: lane.ledger,
     corpusIds: lane.corpusIds,
@@ -2639,6 +2660,9 @@ export async function main(): Promise<void> {
         // is audited as skipped/no_adapter instead of silently disappearing
         // from unified fan-out.
         lanes: sourceAnswerLanes = (request) => {
+          // The scope each corpus is searched under in THIS request, so the
+          // Secret locations released beside the answer are confined to it.
+          const searchScopes = new Map<string, { accountScope?: string; filters?: ConnectorStoreSearchFilters }>();
           const connectorStoreAdapter = (
             store: LocalConnectorStore,
           ): SourceIndexCorpusSearchAdapter | undefined => {
@@ -2656,6 +2680,12 @@ export async function main(): Promise<void> {
             const connectorStoreAccount = scope.accountScope
               ?? mandatoryScope.accountScope
               ?? (request.account?.trim() || connectorStoreAccountScopes.get(store.corpusId));
+            searchScopes.set(store.corpusId, {
+              ...(connectorStoreAccount ? { accountScope: connectorStoreAccount } : {}),
+              ...(scope.filters || mandatoryScope.filters
+                ? { filters: { ...scope.filters, ...mandatoryScope.filters } }
+                : {}),
+            });
             return createConnectorStoreCorpusAdapter({
               store,
               retrievalMode: request.retrieval_mode ?? 'keyword',
@@ -2678,7 +2708,13 @@ export async function main(): Promise<void> {
                 .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
             ),
             visibilityGate: tierVisibilityGate,
-            secretLocations: (query: string) => tierLanes.flatMap((lane) => lane.secrets?.search(query, { limit: 5 }) ?? []),
+            secretLocations: (query: string, searchedCorpora: readonly string[]) => tierSecretLocations(
+              query,
+              searchedCorpora.flatMap((corpusId) => {
+                const scope = searchScopes.get(corpusId);
+                return scope ? [{ corpusId, ...scope }] : [];
+              }),
+            ),
             classificationCoverage: (searchedCorpora: readonly string[]) => searchedCorpora.flatMap((corpusId) => {
               const lane = tierLanes.find((candidate) => candidate.corpusIds.has(corpusId));
               if (!lane) return [];
@@ -3426,7 +3462,7 @@ export async function main(): Promise<void> {
             ...(tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []),
           ].filter((sibling) => sibling !== corpusId),
           sourceIndexVisibilityGate: tierVisibilityGate,
-          secretLocationSearch: (query: string) => tierLanes.flatMap((lane) => lane.secrets?.search(query, { limit: 5 }) ?? []),
+          secretLocationSearch: tierSecretLocations,
         }
       : {}),
     ...(connectorStoreEmbeddingProviders.size > 0 ? { connectorStoreEmbeddingProviders } : {}),

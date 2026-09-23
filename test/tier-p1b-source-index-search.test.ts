@@ -40,7 +40,9 @@ async function workerFixture(): Promise<{ tiered: TierFixture; worker: ReturnTyp
     connectorStores: tiered.set.openStores(),
     connectorStoreTierSiblings: (corpusId) => [...corpusIds].filter((sibling) => sibling !== corpusId),
     sourceIndexVisibilityGate: createTierVisibilityGate(() => [{ ledger: tiered.ledger, corpusIds }]),
-    secretLocationSearch: (query) => tiered.secrets.search(query),
+    secretLocationSearch: (query, searched) => (
+      searched.some((scope) => scope.corpusId === CORPORA.secure_local) ? tiered.secrets.search(query, {}) : []
+    ),
   });
   return { tiered, worker };
 }
@@ -68,9 +70,11 @@ describe('P1b source_index_search', () => {
       ['invoice', CORPORA.secure_local],
     ]));
     expect(result.audit.searched_corpora).toEqual([CORPORA.internal, CORPORA.secure_local]);
-    expect(result.policy).toMatchObject({ trust_domain: 'internal', local_only: true });
+    // The policy describes the most private tier the search read.
+    expect(result.policy).toMatchObject({ trust_domain: 'secure_local', local_only: true });
     expect(result.secret_locations).toEqual([{
       source: 'fixture',
+      ref: expect.stringMatching(/^secret:[0-9a-f]{16}$/),
       locator: '/Files/orchard-deploy.env',
       title: 'orchard-deploy.env',
       finding_kinds: ['aws_access_key_id'],

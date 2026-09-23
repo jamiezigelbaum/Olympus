@@ -342,12 +342,14 @@ export function createGoogleDriveConnectorStoreSyncHandler(
       const envelopeCursor = googleDriveCheckpointCursor(envelope, connectorId, options.scope !== undefined);
       const envelopeUsable = isGoogleDriveConnectorCursor(envelopeCursor);
       // The fallback is the tier set's committed resume point, written only
-      // after every leg of a run committed; a store written before P1b falls
-      // back to its own completed run as before.
+      // after every leg of a run committed. Before a set has committed one,
+      // fall back to the LAST leg's own completed run: legs ran in order, so
+      // it is never ahead of a window an earlier leg missed (the first leg's
+      // row can be).
       const candidate = envelopeUsable
         ? envelopeCursor
         : tierSet.committedCursor(connectorId)?.cursor
-          ?? options.internalStore.lastCompletedSyncRun(connectorId)?.cursor;
+          ?? options.secureStore.lastCompletedSyncRun(connectorId)?.cursor;
       let resume = isGoogleDriveConnectorCursor(candidate) ? candidate : undefined;
       if ((envelope !== undefined && !envelopeUsable) || (candidate !== undefined && resume === undefined)) {
         warnings.push(GOOGLE_DRIVE_RESUME_REJECTED_WARNING);

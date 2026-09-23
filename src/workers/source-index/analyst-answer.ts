@@ -115,7 +115,7 @@ export interface AnalystAnswerLanes {
    * them enters the pack, so the routing to Argus is unchanged in shape.
    */
   visibilityGate?: SourceIndexVisibilityGate;
-  secretLocations?: (query: string) => readonly SecretLocationNote[];
+  secretLocations?: (query: string, searchedCorpora: readonly string[]) => readonly SecretLocationNote[];
   classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
 }
 
@@ -584,6 +584,7 @@ export function createAnalystSourceIndexAnswerHandler(
               // model input (the Analyst saw only the pack).
               secret_locations: (detail.secretLocations ?? []).map((location) => ({
                 source: location.source,
+                ref: location.ref,
                 ...(location.locator ? { locator: location.locator } : {}),
                 ...(location.title ? { title: location.title } : {}),
                 finding_kinds: [...location.findingKinds],

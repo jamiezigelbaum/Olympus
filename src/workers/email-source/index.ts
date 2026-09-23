@@ -1,5 +1,6 @@
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import type { SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
+import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { SecretLocationNote } from '../../core/evidence-pack.ts';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
@@ -413,8 +414,15 @@ export interface EmailSourceWorkerOptions {
   connectorStoreTierSiblings?: (corpusId: string) => readonly string[];
   /** One tier-ledger snapshot over every hit a tiered search gathered. */
   sourceIndexVisibilityGate?: SourceIndexVisibilityGate;
-  /** Location-only Secret matches for a query, returned beside the hits. */
-  secretLocationSearch?: (query: string) => readonly SecretLocationNote[];
+  /**
+   * Location-only Secret matches for a query, returned beside the hits,
+   * confined to the corpora this search covered and the account and filters
+   * each was searched under.
+   */
+  secretLocationSearch?: (
+    query: string,
+    searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
+  ) => readonly SecretLocationNote[];
   /** Generic corpus-keyed overrides for connector-store retrieval providers. */
   connectorStoreEmbeddingProviders?: ReadonlyMap<string, SourceEmbeddingProvider>;
   /** Generic corpus-keyed principal account boundaries for connector-store reads. */
@@ -2639,7 +2647,19 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   allowedCorpusIds: [store.corpusId],
                 },
               }));
-              return { store, searchRequest, result };
+              const accountScope = mandatoryScope?.allowed === true && mandatoryScope.accountScope
+                ? mandatoryScope.accountScope
+                : searchRequest.accountScope;
+              return {
+                store,
+                searchRequest,
+                result,
+                scope: {
+                  corpusId: store.corpusId,
+                  ...(accountScope ? { accountScope } : {}),
+                  ...(combinedFilters ? { filters: combinedFilters } : {}),
+                },
+              };
             };
             const primary = await searchConnectorStore(connectorStore);
             if (!primary) {
@@ -2690,7 +2710,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               }
             }
             const hits = tiered ? merged : tagged;
-            const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query) ?? [] : [];
+            const secretLocations = tiered
+              ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? []
+              : [];
             const locatorsExposed = hits.some((hit) => (
               Object.prototype.hasOwnProperty.call(hit, 'locator')
             ));
@@ -2706,6 +2728,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                     // Location only, beside the hits: never content.
                     secret_locations: secretLocations.map((location) => ({
                       source: location.source,
+                      ref: location.ref,
                       ...(location.locator ? { locator: location.locator } : {}),
                       ...(location.title ? { title: location.title } : {}),
                       finding_kinds: [...location.findingKinds],
@@ -2733,7 +2756,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 source_packets_exposed: false,
                 local_only: searchRequest.explicitEmptyChatScope
                   || runs.some((run) => run.store.trustDomain === 'secure_local'),
-                trust_domain: connectorStore.trustDomain,
+                // The most private tier this search read, not the named
+                // corpus's: a tiered result may carry Private hits.
+                trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
                 ...(locatorsExposed
                   ? { locators_exposed: true, locator_release: 'explicit_request' as const }
                   : {}),
@@ -6438,3 +6463,9 @@ export {
   gmailEmailCorpusTrustDomainForCorpusId,
   type GmailEmailCorpusId,
 } from '../google-connectors/corpora.ts';
+
+function mostPrivateTrustDomain(domains: readonly SourceTrustDomain[]): SourceTrustDomain {
+  if (domains.includes('secure_local')) return 'secure_local';
+  if (domains.includes('internal')) return 'internal';
+  return 'public_safe';
+}

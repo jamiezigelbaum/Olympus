@@ -590,6 +590,25 @@ export class ConnectorStoreMetadataOnlyViolationError extends Error {
  * worker responsive and preserves the active item until the maintenance pass
  * can prove an unambiguous identity.
  */
+/**
+ * A store a tiered store set routed copies into, read or written without that
+ * set's ledger (missing, replaced, or unreadable). Visibility cannot be judged,
+ * so the operation is refused rather than treating routed copies as legacy.
+ */
+export class TierLedgerUnavailableError extends Error {
+  constructor(corpusId: string) {
+    super(
+      `The tier ledger governing ${corpusId} is missing or was replaced, so which copies are visible `
+      + 'cannot be decided. Restore the set ledger (beside the source\'s secure_local store) before '
+      + 'syncing or reading this store.',
+    );
+    this.name = 'TierLedgerUnavailableError';
+  }
+}
+
+const TIER_SET_BINDING_RUN_ID = 'tiered-store-set-binding';
+const TIER_SET_BINDING_CONNECTOR_ID = 'tiered_store_set_binding';
+
 export class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
   constructor() {
     super('Connector store locator identity index requires bounded backfill before path-only deletions can run.');
@@ -708,6 +727,8 @@ export interface ConnectorStoreTierRouteInput {
   metadataOnly: boolean;
   /** A content fetch was attempted and failed. */
   contentFetchFailed: boolean;
+  /** The trusted account/scope observation the lane stamps on the item, when it has one. */
+  sourceScope?: { accountGeneration: string; scopeRevision: string; folderKeys: readonly string[] };
 }
 
 export interface ConnectorStoreTierRouting {
@@ -1918,6 +1939,7 @@ export class LocalConnectorStore {
   private tierLedgerHandle: TierLedger | undefined;
   private tierLedgerOwned: boolean | undefined;
   private tierLedgerDisabled: boolean | undefined;
+  private boundLedgerHandle: TierLedger | undefined;
 
   constructor(options: LocalConnectorStoreOptions) {
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
@@ -1982,6 +2004,8 @@ export class LocalConnectorStore {
   close(): void {
     try {
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
+      this.boundLedgerHandle?.close();
+      this.boundLedgerHandle = undefined;
     } finally {
       this.tierLedgerHandle = undefined;
       closeSqliteStore(this.db);
@@ -2055,11 +2079,103 @@ export class LocalConnectorStore {
    * visible exactly as before P1b.
    */
   private visibilityLedger(): TierLedger | undefined {
+    // A store that has received routed copies is BOUND to its tiered store
+    // set's ledger. Every handle on it — a set leg, a read-only reader, an
+    // embedding drain, a maintenance script — must judge visibility by that
+    // ledger, and when it is missing or replaced, fail closed: a superseded
+    // copy cannot be told apart from a legacy one without it.
+    const binding = this.tierSetBinding();
+    if (binding) {
+      const ledger = this.tierLedgerHandle?.dbPath === binding.ledgerPath
+        ? this.tierLedgerHandle
+        : this.boundTierLedger(binding.ledgerPath);
+      let ledgerId: string | undefined;
+      try {
+        ledgerId = ledger.ledgerId();
+      } catch {
+        ledgerId = undefined;
+      }
+      if (ledgerId !== binding.ledgerId) {
+        throw new TierLedgerUnavailableError(this.corpusId);
+      }
+      return ledger;
+    }
     if (this.tierLedgerHandle) return this.tierLedgerHandle;
     if (this.tierLedgerDisabled === true) return undefined;
     const path = tierLedgerPathForStore(this.dbPath);
     if (path === ':memory:' || !existsSync(path)) return undefined;
     return this.tierLedger();
+  }
+
+  /** The set ledger a bound store must use, opened by path; missing fails closed. */
+  private boundTierLedger(ledgerPath: string): TierLedger {
+    if (this.boundLedgerHandle?.dbPath === ledgerPath) return this.boundLedgerHandle;
+    if (ledgerPath !== ':memory:' && !existsSync(ledgerPath)) throw new TierLedgerUnavailableError(this.corpusId);
+    this.boundLedgerHandle?.close();
+    this.boundLedgerHandle = new TierLedger({ dbPath: ledgerPath, now: this.now });
+    return this.boundLedgerHandle;
+  }
+
+  /**
+   * The tiered store set this store belongs to, once a set has routed a copy
+   * into it: the set ledger's identity and path. Absent: every row is legacy.
+   */
+  tierSetBinding(): { ledgerId: string; ledgerPath: string } | undefined {
+    const row = this.db.query(`
+      SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?
+    `).get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
+    if (!row?.cursor) return undefined;
+    try {
+      const parsed = JSON.parse(row.cursor) as { ledgerId?: unknown; ledgerPath?: unknown };
+      if (typeof parsed.ledgerId === 'string' && typeof parsed.ledgerPath === 'string') {
+        return { ledgerId: parsed.ledgerId, ledgerPath: parsed.ledgerPath };
+      }
+    } catch {
+      // Fall through: a binding that cannot be read is a binding to nothing.
+    }
+    throw new TierLedgerUnavailableError(this.corpusId);
+  }
+
+  /**
+   * Record that a tiered store set's ledger governs this store. Written once,
+   * before the first routed copy lands; a store bound to a DIFFERENT ledger is
+   * refused, never rebound.
+   */
+  bindTierSet(ledger: TierLedger): void {
+    const ledgerId = ledger.ledgerId();
+    const existing = this.tierSetBinding();
+    if (existing) {
+      if (existing.ledgerId !== ledgerId) throw new TierLedgerUnavailableError(this.corpusId);
+      return;
+    }
+    // started_at is the epoch so the marker is never a store's "last run".
+    this.db.query(`
+      INSERT INTO sync_runs (
+        sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+        items_indexed, started_at, completed_at
+      ) VALUES (?, ?, ?, 'completed', ?, 0, 0, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z')
+    `).run(
+      TIER_SET_BINDING_RUN_ID,
+      this.corpusId,
+      TIER_SET_BINDING_CONNECTOR_ID,
+      JSON.stringify({ ledgerId, ledgerPath: ledger.dbPath }),
+    );
+  }
+
+  /**
+   * Identities (of those given) whose copy in THIS store the tier ledger
+   * keeps hidden (superseded or staged). Those copies are kept on purpose, so
+   * a lane's own eviction never touches them; a current copy is the lane's
+   * like any other row.
+   */
+  private hiddenCopyKeys(identities: ReadonlyArray<{ provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }>): Set<string> {
+    const ledger = this.visibilityLedger();
+    if (!ledger || identities.length === 0 || !ledger.corpusHasCopies(this.corpusId)) return new Set();
+    const hidden = new Set<string>();
+    for (const [key, copies] of ledger.copiesForMany(identities)) {
+      if (copies.some((copy) => copy.corpusId === this.corpusId && copy.state !== 'current')) hidden.add(key);
+    }
+    return hidden;
   }
 
   /**
@@ -2073,7 +2189,7 @@ export class LocalConnectorStore {
    */
   private tierVisibleRows<T>(
     rows: readonly T[],
-    identityOf: (row: T) => { provider: string; accountScope: string; providerItemId: string },
+    identityOf: (row: T) => { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string },
     layerOf: (row: T) => TierSearchLayer,
   ): T[] {
     if (rows.length === 0) return [];
@@ -2100,16 +2216,21 @@ export class LocalConnectorStore {
   private tierHiddenItemPks(): { hidden: number[]; held: number[]; metadataLayer: number[]; moving: number } {
     const ledger = this.visibilityLedger();
     if (!ledger || !ledger.corpusHasCopies(this.corpusId)) return { hidden: [], held: [], metadataLayer: [], moving: 0 };
-    const pksFor = (identities: ReadonlyArray<{ provider: string; accountScope: string; providerItemId: string }>): number[] => {
+    const pksFor = (identities: ReadonlyArray<{ provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }>): number[] => {
       const lookup = this.db.query(`
         SELECT item_pk FROM items
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND tombstoned = 0
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+          AND tombstoned = 0
       `);
       const pks: number[] = [];
       for (const identity of identities) {
-        for (const row of lookup.all(identity.provider, identity.accountScope, identity.providerItemId) as Array<{ item_pk: number }>) {
-          pks.push(row.item_pk);
-        }
+        const row = lookup.get(
+          identity.provider,
+          identity.accountScope,
+          normalizeConversationId(identity.providerConversationId),
+          identity.providerItemId,
+        ) as { item_pk: number } | null;
+        if (row) pks.push(row.item_pk);
       }
       return pks;
     };
@@ -2128,7 +2249,7 @@ export class LocalConnectorStore {
   }
 
   /** Whether this store's copy of an item may be served for any layer. */
-  private copyServable(identity: { provider: string; accountScope: string; providerItemId: string }): boolean {
+  private copyServable(identity: { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }): boolean {
     return this.tierVisibleRows([identity], (entry) => entry, () => 'metadata').length > 0
       || this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
   }
@@ -2646,11 +2767,15 @@ export class LocalConnectorStore {
     if (!titleQuery) return { candidates: [], truncated: false };
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedProvider = normalizeBoundedFilterString(provider, 'provider');
+    // Item rows, not DISTINCT titles: a title is only a candidate while some
+    // copy that serves it is visible under the tier ledger (a superseded copy
+    // never names a chat).
     const rows = this.db.query(`
-      SELECT DISTINCT i.provider_conversation_id, i.title
+      SELECT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id, i.title
       FROM connector_store_fts
       JOIN items i ON i.item_pk = connector_store_fts.item_pk
       WHERE connector_store_fts MATCH ?
+        AND connector_store_fts.chunk_pk IS NULL
         AND i.tombstoned = 0
         AND i.provider_conversation_id IS NOT NULL
         AND i.provider_conversation_id <> ''
@@ -2663,14 +2788,27 @@ export class LocalConnectorStore {
       titleQuery,
       ...(selectedAccount ? [selectedAccount] : []),
       ...(selectedProvider ? [selectedProvider] : []),
-      MAX_CONVERSATION_TITLE_LOOKUP_ROWS + 1,
-    ) as Array<{ provider_conversation_id: string; title: string }>;
+      (MAX_CONVERSATION_TITLE_LOOKUP_ROWS + 1) * 8,
+    ) as Array<{ provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string; title: string }>;
+    const visible = this.tierVisibleRows(
+      rows,
+      (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        providerConversationId: row.provider_conversation_id,
+      }),
+      () => 'metadata',
+    );
+    const distinct = new Map<string, { conversationId: string; title: string }>();
+    for (const row of visible) {
+      const key = JSON.stringify([row.provider_conversation_id, row.title]);
+      if (!distinct.has(key)) distinct.set(key, { conversationId: row.provider_conversation_id, title: row.title });
+    }
+    const candidates = [...distinct.values()];
     return {
-      candidates: rows.slice(0, MAX_CONVERSATION_TITLE_LOOKUP_ROWS).map((row) => ({
-        conversationId: row.provider_conversation_id,
-        title: row.title,
-      })),
-      truncated: rows.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS,
+      candidates: candidates.slice(0, MAX_CONVERSATION_TITLE_LOOKUP_ROWS),
+      truncated: candidates.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS || rows.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS * 8,
     };
   }
 
@@ -3879,10 +4017,14 @@ export class LocalConnectorStore {
           AND normalized_conversation = ? AND provider_item_id = ?
           AND tombstoned = 0
       `);
+      // A copy the tier ledger keeps hidden (superseded or staged) is kept on
+      // purpose: a lane's own eviction never deletes it.
+      const hiddenCopies = this.hiddenCopyKeys(options.identities);
       for (const identity of options.identities) {
         const key = sourceItemIdentityKey(identity);
         if (considered.has(key)) continue;
         considered.add(key);
+        if (hiddenCopies.has(tierLedgerIdentityKey(identity))) continue;
         const row = findActive.get(
           identity.provider,
           identity.accountScope,
@@ -5157,6 +5299,9 @@ export class LocalConnectorStore {
               legacy: legacySensitivity,
               metadataOnly,
               contentFetchFailed,
+              ...(options?.sourceScopeObservation
+                ? { sourceScope: normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) }
+                : {}),
             })
             : { kind: 'legacy' };
           if (route.kind === 'elsewhere') {
@@ -7566,7 +7711,12 @@ export class LocalConnectorStore {
     }
     selected = this.tierVisibleRows(
       selected,
-      (row) => ({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id }),
+      (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+      }),
       // A metadata-only FTS row carries no chunk. Chunk rows are the content
       // layer (they are seasoned with the names, as they always were).
       (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
@@ -7676,7 +7826,12 @@ export class LocalConnectorStore {
     ) as ItemRow[];
     return this.tierVisibleRows(
       rows,
-      (row) => ({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id }),
+      (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+      }),
       () => 'content',
     ).map((row) => searchRowFromItemRow(row));
   }
@@ -7691,6 +7846,7 @@ export class LocalConnectorStore {
   ): ConnectorStoreLocalContent | undefined {
     const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
+        provider_conversation_id,
         ${this.reactionsColumnPresent ? 'reactions_json' : 'NULL AS reactions_json'}
       FROM items WHERE local_item_id = ? AND tombstoned = 0
     `).get(localItemId) as {
@@ -7701,12 +7857,18 @@ export class LocalConnectorStore {
       provider: string;
       account_scope: string;
       provider_item_id: string;
+      provider_conversation_id: string | null;
       reactions_json: string | null;
     } | null;
     if (!row) return undefined;
     // Never serve a superseded or staged copy. A metadata-layer copy has no
     // chunks, so serving it can only ever hand over names.
-    if (!this.copyServable({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id })) {
+    if (!this.copyServable({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    })) {
       return undefined;
     }
     const chunkRows = this.db.query(
@@ -7804,7 +7966,7 @@ export class LocalConnectorStore {
             ${parityWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
-          WHERE connector_id <> 'connector_store_embedding_write_authority'
+          WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
         ) AS sync_runs,
         -- EXISTS rather than COUNT(DISTINCT ...) so the per-item probe stops at
         -- the first chunk row instead of walking every chunk of every item.
@@ -7920,7 +8082,7 @@ export class LocalConnectorStore {
     // insertion, so it breaks the tie by true recency.
     const last = this.db.query(
       `SELECT * FROM sync_runs
-       WHERE connector_id <> 'connector_store_embedding_write_authority'
+       WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
        ORDER BY started_at DESC, rowid DESC LIMIT 1`,
     ).get() as SyncRunRow | null;
     return {

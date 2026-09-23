@@ -61,7 +61,10 @@ function lanes(tiered: TierFixture) {
     adapters: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreCorpusAdapter({ store })])),
     contentProviders: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreContentProvider({ store })])),
     visibilityGate: createTierVisibilityGate(() => [{ ledger: tiered.ledger, corpusIds: new Set(Object.values(CORPORA)) }]),
-    secretLocations: (query: string) => tiered.secrets.search(query),
+    // As the runtime does: only when the source's Private corpus was searched.
+    secretLocations: (query: string, searched: readonly string[]) => (
+      searched.includes(CORPORA.secure_local) ? tiered.secrets.search(query, {}) : []
+    ),
     classificationCoverage: (searched: readonly string[]) => searched.map((corpusId) => ({
       corpusId,
       pendingClassificationItems: tiered.ledger.corpusCopyCounts(corpusId).held,

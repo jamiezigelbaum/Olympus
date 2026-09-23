@@ -68,6 +68,8 @@ export interface SourceAnswerSelectedItem {
 // Where a matched Secret lives. Location only (design section 2.3).
 export interface SourceIndexAnswerSecretLocation {
   source: string;
+  // Opaque reference; the only handle when the item's metadata is Private.
+  ref: string;
   locator?: string;
   title?: string;
   finding_kinds: string[];

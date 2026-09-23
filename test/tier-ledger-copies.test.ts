@@ -209,29 +209,77 @@ describe('tier ledger copies (P1b)', () => {
     store.close();
   });
 
-  test('a P1a (schema 1) ledger upgrades additively: rows kept, none routed, no copies', () => {
+  test('a P1a (schema 1) ledger upgrades: rows kept with no conversation, none routed, no copies', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-ledger-v1-'));
     try {
       const dbPath = join(dir, 'tier-ledger.sqlite');
-      // Build a schema-1 file by hand, the way P1a left it.
-      const v1 = new TierLedger({ dbPath });
-      v1.recordDecision(ITEM, decision(), { trustDomain: 'secure_local', trustTier: 'S4' });
-      v1.close();
+      // The exact schema-1 file P1a (#77) writes, with one decision and one override.
       const raw = new Database(dbPath);
       raw.exec(`
-        DROP TABLE tier_copies; DROP TABLE tier_set_cursors;
-        ALTER TABLE tier_items DROP COLUMN routed;
-        UPDATE schema_version SET version = 1 WHERE store_id = 'olympus_tier_ledger';
+        CREATE TABLE schema_version (store_id TEXT PRIMARY KEY, version INTEGER NOT NULL, applied_at TEXT NOT NULL);
+        INSERT INTO schema_version VALUES ('olympus_tier_ledger', 1, '2026-09-23T00:00:00.000Z');
+        CREATE TABLE tier_items (
+          provider TEXT NOT NULL, account_scope TEXT NOT NULL, provider_item_id TEXT NOT NULL, family TEXT NOT NULL,
+          metadata_tier TEXT NOT NULL, content_tier TEXT NOT NULL, generation INTEGER NOT NULL, decided_by TEXT NOT NULL,
+          reasons_json TEXT NOT NULL, engine_version TEXT NOT NULL, map_revision TEXT NOT NULL, model_id TEXT,
+          previous_metadata_tier TEXT, previous_content_tier TEXT, state TEXT NOT NULL,
+          target_metadata_tier TEXT, target_content_tier TEXT, stored_trust_domain TEXT, stored_trust_tier TEXT,
+          content_read INTEGER NOT NULL DEFAULT 0, metadata_pending INTEGER NOT NULL DEFAULT 0,
+          content_pending INTEGER NOT NULL DEFAULT 0, metadata_forced INTEGER NOT NULL DEFAULT 0,
+          metadata_flagged INTEGER NOT NULL DEFAULT 0, decided_at TEXT NOT NULL,
+          PRIMARY KEY (provider, account_scope, provider_item_id)
+        );
+        CREATE INDEX tier_items_state ON tier_items (state, provider, account_scope, provider_item_id);
+        CREATE TABLE tier_history (
+          history_pk INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, account_scope TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL, generation INTEGER NOT NULL, metadata_tier TEXT NOT NULL,
+          content_tier TEXT NOT NULL, decided_by TEXT NOT NULL, reasons_json TEXT NOT NULL, state TEXT NOT NULL,
+          decided_at TEXT NOT NULL
+        );
+        CREATE INDEX tier_history_item ON tier_history (provider, account_scope, provider_item_id, history_pk);
+        CREATE TABLE tier_overrides (
+          provider TEXT NOT NULL, account_scope TEXT NOT NULL, provider_item_id TEXT NOT NULL,
+          override_json TEXT NOT NULL, set_at TEXT NOT NULL, PRIMARY KEY (provider, account_scope, provider_item_id)
+        );
+        INSERT INTO tier_items (provider, account_scope, provider_item_id, family, metadata_tier, content_tier, generation,
+          decided_by, reasons_json, engine_version, map_revision, state, stored_trust_domain, stored_trust_tier, content_read, decided_at)
+        VALUES ('fixture', 'personal', 'item-1', 'file', 'private', 'private', 1, 'default', '[]', 'x', 'none', 'current',
+          'secure_local', 'S4', 1, '2026-09-23T00:00:00.000Z');
+        INSERT INTO tier_history (provider, account_scope, provider_item_id, generation, metadata_tier, content_tier,
+          decided_by, reasons_json, state, decided_at)
+        VALUES ('fixture', 'personal', 'item-1', 1, 'private', 'private', 'default', '[]', 'current', '2026-09-23T00:00:00.000Z');
+        INSERT INTO tier_overrides VALUES ('fixture', 'personal', 'item-1', '{"kind":"not_secret"}', '2026-09-23T00:00:00.000Z');
       `);
       raw.close();
 
       const upgraded = new TierLedger({ dbPath });
-      expect(upgraded.getCurrent(ITEM)).toMatchObject({ routed: false, storedTrustDomain: 'secure_local', generation: 1 });
+      expect(upgraded.getCurrent(ITEM)).toMatchObject({ routed: false, conversationKey: '', storedTrustDomain: 'secure_local', generation: 1 });
+      expect(upgraded.history(ITEM)).toHaveLength(1);
+      expect(upgraded.getOverride(ITEM)).toEqual({ kind: 'not_secret' });
       expect(upgraded.copies(ITEM)).toEqual([]);
+      expect(upgraded.ledgerId()).toMatch(/^[0-9a-f]{32}$/);
       upgraded.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('the conversation is part of the identity: the same message id in two chats is two items', () => {
+    const store = ledger();
+    const chatA = { ...ITEM, providerItemId: '7', providerConversationId: 'chat-a' };
+    const chatB = { ...ITEM, providerItemId: '7', providerConversationId: 'chat-b' };
+    store.recordRoutedPlacement(chatA, decision(), whole(INTERNAL));
+    expect(store.isRouted(chatA)).toBe(true);
+    expect(store.isRouted(chatB)).toBe(false);
+    expect(store.copies(chatB)).toEqual([]);
+    expect(store.copiesForMany([chatA, chatB]).size).toBe(1);
+    expect(store.corpusCopyIdentities(INTERNAL.corpusId, 'held')).toEqual([]);
+    store.recordRoutedPlacement(chatB, decision(), whole(SECURE, true));
+    expect(store.corpusCopyIdentities(SECURE.corpusId, 'held')).toEqual([
+      { provider: 'fixture', accountScope: 'personal', providerItemId: '7', providerConversationId: 'chat-b' },
+    ]);
+    expect(store.getCurrent(chatA)?.conversationKey).toBe('chat-a');
+    store.close();
   });
 
   test('raise detection compares the store serving each layer', () => {

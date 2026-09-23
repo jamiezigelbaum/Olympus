@@ -44,6 +44,7 @@ import { detectSecretFindingKinds } from '../classification/engine.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import { maxTier, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import {
+  tierLedgerIdentityKey,
   tierLedgerPathForStore,
   trustDomainRank,
   type TierCopy,
@@ -55,6 +56,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
+  TierLedgerUnavailableError,
   connectorStoreItemText,
   syncAndEmbedFromConnector,
   type ConnectorStoreEmbedSummary,
@@ -270,6 +272,7 @@ export class TieredStoreSet {
     sync: ConnectorStoreSyncOptions = {},
     options: { commitCursor?: boolean } = {},
   ): Promise<TieredStoreSetRun> {
+    this.assertLedgerGovernsLegs();
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];
@@ -302,6 +305,7 @@ export class TieredStoreSet {
   async syncLegs(
     entries: ReadonlyArray<{ trustDomain: SourceTrustDomain; connector: SourceConnector; sync?: ConnectorStoreSyncOptions }>,
   ): Promise<TieredStoreSetRun> {
+    this.assertLedgerGovernsLegs();
     const run = new TieredRoutingRun(this, 'per_leg');
     const legRuns: TieredStoreLegRun[] = [];
     for (const entry of entries) {
@@ -312,6 +316,20 @@ export class TieredStoreSet {
       run.finalize();
     }
     return tieredRun(legRuns, run.counts, undefined);
+  }
+
+  /**
+   * Refuse to sync when a leg holds routed copies governed by a DIFFERENT
+   * ledger (the set ledger was lost or replaced): treating those copies as
+   * legacy would make superseded copies visible again.
+   */
+  private assertLedgerGovernsLegs(): void {
+    const ledgerId = this.ledger.ledgerId();
+    for (const domain of TIER_DOMAIN_ORDER) {
+      const store = this.store(domain);
+      const binding = store?.tierSetBinding();
+      if (store && binding && binding.ledgerId !== ledgerId) throw new TierLedgerUnavailableError(store.corpusId);
+    }
   }
 
   /** @internal */
@@ -603,9 +621,14 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const { item, connector } = input;
     const identity = item.identity;
     const ledger = this.set.ledger;
+    // Legacy first: an item any store already holds a row for, that this
+    // set's ledger never routed, is the lane's — whatever else the ledger
+    // says about other items.
+    const hasRow = this.set.anyLegHasRow(identity);
+    const routed = ledger.isRouted(identity);
     if (item.metadata['deleted'] === true) {
       this.set.secrets()?.remove(identity);
-      if (!ledger.isRouted(identity)) {
+      if (!routed) {
         this.counts.itemsLegacy += 1;
         return { kind: 'legacy' };
       }
@@ -616,13 +639,12 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
 
     const text = connectorStoreItemText(item);
     const decision = decideItemTiers(connector, item, text, this.set.classification(), ledger);
-    this.recordSecretLocation(item, text, decision);
-    const routed = ledger.isRouted(identity);
+    this.recordSecretLocation(input, text, decision);
     const contentRead = decision.contentRead && !input.contentFetchFailed;
     if (!routed) {
       // Only a NEW item, judged from text actually read, is routed. Metadata-
       // only dispositions and unread content keep the lane's placement.
-      if (!contentRead || input.metadataOnly || this.set.anyLegHasRow(identity)) {
+      if (hasRow || !contentRead || input.metadataOnly) {
         this.counts.itemsLegacy += 1;
         return { kind: 'legacy' };
       }
@@ -652,6 +674,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         const copies = new Map<string, TierCopyLayers>();
         const sensitivity = new Map<string, SourceSensitivity>();
         for (const copy of placement.copies) {
+          // Bind the store to this set's ledger before its first routed copy
+          // lands: from then on no handle may read it without that ledger.
+          this.set.store(copy.trustDomain, { create: true })!.bindTierSet(ledger);
           copies.set(copy.corpusId, copy.layers);
           sensitivity.set(copy.corpusId, buildSourceSensitivity({
             trustTier: defaultStoreTrustTier(copy.trustDomain),
@@ -698,9 +723,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     }
   }
 
-  private recordSecretLocation(item: RawItem, text: string | undefined, decision: TierDecision): void {
+  private recordSecretLocation(input: ConnectorStoreTierRouteInput, text: string | undefined, decision: TierDecision): void {
     const index = this.set.secrets();
     if (!index) return;
+    const item = input.item;
     if (decision.contentTier !== 'secrets' && decision.metadataTier !== 'secrets') {
       // Only text that was read can prove a secret is gone.
       if (decision.contentRead) index.remove(item.identity);
@@ -713,10 +739,26 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       ...(title ? detectSecretFindingKinds(title) : []),
       ...(locator ? detectSecretFindingKinds(locator) : []),
     ])];
+    let folderKeys: readonly string[] = input.sourceScope?.folderKeys ?? [];
+    if (folderKeys.length === 0) {
+      try {
+        folderKeys = input.connector.classificationSignals(item).folderKeys ?? [];
+      } catch {
+        folderKeys = [];
+      }
+    }
+    // Names are released only when the item's METADATA tier is below Private.
+    // A Private-metadata item is located by an opaque reference instead.
+    const namesReleasable = decision.metadataTier === 'public' || decision.metadataTier === 'private';
     index.record({
       identity: item.identity,
       ...(locator ? { locator } : {}),
-      ...(title ? { title } : {}),
+      ...(title && namesReleasable ? { title } : {}),
+      namesReleasable,
+      folderKeys,
+      ...(input.sourceScope
+        ? { scopeGeneration: input.sourceScope.accountGeneration, scopeRevision: input.sourceScope.scopeRevision }
+        : {}),
       // An owner Secrets override has no detector finding; say so by kind.
       findingKinds: kinds.length > 0 ? kinds : ['owner_marked_secret'],
       ...(text !== undefined ? { text } : {}),
@@ -730,8 +772,8 @@ function tieredRun(legs: TieredStoreLegRun[], routing: TieredStoreRoutingCounts,
   return { legs, byDomain, ...(cursor ? { cursor } : {}), routing: { ...routing } };
 }
 
-function identityKey(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId'>): string {
-  return `${identity.provider}\u0000${identity.accountScope}\u0000${identity.providerItemId}`;
+function identityKey(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): string {
+  return tierLedgerIdentityKey(identity);
 }
 
 function stringMetadata(item: RawItem, keys: readonly string[]): string | undefined {
