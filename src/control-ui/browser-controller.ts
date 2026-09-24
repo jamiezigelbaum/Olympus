@@ -84,6 +84,16 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     return Array.from(root.querySelectorAll(selector)) as T[];
   }
 
+  /** Show or hide one sheet and keep every toggle that names it in step. */
+  function setSheetOpen(sheet: HTMLElement, open: boolean): void {
+    sheet.classList.toggle('on', open);
+    sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (!sheet.id) return;
+    queryAll<HTMLElement>('[data-sheet-toggle]').forEach((toggle) => {
+      if (toggle.dataset.sheetToggle === `#${sheet.id}`) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+  }
+
   function say(form: ParentNode, message: string): void {
     const slot = form.querySelector('[data-action-message]');
     if (slot) slot.textContent = message;
@@ -643,9 +653,23 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const selector = toggle.dataset.sheetToggle;
       const sheet = selector ? query<HTMLElement>(selector) : null;
       if (!sheet) return;
-      const open = sheet.classList.toggle('on');
-      sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
+      const open = !sheet.classList.contains('on');
+      // One sheet at a time (owner, 2026-09-24): opening a sheet closes any
+      // other open one, so Connect/Set up never leaves several stacked open.
+      // A sheet holding the toggle stays open, so a nested toggle keeps it.
+      if (open) {
+        queryAll<HTMLElement>('.sheet.on').forEach((other) => {
+          if (other !== sheet && !other.contains(toggle)) setSheetOpen(other, false);
+        });
+      }
+      setSheetOpen(sheet, open);
       toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open) {
+        // Move focus into what just opened so keyboard and screen-reader
+        // users land on it; the sheet is a programmatic focus target only.
+        if (!sheet.hasAttribute('tabindex')) sheet.setAttribute('tabindex', '-1');
+        sheet.focus();
+      }
       // A Connect gesture starts the fieldless publisher flow immediately.
       // Keep BYO forms and pending attempts for explicit input/review, and do
       // not create another attempt when this same panel is reopened.
