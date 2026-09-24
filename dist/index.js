@@ -16274,7 +16274,8 @@ function registerOlympusDashboardGateway(api, config, options = {}) {
         params: parseDashboardReadParams(params),
         canWrite: gatewayClientHasScope(client, "operator.write"),
         config,
-        openClawConfig: context?.getRuntimeConfig?.() ?? api.config,
+        openClawConfig: currentOpenClawConfig(api, context),
+        browserOrigin: client?.browserOrigin,
         fetchImpl,
         ...signal ? { signal } : {}
       });
@@ -16290,8 +16291,8 @@ function registerOlympusDashboardGateway(api, config, options = {}) {
     }
     try {
       const parsed = parseDashboardControlParams(params);
-      const openClawConfig = context?.getRuntimeConfig?.() ?? api.config;
-      const gatewayPublicOrigin = resolveGatewayPublicOrigin(openClawConfig);
+      const openClawConfig = currentOpenClawConfig(api, context);
+      const gatewayPublicOrigin = resolveNativeOAuthOrigin(openClawConfig, client?.browserOrigin);
       if (parsed.action === "start_oauth" && !gatewayPublicOrigin) {
         respond(true, gatewayPublicOriginRequiredResult());
         return;
@@ -16312,6 +16313,7 @@ function registerOlympusDashboardGateway(api, config, options = {}) {
 }
 async function requestDashboardRead(input) {
   const authToken = requireWorkerAuthToken(input.config);
+  const oauthOrigin = resolveNativeOAuthOrigin(input.openClawConfig, input.browserOrigin);
   if (input.params.view === "dispositions" && "action" in input.params && input.params.action === "browse_folder_scope") {
     if (!input.canWrite) {
       throw new DashboardGatewayInvalidRequestError("Operator write scope is required to browse private folders.");
@@ -16327,7 +16329,7 @@ async function requestDashboardRead(input) {
       url: workerRootUrl(input.config, "/dashboard/dispositions"),
       init: {
         method: "POST",
-        headers: workerHeaders(authToken, resolveGatewayPublicOrigin(input.openClawConfig), true),
+        headers: workerHeaders(authToken, oauthOrigin, true),
         body: encoded,
         redirect: "error"
       },
@@ -16352,7 +16354,7 @@ async function requestDashboardRead(input) {
   url.searchParams.set("can_write", input.canWrite ? "1" : "0");
   if (input.params.source_id !== undefined)
     url.searchParams.set("source_id", input.params.source_id);
-  const headers = workerHeaders(authToken, resolveGatewayPublicOrigin(input.openClawConfig));
+  const headers = workerHeaders(authToken, oauthOrigin);
   const { response, text: body } = await boundedWorkerRequest({
     fetchImpl: input.fetchImpl ?? fetch,
     url,
@@ -16613,6 +16615,58 @@ function resolveGatewayPublicOrigin(value) {
     return;
   }
 }
+function currentOpenClawConfig(api, context) {
+  return context?.getRuntimeConfig?.() ?? api.runtime?.config?.current?.() ?? api.config;
+}
+function resolveNativeOAuthOrigin(openClawConfig, browserOrigin) {
+  return resolveGatewayPublicOrigin(openClawConfig) ?? localLoopbackBrowserOrigin(browserOrigin);
+}
+function localLoopbackBrowserOrigin(value) {
+  if (!isRecord2(value) || value.isLocalClient !== true)
+    return;
+  const origin = loopbackHttpOrigin(value.origin);
+  if (!origin || typeof value.requestHost !== "string")
+    return;
+  const requestHost = value.requestHost.trim().toLowerCase();
+  return requestHost && new URL(origin).host === requestHost ? origin : undefined;
+}
+function loopbackHttpOrigin(value) {
+  if (typeof value !== "string")
+    return;
+  const raw = value.trim();
+  if (!raw || raw.length > 256)
+    return;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" || url.username || url.password)
+      return;
+    if (url.pathname !== "/" || url.search || url.hash)
+      return;
+    return isLoopbackHostname2(url.hostname) ? url.origin : undefined;
+  } catch {
+    return;
+  }
+}
+function isLoopbackHostname2(hostname) {
+  const host = hostname.toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+}
+function isLoopbackPeer(address) {
+  if (!address)
+    return false;
+  const peer = address.trim().toLowerCase();
+  return peer === "::1" || /^(?:::ffff:)?127(?:\.\d{1,3}){3}$/.test(peer);
+}
+function loopbackCallbackOrigin(request) {
+  if (request.socket?.encrypted === true)
+    return;
+  if (!isLoopbackPeer(request.socket?.remoteAddress))
+    return;
+  const host = request.headers?.host;
+  if (typeof host !== "string" || !host || host.length > 256 || /[\s/@?#\\]/.test(host))
+    return;
+  return loopbackHttpOrigin(`http://${host}`);
+}
 function registerOAuthCallbackRoutes(api, config, fetchImpl) {
   if (!api.registerHttpRoute)
     return;
@@ -16627,7 +16681,7 @@ function registerOAuthCallbackRoutes(api, config, fetchImpl) {
           writeCallbackPage(response, false, 410);
           return true;
         }
-        await handleOAuthCallback({ request, response, source, config, openClawConfig: api.config, fetchImpl });
+        await handleOAuthCallback({ request, response, source, config, openClawConfig: currentOpenClawConfig(api), fetchImpl });
         return true;
       }
     });
@@ -16678,7 +16732,7 @@ async function handleOAuthCallback(input) {
     writeCallbackPage(input.response, false, 405);
     return;
   }
-  const publicOrigin = resolveGatewayPublicOrigin(input.openClawConfig);
+  const publicOrigin = resolveGatewayPublicOrigin(input.openClawConfig) ?? loopbackCallbackOrigin(input.request);
   const authToken = workerAuthTokenFromConfig(input.config);
   if (!publicOrigin || !authToken) {
     writeCallbackPage(input.response, false, 503);
