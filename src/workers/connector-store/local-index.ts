@@ -108,6 +108,7 @@ import {
   decodeEmbedding,
   encodeEmbedding,
   isApprovedSecureSourceEmbeddingProvider,
+  TransientSourceEmbeddingError,
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
@@ -7599,7 +7600,19 @@ export class LocalConnectorStore {
     if (!trimmed) return { rows: [] };
     const before = this.embeddingReadAuthority(provider);
     if (before.skippedReason) return { rows: [], skippedReason: before.skippedReason };
-    const [queryVector] = await provider.embed([{ text: trimmed }], { taskType: 'RETRIEVAL_QUERY' });
+    let queryVector: number[] | undefined;
+    try {
+      [queryVector] = await provider.embed([{ text: trimmed }], { taskType: 'RETRIEVAL_QUERY' });
+    } catch (error) {
+      // A provider outage that outlived the provider's own retries retires
+      // this lane to keyword for this query, and the audit names it, so the
+      // answer reports a skipped semantic lane instead of failing outright.
+      // Configuration errors still throw: they need the operator.
+      if (error instanceof TransientSourceEmbeddingError) {
+        return { rows: [], skippedReason: `embedding_query_unavailable:${error.reason}` };
+      }
+      throw error;
+    }
     // A provider that answered with nothing is a refusal like any other, and it
     // says so: an unexplained zero-candidate lane is indistinguishable from a
     // corpus that genuinely held no semantic match.

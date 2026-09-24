@@ -1316,9 +1316,16 @@ plain words and ask:
 > off by default. Shall I turn it on? If not, I'll give you a separate
 > Olympus dashboard link instead.
 
-On a yes, set it yourself through `openclaw config set` and validate it with
-the rest of the config below; OpenClaw documents that it applies without a
-restart, and the restart below loads it in any case. On a no, record nothing,
+On a yes, set it yourself with `openclaw config set
+gateway.controlUi.experimental.customPlugins true`, but only as the restart
+below: once that restart has its own go and `openclaw config validate` is
+green. OpenClaw's docs say the key applies without a restart, but on 2026.9.5
+setting it makes the Gateway restart itself (a config-reload restart), and
+that self-restart is this step's restart. Do not follow it with
+`openclaw gateway restart`; wait until `openclaw gateway status` shows it
+running again, then run the post-restart checks. The in-gateway warning below
+applies to this `config set`, since the chat drops right away. If the key was
+already on, restart normally. On a no, record nothing,
 leave it off, and use the standalone opening link in Step 6: never hand the
 operator a Labs instruction as a caveat in the final reply.
 
