@@ -52,7 +52,9 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
    The fast lane also runs `test:exchange` for the publisher Google exchange
    service; `typecheck` checks both the plugin and the exchange service's
    separate WebWorker configuration. The `exchange/` subtree is critical,
-   including its deployment configuration and tests.
+   including its deployment configuration and tests. The same holds for the
+   `connect-relay/` service (`test:connect-relay`, `typecheck:connect-relay`;
+   see `docs/design/relay.md`).
 6. **Review in proportion to risk.** Standard changes may auto-merge after
    required checks. Critical changes require a recorded independent review.
    Live mutations additionally follow the OpenClaw change protocol and remain

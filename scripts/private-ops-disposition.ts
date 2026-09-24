@@ -48,6 +48,7 @@ const ALLOWED_DOCS = new Set([
   'docs/V0_4_BASELINE.md',
   'docs/V0_4_RELEASE.md',
   'docs/design/per-item-four-tier-classification.md',
+  'docs/design/relay.md',
   'docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md',
   'docs/ops/HARNESS_PROTOCOL.md',
   'docs/ops/OAUTH_RELAY.md',
