@@ -356,7 +356,11 @@ plugin against the configuration you approved.
 
 Before this restart, select and prepare the dashboard described in Step 5.
 If the artifact supports native Control UI, handle its Labs opt-in and Gateway
-origin now through the authorized configuration workflow. On the tested Air,
+origin now through the authorized configuration workflow. On OpenClaw 2026.9.5,
+setting `gateway.controlUi.experimental.customPlugins` restarts the Gateway
+itself: when you turn it on here, set it after `openclaw config validate` is
+green, skip the restart command below, and wait for
+`openclaw gateway status` to show it running. On the tested Air,
 WebKit rejects the Secure plugin cookie over plain loopback HTTP; use Chrome
 on loopback or an existing trusted HTTPS route. Do not weaken authentication
 or change certificate trust just to make the plugin page load.

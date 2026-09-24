@@ -1343,7 +1343,9 @@ ends your own session mid-turn. Before running the restart, tell the
 operator exactly this — "the next command restarts the gateway and this
 chat will drop; when it's back, message me: *continue the Olympus install
 from Step 6*" — or hand the operator the three commands below to run in
-their own terminal. The same applies to any gateway restart during
+their own terminal (on the Custom plugin UI yes path, the `config set` above
+replaces the last one: hand them validate, lint and the `config set`, never a
+second restart). The same applies to any gateway restart during
 Step 1's plugin install.
 
 Never restart the gateway without a green validate:

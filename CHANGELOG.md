@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.4.0-beta.5 - 2026-09-24
+
+Fixes from the beta.4 first-time install on a clean Linux user, plus the first
+hosted-agent connection slices.
+
+- **Install guide (#88).** The agent explains the four tiers and walks through
+  the posture before offering any pick-list, and the list then shows plain
+  descriptions, never preset ids. Bun installs without `unzip` or `sudo`
+  through npm into `~/.local` when the official installer cannot run. The
+  privacy classifier decision is a required line of the completion receipt,
+  read from the new `olympus tier classifier decline` record or an approval,
+  so a skipped question shows as `not_asked`. The handoff is delivered as
+  written and links the dashboard inside the OpenClaw Control UI; the
+  standalone link is the fallback, and its single-use ticket now lasts 15
+  minutes instead of 2.
+- **Olympus in the Control UI sidebar (#89).** OpenClaw shows an installed
+  plugin's pages only when Settings → Labs → Custom plugin UI is on. The
+  install asks the operator for it as its own consent step, saying it applies
+  to every installed plugin; on OpenClaw 2026.9.5 setting it restarts the
+  Gateway. A no keeps the standalone dashboard link.
+- **Settings page (#89).** The plugin's Settings page no longer shows
+  "Unsupported schema node": the config schema is written out without `$ref`,
+  and accepts exactly the same configs.
+- **Answers during provider blips (#89).** Embedding requests retry HTTP 429,
+  500, 502, 503, 504 and network errors twice within the existing time limit.
+  A `Retry-After` that fits the limit replaces the normal wait; one that does
+  not ends the retries at once. If the provider is still unavailable, the answer
+  continues on keyword search and reports the skipped semantic lane with its
+  cause (`embedding_query_unavailable:<status|network|timeout>`). Key and
+  permission errors still fail with their own message.
+- **Hosted agents, preview (#84, #85, #86).** Every source answer records which
+  surface asked (OpenClaw, MCP client, CLI or a remote connection), when the
+  caller identifies itself, in its content-free ledger. `olympus connections add|list|revoke` issues revocable
+  tokens for a remote MCP endpoint at the worker's `/mcp`, offering
+  `source_answer` and `source_index_status` only; `data delete --all` removes
+  them too. The worker still listens on loopback by default, so nothing is
+  reachable from outside the host unless the owner exposes it.
+
 ## 0.4.0-beta.4 - 2026-09-23
 
 Every item from every source is now judged on its own into Public, Personal,
