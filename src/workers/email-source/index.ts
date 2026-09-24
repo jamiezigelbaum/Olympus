@@ -3,6 +3,7 @@ import type { SourceIndexVisibilityGate } from '../../core/source-index/router.t
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { SecretLocationNote } from '../../core/evidence-pack.ts';
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { FileLeaseBusyError } from '../../core/file-lease.ts';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -2843,14 +2844,28 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }
             const modelId = asOptionalString(record.model_id);
             const maxPendingChunks = asOptionalNumber(record.max_pending_chunks);
-            const result = await connectorStore.embedChunks({
-              provider: embeddingProvider,
-              ...(embeddingScope?.accountScope ? { accountScope: embeddingScope.accountScope } : {}),
-              ...(embeddingScope?.filters ? { filters: embeddingScope.filters } : {}),
-              ...(assertEmbeddingScopeCurrent ? { assertAuthorized: assertEmbeddingScopeCurrent } : {}),
-              ...(modelId ? { modelId } : {}),
-              ...(maxPendingChunks !== undefined ? { limit: maxPendingChunks } : {}),
-            });
+            let result: Awaited<ReturnType<typeof connectorStore.embedChunks>>;
+            try {
+              result = await connectorStore.embedChunks({
+                provider: embeddingProvider,
+                ...(embeddingScope?.accountScope ? { accountScope: embeddingScope.accountScope } : {}),
+                ...(embeddingScope?.filters ? { filters: embeddingScope.filters } : {}),
+                ...(assertEmbeddingScopeCurrent ? { assertAuthorized: assertEmbeddingScopeCurrent } : {}),
+                ...(modelId ? { modelId } : {}),
+                ...(maxPendingChunks !== undefined ? { limit: maxPendingChunks } : {}),
+              });
+            } catch (error) {
+              // Another embedder (the scheduler's sweep) holds this store's
+              // embedding lease: a retryable wait, not a failure of the caller.
+              if (error instanceof FileLeaseBusyError) {
+                throw new EmailSourceWorkerError(
+                  409,
+                  'embedding_lane_busy',
+                  `Another embedder is embedding ${connectorStore.corpusId}; retry shortly.`,
+                );
+              }
+              throw error;
+            }
             assertNoRawEmailFields(result);
             return json(result);
           }

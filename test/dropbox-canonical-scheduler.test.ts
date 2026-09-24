@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { OlympusConfig } from '../src/core/config.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
-import { createCanonicalDropboxSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { DROPBOX_EMBED_MAX_CHUNKS_PER_PASS, createCanonicalDropboxSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { SourceSchedulerTaskFailure } from '../src/workers/source-scheduler.ts';
 import type { DropboxProviderStoreSyncHandler } from '../src/workers/dropbox-files/index.ts';
 import type {
@@ -22,6 +22,30 @@ describe('canonical Dropbox scheduler', () => {
       fileExtraction: {} as FileExtractionRunner,
     });
     expect(source?.tasks.some((task) => task.kind === 'extract')).toBe(true);
+  });
+
+  test('each Dropbox embed task embeds a bounded batch per pass', async () => {
+    const limits: Array<number | undefined> = [];
+    const store = {
+      corpusId: 'secure_local.dropbox.files',
+      trustDomain: 'secure_local',
+      async embedChunks(options: { limit?: number }) {
+        limits.push(options.limit);
+        return { chunksSeen: 0, chunksEmbedded: 0, chunksSkipped: 0 };
+      },
+    } as unknown as LocalConnectorStore;
+    const local = { provider: 'local-openai-compatible', backend: 'local', modelId: 'm' } as unknown as SourceEmbeddingProvider;
+    const source = createCanonicalDropboxSchedulerSource({
+      policy: defaultDropboxIngestionPolicy(),
+      config: schedulerConfig(),
+      providerSync: stubProviderSync(),
+      store,
+      embeddingProvider: local,
+      tierEmbeddings: [{ corpusId: 'internal.dropbox.files', store: () => store, provider: local }],
+    });
+    for (const task of source!.tasks.filter((entry) => entry.kind === 'embed')) await task.run();
+
+    expect(limits).toEqual([DROPBOX_EMBED_MAX_CHUNKS_PER_PASS, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS]);
   });
 
   test('orders metadata for every admitted root before shared extraction and local embedding', async () => {

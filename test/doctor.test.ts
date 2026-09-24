@@ -1588,6 +1588,67 @@ describe('runDoctor', () => {
     expect(scheduler.detail).toContain('3 consecutive failures');
   });
 
+  test('prices a hybrid store\'s embedding backlog in the source index summary', async () => {
+    const result = await runDoctor(doctorDeps({
+      config: enabledEmailConfig(),
+      delphi: healthyDelphi(),
+      fetchImpl: fakeWorkerFetch({
+        '/v1/health': { status: 'ok', configured: true },
+        '/v1/source/index/status': {
+          kind: 'source_index_status',
+          corpora: [corpusReport('secure_local.dropbox.files', {
+            family: 'file',
+            counts: { chunks: 5704, embedded_chunks: 1664 },
+            embedding_parity: {
+              required: true,
+              chunks: 5704,
+              embedded_chunks: 1664,
+              missing_chunks: 4040,
+              refresh_needed: true,
+              backlog_estimate: {
+                model_id: 'text-embedding-qwen3-8b',
+                missing_chunks: 4040,
+                estimated_tokens: 2_100_000,
+                estimated_cost_usd: 0.03,
+                price_source: 'default_unverified',
+              },
+            },
+          })],
+        },
+      }).fetchImpl,
+      handleRegistry: { version: 1, handles: [connectedHandle('dropbox')] },
+    }));
+
+    const sourceIndex = checkByName(result.checks, 'source_index_status');
+    expect(sourceIndex.detail).toContain('4040 chunks waiting ≈ 2100000 tokens ≈ $0.03 (estimate, unverified list price)');
+  });
+
+  test('names a source whose embedding keeps skipping failed items', async () => {
+    const config = enabledEmailConfig();
+    config.worker.scheduler.enabled = true;
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': { status: 'ok', configured: true },
+      '/v1/source/index/status': { kind: 'source_index_status', corpora: [dropboxCorpusReport()] },
+      '/v1/source/scheduler/status': {
+        kind: 'source_scheduler_status',
+        enabled: true,
+        running: true,
+        generated_at: '2026-07-02T12:00:00.000Z',
+        sources: [{
+          source_id: 'readwise.library',
+          corpus_id: 'internal.readwise.library',
+          stale_sync_anomaly: false,
+          tasks: [{ id: 'readwise.library_embeddings', kind: 'embed', running: false, consecutive_failures: 0, degraded_reason: 'embedding_items_failed' }],
+        }],
+      },
+    });
+
+    const result = await runDoctor(doctorDeps({ config, delphi: healthyDelphi(), fetchImpl }));
+
+    expect(checkByName(result.checks, 'source_scheduler_status').detail)
+      .toContain('readwise.library has items whose embedding failed; they are skipped');
+  });
+
   test('names a source whose embedding is deferred, once, even while every sync succeeds', async () => {
     const config = enabledEmailConfig();
     config.worker.scheduler.enabled = true;

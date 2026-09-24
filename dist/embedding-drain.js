@@ -2,25 +2,729 @@ import { createRequire } from "node:module";
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
-// src/core/atomic-file.ts
+// src/core/file-lease.ts
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
-  existsSync,
   fsyncSync,
-  lstatSync,
   mkdirSync,
   openSync,
-  renameSync,
-  rmSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
   writeFileSync
 } from "node:fs";
-import { open, rename, rm } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { mkdir, open, readFile, stat, unlink, utimes } from "node:fs/promises";
+import { createRequire as createRequire2 } from "node:module";
+import { dirname } from "node:path";
+async function withFileLease(targetPath, callback, options = {}) {
+  const normalized = normalizeOptions(options);
+  const owner = await acquireFileLease(targetPath, normalized);
+  const heartbeat = setInterval(() => {
+    owner.heartbeat();
+  }, normalized.heartbeatIntervalMs);
+  heartbeat.unref?.();
+  try {
+    return await callback(owner);
+  } finally {
+    clearInterval(heartbeat);
+    await owner.release();
+  }
+}
+function withFileLeaseSync(targetPath, callback, options = {}) {
+  const owner = acquireFileLeaseSync(targetPath, normalizeOptions(options));
+  try {
+    return callback(owner);
+  } finally {
+    owner.release();
+  }
+}
+
+class AsyncFileLeaseOwner {
+  targetPath;
+  lockPath;
+  token;
+  descriptor;
+  options;
+  constructor(targetPath, lockPath, token, descriptor, options) {
+    this.targetPath = targetPath;
+    this.lockPath = lockPath;
+    this.token = token;
+    this.descriptor = descriptor;
+    this.options = options;
+  }
+  async assertOwned() {
+    if ((await readLeaseRecord(this.lockPath))?.token !== this.token) {
+      throw new FileLeaseLostError(this.targetPath);
+    }
+  }
+  async commit(write) {
+    return withAsyncCommitGuard(this.targetPath, this.lockPath, this.options, async () => {
+      await this.assertOwned();
+      return write();
+    });
+  }
+  async heartbeat() {
+    try {
+      await this.commit(async () => {
+        const now = new Date;
+        await utimes(this.lockPath, now, now);
+      });
+    } catch {}
+  }
+  async release() {
+    try {
+      await withAsyncCommitGuard(this.targetPath, this.lockPath, this.options, async () => {
+        if ((await readLeaseRecord(this.lockPath))?.token === this.token) {
+          await unlink(this.lockPath).catch((error) => {
+            if (!isNodeErrorWithCode(error, "ENOENT"))
+              throw error;
+          });
+        }
+      });
+    } catch (error) {
+      if (!(error instanceof FileLeaseBusyError))
+        throw error;
+      if ((await readLeaseRecord(this.lockPath))?.token === this.token) {
+        throw error;
+      }
+    } finally {
+      await this.descriptor.close();
+    }
+  }
+}
+
+class SyncFileLeaseOwner {
+  targetPath;
+  lockPath;
+  token;
+  descriptor;
+  options;
+  constructor(targetPath, lockPath, token, descriptor, options) {
+    this.targetPath = targetPath;
+    this.lockPath = lockPath;
+    this.token = token;
+    this.descriptor = descriptor;
+    this.options = options;
+  }
+  assertOwned() {
+    if (readLeaseRecordSync(this.lockPath)?.token !== this.token) {
+      throw new FileLeaseLostError(this.targetPath);
+    }
+  }
+  commit(write) {
+    return withSyncCommitGuard(this.targetPath, this.lockPath, this.options, () => {
+      this.assertOwned();
+      return write();
+    });
+  }
+  release() {
+    try {
+      try {
+        withSyncCommitGuard(this.targetPath, this.lockPath, this.options, () => {
+          if (readLeaseRecordSync(this.lockPath)?.token === this.token) {
+            try {
+              unlinkSync(this.lockPath);
+            } catch (error) {
+              if (!isNodeErrorWithCode(error, "ENOENT"))
+                throw error;
+            }
+          }
+        });
+      } catch (error) {
+        if (!(error instanceof FileLeaseBusyError))
+          throw error;
+        if (readLeaseRecordSync(this.lockPath)?.token === this.token) {
+          throw error;
+        }
+      }
+    } finally {
+      closeSync(this.descriptor);
+    }
+  }
+}
+async function acquireFileLease(targetPath, options) {
+  const lockPath = lockPathFor(targetPath);
+  const deadline = Date.now() + options.acquireTimeoutMs;
+  await mkdir(dirname(lockPath), { recursive: true, mode: 448 });
+  while (true) {
+    const token = randomUUID();
+    let descriptor;
+    try {
+      descriptor = await open(lockPath, "wx", 384);
+      const record = leaseRecord(token);
+      writeFileSync(descriptor.fd, JSON.stringify(record), "utf8");
+      fsyncSync(descriptor.fd);
+      return new AsyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
+    } catch (error) {
+      await descriptor?.close().catch(() => {
+        return;
+      });
+      if (!isNodeErrorWithCode(error, "EEXIST"))
+        throw error;
+    }
+    await removeStaleLease(targetPath, lockPath, options);
+    if (Date.now() >= deadline)
+      throw new FileLeaseBusyError(targetPath);
+    await sleep(options.pollIntervalMs);
+  }
+}
+function acquireFileLeaseSync(targetPath, options) {
+  const lockPath = lockPathFor(targetPath);
+  const deadline = Date.now() + options.acquireTimeoutMs;
+  mkdirSync(dirname(lockPath), { recursive: true, mode: 448 });
+  while (true) {
+    const token = randomUUID();
+    try {
+      const descriptor = openSync(lockPath, "wx", 384);
+      try {
+        writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
+        fsyncSync(descriptor);
+      } catch (error) {
+        closeSync(descriptor);
+        throw error;
+      }
+      return new SyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
+    } catch (error) {
+      if (!isNodeErrorWithCode(error, "EEXIST"))
+        throw error;
+    }
+    removeStaleLeaseSync(targetPath, lockPath, options);
+    if (Date.now() >= deadline)
+      throw new FileLeaseBusyError(targetPath);
+    sleepSync(options.pollIntervalMs);
+  }
+}
+async function removeStaleLease(targetPath, lockPath, options) {
+  await withAsyncCommitGuard(targetPath, lockPath, options, async () => {
+    const observed = await readLeaseRecord(lockPath);
+    if (!await leaseIsStale(lockPath, observed, options.staleAfterMs))
+      return;
+    const confirmed = await readLeaseRecord(lockPath);
+    if (observed && confirmed?.token !== observed.token)
+      return;
+    await unlink(lockPath).catch((error) => {
+      if (!isNodeErrorWithCode(error, "ENOENT"))
+        throw error;
+    });
+  });
+}
+function removeStaleLeaseSync(targetPath, lockPath, options) {
+  withSyncCommitGuard(targetPath, lockPath, options, () => {
+    const observed = readLeaseRecordSync(lockPath);
+    if (!leaseIsStaleSync(lockPath, observed, options.staleAfterMs))
+      return;
+    const confirmed = readLeaseRecordSync(lockPath);
+    if (observed && confirmed?.token !== observed.token)
+      return;
+    try {
+      unlinkSync(lockPath);
+    } catch (error) {
+      if (!isNodeErrorWithCode(error, "ENOENT"))
+        throw error;
+    }
+  });
+}
+async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
+  const guardPath = commitGuardPathFor(lockPath);
+  const deadline = Date.now() + options.acquireTimeoutMs;
+  const token = randomUUID();
+  let descriptor;
+  while (!descriptor) {
+    try {
+      descriptor = await open(guardPath, "wx", 384);
+      writeFileSync(descriptor.fd, JSON.stringify(leaseRecord(token)), "utf8");
+      fsyncSync(descriptor.fd);
+    } catch (error) {
+      const created = descriptor !== undefined;
+      await descriptor?.close().catch(() => {
+        return;
+      });
+      descriptor = undefined;
+      if (!isNodeErrorWithCode(error, "EEXIST")) {
+        if (created)
+          await unlink(guardPath).catch(() => {
+            return;
+          });
+        throw error;
+      }
+      await removeAbandonedCommitGuard(guardPath, options.staleAfterMs);
+      if (Date.now() >= deadline)
+        throw new FileLeaseBusyError(targetPath);
+      await sleep(options.pollIntervalMs);
+    }
+  }
+  try {
+    return await callback();
+  } finally {
+    try {
+      if ((await readLeaseRecord(guardPath))?.token === token) {
+        await unlink(guardPath).catch((error) => {
+          if (!isNodeErrorWithCode(error, "ENOENT"))
+            throw error;
+        });
+      }
+    } finally {
+      await descriptor.close();
+    }
+  }
+}
+function withSyncCommitGuard(targetPath, lockPath, options, callback) {
+  const guardPath = commitGuardPathFor(lockPath);
+  const deadline = Date.now() + options.acquireTimeoutMs;
+  const token = randomUUID();
+  let descriptor;
+  while (descriptor === undefined) {
+    try {
+      descriptor = openSync(guardPath, "wx", 384);
+      writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
+      fsyncSync(descriptor);
+    } catch (error) {
+      if (descriptor !== undefined) {
+        closeSync(descriptor);
+        descriptor = undefined;
+        try {
+          unlinkSync(guardPath);
+        } catch {}
+      }
+      if (!isNodeErrorWithCode(error, "EEXIST"))
+        throw error;
+      removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs);
+      if (Date.now() >= deadline)
+        throw new FileLeaseBusyError(targetPath);
+      sleepSync(options.pollIntervalMs);
+    }
+  }
+  try {
+    return callback();
+  } finally {
+    try {
+      if (readLeaseRecordSync(guardPath)?.token === token) {
+        try {
+          unlinkSync(guardPath);
+        } catch (error) {
+          if (!isNodeErrorWithCode(error, "ENOENT"))
+            throw error;
+        }
+      }
+    } finally {
+      closeSync(descriptor);
+    }
+  }
+}
+async function removeAbandonedCommitGuard(path, staleAfterMs) {
+  const observed = await readLeaseRecord(path);
+  if (observed) {
+    if (recordedProcessInstanceIsAlive(observed))
+      return;
+    const confirmed = await readLeaseRecord(path);
+    if (confirmed?.token !== observed.token)
+      return;
+  } else {
+    const age = await leaseAgeMs(path);
+    if (age === undefined || age < staleAfterMs)
+      return;
+  }
+  await unlink(path).catch((error) => {
+    if (!isNodeErrorWithCode(error, "ENOENT"))
+      throw error;
+  });
+}
+function removeAbandonedCommitGuardSync(path, staleAfterMs) {
+  const observed = readLeaseRecordSync(path);
+  if (observed) {
+    if (recordedProcessInstanceIsAlive(observed))
+      return;
+    const confirmed = readLeaseRecordSync(path);
+    if (confirmed?.token !== observed.token)
+      return;
+  } else {
+    const age = leaseAgeMsSync(path);
+    if (age === undefined || age < staleAfterMs)
+      return;
+  }
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, "ENOENT"))
+      throw error;
+  }
+}
+async function leaseIsStale(lockPath, observed, staleAfterMs) {
+  if (!observed) {
+    const age = await leaseAgeMs(lockPath);
+    return age !== undefined && age >= staleAfterMs;
+  }
+  return !recordedProcessInstanceIsAlive(observed) || (await leaseAgeMs(lockPath) ?? 0) >= staleAfterMs;
+}
+function leaseIsStaleSync(lockPath, observed, staleAfterMs) {
+  if (!observed) {
+    const age = leaseAgeMsSync(lockPath);
+    return age !== undefined && age >= staleAfterMs;
+  }
+  return !recordedProcessInstanceIsAlive(observed) || (leaseAgeMsSync(lockPath) ?? 0) >= staleAfterMs;
+}
+async function readLeaseRecord(path) {
+  try {
+    return parseLeaseRecord(await readFile(path, "utf8"));
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT"))
+      return;
+    throw error;
+  }
+}
+function readLeaseRecordSync(path) {
+  try {
+    return parseLeaseRecord(readFileSync(path, "utf8"));
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT"))
+      return;
+    throw error;
+  }
+}
+function parseLeaseRecord(text) {
+  try {
+    const value = JSON.parse(text);
+    if (value.version !== 1 || typeof value.token !== "string" || typeof value.pid !== "number" || typeof value.acquiredAt !== "string")
+      return;
+    const processInstance = parseProcessInstanceIdentity(value.processInstance);
+    return {
+      version: 1,
+      token: value.token,
+      pid: value.pid,
+      acquiredAt: value.acquiredAt,
+      ...processInstance ? { processInstance } : {}
+    };
+  } catch {
+    return;
+  }
+}
+async function leaseAgeMs(path) {
+  try {
+    return Math.max(0, Date.now() - (await stat(path)).mtimeMs);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT"))
+      return;
+    throw error;
+  }
+}
+function leaseAgeMsSync(path) {
+  try {
+    return Math.max(0, Date.now() - statSync(path).mtimeMs);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT"))
+      return;
+    throw error;
+  }
+}
+function leaseRecord(token) {
+  return {
+    version: 1,
+    token,
+    pid: process.pid,
+    acquiredAt: new Date().toISOString(),
+    ...CURRENT_PROCESS_INSTANCE ? { processInstance: CURRENT_PROCESS_INSTANCE } : {}
+  };
+}
+function recordedProcessInstanceIsAlive(record) {
+  return recordedProcessOwnerIsAlive(record.pid, record.processInstance);
+}
+function recordedProcessOwnerIsAlive(pid, recorded) {
+  if (!isProcessAlive(pid))
+    return false;
+  if (!recorded)
+    return true;
+  const current = processInstanceIdentity(pid);
+  if (!current)
+    return true;
+  return compareProcessInstanceIdentities(recorded, current) !== "different";
+}
+function isProcessAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0)
+    return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !isNodeErrorWithCode(error, "ESRCH");
+  }
+}
+function processInstanceIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0)
+    return;
+  if (process.platform === "linux")
+    return linuxProcessInstanceIdentity(pid);
+  if (process.platform === "darwin")
+    return darwinProcessInstanceIdentity(pid);
+  return;
+}
+function linuxProcessInstanceIdentity(pid) {
+  try {
+    const bootId = validatedBootId("linux", readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim());
+    const statText = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = statText.lastIndexOf(")");
+    if (commandEnd < 0 || !statText.startsWith(`${pid} (`))
+      return;
+    const fieldsFromState = statText.slice(commandEnd + 1).trim().split(/\s+/);
+    const startTime = fieldsFromState[19];
+    if (!startTime || !/^\d+$/.test(startTime))
+      return;
+    return {
+      platform: "linux",
+      ...bootId ? { bootId } : {},
+      mechanism: "linux_procfs_start_ticks",
+      startTime
+    };
+  } catch {
+    return;
+  }
+}
+function darwinProcessInstanceIdentity(pid) {
+  const startIdentity = darwinProcessStartTime(pid);
+  if (!startIdentity)
+    return;
+  return {
+    platform: "darwin",
+    ...CURRENT_BOOT_ID ? { bootId: CURRENT_BOOT_ID } : {},
+    ...startIdentity
+  };
+}
+function darwinProcessStartTime(pid) {
+  return darwinProcessStartTimeViaLibproc(pid) ?? darwinProcessStartTimeViaPs(pid);
+}
+function darwinProcessStartTimeViaLibproc(pid) {
+  const PROC_PIDTBSDINFO = 3;
+  const PROC_BSDINFO_SIZE = 136;
+  const PROC_BSDINFO_PID_OFFSET = 12;
+  const PROC_BSDINFO_START_SECONDS_OFFSET = 120;
+  const PROC_BSDINFO_START_MICROSECONDS_OFFSET = 128;
+  try {
+    const { dlopen, FFIType, ptr } = runtimeRequire("bun:ffi");
+    const library = dlopen("/usr/lib/libproc.dylib", {
+      proc_pidinfo: {
+        args: [FFIType.i32, FFIType.i32, FFIType.u64, FFIType.ptr, FFIType.i32],
+        returns: FFIType.i32
+      }
+    });
+    try {
+      const buffer = new Uint8Array(PROC_BSDINFO_SIZE);
+      const bytes = library.symbols.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, ptr(buffer), buffer.length);
+      if (bytes < PROC_BSDINFO_SIZE)
+        return;
+      const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      if (view.getUint32(PROC_BSDINFO_PID_OFFSET, true) !== pid)
+        return;
+      const seconds = view.getBigUint64(PROC_BSDINFO_START_SECONDS_OFFSET, true);
+      const microseconds = view.getBigUint64(PROC_BSDINFO_START_MICROSECONDS_OFFSET, true);
+      if (seconds <= 0n || microseconds >= 1000000n)
+        return;
+      return {
+        mechanism: "darwin_libproc",
+        startTime: (seconds * 1000000n + microseconds).toString()
+      };
+    } finally {
+      library.close();
+    }
+  } catch {
+    return;
+  }
+}
+function darwinProcessStartTimeViaPs(pid) {
+  try {
+    const startTimeText = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C", LANG: "C", TZ: "UTC" },
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim().replace(/\s+/g, " ");
+    const startTime = parseDarwinPsLstart(startTimeText);
+    return startTime ? { mechanism: "darwin_ps_lstart", startTime } : undefined;
+  } catch {
+    return;
+  }
+}
+function parseDarwinPsLstart(value) {
+  const match = /^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(value);
+  if (!match)
+    return;
+  const month = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec"
+  ].indexOf(match[1]);
+  const day = Number(match[2]);
+  const hour = Number(match[3]);
+  const minute = Number(match[4]);
+  const second = Number(match[5]);
+  const year = Number(match[6]);
+  const epochMs = Date.UTC(year, month, day, hour, minute, second);
+  const roundTrip = new Date(epochMs);
+  if (month < 0 || roundTrip.getUTCFullYear() !== year || roundTrip.getUTCMonth() !== month || roundTrip.getUTCDate() !== day || roundTrip.getUTCHours() !== hour || roundTrip.getUTCMinutes() !== minute || roundTrip.getUTCSeconds() !== second)
+    return;
+  return (BigInt(epochMs) * 1000n).toString();
+}
+function darwinBootId() {
+  try {
+    const bootSessionUuid = execFileSync("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    return validatedBootId("darwin", bootSessionUuid);
+  } catch {
+    return;
+  }
+}
+function validatedBootId(platform, value) {
+  if (typeof value !== "string")
+    return;
+  if (platform === "linux") {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value.toLowerCase() : undefined;
+  }
+  return /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/.test(value) ? value : undefined;
+}
+function parseProcessInstanceIdentity(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return;
+  const record = value;
+  if (record.platform !== "linux" && record.platform !== "darwin" || typeof record.startTime !== "string" || !record.startTime)
+    return;
+  const mechanism = parseProcessInstanceMechanism(record.platform, record.startTime, record.mechanism);
+  if (!mechanism)
+    return;
+  const bootId = validatedBootId(record.platform, record.bootId);
+  return {
+    platform: record.platform,
+    ...bootId ? { bootId } : {},
+    mechanism: mechanism.mechanism,
+    startTime: mechanism.startTime
+  };
+}
+function parseProcessInstanceMechanism(platform, startTime, mechanismValue) {
+  if (platform === "linux") {
+    if ((mechanismValue === undefined || mechanismValue === "linux_procfs_start_ticks") && /^\d+$/.test(startTime)) {
+      return {
+        mechanism: "linux_procfs_start_ticks",
+        startTime
+      };
+    }
+    return;
+  }
+  if ((mechanismValue === "darwin_libproc" || mechanismValue === "darwin_ps_lstart") && /^\d+$/.test(startTime) && BigInt(startTime) > 0n) {
+    return {
+      mechanism: mechanismValue,
+      startTime
+    };
+  }
+  if (mechanismValue === undefined) {
+    const native = /^(\d+)\.(\d{1,6})$/.exec(startTime);
+    if (native) {
+      return {
+        mechanism: "darwin_libproc",
+        startTime: (BigInt(native[1]) * 1000000n + BigInt(native[2])).toString()
+      };
+    }
+  }
+  return;
+}
+function compareProcessInstanceIdentities(expected, actual) {
+  if (expected.platform !== actual.platform)
+    return "unknown";
+  if (expected.bootId !== undefined && actual.bootId !== undefined && expected.bootId !== actual.bootId)
+    return "different";
+  if (expected.platform === "linux" && actual.platform === "linux") {
+    return expected.mechanism === "linux_procfs_start_ticks" && actual.mechanism === "linux_procfs_start_ticks" && expected.startTime === actual.startTime ? "same" : "different";
+  }
+  if (expected.platform !== "darwin" || actual.platform !== "darwin")
+    return "unknown";
+  if (expected.mechanism === actual.mechanism) {
+    return expected.startTime === actual.startTime ? "same" : "different";
+  }
+  return BigInt(expected.startTime) / 1000000n === BigInt(actual.startTime) / 1000000n ? "same" : "unknown";
+}
+function lockPathFor(targetPath) {
+  return `${targetPath}.lock`;
+}
+function commitGuardPathFor(lockPath) {
+  return `${lockPath}.commit`;
+}
+function normalizeOptions(options) {
+  const acquireTimeoutMs = positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs);
+  const pollIntervalMs = positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs);
+  const staleAfterMs = positiveInteger(options.staleAfterMs, DEFAULT_OPTIONS.staleAfterMs);
+  const heartbeatIntervalMs = positiveInteger(options.heartbeatIntervalMs, Math.min(DEFAULT_OPTIONS.heartbeatIntervalMs, Math.max(1, Math.floor(staleAfterMs / 3))));
+  return { acquireTimeoutMs, pollIntervalMs, staleAfterMs, heartbeatIntervalMs };
+}
+function positiveInteger(value, fallback) {
+  return value === undefined || !Number.isFinite(value) || value <= 0 ? fallback : Math.floor(value);
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function isNodeErrorWithCode(error, code) {
+  return !!error && typeof error === "object" && "code" in error && error.code === code;
+}
+var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
+var init_file_lease = __esm(() => {
+  DEFAULT_OPTIONS = {
+    acquireTimeoutMs: 1e4,
+    pollIntervalMs: 25,
+    staleAfterMs: 30000,
+    heartbeatIntervalMs: 5000
+  };
+  runtimeRequire = createRequire2(import.meta.url);
+  FileLeaseBusyError = class FileLeaseBusyError extends Error {
+    code = "file_lease_busy";
+    targetPath;
+    retryable = true;
+    retryAfterMs = 30000;
+    constructor(targetPath) {
+      super(`A writer already holds the lease for ${targetPath}.`);
+      this.targetPath = targetPath;
+    }
+  };
+  FileLeaseLostError = class FileLeaseLostError extends Error {
+    code = "file_lease_lost";
+    targetPath;
+    constructor(targetPath) {
+      super(`The writer lease for ${targetPath} is no longer owned by this process.`);
+      this.targetPath = targetPath;
+    }
+  };
+  CURRENT_BOOT_ID = process.platform === "darwin" ? darwinBootId() : undefined;
+  CURRENT_PROCESS_INSTANCE = processInstanceIdentity(process.pid);
+});
+
+// src/core/atomic-file.ts
+import { randomUUID as randomUUID2 } from "node:crypto";
+import {
+  closeSync as closeSync2,
+  existsSync,
+  fsyncSync as fsyncSync2,
+  lstatSync,
+  mkdirSync as mkdirSync2,
+  openSync as openSync2,
+  renameSync,
+  rmSync,
+  writeFileSync as writeFileSync2
+} from "node:fs";
+import { open as open2, rename, rm } from "node:fs/promises";
+import { dirname as dirname2, isAbsolute, relative, resolve, sep } from "node:path";
 async function writePrivateFileAtomic(path, text) {
   const temp = temporaryPathFor(path);
   try {
-    const file = await open(temp, "wx", 384);
+    const file = await open2(temp, "wx", 384);
     try {
       await file.writeFile(text, "utf8");
       await file.sync();
@@ -34,17 +738,17 @@ async function writePrivateFileAtomic(path, text) {
     });
     throw error;
   }
-  await syncDirectory(dirname(path));
+  await syncDirectory(dirname2(path));
 }
 function writePrivateFileAtomicSync(path, text) {
   const temp = temporaryPathFor(path);
   try {
-    const descriptor = openSync(temp, "wx", 384);
+    const descriptor = openSync2(temp, "wx", 384);
     try {
-      writeFileSync(descriptor, text, { encoding: "utf8" });
-      fsyncSync(descriptor);
+      writeFileSync2(descriptor, text, { encoding: "utf8" });
+      fsyncSync2(descriptor);
     } finally {
-      closeSync(descriptor);
+      closeSync2(descriptor);
     }
     renameSync(temp, path);
   } catch (error) {
@@ -53,13 +757,13 @@ function writePrivateFileAtomicSync(path, text) {
     } catch {}
     throw error;
   }
-  syncDirectorySync(dirname(path));
+  syncDirectorySync(dirname2(path));
 }
 function temporaryPathFor(path) {
-  return `${path}.${randomUUID()}.tmp`;
+  return `${path}.${randomUUID2()}.tmp`;
 }
 async function syncDirectory(path) {
-  const directory = await open(path, "r");
+  const directory = await open2(path, "r");
   try {
     try {
       await directory.sync();
@@ -72,16 +776,16 @@ async function syncDirectory(path) {
   }
 }
 function syncDirectorySync(path) {
-  const descriptor = openSync(path, "r");
+  const descriptor = openSync2(path, "r");
   try {
     try {
-      fsyncSync(descriptor);
+      fsyncSync2(descriptor);
     } catch (error) {
       if (!isUnsupportedDirectorySyncError(error))
         throw error;
     }
   } finally {
-    closeSync(descriptor);
+    closeSync2(descriptor);
   }
 }
 function isUnsupportedDirectorySyncError(error) {
@@ -610,14 +1314,14 @@ function parseSourceIngestionPolicy(rawPolicy, label = "source ingestion policy"
     rules,
     sync: {
       cadence: enumString(syncRecord?.cadence, ["manual", "continuous"], `${label}.sync.cadence`),
-      max_entries_per_pass: positiveInteger(syncRecord?.max_entries_per_pass, `${label}.sync.max_entries_per_pass`),
-      max_pages_per_pass: positiveInteger(syncRecord?.max_pages_per_pass, `${label}.sync.max_pages_per_pass`)
+      max_entries_per_pass: positiveInteger2(syncRecord?.max_entries_per_pass, `${label}.sync.max_entries_per_pass`),
+      max_pages_per_pass: positiveInteger2(syncRecord?.max_pages_per_pass, `${label}.sync.max_pages_per_pass`)
     },
     content: {
       default_extractor_kind: requiredString2(contentRecord?.default_extractor_kind, `${label}.content.default_extractor_kind`),
       default_extractor_version: requiredString2(contentRecord?.default_extractor_version, `${label}.content.default_extractor_version`),
-      plan_limit: positiveInteger(contentRecord?.plan_limit, `${label}.content.plan_limit`),
-      batch_size: positiveInteger(contentRecord?.batch_size, `${label}.content.batch_size`)
+      plan_limit: positiveInteger2(contentRecord?.plan_limit, `${label}.content.plan_limit`),
+      batch_size: positiveInteger2(contentRecord?.batch_size, `${label}.content.batch_size`)
     }
   };
   return policy;
@@ -686,7 +1390,7 @@ function enumString(value, allowed, label) {
     return value;
   throw new OperationError("config_error", `${label} must be one of: ${allowed.join(", ")}.`);
 }
-function positiveInteger(value, label) {
+function positiveInteger2(value, label) {
   if (typeof value === "number" && Number.isInteger(value) && value > 0)
     return value;
   throw new OperationError("config_error", `${label} must be a positive integer.`);
@@ -992,710 +1696,6 @@ var init_source_ingestion_exclusions = __esm(() => {
     outcome: "excluded_ancestry_unevaluable",
     reason: "ancestry_unevaluable"
   });
-});
-
-// src/core/file-lease.ts
-import { execFileSync } from "node:child_process";
-import { randomUUID as randomUUID2 } from "node:crypto";
-import {
-  closeSync as closeSync2,
-  fsyncSync as fsyncSync2,
-  mkdirSync as mkdirSync2,
-  openSync as openSync2,
-  readFileSync,
-  statSync,
-  unlinkSync,
-  writeFileSync as writeFileSync2
-} from "node:fs";
-import { mkdir, open as open2, readFile, stat, unlink, utimes } from "node:fs/promises";
-import { createRequire as createRequire2 } from "node:module";
-import { dirname as dirname2 } from "node:path";
-async function withFileLease(targetPath, callback, options = {}) {
-  const normalized = normalizeOptions(options);
-  const owner = await acquireFileLease(targetPath, normalized);
-  const heartbeat = setInterval(() => {
-    owner.heartbeat();
-  }, normalized.heartbeatIntervalMs);
-  heartbeat.unref?.();
-  try {
-    return await callback(owner);
-  } finally {
-    clearInterval(heartbeat);
-    await owner.release();
-  }
-}
-function withFileLeaseSync(targetPath, callback, options = {}) {
-  const owner = acquireFileLeaseSync(targetPath, normalizeOptions(options));
-  try {
-    return callback(owner);
-  } finally {
-    owner.release();
-  }
-}
-
-class AsyncFileLeaseOwner {
-  targetPath;
-  lockPath;
-  token;
-  descriptor;
-  options;
-  constructor(targetPath, lockPath, token, descriptor, options) {
-    this.targetPath = targetPath;
-    this.lockPath = lockPath;
-    this.token = token;
-    this.descriptor = descriptor;
-    this.options = options;
-  }
-  async assertOwned() {
-    if ((await readLeaseRecord(this.lockPath))?.token !== this.token) {
-      throw new FileLeaseLostError(this.targetPath);
-    }
-  }
-  async commit(write) {
-    return withAsyncCommitGuard(this.targetPath, this.lockPath, this.options, async () => {
-      await this.assertOwned();
-      return write();
-    });
-  }
-  async heartbeat() {
-    try {
-      await this.commit(async () => {
-        const now = new Date;
-        await utimes(this.lockPath, now, now);
-      });
-    } catch {}
-  }
-  async release() {
-    try {
-      await withAsyncCommitGuard(this.targetPath, this.lockPath, this.options, async () => {
-        if ((await readLeaseRecord(this.lockPath))?.token === this.token) {
-          await unlink(this.lockPath).catch((error) => {
-            if (!isNodeErrorWithCode(error, "ENOENT"))
-              throw error;
-          });
-        }
-      });
-    } catch (error) {
-      if (!(error instanceof FileLeaseBusyError))
-        throw error;
-      if ((await readLeaseRecord(this.lockPath))?.token === this.token) {
-        throw error;
-      }
-    } finally {
-      await this.descriptor.close();
-    }
-  }
-}
-
-class SyncFileLeaseOwner {
-  targetPath;
-  lockPath;
-  token;
-  descriptor;
-  options;
-  constructor(targetPath, lockPath, token, descriptor, options) {
-    this.targetPath = targetPath;
-    this.lockPath = lockPath;
-    this.token = token;
-    this.descriptor = descriptor;
-    this.options = options;
-  }
-  assertOwned() {
-    if (readLeaseRecordSync(this.lockPath)?.token !== this.token) {
-      throw new FileLeaseLostError(this.targetPath);
-    }
-  }
-  commit(write) {
-    return withSyncCommitGuard(this.targetPath, this.lockPath, this.options, () => {
-      this.assertOwned();
-      return write();
-    });
-  }
-  release() {
-    try {
-      try {
-        withSyncCommitGuard(this.targetPath, this.lockPath, this.options, () => {
-          if (readLeaseRecordSync(this.lockPath)?.token === this.token) {
-            try {
-              unlinkSync(this.lockPath);
-            } catch (error) {
-              if (!isNodeErrorWithCode(error, "ENOENT"))
-                throw error;
-            }
-          }
-        });
-      } catch (error) {
-        if (!(error instanceof FileLeaseBusyError))
-          throw error;
-        if (readLeaseRecordSync(this.lockPath)?.token === this.token) {
-          throw error;
-        }
-      }
-    } finally {
-      closeSync2(this.descriptor);
-    }
-  }
-}
-async function acquireFileLease(targetPath, options) {
-  const lockPath = lockPathFor(targetPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
-  await mkdir(dirname2(lockPath), { recursive: true, mode: 448 });
-  while (true) {
-    const token = randomUUID2();
-    let descriptor;
-    try {
-      descriptor = await open2(lockPath, "wx", 384);
-      const record = leaseRecord(token);
-      writeFileSync2(descriptor.fd, JSON.stringify(record), "utf8");
-      fsyncSync2(descriptor.fd);
-      return new AsyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
-    } catch (error) {
-      await descriptor?.close().catch(() => {
-        return;
-      });
-      if (!isNodeErrorWithCode(error, "EEXIST"))
-        throw error;
-    }
-    await removeStaleLease(targetPath, lockPath, options);
-    if (Date.now() >= deadline)
-      throw new FileLeaseBusyError(targetPath);
-    await sleep(options.pollIntervalMs);
-  }
-}
-function acquireFileLeaseSync(targetPath, options) {
-  const lockPath = lockPathFor(targetPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
-  mkdirSync2(dirname2(lockPath), { recursive: true, mode: 448 });
-  while (true) {
-    const token = randomUUID2();
-    try {
-      const descriptor = openSync2(lockPath, "wx", 384);
-      try {
-        writeFileSync2(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
-        fsyncSync2(descriptor);
-      } catch (error) {
-        closeSync2(descriptor);
-        throw error;
-      }
-      return new SyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, "EEXIST"))
-        throw error;
-    }
-    removeStaleLeaseSync(targetPath, lockPath, options);
-    if (Date.now() >= deadline)
-      throw new FileLeaseBusyError(targetPath);
-    sleepSync(options.pollIntervalMs);
-  }
-}
-async function removeStaleLease(targetPath, lockPath, options) {
-  await withAsyncCommitGuard(targetPath, lockPath, options, async () => {
-    const observed = await readLeaseRecord(lockPath);
-    if (!await leaseIsStale(lockPath, observed, options.staleAfterMs))
-      return;
-    const confirmed = await readLeaseRecord(lockPath);
-    if (observed && confirmed?.token !== observed.token)
-      return;
-    await unlink(lockPath).catch((error) => {
-      if (!isNodeErrorWithCode(error, "ENOENT"))
-        throw error;
-    });
-  });
-}
-function removeStaleLeaseSync(targetPath, lockPath, options) {
-  withSyncCommitGuard(targetPath, lockPath, options, () => {
-    const observed = readLeaseRecordSync(lockPath);
-    if (!leaseIsStaleSync(lockPath, observed, options.staleAfterMs))
-      return;
-    const confirmed = readLeaseRecordSync(lockPath);
-    if (observed && confirmed?.token !== observed.token)
-      return;
-    try {
-      unlinkSync(lockPath);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, "ENOENT"))
-        throw error;
-    }
-  });
-}
-async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
-  const guardPath = commitGuardPathFor(lockPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
-  const token = randomUUID2();
-  let descriptor;
-  while (!descriptor) {
-    try {
-      descriptor = await open2(guardPath, "wx", 384);
-      writeFileSync2(descriptor.fd, JSON.stringify(leaseRecord(token)), "utf8");
-      fsyncSync2(descriptor.fd);
-    } catch (error) {
-      const created = descriptor !== undefined;
-      await descriptor?.close().catch(() => {
-        return;
-      });
-      descriptor = undefined;
-      if (!isNodeErrorWithCode(error, "EEXIST")) {
-        if (created)
-          await unlink(guardPath).catch(() => {
-            return;
-          });
-        throw error;
-      }
-      await removeAbandonedCommitGuard(guardPath, options.staleAfterMs);
-      if (Date.now() >= deadline)
-        throw new FileLeaseBusyError(targetPath);
-      await sleep(options.pollIntervalMs);
-    }
-  }
-  try {
-    return await callback();
-  } finally {
-    try {
-      if ((await readLeaseRecord(guardPath))?.token === token) {
-        await unlink(guardPath).catch((error) => {
-          if (!isNodeErrorWithCode(error, "ENOENT"))
-            throw error;
-        });
-      }
-    } finally {
-      await descriptor.close();
-    }
-  }
-}
-function withSyncCommitGuard(targetPath, lockPath, options, callback) {
-  const guardPath = commitGuardPathFor(lockPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
-  const token = randomUUID2();
-  let descriptor;
-  while (descriptor === undefined) {
-    try {
-      descriptor = openSync2(guardPath, "wx", 384);
-      writeFileSync2(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
-      fsyncSync2(descriptor);
-    } catch (error) {
-      if (descriptor !== undefined) {
-        closeSync2(descriptor);
-        descriptor = undefined;
-        try {
-          unlinkSync(guardPath);
-        } catch {}
-      }
-      if (!isNodeErrorWithCode(error, "EEXIST"))
-        throw error;
-      removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs);
-      if (Date.now() >= deadline)
-        throw new FileLeaseBusyError(targetPath);
-      sleepSync(options.pollIntervalMs);
-    }
-  }
-  try {
-    return callback();
-  } finally {
-    try {
-      if (readLeaseRecordSync(guardPath)?.token === token) {
-        try {
-          unlinkSync(guardPath);
-        } catch (error) {
-          if (!isNodeErrorWithCode(error, "ENOENT"))
-            throw error;
-        }
-      }
-    } finally {
-      closeSync2(descriptor);
-    }
-  }
-}
-async function removeAbandonedCommitGuard(path, staleAfterMs) {
-  const observed = await readLeaseRecord(path);
-  if (observed) {
-    if (recordedProcessInstanceIsAlive(observed))
-      return;
-    const confirmed = await readLeaseRecord(path);
-    if (confirmed?.token !== observed.token)
-      return;
-  } else {
-    const age = await leaseAgeMs(path);
-    if (age === undefined || age < staleAfterMs)
-      return;
-  }
-  await unlink(path).catch((error) => {
-    if (!isNodeErrorWithCode(error, "ENOENT"))
-      throw error;
-  });
-}
-function removeAbandonedCommitGuardSync(path, staleAfterMs) {
-  const observed = readLeaseRecordSync(path);
-  if (observed) {
-    if (recordedProcessInstanceIsAlive(observed))
-      return;
-    const confirmed = readLeaseRecordSync(path);
-    if (confirmed?.token !== observed.token)
-      return;
-  } else {
-    const age = leaseAgeMsSync(path);
-    if (age === undefined || age < staleAfterMs)
-      return;
-  }
-  try {
-    unlinkSync(path);
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT"))
-      throw error;
-  }
-}
-async function leaseIsStale(lockPath, observed, staleAfterMs) {
-  if (!observed) {
-    const age = await leaseAgeMs(lockPath);
-    return age !== undefined && age >= staleAfterMs;
-  }
-  return !recordedProcessInstanceIsAlive(observed) || (await leaseAgeMs(lockPath) ?? 0) >= staleAfterMs;
-}
-function leaseIsStaleSync(lockPath, observed, staleAfterMs) {
-  if (!observed) {
-    const age = leaseAgeMsSync(lockPath);
-    return age !== undefined && age >= staleAfterMs;
-  }
-  return !recordedProcessInstanceIsAlive(observed) || (leaseAgeMsSync(lockPath) ?? 0) >= staleAfterMs;
-}
-async function readLeaseRecord(path) {
-  try {
-    return parseLeaseRecord(await readFile(path, "utf8"));
-  } catch (error) {
-    if (isNodeErrorWithCode(error, "ENOENT"))
-      return;
-    throw error;
-  }
-}
-function readLeaseRecordSync(path) {
-  try {
-    return parseLeaseRecord(readFileSync(path, "utf8"));
-  } catch (error) {
-    if (isNodeErrorWithCode(error, "ENOENT"))
-      return;
-    throw error;
-  }
-}
-function parseLeaseRecord(text) {
-  try {
-    const value = JSON.parse(text);
-    if (value.version !== 1 || typeof value.token !== "string" || typeof value.pid !== "number" || typeof value.acquiredAt !== "string")
-      return;
-    const processInstance = parseProcessInstanceIdentity(value.processInstance);
-    return {
-      version: 1,
-      token: value.token,
-      pid: value.pid,
-      acquiredAt: value.acquiredAt,
-      ...processInstance ? { processInstance } : {}
-    };
-  } catch {
-    return;
-  }
-}
-async function leaseAgeMs(path) {
-  try {
-    return Math.max(0, Date.now() - (await stat(path)).mtimeMs);
-  } catch (error) {
-    if (isNodeErrorWithCode(error, "ENOENT"))
-      return;
-    throw error;
-  }
-}
-function leaseAgeMsSync(path) {
-  try {
-    return Math.max(0, Date.now() - statSync(path).mtimeMs);
-  } catch (error) {
-    if (isNodeErrorWithCode(error, "ENOENT"))
-      return;
-    throw error;
-  }
-}
-function leaseRecord(token) {
-  return {
-    version: 1,
-    token,
-    pid: process.pid,
-    acquiredAt: new Date().toISOString(),
-    ...CURRENT_PROCESS_INSTANCE ? { processInstance: CURRENT_PROCESS_INSTANCE } : {}
-  };
-}
-function recordedProcessInstanceIsAlive(record) {
-  return recordedProcessOwnerIsAlive(record.pid, record.processInstance);
-}
-function recordedProcessOwnerIsAlive(pid, recorded) {
-  if (!isProcessAlive(pid))
-    return false;
-  if (!recorded)
-    return true;
-  const current = processInstanceIdentity(pid);
-  if (!current)
-    return true;
-  return compareProcessInstanceIdentities(recorded, current) !== "different";
-}
-function isProcessAlive(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 0)
-    return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !isNodeErrorWithCode(error, "ESRCH");
-  }
-}
-function processInstanceIdentity(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 0)
-    return;
-  if (process.platform === "linux")
-    return linuxProcessInstanceIdentity(pid);
-  if (process.platform === "darwin")
-    return darwinProcessInstanceIdentity(pid);
-  return;
-}
-function linuxProcessInstanceIdentity(pid) {
-  try {
-    const bootId = validatedBootId("linux", readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim());
-    const statText = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const commandEnd = statText.lastIndexOf(")");
-    if (commandEnd < 0 || !statText.startsWith(`${pid} (`))
-      return;
-    const fieldsFromState = statText.slice(commandEnd + 1).trim().split(/\s+/);
-    const startTime = fieldsFromState[19];
-    if (!startTime || !/^\d+$/.test(startTime))
-      return;
-    return {
-      platform: "linux",
-      ...bootId ? { bootId } : {},
-      mechanism: "linux_procfs_start_ticks",
-      startTime
-    };
-  } catch {
-    return;
-  }
-}
-function darwinProcessInstanceIdentity(pid) {
-  const startIdentity = darwinProcessStartTime(pid);
-  if (!startIdentity)
-    return;
-  return {
-    platform: "darwin",
-    ...CURRENT_BOOT_ID ? { bootId: CURRENT_BOOT_ID } : {},
-    ...startIdentity
-  };
-}
-function darwinProcessStartTime(pid) {
-  return darwinProcessStartTimeViaLibproc(pid) ?? darwinProcessStartTimeViaPs(pid);
-}
-function darwinProcessStartTimeViaLibproc(pid) {
-  const PROC_PIDTBSDINFO = 3;
-  const PROC_BSDINFO_SIZE = 136;
-  const PROC_BSDINFO_PID_OFFSET = 12;
-  const PROC_BSDINFO_START_SECONDS_OFFSET = 120;
-  const PROC_BSDINFO_START_MICROSECONDS_OFFSET = 128;
-  try {
-    const { dlopen, FFIType, ptr } = runtimeRequire("bun:ffi");
-    const library = dlopen("/usr/lib/libproc.dylib", {
-      proc_pidinfo: {
-        args: [FFIType.i32, FFIType.i32, FFIType.u64, FFIType.ptr, FFIType.i32],
-        returns: FFIType.i32
-      }
-    });
-    try {
-      const buffer = new Uint8Array(PROC_BSDINFO_SIZE);
-      const bytes = library.symbols.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, ptr(buffer), buffer.length);
-      if (bytes < PROC_BSDINFO_SIZE)
-        return;
-      const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-      if (view.getUint32(PROC_BSDINFO_PID_OFFSET, true) !== pid)
-        return;
-      const seconds = view.getBigUint64(PROC_BSDINFO_START_SECONDS_OFFSET, true);
-      const microseconds = view.getBigUint64(PROC_BSDINFO_START_MICROSECONDS_OFFSET, true);
-      if (seconds <= 0n || microseconds >= 1000000n)
-        return;
-      return {
-        mechanism: "darwin_libproc",
-        startTime: (seconds * 1000000n + microseconds).toString()
-      };
-    } finally {
-      library.close();
-    }
-  } catch {
-    return;
-  }
-}
-function darwinProcessStartTimeViaPs(pid) {
-  try {
-    const startTimeText = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
-      encoding: "utf8",
-      env: { ...process.env, LC_ALL: "C", LANG: "C", TZ: "UTC" },
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim().replace(/\s+/g, " ");
-    const startTime = parseDarwinPsLstart(startTimeText);
-    return startTime ? { mechanism: "darwin_ps_lstart", startTime } : undefined;
-  } catch {
-    return;
-  }
-}
-function parseDarwinPsLstart(value) {
-  const match = /^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(value);
-  if (!match)
-    return;
-  const month = [
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec"
-  ].indexOf(match[1]);
-  const day = Number(match[2]);
-  const hour = Number(match[3]);
-  const minute = Number(match[4]);
-  const second = Number(match[5]);
-  const year = Number(match[6]);
-  const epochMs = Date.UTC(year, month, day, hour, minute, second);
-  const roundTrip = new Date(epochMs);
-  if (month < 0 || roundTrip.getUTCFullYear() !== year || roundTrip.getUTCMonth() !== month || roundTrip.getUTCDate() !== day || roundTrip.getUTCHours() !== hour || roundTrip.getUTCMinutes() !== minute || roundTrip.getUTCSeconds() !== second)
-    return;
-  return (BigInt(epochMs) * 1000n).toString();
-}
-function darwinBootId() {
-  try {
-    const bootSessionUuid = execFileSync("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim();
-    return validatedBootId("darwin", bootSessionUuid);
-  } catch {
-    return;
-  }
-}
-function validatedBootId(platform, value) {
-  if (typeof value !== "string")
-    return;
-  if (platform === "linux") {
-    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value.toLowerCase() : undefined;
-  }
-  return /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/.test(value) ? value : undefined;
-}
-function parseProcessInstanceIdentity(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return;
-  const record = value;
-  if (record.platform !== "linux" && record.platform !== "darwin" || typeof record.startTime !== "string" || !record.startTime)
-    return;
-  const mechanism = parseProcessInstanceMechanism(record.platform, record.startTime, record.mechanism);
-  if (!mechanism)
-    return;
-  const bootId = validatedBootId(record.platform, record.bootId);
-  return {
-    platform: record.platform,
-    ...bootId ? { bootId } : {},
-    mechanism: mechanism.mechanism,
-    startTime: mechanism.startTime
-  };
-}
-function parseProcessInstanceMechanism(platform, startTime, mechanismValue) {
-  if (platform === "linux") {
-    if ((mechanismValue === undefined || mechanismValue === "linux_procfs_start_ticks") && /^\d+$/.test(startTime)) {
-      return {
-        mechanism: "linux_procfs_start_ticks",
-        startTime
-      };
-    }
-    return;
-  }
-  if ((mechanismValue === "darwin_libproc" || mechanismValue === "darwin_ps_lstart") && /^\d+$/.test(startTime) && BigInt(startTime) > 0n) {
-    return {
-      mechanism: mechanismValue,
-      startTime
-    };
-  }
-  if (mechanismValue === undefined) {
-    const native = /^(\d+)\.(\d{1,6})$/.exec(startTime);
-    if (native) {
-      return {
-        mechanism: "darwin_libproc",
-        startTime: (BigInt(native[1]) * 1000000n + BigInt(native[2])).toString()
-      };
-    }
-  }
-  return;
-}
-function compareProcessInstanceIdentities(expected, actual) {
-  if (expected.platform !== actual.platform)
-    return "unknown";
-  if (expected.bootId !== undefined && actual.bootId !== undefined && expected.bootId !== actual.bootId)
-    return "different";
-  if (expected.platform === "linux" && actual.platform === "linux") {
-    return expected.mechanism === "linux_procfs_start_ticks" && actual.mechanism === "linux_procfs_start_ticks" && expected.startTime === actual.startTime ? "same" : "different";
-  }
-  if (expected.platform !== "darwin" || actual.platform !== "darwin")
-    return "unknown";
-  if (expected.mechanism === actual.mechanism) {
-    return expected.startTime === actual.startTime ? "same" : "different";
-  }
-  return BigInt(expected.startTime) / 1000000n === BigInt(actual.startTime) / 1000000n ? "same" : "unknown";
-}
-function lockPathFor(targetPath) {
-  return `${targetPath}.lock`;
-}
-function commitGuardPathFor(lockPath) {
-  return `${lockPath}.commit`;
-}
-function normalizeOptions(options) {
-  const acquireTimeoutMs = positiveInteger2(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs);
-  const pollIntervalMs = positiveInteger2(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs);
-  const staleAfterMs = positiveInteger2(options.staleAfterMs, DEFAULT_OPTIONS.staleAfterMs);
-  const heartbeatIntervalMs = positiveInteger2(options.heartbeatIntervalMs, Math.min(DEFAULT_OPTIONS.heartbeatIntervalMs, Math.max(1, Math.floor(staleAfterMs / 3))));
-  return { acquireTimeoutMs, pollIntervalMs, staleAfterMs, heartbeatIntervalMs };
-}
-function positiveInteger2(value, fallback) {
-  return value === undefined || !Number.isFinite(value) || value <= 0 ? fallback : Math.floor(value);
-}
-function sleep(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
-}
-function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-function isNodeErrorWithCode(error, code) {
-  return !!error && typeof error === "object" && "code" in error && error.code === code;
-}
-var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
-var init_file_lease = __esm(() => {
-  DEFAULT_OPTIONS = {
-    acquireTimeoutMs: 1e4,
-    pollIntervalMs: 25,
-    staleAfterMs: 30000,
-    heartbeatIntervalMs: 5000
-  };
-  runtimeRequire = createRequire2(import.meta.url);
-  FileLeaseBusyError = class FileLeaseBusyError extends Error {
-    code = "file_lease_busy";
-    targetPath;
-    retryable = true;
-    retryAfterMs = 30000;
-    constructor(targetPath) {
-      super(`A writer already holds the lease for ${targetPath}.`);
-      this.targetPath = targetPath;
-    }
-  };
-  FileLeaseLostError = class FileLeaseLostError extends Error {
-    code = "file_lease_lost";
-    targetPath;
-    constructor(targetPath) {
-      super(`The writer lease for ${targetPath} is no longer owned by this process.`);
-      this.targetPath = targetPath;
-    }
-  };
-  CURRENT_BOOT_ID = process.platform === "darwin" ? darwinBootId() : undefined;
-  CURRENT_PROCESS_INSTANCE = processInstanceIdentity(process.pid);
 });
 
 // src/core/secret-store.ts
@@ -12195,7 +12195,8 @@ var init_local_index = __esm(() => {
     tierLedgerOwned;
     tierLedgerDisabled;
     boundLedgerHandle;
-    embeddingQueue = new Set;
+    embeddingQueueState;
+    embeddingFailureState;
     embeddingDeferral;
     constructor(options) {
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
@@ -15171,19 +15172,84 @@ var init_local_index = __esm(() => {
         return chunks.length + 1;
       })();
     }
-    queueEmbedding(localItemIds, deferredReason) {
-      for (const localItemId of localItemIds)
-        this.embeddingQueue.add(localItemId);
+    queueEmbedding(localItemIds, provider, deferredReason) {
+      const queue = this.embeddingQueueState ??= new Map;
+      const failed = this.embeddingFailureState;
+      for (const localItemId of localItemIds) {
+        if (failed?.has(localItemId))
+          continue;
+        queue.set(localItemId, provider);
+      }
       if (deferredReason !== undefined)
         this.embeddingDeferral = deferredReason;
     }
     queuedEmbeddingItemIds(limit) {
-      const ids = [...this.embeddingQueue];
+      const ids = [...this.embeddingQueueState?.keys() ?? []];
       return limit === undefined ? ids : ids.slice(0, Math.max(0, limit));
     }
+    queuedEmbeddingGroups(limit) {
+      const groups = new Map;
+      let taken = 0;
+      for (const [localItemId, provider] of this.embeddingQueueState ?? []) {
+        if (taken >= limit)
+          break;
+        const group = groups.get(provider) ?? [];
+        group.push(localItemId);
+        groups.set(provider, group);
+        taken += 1;
+      }
+      return [...groups].map(([provider, localItemIds]) => ({ provider, localItemIds }));
+    }
     completeQueuedEmbedding(localItemIds) {
+      const queue = this.embeddingQueueState;
+      if (!queue)
+        return;
       for (const localItemId of localItemIds)
-        this.embeddingQueue.delete(localItemId);
+        queue.delete(localItemId);
+    }
+    markEmbeddingFailed(localItemId, errorKind) {
+      (this.embeddingFailureState ??= new Map).set(localItemId, errorKind);
+      this.embeddingQueueState?.delete(localItemId);
+    }
+    embeddingFailedItemCount() {
+      return this.embeddingFailureState?.size ?? 0;
+    }
+    missingEmbeddingItemIds(modelId, limit) {
+      if (limit <= 0)
+        return [];
+      const failed = this.embeddingFailureState;
+      const { filter, params } = this.embeddingTierExclusionFilter();
+      const rows = this.db.query(`
+      SELECT i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${filter}
+      GROUP BY i.item_pk
+      ORDER BY MIN(c.chunk_pk) ASC
+      LIMIT ?
+    `).all(modelId, ...params, limit + (failed?.size ?? 0));
+      return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
+    }
+    embeddingBacklogEstimate(modelId) {
+      const { filter, params } = this.embeddingTierExclusionFilter();
+      const row = this.db.query(`
+      SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${filter}
+    `).get(modelId, ...params);
+      return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+    }
+    embeddingTierExclusionFilter() {
+      const tierExcluded = this.tierHiddenItemPks();
+      const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
+      return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
     embeddingDeferredReason() {
       return this.embeddingDeferral;
@@ -16411,7 +16477,7 @@ var init_connector_store = __esm(() => {
 });
 
 // src/workers/dropbox-files/corpus-adapter.ts
-var DROPBOX_FILES_CORPUS_ID = "secure_local.dropbox.files";
+var DROPBOX_FILES_CORPUS_ID = "secure_local.dropbox.files", DROPBOX_FILES_SOURCE_ID = "dropbox.files";
 var init_corpus_adapter = __esm(() => {
   init_corpus();
 });
@@ -17864,7 +17930,7 @@ function defaultWhatsAppStateDir(env = process.env) {
 function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
   return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join10(defaultWhatsAppStateDir(env), "connector-store.db");
 }
-var WHATSAPP_STORE_PLACEMENT;
+var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
 var init_store_sync = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
@@ -17940,6 +18006,9 @@ var init_selected_item_safety = __esm(() => {
     "text"
   ]);
 });
+
+// src/core/embedding-cost-estimates.ts
+var init_embedding_cost_estimates = () => {};
 
 // src/core/privacy-language.ts
 var SENSITIVITY_TIER_LABELS;
@@ -18901,6 +18970,7 @@ var init_capture_spool_connector = __esm(() => {
 });
 
 // src/workers/telegram-messages/store-sync.ts
+var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var init_store_sync2 = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
@@ -18960,6 +19030,7 @@ var init_secret_locations = __esm(() => {
 // src/workers/source-index/status.ts
 var init_status = __esm(() => {
   init_corpus();
+  init_embedding_cost_estimates();
   init_source_corpus_registry();
   init_answer_ready_coverage();
   init_corpora();
@@ -19530,6 +19601,7 @@ var init_credential_degradation = __esm(() => {
 });
 
 // scripts/source-embedding-drain.ts
+init_file_lease();
 init_atomic_file();
 init_config();
 init_sovereignty();
@@ -20436,6 +20508,7 @@ init_venice_models();
 init_sovereignty();
 
 // src/workers/email-source/index.ts
+init_file_lease();
 init_email_policy();
 init_publisher_oauth_client();
 init_oauth_relay();
@@ -21478,6 +21551,15 @@ var GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regressi
 var GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression";
 var GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy";
 var GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy";
+var SCHEDULER_SOURCE_IDS = {
+  gmail: "gmail.email",
+  googleDrive: "google_drive.docs",
+  dropbox: DROPBOX_FILES_SOURCE_ID,
+  readwise: "readwise.library",
+  xBookmarks: "x.bookmarks",
+  telegram: TELEGRAM_MESSAGES_SOURCE_ID,
+  whatsapp: WHATSAPP_PERSONAL_SOURCE_ID
+};
 class SourceSchedulerTaskFailure extends Error {
   errorKind;
   warnings;
@@ -21993,6 +22075,13 @@ ${request.taskId}`);
 }
 var EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60000;
 var EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+var CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = false;
+var WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE = {
+  [SCHEDULER_SOURCE_IDS.readwise]: true,
+  [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
+  [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
+  [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP
+};
 function normalizeTaskResult(result) {
   return {
     status: result.status,
@@ -23541,6 +23630,7 @@ class TierSnifferService {
 }
 
 // src/workers/classification/tier-migration.ts
+init_embedding_cost_estimates();
 init_operation_error();
 
 // src/workers/connector-store/tier-move.ts
@@ -24276,7 +24366,7 @@ async function runSourceEmbeddingDrain(options) {
       }
     } catch (error) {
       const message = errorMessage3(error);
-      const transientLock = isSqliteBusyError(message);
+      const transientLock = isSqliteBusyError(message) || isEmbeddingLaneBusyError(error, message);
       if (transientLock) {
         transientLockRetries += 1;
         laneConsecutiveFailures[item.laneIndex] = 0;
@@ -24812,6 +24902,11 @@ function secondsToMs(value) {
 function errorMessage3(error) {
   return error instanceof Error && error.message.trim() ? error.message.trim() : "unknown embedding drain error";
 }
+function isEmbeddingLaneBusyError(error, message) {
+  if (error instanceof FileLeaseBusyError)
+    return true;
+  return /embedding_lane_busy|file_lease_busy|already holds the lease/i.test(message);
+}
 function isSqliteBusyError(message) {
   const normalized = message.toLowerCase();
   return normalized.includes("database is locked") || normalized.includes("sqlite_busy");
@@ -24904,6 +24999,7 @@ export {
   runSourceEmbeddingDrain,
   publishNativeEmbeddingDrainReadiness,
   optionsFromEnv,
+  isEmbeddingLaneBusyError,
   embeddingLedgerRecorderFromEnv,
   assertEmbeddingProviderForLane,
   DirectSourceEmbeddingDrainClient

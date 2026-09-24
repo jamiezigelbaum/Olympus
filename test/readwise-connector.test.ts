@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import {
   createConnectorStoreCorpusAdapter,
-  embedQueuedChunks,
+  embedPendingChunks,
 } from '../src/workers/connector-store/index.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
 import {
@@ -213,11 +213,11 @@ describe('Readwise thin connector and canonical store', () => {
       const unembeddedStatus = store.status();
       // The sync commits items and chunks and queues them (owner decision
       // 2026-09-24: decouple embedding from sync); the embedding sweep embeds.
-      const embedded = await embedQueuedChunks([{ store, provider }]);
+      const embedded = await embedPendingChunks([{ store, provider }], { maxItems: 32 });
       const firstStatus = store.status();
       const second = await sync.sync();
       const secondStatus = store.status();
-      const reEmbedded = await embedQueuedChunks([{ store, provider }]);
+      const reEmbedded = await embedPendingChunks([{ store, provider }], { maxItems: 32 });
 
       expect(unembeddedStatus.counts).toMatchObject({ chunks: 2, embeddedChunks: 0 });
       expect(embedded).toEqual([expect.objectContaining({ chunksEmbedded: 2 })]);

@@ -147,6 +147,7 @@ export const DASHBOARD_GUARD_CONSEQUENCES: Readonly<Record<string, string>> = {
   config_missing_folder_argument: 'this sync is configured without the folder it needs',
   reconcile_incomplete: 'the last reconcile did not cover everything it was asked to',
   embedding_provider_unavailable: 'the embedding provider is not answering, so new chunks wait for embedding and the lane retries with backoff; keyword search still answers',
+  embedding_items_failed: 'some items could not be embedded and are skipped; keyword search still finds them and the rest keep embedding',
 };
 
 /** The two drain states that are a switch somebody threw, not a fault. */

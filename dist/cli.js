@@ -15781,32 +15781,90 @@ function exclusionCounts(tally) {
 function connectorStoreEmbeddingDeferredReason(error) {
   return `embedding_provider_unavailable:${error.reason}`;
 }
-async function embedQueuedChunks(targets, options = {}) {
+async function embedPendingChunks(targets, options) {
   const runs = [];
-  for (const { store, provider } of targets) {
-    const localItemIds = store.queuedEmbeddingItemIds(options.maxItems);
-    if (localItemIds.length === 0) {
-      runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0 });
-      continue;
+  for (const target of targets) {
+    const { store } = target;
+    const run = {
+      corpusId: store.corpusId,
+      itemsAttempted: 0,
+      chunksEmbedded: 0,
+      itemsFailed: 0,
+      itemsOutOfScope: 0
+    };
+    runs.push(run);
+    const groups = store.queuedEmbeddingGroups(options.maxItems);
+    const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
+    if (target.wholeStore === true && queued < options.maxItems) {
+      const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
+      const missing = store.missingEmbeddingItemIds(target.provider.modelId, options.maxItems - queued).filter((localItemId) => !queuedIds.has(localItemId));
+      if (missing.length > 0)
+        groups.push({ provider: target.provider, localItemIds: missing });
     }
-    try {
-      const embed = await store.embedChunks({ provider, localItemIds });
-      store.completeQueuedEmbedding(localItemIds);
-      store.setEmbeddingDeferral(undefined);
-      runs.push({ corpusId: store.corpusId, itemsAttempted: localItemIds.length, chunksEmbedded: embed.chunksEmbedded });
-    } catch (error) {
-      if (error instanceof FileLeaseBusyError) {
-        runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, busy: true });
+    let answered = false;
+    for (const group of groups) {
+      try {
+        group.provider.assertBindingCurrent?.();
+      } catch {
+        store.completeQueuedEmbedding(group.localItemIds);
+        run.itemsOutOfScope += group.localItemIds.length;
         continue;
       }
-      if (!(error instanceof TransientSourceEmbeddingError))
-        throw error;
-      const deferredReason = connectorStoreEmbeddingDeferredReason(error);
-      store.setEmbeddingDeferral(deferredReason);
-      runs.push({ corpusId: store.corpusId, itemsAttempted: localItemIds.length, chunksEmbedded: 0, deferredReason });
+      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds);
+      run.itemsAttempted += group.localItemIds.length;
+      run.chunksEmbedded += outcome.chunksEmbedded;
+      run.itemsFailed += outcome.itemsFailed;
+      if (outcome.busy) {
+        run.busy = true;
+        break;
+      }
+      if (outcome.deferredReason) {
+        run.deferredReason = outcome.deferredReason;
+        break;
+      }
+      answered = true;
     }
+    if (run.deferredReason)
+      store.setEmbeddingDeferral(run.deferredReason);
+    else if (answered)
+      store.setEmbeddingDeferral(undefined);
   }
   return runs;
+}
+async function embedItemsIsolated(store, provider, localItemIds) {
+  try {
+    const embed = await store.embedChunks({ provider, localItemIds: [...localItemIds] });
+    store.completeQueuedEmbedding(localItemIds);
+    return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError)
+      return { chunksEmbedded: 0, itemsFailed: 0, busy: true };
+    if (error instanceof TransientSourceEmbeddingError) {
+      return { chunksEmbedded: 0, itemsFailed: 0, deferredReason: connectorStoreEmbeddingDeferredReason(error) };
+    }
+    if (localItemIds.length === 1) {
+      store.markEmbeddingFailed(localItemIds[0], embeddingFailureKind(error));
+      console.warn(`[olympus:connector-store] embedding_item_skipped corpus_id=${store.corpusId} error_kind=${embeddingFailureKind(error)}`);
+      return { chunksEmbedded: 0, itemsFailed: 1 };
+    }
+    let chunksEmbedded = 0;
+    let itemsFailed = 0;
+    for (const localItemId of localItemIds) {
+      const single = await embedItemsIsolated(store, provider, [localItemId]);
+      chunksEmbedded += single.chunksEmbedded;
+      itemsFailed += single.itemsFailed;
+      if (single.busy || single.deferredReason)
+        return { ...single, chunksEmbedded, itemsFailed };
+    }
+    return { chunksEmbedded, itemsFailed };
+  }
+}
+function embeddingFailureKind(error) {
+  const code = error?.code;
+  if (typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code))
+    return code;
+  const name = error instanceof Error ? error.name : "error";
+  return /^[A-Za-z0-9_]{1,64}$/.test(name) ? name.toLowerCase() : "error";
 }
 function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
   const modelId = requireNonEmpty2(options.modelId, "Connector store embedding model id");
@@ -15853,7 +15911,7 @@ async function syncAndEmbedFromConnector(options) {
   const selectedIds = [...localItemIds];
   const emptyEmbed = () => connectorStoreEmbedSummary(options.store.corpusId, options.store.trustDomain, options.embeddingProvider, 0, 0, 0);
   if (options.embed === false) {
-    options.store.queueEmbedding(selectedIds);
+    options.store.queueEmbedding(selectedIds, options.embeddingProvider);
     return { sync, embed: emptyEmbed() };
   }
   const selectedBatches = selectedIds.length === 0 ? [[]] : [...batched(selectedIds, MAX_SELECTED_EMBED_ITEM_IDS)];
@@ -15868,13 +15926,13 @@ async function syncAndEmbedFromConnector(options) {
     } catch (error) {
       const unembedded = selectedBatches.slice(batchIndex).flat();
       if (error instanceof FileLeaseBusyError) {
-        options.store.queueEmbedding(unembedded);
+        options.store.queueEmbedding(unembedded, options.embeddingProvider);
         return { sync, embed: { ...embed ?? emptyEmbed(), deferredReason: "embedding_lane_busy" } };
       }
       if (!(error instanceof TransientSourceEmbeddingError))
         throw error;
       const deferredReason = connectorStoreEmbeddingDeferredReason(error);
-      options.store.queueEmbedding(unembedded, deferredReason);
+      options.store.queueEmbedding(unembedded, options.embeddingProvider, deferredReason);
       console.warn(`[olympus:connector-store] embedding_deferred corpus_id=${options.store.corpusId} reason=${deferredReason}`);
       return { sync, embed: { ...embed ?? emptyEmbed(), deferredReason } };
     }
@@ -17987,7 +18045,7 @@ function errorMessage2(error) {
 function nowIso2() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -18088,7 +18146,8 @@ var init_local_index = __esm(() => {
     tierLedgerOwned;
     tierLedgerDisabled;
     boundLedgerHandle;
-    embeddingQueue = new Set;
+    embeddingQueueState;
+    embeddingFailureState;
     embeddingDeferral;
     constructor(options) {
       this.corpusId = requireNonEmpty2(options.corpusId, "Connector store corpus id");
@@ -21064,19 +21123,84 @@ var init_local_index = __esm(() => {
         return chunks.length + 1;
       })();
     }
-    queueEmbedding(localItemIds, deferredReason) {
-      for (const localItemId of localItemIds)
-        this.embeddingQueue.add(localItemId);
+    queueEmbedding(localItemIds, provider, deferredReason) {
+      const queue = this.embeddingQueueState ??= new Map;
+      const failed = this.embeddingFailureState;
+      for (const localItemId of localItemIds) {
+        if (failed?.has(localItemId))
+          continue;
+        queue.set(localItemId, provider);
+      }
       if (deferredReason !== undefined)
         this.embeddingDeferral = deferredReason;
     }
     queuedEmbeddingItemIds(limit) {
-      const ids = [...this.embeddingQueue];
+      const ids = [...this.embeddingQueueState?.keys() ?? []];
       return limit === undefined ? ids : ids.slice(0, Math.max(0, limit));
     }
+    queuedEmbeddingGroups(limit) {
+      const groups = new Map;
+      let taken = 0;
+      for (const [localItemId, provider] of this.embeddingQueueState ?? []) {
+        if (taken >= limit)
+          break;
+        const group = groups.get(provider) ?? [];
+        group.push(localItemId);
+        groups.set(provider, group);
+        taken += 1;
+      }
+      return [...groups].map(([provider, localItemIds]) => ({ provider, localItemIds }));
+    }
     completeQueuedEmbedding(localItemIds) {
+      const queue = this.embeddingQueueState;
+      if (!queue)
+        return;
       for (const localItemId of localItemIds)
-        this.embeddingQueue.delete(localItemId);
+        queue.delete(localItemId);
+    }
+    markEmbeddingFailed(localItemId, errorKind) {
+      (this.embeddingFailureState ??= new Map).set(localItemId, errorKind);
+      this.embeddingQueueState?.delete(localItemId);
+    }
+    embeddingFailedItemCount() {
+      return this.embeddingFailureState?.size ?? 0;
+    }
+    missingEmbeddingItemIds(modelId, limit) {
+      if (limit <= 0)
+        return [];
+      const failed = this.embeddingFailureState;
+      const { filter, params } = this.embeddingTierExclusionFilter();
+      const rows = this.db.query(`
+      SELECT i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${filter}
+      GROUP BY i.item_pk
+      ORDER BY MIN(c.chunk_pk) ASC
+      LIMIT ?
+    `).all(modelId, ...params, limit + (failed?.size ?? 0));
+      return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
+    }
+    embeddingBacklogEstimate(modelId) {
+      const { filter, params } = this.embeddingTierExclusionFilter();
+      const row = this.db.query(`
+      SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${filter}
+    `).get(modelId, ...params);
+      return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+    }
+    embeddingTierExclusionFilter() {
+      const tierExcluded = this.tierHiddenItemPks();
+      const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
+      return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
     embeddingDeferredReason() {
       return this.embeddingDeferral;
@@ -44359,6 +44483,35 @@ var init_credential_health = __esm(() => {
   CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
 });
 
+// src/core/embedding-cost-estimates.ts
+function embeddingModelEstimate(modelId, prices) {
+  const configured = prices?.[modelId];
+  const fallback = DEFAULT_EMBEDDING_MODEL_ESTIMATES[modelId] ?? FALLBACK_EMBEDDING_MODEL_ESTIMATE;
+  if (configured && typeof configured.usdPerMillionTokens === "number") {
+    return {
+      estimate: {
+        usdPerMillionTokens: configured.usdPerMillionTokens,
+        chunksPerMinute: configured.chunksPerMinute ?? fallback.chunksPerMinute
+      },
+      source: "config"
+    };
+  }
+  return { estimate: fallback, source: "default_unverified" };
+}
+function estimatedEmbeddingCostUsd(tokens, modelId, prices) {
+  const { estimate } = embeddingModelEstimate(modelId, prices);
+  return Math.round(tokens / 1e6 * estimate.usdPerMillionTokens * 100) / 100;
+}
+var DEFAULT_EMBEDDING_MODEL_ESTIMATES, FALLBACK_EMBEDDING_MODEL_ESTIMATE;
+var init_embedding_cost_estimates = __esm(() => {
+  DEFAULT_EMBEDDING_MODEL_ESTIMATES = {
+    "gemini-embedding-2": { usdPerMillionTokens: 0.15, chunksPerMinute: 600 },
+    "text-embedding-qwen3-8b": { usdPerMillionTokens: 0.0125, chunksPerMinute: 300 },
+    "secure-local-qwen3-embed": { usdPerMillionTokens: 0, chunksPerMinute: 60 }
+  };
+  FALLBACK_EMBEDDING_MODEL_ESTIMATE = { usdPerMillionTokens: 0.15, chunksPerMinute: 60 };
+});
+
 // src/workers/classification/secret-locations.ts
 import { Database as Database9 } from "bun:sqlite";
 import { createHash as createHash33 } from "node:crypto";
@@ -44639,7 +44792,8 @@ function createSourceIndexStatusHandler(options = {}) {
           return cached.status;
         const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId) : undefined;
         const status = store ? connectorStoreStatus(corpus, store.status(statusScope), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store)) : configuredCorpusStatus(corpus);
-        const resolved = withRetrievalEnforcementStatus(corpus, status, availability);
+        const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
+        const resolved = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId) : enforced;
         if (maxAgeMs > 0)
           cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
@@ -44849,6 +45003,26 @@ function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
     }
   };
 }
+function withEmbeddingBacklogEstimate(status, store, modelId) {
+  const parity = status.embedding_parity;
+  if (!parity?.required)
+    return status;
+  const backlog = store.embeddingBacklogEstimate(modelId);
+  const { source } = embeddingModelEstimate(modelId);
+  return {
+    ...status,
+    embedding_parity: {
+      ...parity,
+      backlog_estimate: {
+        model_id: modelId,
+        missing_chunks: backlog.missingChunks,
+        estimated_tokens: backlog.estimatedTokens,
+        estimated_cost_usd: estimatedEmbeddingCostUsd(backlog.estimatedTokens, modelId),
+        price_source: source
+      }
+    }
+  };
+}
 function lastRefreshFromConnectorStoreSync(sync) {
   return {
     sync_run_id: sync.syncRunId,
@@ -44874,6 +45048,7 @@ function providerFromCorpusId(corpusId) {
 var ITEMS_EMBEDDED_COUNT_KEY = "items_embedded", DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000;
 var init_status = __esm(() => {
   init_corpus();
+  init_embedding_cost_estimates();
   init_source_corpus_registry();
   init_answer_ready_coverage();
   init_corpora();
@@ -45524,11 +45699,19 @@ function embeddingBacklogFromCorpora(corpora) {
   const chunks = parities.reduce((sum2, parity) => sum2 + parity.chunks, 0);
   if (chunks <= 0)
     return;
+  const estimates = parities.map((parity) => parity.backlog_estimate).filter((estimate) => estimate !== undefined);
   return {
     chunks,
     embedded_chunks: parities.reduce((sum2, parity) => sum2 + parity.embedded_chunks, 0),
     missing_chunks: parities.reduce((sum2, parity) => sum2 + parity.missing_chunks, 0),
-    refresh_needed: parities.some((parity) => parity.refresh_needed)
+    refresh_needed: parities.some((parity) => parity.refresh_needed),
+    ...estimates.length > 0 ? {
+      estimate: {
+        estimated_tokens: estimates.reduce((sum2, estimate) => sum2 + estimate.estimated_tokens, 0),
+        estimated_cost_usd: Math.round(estimates.reduce((sum2, estimate) => sum2 + estimate.estimated_cost_usd, 0) * 100) / 100,
+        price_source: estimates.every((estimate) => estimate.price_source === "config") ? "config" : "default_unverified"
+      }
+    } : {}
   };
 }
 function embeddingRequiredFromCorpora(corpora) {
@@ -48383,7 +48566,9 @@ async function sourceIndexStatusCheck(deps) {
     const embeddingLag = Math.max(chunks - embedded, 0);
     if (chunks > 0 || embedded > 0) {
       const items = typeof counts.indexed_items === "number" ? `, ${asCount(counts.indexed_items)} items indexed` : "";
-      summaries.push((embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`) + items);
+      const backlog = asRecord9(embeddingParity.backlog_estimate);
+      const backlogEstimate = embeddingRequired && typeof backlog.estimated_cost_usd === "number" && asCount(backlog.missing_chunks) > 0 ? `, ${asCount(backlog.missing_chunks)} chunks waiting ≈ ${asCount(backlog.estimated_tokens)} tokens ≈ $${Number(backlog.estimated_cost_usd).toFixed(2)} (estimate${backlog.price_source === "default_unverified" ? ", unverified list price" : ""})` : "";
+      summaries.push((embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})${backlogEstimate}` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`) + items);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
       const approvedLag = Math.min(embeddingLag, migration?.destinations.get(corpusId) ?? 0);
@@ -48706,6 +48891,9 @@ async function sourceSchedulerStatusCheck(deps) {
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
     if (tasks.some((taskEntry) => asRecord9(taskEntry).degraded_reason === "embedding_provider_unavailable")) {
       problems.push(`${sourceId} embedding is deferred: the embedding provider is not answering, so new chunks wait and the sweep retries with backoff`);
+    }
+    if (tasks.some((taskEntry) => asRecord9(taskEntry).degraded_reason === "embedding_items_failed")) {
+      problems.push(`${sourceId} has items whose embedding failed; they are skipped (keyword search still finds them) and the rest keep embedding`);
     }
     for (const taskEntry of tasks) {
       const task = asRecord9(taskEntry);
@@ -51421,18 +51609,7 @@ function decisionFromQueuedMove(record) {
   };
 }
 function estimateFor(modelId, prices) {
-  const configured = prices?.[modelId];
-  const fallback = DEFAULT_TIER_MIGRATION_ESTIMATES[modelId] ?? FALLBACK_ESTIMATE;
-  if (configured && typeof configured.usdPerMillionTokens === "number") {
-    return {
-      estimate: {
-        usdPerMillionTokens: configured.usdPerMillionTokens,
-        chunksPerMinute: configured.chunksPerMinute ?? fallback.chunksPerMinute
-      },
-      source: "config"
-    };
-  }
-  return { estimate: fallback, source: "default_unverified" };
+  return embeddingModelEstimate(modelId, prices);
 }
 function authorityMatches(authority, identity) {
   return authority !== undefined && authority.modelId === identity.modelId && authority.provider === identity.provider && authority.backend === identity.backend && authority.dimension === identity.dimension && authority.epochId === identity.epochId;
@@ -52639,8 +52816,9 @@ function tierMigrationStatusSummary(statePath) {
     ...plan.state === "stopped" ? { stopped_at: plan.stoppedAt ?? plan.updatedAt } : {}
   };
 }
-var TIER_MIGRATION_STATE_SCHEMA_VERSION = 1, TIER_MIGRATION_DIR_ENV = "OLYMPUS_TIER_MIGRATION_DIR", TIER_DISPLAY, DEFAULT_TIER_MIGRATION_ESTIMATES, FALLBACK_ESTIMATE, SELECTOR_KINDS, TIER_MIGRATION_REPLAN_STOP_REASONS;
+var TIER_MIGRATION_STATE_SCHEMA_VERSION = 1, TIER_MIGRATION_DIR_ENV = "OLYMPUS_TIER_MIGRATION_DIR", TIER_DISPLAY, SELECTOR_KINDS, TIER_MIGRATION_REPLAN_STOP_REASONS;
 var init_tier_migration = __esm(() => {
+  init_embedding_cost_estimates();
   init_operation_error();
   init_tier_move();
   init_embedding_ledger();
@@ -52653,12 +52831,6 @@ var init_tier_migration = __esm(() => {
     secure: "Private",
     secrets: "Secrets"
   };
-  DEFAULT_TIER_MIGRATION_ESTIMATES = {
-    "gemini-embedding-2": { usdPerMillionTokens: 0.15, chunksPerMinute: 600 },
-    "text-embedding-qwen3-8b": { usdPerMillionTokens: 0.0125, chunksPerMinute: 300 },
-    "secure-local-qwen3-embed": { usdPerMillionTokens: 0, chunksPerMinute: 60 }
-  };
-  FALLBACK_ESTIMATE = { usdPerMillionTokens: 0.15, chunksPerMinute: 60 };
   SELECTOR_KINDS = ["source", "folder", "label", "sender", "chat"];
   TIER_MIGRATION_REPLAN_STOP_REASONS = new Set([
     "unplanned_destination",
@@ -81541,7 +81713,8 @@ var init_attention = __esm(() => {
     credential_session_latched: "the credential session is latched by another run",
     config_missing_folder_argument: "this sync is configured without the folder it needs",
     reconcile_incomplete: "the last reconcile did not cover everything it was asked to",
-    embedding_provider_unavailable: "the embedding provider is not answering, so new chunks wait for embedding and the lane retries with backoff; keyword search still answers"
+    embedding_provider_unavailable: "the embedding provider is not answering, so new chunks wait for embedding and the lane retries with backoff; keyword search still answers",
+    embedding_items_failed: "some items could not be embedded and are skipped; keyword search still finds them and the rest keep embedding"
   };
   DASHBOARD_DRAIN_CONSEQUENCES = {
     held: "the extraction lane is held, so no new text is being extracted",
@@ -81757,6 +81930,10 @@ function renderProgress(source, progress, now) {
   if (progress.phases.some((phase) => phase.tracks_sync === true)) {
     notes.push(`${source.label} delivers its text with each item, so there is no separate extraction step: the extraction row tracks the sync row.`);
   }
+  const backlog = source.embedding_backlog;
+  if (source.embedding_required !== false && backlog?.estimate && backlog.missing_chunks > 0) {
+    notes.push(`${dashboardCount(backlog.missing_chunks)} chunks are waiting to be embedded` + ` (${embeddingCostPhrase(backlog.estimate)}). Keyword search answers from them meanwhile.`);
+  }
   if (progress.phases.some((phase) => phase.unmeasured === true)) {
     notes.push("This store does not yet publish a per-item embedding count, so the embedding row states no share rather than deriving one from chunk totals.");
   }
@@ -81786,6 +81963,11 @@ function settledLine(source, now) {
       return `${lead} · last checked ${relative7}`;
   }
   return lead;
+}
+function embeddingCostPhrase(estimate) {
+  const tokens = estimate.estimated_tokens >= 1e6 ? `${(estimate.estimated_tokens / 1e6).toFixed(1)}M` : estimate.estimated_tokens >= 1000 ? `${Math.round(estimate.estimated_tokens / 1000)}k` : `${estimate.estimated_tokens}`;
+  const cost = `~$${estimate.estimated_cost_usd.toFixed(2)}`;
+  return `about ${tokens} tokens, ${cost} estimated` + (estimate.price_source === "default_unverified" ? " at unverified list price" : "");
 }
 function phaseFacts(phase) {
   const measure = phase.measure;
@@ -81966,7 +82148,7 @@ function detailChecks(source, degraded, now) {
   if (backlog) {
     checks4.push({
       name: "EMBEDDING_PARITY",
-      observed: `${dashboardCount(backlog.missing_chunks)} of ${dashboardCount(backlog.chunks)} chunks missing`,
+      observed: `${dashboardCount(backlog.missing_chunks)} of ${dashboardCount(backlog.chunks)} chunks missing` + (backlog.estimate && backlog.missing_chunks > 0 ? ` · ${embeddingCostPhrase(backlog.estimate)}` : ""),
       expectation: "== up to date",
       ok: !backlog.refresh_needed
     });
@@ -87148,14 +87330,22 @@ function createEmailSourceWorker(options = {}) {
             }
             const modelId = asOptionalString(record3.model_id);
             const maxPendingChunks = asOptionalNumber(record3.max_pending_chunks);
-            const result = await connectorStore.embedChunks({
-              provider: embeddingProvider,
-              ...embeddingScope?.accountScope ? { accountScope: embeddingScope.accountScope } : {},
-              ...embeddingScope?.filters ? { filters: embeddingScope.filters } : {},
-              ...assertEmbeddingScopeCurrent ? { assertAuthorized: assertEmbeddingScopeCurrent } : {},
-              ...modelId ? { modelId } : {},
-              ...maxPendingChunks !== undefined ? { limit: maxPendingChunks } : {}
-            });
+            let result;
+            try {
+              result = await connectorStore.embedChunks({
+                provider: embeddingProvider,
+                ...embeddingScope?.accountScope ? { accountScope: embeddingScope.accountScope } : {},
+                ...embeddingScope?.filters ? { filters: embeddingScope.filters } : {},
+                ...assertEmbeddingScopeCurrent ? { assertAuthorized: assertEmbeddingScopeCurrent } : {},
+                ...modelId ? { modelId } : {},
+                ...maxPendingChunks !== undefined ? { limit: maxPendingChunks } : {}
+              });
+            } catch (error2) {
+              if (error2 instanceof FileLeaseBusyError) {
+                throw new EmailSourceWorkerError(409, "embedding_lane_busy", `Another embedder is embedding ${connectorStore.corpusId}; retry shortly.`);
+              }
+              throw error2;
+            }
             assertNoRawEmailFields(result);
             return json(result);
           }
@@ -89368,6 +89558,7 @@ function mostPrivateTrustDomain(domains) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger";
 var init_email_source = __esm(() => {
+  init_file_lease();
   init_email_policy();
   init_publisher_oauth_client();
   init_oauth_relay();
@@ -90334,7 +90525,10 @@ function createCanonicalDropboxSchedulerSource(input) {
       kind: "embed",
       writer: true,
       run: async () => {
-        const result = await input.store.embedChunks({ provider: input.embeddingProvider });
+        const result = await input.store.embedChunks({
+          provider: input.embeddingProvider,
+          limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS
+        });
         return progressFromCounts({
           chunks_seen: result.chunksSeen,
           chunks_embedded: result.chunksEmbedded,
@@ -90355,7 +90549,7 @@ function createCanonicalDropboxSchedulerSource(input) {
         if (store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(tier.provider)) {
           throw new Error("A secure_local tier store requires a local/private or approved Venice embedding provider.");
         }
-        const result = await store.embedChunks({ provider: tier.provider });
+        const result = await store.embedChunks({ provider: tier.provider, limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS });
         return progressFromCounts({
           chunks_seen: result.chunksSeen,
           chunks_embedded: result.chunksEmbedded,
@@ -90433,6 +90627,9 @@ function createReadwiseSchedulerSource(input) {
     lastSyncCompletedAt: () => input.liveSync?.lastStoreRunCompletedAt()
   };
 }
+function wholeStoreEmbeddingSweepAllowed(sourceId) {
+  return WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId] === true;
+}
 function withEmbeddingSweep(sources, targetsFor) {
   return sources.map((source) => {
     if (source.tasks.some((task) => task.kind === "embed"))
@@ -90455,20 +90652,33 @@ function embeddingSweepTask(source, targets) {
     intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context) => {
-      const runs = await embedQueuedChunks(targets(), { maxItems: EMBEDDING_SWEEP_MAX_ITEMS });
+      const passTargets = targets();
+      const runs = await embedPendingChunks(passTargets, { maxItems: EMBEDDING_SWEEP_MAX_ITEMS });
       const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
       const counts = {
         chunks_embedded: runs.reduce((sum2, run) => sum2 + run.chunksEmbedded, 0),
-        items_queued: targets().reduce((sum2, target) => sum2 + target.store.queuedEmbeddingItemIds().length, 0),
+        items_queued: passTargets.reduce((sum2, target) => sum2 + target.store.queuedEmbeddingItemIds().length, 0),
+        items_failed: passTargets.reduce((sum2, target) => sum2 + target.store.embeddingFailedItemCount(), 0),
+        items_out_of_scope: runs.reduce((sum2, run) => sum2 + run.itemsOutOfScope, 0),
         stores_deferred: deferred,
         stores_busy: runs.filter((run) => run.busy === true).length
       };
       const status = counts.chunks_embedded > 0 ? "progress" : "idle";
-      if (deferred === 0)
-        return { status, counts };
+      const attemptedAt = Date.parse(context?.attemptedAt ?? "") || Date.now();
+      if (deferred === 0) {
+        if (counts.items_failed === 0)
+          return { status, counts };
+        return {
+          status,
+          counts,
+          retryAt: {
+            at: new Date(attemptedAt + EMBEDDING_SWEEP_INTERVAL_MS).toISOString(),
+            degradedReason: EMBEDDING_ITEMS_FAILED_REASON
+          }
+        };
+      }
       const previousMs = context?.effectiveIntervalMs ?? EMBEDDING_SWEEP_INTERVAL_MS;
       const backoffMs = Math.min(Math.max(previousMs, EMBEDDING_SWEEP_INTERVAL_MS) * 2, EMBEDDING_SWEEP_MAX_BACKOFF_MS);
-      const attemptedAt = Date.parse(context?.attemptedAt ?? "") || Date.now();
       return {
         status,
         counts,
@@ -91107,7 +91317,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SourceSchedulerTaskFailure, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 64, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SourceSchedulerTaskFailure, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = false, WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS = 512, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS;
 var init_source_scheduler = __esm(() => {
   init_config();
   init_operation_error();
@@ -91150,6 +91360,12 @@ var init_source_scheduler = __esm(() => {
   };
   EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60000;
   EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+  WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE = {
+    [SCHEDULER_SOURCE_IDS.readwise]: true,
+    [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
+    [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
+    [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP
+  };
   HONEST_SCHEDULER_ERROR_KINDS = new Set([
     "api_request_guard",
     "config_missing_folder_argument",
@@ -91415,6 +91631,9 @@ function scopeBoundEmbeddingProvider(provider, authority, ref) {
     async embed(inputs, options) {
       authority.assertRefCurrent(ref);
       return provider.embed(inputs, options);
+    },
+    assertBindingCurrent() {
+      authority.assertRefCurrent(ref);
     }
   };
 }
@@ -96477,11 +96696,16 @@ async function main() {
     const sweptSources = withEmbeddingSweep(sources, (source) => {
       const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
       corpusIds.add(source.corpusId);
+      const wholeStoreAllowed = wholeStoreEmbeddingSweepAllowed(source.sourceId);
+      const hybridServed = (corpusId) => {
+        const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === corpusId) ?? sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === corpusId);
+        return definition !== undefined && definition.activationMode !== "lexical_only" && definition.embeddingPolicy !== "disabled";
+      };
       const targets = () => connectorStores.flatMap((store) => {
         if (!corpusIds.has(store.corpusId))
           return [];
         const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
-        return provider ? [{ store, provider }] : [];
+        return provider ? [{ store, provider, wholeStore: wholeStoreAllowed && hybridServed(store.corpusId) }] : [];
       });
       return targets().length > 0 ? targets : undefined;
     });

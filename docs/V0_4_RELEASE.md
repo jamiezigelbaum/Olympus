@@ -36,10 +36,17 @@ testers have exercised the normal product journey without custom engineering.
   report `embedding_provider_unavailable` while it lasts (Background page,
   source page, doctor), and the sweep backs off up to 30 minutes. Every
   embedder on a store holds one cross-process per-store lease, so the sweep
-  and the external drain never embed the same chunks twice. The sweep embeds
-  only queued items, so no lane's embedding scope widens; the queue is in
-  memory and a restart relies on the next traversal to re-queue. No model,
-  endpoint or epoch changes; no existing vector is invalidated or re-embedded.
+  and the external drain never embed the same chunks twice. Queued items
+  embed under the scope binding their sync used, so a narrowed Gmail or Drive
+  scope drops them unembedded. Readwise also sweeps store-wide (any hybrid
+  chunk still missing a vector, bounded per pass), which survives a restart
+  and clears the existing Private backlog; whether the chat lanes (X,
+  WhatsApp, Telegram) do too is a pending owner decision, off until then
+  (`CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP`). An item whose embedding keeps
+  failing is skipped and surfaced (`embedding_items_failed`), and the
+  hybrid backlog is counted and priced as an estimate in doctor and on the
+  source page. No model, endpoint or epoch changes; no existing vector is
+  invalidated or re-embedded.
 
 - **2026-09-23 — One public beta, no structured beta testing.** The owner
   ends structured beta testing. The latest Olympus is published as a single

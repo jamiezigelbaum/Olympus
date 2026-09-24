@@ -655,8 +655,12 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
       // Readwise's 1,527 and 5,704 CHUNKS as items per tier to an owner whose
       // dashboard said 2,791 items (owner-reported, 2026-09-24).
       const items = typeof counts.indexed_items === 'number' ? `, ${asCount(counts.indexed_items)} items indexed` : '';
+      const backlog = asRecord(embeddingParity.backlog_estimate);
+      const backlogEstimate = embeddingRequired && typeof backlog.estimated_cost_usd === 'number' && asCount(backlog.missing_chunks) > 0
+        ? `, ${asCount(backlog.missing_chunks)} chunks waiting ≈ ${asCount(backlog.estimated_tokens)} tokens ≈ $${Number(backlog.estimated_cost_usd).toFixed(2)} (estimate${backlog.price_source === 'default_unverified' ? ', unverified list price' : ''})`
+        : '';
       summaries.push((embeddingRequired
-        ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})`
+        ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})${backlogEstimate}`
         : corpus.embedding_policy === 'disabled'
           ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled`
           : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`) + items);
@@ -1044,6 +1048,9 @@ async function sourceSchedulerStatusCheck(deps: DoctorDeps): Promise<DoctorCheck
     // chunks waiting on a provider that does not answer are never silent.
     if (tasks.some((taskEntry) => asRecord(taskEntry).degraded_reason === 'embedding_provider_unavailable')) {
       problems.push(`${sourceId} embedding is deferred: the embedding provider is not answering, so new chunks wait and the sweep retries with backoff`);
+    }
+    if (tasks.some((taskEntry) => asRecord(taskEntry).degraded_reason === 'embedding_items_failed')) {
+      problems.push(`${sourceId} has items whose embedding failed; they are skipped (keyword search still finds them) and the rest keep embedding`);
     }
     for (const taskEntry of tasks) {
       const task = asRecord(taskEntry);

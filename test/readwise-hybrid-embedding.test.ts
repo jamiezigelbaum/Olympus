@@ -8,6 +8,7 @@
 // Meanwhile the stores were declared keyword-only, so the vectors it paid for
 // never reached an answer.
 import { afterEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,7 +20,7 @@ import {
   LocalConnectorStore,
   createConnectorStoreContentProvider,
   createConnectorStoreCorpusAdapter,
-  embedQueuedChunks,
+  embedPendingChunks,
   syncAndEmbedFromConnector,
   type ConnectorStoreEmbeddingTarget,
 } from '../src/workers/connector-store/index.ts';
@@ -45,8 +46,11 @@ import {
   SourceScheduler,
   createReadwiseSchedulerSource,
   withEmbeddingSweep,
+  wholeStoreEmbeddingSweepAllowed,
+  CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
   type SourceSchedulerSource,
 } from '../src/workers/source-scheduler.ts';
+import { estimatedEmbeddingCostUsd } from '../src/core/embedding-cost-estimates.ts';
 import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
 import { RecordingProvider } from './helpers/tier-fixtures.ts';
 
@@ -198,7 +202,7 @@ describe('a provider timeout during sync never fails the sync (shared connector-
 
     // The provider comes back: the sweep embeds the queued chunks, once.
     provider.down = false;
-    expect(await embedQueuedChunks([{ store, provider }])).toEqual([
+    expect(await embedPendingChunks([{ store, provider }], { maxItems: 32 })).toEqual([
       expect.objectContaining({ chunksEmbedded: 2 }),
     ]);
     expect(store.queuedEmbeddingItemIds()).toEqual([]);
@@ -283,9 +287,9 @@ describe('Readwise: sync commits, the embedding task embeds with backoff, nothin
         liveConfig: defaultReadwiseLiveSyncConfig({}),
       })!], () => () => {
         // The worker's registry: each mounted store with the identity it embeds with.
-        const targets: ConnectorStoreEmbeddingTarget[] = [{ store, provider: cloud }];
+        const targets: ConnectorStoreEmbeddingTarget[] = [{ store, provider: cloud, wholeStore: true }];
         const secureStore = lane.newStores.secure_local?.current();
-        if (secureStore) targets.push({ store: secureStore, provider: venice });
+        if (secureStore) targets.push({ store: secureStore, provider: venice, wholeStore: true });
         return targets;
       }),
     });
@@ -347,7 +351,7 @@ describe('Readwise: sync commits, the embedding task embeds with backoff, nothin
     // sweep embed nothing that already has a vector at its content.
     const embeddedInputs = venice.inputs.length + cloud.inputs.length;
     await handler.pull();
-    await embedQueuedChunks([{ store, provider: cloud }, { store: secure, provider: venice }]);
+    await embedPendingChunks([{ store, provider: cloud }, { store: secure, provider: venice }], { maxItems: 32 });
     expect(venice.inputs.length + cloud.inputs.length).toBe(embeddedInputs);
   });
 
@@ -507,7 +511,7 @@ describe('the generic embedding sweep recovers any lane that deferred inline (ch
   });
 
   test('a source that declares its own embed task keeps it and gets no second sweep', () => {
-    const store = { embeddingDeferredReason: () => undefined, queuedEmbeddingItemIds: () => [] };
+    const store = { embeddingDeferredReason: () => undefined, queuedEmbeddingItemIds: () => [], embeddingFailedItemCount: () => 0 };
     const source: SourceSchedulerSource = {
       sourceId: 'dropbox.files',
       corpusId: 'secure_local.dropbox.files',
@@ -624,5 +628,170 @@ describe('Readwise Private (readwise-secure) answers hybrid end to end', () => {
     const cloudPack = await evidence(cloud);
     expect(cloud.calls).toBe(0);
     expect(cloudPack.candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId)).not.toContain('hl-stoic');
+  });
+});
+
+describe('review round 2: scope binding, store-wide sweep, isolation, gate', () => {
+  function fixtureStore(root: string, name: string, trustDomain: 'internal' | 'secure_local' = 'internal') {
+    const store = new LocalConnectorStore({
+      dbPath: join(root, `${name}.sqlite`),
+      corpusId: `${trustDomain}.fixture.${name}`,
+      family: 'readwise',
+      trustDomain,
+    });
+    closers.push(() => store.close());
+    return store;
+  }
+
+  test('queued items embed only under their own scope binding; a narrowed scope drops them unembedded', async () => {
+    const root = workspace();
+    const store = fixtureStore(root, 'scoped');
+    await store.syncFromConnector(listConnector([readwiseItem('a', 'Alpha.'), readwiseItem('b', 'Beta.')]), { fetchContent: true });
+    const raw = cloudProvider();
+    let current = true;
+    // The shape scopeBoundEmbeddingProvider gives a Gmail or Drive sync.
+    const bound = {
+      ...raw,
+      embed: raw.embed.bind(raw),
+      assertBindingCurrent: () => {
+        if (!current) throw new Error('scope revision changed');
+      },
+    };
+    store.queueEmbedding(['personal:a', 'personal:b'], bound);
+
+    current = false;
+    const [run] = await embedPendingChunks([{ store, provider: raw }], { maxItems: 32 });
+
+    expect(run).toMatchObject({ itemsOutOfScope: 2, chunksEmbedded: 0 });
+    expect(raw.inputs).toEqual([]);
+    expect(store.queuedEmbeddingItemIds()).toEqual([]);
+    expect(store.status().counts.embeddedChunks).toBe(0);
+  });
+
+  test('a store-wide sweep recovers a backlog no queue holds (a restart), bounded per pass; a queue-only target does not', async () => {
+    const root = workspace();
+    const store = fixtureStore(root, 'backlog');
+    const items = Array.from({ length: 5 }, (_, index) => readwiseItem(`i${index}`, `Item number ${index}.`));
+    await store.syncFromConnector(listConnector(items), { fetchContent: true });
+    const provider = cloudProvider();
+    expect(store.queuedEmbeddingItemIds()).toEqual([]);
+
+    const queueOnly = await embedPendingChunks([{ store, provider }], { maxItems: 2 });
+    expect(queueOnly[0]).toMatchObject({ chunksEmbedded: 0, itemsAttempted: 0 });
+
+    const first = await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 2 });
+    expect(first[0]).toMatchObject({ chunksEmbedded: 2, itemsAttempted: 2 });
+    expect(store.embeddingBacklogEstimate(provider.modelId).missingChunks).toBe(3);
+
+    await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 2 });
+    await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 2 });
+    expect(store.embeddingBacklogEstimate(provider.modelId)).toEqual({ missingChunks: 0, estimatedTokens: 0 });
+    // Nothing is re-embedded once the backlog is done.
+    const inputs = provider.inputs.length;
+    await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 2 });
+    expect(provider.inputs.length).toBe(inputs);
+  });
+
+  test('the store-wide sweep keeps the exclusions: a deleted item is never embedded', async () => {
+    const root = workspace();
+    const store = fixtureStore(root, 'deleted');
+    await store.syncFromConnector(listConnector([readwiseItem('keep', 'Keep me.'), readwiseItem('gone', 'Delete me.')]), { fetchContent: true });
+    // A provider deletion leaves the row tombstoned; mark it directly.
+    const db = new Database(store.dbPath);
+    db.query("UPDATE items SET tombstoned = 1 WHERE local_item_id = 'personal:gone'").run();
+    db.close();
+    const provider = cloudProvider();
+
+    await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 32 });
+
+    expect(provider.inputs.some((input) => input.includes('Delete me'))).toBe(false);
+    expect(provider.inputs.some((input) => input.includes('Keep me'))).toBe(true);
+  });
+
+  test('one item that always fails is skipped and counted; the rest embed', async () => {
+    const root = workspace();
+    const store = fixtureStore(root, 'poison');
+    await store.syncFromConnector(listConnector([
+      readwiseItem('ok1', 'Fine one.'),
+      readwiseItem('bad', 'POISON text the provider rejects.'),
+      readwiseItem('ok2', 'Fine two.'),
+    ]), { fetchContent: true });
+    const provider = cloudProvider();
+    const original = provider.embed.bind(provider);
+    provider.embed = async (inputs) => {
+      if (inputs.some((input) => input.text.includes('POISON'))) {
+        throw Object.assign(new Error('provider rejected input'), { code: 'source_index_error' });
+      }
+      return original(inputs);
+    };
+
+    const [run] = await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 32 });
+
+    expect(run).toMatchObject({ itemsFailed: 1, chunksEmbedded: 2 });
+    expect(store.embeddingFailedItemCount()).toBe(1);
+    // The failed item is not retried every pass, and does not hold the others.
+    const [again] = await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 32 });
+    expect(again).toMatchObject({ itemsFailed: 0, itemsAttempted: 0 });
+  });
+
+  test('the sweep task surfaces skipped items as a degraded reason', async () => {
+    const root = workspace();
+    const store = fixtureStore(root, 'surfaced');
+    await store.syncFromConnector(listConnector([readwiseItem('bad', 'POISON.'), readwiseItem('ok', 'Fine.')]), { fetchContent: true });
+    const provider = cloudProvider();
+    const original = provider.embed.bind(provider);
+    provider.embed = async (inputs) => {
+      if (inputs.some((input) => input.text.includes('POISON'))) throw new Error('rejected');
+      return original(inputs);
+    };
+    const source: SourceSchedulerSource = {
+      sourceId: 'readwise.library',
+      corpusId: store.corpusId,
+      cadence: 'continuous',
+      intervalMs: 5 * 60_000,
+      freshnessThresholdHours: 26,
+      tasks: [],
+    };
+    const clock = { now: new Date('2026-09-24T12:00:00.000Z') };
+    const stateStore = new LocalSourceSchedulerStateStore(':memory:');
+    closers.push(() => stateStore.close());
+    const scheduler = new SourceScheduler({
+      enabled: true,
+      tickMs: 60_000,
+      errorBackoffMs: 60_000,
+      maxTransientRetries: 1,
+      now: () => clock.now,
+      stateStore,
+      sources: withEmbeddingSweep([source], () => () => [{ store, provider, wholeStore: true }]),
+    });
+    closers.push(() => scheduler.stop());
+
+    await scheduler.runDueTasks();
+    const task = scheduler.status().sources[0]!.tasks[0]!;
+    expect(task.consecutive_failures).toBe(0);
+    expect(task.degraded_reason).toBe('embedding_items_failed');
+    expect(task.last_result?.counts).toMatchObject({ items_failed: 1, chunks_embedded: 1 });
+  });
+
+  test('the store-wide sweep is a per-source setting: on for Readwise, the owner\'s answer for chat lanes', () => {
+    expect(wholeStoreEmbeddingSweepAllowed('readwise.library')).toBe(true);
+    for (const chat of ['x.bookmarks', 'whatsapp.personal.messages', 'telegram.messages']) {
+      expect(wholeStoreEmbeddingSweepAllowed(chat)).toBe(CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP);
+    }
+    // Scoped file and mail lanes never sweep store-wide.
+    for (const scoped of ['gmail.email', 'google_drive.docs', 'dropbox.files']) {
+      expect(wholeStoreEmbeddingSweepAllowed(scoped)).toBe(false);
+    }
+  });
+
+  test('the backlog estimate counts chunks and prices tokens', () => {
+    const root = workspace();
+    const store = fixtureStore(root, 'estimate');
+    return store.syncFromConnector(listConnector([readwiseItem('a', 'x'.repeat(400))]), { fetchContent: true }).then(() => {
+      const backlog = store.embeddingBacklogEstimate('gemini-embedding-2');
+      expect(backlog.missingChunks).toBeGreaterThan(0);
+      expect(backlog.estimatedTokens).toBeGreaterThanOrEqual(100);
+      expect(estimatedEmbeddingCostUsd(1_000_000, 'gemini-embedding-2')).toBe(0.15);
+    });
   });
 });

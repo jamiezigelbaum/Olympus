@@ -60,6 +60,17 @@ function readwiseView(pull: TaskState, options: { embeddingRequired?: boolean } 
       embedded_chunks: counts.embedded,
       missing_chunks: counts.chunks - counts.embedded,
       refresh_needed: required && counts.embedded < counts.chunks,
+      ...(required
+        ? {
+            backlog_estimate: {
+              model_id: 'fixture-model',
+              missing_chunks: counts.chunks - counts.embedded,
+              estimated_tokens: (counts.chunks - counts.embedded) * 500,
+              estimated_cost_usd: counts.chunks === counts.embedded ? 0 : 0.03,
+              price_source: 'default_unverified',
+            },
+          }
+        : {}),
     },
     last_refresh: {
       sync_run_id: `run-${trustDomain}`,
@@ -273,6 +284,13 @@ describe('the Readwise page states one embedding fact and counts in its own noun
     expect(card.embedding_required).toBe(true);
     expect(card.embedding_backlog?.missing_chunks).toBe(4040);
     expect(html).toMatch(/<span>Embedded<\/span><b>[0-9,]+ items<\/b>/);
+    // The hybrid backlog is counted and priced on the page, as an estimate.
+    expect(card.embedding_backlog?.estimate).toEqual({
+      estimated_tokens: 2_020_000,
+      estimated_cost_usd: 0.03,
+      price_source: 'default_unverified',
+    });
+    expect(html).toContain('4,040 chunks are waiting to be embedded (about 2.0M tokens, ~$0.03 estimated at unverified list price)');
   });
 
   test('Readwise counts in items — it holds documents and highlights — never files', () => {

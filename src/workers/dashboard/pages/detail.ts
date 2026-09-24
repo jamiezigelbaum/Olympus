@@ -432,6 +432,11 @@ function renderProgress(
   if (progress.phases.some((phase) => phase.tracks_sync === true)) {
     notes.push(`${source.label} delivers its text with each item, so there is no separate extraction step: the extraction row tracks the sync row.`);
   }
+  const backlog = source.embedding_backlog;
+  if (source.embedding_required !== false && backlog?.estimate && backlog.missing_chunks > 0) {
+    notes.push(`${dashboardCount(backlog.missing_chunks)} chunks are waiting to be embedded`
+      + ` (${embeddingCostPhrase(backlog.estimate)}). Keyword search answers from them meanwhile.`);
+  }
   if (progress.phases.some((phase) => phase.unmeasured === true)) {
     notes.push('This store does not yet publish a per-item embedding count, so the embedding row states no share rather than deriving one from chunk totals.');
   }
@@ -481,6 +486,18 @@ function settledLine(source: DashboardSourceCard, now: Date): string {
     if (relative) return `${lead} · last checked ${relative}`;
   }
   return lead;
+}
+
+/** "about 1.2M tokens, ~$0.18 estimated at unverified list price". */
+function embeddingCostPhrase(estimate: NonNullable<NonNullable<DashboardSourceCard['embedding_backlog']>['estimate']>): string {
+  const tokens = estimate.estimated_tokens >= 1_000_000
+    ? `${(estimate.estimated_tokens / 1_000_000).toFixed(1)}M`
+    : estimate.estimated_tokens >= 1_000
+      ? `${Math.round(estimate.estimated_tokens / 1_000)}k`
+      : `${estimate.estimated_tokens}`;
+  const cost = `~$${estimate.estimated_cost_usd.toFixed(2)}`;
+  return `about ${tokens} tokens, ${cost} estimated`
+    + (estimate.price_source === 'default_unverified' ? ' at unverified list price' : '');
 }
 
 /** The facts line beside one bar, always in that phase's own unit. */
@@ -751,7 +768,8 @@ function detailChecks(
   if (backlog) {
     checks.push({
       name: 'EMBEDDING_PARITY',
-      observed: `${dashboardCount(backlog.missing_chunks)} of ${dashboardCount(backlog.chunks)} chunks missing`,
+      observed: `${dashboardCount(backlog.missing_chunks)} of ${dashboardCount(backlog.chunks)} chunks missing`
+        + (backlog.estimate && backlog.missing_chunks > 0 ? ` · ${embeddingCostPhrase(backlog.estimate)}` : ''),
       expectation: '== up to date',
       ok: !backlog.refresh_needed,
     });

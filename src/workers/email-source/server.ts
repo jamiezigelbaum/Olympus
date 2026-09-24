@@ -252,6 +252,7 @@ import {
   createXBookmarksSchedulerSource,
   attachSourceWatchSchedulerTask,
   withEmbeddingSweep,
+  wholeStoreEmbeddingSweepAllowed,
   sourceSchedulerConstructionLogLines,
   SCHEDULER_SOURCE_IDS,
   type SourceSchedulerConstructionDecision,
@@ -3469,10 +3470,26 @@ export async function main(): Promise<void> {
         .filter((corpus) => corpus.sourceId === source.sourceId)
         .map((corpus) => corpus.corpusId));
       corpusIds.add(source.corpusId);
+      // Store-wide only where the owner approved it for the source, the corpus
+      // is served hybrid, and its embedding policy is not disabled. Scoped
+      // lanes stay queue-only: their queued items carry the scope-bound
+      // provider their sync used, and nothing else is embedded.
+      const wholeStoreAllowed = wholeStoreEmbeddingSweepAllowed(source.sourceId);
+      const hybridServed = (corpusId: string): boolean => {
+        // A tier store opened after boot has no full definition yet; the
+        // registry's declaration of the same corpus stands in for it.
+        const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === corpusId)
+          ?? sourceCorpusRegistry.definitions().find((entry) => entry.corpusId === corpusId);
+        return definition !== undefined
+          && definition.activationMode !== 'lexical_only'
+          && definition.embeddingPolicy !== 'disabled';
+      };
       const targets = () => connectorStores.flatMap((store) => {
         if (!corpusIds.has(store.corpusId)) return [];
         const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
-        return provider ? [{ store, provider }] : [];
+        return provider
+          ? [{ store, provider, wholeStore: wholeStoreAllowed && hybridServed(store.corpusId) }]
+          : [];
       });
       // A source with no store that embeds (a keyword-only lane) gets no sweep.
       return targets().length > 0 ? targets : undefined;
