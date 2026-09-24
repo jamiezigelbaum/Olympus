@@ -3253,14 +3253,60 @@ describe('retry counters are not item counts', () => {
   }
 
   test('the displayed severity does not grow with elapsed time', () => {
-    const early = bookmarksRetryingView(1);
+    // Both past DASHBOARD_PERSISTENT_FAILURE_RUNS: once a task keeps failing,
+    // a day more of failing must not read any worse than the third attempt.
+    const early = bookmarksRetryingView(3);
     const late = bookmarksRetryingView(4096);
 
     expect(early.sources.find((source) => source.source_id === 'x.bookmarks')?.queue_health)
       .toEqual(late.sources.find((source) => source.source_id === 'x.bookmarks')?.queue_health);
   });
 
-  test('a retrying task still holds the source out of answer-ready', () => {
+  test('one failed attempt is a booked retry, not a request of the reader', () => {
+    const view = bookmarksRetryingView(1);
+    const card = view.sources.find((source) => source.source_id === 'x.bookmarks');
+
+    expect(card?.queue_health.retrying_tasks).toBe(1);
+    expect(card?.queue_health.failing_tasks).toBeUndefined();
+    expect(card?.queue_health.label).not.toBe('Needs attention');
+    expect(card?.answer_readiness.state).not.toBe('needs_attention');
+    // Other fixture sources may need attention; this retry must add none.
+    expect(view.summary.needs_attention_sources).toBe(bookmarksRetryingView(0).summary.needs_attention_sources);
+  });
+
+  test('a keyword-only corpus owes no embedding backlog, on its card or in background work', () => {
+    // Live 2026-09-24 (Readwise): both lexical-only tier stores published
+    // parity with required=false, yet their 4,392 missing chunks became the
+    // card's and the page-wide embedding backlog beside an Embedding row that
+    // said no embedding stage exists for the source.
+    const status = fixtureStatus();
+    status.corpora = [{
+      corpus_id: 'internal.x.bookmarks',
+      family: 'x',
+      trust_domain: 'internal',
+      activation_mode: 'lexical_only',
+      embedding_policy: 'cloud_allowed',
+      configured: true,
+      provider: 'x',
+      counts: { indexed_items: 751, items_with_text: 751, chunks: 5704, embedded_chunks: 1664 },
+      embedding_parity: { required: false, chunks: 5704, embedded_chunks: 1664, missing_chunks: 4040, refresh_needed: false },
+      item_metadata_returned: false,
+    } as never];
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: status,
+      schedulerStatus: fixtureScheduler(),
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: fixtureHandleRegistry(),
+      now: new Date('2026-07-02T12:00:00.000Z'),
+    });
+    const card = view.sources.find((source) => source.source_id === 'x.bookmarks');
+
+    expect(card?.embedding_required).toBe(false);
+    expect(card?.embedding_backlog).toBeUndefined();
+    expect(view.background_work?.embedding_backlog).toBeUndefined();
+  });
+
+  test('a task that keeps failing holds the source out of answer-ready', () => {
     const view = bookmarksRetryingView(3);
     const card = view.sources.find((source) => source.source_id === 'x.bookmarks');
 

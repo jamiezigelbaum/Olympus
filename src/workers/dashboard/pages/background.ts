@@ -1194,8 +1194,18 @@ function syncsLane(
   } else {
     facts.push(`${dashboardCount(scheduled.length - failing.length)} of ${dashboardCount(scheduled.length)} on schedule`);
   }
-  if (failing.length > 0) {
-    facts.push(`${dashboardCount(failing.length)} ${plural(failing.length, 'source')} failing`);
+  // Failing is the word for a task that keeps failing — the same count that
+  // puts the source under Needs you. One that failed once has a retry booked,
+  // which the checks below already call self-healing; calling it failing here
+  // too put "1 source failing" beside a source page that said nothing was
+  // wrong (owner-reported, 2026-09-24).
+  const persistentlyFailing = failing.filter((source) => (source.queue_health.failing_tasks ?? 0) > 0);
+  const retryingOnly = failing.length - persistentlyFailing.length;
+  if (retryingOnly > 0) {
+    facts.push(`${dashboardCount(retryingOnly)} ${plural(retryingOnly, 'source')} retrying`);
+  }
+  if (persistentlyFailing.length > 0) {
+    facts.push(`${dashboardCount(persistentlyFailing.length)} ${plural(persistentlyFailing.length, 'source')} failing`);
   }
   const queued = view.sources.reduce(
     (total, source) => total + source.queue_health.waiting + source.queue_health.active,

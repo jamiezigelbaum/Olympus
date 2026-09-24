@@ -45415,7 +45415,7 @@ function orderedIsoTimestamps(values) {
   return values.filter((value) => typeof value === "string" && Number.isFinite(Date.parse(value))).sort((left, right) => Date.parse(left) - Date.parse(right));
 }
 function embeddingBacklogFromCorpora(corpora) {
-  const parities = corpora.map((corpus) => corpus.embedding_parity).filter((parity) => parity !== undefined);
+  const parities = corpora.map((corpus) => corpus.embedding_parity).filter((parity) => parity !== undefined && parity.required !== false);
   if (parities.length === 0)
     return;
   const chunks = parities.reduce((sum2, parity) => sum2 + parity.chunks, 0);
@@ -45555,8 +45555,19 @@ function aggregateQueueHealth(cards, _schedulers) {
   const active = cards.reduce((sum2, card) => sum2 + card.queue_health.active, 0);
   const needsAttention = cards.reduce((sum2, card) => sum2 + card.queue_health.needs_attention, 0);
   const retryingTasks = cards.reduce((sum2, card) => sum2 + (card.queue_health.retrying_tasks ?? 0), 0);
-  const label = needsAttention > 0 || retryingTasks > 0 ? "Needs attention" : active > 0 ? "Working now" : waiting > 0 ? "Waiting to catch up" : "Caught up";
-  return { label, waiting, active, needs_attention: needsAttention, ...retryingTasks > 0 ? { retrying_tasks: retryingTasks } : {} };
+  const failingTasks = cards.reduce((sum2, card) => sum2 + (card.queue_health.failing_tasks ?? 0), 0);
+  return queueHealthResult(waiting, active, needsAttention, retryingTasks, failingTasks);
+}
+function queueHealthResult(waiting, active, needsAttention, retryingTasks, failingTasks) {
+  const label = needsAttention > 0 || failingTasks > 0 ? "Needs attention" : active > 0 ? "Working now" : waiting > 0 || retryingTasks > 0 ? "Waiting to catch up" : "Caught up";
+  return {
+    label,
+    waiting,
+    active,
+    needs_attention: needsAttention,
+    ...retryingTasks > 0 ? { retrying_tasks: retryingTasks } : {},
+    ...failingTasks > 0 ? { failing_tasks: failingTasks } : {}
+  };
 }
 function aggregateFreshness(cards, schedulers, corpora, definition, now) {
   const stale = cards.some((card) => card.freshness.stale) || schedulers.some((scheduler) => scheduler.stale_sync_anomaly);
@@ -46252,8 +46263,8 @@ function queueHealth(counts, scheduler) {
     "metadata_sync_folders_failed",
     "qa_failed_needs_operator"
   ]);
-  const label = needsAttention > 0 || retryingTasks > 0 ? "Needs attention" : active > 0 ? "Working now" : waiting > 0 ? "Waiting to catch up" : "Caught up";
-  return { label, waiting, active, needs_attention: needsAttention, ...retryingTasks > 0 ? { retrying_tasks: retryingTasks } : {} };
+  const failingTasks = scheduler?.tasks.filter((task) => task.consecutive_failures >= DASHBOARD_PERSISTENT_FAILURE_RUNS).length ?? 0;
+  return queueHealthResult(waiting, active, needsAttention, retryingTasks, failingTasks);
 }
 function liveQueueCount(counts, gaugeKeys, jobKeys) {
   const gauge = firstCount(counts, gaugeKeys, -1);
@@ -46318,8 +46329,8 @@ function answerReadinessFrom(configured, coverage, queue, freshness, operatorPau
   if (!configured)
     return { state: "disconnected", label: "Connect this source" };
   const staleUnexplained = freshness.stale && !(operatorPaused && parkExplainsStaleness(freshness));
-  const retryingUnexplained = !operatorPaused && (queue.retrying_tasks ?? 0) > 0;
-  if (staleUnexplained || queue.needs_attention > 0 || retryingUnexplained) {
+  const failingUnexplained = !operatorPaused && (queue.failing_tasks ?? 0) > 0;
+  if (staleUnexplained || queue.needs_attention > 0 || failingUnexplained) {
     return { state: "needs_attention", label: "Needs attention before answers" };
   }
   if (coverage.content_ready_items > 0 || coverage.embedded_items > 0) {
@@ -46628,7 +46639,7 @@ function titleCase(value) {
 function round12(value) {
   return Math.round(value * 10) / 10;
 }
-var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_privacy_language();
   init_sqlite_migrations();
@@ -48264,7 +48275,8 @@ async function sourceIndexStatusCheck(deps) {
     const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
     const embeddingLag = Math.max(chunks - embedded, 0);
     if (chunks > 0 || embedded > 0) {
-      summaries.push(embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`);
+      const items = typeof counts.indexed_items === "number" ? `, ${asCount(counts.indexed_items)} items indexed` : "";
+      summaries.push((embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`) + items);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
       const approvedLag = Math.min(embeddingLag, migration?.destinations.get(corpusId) ?? 0);
@@ -80751,8 +80763,13 @@ function syncsLane(view, now, basePath) {
   } else {
     facts.push(`${dashboardCount(scheduled.length - failing.length)} of ${dashboardCount(scheduled.length)} on schedule`);
   }
-  if (failing.length > 0) {
-    facts.push(`${dashboardCount(failing.length)} ${plural2(failing.length, "source")} failing`);
+  const persistentlyFailing = failing.filter((source) => (source.queue_health.failing_tasks ?? 0) > 0);
+  const retryingOnly = failing.length - persistentlyFailing.length;
+  if (retryingOnly > 0) {
+    facts.push(`${dashboardCount(retryingOnly)} ${plural2(retryingOnly, "source")} retrying`);
+  }
+  if (persistentlyFailing.length > 0) {
+    facts.push(`${dashboardCount(persistentlyFailing.length)} ${plural2(persistentlyFailing.length, "source")} failing`);
   }
   const queued = view.sources.reduce((total, source) => total + source.queue_health.waiting + source.queue_health.active, 0);
   if (queued > 0)
@@ -81127,7 +81144,29 @@ var init_home = __esm(() => {
 
 // src/workers/dashboard/attention.ts
 function dashboardAttentionBanner(source, options) {
-  return credentialBanner(source, options) ?? scopeApprovalBanner(source, options) ?? terminalExtractionBanner(source, options) ?? laneStuckBanner(source, options.now ?? new Date, options);
+  return credentialBanner(source, options) ?? scopeApprovalBanner(source, options) ?? terminalExtractionBanner(source, options) ?? syncFailingBanner(source, options) ?? laneStuckBanner(source, options.now ?? new Date, options);
+}
+function syncFailingBanner(source, options) {
+  if ((source.queue_health.failing_tasks ?? 0) <= 0)
+    return;
+  if (dashboardOperatorPaused(source))
+    return;
+  const errorKind = source.schedule?.last_error_kind;
+  const condition = errorKind ? DASHBOARD_GUARD_CONSEQUENCES[errorKind] ?? errorKind : "nothing has reported a reason";
+  const action = syncNowAction(source, options);
+  return {
+    kind: "sync_failing",
+    sentence: `${source.label}'s scheduled sync keeps failing, so new material is not coming in. Last condition on` + ` the lane: ${condition}. Olympus keeps retrying on its own.` + `${action === undefined ? " Ask" : " Try a sync now; if it still fails, ask"} your agent to look at the lane.`,
+    ...action === undefined ? {} : { action },
+    agent_prompt: `Olympus says the ${source.label} scheduled sync keeps failing (last condition: ${condition}).` + ` Please check why the ${source.label} sync tasks fail — the worker logs and the scheduler state for this` + " source — and fix it using supported Olympus commands. Do not ask me to edit files, configuration, or code."
+  };
+}
+function syncNowAction(source, options) {
+  const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
+  const syncSource = source.sync_now_available === false ? undefined : definition?.connect_action.kind === "oauth" || definition?.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
+  if (syncSource === undefined)
+    return;
+  return options.readOnly === true ? { label: "Sync now", kind: "link", href: `${options.setupPath}#dashboard-controls`, hint: "unlock controls in Setup" } : { label: "Sync now", kind: "sync_now", source: syncSource, primary: true };
 }
 function scopeApprovalBanner(source, options) {
   if (!source.scope_selection?.connected || source.scope_selection.status !== "scope_pending")
@@ -81258,9 +81297,7 @@ function laneStuckBanner(source, now, options) {
   const condition = governingCondition(source, stalledPhases);
   const laneName = stalledPhases.length === 1 ? `${DASHBOARD_PHASE_LABELS[stalledPhases[0]].toLowerCase()} lane` : "lane";
   const stillness = idleHours === undefined ? "has stopped moving" : `has not moved for ${dashboardDuration(idleHours * 3600)}`;
-  const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
-  const syncSource = source.sync_now_available === false ? undefined : definition?.connect_action.kind === "oauth" || definition?.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
-  const action = syncSource === undefined ? undefined : options.readOnly === true ? { label: "Sync now", kind: "link", href: `${options.setupPath}#dashboard-controls`, hint: "unlock controls in Setup" } : { label: "Sync now", kind: "sync_now", source: syncSource, primary: true };
+  const action = syncNowAction(source, options);
   return {
     kind: "lane_stuck",
     sentence: `${source.label} still has work to do and its ${laneName} ${stillness}. Last condition on the lane:` + ` ${condition}.${action === undefined ? "" : " Try a sync now;"}` + `${action === undefined ? " Ask" : " if it still does not move, ask"} your agent to look at the lane.`,
@@ -81482,12 +81519,14 @@ function renderIngestionSelection(source) {
   if (!selection)
     return "";
   const deferred = Math.max(0, selection.policy_deferred_files ?? 0);
+  const noun = dashboardItemNoun(source);
+  const count = (value) => `${dashboardCount(value)} ${value === 1 ? singularNoun(noun) : noun}`;
   return `
         <div class="dsect">Added to Olympus</div>
         <div class="selectioncounts">
-          <div><span>Metadata only</span><b>${escapeHtml(`${dashboardCount(selection.metadata_only_files)} files`)}</b></div>
-          <div><span>Full ingestion</span><b>${escapeHtml(`${dashboardCount(selection.full_ingestion_files)} files`)}</b></div>
-        </div>${deferred > 0 ? `<p class="hint">${dashboardCount(deferred)} ${deferred === 1 ? "file selected for full ingestion is" : "files selected for full ingestion are"} not being processed because of a separate ingestion policy.</p>` : ""}`;
+          <div><span>Metadata only</span><b>${escapeHtml(count(selection.metadata_only_files))}</b></div>
+          <div><span>Full ingestion</span><b>${escapeHtml(count(selection.full_ingestion_files))}</b></div>
+        </div>${deferred > 0 ? `<p class="hint">${escapeHtml(count(deferred))} selected for full ingestion ${deferred === 1 ? "is" : "are"} not being processed because of a separate ingestion policy.</p>` : ""}`;
 }
 function renderTotals(source) {
   const noun = dashboardItemNoun(source);
@@ -81495,7 +81534,7 @@ function renderTotals(source) {
   const indexed = Math.max(0, source.coverage.indexed_items);
   const extracted = summary?.read_items ?? Math.max(0, Math.min(source.coverage.content_ready_items, indexed));
   const measured = source.coverage.embedded_files;
-  const embedded = measured === undefined ? "not measured" : `${dashboardCount(Math.max(0, Math.min(measured, extracted)))} ${noun}`;
+  const embedded = source.embedding_required === false ? "not needed · keyword search" : measured === undefined ? "not measured" : `${dashboardCount(Math.max(0, Math.min(measured, extracted)))} ${noun}`;
   return `
         <div class="dsect">In Olympus</div>
         <div class="selectioncounts">
@@ -81641,7 +81680,10 @@ function phaseFacts(phase) {
   return `${formatPercent(measure.percent)} · ${dashboardCount(measure.done)} of` + ` ${dashboardCount(measure.total)} ${unit}${tracks}`;
 }
 function unitFor(count, unit) {
-  return count === 1 && unit.endsWith("s") ? unit.slice(0, -1) : unit;
+  return count === 1 ? singularNoun(unit) : unit;
+}
+function singularNoun(unit) {
+  return unit.endsWith("s") ? unit.slice(0, -1) : unit;
 }
 function formatPercent(percent) {
   return Number.isInteger(percent) ? `${percent}%` : `${percent.toFixed(1)}%`;

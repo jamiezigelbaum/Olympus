@@ -216,13 +216,18 @@ function renderIngestionSelection(source: DashboardSourceCard): string {
   const selection = source.ingestion_selection;
   if (!selection) return '';
   const deferred = Math.max(0, selection.policy_deferred_files ?? 0);
+  // The field names say files because folder sources came first; the page
+  // counts in the source's own noun, as every other count on it does. A
+  // Readwise page read "Full ingestion 2,791 files" (owner-reported, 2026-09-24).
+  const noun = dashboardItemNoun(source);
+  const count = (value: number) => `${dashboardCount(value)} ${value === 1 ? singularNoun(noun) : noun}`;
   return `
         <div class="dsect">Added to Olympus</div>
         <div class="selectioncounts">
-          <div><span>Metadata only</span><b>${escapeHtml(`${dashboardCount(selection.metadata_only_files)} files`)}</b></div>
-          <div><span>Full ingestion</span><b>${escapeHtml(`${dashboardCount(selection.full_ingestion_files)} files`)}</b></div>
+          <div><span>Metadata only</span><b>${escapeHtml(count(selection.metadata_only_files))}</b></div>
+          <div><span>Full ingestion</span><b>${escapeHtml(count(selection.full_ingestion_files))}</b></div>
         </div>${deferred > 0
-          ? `<p class="hint">${dashboardCount(deferred)} ${deferred === 1 ? 'file selected for full ingestion is' : 'files selected for full ingestion are'} not being processed because of a separate ingestion policy.</p>`
+          ? `<p class="hint">${escapeHtml(count(deferred))} selected for full ingestion ${deferred === 1 ? 'is' : 'are'} not being processed because of a separate ingestion policy.</p>`
           : ''}`;
 }
 
@@ -251,9 +256,16 @@ function renderTotals(source: DashboardSourceCard): string {
   const extracted = summary?.read_items
     ?? Math.max(0, Math.min(source.coverage.content_ready_items, indexed));
   const measured = source.coverage.embedded_files;
-  const embedded = measured === undefined
-    ? 'not measured'
-    : `${dashboardCount(Math.max(0, Math.min(measured, extracted)))} ${noun}`;
+  // A keyword-only source has no embedding stage, and its Embedding bar says
+  // so. A count here — of vectors a lane wrote that no answer reads — put
+  // "Embedded 959 highlights" beside "no embedding stage for this source" on
+  // one Readwise page (owner-reported, 2026-09-24). The line states the same
+  // fact the bar does.
+  const embedded = source.embedding_required === false
+    ? 'not needed · keyword search'
+    : measured === undefined
+      ? 'not measured'
+      : `${dashboardCount(Math.max(0, Math.min(measured, extracted)))} ${noun}`;
   return `
         <div class="dsect">In Olympus</div>
         <div class="selectioncounts">
@@ -500,7 +512,12 @@ function phaseFacts(phase: DashboardPhase): string {
  * have to say so rather than be silently mangled here.
  */
 function unitFor(count: number, unit: string): string {
-  return count === 1 && unit.endsWith('s') ? unit.slice(0, -1) : unit;
+  return count === 1 ? singularNoun(unit) : unit;
+}
+
+/** "file" for "files"; the same regular-plural rule unitFor states. */
+function singularNoun(unit: string): string {
+  return unit.endsWith('s') ? unit.slice(0, -1) : unit;
 }
 
 /** Whole numbers stay whole; a fraction keeps one decimal. */
