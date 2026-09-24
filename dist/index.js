@@ -9252,7 +9252,7 @@ function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join13(homedir8(), ".local", "share");
   return join13(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
-var MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
   init_privacy_language();
   init_sqlite_migrations();
@@ -9266,6 +9266,10 @@ var init_source_dashboard = __esm(() => {
   init_credential_health();
   init_status();
   init_public_source_capabilities();
+  DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
+    "credential_refresh_busy",
+    "credential_session_latched"
+  ]);
   MIN_PROGRESS_WINDOW_MS = 5 * 60000;
   SAMPLE_RETENTION_MS = 24 * 60 * 60000;
   DASHBOARD_SENSITIVITY_TIERS = {

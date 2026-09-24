@@ -44801,7 +44801,8 @@ import { Database as Database10 } from "bun:sqlite";
 function dashboardSchedulerTaskFailing(task) {
   if (task.consecutive_failures <= 0)
     return false;
-  if (task.last_error_kind?.startsWith("credential_"))
+  const kind = task.last_error_kind;
+  if (kind?.startsWith("credential_") && !DASHBOARD_CREDENTIAL_CONTENTION_KINDS.has(kind))
     return true;
   return task.consecutive_failures >= DASHBOARD_PERSISTENT_FAILURE_RUNS;
 }
@@ -46649,7 +46650,7 @@ function titleCase(value) {
 function round12(value) {
   return Math.round(value * 10) / 10;
 }
-var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_privacy_language();
   init_sqlite_migrations();
@@ -46663,6 +46664,10 @@ var init_source_dashboard = __esm(() => {
   init_credential_health();
   init_status();
   init_public_source_capabilities();
+  DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
+    "credential_refresh_busy",
+    "credential_session_latched"
+  ]);
   MIN_PROGRESS_WINDOW_MS = 5 * 60000;
   SAMPLE_RETENTION_MS = 24 * 60 * 60000;
   DASHBOARD_NEEDS_REVIEW_REASONS = [

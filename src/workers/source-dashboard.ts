@@ -103,18 +103,30 @@ export const DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = 'Waiting for the first sync'
 export const DASHBOARD_PERSISTENT_FAILURE_RUNS = 3;
 
 /**
+ * Credential error kinds that are contention between two runs, not a request of
+ * the owner: another refresh in flight, a session latched by another run. They
+ * clear on their own, so they follow the ordinary three-strike rule.
+ */
+const DASHBOARD_CREDENTIAL_CONTENTION_KINDS: ReadonlySet<string> = new Set([
+  'credential_refresh_busy',
+  'credential_session_latched',
+]);
+
+/**
  * Whether one scheduler task is failing rather than retrying itself.
  *
  * A credential failure is failing on its first attempt: no retry fixes a
  * missing or expired credential, so waiting two more rounds before telling the
- * owner only delays the one act that clears it. Every other failure kind earns
- * the DASHBOARD_PERSISTENT_FAILURE_RUNS count first.
+ * owner only delays the one act that clears it. Credential contention
+ * (DASHBOARD_CREDENTIAL_CONTENTION_KINDS) and every other failure kind earn the
+ * DASHBOARD_PERSISTENT_FAILURE_RUNS count first.
  */
 export function dashboardSchedulerTaskFailing(
   task: Pick<SourceSchedulerSourceStatus['tasks'][number], 'consecutive_failures' | 'last_error_kind'>,
 ): boolean {
   if (task.consecutive_failures <= 0) return false;
-  if (task.last_error_kind?.startsWith('credential_')) return true;
+  const kind = task.last_error_kind;
+  if (kind?.startsWith('credential_') && !DASHBOARD_CREDENTIAL_CONTENTION_KINDS.has(kind)) return true;
   return task.consecutive_failures >= DASHBOARD_PERSISTENT_FAILURE_RUNS;
 }
 

@@ -212,6 +212,17 @@ describe('Readwise attention reads one way on home, the header and the page', ()
     expect(dashboardAttentionBanner(card, { now: NOW, setupPath: SETUP })).toBeDefined();
   });
 
+  test('credential contention is not failing at 1; it follows the three-strike rule', () => {
+    const busy = readwiseCard(readwiseView({ failures: 1, errorKind: 'credential_refresh_busy' }));
+    expect(busy.queue_health.failing_tasks).toBeUndefined();
+    expect(dashboardStatus({ source: busy })).not.toBe('Needs you');
+    expect(dashboardAttentionBanner(busy, { now: NOW, setupPath: SETUP })).toBeUndefined();
+
+    const latched = readwiseCard(readwiseView({ failures: 3, errorKind: 'credential_session_latched' }));
+    expect(latched.queue_health.failing_tasks).toBe(1);
+    expect(dashboardStatus({ source: latched })).toBe('Needs you');
+  });
+
   test('the background page marks a sync that keeps failing as needs-you, booked retry or not', () => {
     const failing = readwiseView({ failures: 3 });
     const failingCheck = dashboardBackgroundLanes(failing, { now: NOW })

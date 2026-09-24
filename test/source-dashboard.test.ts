@@ -3331,6 +3331,19 @@ describe('retry counters are not item counts', () => {
     expect(card?.answer_readiness.state).toBe('needs_attention');
   });
 
+  test('credential contention follows the three-strike rule, not fail-at-1', () => {
+    for (const kind of ['credential_refresh_busy', 'credential_session_latched']) {
+      const card = (failures: number) => bookmarksRetryingView(failures, kind).sources
+        .find((source) => source.source_id === 'x.bookmarks');
+
+      expect(card(1)?.queue_health.failing_tasks).toBeUndefined();
+      expect(card(2)?.queue_health.failing_tasks).toBeUndefined();
+      expect(card(2)?.answer_readiness.state).not.toBe('needs_attention');
+      expect(card(3)?.queue_health.failing_tasks).toBe(1);
+      expect(card(3)?.answer_readiness.state).toBe('needs_attention');
+    }
+  });
+
   test('a task that keeps failing holds the source out of answer-ready', () => {
     const view = bookmarksRetryingView(3);
     const card = view.sources.find((source) => source.source_id === 'x.bookmarks');
