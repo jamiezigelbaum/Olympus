@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { obtainCertificate } from './acme.ts';
 import {
+  ensureStateDir,
   loadOrCreateAcmeAccountKey,
   loadOrCreateIdentity,
   loadOrCreateTlsKey,
@@ -60,7 +61,7 @@ export function certificateIsFresh(pem: string | undefined, hostname: string, no
 export async function startConnect(options: ConnectOptions): Promise<ConnectHandle> {
   const identity = loadOrCreateIdentity(options.stateDir);
   const client = new RelayClient({ ...options, identity });
-  const certPath = join(options.stateDir, 'tls-cert.pem');
+  const certPath = join(ensureStateDir(options.stateDir), 'tls-cert.pem');
   const tlsKey = loadOrCreateTlsKey(options.stateDir);
   const tlsKeyPem = tlsKey.export({ format: 'pem', type: 'pkcs8' }) as string;
   let renewing: Promise<void> | undefined;

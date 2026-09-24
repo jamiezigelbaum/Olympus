@@ -32,6 +32,12 @@ export interface RelayClientOptions {
   readonly relayPort?: number;
   /** The relay's control hostname (SNI and certificate name), e.g. `relay.connect.olympusplugin.ai`. */
   readonly controlServerName: string;
+  /** The relay's data hostname; defaults to `data.<controlServerName>`. */
+  readonly dataServerName?: string;
+  /** The zone install hostnames live in. `ready` must name `<installId>.<zone>` exactly. */
+  readonly zone: string;
+  /** Concurrent data connections the relay may make this install open (default 64). */
+  readonly maxDataConnections?: number;
   readonly identity: InstallIdentity;
   /** Loopback Olympus worker; defaults to `http://127.0.0.1:28090`. */
   readonly target?: string;
@@ -57,6 +63,7 @@ export class RelayClient implements AcmeDnsPublisher {
   private readonly peers = new Map<number, string>();
   private readonly dataSockets = new Set<net.Socket>();
   private sequence = 0;
+  private dataConnections = 0;
   private hostnameValue: string | undefined;
   private readyWaiters: Array<(hostname: string) => void> = [];
 
@@ -64,6 +71,11 @@ export class RelayClient implements AcmeDnsPublisher {
 
   get installId(): string {
     return this.options.identity.installId;
+  }
+
+  /** Data connections currently open to the relay. */
+  get activeDataConnections(): number {
+    return this.dataConnections;
   }
 
   get hostname(): string | undefined {
@@ -144,11 +156,11 @@ export class RelayClient implements AcmeDnsPublisher {
     socket.write(encodeLine(message));
   }
 
-  private dial(): TLSSocket {
+  private dial(servername: string): TLSSocket {
     return tls.connect({
       host: this.options.relayHost,
       port: this.options.relayPort ?? 443,
-      servername: this.options.controlServerName,
+      servername,
       minVersion: 'TLSv1.2',
       ...(this.options.ca ? { ca: this.options.ca } : {}),
     });
@@ -157,7 +169,7 @@ export class RelayClient implements AcmeDnsPublisher {
   private connect(): void {
     if (this.stopped) return;
     this.options.onStatus?.({ state: 'connecting' });
-    const socket = this.dial();
+    const socket = this.dial(this.options.controlServerName);
     this.session = socket;
     let reason = 'connection closed';
     let replaced = false;
@@ -180,9 +192,17 @@ export class RelayClient implements AcmeDnsPublisher {
             return 'continue';
           }
           case 'ready': {
+            // The hostname feeds ACME and the URL the user hands to agents:
+            // accept only the one this install's key and zone determine.
+            const expected = `${identity.installId}.${this.options.zone.toLowerCase()}`;
+            if (message.hostname !== expected || message.installId !== identity.installId) {
+              reason = 'relay announced an unexpected hostname';
+              socket.destroy();
+              return 'stop';
+            }
             this.failures = 0;
             this.register = false;
-            this.hostnameValue = String(message.hostname);
+            this.hostnameValue = expected;
             this.options.onStatus?.({ state: 'online', hostname: this.hostnameValue });
             if (this.heartbeat) clearInterval(this.heartbeat);
             this.heartbeat = setInterval(() => this.send(socket, { type: 'ping' }), this.options.heartbeatMs ?? 30_000);
@@ -250,12 +270,17 @@ export class RelayClient implements AcmeDnsPublisher {
 
   private attach(connId: string, remoteAddress: string | undefined): void {
     const endpoint = this.endpoint;
-    // No certificate yet: let the relay's attach timeout answer the agent.
-    if (!endpoint) return;
+    // No certificate yet, or already at the cap: let the relay's attach
+    // timeout answer the agent rather than open unbounded connections.
+    if (!endpoint || this.dataConnections >= (this.options.maxDataConnections ?? 64)) return;
     const { identity } = this.options;
-    const data = this.dial();
+    const data = this.dial(this.options.dataServerName ?? `data.${this.options.controlServerName}`);
+    this.dataConnections += 1;
     this.dataSockets.add(data);
-    data.on('close', () => this.dataSockets.delete(data));
+    data.on('close', () => {
+      this.dataConnections -= 1;
+      this.dataSockets.delete(data);
+    });
     data.on('error', () => data.destroy());
     let sentAttach = false;
     readLines(
