@@ -317,7 +317,7 @@ import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { remoteAccessFromEnv, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
+import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
@@ -3791,10 +3791,11 @@ export async function main(): Promise<void> {
   // Assigned once the remote agent routes are built below, so the Setup
   // page's agent panel reads the very store handle `/mcp` and OAuth use.
   let dashboardAgentStore: DashboardAgentConnectionsBackend['store'] | undefined;
+  let dashboardRemoteAccess: DashboardAgentConnectionsBackend['remoteAccess'] = () => ({ state: 'off' });
   const worker = createEmailSourceWorker({
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
-      remoteAccess: () => remoteAccessFromEnv(process.env),
+      remoteAccess: () => dashboardRemoteAccess(),
     },
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
@@ -3919,6 +3920,24 @@ export async function main(): Promise<void> {
     openRemoteConnectionStore,
   );
   dashboardAgentStore = remoteConnections;
+  // The panel's remote-access line: the address this worker serves right now,
+  // explained by the relay status `olympus connections status` prints.
+  const { readRemoteAccessStatus, remoteAccessDir, remoteAccessStatusView, resolveRemoteAccessUrls } = await import('../../core/remote-access.ts');
+  dashboardRemoteAccess = () => {
+    let status: ReturnType<typeof remoteAccessStatusView> | undefined;
+    try {
+      const dir = remoteAccessDir(process.env);
+      const file = readRemoteAccessStatus(dir);
+      status = remoteAccessStatusView({
+        dir,
+        status: file,
+        urls: resolveRemoteAccessUrls({ layeredEnv: process.env, env: process.env, status: file, configuredWorkerBaseUrl: olympusConfig.email.baseUrl }),
+      });
+    } catch {
+      status = undefined;
+    }
+    return remoteAccessFromStatus({ live: remotePublicUrls(), status });
+  };
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,

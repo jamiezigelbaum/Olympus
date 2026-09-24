@@ -17,12 +17,12 @@
  * Codes and tokens appear only in the response body of the request that
  * minted them, with `Cache-Control: no-store`. Nothing here logs.
  *
- * Remote-access status is a thin adapter so the relay's status (the
- * `olympus connections status` shape, once it lands) can replace the
- * environment reading in one place.
+ * Remote-access status comes from the relay's status through one thin
+ * adapter, `remoteAccessFromStatus`.
  */
 import type { RemoteConnectionRecord, RemoteConnectionStore } from '../core/remote-connections.ts';
-import { resolveRemotePublicUrls } from '../core/remote-public-url.ts';
+import type { RemotePublicUrls } from '../core/remote-public-url.ts';
+import type { RemoteAccessStatusView } from '../core/remote-access.ts';
 import { sanitizeCallerDisplayName } from '../core/operation-caller.ts';
 
 export const DASHBOARD_AGENT_PAIRING_CODE_PATH = '/dashboard/agents/pairing-code';
@@ -38,13 +38,14 @@ export const DASHBOARD_AGENT_CONTROL_PATHS = [
 /**
  * Whether agents in a vendor's cloud can reach this computer.
  *
- * `not_connected` is for a configured relay whose link is down; the
- * environment adapter below never produces it, the relay status will.
+ * `not_connected`: remote access is on and the relay is configured, but the
+ * public address does not work yet (connecting, certificate pending, terms
+ * to accept, relay process down). `detail` is the status's own next step.
  */
 export type DashboardRemoteAccess =
   | { state: 'on'; mcpUrl: string; openapiUrl: string }
   | { state: 'off' }
-  | { state: 'not_connected' }
+  | { state: 'not_connected'; detail?: string }
   | { state: 'invalid'; detail: string };
 
 export interface DashboardAgentConnection {
@@ -69,18 +70,23 @@ export interface DashboardAgentConnectionsBackend {
   remoteAccess(): DashboardRemoteAccess;
 }
 
-/** Today's adapter: remote access is on exactly when the OAuth switch is. */
-export function remoteAccessFromEnv(env: Record<string, string | undefined>): DashboardRemoteAccess {
-  const resolved = resolveRemotePublicUrls(env);
-  if (resolved.enabled) {
-    return {
-      state: 'on',
-      mcpUrl: resolved.urls.resource,
-      openapiUrl: `${resolved.urls.origin}/openapi.json`,
-    };
+/**
+ * The adapter from the relay's status (`olympus connections status`,
+ * `RemoteAccessStatusView`) to what the panel shows. `live` is the public
+ * address the worker is serving OAuth and `/mcp` on right now, so "on" means
+ * exactly what hosted agents will find; the status explains every other case.
+ */
+export function remoteAccessFromStatus(input: {
+  live: RemotePublicUrls | undefined;
+  status: Pick<RemoteAccessStatusView, 'error' | 'mode' | 'remote_enabled' | 'next_step'> | undefined;
+}): DashboardRemoteAccess {
+  if (input.live) {
+    return { state: 'on', mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json` };
   }
-  if (resolved.reason === 'invalid') {
-    return { state: 'invalid', detail: resolved.detail ?? 'The public address is not valid.' };
+  const status = input.status;
+  if (status?.error) return { state: 'invalid', detail: status.error };
+  if (status && status.mode !== 'off' && status.remote_enabled) {
+    return status.next_step ? { state: 'not_connected', detail: status.next_step } : { state: 'not_connected' };
   }
   return { state: 'off' };
 }
@@ -178,7 +184,9 @@ export async function handleDashboardAgentRequest(
 
 function remoteAccessRefusal(access: DashboardRemoteAccess): string {
   if (access.state === 'invalid') return `Remote access is not set up correctly: ${access.detail}`;
-  if (access.state === 'not_connected') return 'Remote access is not connected right now, so no agent could use a pairing code. Try again once it reconnects.';
+  if (access.state === 'not_connected') {
+    return `Remote access is not connected yet, so no agent could use a pairing code. Try again once it is.${access.detail ? ` ${access.detail}` : ''}`;
+  }
   return 'Remote access is off, so agents in the cloud cannot reach Olympus yet. Pairing codes work once it is on.';
 }
 

@@ -28,18 +28,20 @@ import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
 import {
   DASHBOARD_AGENT_CONTROL_PATHS,
   dashboardAgentsView,
-  remoteAccessFromEnv,
+  remoteAccessFromStatus,
   type DashboardAgentConnectionsBackend,
   type DashboardRemoteAccess,
 } from '../src/workers/agent-connections.ts';
 import { renderDashboardAgentsSection } from '../src/workers/dashboard/agents.ts';
+import { parseRemotePublicBaseUrl } from '../src/core/remote-public-url.ts';
+import type { RemoteAccessStatusView } from '../src/core/remote-access.ts';
 import { mountDashboardController } from '../src/control-ui/browser-controller.ts';
 import type { OlympusDashboardControlParams, OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
 
 const ROOT = join(import.meta.dir, '..');
 const ORIGIN = 'http://127.0.0.1:17777';
 const PUBLIC = 'https://abc123.connect.olympusplugin.ai';
-const REMOTE_ON: DashboardRemoteAccess = remoteAccessFromEnv({ OLYMPUS_PUBLIC_BASE_URL: PUBLIC });
+const REMOTE_ON: DashboardRemoteAccess = { state: 'on', mcpUrl: `${PUBLIC}/mcp`, openapiUrl: `${PUBLIC}/openapi.json` };
 const NOW = new Date('2026-09-24T12:00:00.000Z');
 
 const cleanups: Array<() => void> = [];
@@ -309,12 +311,31 @@ describe('request validation', () => {
   });
 });
 
-describe('the panel', () => {
-  function render(access: DashboardRemoteAccess, store?: RemoteConnectionStore): string {
-    const view = store ? dashboardAgentsView(backend(store, access)) : { remoteAccess: access, connections: [] };
-    return renderDashboardAgentsSection({ view, now: NOW });
-  }
+describe('remote access follows the relay status', () => {
+  const live = parseRemotePublicBaseUrl(PUBLIC);
+  const status = (patch: Partial<RemoteAccessStatusView>) => ({ error: null, mode: 'relay', remote_enabled: true, next_step: null, ...patch }) as RemoteAccessStatusView;
+  test('on means the worker is serving a public address now', () => {
+    expect(remoteAccessFromStatus({ live: live.enabled ? live.urls : undefined, status: status({}) })).toEqual(REMOTE_ON);
+  });
+  test('a relay that is enabled but not yet serving is not connected, with its next step', () => {
+    expect(remoteAccessFromStatus({ live: undefined, status: status({ next_step: 'Olympus is obtaining its certificate.' }) }))
+      .toEqual({ state: 'not_connected', detail: 'Olympus is obtaining its certificate.' });
+    expect(render({ state: 'not_connected', detail: 'Olympus is obtaining its certificate.' })).toContain('Olympus is obtaining its certificate.');
+  });
+  test('a configuration error is invalid, and no status or mode off is off', () => {
+    expect(remoteAccessFromStatus({ live: undefined, status: status({ error: 'remote.relayHost and remote.publicBaseUrl are mutually exclusive' }) }))
+      .toEqual({ state: 'invalid', detail: 'remote.relayHost and remote.publicBaseUrl are mutually exclusive' });
+    expect(remoteAccessFromStatus({ live: undefined, status: undefined })).toEqual({ state: 'off' });
+    expect(remoteAccessFromStatus({ live: undefined, status: status({ mode: 'off', remote_enabled: false }) })).toEqual({ state: 'off' });
+  });
+});
 
+function render(access: DashboardRemoteAccess, store?: RemoteConnectionStore): string {
+  const view = store ? dashboardAgentsView(backend(store, access)) : { remoteAccess: access, connections: [] };
+  return renderDashboardAgentsSection({ view, now: NOW });
+}
+
+describe('the panel', () => {
   test('offers every agent with its own method when remote access is on', () => {
     const html = render(REMOTE_ON);
     for (const label of ['Claude', 'ChatGPT', 'Grok or Grok Bot', 'Muse', 'Grok API', 'Claude Code or Codex', 'Other']) {

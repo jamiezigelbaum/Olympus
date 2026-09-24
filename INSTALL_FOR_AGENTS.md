@@ -2107,8 +2107,10 @@ Only when the operator asks for it. Do not offer it as part of installation.
   its resolved plugin path). Never ask the operator to paste a key or code back
   to you, and never print one into chat or a log.
 - Agents in a vendor's cloud need remote access. If the panel says remote
-  access is off, say so plainly; do not set up a tunnel or edit worker.env
-  without the operator's explicit consent for that specific change.
+  access is off, say so plainly. Turning it on (`remote.enabled` plus
+  `remote.relayHost`) is a configuration change with its own consent, made
+  through `openclaw config set` and the validate-then-restart order in Step 5.
+  `olympus connections status` says what a relay that is on is waiting for.
 - For Claude Code or Codex on the same machine, the local command is
   `<rootDir>/bin/olympus serve` (rootDir from
   `openclaw plugins inspect olympus --json`). Adding it to another agent's MCP

@@ -19195,12 +19195,6 @@ var init_source_dashboard = __esm(() => {
   };
 });
 
-// src/core/remote-public-url.ts
-var LOOPBACK_HOSTNAMES;
-var init_remote_public_url = __esm(() => {
-  LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
-});
-
 // src/workers/google-connectors/gmail-live-control.ts
 var GMAIL_STORE_PULL_INTERVAL_MS, GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS, GMAIL_STORE_RECONCILE_INTERVAL_MS, GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, GMAIL_DAILY_REQUEST_GUARD_REASON = "gmail_daily_api_request_guard";
 var init_gmail_live_control = __esm(() => {
@@ -21168,7 +21162,6 @@ class LaneSampleStore {
 var backgroundLaneSampleStore = new LaneSampleStore;
 
 // src/workers/agent-connections.ts
-init_remote_public_url();
 init_operation_caller();
 
 // src/workers/email-source/index.ts

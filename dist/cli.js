@@ -82131,8 +82131,9 @@ function renderDashboardAgentsSection(input) {
 `);
 }
 function remoteAccessRow(access) {
-  const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf(access.mcpUrl)}.` : access.state === "off" ? "Off. Only agents on this computer can ask Olympus." : access.state === "not_connected" ? "Not connected right now. Agents in the cloud cannot reach Olympus until it reconnects." : `Not set up correctly. ${access.detail}`;
-  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span></div>` + `</div>`;
+  const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf(access.mcpUrl)}.` : access.state === "off" ? "Off. Only agents on this computer can ask Olympus." : access.state === "not_connected" ? "On, but not connected yet. Agents in the cloud cannot reach Olympus until it is." : `Not set up correctly. ${access.detail}`;
+  const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml(access.detail)}</span>` : "";
+  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span>${next}</div>` + `</div>`;
 }
 function connectSheet(access) {
   const choices = AGENTS.map((agent) => agentChoice(agent, access)).join("");
@@ -82160,7 +82161,7 @@ function localBody(agent) {
   return `<p>These run on this computer, so they work without remote access. Paste this into Claude Code or Codex and it adds Olympus for you:</p>` + copyBox("agent-local-prompt", LOCAL_AGENT_PROMPT, "Copy prompt", true) + `<details class="agentprompt" data-poll-key="agent-local-manual"><summary>Add it yourself instead</summary>` + `<p>The plugin folder is the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>` + copyBox("agent-local-claude", CLAUDE_CODE_SNIPPET, "Copy command") + `<p>For Codex, add this to ~/.codex/config.toml:</p>` + copyBox("agent-local-codex", CODEX_SNIPPET, "Copy snippet") + `</details>` + instructionsStep(agent, false);
 }
 function remoteUnavailable(access) {
-  const text = access.state === "not_connected" ? "Remote access is not connected right now, so this agent cannot reach Olympus. Check that this computer is online and Olympus is running, then open this page again." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Claude Code and Codex on this computer work now.";
+  const text = access.state === "not_connected" ? "Remote access is on but not connected yet, so this agent cannot reach Olympus. The Remote access line above says what it is waiting for." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Claude Code and Codex on this computer work now.";
   return `<p class="why" data-remote-unavailable>${escapeHtml(text)}</p>`;
 }
 function instructionsStep(agent, inStep) {
@@ -84084,17 +84085,15 @@ var init_background_runtime = __esm(() => {
 });
 
 // src/workers/agent-connections.ts
-function remoteAccessFromEnv(env) {
-  const resolved = resolveRemotePublicUrls(env);
-  if (resolved.enabled) {
-    return {
-      state: "on",
-      mcpUrl: resolved.urls.resource,
-      openapiUrl: `${resolved.urls.origin}/openapi.json`
-    };
+function remoteAccessFromStatus(input) {
+  if (input.live) {
+    return { state: "on", mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json` };
   }
-  if (resolved.reason === "invalid") {
-    return { state: "invalid", detail: resolved.detail ?? "The public address is not valid." };
+  const status = input.status;
+  if (status?.error)
+    return { state: "invalid", detail: status.error };
+  if (status && status.mode !== "off" && status.remote_enabled) {
+    return status.next_step ? { state: "not_connected", detail: status.next_step } : { state: "not_connected" };
   }
   return { state: "off" };
 }
@@ -84184,8 +84183,9 @@ async function handleDashboardAgentRequest(request, pathname, backend) {
 function remoteAccessRefusal(access) {
   if (access.state === "invalid")
     return `Remote access is not set up correctly: ${access.detail}`;
-  if (access.state === "not_connected")
-    return "Remote access is not connected right now, so no agent could use a pairing code. Try again once it reconnects.";
+  if (access.state === "not_connected") {
+    return `Remote access is not connected yet, so no agent could use a pairing code. Try again once it is.${access.detail ? ` ${access.detail}` : ""}`;
+  }
   return "Remote access is off, so agents in the cloud cannot reach Olympus yet. Pairing codes work once it is on.";
 }
 function openStore(backend, create = true) {
@@ -84233,7 +84233,6 @@ function refusal(status, code, message) {
 }
 var DASHBOARD_AGENT_PAIRING_CODE_PATH = "/dashboard/agents/pairing-code", DASHBOARD_AGENT_KEYS_PATH = "/dashboard/agents/keys", DASHBOARD_AGENT_REVOKE_PATH = "/dashboard/agents/revoke", DASHBOARD_AGENT_CONTROL_PATHS;
 var init_agent_connections = __esm(() => {
-  init_remote_public_url();
   init_operation_caller();
   DASHBOARD_AGENT_CONTROL_PATHS = [
     DASHBOARD_AGENT_PAIRING_CODE_PATH,
@@ -96499,10 +96498,11 @@ async function main() {
     }
   } : undefined;
   let dashboardAgentStore;
+  let dashboardRemoteAccess = () => ({ state: "off" });
   const worker = createEmailSourceWorker({
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
-      remoteAccess: () => remoteAccessFromEnv(process.env)
+      remoteAccess: () => dashboardRemoteAccess()
     },
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
@@ -96595,6 +96595,22 @@ async function main() {
   const trustRelayHeaders = createRelayRequestVerifier2(process.env);
   const remoteConnections = lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2);
   dashboardAgentStore = remoteConnections;
+  const { readRemoteAccessStatus: readRemoteAccessStatus2, remoteAccessDir: remoteAccessDir2, remoteAccessStatusView: remoteAccessStatusView2, resolveRemoteAccessUrls: resolveRemoteAccessUrls2 } = await Promise.resolve().then(() => (init_remote_access(), exports_remote_access));
+  dashboardRemoteAccess = () => {
+    let status;
+    try {
+      const dir = remoteAccessDir2(process.env);
+      const file = readRemoteAccessStatus2(dir);
+      status = remoteAccessStatusView2({
+        dir,
+        status: file,
+        urls: resolveRemoteAccessUrls2({ layeredEnv: process.env, env: process.env, status: file, configuredWorkerBaseUrl: olympusConfig.email.baseUrl })
+      });
+    } catch {
+      status = undefined;
+    }
+    return remoteAccessFromStatus({ live: remotePublicUrls(), status });
+  };
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,

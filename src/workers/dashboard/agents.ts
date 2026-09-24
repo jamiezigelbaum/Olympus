@@ -155,10 +155,13 @@ function remoteAccessRow(access: DashboardRemoteAccess): string {
     : access.state === 'off'
       ? 'Off. Only agents on this computer can ask Olympus.'
       : access.state === 'not_connected'
-        ? 'Not connected right now. Agents in the cloud cannot reach Olympus until it reconnects.'
+        ? 'On, but not connected yet. Agents in the cloud cannot reach Olympus until it is.'
         : `Not set up correctly. ${access.detail}`;
+  const next = access.state === 'not_connected' && access.detail
+    ? `<span class="hint" data-remote-next-step> ${escapeHtml(access.detail)}</span>`
+    : '';
   return `<div class="attncard plain" data-remote-access="${access.state}">`
-    + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span></div>`
+    + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span>${next}</div>`
     + `</div>`;
 }
 
@@ -222,7 +225,7 @@ function localBody(agent: AgentChoice): string {
 
 function remoteUnavailable(access: DashboardRemoteAccess): string {
   const text = access.state === 'not_connected'
-    ? 'Remote access is not connected right now, so this agent cannot reach Olympus. Check that this computer is online and Olympus is running, then open this page again.'
+    ? 'Remote access is on but not connected yet, so this agent cannot reach Olympus. The Remote access line above says what it is waiting for.'
     : access.state === 'invalid'
       ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}`
       : 'This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Claude Code and Codex on this computer work now.';
