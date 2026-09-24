@@ -149,6 +149,10 @@ BEFORE the action is performed, every time:
   posture gate and before setup runs, not later in Step 4.
 - **Privacy classifier approval** (end of Step 3) — what the classifier
   sends and where, then the operator's own yes before you record it.
+- **Custom plugin UI opt-in** (Step 5, before the restart) — it lets every
+  installed plugin, not only Olympus, run its own page code inside the
+  Control UI with the operator's Gateway access. Its own ask; a no means the
+  standalone dashboard link in Step 6.
 - **Gateway restart** (Step 5) — its own explicit go, never queued
   silently behind earlier consent. The go is about timing: the restart
   itself is required on every install.
@@ -172,7 +176,7 @@ Check, and tell the operator what is missing with the remedy:
 
 ```bash
 openclaw --version        # need 2026.7.1+  (https://openclaw.ai)
-bun --version             # need 1.2+       (curl -fsSL https://bun.sh/install | bash)
+bun --version             # need 1.2+  (curl -fsSL https://bun.sh/install | bash; no unzip or sudo: see "Installing Bun" below)
 node --version            # OpenClaw 2026.9.5 requires >=24.16.0 <25 or >=26.1.0
 ```
 
@@ -186,21 +190,52 @@ location directly:
 
 ```bash
 ~/.bun/bin/bun --version
+~/.local/bin/bun --version   # a user-prefix npm install (below)
 ```
 
-If that prints a version, Bun is installed and nothing needs installing.
-Prepend it to PATH **for your session only** and continue:
+If either prints a version, Bun is installed and nothing needs installing.
+Prepend that directory to PATH **for your session only** and continue:
 
 ```bash
-export PATH="$HOME/.bun/bin:$PATH"
+export PATH="$HOME/.bun/bin:$PATH"     # or "$HOME/.local/bin:$PATH"
 ```
 
 Do NOT re-run the Bun installer and do NOT edit any shell startup file to
 fix this — editing `.zshrc`/`.zprofile`/`.bash_profile` and friends is
 forbidden (Step 1, MUST NOT #8), and a reinstall over a working Bun is a
-state change the operator did not ask for. Only if `~/.bun/bin/bun` is
-genuinely absent do you report Bun as missing, with the install command
-as the operator's to run.
+state change the operator did not ask for. Only if both are genuinely
+absent do you report Bun as missing and ask the operator's go to install it.
+
+**Installing Bun without `unzip` or `sudo`.** Bun's official installer
+needs `unzip`, which minimal Linux images (Ubuntu server/cloud) lack, and the
+install user may have no `sudo`. Check `command -v unzip` first. If `unzip`
+is present, the official installer is fine. If it is missing, do not ask the
+operator to `sudo apt install unzip` or run any other `sudo` command: Node is
+already required, so on the operator's go install Bun yourself into a user
+prefix, which needs neither:
+
+```bash
+npm install -g --prefix "$HOME/.local" bun
+export PATH="$HOME/.local/bin:$PATH"
+bun --version
+```
+
+The npm package fetches the real binary in an install script. If npm is set
+to `ignore-scripts=true`, `bun --version` fails after an apparently clean
+install; rerun with scripts allowed for this one package and check again:
+
+```bash
+npm install -g --prefix "$HOME/.local" --ignore-scripts=false bun
+bun --version
+```
+
+`--prefix` keeps the install in the user's home, so a system-owned npm prefix
+never produces an `EACCES` that tempts a `sudo npm`. The npm package's real
+binary is `…/lib/node_modules/bun/bin/bun.exe` on every platform, with a
+`bun` link in `~/.local/bin`; that naming is expected, not a broken install.
+`olympus setup` accepts it: it records the `bun.exe` runtime for the worker
+service and adds the `~/.local/bin` directory holding the `bun` link to the
+worker's PATH. Never ask the operator to run a `sudo` command you can avoid.
 
 This matters past Step 0: `bin/olympus` is a Bun script, so every
 `"$OLYMPUS_BIN" …` call in this guide needs `bun` on PATH in the shell
@@ -478,6 +513,18 @@ as a bare list of names. A new operator has no idea what a preset id means.
 **The walkthrough below is part of the gate**: explain, in plain language,
 what each posture means for THEIR data, what it requires, and its trade-off
 — then ask. Preserve the full explanation below; do not compress it to a menu.
+
+**No pick-list before the explanation — question tools included.** Never ask
+the posture as a multiple-choice question, a pick-list, or a choice in a
+question tool (OpenClaw's Ask User tool, a button prompt, or similar) until
+all three have happened in chat, in this order: the required four-tier
+explanation below was delivered in full, the sensitivity conversation ran and
+the operator confirmed the map, and the four-option posture walkthrough was
+delivered in full. A question tool is a way to collect the answer after that,
+never a substitute for it. When you do use one, each option label is the
+plain-language description from the walkthrough (for example "Venice —
+Private content goes only to Venice"), never a bare preset id and never a
+compressed menu such as "Local, cloud, local only…".
 
 **Required user-facing four-tier explanation.** Deliver this entire block
 before asking any sensitivity or posture question. The point of each tier is
@@ -1064,10 +1111,12 @@ lane, model and prompt version. Read what it would use (you run this):
 olympus tier classifier status
 ```
 
-It reports `lane` (`local` or `venice`), `profile`, `modelId` and `approved`,
-or `lane: null` with a `refused` reason. On `no-sensitive` the reason is
-`no_private_lane`: there is nothing to approve, so skip this gate and do not
-mention the classifier. Any other refusal (`standard_cloud`,
+It reports `lane` (`local` or `venice`), `profile`, `modelId`, `approved` and
+`decision`, or `lane: null` with a `refused` reason. On `no-sensitive` the
+reason is `no_private_lane` and `decision` is `not_applicable`: there is
+nothing to approve, so skip this gate and do not explain or ask about the
+classifier. Its only mention is the one Step 6 summary line, "Privacy
+classifier: not applicable (no-sensitive)". Any other refusal (`standard_cloud`,
 `unsupported_provider`, `outside_private_policy`) means the policy names a
 classifier model Olympus will not use for possibly-private material. Report
 it to the operator in plain words ("the policy names a model the privacy
@@ -1098,8 +1147,18 @@ in their own words:
 olympus tier classifier approve --why "<operator's reason>"
 ```
 
-A no is a complete answer; record nothing. A later change of model, lane or
-prompt stops the classifier until the operator approves again.
+A no is a complete answer: do not argue or re-ask. Record it, so the receipt
+can tell a no from a question never asked (the reason is optional):
+
+```bash
+olympus tier classifier decline --why "<operator's reason, if given>"
+```
+
+A later change of model, lane or prompt stops the classifier until the
+operator approves again. Either way, `olympus tier classifier status` then
+reports `decision` as `approved` or `declined`; `not_asked` means this gate
+has not been cleared. The Step 6 completion receipt reads that field, so this
+gate cannot be skipped on the way to the handoff.
 
 ## Step 4 — Verify the worker
 
@@ -1236,10 +1295,39 @@ go, and if the operator wants to wait, installation is not complete until the
 restart runs.
 
 Resolve the selected dashboard's prerequisites before this restart. If the
-artifact declares native Control UI support, check its Labs opt-in, browser/
-transport compatibility, and Gateway origin described in Step 6 now. Apply
-only authorized settings through the host's supported configuration workflow;
-do not discover these settings only after restarting and handing off.
+artifact declares native Control UI support, check its browser/transport
+compatibility and Gateway origin described in Step 6 now. Apply only
+authorized settings through the host's supported configuration workflow; do
+not discover these settings only after restarting and handing off.
+
+**Custom plugin UI opt-in (its own Rule one gate, before the restart).** The
+native Olympus page needs OpenClaw's Custom plugin UI setting, which is off by
+default: **Settings → Labs → Custom plugin UI** in the Control UI, or the
+equivalent Gateway setting `gateway.controlUi.experimental.customPlugins: true`
+([OpenClaw docs](https://docs.openclaw.ai/plugins/feature-plugins)). Confirm
+the key with `config.schema.lookup` on the installed host and read its current
+value. If it is already on, there is nothing to ask. Otherwise explain it in
+plain words and ask:
+
+> Olympus has a page inside OpenClaw's Control UI. To show it, OpenClaw has a
+> setting called Custom plugin UI. Turning it on lets every plugin you have
+> installed, not only Olympus, run its own page code inside the Control UI,
+> with the same access to your OpenClaw Gateway you have when signed in. It's
+> off by default. Shall I turn it on? If not, I'll give you a separate
+> Olympus dashboard link instead.
+
+On a yes, set it yourself with `openclaw config set
+gateway.controlUi.experimental.customPlugins true`, but only as the restart
+below: once that restart has its own go and `openclaw config validate` is
+green. OpenClaw's docs say the key applies without a restart, but on 2026.9.5
+setting it makes the Gateway restart itself (a config-reload restart), and
+that self-restart is this step's restart. Do not follow it with
+`openclaw gateway restart`; wait until `openclaw gateway status` shows it
+running again, then run the post-restart checks. The in-gateway warning below
+applies to this `config set`, since the chat drops right away. If the key was
+already on, restart normally. On a no, record nothing,
+leave it off, and use the standalone opening link in Step 6: never hand the
+operator a Labs instruction as a caveat in the final reply.
 
 **Residue check first (Rule zero):** never run this restart to activate a
 configuration the operator has not consented to in this flow; on a
@@ -1427,6 +1515,14 @@ readiness checks documented in Step 3. Then prove the worker consumes that wirin
   and `email_worker` checks green, and `olympus worker status` must show the
   worker reachable without degraded credentials. Use the posture's existing
   remedies when one is red, then rerun the same checks.
+- **Privacy classifier decision.** Run `olympus tier classifier status` and
+  report its `decision` field, not your recollection: **approved**
+  (`approved`, the operator's recorded yes), **declined** (`declined`, the
+  operator's recorded no), **refused** (`refused`, with the `refused`
+  reason), or **not applicable** (`not_applicable`: `no-sensitive`, reason
+  `no_private_lane`). `not_asked` means the Step 3 gate was never cleared: go
+  back and ask it now. Do not send the dashboard handoff until this line reads
+  one of those four outcomes.
 
 A provider key being present, a configured model profile, or a check reported
 as **Skipped** is not readiness. A Venice key also does not prove usable API
@@ -1434,16 +1530,17 @@ balance. Do not add a new CLI/API/billing probe or a source connection to make
 the receipt look complete. If a required check is not green, say which provider
 wiring remains open and keep source Connect unopened.
 
-Give the operator this honest summary before the source handoff, adapting only
-the observed facts:
+Give the operator this honest summary in the same final reply, immediately
+before the source handoff, adapting only the observed facts:
 
 > Base installation is verified. Chosen posture: `<posture>`. Gemini wiring
 > for Public and Personal embeddings: `<verified or still open>`.
 > Venice Private-answer and Private-embedding wiring, reported separately:
 > `<verified, not required for this posture, or
-> still open>`. Worker consumer checks: `<green or name the open check>`. No
-> source is connected yet, and I will wait to invite Connect until every
-> required provider check is green.
+> still open>`. Privacy classifier: `<approved, declined, refused (reason),
+> or not applicable (no-sensitive)>`. Worker consumer checks: `<green or
+> name the open check>`. No source is connected yet, and I will wait to
+> invite Connect until every required provider check is green.
 
 Deliver the dashboard handoff below after base activation. If Models is not
 ready, direct the operator to finish that section before connecting sources.
@@ -1455,7 +1552,28 @@ Resolve and verify the selected dashboard as described below. The final reply
 must contain the actual clickable link, even if the dashboard is already open.
 Replace `<verified-dashboard-url>` with the real operator-facing address; never
 send the placeholder, a host-only loopback URL, or only a terminal command.
-Then deliver this required user-facing handoff:
+
+**Which link.** When the operator reaches OpenClaw through its Control UI and
+the native Olympus page is available (the default for this artifact), the link
+is the native page `/plugin?plugin=olympus&id=dashboard` on the Gateway origin
+the operator's browser is already using. It needs no ticket and does not
+expire. Use the standalone `olympus dashboard` opening link only when native
+UI is unavailable, the operator declined the Step 5 Custom plugin UI opt-in,
+or the operator explicitly chose direct access. Concretely,
+a "host-only loopback URL" is any `127.0.0.1`, `localhost` or `[::1]` address
+whose host is not the machine the operator's browser runs on: the worker's
+`http://127.0.0.1:8010/…` and a Gateway loopback origin qualify unless you
+have confirmed the operator browses from the Olympus host itself (or through
+a tunnel that forwards that exact port). If you do not know the operator's
+Gateway origin, read `gateway.publicOrigin` or ask them for the address in
+their browser's address bar; do not guess one.
+
+Deliver this required user-facing handoff **verbatim**. Change nothing but
+the `<verified-dashboard-url>` placeholder: no reworded sentences, no
+"optional" or "you pick which ones, if any" framing, no Labs or settings
+caveats. If a caveat seems necessary, the dashboard is not verified yet;
+resolve it first, as described below. Only for the standalone fallback, one
+sentence after the block may say the link works once within fifteen minutes.
 
 > Olympus is installed. [Open your Olympus dashboard](<verified-dashboard-url>).
 > Olympus is as useful as the sources you give it. Each one you connect —
@@ -1520,9 +1638,10 @@ using: `/plugin?plugin=olympus&id=dashboard`. Copy the working page's URL; do
 not assume port 18789, reuse the agent host's localhost origin for a remote
 operator, or link only to the OpenClaw chat homepage. Verify that the page loads
 and exposes Setup, Home, and Background before handing it over. Native plugin pages need
-**Settings → Labs → Custom plugin UI**, a Gateway restart through the applicable
-managed procedure, and a browser reload. Explain this opt-in and obtain any
-uncovered authorization before enabling it. Use that Gateway's Control UI in a supported browser. On the tested macOS
+the Custom plugin UI opt-in, which Step 5 asks for before the restart; reload
+the browser if the sidebar entry is still missing. If the operator declined it
+there, the native page is not available: use the standalone opening link. It
+is never handed to the operator as a caveat in the final reply. Use that Gateway's Control UI in a supported browser. On the tested macOS
   WebKit/Safari 26.2 runtime, Secure plugin cookies are rejected over plain
   localhost/loopback HTTP even though the page is a secure context. For the
   integrated UI, use Chrome on loopback or an already configured trusted HTTPS
@@ -1555,7 +1674,7 @@ Use `--no-open` for an agent handoff so a browser on the host cannot consume
 the single-use link before the operator opens it.
 
 The opening link contains a short-lived, single-use authorization ticket. It
-expires after two minutes, so generate it at handoff time; if it expires or has
+expires after fifteen minutes, so generate it at handoff time; if it expires or has
 already been used, run the command again. Do not fetch the link as a preview or
 probe before giving it to the operator. The browser removes the ticket from its
 address bar, exchanges it for the existing HttpOnly control session, and opens
@@ -1904,7 +2023,10 @@ the step is DONE, not broken.
 1. **Never choose the privacy posture yourself — and never present it as
    a bare menu of preset names.** The plain-language walkthrough in Step 2
    is part of the gate; the operator decides only after hearing what each
-   posture means for their data.
+   posture means for their data. A question tool or pick-list is allowed
+   only after the four-tier explanation, the sensitivity conversation and
+   the posture walkthrough have all been delivered in chat, and its labels
+   are the plain-language descriptions, never preset ids.
 2. **Never echo, log, or store secrets in plain text.** Keys go through
    stdin connect flows or the worker environment; Olympus keeps them in an
    encrypted local secret store.

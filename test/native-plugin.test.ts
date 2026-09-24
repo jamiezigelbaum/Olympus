@@ -542,8 +542,7 @@ describe('native OpenClaw plugin adapter', () => {
       'model',
       'secretRef',
     ]));
-    const argusModelProfile = asRecord(asRecord(manifest.configSchema).$defs).argusModelProfile;
-    const argusModelProfileProperties = asRecord(asRecord(argusModelProfile).properties);
+    const argusModelProfileProperties = configSchemaProperties(['argus', 'modelProfiles', 'default_chat']);
     expect(Object.keys(argusModelProfileProperties)).toEqual(expect.arrayContaining([
       'baseUrl',
       'model',
@@ -558,8 +557,10 @@ describe('native OpenClaw plugin adapter', () => {
       'corpora',
       'ingestionPolicies',
     ]));
-    expect(asRecord(configSchemaProperties(['sourceIndex']).corpusRegistry).$ref).toBe('#/$defs/sourceCorpusRegistry');
-    expect(asRecord(asRecord(configSchemaProperties(['sourceIndex']).corpora).items).$ref).toBe('#/$defs/sourceCorpus');
+    // Inlined, not $ref: the Control UI form renderer cannot follow references.
+    const corpusItems = asRecord(asRecord(configSchemaProperties(['sourceIndex']).corpora).items);
+    expect(Object.keys(asRecord(corpusItems.properties))).toEqual(expect.arrayContaining(['corpusId', 'sourceId', 'trustDomain']));
+    expect(asRecord(asRecord(configSchemaProperties(['sourceIndex', 'corpusRegistry']).corpora).items)).toEqual(corpusItems);
     expect(Object.keys(configSchemaProperties(['sourceIndex', 'ingestionPolicies', 'dropboxPersonal']))).toEqual(expect.arrayContaining([
       'policyPath',
       'policy',
@@ -581,7 +582,7 @@ describe('native OpenClaw plugin adapter', () => {
       { path: 'worker.creditMonitor.credentials.*', expected: 'string' },
       { path: 'worker.embeddingDrain.credentials.*', expected: 'string' },
     ]);
-    const secretInput = asRecord(asRecord(manifest.configSchema).$defs).secretInput;
+    const secretInput = configSchemaProperties(['worker']).authToken;
     expect(asRecord(secretInput).oneOf).toEqual([
       { type: 'string' },
       {

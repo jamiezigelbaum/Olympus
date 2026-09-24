@@ -178,8 +178,8 @@ managed plugin; use the resolved executable rather than assuming it is on PATH.
 This candidate artifact includes native Control UI support. On OpenClaw
 **2026.9.2**, use **Olympus** in the Control UI sidebar to connect
 sources, choose scope, and follow ingestion. Enable **Settings → Labs → Custom
-plugin UI**, then restart the Gateway through your normal managed procedure
-and reload the browser. OpenClaw currently makes this integration experimental
+plugin UI** (the Gateway restarts itself to apply it on OpenClaw 2026.9.5; run
+no second restart), then reload the browser. OpenClaw currently makes this integration experimental
 and requires its own Gateway's Control UI over HTTPS or localhost. Olympus uses
 your signed-in OpenClaw permissions; its worker token stays on the server.
 The standalone `olympus dashboard` command remains available for older hosts,

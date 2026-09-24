@@ -7999,11 +7999,12 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-var SUPPORTED_IMAGE_MIME_TYPES;
+var SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
   init_operation_error();
   init_embedding_identity();
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
+  TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
 
 // src/workers/connector-store/local-index.ts
@@ -13308,7 +13309,7 @@ import { createHmac, randomBytes as randomBytes3, timingSafeEqual } from "node:c
 // src/core/dashboard-launch.ts
 import { createHash, randomBytes as randomBytes2 } from "node:crypto";
 var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket";
-var DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 120;
+var DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900;
 var DASHBOARD_LAUNCH_MAX_TICKETS = 32;
 
 class DashboardLaunchTickets {

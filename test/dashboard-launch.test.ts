@@ -68,7 +68,9 @@ function redeemRequest(ticket: unknown, origin = ORIGIN, headers: Record<string,
 }
 
 describe('dashboard opening tickets', () => {
-  test('is 256 random bits, single use, with a bounded 120-second life', async () => {
+  test('is 256 random bits, single use, with a bounded 15-minute life', async () => {
+    // Owner decision 2026-09-24: fifteen minutes, still single-use.
+    expect(DASHBOARD_LAUNCH_TICKET_TTL_SECONDS).toBe(15 * 60);
     const fixture = guardFixture();
     const ticket = await mintTicket(fixture);
     expect(ticket).toMatch(/^[A-Za-z0-9_-]{43}$/);

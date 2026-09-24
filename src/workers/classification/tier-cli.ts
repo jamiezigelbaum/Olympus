@@ -4,7 +4,7 @@
 //   olympus tier set <locator> public|personal|private|secrets|not-secret|clear
 //   olympus tier explain <locator>
 //   olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>
-//   olympus tier classifier status | approve --why <reason> [--model <id>] [--prompt-version <v>]
+//   olympus tier classifier status | approve --why <reason> | decline [--why <reason>]
 //
 // Tier words are the DISPLAY names (Public, Personal, Private, Secrets); the
 // files store schema-v1 keys (tier-rules.ts, tierKeyFromDisplayName).
@@ -59,7 +59,7 @@ export const TIER_CLI_USAGE: Readonly<Record<string, string>> = {
   'tier set': 'olympus tier set <locator> public|personal|private|secrets|not-secret|clear',
   'tier explain': 'olympus tier explain <locator>',
   'tier rules': 'olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>',
-  'tier classifier': 'olympus tier classifier status | approve --why <reason>',
+  'tier classifier': 'olympus tier classifier status | approve --why <reason> | decline [--why <reason>]',
   'tier migrate': 'olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | '
     + 'run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | '
     + 'rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status',
@@ -432,12 +432,17 @@ export async function runTierClassifier(args: readonly string[], context: TierCl
     : { lane: lane.kind, profile: lane.profileId, modelId: lane.modelId };
   if (command === 'status') {
     const ledger = await readClassificationLedger(ledgerPath);
+    const decision = 'refused' in lane
+      ? (lane.refused === 'no_private_lane' ? 'not_applicable' : 'refused')
+      : classifierDecision(ledger.entries, { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION });
     return {
       ...laneSummary,
       promptVersion: SNIFFER_PROMPT_VERSION,
-      approved: 'refused' in lane
-        ? false
-        : isClassifierApproved(ledger.entries, { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION }),
+      approved: decision === 'approved',
+      // What the install receipt reports: approved, declined, refused,
+      // not_applicable (no Private lane), or not_asked (no owner answer
+      // recorded for this exact lane, model and prompt yet).
+      decision,
       ledger: ledgerPath,
       recent: ledger.entries.slice(0, 5),
       skippedLines: ledger.skipped,
@@ -470,7 +475,50 @@ export async function runTierClassifier(args: readonly string[], context: TierCl
     await appendClassificationLedgerEntry(ledgerPath, entry);
     return { ledger: ledgerPath, recorded: entry };
   }
+  if (command === 'decline') {
+    // A no is a complete answer, so a reason is optional; recording it is
+    // what lets status tell "declined" from "never asked".
+    const options = parseFlags(rest, ['why']);
+    const why = options.get('why')?.trim();
+    if ('refused' in lane) {
+      throw new OperationError('invalid_params', `No private sniffer lane is configured (${lane.refused}); there is nothing to decline.`);
+    }
+    const entry = {
+      recorded_at: (context.now?.() ?? new Date()).toISOString(),
+      kind: 'classifier_model_revoked' as const,
+      what: `The owner declined ${lane.kind} classifier model ${lane.modelId} (profile ${lane.profileId}) with prompt ${SNIFFER_PROMPT_VERSION} for the privacy sniffer; possibly-private items stay held as Private.`,
+      model_id: lane.modelId,
+      prompt_version: SNIFFER_PROMPT_VERSION,
+      lane: lane.kind,
+      profile_id: lane.profileId,
+      ...(why ? { why } : {}),
+      approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+      status: 'complete' as const,
+    };
+    await appendClassificationLedgerEntry(ledgerPath, entry);
+    return { ledger: ledgerPath, recorded: entry };
+  }
   throw new OperationError('invalid_params', `Usage: ${TIER_CLI_USAGE['tier classifier']}`);
+}
+
+/**
+ * The owner's newest recorded answer for this exact key. A decline is stored
+ * as an owner-signed revocation, so `isClassifierApproved` already treats it
+ * as not approved; this only names which of the two answers, or neither, the
+ * ledger holds.
+ */
+function classifierDecision(
+  entries: Parameters<typeof isClassifierApproved>[0],
+  key: Parameters<typeof isClassifierApproved>[1],
+): 'approved' | 'declined' | 'not_asked' {
+  if (isClassifierApproved(entries, key)) return 'approved';
+  for (const entry of entries) {
+    if (entry.model_id !== key.modelId || entry.prompt_version !== key.promptVersion
+      || entry.lane !== key.lane || entry.profile_id !== key.profileId) continue;
+    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL) continue;
+    if (entry.kind === 'classifier_model_revoked') return 'declined';
+  }
+  return 'not_asked';
 }
 
 function parseFlags(args: readonly string[], allowed: readonly string[]): Map<string, string> {

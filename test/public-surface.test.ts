@@ -57,25 +57,33 @@ describe('v0.4 positive public surface', () => {
       skills: string[];
       configSchema: {
         properties: Record<string, unknown>;
-        $defs: {
-          sourceCorpus: {
-            properties: Record<string, { enum?: string[] }>;
-            required: string[];
-            oneOf: Array<{
-              properties: {
-                corpusId: { const: string };
-                sourceId: { const: string };
-                provider: { const: string };
-                family: { const: string };
-                trustDomain: { const: string };
-                capabilities: { items: { enum: string[] } };
-              };
-            }>;
-          };
-        };
       };
       uiHints: Record<string, { label?: string; help?: string; sensitive?: boolean }>;
     };
+    // The corpus schema is inlined (the Control UI form renderer cannot follow
+    // $ref), once under sourceIndex.corpora and once under the registry.
+    type SourceCorpusSchema = {
+      properties: Record<string, { enum?: string[] }>;
+      required: string[];
+      oneOf: Array<{
+        properties: {
+          corpusId: { const: string };
+          sourceId: { const: string };
+          provider: { const: string };
+          family: { const: string };
+          trustDomain: { const: string };
+          capabilities: { items: { enum: string[] } };
+        };
+      }>;
+    };
+    const sourceIndexSchema = plugin.configSchema.properties.sourceIndex as {
+      properties: {
+        corpora: { items: SourceCorpusSchema };
+        corpusRegistry: { properties: { corpora: { items: SourceCorpusSchema } } };
+      };
+    };
+    const sourceCorpus = sourceIndexSchema.properties.corpora.items;
+    expect(sourceIndexSchema.properties.corpusRegistry.properties.corpora.items).toEqual(sourceCorpus);
     const skillManifest = JSON.parse(readFileSync(join(ROOT, 'skills/manifest.json'), 'utf8')) as {
       skills: Array<{ path: string }>;
     };
@@ -86,16 +94,16 @@ describe('v0.4 positive public surface', () => {
     expect(Object.keys(plugin.uiHints)).toEqual(['argus', 'sovereignty', 'email', 'sourceIndex', 'worker.authToken']);
     // A bearer token must never render in the clear in Control UI or a config read.
     expect(plugin.uiHints['worker.authToken']).toMatchObject({ sensitive: true });
-    expect(plugin.configSchema.$defs.sourceCorpus.properties.sourceId?.enum).toEqual([...V0_4_PUBLIC_SOURCE_IDS]);
-    expect(plugin.configSchema.$defs.sourceCorpus.properties.provider?.enum)
+    expect(sourceCorpus.properties.sourceId?.enum).toEqual([...V0_4_PUBLIC_SOURCE_IDS]);
+    expect(sourceCorpus.properties.provider?.enum)
       .toEqual(['gmail', 'google_drive', 'dropbox', 'x', 'telegram', 'whatsapp', 'readwise']);
-    expect(plugin.configSchema.$defs.sourceCorpus.properties.family?.enum)
+    expect(sourceCorpus.properties.family?.enum)
       .toEqual(['email', 'file', 'chat', 'readwise', 'x']);
-    expect(plugin.configSchema.$defs.sourceCorpus.properties.activationMode?.enum)
+    expect(sourceCorpus.properties.activationMode?.enum)
       .toEqual(['lexical_only', 'hybrid_shadow', 'hybrid_primary']);
-    expect(plugin.configSchema.$defs.sourceCorpus.required)
+    expect(sourceCorpus.required)
       .toEqual(['corpusId', 'sourceId', 'provider', 'family', 'trustDomain', 'capabilities']);
-    const schemaCorpora = plugin.configSchema.$defs.sourceCorpus.oneOf.map((branch) => ({
+    const schemaCorpora = sourceCorpus.oneOf.map((branch) => ({
       corpusId: branch.properties.corpusId.const,
       sourceId: branch.properties.sourceId.const,
       provider: branch.properties.provider.const,

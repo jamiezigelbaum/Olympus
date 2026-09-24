@@ -120,6 +120,143 @@ const MEDIA_FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (compatible; OlympusSourceIndex/0.1)',
 };
 
+/**
+ * Statuses a hosted embedding endpoint returns for a momentary outage or
+ * throttle. A query embedding that hits one is retried inside the provider's
+ * own time budget before anything fails (2026-09-24: a single Gemini 503 on a
+ * query embedding failed a `source_answer` whose immediate retry succeeded).
+ */
+const TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
+const TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1_000] as const;
+
+/** An HTTP status, a fetch-level network failure, or the provider's own budget running out. */
+export type TransientEmbeddingReason = number | 'network' | 'timeout';
+
+function transientEmbeddingMessage(
+  provider: string,
+  reason: TransientEmbeddingReason,
+  attempts: number,
+  budgetMs: number,
+): { message: string; suggestion: string } {
+  const tries = `${attempts} attempt${attempts === 1 ? '' : 's'}`;
+  if (reason === 429) {
+    return {
+      message: `${provider} source embedding endpoint refused the request with HTTP 429 (rate limit or quota) after ${tries}.`,
+      suggestion: 'The provider is throttling this account or its quota may be exhausted. Check the provider quota and billing before retrying; the key and model are not implicated.',
+    };
+  }
+  if (reason === 'network') {
+    return {
+      message: `${provider} source embedding endpoint could not be reached (network error after ${tries}).`,
+      suggestion: 'A connection or DNS failure, not a key or model problem. Retry the same request shortly; if it persists, check the Gateway host network.',
+    };
+  }
+  if (reason === 'timeout') {
+    return {
+      message: `${provider} source embedding endpoint did not answer within its ${budgetMs}ms budget (${tries}).`,
+      suggestion: 'The provider was slow or unavailable, not misconfigured. Retry the same request shortly.',
+    };
+  }
+  return {
+    message: `${provider} source embedding endpoint is temporarily unavailable (HTTP ${reason} after ${tries}).`,
+    suggestion: 'This is a transient provider outage, not a key or model problem. Retry the same request in a few seconds.',
+  };
+}
+
+/**
+ * The embedding endpoint was unavailable after the provider's internal
+ * retries, or its time budget ran out. Callers that can degrade (the
+ * query-time vector lane) catch this class; a configuration error stays a
+ * plain OperationError.
+ */
+export class TransientSourceEmbeddingError extends OperationError {
+  reason: TransientEmbeddingReason;
+
+  constructor(provider: string, reason: TransientEmbeddingReason, attempts: number, budgetMs = 0) {
+    const { message, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
+    super('source_index_error', message, suggestion);
+    this.name = 'TransientSourceEmbeddingError';
+    this.reason = reason;
+  }
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
+/** Retry-After as milliseconds (delta-seconds or HTTP-date), or undefined when absent or unreadable. */
+export function retryAfterMs(response: Response, nowMs = Date.now()): number | undefined {
+  const value = response.headers.get('retry-after')?.trim();
+  if (!value) return undefined;
+  if (/^\d+$/.test(value)) return Number(value) * 1_000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - nowMs);
+}
+
+async function discardBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
+}
+
+/**
+ * POST to an embedding endpoint, retrying transient statuses and network
+ * failures with a short backoff inside the caller's budget. A Retry-After
+ * that fits the remaining budget replaces the backoff; one that does not
+ * ends the retries at once. Throws TransientSourceEmbeddingError when the
+ * endpoint stayed unavailable or the budget ran out; returns any other
+ * response (ok or not) for the caller to judge.
+ */
+async function fetchEmbeddingResponse(
+  fetchImpl: typeof fetch,
+  provider: string,
+  url: string,
+  init: RequestInit & { signal: AbortSignal },
+  budget: { deadlineAtMs: number; budgetMs: number },
+): Promise<Response> {
+  const timedOut = (attempts: number) =>
+    new TransientSourceEmbeddingError(provider, 'timeout', attempts, budget.budgetMs);
+  let attempt = 0;
+  for (;;) {
+    let reason: TransientEmbeddingReason;
+    let waitMs: number | undefined;
+    try {
+      const response = await fetchImpl(url, init);
+      attempt += 1;
+      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status)) return response;
+      reason = response.status;
+      const backoffMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
+      const requestedMs = retryAfterMs(response);
+      await discardBody(response);
+      if (backoffMs !== undefined) {
+        waitMs = requestedMs ?? backoffMs;
+        // A server-requested wait past the budget is a refusal for this
+        // request: retrying earlier would only be refused again.
+        if (Date.now() + waitMs >= budget.deadlineAtMs) waitMs = undefined;
+      }
+    } catch (error) {
+      if (error instanceof TransientSourceEmbeddingError) throw error;
+      if (init.signal.aborted) throw timedOut(attempt + 1);
+      attempt += 1;
+      reason = 'network';
+      waitMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
+    }
+    if (waitMs === undefined) {
+      throw new TransientSourceEmbeddingError(provider, reason, attempt, budget.budgetMs);
+    }
+    if (init.signal.aborted) throw timedOut(attempt);
+    await abortableDelay(waitMs, init.signal);
+    if (init.signal.aborted) throw timedOut(attempt);
+  }
+}
+
 export class GeminiSourceEmbeddingProvider implements SourceEmbeddingProvider {
   provider = 'google-gemini';
   modelId: string;
@@ -184,6 +321,7 @@ export class GeminiSourceEmbeddingProvider implements SourceEmbeddingProvider {
     if (inputs.length === 0) return [];
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
       const modelPath = `models/${this.modelId}`;
       let mediaPartsSkipped = 0;
@@ -202,7 +340,7 @@ export class GeminiSourceEmbeddingProvider implements SourceEmbeddingProvider {
       }));
       this.lastMediaPartsSkipped = mediaPartsSkipped;
       this.mediaPartsSkipped += mediaPartsSkipped;
-      const response = await this.fetchImpl(`${this.baseUrl}/${modelPath}:batchEmbedContents`, {
+      const response = await fetchEmbeddingResponse(this.fetchImpl, 'Gemini', `${this.baseUrl}/${modelPath}:batchEmbedContents`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -212,7 +350,7 @@ export class GeminiSourceEmbeddingProvider implements SourceEmbeddingProvider {
           requests,
         }),
         signal: controller.signal,
-      });
+      }, budget);
       if (!response.ok) {
         throw new OperationError(
           'source_index_error',
@@ -230,6 +368,9 @@ export class GeminiSourceEmbeddingProvider implements SourceEmbeddingProvider {
       return vectors;
     } catch (error) {
       if (error instanceof OperationError) throw error;
+      // The whole budget ran out (media, preflight, or the response body):
+      // a transient outage like any other, so the query lane can degrade.
+      if (controller.signal.aborted) throw new TransientSourceEmbeddingError('Gemini', 'timeout', 1, this.timeoutMs);
       throw new OperationError(
         'source_index_error',
         'Gemini source embedding endpoint failed.',
@@ -369,9 +510,10 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
     if (inputs.length === 0) return [];
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
       await this.preflight?.(controller.signal);
-      const response = await this.fetchImpl(`${this.baseUrl}/embeddings`, {
+      const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
         method: 'POST',
         headers: this.requestHeaders(),
         body: JSON.stringify({
@@ -381,7 +523,7 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
         }),
         redirect: 'error',
         signal: controller.signal,
-      });
+      }, budget);
       if (!response.ok) {
         throw new OperationError(
           'source_index_error',
@@ -409,6 +551,9 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
       return vectors;
     } catch (error) {
       if (error instanceof OperationError) throw error;
+      // The whole budget ran out (media, preflight, or the response body):
+      // a transient outage like any other, so the query lane can degrade.
+      if (controller.signal.aborted) throw new TransientSourceEmbeddingError(this.provider, 'timeout', 1, this.timeoutMs);
       throw new OperationError(
         'source_index_error',
         `${this.provider} source embedding endpoint failed.`,

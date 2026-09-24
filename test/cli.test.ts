@@ -1059,7 +1059,7 @@ describe('CLI tool surface', () => {
         origin: request.headers.origin,
       });
       response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ ok: true, ticket, expires_in_seconds: 120 }));
+      response.end(JSON.stringify({ ok: true, ticket, expires_in_seconds: 900 }));
     });
     let serverOpen = false;
     try {
@@ -1092,7 +1092,7 @@ describe('CLI tool surface', () => {
         origin: workerOrigin,
       }]);
       expect(output).toMatchObject({ url: expectedUrl, opened: true });
-      expect(output.hint).toContain('single-use 120-second ticket');
+      expect(output.hint).toContain('single-use 15-minute ticket');
       expect(output.hint).toContain('dashboard --read-only');
       expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
       expect(new URL(output.url).search).toBe('');
@@ -1651,7 +1651,7 @@ function writeWorkerEnv(home: string, token: string): string {
  * the whole point of resolving the token before printing a URL.
  */
 function workerTicketResponse(ticket: string): Response {
-  return new Response(JSON.stringify({ ok: true, ticket, expires_in_seconds: 120 }), {
+  return new Response(JSON.stringify({ ok: true, ticket, expires_in_seconds: 900 }), {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   });
