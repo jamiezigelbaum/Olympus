@@ -11,7 +11,8 @@ export function defineReadwiseLibraryCorpus(): SourceIndexCorpusDefinition {
     corpusId: READWISE_LIBRARY_CORPUS_ID,
     family: 'readwise',
     trustDomain: 'internal',
-    activationMode: 'lexical_only',
+    // Owner decision 2026-09-24: hybrid on the vectors the lane already stores.
+    activationMode: 'hybrid_primary',
     storageProfileInput: {
       cloudEmbeddingApproved: true,
       cloudQueryApproved: false,

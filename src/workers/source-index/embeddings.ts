@@ -29,6 +29,12 @@ export interface SourceEmbeddingProvider {
   epochId: string;
   backend: SourceEmbeddingBackend;
   embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]>;
+  /**
+   * Throws when the approval this provider was bound to is no longer current
+   * (scopeBoundEmbeddingProvider). An unbound provider has none. The embedding
+   * sweep checks it before embedding anything queued under the binding.
+   */
+  assertBindingCurrent?(): void;
 }
 
 /** Secure corpora may use local embeddings or the explicitly approved Venice cloud lane. */

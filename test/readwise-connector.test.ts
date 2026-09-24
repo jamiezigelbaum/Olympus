@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import {
   createConnectorStoreCorpusAdapter,
+  embedPendingChunks,
 } from '../src/workers/connector-store/index.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
 import {
@@ -209,9 +210,19 @@ describe('Readwise thin connector and canonical store', () => {
 
     try {
       const first = await sync.sync();
+      const unembeddedStatus = store.status();
+      // The sync commits items and chunks and queues them (owner decision
+      // 2026-09-24: decouple embedding from sync); the embedding sweep embeds.
+      const embedded = await embedPendingChunks([{ store, provider }], { maxItems: 32 });
       const firstStatus = store.status();
       const second = await sync.sync();
       const secondStatus = store.status();
+      const reEmbedded = await embedPendingChunks([{ store, provider }], { maxItems: 32 });
+
+      expect(unembeddedStatus.counts).toMatchObject({ chunks: 2, embeddedChunks: 0 });
+      expect(embedded).toEqual([expect.objectContaining({ chunksEmbedded: 2 })]);
+      // Nothing already embedded at its current content is embedded again.
+      expect(reEmbedded).toEqual([expect.objectContaining({ chunksEmbedded: 0 })]);
 
       expect(first).toMatchObject({
         status: 'progress',
@@ -222,7 +233,7 @@ describe('Readwise thin connector and canonical store', () => {
           items_indexed: 2,
           items_tombstoned: 0,
           chunks_indexed: 2,
-          chunks_embedded: 2,
+          chunks_embedded: 0,
         },
         policy: {
           counts_only: true,
@@ -291,7 +302,7 @@ describe('Readwise thin connector and canonical store', () => {
         counts: {
           api_requests: 2,
           items_seen: 2,
-          chunks_embedded: 2,
+          chunks_embedded: 0,
         },
         policy: {
           counts_only: true,

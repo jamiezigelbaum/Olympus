@@ -140,7 +140,9 @@ const DEFAULT_SOURCE_CORPORA: SourceCorpusConfig[] = [
     provider: 'readwise',
     family: 'readwise',
     trustDomain: 'internal',
-    activationMode: 'lexical_only',
+    // Hybrid on the vectors the lane already stores (owner decision
+    // 2026-09-24, embedding ledger entry decision-2026-09-24-readwise-hybrid).
+    activationMode: 'hybrid_primary',
     capabilities: ['answer', 'status', 'sync'],
     description: 'S1/internal Readwise saved library. The former public-safe corpus id resolves here as an input alias.',
   },
@@ -150,7 +152,9 @@ const DEFAULT_SOURCE_CORPORA: SourceCorpusConfig[] = [
     provider: 'readwise',
     family: 'readwise',
     trustDomain: 'secure_local',
-    activationMode: 'lexical_only',
+    // Hybrid through the approved private embedding lane; answered by the
+    // secure analyst route like every Private corpus (owner decision 2026-09-24).
+    activationMode: 'hybrid_primary',
     // No 'sync' of its own: the Readwise lane's tier set fills it.
     capabilities: ['answer', 'status'],
     createdOnDemand: true,

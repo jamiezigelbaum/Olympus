@@ -1,3 +1,4 @@
+import { FileLeaseBusyError } from '../src/core/file-lease.ts';
 import { writePrivateFileAtomicSync } from '../src/core/atomic-file.ts';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -665,7 +666,10 @@ export async function runSourceEmbeddingDrain(
       }
     } catch (error) {
       const message = errorMessage(error);
-      const transientLock = isSqliteBusyError(message);
+      // A busy store embedding lease means another embedder (the worker's
+      // scheduler sweep) is embedding this store right now: it is doing this
+      // lane's work, so the wait is transient, never a lane failure.
+      const transientLock = isSqliteBusyError(message) || isEmbeddingLaneBusyError(error, message);
       if (transientLock) {
         transientLockRetries += 1;
         laneConsecutiveFailures[item.laneIndex] = 0;
@@ -1381,6 +1385,12 @@ function secondsToMs(value: number): number {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error && error.message.trim() ? error.message.trim() : 'unknown embedding drain error';
+}
+
+/** The per-store embedding lease is held by another embedder (direct mode throws it; HTTP mode answers 409). */
+export function isEmbeddingLaneBusyError(error: unknown, message: string): boolean {
+  if (error instanceof FileLeaseBusyError) return true;
+  return /embedding_lane_busy|file_lease_busy|already holds the lease/i.test(message);
 }
 
 function isSqliteBusyError(message: string): boolean {

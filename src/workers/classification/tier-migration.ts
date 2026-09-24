@@ -33,6 +33,7 @@
 // caller. Source-neutral: a lane is data (a tiered store set plus a source id
 // string); nothing branches on which source an item came from.
 
+import { DEFAULT_EMBEDDING_MODEL_ESTIMATES, embeddingModelEstimate } from '../../core/embedding-cost-estimates.ts';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -138,13 +139,8 @@ export type TierMigrationPriceTable = Readonly<Record<string, Partial<TierMigrat
  * UNVERIFIED list prices (design section 4.4); the owner reads the live price
  * before approving. Throughput is a planning figure, not a measurement.
  */
-export const DEFAULT_TIER_MIGRATION_ESTIMATES: Readonly<Record<string, TierMigrationModelEstimate>> = {
-  'gemini-embedding-2': { usdPerMillionTokens: 0.15, chunksPerMinute: 600 },
-  'text-embedding-qwen3-8b': { usdPerMillionTokens: 0.0125, chunksPerMinute: 300 },
-  'secure-local-qwen3-embed': { usdPerMillionTokens: 0, chunksPerMinute: 60 },
-};
-
-const FALLBACK_ESTIMATE: TierMigrationModelEstimate = { usdPerMillionTokens: 0.15, chunksPerMinute: 60 };
+export const DEFAULT_TIER_MIGRATION_ESTIMATES: Readonly<Record<string, TierMigrationModelEstimate>> =
+  DEFAULT_EMBEDDING_MODEL_ESTIMATES;
 
 /** The embedding identity each trust domain embeds with on this install (sovereignty policy), if any. */
 export type TierMigrationDomainIdentity = (domain: SourceTrustDomain) => TierMoveEmbeddingIdentity | undefined;
@@ -462,18 +458,7 @@ function estimateFor(modelId: string, prices: TierMigrationPriceTable | undefine
   estimate: TierMigrationModelEstimate;
   source: 'config' | 'default_unverified';
 } {
-  const configured = prices?.[modelId];
-  const fallback = DEFAULT_TIER_MIGRATION_ESTIMATES[modelId] ?? FALLBACK_ESTIMATE;
-  if (configured && typeof configured.usdPerMillionTokens === 'number') {
-    return {
-      estimate: {
-        usdPerMillionTokens: configured.usdPerMillionTokens,
-        chunksPerMinute: configured.chunksPerMinute ?? fallback.chunksPerMinute,
-      },
-      source: 'config',
-    };
-  }
-  return { estimate: fallback, source: 'default_unverified' };
+  return embeddingModelEstimate(modelId, prices);
 }
 
 function authorityMatches(

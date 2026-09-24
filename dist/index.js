@@ -573,7 +573,7 @@ var init_source_corpus_registry = __esm(() => {
       provider: "readwise",
       family: "readwise",
       trustDomain: "internal",
-      activationMode: "lexical_only",
+      activationMode: "hybrid_primary",
       capabilities: ["answer", "status", "sync"],
       description: "S1/internal Readwise saved library. The former public-safe corpus id resolves here as an input alias."
     },
@@ -583,7 +583,7 @@ var init_source_corpus_registry = __esm(() => {
       provider: "readwise",
       family: "readwise",
       trustDomain: "secure_local",
-      activationMode: "lexical_only",
+      activationMode: "hybrid_primary",
       capabilities: ["answer", "status"],
       createdOnDemand: true,
       description: "Readwise items raised to Private by per-item four-tier classification (for example a private highlight)."
@@ -6341,6 +6341,9 @@ var init_credential_health = __esm(() => {
   CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
 });
 
+// src/core/embedding-cost-estimates.ts
+var init_embedding_cost_estimates = () => {};
+
 // src/core/invocation-provenance.ts
 function sourceInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
@@ -8033,6 +8036,7 @@ var init_local_index = __esm(() => {
   init_chunk_selection();
   init_reactions();
   init_corpus();
+  init_file_lease();
   init_embeddings();
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
@@ -9112,6 +9116,7 @@ var init_secret_locations = __esm(() => {
 // src/workers/source-index/status.ts
 var init_status = __esm(() => {
   init_corpus();
+  init_embedding_cost_estimates();
   init_source_corpus_registry();
   init_answer_ready_coverage();
   init_corpora();
@@ -14705,7 +14710,9 @@ async function sourceIndexStatusCheck(deps) {
     const embeddingLag = Math.max(chunks - embedded, 0);
     if (chunks > 0 || embedded > 0) {
       const items = typeof counts.indexed_items === "number" ? `, ${asCount(counts.indexed_items)} items indexed` : "";
-      summaries.push((embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`) + items);
+      const backlog = asRecord15(embeddingParity.backlog_estimate);
+      const backlogEstimate = embeddingRequired && typeof backlog.estimated_cost_usd === "number" && asCount(backlog.missing_chunks) > 0 ? `, ${asCount(backlog.missing_chunks)} chunks waiting ≈ ${asCount(backlog.estimated_tokens)} tokens ≈ $${Number(backlog.estimated_cost_usd).toFixed(2)} (estimate${backlog.price_source === "default_unverified" ? ", unverified list price" : ""})` : "";
+      summaries.push((embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})${backlogEstimate}` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`) + items);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
       const approvedLag = Math.min(embeddingLag, migration?.destinations.get(corpusId) ?? 0);
@@ -15029,6 +15036,12 @@ async function sourceSchedulerStatusCheck(deps) {
     if (source.stale_sync_anomaly === true)
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
+    if (tasks.some((taskEntry) => asRecord15(taskEntry).degraded_reason === "embedding_provider_unavailable")) {
+      problems.push(`${sourceId} embedding is deferred: the embedding provider is not answering, so new chunks wait and the sweep retries with backoff`);
+    }
+    if (tasks.some((taskEntry) => asRecord15(taskEntry).degraded_reason === "embedding_items_failed")) {
+      problems.push(`${sourceId} has items whose embedding failed; they are skipped (keyword search still finds them) and the rest keep embedding`);
+    }
     for (const taskEntry of tasks) {
       const task = asRecord15(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";

@@ -1,4 +1,5 @@
 import { buildSourceIndexCorpusRegistry, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
+import { embeddingModelEstimate, estimatedEmbeddingCostUsd } from '../../core/embedding-cost-estimates.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import {
   ITEMS_WITH_TEXT_COUNT_KEY,
@@ -152,6 +153,18 @@ export interface SourceIndexCorpusStatusBase {
     embedded_chunks: number;
     missing_chunks: number;
     refresh_needed: boolean;
+    /**
+     * For a store served hybrid: an ESTIMATE of embedding what is still
+     * missing on the serving model (characters / 4 tokens, priced from the
+     * install's estimates or the unverified defaults). Never a billing fact.
+     */
+    backlog_estimate?: {
+      model_id: string;
+      missing_chunks: number;
+      estimated_tokens: number;
+      estimated_cost_usd: number;
+      price_source: 'config' | 'default_unverified';
+    };
   };
   content_extraction_throughput?: ContentExtractionThroughputSignal;
 }
@@ -325,7 +338,10 @@ export function createSourceIndexStatusHandler(
             secretLocationCount(store),
           )
           : configuredCorpusStatus(corpus);
-        const resolved = withRetrievalEnforcementStatus(corpus, status, availability);
+        const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
+        const resolved = store && availability?.modelId
+          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId)
+          : enforced;
         if (maxAgeMs > 0) cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
       });
@@ -594,6 +610,35 @@ function withRetrievalEnforcementStatus<T extends SourceIndexStatusCorpus>(
       embedded_chunks: embeddedChunks,
       missing_chunks: Math.max(0, chunks - embeddedChunks),
       refresh_needed: embeddingRequired && embeddedChunks < chunks,
+    },
+  };
+}
+
+/**
+ * Count and price the embedding backlog of a store answers are served from
+ * with embeddings. Only such a store owes one: a keyword-only store's missing
+ * vectors keep nothing from an answer, and pricing them would read as a bill.
+ */
+function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
+  status: T,
+  store: LocalConnectorStore,
+  modelId: string,
+): T {
+  const parity = status.embedding_parity;
+  if (!parity?.required) return status;
+  const backlog = store.embeddingBacklogEstimate(modelId);
+  const { source } = embeddingModelEstimate(modelId);
+  return {
+    ...status,
+    embedding_parity: {
+      ...parity,
+      backlog_estimate: {
+        model_id: modelId,
+        missing_chunks: backlog.missingChunks,
+        estimated_tokens: backlog.estimatedTokens,
+        estimated_cost_usd: estimatedEmbeddingCostUsd(backlog.estimatedTokens, modelId),
+        price_source: source,
+      },
     },
   };
 }

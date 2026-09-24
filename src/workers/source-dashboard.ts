@@ -352,6 +352,16 @@ export interface DashboardEmbeddingBacklog {
   embedded_chunks: number;
   missing_chunks: number;
   refresh_needed: boolean;
+  /**
+   * An ESTIMATE of embedding what is still missing, summed over the card's
+   * hybrid-served stores. Absent when no store published one.
+   */
+  estimate?: {
+    estimated_tokens: number;
+    estimated_cost_usd: number;
+    /** 'default_unverified' when any store priced from the built-in list prices. */
+    price_source: 'config' | 'default_unverified';
+  };
 }
 
 /**
@@ -2597,11 +2607,23 @@ function embeddingBacklogFromCorpora(
   // Zero chunks is not a backlog of zero, it is nothing to embed yet, and a
   // page dividing by it would render a wedge with no meaning.
   if (chunks <= 0) return undefined;
+  const estimates = parities
+    .map((parity) => parity.backlog_estimate)
+    .filter((estimate): estimate is NonNullable<typeof estimate> => estimate !== undefined);
   return {
     chunks,
     embedded_chunks: parities.reduce((sum, parity) => sum + parity.embedded_chunks, 0),
     missing_chunks: parities.reduce((sum, parity) => sum + parity.missing_chunks, 0),
     refresh_needed: parities.some((parity) => parity.refresh_needed),
+    ...(estimates.length > 0
+      ? {
+          estimate: {
+            estimated_tokens: estimates.reduce((sum, estimate) => sum + estimate.estimated_tokens, 0),
+            estimated_cost_usd: Math.round(estimates.reduce((sum, estimate) => sum + estimate.estimated_cost_usd, 0) * 100) / 100,
+            price_source: estimates.every((estimate) => estimate.price_source === 'config') ? 'config' as const : 'default_unverified' as const,
+          },
+        }
+      : {}),
   };
 }
 

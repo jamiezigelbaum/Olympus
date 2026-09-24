@@ -117,8 +117,9 @@ describe('append and read', () => {
 
   test('returns entries newest first', async () => {
     const path = tempLedgerPath();
-    await appendEmbeddingLedgerEntry(path, entry({ entry_id: 'old', recorded_at: '2026-08-25T00:00:00.000Z' }));
-    await appendEmbeddingLedgerEntry(path, entry({ entry_id: 'new', recorded_at: '2026-08-26T00:00:00.000Z' }));
+    // After every committed backfill entry, so the two appended ones lead.
+    await appendEmbeddingLedgerEntry(path, entry({ entry_id: 'old', recorded_at: '2026-10-25T00:00:00.000Z' }));
+    await appendEmbeddingLedgerEntry(path, entry({ entry_id: 'new', recorded_at: '2026-10-26T00:00:00.000Z' }));
 
     const ledger = await readEmbeddingLedger(path);
 
@@ -232,22 +233,34 @@ describe('backfill', () => {
     expect(reEmbed?.status).toBe('in_progress');
   });
 
-  test('only owner decisions are approved, and the newest is the 2026-08-24 lane enablement', async () => {
+  test('only owner decisions are approved, and the newest is the 2026-09-24 Readwise hybrid decision', async () => {
     const ledger = await readEmbeddingLedger(tempLedgerPath());
     const approved = ledger.entries.filter((found) => found.approved_by === 'jamie');
 
-    expect(ledger.entries[0]?.entry_id).toBe('backfill-2026-08-24-drain-lane-enablement');
+    expect(ledger.entries[0]?.entry_id).toBe('decision-2026-09-24-readwise-hybrid');
     expect(ledger.entries[0]?.approved_by).toBe('jamie');
-    // The two owner decisions of 2026-08-24, newest first: keep the model, then
-    // switch on the three lanes that run on it. Nothing else claims approval,
-    // which is the rule the ledger exists to keep — an approval is never
-    // inferred from a machine having done something.
+    // The owner decisions, newest first: Readwise answers hybrid on its
+    // existing vectors (2026-09-24); then 2026-08-24's keep-the-model and the
+    // three lanes that run on it. Nothing else claims approval, which is the
+    // rule the ledger exists to keep — an approval is never inferred from a
+    // machine having done something.
     expect(approved.map((found) => found.entry_id)).toEqual([
+      'decision-2026-09-24-readwise-hybrid',
       'backfill-2026-08-24-drain-lane-enablement',
       'backfill-2026-08-24-model-decision',
     ]);
-    expect(approved[1]?.kind).toBe('model_decision');
-    expect(approved[1]?.model_id).toBe(QWEN3);
+    expect(approved[2]?.kind).toBe('model_decision');
+    expect(approved[2]?.model_id).toBe(QWEN3);
+  });
+
+  test('the Readwise hybrid decision quotes the owner and invalidates nothing', async () => {
+    const ledger = await readEmbeddingLedger(tempLedgerPath());
+    const decision = ledger.entries.find((found) => found.entry_id === 'decision-2026-09-24-readwise-hybrid');
+
+    expect(decision?.kind).toBe('model_decision');
+    expect(decision?.what).toContain('Readwise: use existing embeddings for hybrid answers; decouple embedding from sync; keep vectors.');
+    expect(decision?.scope?.corpora).toEqual(['readwise', 'readwise-secure']);
+    expect(decision?.why).toContain('no existing vector is invalidated or re-embedded');
   });
 
   test('the lane enablement names its corpora and invalidates nothing', async () => {

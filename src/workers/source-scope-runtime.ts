@@ -365,6 +365,9 @@ export function scopeBoundEmbeddingProvider(
       authority.assertRefCurrent(ref);
       return provider.embed(inputs, options);
     },
+    assertBindingCurrent() {
+      authority.assertRefCurrent(ref);
+    },
   };
 }
 

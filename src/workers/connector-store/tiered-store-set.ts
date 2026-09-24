@@ -387,23 +387,33 @@ export class TieredStoreSet {
   async sync(
     connector: SourceConnector,
     sync: ConnectorStoreSyncOptions = {},
-    options: { commitCursor?: boolean } = {},
+    options: {
+      commitCursor?: boolean;
+      /**
+       * false: commit items only and queue every leg's listed items for the
+       * store's embedding sweep (embedQueuedChunks). A lane whose embedding
+       * runs on its own schedule sets this so a slow provider can never hold,
+       * or fail, its sync.
+       */
+      embed?: boolean;
+    } = {},
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];
     const ran = new Set<SourceTrustDomain>();
+    const embed = options.embed !== false;
     for (const domain of TIER_DOMAIN_ORDER) {
       const store = this.store(domain);
       if (!store) continue;
-      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }));
+      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }, embed));
       ran.add(domain);
     }
     for (const domain of TIER_DOMAIN_ORDER) {
       if (ran.has(domain) || !run.routedDomains.has(domain)) continue;
       const store = this.store(domain, { create: true })!;
-      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }));
+      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }, embed));
     }
     run.finalize();
     const cursor = legRuns[0]?.sync.cursor;
@@ -509,13 +519,20 @@ export class TieredStoreSet {
     store: LocalConnectorStore,
     connector: SourceConnector,
     sync: ConnectorStoreSyncOptions,
+    embed = true,
   ): Promise<TieredStoreLegRun> {
     const provider = this.legs.get(domain)?.spec.embeddingProvider;
     if (!provider) {
       return { trustDomain: domain, corpusId: store.corpusId, sync: await store.syncFromConnector(connector, sync) };
     }
-    const result = await syncAndEmbedFromConnector({ store, connector, embeddingProvider: provider, sync });
-    return { trustDomain: domain, corpusId: store.corpusId, sync: result.sync, embed: result.embed };
+    // embed=false still hands the leg's listed items to its embedding sweep.
+    const result = await syncAndEmbedFromConnector({ store, connector, embeddingProvider: provider, sync, embed });
+    return {
+      trustDomain: domain,
+      corpusId: store.corpusId,
+      sync: result.sync,
+      ...(embed ? { embed: result.embed } : {}),
+    };
   }
 }
 
@@ -837,6 +854,7 @@ export function mergedTieredLaneRun(
   const embedded = legs.filter((leg) => leg.embed !== undefined);
   if (embedded.length === 0) return { sync };
   const base = lane.embed ?? embedded[0]!.embed!;
+  const deferredEmbed = embedded.find((leg) => leg.embed!.deferredReason !== undefined)?.embed!.deferredReason;
   return {
     sync,
     embed: {
@@ -844,6 +862,7 @@ export function mergedTieredLaneRun(
       chunksSeen: embedded.reduce((total, leg) => total + leg.embed!.chunksSeen, 0),
       chunksEmbedded: embedded.reduce((total, leg) => total + leg.embed!.chunksEmbedded, 0),
       chunksSkipped: embedded.reduce((total, leg) => total + leg.embed!.chunksSkipped, 0),
+      ...(deferredEmbed ? { deferredReason: deferredEmbed } : {}),
     },
   };
 }

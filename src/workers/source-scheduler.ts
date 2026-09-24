@@ -12,7 +12,13 @@ import {
 } from './dropbox-files/index.ts';
 import type { DropboxProviderStoreSyncHandler } from './dropbox-files/provider-store-sync.ts';
 import type { FileExtractionRunner } from './file-extraction/runner.ts';
-import type { LocalConnectorStore } from './connector-store/index.ts';
+import {
+  EMBEDDING_ITEMS_FAILED_REASON,
+  EMBEDDING_PROVIDER_UNAVAILABLE_REASON,
+  embedPendingChunks,
+  type ConnectorStoreEmbeddingTarget,
+  type LocalConnectorStore,
+} from './connector-store/index.ts';
 import {
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -243,6 +249,11 @@ export interface SourceSchedulerSource {
   freshnessThresholdHours: number;
   tasks: SourceSchedulerTask[];
   lastSyncCompletedAt?(): string | undefined;
+  /**
+   * Set by withEmbeddingSweep: the degraded reason a successful sync task
+   * carries while one of this source's stores has embedding deferred.
+   */
+  embeddingDeferredReason?(): string | undefined;
 }
 
 export interface SourceWatchSchedulerPass {
@@ -673,7 +684,10 @@ export class SourceScheduler {
       const degradedReason = retryAt?.degradedReason
         ?? (zeroChangeRuns !== undefined && zeroChangeRuns >= this.zeroChangeDegradeRuns
           ? LANE_NOT_ADVANCING_DEGRADED_REASON
-          : undefined);
+          : undefined)
+        // A sync that committed and then could not embed succeeded, and says
+        // why it is not whole: the store's embedding is deferred.
+        ?? (runningTask.kind === 'sync' ? state.source.embeddingDeferredReason?.() : undefined);
       const configuredIntervalMs = taskIntervalMs(state.source, state.task);
       const effectiveIntervalMs = retryAt?.effectiveIntervalMs ?? configuredIntervalMs;
       const nextRunAt = retryAt?.at
@@ -1130,7 +1144,10 @@ export function createCanonicalDropboxSchedulerSource(input: {
       kind: 'embed',
       writer: true,
       run: async () => {
-        const result = await input.store!.embedChunks({ provider: input.embeddingProvider! });
+        const result = await input.store!.embedChunks({
+          provider: input.embeddingProvider!,
+          limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS,
+        });
         return progressFromCounts({
           chunks_seen: result.chunksSeen,
           chunks_embedded: result.chunksEmbedded,
@@ -1152,7 +1169,7 @@ export function createCanonicalDropboxSchedulerSource(input: {
         if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(tier.provider)) {
           throw new Error('A secure_local tier store requires a local/private or approved Venice embedding provider.');
         }
-        const result = await store.embedChunks({ provider: tier.provider });
+        const result = await store.embedChunks({ provider: tier.provider, limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS });
         return progressFromCounts({
           chunks_seen: result.chunksSeen,
           chunks_embedded: result.chunksEmbedded,
@@ -1243,6 +1260,149 @@ export function createReadwiseSchedulerSource(input: {
     lastSyncCompletedAt: () => input.liveSync?.lastStoreRunCompletedAt(),
   };
 }
+
+/** How often a source's embedding sweep looks for queued items, while the provider answers. */
+export const EMBEDDING_SWEEP_INTERVAL_MS = 60_000;
+/** The longest a sweep backs off while its provider does not answer. */
+export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60_000;
+/** Items per store per sweep pass. */
+export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
+const EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
+
+/**
+ * Owner decision for the chat lanes' store-wide sweep (X, WhatsApp, Telegram):
+ * whether their sweep also embeds chunks no sync queued, which starts
+ * embedding an existing backlog on the lane's approved identity. Pending the
+ * owner's answer (asked 2026-09-24), off: those lanes sweep their queue only.
+ * Flip this one line to switch every chat lane at once.
+ */
+export const CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = false;
+
+/**
+ * Per source: may its embedding sweep embed store-wide (every hybrid-served
+ * chunk still missing a vector), not only what its syncs queued? Readwise: yes,
+ * owner decision 2026-09-24 (embedding ledger decision-2026-09-24-readwise-hybrid).
+ * Scoped file and mail lanes (Gmail, Drive, Dropbox) are absent: they stay
+ * queue-only under their scope binding, and Dropbox keeps its own embed tasks.
+ */
+export const WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE: Readonly<Record<string, boolean>> = {
+  [SCHEDULER_SOURCE_IDS.readwise]: true,
+  [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
+  [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
+  [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
+};
+
+/** Whether a source's sweep may run store-wide; see WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE. */
+export function wholeStoreEmbeddingSweepAllowed(sourceId: string): boolean {
+  return WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId] === true;
+}
+
+/**
+ * Give every source that embeds one embedding sweep, built here once for all
+ * of them rather than per source.
+ *
+ * `targetsFor(source)` names the stores the source embeds into, with the
+ * identity each embeds with (tier legs included), resolved on every pass so a
+ * store opened later is swept too. It returns undefined for a source that
+ * embeds nothing. A source that already declares its own embed task (Dropbox)
+ * keeps it and gets no sweep.
+ *
+ * Each pass (embedPendingChunks) embeds the items syncs queued, each under
+ * the provider and scope binding it was queued with, and for a target marked
+ * `wholeStore` (see WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE) any other chunk
+ * still missing a vector, bounded per pass. Its task:
+ *   - reports progress only when it embedded a chunk;
+ *   - while a provider does not answer, succeeds with degraded reason
+ *     EMBEDDING_PROVIDER_UNAVAILABLE_REASON and doubles its interval up to
+ *     EMBEDDING_SWEEP_MAX_BACKOFF_MS; the first pass that answers resets both;
+ *   - while any item was skipped because its embedding failed, succeeds with
+ *     degraded reason EMBEDDING_ITEMS_FAILED_REASON and counts them;
+ *   - and the source's sync tasks carry the same degraded reason while any of
+ *     its stores is deferred, so a sync that committed and then could not
+ *     embed says so instead of reading healthy.
+ *
+ * A source exists only while its credential is connected, so a disconnected
+ * source has no sweep; its queued items wait for the reconnect's first pass.
+ */
+export function withEmbeddingSweep(
+  sources: readonly SourceSchedulerSource[],
+  targetsFor: (source: SourceSchedulerSource) => (() => readonly ConnectorStoreEmbeddingTarget[]) | undefined,
+): SourceSchedulerSource[] {
+  return sources.map((source) => {
+    if (source.tasks.some((task) => task.kind === 'embed')) return source;
+    const targets = targetsFor(source);
+    if (!targets) return source;
+    return {
+      ...source,
+      tasks: [...source.tasks, embeddingSweepTask(source, targets)],
+      embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
+        ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
+        : undefined,
+    };
+  });
+}
+
+function embeddingSweepTask(
+  source: SourceSchedulerSource,
+  targets: () => readonly ConnectorStoreEmbeddingTarget[],
+): SourceSchedulerTask {
+  return {
+    id: `${source.sourceId}_embeddings`,
+    kind: 'embed',
+    writer: true,
+    intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
+    freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
+    run: async (context?: SourceSchedulerTaskRunContext) => {
+      const passTargets = targets();
+      const runs = await embedPendingChunks(passTargets, { maxItems: EMBEDDING_SWEEP_MAX_ITEMS });
+      const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
+      const counts = {
+        chunks_embedded: runs.reduce((sum, run) => sum + run.chunksEmbedded, 0),
+        items_queued: passTargets.reduce((sum, target) => sum + target.store.queuedEmbeddingItemIds().length, 0),
+        items_failed: passTargets.reduce((sum, target) => sum + target.store.embeddingFailedItemCount(), 0),
+        items_out_of_scope: runs.reduce((sum, run) => sum + run.itemsOutOfScope, 0),
+        stores_deferred: deferred,
+        stores_busy: runs.filter((run) => run.busy === true).length,
+      };
+      const status: SourceSchedulerTaskRunResult['status'] = counts.chunks_embedded > 0 ? 'progress' : 'idle';
+      const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();
+      if (deferred === 0) {
+        if (counts.items_failed === 0) return { status, counts };
+        // Skipped items are surfaced, not retried: the sweep keeps its cadence.
+        return {
+          status,
+          counts,
+          retryAt: {
+            at: new Date(attemptedAt + EMBEDDING_SWEEP_INTERVAL_MS).toISOString(),
+            degradedReason: EMBEDDING_ITEMS_FAILED_REASON,
+          },
+        };
+      }
+      const previousMs = context?.effectiveIntervalMs ?? EMBEDDING_SWEEP_INTERVAL_MS;
+      const backoffMs = Math.min(
+        Math.max(previousMs, EMBEDDING_SWEEP_INTERVAL_MS) * 2,
+        EMBEDDING_SWEEP_MAX_BACKOFF_MS,
+      );
+      return {
+        status,
+        counts,
+        retryAt: {
+          at: new Date(attemptedAt + backoffMs).toISOString(),
+          effectiveIntervalMs: backoffMs,
+          degradedReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON,
+        },
+      };
+    },
+  };
+}
+
+/**
+ * Chunks a Dropbox embed task embeds per pass. Unbounded, one pass over a large
+ * backlog held the store's embedding lease (and its source's scheduler group)
+ * for as long as the whole backlog took; bounded, the task returns and the
+ * next pass continues.
+ */
+export const DROPBOX_EMBED_MAX_CHUNKS_PER_PASS = 512;
 
 export function createWhatsAppSchedulerSource(input: {
   config: OlympusConfig;

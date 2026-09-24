@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import {
   assertEmbeddingProviderForLane,
   DirectSourceEmbeddingDrainClient,
+  isEmbeddingLaneBusyError,
   optionsFromEnv,
   publishNativeEmbeddingDrainReadiness,
   runSourceEmbeddingDrain,
@@ -13,6 +14,7 @@ import {
   type SourceEmbeddingDrainClient,
 } from '../scripts/source-embedding-drain.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
+import { FileLeaseBusyError } from '../src/core/file-lease.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
@@ -100,6 +102,38 @@ describe('canonical connector-store embedding drain', () => {
     expect(report.scopes[0]?.errors).toHaveLength(1);
     expect(report.scopes[0]?.errors[0]).toHaveLength(64);
     expect(JSON.stringify(report)).not.toContain('synthetic connector-store failure');
+  });
+
+  test('a busy store embedding lease is a transient wait, never a lane failure', async () => {
+    const lane = (error: Error) => ({
+      corpusId: 'secure_local.dropbox.files' as const,
+      trustDomain: 'secure_local' as const,
+      targetKeys: ['secure_local.dropbox.files'],
+      cadencePasses: 1,
+      embed: async () => {
+        throw error;
+      },
+    });
+    for (const busy of [
+      new FileLeaseBusyError('/tmp/store.sqlite.embedding'),
+      new Error('Worker 409 embedding_lane_busy: Another embedder is embedding secure_local.dropbox.files; retry shortly.'),
+    ]) {
+      const report = await runSourceEmbeddingDrain({
+        client: new FakeClient(),
+        lanes: [lane(busy)],
+        maxRuns: 3,
+        maxConsecutiveFailures: 1,
+        maxRuntimeSeconds: 30,
+        idleSleepMs: 0,
+        errorBackoffMs: 0,
+        now: new Date('2026-09-24T12:00:00.000Z'),
+      });
+
+      expect(report.consecutive_failures).toBe(0);
+      expect(report.transient_lock_retries).toBe(3);
+    }
+    expect(isEmbeddingLaneBusyError(new Error('synthetic connector-store failure'), 'synthetic connector-store failure'))
+      .toBe(false);
   });
 
   test('builds only connector-store lanes from environment policy', () => {

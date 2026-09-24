@@ -207,15 +207,27 @@ export function createReadwiseConnectorStoreSyncHandler(
   // One traversal feeds every tier store. Existing items keep the lane's
   // placement in its own store; a NEW item is routed by its recorded tiers
   // (raised to Private, or Secrets, by what its text says).
+  //
+  // The traversal commits items and chunks and queues every listed item for
+  // the store's embedding sweep (the scheduler's generic embedding task,
+  // withEmbeddingSweep). It never embeds: a Venice embedding timeout inside
+  // the reconcile once held the lane for thirteen minutes and then failed it
+  // with every item already committed (live, 2026-09-24).
   const runLane = async (
     connector: SourceConnector,
     sync: ConnectorStoreSyncOptions,
     commitCursor = true,
   ): Promise<ReadwiseLaneRun> => {
     if (!tierSet) {
-      return syncAndEmbedFromConnector({ store: options.store, connector, embeddingProvider: options.embeddingProvider, sync });
+      return syncAndEmbedFromConnector({
+        store: options.store,
+        connector,
+        embeddingProvider: options.embeddingProvider,
+        sync,
+        embed: false,
+      });
     }
-    const run = await tierSet.sync(connector, sync, { commitCursor });
+    const run = await tierSet.sync(connector, sync, { commitCursor, embed: false });
     const merged = mergedTieredLaneRun(run, 'internal');
     return {
       sync: merged.sync,

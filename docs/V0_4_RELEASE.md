@@ -21,6 +21,33 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-24 — Readwise answers hybrid on its existing vectors.** Owner
+  decision, recorded in the embedding ledger as
+  `decision-2026-09-24-readwise-hybrid` (committed backfill in
+  `src/workers/embedding-ledger.ts`): "Readwise: use existing embeddings for
+  hybrid answers; decouple embedding from sync; keep vectors." Both Readwise
+  tier stores declare `hybrid_primary`; the Private store embeds only on the
+  approved private (Venice) lane and is answered by the secure route as
+  before. Pull and reconcile commit items without embedding and queue them
+  for the scheduler's embedding sweep, which every source that embeds now
+  has (built once in the scheduler; Dropbox keeps its own embed tasks). A
+  provider timeout during any connector-store sync now queues the unembedded
+  items for that sweep instead of failing the sync; the sync and the sweep
+  report `embedding_provider_unavailable` while it lasts (Background page,
+  source page, doctor), and the sweep backs off up to 30 minutes. Every
+  embedder on a store holds one cross-process per-store lease, so the sweep
+  and the external drain never embed the same chunks twice. Queued items
+  embed under the scope binding their sync used, so a narrowed Gmail or Drive
+  scope drops them unembedded. Readwise also sweeps store-wide (any hybrid
+  chunk still missing a vector, bounded per pass), which survives a restart
+  and clears the existing Private backlog; whether the chat lanes (X,
+  WhatsApp, Telegram) do too is a pending owner decision, off until then
+  (`CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP`). An item whose embedding keeps
+  failing is skipped and surfaced (`embedding_items_failed`), and the
+  hybrid backlog is counted and priced as an estimate in doctor and on the
+  source page. No model, endpoint or epoch changes; no existing vector is
+  invalidated or re-embedded.
+
 - **2026-09-23 — One public beta, no structured beta testing.** The owner
   ends structured beta testing. The latest Olympus is published as a single
   GitHub prerelease (`v0.4.0-beta.3`, from main `83093b76`) and is the only
