@@ -60,7 +60,12 @@ export async function startMockAcme(options: {
       json(status, { type: `urn:ietf:params:acme:error:${type}`, detail });
 
     if (req.method === 'GET' && req.url === '/directory') {
-      return json(200, { newNonce: `${base}/new-nonce`, newAccount: `${base}/new-account`, newOrder: `${base}/new-order` });
+      return json(200, {
+        newNonce: `${base}/new-nonce`,
+        newAccount: `${base}/new-account`,
+        newOrder: `${base}/new-order`,
+        meta: { termsOfService: `${base}/terms/v1.pdf` },
+      });
     }
     if (req.url === '/new-nonce') {
       res.writeHead(200);

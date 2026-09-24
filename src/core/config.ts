@@ -167,6 +167,17 @@ export interface OlympusConfig {
     baseUrl: string;
     requestTimeoutSeconds: number;
   };
+  /**
+   * Remote access for hosted agents (plugin config only; opt-in). Parsed
+   * verbatim here; `resolveRemoteAccessMode` (core/remote-access.ts) decides
+   * relay, manual or off and names any conflict, so a remote-access mistake
+   * disables remote access rather than the whole plugin.
+   */
+  remote?: {
+    enabled: boolean;
+    relayHost?: string;
+    publicBaseUrl?: string;
+  };
   sourceIndex: {
     enabled: boolean;
     corpusRegistry: SourceCorpusRegistryConfig;
@@ -514,6 +525,15 @@ export function configFromPluginConfig(
   const argus = asRecord(root?.argus);
   const email = asRecord(root?.email);
   const sourceIndex = asRecord(root?.sourceIndex);
+  const remote = asRecord(root?.remote);
+
+  if (remote) {
+    config.remote = { enabled: remote.enabled === true };
+    for (const key of ['relayHost', 'publicBaseUrl'] as const) {
+      const value = remote[key];
+      if (typeof value === 'string' && value.trim()) config.remote[key] = value.trim();
+    }
+  }
 
   if (sovereignty) {
     config.sovereignty = {};

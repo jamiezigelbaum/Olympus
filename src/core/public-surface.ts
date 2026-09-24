@@ -72,6 +72,7 @@ export const V0_4_PUBLIC_PLUGIN_CONFIG_KEYS = [
   'argus',
   'email',
   'sourceIndex',
+  'remote',
 ] as const;
 
 export const V0_4_PUBLIC_CONNECT_SOURCES = [
@@ -126,6 +127,8 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'connections pair',
   'connections list',
   'connections revoke',
+  'connections status',
+  'connections terms',
   'dashboard',
   'source answer',
   'source index status',
@@ -158,6 +161,7 @@ export const V0_4_PUBLIC_CLI_GLOBALS = [
 export const V0_4_PACKAGE_INTERNAL_CLI_HELPERS = [
   '__oauth-detached-child',
   '__worker-service-run',
+  '__relay-service-run',
 ] as const;
 
 export interface PublicDashboardRoute {

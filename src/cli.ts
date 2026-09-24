@@ -111,7 +111,16 @@ import {
   resolveRemoteConnectionsDbPathForCli,
   type RemoteConnectionRecord,
 } from './core/remote-connections.ts';
-import { REMOTE_PUBLIC_BASE_URL_ENV, resolveRemotePublicUrls } from './core/remote-public-url.ts';
+import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
+import {
+  readRemoteAccessStatus,
+  readTermsAcceptance,
+  recordTermsAcceptance,
+  remoteAccessDirForCli,
+  remoteAccessStatusView,
+  resolveRemoteAccessUrls,
+  type RemoteAccessUrls,
+} from './core/remote-access.ts';
 
 const PUBLIC_CLI_COMMAND_NAMES = new Set<string>(V0_4_PUBLIC_CLI_COMMANDS);
 const PUBLIC_CLI_HELP_GROUPS = new Set([
@@ -225,6 +234,16 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === '__relay-service-run') {
+    if (args.length !== 2 || !args[1]) {
+      throw new OperationError('invalid_params', 'Native relay service invocation needs exactly one instance id.');
+    }
+    // Loaded only here: the relay client is not part of any other command.
+    const { runRelayRuntimeProcess } = await import('./core/remote-relay-runtime.ts');
+    await runRelayRuntimeProcess(args[1]);
+    process.exit(0);
+  }
+
   if (args[0] === '__oauth-detached-child') {
     const requestPath = args[1];
     if (!requestPath) throw new OperationError('invalid_params', 'Detached OAuth child request path is required.');
@@ -249,7 +268,10 @@ async function main(): Promise<void> {
 
   if (args[0] === 'connections') {
     try {
-      console.log(JSON.stringify(runConnectionsCommand(args.slice(1)), null, 2));
+      const result = args[1] === 'terms'
+        ? await runConnectionsTermsCommand(args.slice(2))
+        : runConnectionsCommand(args.slice(1));
+      console.log(JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
         console.error(`Error [${error.code}]: ${error.message}`);
@@ -1088,6 +1110,8 @@ function printHelp(): void {
   console.log('  olympus connections pair');
   console.log('  olympus connections list');
   console.log('  olympus connections revoke <id>');
+  console.log('  olympus connections status');
+  console.log('  olympus connections terms [--accept]');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
@@ -1123,6 +1147,8 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connections pair': 'olympus connections pair',
   'connections list': 'olympus connections list',
   'connections revoke': 'olympus connections revoke <id>',
+  'connections status': 'olympus connections status',
+  'connections terms': 'olympus connections terms [--accept]',
   dashboard: 'olympus dashboard [--read-only] [--no-open]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
@@ -1199,6 +1225,8 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus connections pair            Print a one-time code to approve Claude, ChatGPT or Grok',
     '  olympus connections list',
     '  olympus connections revoke <id>',
+    '  olympus connections status          Remote access: relay, public URLs, certificate expiry',
+    '  olympus connections terms [--accept]  Show (or accept) the Let\'s Encrypt subscriber agreement',
   ],
   data: [
     'Usage: olympus data <command>',
@@ -2439,12 +2467,19 @@ function resolveWorkerAuthToken(
 /**
  * Remote agent connections (`/mcp` on the worker). `add` prints the token
  * exactly once: the store keeps only its digest, so it cannot be shown again.
+ * Every URL printed comes from the resolved public base URL (worker.env's
+ * manual value, else what the relay service reports), and falls back to the
+ * worker's real loopback address only when there is none.
  */
 export function runConnectionsCommand(
   args: readonly string[],
   env: Record<string, string | undefined> = process.env,
 ): Record<string, unknown> {
   const [command, ...rest] = args;
+  if (command === 'status') {
+    if (rest.length !== 0) throw new OperationError('invalid_params', 'Usage: olympus connections status');
+    return runConnectionsStatus(env);
+  }
   // The worker's database, resolved from worker.env on a managed install.
   const store = openRemoteConnectionStore(resolveRemoteConnectionsDbPathForCli(env));
   try {
@@ -2453,11 +2488,11 @@ export function runConnectionsCommand(
         throw new OperationError('invalid_params', 'Usage: olympus connections add <name>');
       }
       const created = store.create(rest[0]!);
+      const urls = remoteAccessUrlsForCli(env);
       return {
         kind: 'remote_connection_created',
         connection: remoteConnectionView(created.connection),
-        url: remoteConnectionUrl(loadConfig(env)),
-        openapi_url: remoteConnectionUrl(loadConfig(env), '/openapi.json'),
+        ...remoteUrlFields(urls),
         db_path: store.dbPath,
         token: created.token,
         notice: 'The token is shown once and is not stored. Paste it into the agent now; revoke with olympus connections revoke <id>.',
@@ -2465,28 +2500,29 @@ export function runConnectionsCommand(
     }
     if (command === 'pair') {
       if (rest.length !== 0) throw new OperationError('invalid_params', 'Usage: olympus connections pair');
-      // The public address the worker serves OAuth on, from worker.env on a
-      // managed install. Minted either way: the code is harmless until then.
-      const publicUrls = resolveRemotePublicUrls(environmentWithWorkerSetupEnv({ env }));
+      // Minted either way: the code is harmless until OAuth is on.
+      const urls = remoteAccessUrlsForCli(env);
       const minted = store.oauth.mintPairingCode();
+      const oauthEnabled = urls.public_base_url !== null;
       return {
         kind: 'remote_pairing_code',
         code: minted.code,
         expires_at: minted.expiresAt,
-        oauth_enabled: publicUrls.enabled,
-        url: publicUrls.enabled ? publicUrls.urls.resource : null,
+        oauth_enabled: oauthEnabled,
+        url: oauthEnabled ? urls.mcp_url : null,
+        openapi_url: oauthEnabled ? urls.openapi_url : null,
+        oauth_issuer: urls.oauth_issuer,
         db_path: store.dbPath,
-        notice: publicUrls.enabled
+        notice: oauthEnabled
           ? 'Type this code on the Olympus approval page that opens when you add the URL as a connector. It works once and expires in 10 minutes.'
-          : `OAuth approval is off until ${REMOTE_PUBLIC_BASE_URL_ENV} gives this install a public https address. Bearer connections (olympus connections add) still work.`,
+          : `OAuth approval is off until this install has a public https address: turn on remote access (plugin config remote.*), or set ${REMOTE_PUBLIC_BASE_URL_ENV}. Bearer connections (olympus connections add) still work.`,
       };
     }
     if (command === 'list') {
       if (rest.length !== 0) throw new OperationError('invalid_params', 'Usage: olympus connections list');
       return {
         kind: 'remote_connections',
-        url: remoteConnectionUrl(loadConfig(env)),
-        openapi_url: remoteConnectionUrl(loadConfig(env), '/openapi.json'),
+        ...remoteUrlFields(remoteAccessUrlsForCli(env)),
         db_path: store.dbPath,
         connections: store.list().map(remoteConnectionView),
       };
@@ -2501,6 +2537,106 @@ export function runConnectionsCommand(
   }
 }
 
+/** The public (or loopback) URLs as seen from the owner's shell. */
+function remoteAccessUrlsForCli(env: Record<string, string | undefined>): RemoteAccessUrls {
+  const layeredEnv = environmentWithWorkerSetupEnv({ env });
+  return resolveRemoteAccessUrls({
+    layeredEnv,
+    env,
+    status: readRemoteAccessStatus(remoteAccessDirForCli(env)),
+    configuredWorkerBaseUrl: loadConfig(layeredEnv).email.baseUrl,
+  });
+}
+
+function remoteUrlFields(urls: RemoteAccessUrls): Record<string, unknown> {
+  return {
+    url: urls.mcp_url,
+    openapi_url: urls.openapi_url,
+    oauth_issuer: urls.oauth_issuer,
+    public_base_url: urls.public_base_url,
+  };
+}
+
+/**
+ * `olympus connections status`: remote access mode, relay session,
+ * certificate expiry and the URLs to hand an agent. The same JSON is what the
+ * dashboard's "Connect an agent" panel consumes.
+ */
+function runConnectionsStatus(env: Record<string, string | undefined>): Record<string, unknown> {
+  const dir = remoteAccessDirForCli(env);
+  const status = readRemoteAccessStatus(dir);
+  const layeredEnv = environmentWithWorkerSetupEnv({ env });
+  const urls = resolveRemoteAccessUrls({
+    layeredEnv,
+    env,
+    status,
+    configuredWorkerBaseUrl: loadConfig(layeredEnv).email.baseUrl,
+  });
+  return { ...remoteAccessStatusView({ dir, urls, status }) };
+}
+
+/**
+ * `olympus connections terms [--accept]`: shows the certificate authority's
+ * subscriber agreement, and records the owner's acceptance of that exact
+ * version. The relay places no certificate order until this is recorded, and a
+ * new agreement from the CA needs a new acceptance.
+ */
+export async function runConnectionsTermsCommand(
+  args: readonly string[],
+  env: Record<string, string | undefined> = process.env,
+  dependencies: { fetchTerms?: () => Promise<string | undefined>; now?: () => Date } = {},
+): Promise<Record<string, unknown>> {
+  const accept = args.length === 1 && args[0] === '--accept';
+  if (args.length > 1 || (args.length === 1 && !accept)) {
+    throw new OperationError('invalid_params', 'Usage: olympus connections terms [--accept]');
+  }
+  const dir = remoteAccessDirForCli(env);
+  const status = readRemoteAccessStatus(dir);
+  let termsUrl = status?.terms_url ?? undefined;
+  if (!termsUrl) {
+    const fetchTerms = dependencies.fetchTerms ?? (async () => {
+      const { fetchTermsOfService } = await import('../connect-relay/client/acme.ts');
+      const { LETS_ENCRYPT_DIRECTORY } = await import('../connect-relay/client/connect.ts');
+      const bounded = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+        fetch(input, { ...init, signal: AbortSignal.timeout(10_000) })) as typeof fetch;
+      return fetchTermsOfService(LETS_ENCRYPT_DIRECTORY, bounded);
+    });
+    try {
+      termsUrl = await fetchTerms();
+    } catch {
+      throw new OperationError(
+        'config_error',
+        'Could not read the Let\'s Encrypt subscriber agreement URL from its directory.',
+        'Check the network and retry; the agreement is published at https://letsencrypt.org/repository/.',
+      );
+    }
+  }
+  if (!termsUrl) {
+    throw new OperationError('config_error', 'The certificate authority did not name a subscriber agreement.');
+  }
+  if (accept) {
+    const acceptance = recordTermsAcceptance(dir, termsUrl, dependencies.now?.() ?? new Date());
+    return {
+      kind: 'remote_access_terms',
+      url: termsUrl,
+      accepted: true,
+      accepted_at: acceptance.accepted_at,
+      notice: 'Accepted. Olympus will now request this install\'s certificate from Let\'s Encrypt through the relay.',
+    };
+  }
+  const acceptance = readTermsAcceptance(dir);
+  const accepted = acceptance?.terms_url === termsUrl;
+  return {
+    kind: 'remote_access_terms',
+    url: termsUrl,
+    accepted,
+    accepted_at: accepted ? acceptance!.accepted_at : null,
+    notice: accepted
+      ? 'Already accepted.'
+      : 'Remote access needs a certificate from Let\'s Encrypt for this install\'s own hostname, which means agreeing to its Subscriber Agreement. Read it at the url above; to accept, run olympus connections terms --accept.',
+  };
+}
+
 function remoteConnectionView(connection: RemoteConnectionRecord): Record<string, unknown> {
   return {
     id: connection.id,
@@ -2512,14 +2648,6 @@ function remoteConnectionView(connection: RemoteConnectionRecord): Record<string
     revoked_at: connection.revokedAt,
     status: connection.revokedAt ? 'revoked' : 'active',
   };
-}
-
-/**
- * The worker's own origin plus `/mcp` (MCP clients) or `/openapi.json`
- * (OpenAPI clients such as Muse): loopback until a relay fronts it.
- */
-function remoteConnectionUrl(config: OlympusConfig, path: '/mcp' | '/openapi.json' = '/mcp'): string {
-  return new URL(path, config.email.baseUrl).toString();
 }
 
 export function runDashboardTokenCommand(env: Record<string, string | undefined> = process.env): string {
