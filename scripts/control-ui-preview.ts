@@ -20,6 +20,9 @@ import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from './dashboard-pr
 
 const PORT = Number(process.env.CONTROL_UI_PREVIEW_PORT ?? 8931);
 const ROOT = join(import.meta.dir, '..');
+// The preview view behind the native Setup page; any dashboard-preview state
+// (for example models, models-applying, first-install).
+const SETUP_STATE = process.env.CONTROL_UI_PREVIEW_SETUP_STATE ?? 'partial';
 
 export function buildDispositionsPreviewView(): SourceDispositionsView {
   const counts = {
@@ -134,7 +137,7 @@ function readResult(params: OlympusDashboardReadParams, canWrite: boolean) {
   }
   return renderDashboardControlUi({
     params,
-    view: buildDashboardPreviewView(params.view === 'setup' ? 'partial' : 'full'),
+    view: buildDashboardPreviewView(params.view === 'setup' ? SETUP_STATE : 'full'),
     canWrite,
     options: {
       now: DASHBOARD_PREVIEW_NOW,

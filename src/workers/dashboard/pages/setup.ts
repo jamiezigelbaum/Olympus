@@ -1,5 +1,5 @@
-import { MODEL_SETUP_CSS, renderModelSetup } from '../model-setup.ts';
-import { SETUP_JOURNEY_CSS } from '../static-styles.ts';
+import { renderModelSetup } from '../model-setup.ts';
+import { MODEL_SETUP_CSS, SETUP_JOURNEY_CSS } from '../static-styles.ts';
 export { SETUP_JOURNEY_CSS };
 /**
  * First run: what is connecting, what is available to connect, and the way to
