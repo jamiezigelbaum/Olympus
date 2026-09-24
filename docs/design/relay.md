@@ -70,9 +70,16 @@ install ──TLS(SNI=relay.zone)─┘  control session: hello/register, open, 
   - Before the ClientHello, the relay caps connections per address and
     overall, and parses only once a whole TLS record has arrived, so a
     byte-by-byte trickle costs one parse per record.
-  - One address can hold at most 6 of an install's 32 slots, and the install
-    closes any connection that has not finished TLS and sent a request within
-    10 seconds, so stalled handshakes cannot exhaust an install.
+  - One address can hold at most 16 of an install's 64 slots. The install
+    endpoint speaks HTTP/1.1, so an agent needs one connection per in-flight
+    request plus one SSE stream per MCP session; the limits leave room for
+    that behind a single vendor egress address.
+  - The install closes any connection that has not finished TLS and sent a
+    request within 10 seconds, and any connection with no request in flight
+    for 30 seconds. The idle rule is the client's own, because Bun's HTTP
+    server does not close idle keep-alive connections. A response still
+    streaming counts as in flight, so SSE streams are not cut. A slot is freed
+    as soon as either half of the spliced pair closes.
   - When one side of a spliced connection closes, the other is ended, not
     destroyed, so bytes still queued for a slow reader are delivered.
   - Per-address limits key IPv6 by /64. When an AAAA record is published the
@@ -91,7 +98,10 @@ install ──TLS(SNI=relay.zone)─┘  control session: hello/register, open, 
     that never starts certificate issuance expires after 24 hours once it is
     offline; one with no session for 90 days expires. Its address record stays
     counted until the DNS removal (within the DNS budget) succeeds, and failed
-    removals are retried on the next sweep. The store is an
+    removals are retried on the next sweep. If the install re-registers while
+    the removal is in flight, the relay re-creates the record (or marks it
+    missing so the next publish does), so the registry never claims a record
+    DNS does not have. The store is an
     append-only JSON-lines log, compacted on start, so no request rewrites the
     whole file.
 - **Local TLS endpoint.** It forwards only the remote agent surface: `/mcp`,
@@ -202,8 +212,9 @@ cannot name another record.
 |---|---|
 | ClientHello deadline / size | 5 s / 16 KiB + record headers |
 | Attach deadline after `open` | 10 s |
-| Concurrent public connections per install / per install from one address (IPv6 /64) | 32 / 6 |
+| Concurrent public connections per install / per install from one address (IPv6 /64) | 64 / 16 |
 | Install side: TLS handshake and first request deadline per connection | 10 s |
+| Install side: idle connection (no request in flight) | 30 s |
 | New public connections per install | burst 30, 5/s |
 | Control-host connections (session setup) per address | burst 30, 1 per 2 s |
 | Data-host connections per address (concurrent) / handshakes per address | 512 / burst 200, 50/s |

@@ -84,7 +84,7 @@ async function makeRelay(
 async function connectInstall(
   relay: RelayHandle,
   stateDir = newStateDir(),
-  extra: { maxDataConnections?: number; firstRequestTimeoutMs?: number } = {},
+  extra: { maxDataConnections?: number; firstRequestTimeoutMs?: number; idleTimeoutMs?: number } = {},
 ) {
   const handle = await startConnect({
     ...extra,
@@ -120,6 +120,10 @@ beforeAll(async () => {
     req.on('data', (chunk) => chunks.push(chunk));
     req.on('end', () => {
       workerRequests.push({ url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('utf8') });
+      if (req.url === '/mcp/slow') {
+        setTimeout(() => res.end('slow answer'), 1_000);
+        return;
+      }
       if (req.url === '/mcp/big') {
         res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(BIG.length) });
         res.end(BIG);
@@ -394,9 +398,11 @@ async function registerRaw(relay: RelayHandle) {
 class CountingDns extends MemoryDnsProvider {
   calls = 0;
   failRemovals = false;
+  duringRemove?: () => void;
   override async removeAddress(hostname: string) {
     this.calls += 1;
     if (this.failRemovals) throw new Error('provider unavailable');
+    this.duringRemove?.();
     return super.removeAddress(hostname);
   }
   override async ensureAddress(hostname: string) {
@@ -507,6 +513,23 @@ describe('abuse resistance', () => {
     expect(await relay.sweep(Date.now() + 91 * day)).toEqual([]);
     expect(counting.addresses.has(hostname)).toBe(false);
     expect(registry.addressRecordCount()).toBe(0);
+    expect(registry.pendingAddressRemovals()).toEqual([]);
+  });
+
+  test('an install that reclaims its record while the removal is in flight gets the record back', async () => {
+    const counting = new CountingDns();
+    const { relay, registry } = await makeRelay({}, undefined, { dns: counting });
+    const active = await registerRaw(relay);
+    active.control.send({ type: 'acme-dns-set', id: 'a', value: 'J'.repeat(43) });
+    expect(await active.control.next()).toMatchObject({ ok: true });
+    active.control.destroy();
+    await until(() => relay.onlineInstalls().length === 0);
+    const hostname = `${active.identity.installId}.${ZONE}`;
+    counting.duringRemove = () => registry.register(active.identity.installId, active.identity.publicKeySpki);
+    expect(await relay.sweep(Date.now() + 91 * 24 * 60 * 60_000)).toEqual([active.identity.installId]);
+    expect(registry.get(active.identity.installId)?.hasAddressRecord).toBe(true);
+    expect(counting.addresses.has(hostname)).toBe(true);
+    expect(registry.addressRecordCount()).toBe(1);
     expect(registry.pendingAddressRemovals()).toEqual([]);
   });
 
@@ -677,5 +700,25 @@ describe('flow control and client limits', () => {
     await until(() => handle.client.activeDataConnections === 0);
     const response = await agentRequest({ port: relay.port, servername: hostname, ca: ca.cert, path: '/mcp' });
     expect(response.status).toBe(200);
+  });
+
+  test('an idle keep-alive connection is closed (portable across Node and Bun), but a slow in-flight response is not', async () => {
+    const { relay } = await makeRelay();
+    const { handle, hostname } = await connectInstall(relay, newStateDir(), { idleTimeoutMs: 400 });
+    const started = Date.now();
+    const closedAfter = await new Promise<number>((resolve, reject) => {
+      const socket = tls.connect({ host: '127.0.0.1', port: relay.port, servername: hostname, ca: ca.cert }, () => {
+        socket.write(`GET /mcp HTTP/1.1\r\nHost: ${hostname}\r\nConnection: keep-alive\r\n\r\n`);
+      });
+      socket.on('data', () => {});
+      socket.on('error', reject);
+      socket.on('close', () => resolve(Date.now() - started));
+    });
+    expect(closedAfter).toBeGreaterThanOrEqual(400);
+    expect(closedAfter).toBeLessThan(3_000);
+    await until(() => handle.client.activeDataConnections === 0);
+    const slow = await agentRequest({ port: relay.port, servername: hostname, ca: ca.cert, path: '/mcp/slow' });
+    expect(slow.status).toBe(200);
+    expect(slow.body).toBe('slow answer');
   });
 });
