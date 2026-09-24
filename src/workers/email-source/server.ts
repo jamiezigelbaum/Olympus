@@ -3893,6 +3893,22 @@ export async function main(): Promise<void> {
     withRemoteMcpRoute,
   } = await import('../remote-mcp.ts');
   const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
+  // `/openapi.json` and `/api/v1/tools/<name>`: the same remote surface as
+  // `/mcp`, as REST for agents that take an OpenAPI spec (Muse).
+  const { createRemoteOpenApiHandler, withRemoteOpenApiRoutes } = await import('../remote-openapi.ts');
+  const remoteOpenApi = createRemoteOpenApiHandler({
+    connections: lazyRemoteConnectionStore(
+      () => resolveRemoteConnectionsDbPath(process.env),
+      openRemoteConnectionStore,
+    ),
+    makeOperationContext: (caller, signal) => createInProcessOperationContext({
+      config: olympusConfig,
+      sourceIndexReadEnabled,
+      workerFetch: worker.fetch,
+      caller,
+      signal,
+    }),
+  });
 
   const server = Bun.serve({
     hostname,
@@ -3900,7 +3916,7 @@ export async function main(): Promise<void> {
     idleTimeout: 0,
     // `/mcp` is the remote agent endpoint and authenticates connection tokens
     // only; every other route keeps the worker bearer. See workers/remote-mcp.ts.
-    fetch: withRemoteMcpRoute(
+    fetch: withRemoteOpenApiRoutes(remoteOpenApi, withRemoteMcpRoute(
       createRemoteMcpHandler({
         connections: lazyRemoteConnectionStore(
           () => resolveRemoteConnectionsDbPath(process.env),
@@ -3915,7 +3931,7 @@ export async function main(): Promise<void> {
         }),
       }),
       withWorkerBearerAuth(worker.fetch, { authToken }),
-    ),
+    )),
   });
   sourceScheduler?.start();
   await reconcileCaptures();

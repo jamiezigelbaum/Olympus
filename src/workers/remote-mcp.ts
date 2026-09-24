@@ -164,13 +164,13 @@ export function createInProcessOperationContext(input: {
   };
 }
 
-function bearerToken(header: string | null): string | undefined {
+export function bearerToken(header: string | null): string | undefined {
   if (!header) return undefined;
   const match = /^Bearer ([^\s]+)$/i.exec(header.trim());
   return match?.[1];
 }
 
-function unauthorized(error?: 'invalid_token'): Response {
+export function unauthorized(error?: 'invalid_token'): Response {
   // Shaped for the OAuth slice: RFC 6750 challenge now, a resource_metadata
   // parameter (RFC 9728) once protected-resource metadata is served.
   const challenge = error
@@ -179,7 +179,7 @@ function unauthorized(error?: 'invalid_token'): Response {
   return jsonResponse(401, { error: error ?? 'unauthorized' }, { 'WWW-Authenticate': challenge });
 }
 
-function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+export function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers },

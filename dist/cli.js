@@ -90089,11 +90089,14 @@ var init_webStandardStreamableHttp = __esm(() => {
 var exports_remote_mcp = {};
 __export(exports_remote_mcp, {
   withRemoteMcpRoute: () => withRemoteMcpRoute,
+  unauthorized: () => unauthorized,
   remoteOperationCaller: () => remoteOperationCaller,
   lazyRemoteConnectionStore: () => lazyRemoteConnectionStore,
+  jsonResponse: () => jsonResponse,
   isRemoteMcpRequest: () => isRemoteMcpRequest,
   createRemoteMcpHandler: () => createRemoteMcpHandler,
   createInProcessOperationContext: () => createInProcessOperationContext,
+  bearerToken: () => bearerToken,
   REMOTE_MCP_PATH: () => REMOTE_MCP_PATH
 });
 import { existsSync as existsSync41 } from "node:fs";
@@ -90201,6 +90204,252 @@ var init_remote_mcp = __esm(() => {
   init_operation_caller();
   init_remote_connections();
   init_server3();
+});
+
+// src/workers/remote-openapi.ts
+var exports_remote_openapi = {};
+__export(exports_remote_openapi, {
+  withRemoteOpenApiRoutes: () => withRemoteOpenApiRoutes,
+  isRemoteOpenApiRequest: () => isRemoteOpenApiRequest,
+  createRemoteOpenApiHandler: () => createRemoteOpenApiHandler,
+  buildRemoteOpenApiSpec: () => buildRemoteOpenApiSpec,
+  REMOTE_OPENAPI_TOOLS_PREFIX: () => REMOTE_OPENAPI_TOOLS_PREFIX,
+  REMOTE_OPENAPI_SPEC_PATH: () => REMOTE_OPENAPI_SPEC_PATH,
+  REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES
+});
+function isRemoteOpenApiRequest(request) {
+  const { pathname } = new URL(request.url);
+  return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
+}
+function withRemoteOpenApiRoutes(openApi, rest) {
+  return (request) => isRemoteOpenApiRequest(request) ? openApi(request) : rest(request);
+}
+function createRemoteOpenApiHandler(options) {
+  const serverUrl = publicServerUrl(options.publicBaseUrl);
+  return async (request) => {
+    const { pathname } = new URL(request.url);
+    if (pathname === REMOTE_OPENAPI_SPEC_PATH)
+      return serveSpec(request, options, serverUrl);
+    const name = TOOL_PATH_PATTERN.exec(pathname)?.[1];
+    if (name === undefined)
+      return jsonResponse(404, { error: "not_found" });
+    return callTool(request, name, options);
+  };
+}
+function serveSpec(request, options, serverUrl) {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "GET, HEAD" });
+  }
+  const config2 = options.makeOperationContext({ surface: "remote" }, new AbortController().signal).config;
+  return new Response(JSON.stringify(buildRemoteOpenApiSpec(config2, { serverUrl })), {
+    status: 200,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" }
+  });
+}
+async function callTool(request, name, options) {
+  const token = bearerToken(request.headers.get("Authorization"));
+  if (token === undefined)
+    return unauthorized();
+  if (!isWellFormedRemoteConnectionToken(token))
+    return unauthorized("invalid_token");
+  let store;
+  try {
+    store = options.connections();
+  } catch {
+    return jsonResponse(503, { error: "remote_connections_unavailable" });
+  }
+  if (!store)
+    return unauthorized("invalid_token");
+  const verification = store.verifyToken(token);
+  if (!verification.ok)
+    return unauthorized("invalid_token");
+  if (request.method !== "POST") {
+    return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "POST" });
+  }
+  const ctx = options.makeOperationContext(remoteOperationCaller(verification.connection), request.signal);
+  const operation = findOperationByName(name);
+  if (!operation || !shouldExposeOperation(operation, { config: ctx.config, surface: "remote" })) {
+    return jsonResponse(404, { error: "unknown_operation", message: `No Olympus operation named ${name} is available here.` });
+  }
+  const params = await readParams(request);
+  if (!params.ok)
+    return params.response;
+  try {
+    const result = await operation.handler(ctx, params.value);
+    return jsonResponse(200, result ?? null);
+  } catch (error2) {
+    return operationErrorResponse(error2);
+  }
+}
+async function readParams(request) {
+  const declared = Number(request.headers.get("Content-Length") ?? "0");
+  if (Number.isFinite(declared) && declared > REMOTE_OPENAPI_MAX_BODY_BYTES) {
+    return { ok: false, response: jsonResponse(413, { error: "payload_too_large" }) };
+  }
+  let text;
+  try {
+    text = await request.text();
+  } catch {
+    return { ok: false, response: invalidRequest("The request body could not be read.") };
+  }
+  if (Buffer.byteLength(text) > REMOTE_OPENAPI_MAX_BODY_BYTES) {
+    return { ok: false, response: jsonResponse(413, { error: "payload_too_large" }) };
+  }
+  if (text.trim() === "")
+    return { ok: true, value: {} };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, response: invalidRequest("The request body must be a JSON object.") };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, response: invalidRequest("The request body must be a JSON object.") };
+  }
+  return { ok: true, value: parsed };
+}
+function invalidRequest(message) {
+  return jsonResponse(400, { error: "invalid_request", message });
+}
+function operationErrorResponse(error2) {
+  if (error2 instanceof OperationError) {
+    const status = CALLER_FACING_ERRORS[error2.code];
+    if (status !== undefined) {
+      return jsonResponse(status, {
+        error: error2.code,
+        message: error2.message,
+        ...error2.suggestion ? { suggestion: error2.suggestion } : {}
+      });
+    }
+    return jsonResponse(502, {
+      error: error2.code,
+      message: INTERNAL_ERROR_MESSAGES[error2.code] ?? "Olympus could not complete this request."
+    });
+  }
+  return jsonResponse(500, { error: "internal_error", message: "Olympus could not complete this request." });
+}
+function publicServerUrl(publicBaseUrl) {
+  if (publicBaseUrl === undefined)
+    return "/";
+  const url = new URL(publicBaseUrl);
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+    throw new Error("The public base URL must be a plain https origin.");
+  }
+  return url.origin;
+}
+function buildRemoteOpenApiSpec(config2, options = {}) {
+  const exposed = exposedOperations(operations, { config: config2, surface: "remote" });
+  const rendering = neutralRenderingConfig(config2);
+  const paths = Object.fromEntries(exposed.map((operation) => [
+    `${REMOTE_OPENAPI_TOOLS_PREFIX}${operation.name}`,
+    { post: openApiOperation(operation, rendering) }
+  ]));
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: "Olympus",
+      version: VERSION,
+      description: [
+        "Ask the owner's Olympus source index questions, under the same privacy rules as their own assistant.",
+        "Authenticate every call with the connection token from `olympus connections add <name>` as a bearer token.",
+        "Call source_answer one at a time; an answer can take several minutes."
+      ].join(" ")
+    },
+    servers: [{ url: options.serverUrl ?? "/" }],
+    security: [{ connectionToken: [] }],
+    paths,
+    components: {
+      securitySchemes: {
+        connectionToken: {
+          type: "http",
+          scheme: "bearer",
+          description: "An Olympus connection token (olympus_conn_...). Revoke it with olympus connections revoke <id>."
+        }
+      },
+      schemas: {
+        Error: {
+          type: "object",
+          required: ["error"],
+          properties: {
+            error: { type: "string", description: "A stable error code." },
+            message: { type: "string" },
+            suggestion: { type: "string" }
+          }
+        }
+      },
+      responses: {
+        Error: {
+          description: "The request failed.",
+          content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } }
+        }
+      }
+    }
+  };
+}
+function openApiOperation(operation, config2) {
+  const description = operationDescription(operation, { config: config2 });
+  const schema = { ...operationToolSchema(operation, { config: config2 }), additionalProperties: false };
+  const hasRequired = Object.values(operation.params).some((param) => param.required);
+  const errorRef = { $ref: "#/components/responses/Error" };
+  return {
+    operationId: operation.name,
+    summary: firstSentence(description),
+    description,
+    requestBody: {
+      required: hasRequired,
+      content: { "application/json": { schema } }
+    },
+    responses: {
+      200: {
+        description: "The operation result.",
+        content: { "application/json": { schema: { type: "object" } } }
+      },
+      400: errorRef,
+      401: errorRef,
+      403: errorRef,
+      404: errorRef,
+      413: errorRef,
+      500: errorRef,
+      502: errorRef,
+      503: errorRef
+    }
+  };
+}
+function neutralRenderingConfig(config2) {
+  const neutral = defaultConfig();
+  return {
+    ...config2,
+    identity: neutral.identity,
+    sourceIndex: { ...config2.sourceIndex, corpusRegistry: neutral.sourceIndex.corpusRegistry }
+  };
+}
+function firstSentence(text) {
+  const match = /^(.+?[.!?])(\s|$)/.exec(text);
+  return (match?.[1] ?? text).slice(0, 120);
+}
+var REMOTE_OPENAPI_SPEC_PATH = "/openapi.json", REMOTE_OPENAPI_TOOLS_PREFIX = "/api/v1/tools/", REMOTE_OPENAPI_MAX_BODY_BYTES, TOOL_PATH_PATTERN, CALLER_FACING_ERRORS, INTERNAL_ERROR_MESSAGES;
+var init_remote_openapi = __esm(() => {
+  init_config();
+  init_operation_error();
+  init_operation_exposure();
+  init_operations();
+  init_remote_connections();
+  init_version();
+  init_remote_mcp();
+  REMOTE_OPENAPI_MAX_BODY_BYTES = 256 * 1024;
+  TOOL_PATH_PATTERN = /^\/api\/v1\/tools\/([a-z][a-z0-9_]{0,63})$/;
+  CALLER_FACING_ERRORS = {
+    invalid_params: 400,
+    invalid_request: 400,
+    unsupported_filter: 400,
+    email_policy_violation: 403,
+    source_index_policy_violation: 403,
+    source_index_not_enabled: 503
+  };
+  INTERNAL_ERROR_MESSAGES = {
+    email_unreachable: "Olympus could not reach its source worker in time. Retry later.",
+    argus_unreachable: "Olympus could not reach its private analyst. Retry later."
+  };
 });
 
 // src/workers/email-source/server.ts
@@ -92562,11 +92811,22 @@ async function main() {
     withRemoteMcpRoute: withRemoteMcpRoute2
   } = await Promise.resolve().then(() => (init_remote_mcp(), exports_remote_mcp));
   const { resolveRemoteConnectionsDbPath: resolveRemoteConnectionsDbPath2, openRemoteConnectionStore: openRemoteConnectionStore2 } = await Promise.resolve().then(() => (init_remote_connections(), exports_remote_connections));
+  const { createRemoteOpenApiHandler: createRemoteOpenApiHandler2, withRemoteOpenApiRoutes: withRemoteOpenApiRoutes2 } = await Promise.resolve().then(() => (init_remote_openapi(), exports_remote_openapi));
+  const remoteOpenApi = createRemoteOpenApiHandler2({
+    connections: lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2),
+    makeOperationContext: (caller, signal) => createInProcessOperationContext2({
+      config: olympusConfig,
+      sourceIndexReadEnabled,
+      workerFetch: worker.fetch,
+      caller,
+      signal
+    })
+  });
   const server = Bun.serve({
     hostname,
     port,
     idleTimeout: 0,
-    fetch: withRemoteMcpRoute2(createRemoteMcpHandler2({
+    fetch: withRemoteOpenApiRoutes2(remoteOpenApi, withRemoteMcpRoute2(createRemoteMcpHandler2({
       connections: lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2),
       makeOperationContext: (caller, signal) => createInProcessOperationContext2({
         config: olympusConfig,
@@ -92575,7 +92835,7 @@ async function main() {
         caller,
         signal
       })
-    }), withWorkerBearerAuth(worker.fetch, { authToken }))
+    }), withWorkerBearerAuth(worker.fetch, { authToken })))
   });
   sourceScheduler?.start();
   await reconcileCaptures();
@@ -98253,6 +98513,7 @@ function runConnectionsCommand(args, env = process.env) {
         kind: "remote_connection_created",
         connection: remoteConnectionView(created.connection),
         url: remoteConnectionUrl(loadConfig(env)),
+        openapi_url: remoteConnectionUrl(loadConfig(env), "/openapi.json"),
         db_path: store.dbPath,
         token: created.token,
         notice: "The token is shown once and is not stored. Paste it into the agent now; revoke with olympus connections revoke <id>."
@@ -98264,6 +98525,7 @@ function runConnectionsCommand(args, env = process.env) {
       return {
         kind: "remote_connections",
         url: remoteConnectionUrl(loadConfig(env)),
+        openapi_url: remoteConnectionUrl(loadConfig(env), "/openapi.json"),
         db_path: store.dbPath,
         connections: store.list().map(remoteConnectionView)
       };
@@ -98289,8 +98551,8 @@ function remoteConnectionView(connection) {
     status: connection.revokedAt ? "revoked" : "active"
   };
 }
-function remoteConnectionUrl(config2) {
-  return new URL("/mcp", config2.email.baseUrl).toString();
+function remoteConnectionUrl(config2, path = "/mcp") {
+  return new URL(path, config2.email.baseUrl).toString();
 }
 function runDashboardTokenCommand(env = process.env) {
   const token = resolveWorkerAuthToken(env);

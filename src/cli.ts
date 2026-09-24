@@ -2452,6 +2452,7 @@ export function runConnectionsCommand(
         kind: 'remote_connection_created',
         connection: remoteConnectionView(created.connection),
         url: remoteConnectionUrl(loadConfig(env)),
+        openapi_url: remoteConnectionUrl(loadConfig(env), '/openapi.json'),
         db_path: store.dbPath,
         token: created.token,
         notice: 'The token is shown once and is not stored. Paste it into the agent now; revoke with olympus connections revoke <id>.',
@@ -2462,6 +2463,7 @@ export function runConnectionsCommand(
       return {
         kind: 'remote_connections',
         url: remoteConnectionUrl(loadConfig(env)),
+        openapi_url: remoteConnectionUrl(loadConfig(env), '/openapi.json'),
         db_path: store.dbPath,
         connections: store.list().map(remoteConnectionView),
       };
@@ -2488,9 +2490,12 @@ function remoteConnectionView(connection: RemoteConnectionRecord): Record<string
   };
 }
 
-/** The worker's own origin plus `/mcp`: loopback until a relay fronts it. */
-function remoteConnectionUrl(config: OlympusConfig): string {
-  return new URL('/mcp', config.email.baseUrl).toString();
+/**
+ * The worker's own origin plus `/mcp` (MCP clients) or `/openapi.json`
+ * (OpenAPI clients such as Muse): loopback until a relay fronts it.
+ */
+function remoteConnectionUrl(config: OlympusConfig, path: '/mcp' | '/openapi.json' = '/mcp'): string {
+  return new URL(path, config.email.baseUrl).toString();
 }
 
 export function runDashboardTokenCommand(env: Record<string, string | undefined> = process.env): string {
