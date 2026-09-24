@@ -651,11 +651,15 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
       : asCount(counts.embedded_chunks);
     const embeddingLag = Math.max(chunks - embedded, 0);
     if (chunks > 0 || embedded > 0) {
-      summaries.push(embeddingRequired
+      // Items ride beside chunks, named: an agent reading this line reported
+      // Readwise's 1,527 and 5,704 CHUNKS as items per tier to an owner whose
+      // dashboard said 2,791 items (owner-reported, 2026-09-24).
+      const items = typeof counts.indexed_items === 'number' ? `, ${asCount(counts.indexed_items)} items indexed` : '';
+      summaries.push((embeddingRequired
         ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})`
         : corpus.embedding_policy === 'disabled'
           ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled`
-          : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`);
+          : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`) + items);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
       // An owner-approved tier migration that is moving hands chunks to a

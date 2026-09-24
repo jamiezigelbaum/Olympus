@@ -3220,7 +3220,7 @@ describe('needs-review counts each item once', () => {
 });
 
 describe('retry counters are not item counts', () => {
-  function bookmarksRetryingView(consecutiveFailures: number) {
+  function bookmarksRetryingView(consecutiveFailures: number, lastErrorKind?: string) {
     const status = fixtureStatus();
     status.corpora = [{
       corpus_id: 'internal.x.bookmarks',
@@ -3241,7 +3241,13 @@ describe('retry counters are not item counts', () => {
       sync_interval_seconds: 300,
       freshness_threshold_hours: 26,
       stale_sync_anomaly: false,
-      tasks: [{ id: 'x.sync', kind: 'sync', running: false, consecutive_failures: consecutiveFailures }],
+      tasks: [{
+        id: 'x.sync',
+        kind: 'sync',
+        running: false,
+        consecutive_failures: consecutiveFailures,
+        ...(lastErrorKind ? { last_error_kind: lastErrorKind } : {}),
+      }],
     }];
     return buildSourceDashboardViewModel({
       sourceIndexStatus: status,
@@ -3253,14 +3259,92 @@ describe('retry counters are not item counts', () => {
   }
 
   test('the displayed severity does not grow with elapsed time', () => {
-    const early = bookmarksRetryingView(1);
+    // Both past DASHBOARD_PERSISTENT_FAILURE_RUNS: once a task keeps failing,
+    // a day more of failing must not read any worse than the third attempt.
+    const early = bookmarksRetryingView(3);
     const late = bookmarksRetryingView(4096);
 
     expect(early.sources.find((source) => source.source_id === 'x.bookmarks')?.queue_health)
       .toEqual(late.sources.find((source) => source.source_id === 'x.bookmarks')?.queue_health);
   });
 
-  test('a retrying task still holds the source out of answer-ready', () => {
+  test('one failed attempt is a booked retry, not a request of the reader', () => {
+    const view = bookmarksRetryingView(1);
+    const card = view.sources.find((source) => source.source_id === 'x.bookmarks');
+
+    expect(card?.queue_health.retrying_tasks).toBe(1);
+    expect(card?.queue_health.failing_tasks).toBeUndefined();
+    expect(card?.queue_health.label).not.toBe('Needs attention');
+    expect(card?.answer_readiness.state).not.toBe('needs_attention');
+    // Other fixture sources may need attention; this retry must add none.
+    expect(view.summary.needs_attention_sources).toBe(bookmarksRetryingView(0).summary.needs_attention_sources);
+  });
+
+  test('a keyword-only corpus owes no embedding backlog, on its card or in background work', () => {
+    // Live 2026-09-24 (Readwise): both lexical-only tier stores published
+    // parity with required=false, yet their 4,392 missing chunks became the
+    // card's and the page-wide embedding backlog beside an Embedding row that
+    // said no embedding stage exists for the source.
+    const status = fixtureStatus();
+    status.corpora = [{
+      corpus_id: 'internal.x.bookmarks',
+      family: 'x',
+      trust_domain: 'internal',
+      activation_mode: 'lexical_only',
+      embedding_policy: 'cloud_allowed',
+      configured: true,
+      provider: 'x',
+      counts: { indexed_items: 751, items_with_text: 751, chunks: 5704, embedded_chunks: 1664 },
+      embedding_parity: { required: false, chunks: 5704, embedded_chunks: 1664, missing_chunks: 4040, refresh_needed: false },
+      item_metadata_returned: false,
+    } as never];
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: status,
+      schedulerStatus: fixtureScheduler(),
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: fixtureHandleRegistry(),
+      now: new Date('2026-07-02T12:00:00.000Z'),
+    });
+    const card = view.sources.find((source) => source.source_id === 'x.bookmarks');
+
+    expect(card?.embedding_required).toBe(false);
+    expect(card?.embedding_backlog).toBeUndefined();
+    expect(view.background_work?.embedding_backlog).toBeUndefined();
+  });
+
+  test('two failures in a row are still a retry; the third makes the task failing', () => {
+    const card = (failures: number) => bookmarksRetryingView(failures).sources
+      .find((source) => source.source_id === 'x.bookmarks');
+
+    expect(card(2)?.queue_health.failing_tasks).toBeUndefined();
+    expect(card(2)?.answer_readiness.state).not.toBe('needs_attention');
+    expect(card(3)?.queue_health.failing_tasks).toBe(1);
+    expect(card(3)?.answer_readiness.state).toBe('needs_attention');
+  });
+
+  test('a credential failure is failing on its first attempt', () => {
+    const card = bookmarksRetryingView(1, 'credential_missing').sources
+      .find((source) => source.source_id === 'x.bookmarks');
+
+    expect(card?.queue_health.failing_tasks).toBe(1);
+    expect(card?.queue_health.label).toBe('Needs attention');
+    expect(card?.answer_readiness.state).toBe('needs_attention');
+  });
+
+  test('credential contention follows the three-strike rule, not fail-at-1', () => {
+    for (const kind of ['credential_refresh_busy', 'credential_session_latched']) {
+      const card = (failures: number) => bookmarksRetryingView(failures, kind).sources
+        .find((source) => source.source_id === 'x.bookmarks');
+
+      expect(card(1)?.queue_health.failing_tasks).toBeUndefined();
+      expect(card(2)?.queue_health.failing_tasks).toBeUndefined();
+      expect(card(2)?.answer_readiness.state).not.toBe('needs_attention');
+      expect(card(3)?.queue_health.failing_tasks).toBe(1);
+      expect(card(3)?.answer_readiness.state).toBe('needs_attention');
+    }
+  });
+
+  test('a task that keeps failing holds the source out of answer-ready', () => {
     const view = bookmarksRetryingView(3);
     const card = view.sources.find((source) => source.source_id === 'x.bookmarks');
 

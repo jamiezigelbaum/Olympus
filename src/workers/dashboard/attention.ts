@@ -13,7 +13,7 @@
  * That silence is the feature; the module is written so that arming is the
  * exception it has to earn.
  *
- * Four classes can surface, in this precedence:
+ * Five classes can surface, in this precedence:
  *
  *   1. CREDENTIAL — the connection needs an act before anything else can
  *      matter. Wired to the same connect controls the rest of the dashboard
@@ -21,7 +21,11 @@
  *   2. SCOPE — a connected file source needs explicit folder approval.
  *   3. TERMINAL_EXTRACTION — files no lane will ever retry. One real action:
  *      exclude the folders they sit in, or leave them.
- *   4. LANE_STUCK — machine-detected. A lane with open work that has not moved
+ *   4. SYNC_FAILING — a scheduled sync task that keeps failing
+ *      (DASHBOARD_PERSISTENT_FAILURE_RUNS in a row). This is the same count
+ *      that puts the source under Needs you on home and in the page header, so
+ *      the header never says Needs you over a page that says nothing.
+ *   5. LANE_STUCK — machine-detected. A lane with open work that has not moved
  *      beyond its own grace window, named in plain words with the last
  *      condition that governed it.
  *
@@ -40,9 +44,9 @@ import {
   dashboardSourceProgress,
   type DashboardPhaseId,
 } from './phases.ts';
-import { dashboardCount, dashboardDuration } from './vocabulary.ts';
+import { dashboardCount, dashboardDuration, dashboardSyncKeepsFailing } from './vocabulary.ts';
 
-export type DashboardAttentionKind = 'credential' | 'scope' | 'terminal_extraction' | 'lane_stuck';
+export type DashboardAttentionKind = 'credential' | 'scope' | 'terminal_extraction' | 'sync_failing' | 'lane_stuck';
 
 export interface DashboardAttentionBanner {
   kind: DashboardAttentionKind;
@@ -158,7 +162,63 @@ export function dashboardAttentionBanner(
   return credentialBanner(source, options)
     ?? scopeApprovalBanner(source, options)
     ?? terminalExtractionBanner(source, options)
+    ?? syncFailingBanner(source, options)
     ?? laneStuckBanner(source, options.now ?? new Date(), options);
+}
+
+/**
+ * A scheduled sync that keeps failing.
+ *
+ * Armed by exactly the count that arms the card's needs-attention ladder
+ * (`queue_health.failing_tasks`), and silenced by exactly the pause that
+ * silences it. A task that failed once or twice is a retry already booked and
+ * says nothing here or on home; the Readwise contradiction this closes was the
+ * home card arming on one retry while this page, correctly, stayed quiet
+ * (owner-reported, 2026-09-24).
+ */
+function syncFailingBanner(
+  source: DashboardSourceCard,
+  options: DashboardAttentionOptions,
+): DashboardAttentionBanner | undefined {
+  if (!dashboardSyncKeepsFailing(source)) return undefined;
+  const errorKind = source.schedule?.last_error_kind;
+  const condition = errorKind ? DASHBOARD_GUARD_CONSEQUENCES[errorKind] ?? errorKind : 'nothing has reported a reason';
+  const action = syncNowAction(source, options);
+  return {
+    kind: 'sync_failing',
+    sentence: `${source.label}'s scheduled sync keeps failing, so new material is not coming in. Last condition on`
+      + ` the lane: ${condition}. Olympus keeps retrying on its own.`
+      + `${action === undefined ? ' Ask' : ' Try a sync now; if it still fails, ask'} your agent to look at the lane.`,
+    ...(action === undefined ? {} : { action }),
+    agent_prompt: `Olympus says the ${source.label} scheduled sync keeps failing (last condition: ${condition}).`
+      + ` Please check why the ${source.label} sync tasks fail — the worker logs and the scheduler state for this`
+      + ' source — and fix it using supported Olympus commands. Do not ask me to edit files, configuration, or code.',
+  };
+}
+
+/**
+ * The Sync now control for a source, where a sync route exists for it.
+ *
+ * Read off the source definition, not the card's connect action: a connected
+ * source carries no connect action at all. A read-only reader gets the gate
+ * link instead of a button that can only 401.
+ */
+function syncNowAction(
+  source: DashboardSourceCard,
+  options: DashboardAttentionOptions,
+): DashboardActionInput | undefined {
+  const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
+  const syncSource = source.sync_now_available === false
+    // This worker cannot run Sync now for this source. Offering the button, and
+    // then advising the reader to press it, produced a 501 and no next step.
+    ? undefined
+    : definition?.connect_action.kind === 'oauth' || definition?.connect_action.kind === 'api_key'
+      ? definition.connect_action.source
+      : undefined;
+  if (syncSource === undefined) return undefined;
+  return options.readOnly === true
+    ? { label: 'Sync now', kind: 'link', href: `${options.setupPath}#dashboard-controls`, hint: 'unlock controls in Setup' }
+    : { label: 'Sync now', kind: 'sync_now', source: syncSource, primary: true };
 }
 
 function scopeApprovalBanner(source: DashboardSourceCard, options: DashboardAttentionOptions): DashboardAttentionBanner | undefined {
@@ -391,25 +451,9 @@ function laneStuckBanner(
     ? 'has stopped moving'
     : `has not moved for ${dashboardDuration(idleHours * 3600)}`;
   // The one act a route exists for is a manual sync, offered wherever the
-  // source has a sync route (the oauth and api-key families). A read-only
-  // reader gets the gate link instead of a button that can only 401. The
-  // agent prompt is the second act and the only one for a paired chat source.
-  // Read off the source definition, not the card's connect action: a
-  // connected source carries no connect action at all, and it is exactly the
-  // connected-but-stuck source this banner is for.
-  const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
-  const syncSource = source.sync_now_available === false
-    // This worker cannot run Sync now for this source. Offering the button, and
-    // then advising the reader to press it, produced a 501 and no next step.
-    ? undefined
-    : definition?.connect_action.kind === 'oauth' || definition?.connect_action.kind === 'api_key'
-      ? definition.connect_action.source
-      : undefined;
-  const action: DashboardActionInput | undefined = syncSource === undefined
-    ? undefined
-    : options.readOnly === true
-      ? { label: 'Sync now', kind: 'link', href: `${options.setupPath}#dashboard-controls`, hint: 'unlock controls in Setup' }
-      : { label: 'Sync now', kind: 'sync_now', source: syncSource, primary: true };
+  // source has a sync route (the oauth and api-key families). The agent prompt
+  // is the second act and the only one for a paired chat source.
+  const action = syncNowAction(source, options);
   return {
     kind: 'lane_stuck',
     sentence: `${source.label} still has work to do and its ${laneName} ${stillness}. Last condition on the lane:`

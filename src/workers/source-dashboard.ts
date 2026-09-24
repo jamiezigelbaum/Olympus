@@ -88,6 +88,48 @@ export type DashboardConnectionState =
  */
 export const DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = 'Waiting for the first sync';
 
+/**
+ * How many failures in a row turn one scheduler task from retrying itself into
+ * failing — the point where a sync "keeps failing" and the owner is told.
+ *
+ * Below it a failed attempt is a retry the scheduler has already booked, and
+ * every surface calls it self-healing: the background lane marks it requeued,
+ * the detail check says no action is needed unless it keeps failing, and the
+ * page banner stays silent. The home card and the page header used to arm on
+ * the very first failure instead, so one retry after a worker upgrade put a
+ * working Readwise source under Needs you while its own page said nothing was
+ * waiting (owner-reported, 2026-09-24). Every surface now reads this one count.
+ */
+export const DASHBOARD_PERSISTENT_FAILURE_RUNS = 3;
+
+/**
+ * Credential error kinds that are contention between two runs, not a request of
+ * the owner: another refresh in flight, a session latched by another run. They
+ * clear on their own, so they follow the ordinary three-strike rule.
+ */
+const DASHBOARD_CREDENTIAL_CONTENTION_KINDS: ReadonlySet<string> = new Set([
+  'credential_refresh_busy',
+  'credential_session_latched',
+]);
+
+/**
+ * Whether one scheduler task is failing rather than retrying itself.
+ *
+ * A credential failure is failing on its first attempt: no retry fixes a
+ * missing or expired credential, so waiting two more rounds before telling the
+ * owner only delays the one act that clears it. Credential contention
+ * (DASHBOARD_CREDENTIAL_CONTENTION_KINDS) and every other failure kind earn the
+ * DASHBOARD_PERSISTENT_FAILURE_RUNS count first.
+ */
+export function dashboardSchedulerTaskFailing(
+  task: Pick<SourceSchedulerSourceStatus['tasks'][number], 'consecutive_failures' | 'last_error_kind'>,
+): boolean {
+  if (task.consecutive_failures <= 0) return false;
+  const kind = task.last_error_kind;
+  if (kind?.startsWith('credential_') && !DASHBOARD_CREDENTIAL_CONTENTION_KINDS.has(kind)) return true;
+  return task.consecutive_failures >= DASHBOARD_PERSISTENT_FAILURE_RUNS;
+}
+
 export type DashboardConnectFieldName = 'client_id' | 'client_secret' | 'api_key';
 
 /**
@@ -731,6 +773,12 @@ export interface DashboardSourceCard {
     needs_attention: number;
     /** Scheduler tasks currently in a retry loop, not how many times they retried. */
     retrying_tasks?: number;
+    /**
+     * Of `retrying_tasks`, the ones dashboardSchedulerTaskFailing calls
+     * failing: DASHBOARD_PERSISTENT_FAILURE_RUNS or more failures in a row, or
+     * any credential failure. Only these put the source under Needs you.
+     */
+    failing_tasks?: number;
   };
   answer_readiness: {
     state: 'ready' | 'syncing' | 'needs_attention' | 'empty' | 'disconnected';
@@ -2534,9 +2582,16 @@ function orderedIsoTimestamps(values: Array<string | undefined>): string[] {
 function embeddingBacklogFromCorpora(
   corpora: SourceIndexStatusCorpus[],
 ): DashboardEmbeddingBacklog | undefined {
+  // Only a corpus answers are served from embeddings on owes an embedding
+  // backlog. A keyword-only corpus (lexical_only, or embeddings disabled) may
+  // still hold vectors a lane wrote along the way, but none of its missing
+  // chunks keeps an answer from anything: counting them made the Readwise page
+  // report thousands of chunks "left" beside an Embedding row that correctly
+  // said no embedding stage exists for it (owner-reported, 2026-09-24).
   const parities = corpora
     .map((corpus) => corpus.embedding_parity)
-    .filter((parity): parity is NonNullable<SourceIndexStatusCorpus['embedding_parity']> => parity !== undefined);
+    .filter((parity): parity is NonNullable<SourceIndexStatusCorpus['embedding_parity']> =>
+      parity !== undefined && parity.required !== false);
   if (parities.length === 0) return undefined;
   const chunks = parities.reduce((sum, parity) => sum + parity.chunks, 0);
   // Zero chunks is not a backlog of zero, it is nothing to embed yet, and a
@@ -2767,14 +2822,39 @@ function aggregateQueueHealth(
   const active = cards.reduce((sum, card) => sum + card.queue_health.active, 0);
   const needsAttention = cards.reduce((sum, card) => sum + card.queue_health.needs_attention, 0);
   const retryingTasks = cards.reduce((sum, card) => sum + (card.queue_health.retrying_tasks ?? 0), 0);
-  const label = needsAttention > 0 || retryingTasks > 0
+  const failingTasks = cards.reduce((sum, card) => sum + (card.queue_health.failing_tasks ?? 0), 0);
+  return queueHealthResult(waiting, active, needsAttention, retryingTasks, failingTasks);
+}
+
+/**
+ * The one queue label ladder, shared by a card and the aggregate over cards.
+ *
+ * A task that is merely retrying does not reach the label: it is a retry the
+ * scheduler has already booked (DASHBOARD_PERSISTENT_FAILURE_RUNS). It stays
+ * countable in `retrying_tasks` for the detail checks and the background lane.
+ */
+function queueHealthResult(
+  waiting: number,
+  active: number,
+  needsAttention: number,
+  retryingTasks: number,
+  failingTasks: number,
+): DashboardSourceCard['queue_health'] {
+  const label = needsAttention > 0 || failingTasks > 0
     ? 'Needs attention'
     : active > 0
       ? 'Working now'
-      : waiting > 0
+      : waiting > 0 || retryingTasks > 0
         ? 'Waiting to catch up'
         : 'Caught up';
-  return { label, waiting, active, needs_attention: needsAttention, ...(retryingTasks > 0 ? { retrying_tasks: retryingTasks } : {}) };
+  return {
+    label,
+    waiting,
+    active,
+    needs_attention: needsAttention,
+    ...(retryingTasks > 0 ? { retrying_tasks: retryingTasks } : {}),
+    ...(failingTasks > 0 ? { failing_tasks: failingTasks } : {}),
+  };
 }
 
 function aggregateFreshness(
@@ -4064,14 +4144,8 @@ function queueHealth(
     'metadata_sync_folders_failed',
     'qa_failed_needs_operator',
   ]);
-  const label = needsAttention > 0 || retryingTasks > 0
-    ? 'Needs attention'
-    : active > 0
-      ? 'Working now'
-      : waiting > 0
-        ? 'Waiting to catch up'
-        : 'Caught up';
-  return { label, waiting, active, needs_attention: needsAttention, ...(retryingTasks > 0 ? { retrying_tasks: retryingTasks } : {}) };
+  const failingTasks = scheduler?.tasks.filter((task) => dashboardSchedulerTaskFailing(task)).length ?? 0;
+  return queueHealthResult(waiting, active, needsAttention, retryingTasks, failingTasks);
 }
 
 // The store's own queue depth, or -1 when the corpus reports none. The
@@ -4173,7 +4247,8 @@ function parkExplainsStaleness(freshness: DashboardSourceCard['freshness']): boo
  * control and the detail sentence but not this ladder).
  *
  * Two causes the park absorbs, and one it does not:
- * - Retrying tasks are absorbed. A parked lane's failure count is history — the
+ * - Failing tasks are absorbed. (A task that is merely retrying never arms this
+ *   ladder at all; see DASHBOARD_PERSISTENT_FAILURE_RUNS.) A parked lane's failure count is history — the
  *   guard stopped it carrying whatever error it last recorded on the way in —
  *   and detail.ts refuses to translate that same stale kind for exactly this
  *   reason. Re-arming on it would restore the contradiction from the other end.
@@ -4192,8 +4267,10 @@ function answerReadinessFrom(
 ): DashboardSourceCard['answer_readiness'] {
   if (!configured) return { state: 'disconnected', label: 'Connect this source' };
   const staleUnexplained = freshness.stale && !(operatorPaused && parkExplainsStaleness(freshness));
-  const retryingUnexplained = !operatorPaused && (queue.retrying_tasks ?? 0) > 0;
-  if (staleUnexplained || queue.needs_attention > 0 || retryingUnexplained) {
+  // A task that failed once is a retry already booked, not a request of the
+  // reader; only one that keeps failing is (DASHBOARD_PERSISTENT_FAILURE_RUNS).
+  const failingUnexplained = !operatorPaused && (queue.failing_tasks ?? 0) > 0;
+  if (staleUnexplained || queue.needs_attention > 0 || failingUnexplained) {
     return { state: 'needs_attention', label: 'Needs attention before answers' };
   }
   if (coverage.content_ready_items > 0 || coverage.embedded_items > 0) {

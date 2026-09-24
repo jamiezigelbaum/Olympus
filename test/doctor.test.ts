@@ -238,6 +238,10 @@ describe('runDoctor', () => {
     expect(checkByName(result.checks, 'email_worker').detail).toContain('no worker health or credential failures');
     expect(checkByName(result.checks, 'source_index_status').detail)
       .toContain('secure_local.dropbox.files: connector store, 100 chunks, 100 embedded');
+    // Items are named beside chunks: an agent read per-tier chunk counts off
+    // this line as item counts (owner-reported, 2026-09-24).
+    expect(checkByName(result.checks, 'source_index_status').detail)
+      .toContain('secure_local.dropbox.files: connector store, 100 chunks, 100 embedded (lag 0), 100 items indexed');
   });
 
   test('flags a down Argus model pool with the rehydration runbook hint and never throws', async () => {
