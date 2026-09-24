@@ -68,16 +68,21 @@ describe('verification contract', () => {
     expect(workflow).not.toMatch(/uses: [^\n]+@(v|main\b)/);
   });
 
-  test('the required CI lanes include the separately configured publisher exchange package', () => {
+  test('the required CI lanes include the separately configured publisher exchange and connect relay packages', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
     const workflow = readFileSync(join(ROOT, '.github/workflows/verify.yml'), 'utf8');
     const staticSection = workflow.slice(workflow.indexOf('\n  static:\n'), workflow.indexOf('\n  fast:\n'));
     const fastSection = workflow.slice(workflow.indexOf('\n  fast:\n'), workflow.indexOf('\n  deploy:\n'));
     expect(staticSection).toContain('run: bun run typecheck');
-    expect(pkg.scripts.typecheck).toBe('tsc --noEmit && bun run typecheck:exchange');
+    expect(pkg.scripts.typecheck).toBe('tsc --noEmit && bun run typecheck:exchange && bun run typecheck:connect-relay');
     expect(pkg.scripts['typecheck:exchange']).toBe('tsc --noEmit -p exchange/tsconfig.json');
+    expect(pkg.scripts['typecheck:connect-relay']).toBe('tsc --noEmit -p connect-relay/tsconfig.json');
     expect(fastSection).toContain('run: bun run test:fast');
-    expect(pkg.scripts['test:fast']).toBe('bun run build && bun scripts/test-lane.ts fast && bun run test:exchange');
+    expect(pkg.scripts['test:fast']).toBe(
+      'bun run build && bun scripts/test-lane.ts fast && bun run test:exchange && bun run test:connect-relay',
+    );
+    expect(pkg.scripts['test:connect-relay']).toBe('bun test ./connect-relay/test');
+    expect(existsSync(join(ROOT, 'connect-relay/test/relay-e2e.test.ts'))).toBe(true);
     // Directory discovery includes new exchange tests, including nested tests.
     expect(pkg.scripts['test:exchange']).toBe('bun test ./exchange/test');
     expect(existsSync(join(ROOT, 'exchange/test/google-exchange.test.ts'))).toBe(true);

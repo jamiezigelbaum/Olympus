@@ -1,0 +1,322 @@
+# Olympus connect relay
+
+Status: slice 5 of the hosted-agent compatibility design
+(`docs/design/hosted-agent-compatibility.md`, PR #84, not yet on `main`). Code: [`connect-relay/`](../../connect-relay). Nothing here is
+deployed yet.
+
+A hosted agent (Claude, Grok, Muse) calls
+`https://<install-id>.connect.olympusplugin.ai/mcp`. The relay routes that
+connection by TLS SNI, still encrypted, down an outbound link the user's
+Olympus keeps open. The install terminates TLS with a key that never leaves
+the machine, and forwards the request to the loopback worker
+(`http://127.0.0.1:28090`).
+
+## Relay design
+
+**Decision: a small purpose-built TypeScript relay and client, with no new
+dependencies.** No existing tunnel met the hard constraints without a fork or
+a per-platform binary in the npm package.
+
+| Option | SNI pass-through with a reverse outbound client | Install-key registration | Client in the npm package | Verdict |
+|---|---|---|---|---|
+| [frp](https://github.com/fatedier/frp) | Yes. The `https` proxy type routes by SNI on `vhostHTTPSPort`, and "frps will not perform TLS termination" ([docs](https://gofrp.org/en/docs/examples/https2http/)). | No. It offers `token` or OIDC only. Per-install keys need a custom [`Login`/`NewProxy` plugin](https://github.com/fatedier/frp/blob/dev/doc/server_plugin.md) service anyway. | No. `frpc` is a Go binary, so four prebuilt platform binaries would ship in the package. | Works, but it still needs custom auth and DNS services, plus binaries. |
+| [rathole](https://github.com/rapiz1/rathole) | No. Each service gets its own server bind port, with no hostname routing. | Per-service tokens only. | No. It is a Rust binary. | Does not fit. |
+| [zrok](https://docs.zrok.io/docs/concepts/tunnels/) | No. Public frontends terminate TLS, and `tcpTunnel` shares are private only. TLS pass-through is an [open request](https://github.com/openziti/zrok/issues/387). | zrok accounts | No. It is a Go binary, and it needs an OpenZiti controller and router. | Does not fit. |
+| [sish](https://docs.ssi.sh/cli) | Yes (`--sni-proxy`). The client is plain `ssh -R`. | SSH public keys via `--authentication-key-request-url`. That is close, but there is [no per-key binding restriction](https://docs.ssi.sh/cli), so any key holder can squat another install's name, which is a denial of service. | Would need an SSH client in Node (`ssh2`), a new dependency. | Closest. Needs a fork for per-key name binding and custom DNS-01 publishing. |
+| **Purpose-built TS** | Yes. The ClientHello parser is about 100 lines. | Ed25519 install key. The install id is derived from the key. | Yes. It uses only `node:` built-ins and works on Node and Bun. | **Chosen.** |
+
+The relay and shared protocol are about 1,150 lines of commented TypeScript. The install client adds about 850 more, and tests come on top. Every option
+above would still have needed the two pieces that carry the real design
+weight: key-bound registration, and relay-published DNS-01 TXT records
+constrained to the install's own name. The WhatsApp bridge shows the existing
+Go pattern: it ships Go *source* and builds on the user's machine with a local
+Go toolchain (`src/core/messaging-pairing.ts`). That is acceptable for an
+opt-in pairing step, but it is not acceptable for the default remote path.
+
+### Shape
+
+```
+agent ──TLS(SNI=<id>.zone)──▶ relay :443 ──splice──▶ data conn ──▶ install: local TLS endpoint ──HTTP──▶ worker /mcp
+                              │  reads ClientHello only        (outer TLS to relay control host,
+                              │                                  inner = the agent's TLS, untouched)
+install ──TLS(SNI=relay.zone)─┘  control session: hello/register, open, ping, acme-dns-set/clear
+```
+
+- **One port.** The relay listens on port 443 and reads only the cleartext
+  ClientHello:
+  - SNI equal to `relay.<zone>` goes to the relay's own control plane, which
+    serves the relay's own certificate.
+  - SNI `<install-id>.<zone>` is spliced byte for byte.
+  - Anything else gets a TLS alert.
+- **Data connections, not a multiplexer.** For each public connection, the
+  relay sends `open {connId}` on the install's session. The install then dials
+  a fresh connection and sends `attach`, signed over a new nonce and bound to
+  that `connId`. TCP handles backpressure, and there is no framing layer to get
+  wrong. The cost is one extra round trip per connection. A pre-opened pool is
+  a later optimization.
+- **Identity.**
+  - The install key is Ed25519. The install id is `base32(sha256(SPKI))[:32]`,
+    so an id cannot be claimed with a different key.
+  - `register` proves possession of the key by signing the relay's nonce.
+    Registration is rate-limited per source address.
+  - `hello` is refused for ids that never registered.
+  - Signatures are domain-separated and bound to the nonce, so they cannot be
+    replayed.
+  - The registry stores only the id, the public key and the registration time.
+    It stores no IP address and no account.
+- **Local TLS endpoint.** It forwards only the remote agent surface: `/mcp`,
+  `/openapi.json` and the OAuth `/.well-known/*` metadata.
+  - The worker's other loopback routes (dashboard, local APIs) assume a local
+    caller. Everything outside the allowlist gets a local 404 and never reaches
+    the worker.
+  - Dot segments and encoded separators are refused rather than normalized.
+  - Forwarding headers from the internet are dropped. The endpoint sets
+    `x-olympus-relay: 1`, `x-forwarded-proto`, `x-forwarded-host` and
+    `x-forwarded-for`, taking the agent address from the relay's `open`. The
+    `Host` header is kept, so it is `<id>.<zone>`.
+
+### What the relay can and cannot see
+
+- **Sees:**
+  - the requested hostname (it is cleartext SNI);
+  - the agent's IP address;
+  - connection timing and byte counts;
+  - the install's IP address.
+- **Cannot see:** requests and answers. The public path
+  (`server/public-path.ts`) handles raw sockets only and never imports
+  `node:tls`. The relay's single TLS identity is its own control-plane
+  certificate.
+
+`connect-relay/test/structure.test.ts` holds that structure in place, and the
+end-to-end test taps every forwarded byte. It asserts that both directions are
+TLS records containing none of the request or response plaintext.
+
+**Honest limit:** the relay operator controls DNS for the zone, so an *active*
+malicious operator could obtain a certificate for any install hostname and
+intercept traffic. Pass-through TLS protects against:
+
+- relay compromise that is passive or read-only;
+- logging;
+- legal requests for stored data.
+
+It does not protect against the DNS owner itself. Such an issuance would be
+publicly visible in Certificate Transparency logs. Watching CT for the
+install's own hostname is a listed follow-up. CAA `accounturi` pinning does not
+help, because the same operator controls the CAA record.
+
+### Offline and over-limit behavior
+
+TLS pass-through means the relay cannot send an HTTP error without a
+certificate for the install name. The relay answers with a **fatal TLS alert
+record** before any handshake, sent in the clear, which RFC 8446 section 6
+permits:
+
+| Situation | Alert | Typical client message |
+|---|---|---|
+| Unknown or unregistered install name, a non-zone name, or no SNI | `unrecognized_name` (112) | "tlsv1 unrecognized name" |
+| Registered install that is offline, over its connection limits, or did not attach within 10 seconds | `internal_error` (80) | "tlsv1 alert internal error" |
+
+Two alternatives were rejected:
+
+- **A relay-held wildcard certificate** (`*.connect.olympusplugin.ai`) to serve
+  an "Olympus is offline" page.
+  - It would give the relay a standing, silently usable ability to impersonate
+    every install. No new CT-visible issuance would be needed, which removes
+    the one detection signal above.
+  - It would also train clients to accept relay-terminated connections for
+    install names. A clearer error message is not worth that.
+- **A bare TCP close.** It looks like network flakiness, so clients retry into
+  it. An immediate, distinct alert is deterministic and cannot be confused with
+  a hang.
+
+When the install's session ends, agents waiting on it get the alert
+immediately. Human-readable status belongs to `olympus connect` and the
+dashboard (follow-up).
+
+### Certificates (ACME DNS-01)
+
+The install runs the ACME client (`client/acme.ts`, RFC 8555, ES256). The ACME
+account key, the certificate key and the CSR stay local. The relay publishes
+one thing: the TXT value `base64url(sha256(keyAuthorization))`, and only at the
+name it derives itself, `_acme-challenge.<install-id>.<zone>`. An install
+cannot name another record.
+
+- **Limits on DNS requests:** requests are rate-limited per install, and at
+  most 4 values can be outstanding.
+- **Cleanup:** values are cleared after validation, and again when the session
+  ends.
+- **Explicit address record per install:** before the first TXT record, the
+  relay creates an explicit `A`/`AAAA` record for `<install-id>.<zone>`. A TXT
+  record at `_acme-challenge.<id>.<zone>` makes `<id>.<zone>` an empty
+  non-terminal, and RFC 4592 wildcard synthesis stops applying to it. A
+  wildcard-only zone would therefore break the install's own address during
+  every issuance and renewal.
+- **Renewal:** the install renews when less than a third of the certificate's
+  lifetime remains. The window is proportional, so it survives Let's Encrypt
+  moving to shorter lifetimes.
+- **Subscriber agreement:** creating the ACME account accepts the CA's
+  subscriber agreement, so `obtainCertificate` refuses to run unless the caller
+  passes `termsOfServiceAgreed: true`. The wiring follow-up must show that
+  agreement to the user.
+
+### Limits (defaults, `server/public-path.ts`)
+
+| Limit | Default |
+|---|---|
+| ClientHello deadline / size | 5 s / 16 KiB + record headers |
+| Attach deadline after `open` | 10 s |
+| Concurrent public connections per install | 32 |
+| New public connections per install | burst 30, 5/s |
+| Control connections per source IP | burst 30, 1 per 2 s |
+| Registrations per source IP | 5, then 5/hour |
+| ACME TXT publishes per install | 10, then 10/hour; 4 outstanding |
+| Session idle (install pings every 30 s) | 90 s |
+| Spliced connection idle | 15 min |
+| Global pending / sessions / registry | 5,000 / 20,000 / 100,000 |
+
+## Design-doc claims checked against primary sources
+
+Claims from `hosted-agent-compatibility.md` (PR #84), checked against primary
+sources:
+
+- **"Put `connect.olympusplugin.ai` on the Public Suffix List, so per-install
+  certificates don't hit Let's Encrypt's per-domain weekly limit": wrong as
+  stated.**
+  - The [PSL guidelines](https://github.com/publicsuffix/list/wiki/Guidelines)
+    say they do not accept entries "whose sole purpose is to circumvent rate
+    limits of third parties (such as Let's Encrypt rate limits - use their form
+    instead)".
+  - They promise no processing time ("NO SERVICE LEVEL AGREEMENTS").
+  - The right path for rate limits is the Let's Encrypt
+    [override form](https://letsencrypt.org/docs/rate-limits/), which takes
+    weeks.
+  - A PSL entry *is* justified on security grounds. Each `<id>.connect…` is a
+    different user's origin, including the OAuth approval pages served through
+    the relay, and without a PSL entry one install's page can set cookies on
+    `.connect.olympusplugin.ai` that other installs receive. The request must
+    argue that, and the domain must be registered for more than 2 years beyond
+    the submission date.
+- **Rate-limit detail.**
+  - Let's Encrypt allows 50 new certificates per registered domain per 7 days,
+    refilling 1 every 202 minutes. The registered domain is determined via the
+    PSL.
+  - Renewals are exempt from that limit: all renewals from the per-domain
+    limit, and ARI renewals from every limit.
+  - Account creation is capped at 10 accounts per IP per 3 hours. Each install
+    creates its own account from its own IP.
+  - Without a PSL entry, the binding constraint is therefore **first
+    issuances**: about 50 new installs per week across all of
+    `olympusplugin.ai`. So the override request should go in before launch.
+- **"frp, rathole, zrok or sish" as interchangeable candidates: partly
+  wrong.** rathole has no SNI or hostname routing. zrok's public frontends
+  terminate TLS, and its TCP tunnels are private-only. Only frp and sish do SNI
+  pass-through (table above).
+- **"Cloudflare Workers … Cloudflare terminates TLS": consistent.** Relatedly,
+  the Cloudflare DNS provider here always creates records with
+  `proxied: false`.
+- **"About €20–40/month total": plausible.** It was not re-verified, because no
+  server is purchased in this slice.
+
+## Runbook
+
+Nothing below has been executed. It is what deployment needs from Jamie.
+
+### Decisions and accounts (Jamie)
+
+1. **Server.** One small Linux VPS (x64 or arm64, 1–2 vCPU, 2 GB) with a
+   static IPv4 address (IPv6 optional). Ports 443/tcp in and 22 for admin.
+   Install Bun at `/usr/local/bin/bun`.
+2. **DNS.** Serve `olympusplugin.ai` (or a delegated `connect.olympusplugin.ai`
+   zone) from Cloudflare.
+   - Create a Cloudflare API token scoped to **Zone → DNS → Edit on that zone
+     only**. It goes to the host as a root-owned file (1P workstream). It is
+     never pasted into chat.
+   - Records:
+     - `relay.connect.olympusplugin.ai A <ip>` (DNS only, not proxied);
+     - `*.connect.olympusplugin.ai A <ip>` (DNS only);
+     - optional `CAA 0 issue "letsencrypt.org"` at `connect.olympusplugin.ai`.
+   - The relay creates per-install explicit records itself.
+3. **PSL.** Open a private-section PR to
+   [publicsuffix/list](https://github.com/publicsuffix/list) for
+   `connect.olympusplugin.ai`:
+   - justify it by tenant isolation, not rate limits;
+   - add the `_psl` TXT record;
+   - confirm the domain's expiry is more than 2 years out.
+4. **Let's Encrypt.** Submit the rate-limit override request for
+   `olympusplugin.ai`, covering new certificates per registered domain, sized to
+   expected weekly new installs. Do it now, because it takes weeks. This is
+   independent of the PSL outcome.
+
+### Deploy
+
+1. **Host setup.**
+   - `useradd --system --home /nonexistent --shell /usr/sbin/nologin olympus-relay`
+   - Copy `connect-relay/` at the released SHA to
+     `/opt/olympus-connect-relay/connect-relay`.
+   - It needs no `node_modules`: the service uses only `node:` built-ins.
+2. **Relay certificate for `relay.connect.olympusplugin.ai`.** Any ACME client
+   using Cloudflare DNS-01 works, for example
+   `certbot certonly --dns-cloudflare -d relay.connect.olympusplugin.ai`.
+   - Point `RELAY_CONTROL_CERT_PATH` at the chain.
+   - Copy the key to `/etc/olympus-connect-relay/credentials/control-key.pem`
+     (0600, root).
+   - The renewal deploy hook runs
+     `systemctl restart olympus-connect-relay`. Installs reconnect with backoff
+     within about a minute.
+3. **Configuration and secrets.**
+   - `/etc/olympus-connect-relay/relay.env` from `deploy/relay.env.example`.
+   - The Cloudflare token goes in
+     `/etc/olympus-connect-relay/credentials/cloudflare-api-token`.
+4. **Service.**
+   - Install `deploy/olympus-connect-relay.service`, then run
+     `systemctl daemon-reload && systemctl enable --now olympus-connect-relay`.
+   - Check the logs with `journalctl -u olympus-connect-relay`: the service
+     writes one JSON line per event, including `relay_listening`.
+
+### Verify
+
+- `openssl s_client -connect relay.connect.olympusplugin.ai:443 -servername relay.connect.olympusplugin.ai`
+  presents the relay certificate.
+- `openssl s_client -connect <ip>:443 -servername aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.connect.olympusplugin.ai`
+  fails with `unrecognized name`.
+- **Real install.** Once the wiring follow-up lands, a real install reports
+  `https://<id>.connect.olympusplugin.ai/mcp`. Check three things:
+  - `curl https://<id>…/mcp` reaches the worker;
+  - `curl https://<id>…/` returns 404 from the install;
+  - after stopping Olympus, curl fails with `internal error`.
+
+### Operate
+
+- **State.** The registry is `/var/lib/olympus-connect-relay/registry.json`.
+  Back it up. Losing it forces installs to re-register, which they do
+  automatically on the `unregistered` error.
+- **Removing an install.** Delete its entry and its DNS records, then restart.
+  An admin revoke command is a follow-up.
+- **Incidents.** A spike in `public_rejected_limit` means an abusive agent or
+  a misbehaving install. Adjust the limits in `server/public-path.ts` and
+  record a disposition.
+
+## Follow-ups
+
+1. **Wiring (after the `/mcp` slice merges).** Move `connect-relay/client` and
+   `connect-relay/shared` into `src/connect/`, then:
+   - start `startConnect` from `registerService`;
+   - print the URL from `olympus connect`;
+   - show the Let's Encrypt subscriber agreement at opt-in;
+   - add relay status to the dashboard.
+
+   The client stays outside `src/` until then, so the public-surface guard
+   needs no allowlist entry for an unwired module.
+2. **Coordinate with the `/mcp` slice.** The worker must accept
+   `Host: <id>.<zone>` (DNS-rebinding allowlist), and it must treat
+   `x-olympus-relay: 1` as a remote caller. That header is trustworthy only
+   because the local endpoint strips any inbound copy, and only while the
+   worker stays bound to loopback. OAuth metadata should build URLs from
+   `x-forwarded-host`.
+3. **Certificate Transparency watch** for the install's hostname: an alert on
+   any certificate the install did not request.
+4. **ACME Renewal Information (ARI, RFC 9773).** It makes renewals exempt from
+   every Let's Encrypt limit.
+5. A human-readable relay status endpoint, and an admin revoke command.
+6. A pre-opened data-connection pool, if first-byte latency matters.
+7. Multi-node relay: a shared registry, plus session routing by install id.
