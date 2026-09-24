@@ -33,6 +33,11 @@ type GatewayRespond = (
 interface GatewayClientLike {
   invalidated?: boolean;
   connect?: { scopes?: unknown };
+  /**
+   * OpenClaw's server-attested browser origin for this WebSocket client,
+   * captured at the handshake after its own origin policy admitted it.
+   */
+  browserOrigin?: { origin?: unknown };
 }
 
 interface GatewayRequestHandlerInput {
@@ -105,6 +110,7 @@ export function registerOlympusDashboardGateway(
           canWrite: gatewayClientHasScope(client, 'operator.write'),
           config,
           openClawConfig: context?.getRuntimeConfig?.() ?? api.config,
+          browserOrigin: client?.browserOrigin?.origin,
           fetchImpl,
           ...(signal ? { signal } : {}),
         });
@@ -126,7 +132,7 @@ export function registerOlympusDashboardGateway(
       try {
         const parsed = parseDashboardControlParams(params);
         const openClawConfig = context?.getRuntimeConfig?.() ?? api.config;
-        const gatewayPublicOrigin = resolveGatewayPublicOrigin(openClawConfig);
+        const gatewayPublicOrigin = resolveNativeOAuthOrigin(openClawConfig, client?.browserOrigin?.origin);
         if (parsed.action === 'start_oauth' && !gatewayPublicOrigin) {
           respond(true, gatewayPublicOriginRequiredResult());
           return;
@@ -154,12 +160,15 @@ export async function requestDashboardRead(input: {
   canWrite: boolean;
   config: OlympusConfig;
   openClawConfig?: unknown;
+  /** The reading client's server-attested browser origin, when OpenClaw supplies one. */
+  browserOrigin?: unknown;
   fetchImpl?: DashboardFetch;
   signal?: AbortSignal;
   /** Test seam; production callers use the configured, capped worker timeout. */
   timeoutMs?: number;
 }): Promise<OlympusDashboardReadResult> {
   const authToken = requireWorkerAuthToken(input.config);
+  const oauthOrigin = resolveNativeOAuthOrigin(input.openClawConfig, input.browserOrigin);
   if (input.params.view === 'dispositions'
     && 'action' in input.params
     && input.params.action === 'browse_folder_scope') {
@@ -177,7 +186,7 @@ export async function requestDashboardRead(input: {
       url: workerRootUrl(input.config, '/dashboard/dispositions'),
       init: {
         method: 'POST',
-        headers: workerHeaders(authToken, resolveGatewayPublicOrigin(input.openClawConfig), true),
+        headers: workerHeaders(authToken, oauthOrigin, true),
         body: encoded,
         redirect: 'error',
       },
@@ -201,7 +210,7 @@ export async function requestDashboardRead(input: {
   url.searchParams.set('view', input.params.view);
   url.searchParams.set('can_write', input.canWrite ? '1' : '0');
   if (input.params.source_id !== undefined) url.searchParams.set('source_id', input.params.source_id);
-  const headers = workerHeaders(authToken, resolveGatewayPublicOrigin(input.openClawConfig));
+  const headers = workerHeaders(authToken, oauthOrigin);
   const { response, text: body } = await boundedWorkerRequest({
     fetchImpl: input.fetchImpl ?? fetch,
     url,
@@ -471,6 +480,64 @@ export function resolveGatewayPublicOrigin(value: unknown): string | undefined {
   }
 }
 
+/**
+ * The origin a native OAuth flow returns to.
+ *
+ * `gateway.publicOrigin` wins whenever it is configured. Without it, a fresh
+ * install's loopback Gateway still has one origin it can prove: the loopback
+ * browser origin OpenClaw itself attested and admitted at the operator's
+ * WebSocket handshake. Requiring `gateway.publicOrigin` for that case left every
+ * fresh install on the bring-your-own walkthrough with a disabled button
+ * (beta.5 fresh install on a clean Linux user, 2026-09-24). Only loopback http
+ * is accepted here: a provider code then reaches software on the operator's own
+ * machine, and the callback route can re-derive the identical origin from the
+ * loopback request it arrives on. A remote https origin still needs
+ * `gateway.publicOrigin`, because nothing on the callback can attest it.
+ */
+export function resolveNativeOAuthOrigin(openClawConfig: unknown, browserOrigin: unknown): string | undefined {
+  return resolveGatewayPublicOrigin(openClawConfig) ?? loopbackHttpOrigin(browserOrigin);
+}
+
+function loopbackHttpOrigin(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const raw = value.trim();
+  if (!raw || raw.length > 256) return undefined;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'http:' || url.username || url.password) return undefined;
+    if (url.pathname !== '/' || url.search || url.hash) return undefined;
+    return isLoopbackHostname(url.hostname) ? url.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+}
+
+function isLoopbackPeer(address: string | undefined): boolean {
+  if (!address) return false;
+  const peer = address.trim().toLowerCase();
+  return peer === '::1' || /^(?:::ffff:)?127(?:\.\d{1,3}){3}$/.test(peer);
+}
+
+/**
+ * The loopback origin a relay-bounced callback arrived on, when no
+ * `gateway.publicOrigin` is configured. It counts only for a plain-http request
+ * from a loopback socket peer naming a loopback Host — the shape of a browser on
+ * the Gateway host or behind the operator's own port forward. The worker still
+ * requires this origin to equal the one signed into the flow's state.
+ */
+function loopbackCallbackOrigin(request: IncomingMessage): string | undefined {
+  if ((request.socket as { encrypted?: boolean } | undefined)?.encrypted === true) return undefined;
+  if (!isLoopbackPeer(request.socket?.remoteAddress)) return undefined;
+  const host = request.headers?.host;
+  if (typeof host !== 'string' || !host || host.length > 256 || /[\s/@?#\\]/.test(host)) return undefined;
+  return loopbackHttpOrigin(`http://${host}`);
+}
+
 function registerOAuthCallbackRoutes(
   api: OlympusDashboardGatewayApi,
   config: OlympusConfig,
@@ -556,7 +623,7 @@ async function handleOAuthCallback(input: {
     writeCallbackPage(input.response, false, 405);
     return;
   }
-  const publicOrigin = resolveGatewayPublicOrigin(input.openClawConfig);
+  const publicOrigin = resolveGatewayPublicOrigin(input.openClawConfig) ?? loopbackCallbackOrigin(input.request);
   const authToken = workerAuthTokenFromConfig(input.config);
   if (!publicOrigin || !authToken) {
     writeCallbackPage(input.response, false, 503);

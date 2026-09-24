@@ -11,6 +11,7 @@ import {
   registerOlympusDashboardGateway,
   requestDashboardRead,
   resolveGatewayPublicOrigin,
+  resolveNativeOAuthOrigin,
   type DashboardFetch,
 } from '../src/core/control-ui-gateway.ts';
 import {
@@ -231,6 +232,52 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
       status: 409,
       body: expect.objectContaining({ error: expect.objectContaining({ code: 'gateway_public_origin_required' }) }),
     })]]);
+  });
+
+  test('without publicOrigin, only an attested loopback browser origin and a loopback callback stand in', async () => {
+    const fresh = { gateway: { bind: 'loopback', port: 19989 } };
+    expect(resolveNativeOAuthOrigin(fresh, 'http://localhost:19989')).toBe('http://localhost:19989');
+    expect(resolveNativeOAuthOrigin(fresh, 'http://127.0.0.1:19989/')).toBe('http://127.0.0.1:19989');
+    expect(resolveNativeOAuthOrigin(fresh, 'http://[::1]:19989')).toBe('http://[::1]:19989');
+    expect(resolveNativeOAuthOrigin(fresh, 'https://gateway.tailnet.example')).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, 'http://192.168.1.20:19989')).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, 'http://localhost:19989/path')).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, 'http://user@localhost:19989')).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, undefined)).toBeUndefined();
+    // A configured publicOrigin always wins over the browser.
+    expect(resolveNativeOAuthOrigin({ gateway: { publicOrigin: 'https://gateway.example' } }, 'http://localhost:19989'))
+      .toBe('https://gateway.example');
+
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const registrations = gatewayRegistrations(async (url, init) => {
+      requests.push({ url: String(url), ...(init ? { init } : {}) });
+      return new Response(null, { status: 303, headers: { Location: '/oauth/callback/dropbox/done' } });
+    }, '');
+    const route = registrations.routes.get('/oauth/callback/dropbox')!;
+    const callback = (remoteAddress: string, host: string, encrypted = false) => ({
+      method: 'GET',
+      url: '/oauth/callback/dropbox?code=provider-code&state=signed-state',
+      headers: { host },
+      socket: { remoteAddress, encrypted },
+    } as unknown as IncomingMessage);
+
+    const remotePeer = mockResponse();
+    await route(callback('203.0.113.10', 'localhost:19989'), remotePeer.value);
+    expect(remotePeer.statusCode()).toBe(503);
+    const remoteHost = mockResponse();
+    await route(callback('127.0.0.1', 'gateway.example'), remoteHost.value);
+    expect(remoteHost.statusCode()).toBe(503);
+    const tls = mockResponse();
+    await route(callback('127.0.0.1', 'localhost:19989', true), tls.value);
+    expect(tls.statusCode()).toBe(503);
+    expect(requests).toHaveLength(0);
+
+    const loopback = mockResponse();
+    await route(callback('::ffff:127.0.0.1', 'localhost:19989'), loopback.value);
+    expect(loopback.statusCode()).toBe(303);
+    expect(requests).toHaveLength(1);
+    expect(new Headers(requests[0]?.init?.headers).get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER))
+      .toBe('http://localhost:19989');
   });
 
   test('OAuth callback relays only the fixed source and bounded query, without following redirects', async () => {

@@ -33,6 +33,13 @@ import {
   DEFAULT_DROPBOX_PUBLISHER_APP_KEY,
   DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
 } from '../src/core/publisher-oauth-client.ts';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { OLYMPUS_DASHBOARD_CONTROL_METHOD } from '../src/control-ui-contract.ts';
+import { defaultConfig } from '../src/core/config.ts';
+import {
+  registerOlympusDashboardGateway,
+  requestDashboardRead,
+} from '../src/core/control-ui-gateway.ts';
 import { dashboardOAuthConnectSheet } from '../src/workers/dashboard/components.ts';
 import {
   PUBLISHER_ADVANCED_BYO_SUMMARY,
@@ -995,6 +1002,169 @@ describe('publisher-mode card', () => {
     expect(view).not.toContain(state);
     for (const segment of state.split('.')) expect(view).not.toContain(segment);
     expect(view).toContain('awaiting_consent');
+  });
+});
+
+// Beta.5 fresh install on a clean Linux user, OpenClaw 2026.9.6, loopback
+// Gateway with no gateway.publicOrigin (owner, 2026-09-24). The standalone
+// dashboard.json offered publisher one-click for Gmail, Drive and Dropbox; the
+// native Control UI page for the same worker offered the bring-your-own
+// walkthrough with the pilot client id prefilled, because the card shape was
+// gated on the native render having an OAuth origin, and that origin existed
+// only when gateway.publicOrigin was configured.
+describe('native OpenClaw page offers the same publisher one-click connect', () => {
+  const PUBLISHER_SHEETS = ['connect-gmail-email', 'connect-google_drive-docs', 'connect-dropbox-files'] as const;
+  const LOOPBACK_BROWSER_ORIGIN = 'http://localhost:19989';
+  const FRESH_GATEWAY = { gateway: { bind: 'loopback', port: 19989 } };
+
+  function nativeWorkerConfig() {
+    const config = defaultConfig();
+    config.worker.authToken = 'dashboard-secret';
+    config.email.baseUrl = 'http://127.0.0.1:8010/v1';
+    return config;
+  }
+
+  function bridge(instance: Fixture) {
+    return async (url: RequestInfo | URL, init?: RequestInit) => instance.fetch(new Request(url, init));
+  }
+
+  async function nativeSetupBody(instance: Fixture, browserOrigin?: string): Promise<string> {
+    const result = await requestDashboardRead({
+      params: { view: 'setup' },
+      canWrite: true,
+      config: nativeWorkerConfig(),
+      openClawConfig: FRESH_GATEWAY,
+      ...(browserOrigin === undefined ? {} : { browserOrigin }),
+      fetchImpl: bridge(instance),
+    });
+    expect(result.status).toBe(200);
+    return result.body;
+  }
+
+  function sheet(body: string, id: string): string {
+    const start = body.indexOf(`<div class="sheet" id="${id}"`);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const next = body.indexOf('<div class="sheet"', start + 1);
+    return body.slice(start, next === -1 ? undefined : next);
+  }
+
+  function expectPublisherSheet(markup: string): void {
+    // The one-click form leads and asks for nothing: no client id field.
+    const firstForm = markup.slice(markup.indexOf('<form'), markup.indexOf('</form>'));
+    expect(firstForm).toContain('data-oauth-autostart');
+    expect(firstForm).not.toContain('name="client_id"');
+    // Bring-your-own is still there, one disclosure down.
+    expect(markup).toContain(`<summary>${PUBLISHER_ADVANCED_BYO_SUMMARY}</summary>`);
+    expect(markup.indexOf('name="client_id"')).toBeGreaterThan(markup.indexOf('<details'));
+  }
+
+  function gateway(instance: Fixture, openClawConfig: unknown) {
+    const methods = new Map<string, (input: Record<string, unknown>) => Promise<void>>();
+    const routes = new Map<string, (request: IncomingMessage, response: ServerResponse) => unknown>();
+    registerOlympusDashboardGateway({
+      config: openClawConfig,
+      registerGatewayMethod(method, handler) {
+        methods.set(method, handler as unknown as (input: Record<string, unknown>) => Promise<void>);
+      },
+      registerHttpRoute(route) {
+        routes.set(route.path, route.handler);
+      },
+    }, nativeWorkerConfig(), { fetchImpl: bridge(instance) });
+    return { methods, routes };
+  }
+
+  async function startThroughGateway(
+    registered: ReturnType<typeof gateway>,
+    openClawConfig: unknown,
+  ): Promise<{ status: number; body: { authorization_url: string } }> {
+    const calls: unknown[][] = [];
+    await registered.methods.get(OLYMPUS_DASHBOARD_CONTROL_METHOD)!({
+      params: { action: 'start_oauth', source: 'dropbox' },
+      client: { connect: { scopes: ['operator.write'] }, browserOrigin: { origin: LOOPBACK_BROWSER_ORIGIN } },
+      context: { getRuntimeConfig: () => openClawConfig },
+      respond: (...args: unknown[]) => calls.push(args),
+    });
+    return calls[0]?.[1] as { status: number; body: { authorization_url: string } };
+  }
+
+  async function callbackThroughGateway(
+    registered: ReturnType<typeof gateway>,
+    state: string,
+    host: string,
+  ): Promise<{ status: number; location: string | undefined }> {
+    let statusCode = 0;
+    const headers = new Map<string, string>();
+    const response = {
+      set statusCode(value: number) { statusCode = value; },
+      get statusCode() { return statusCode; },
+      setHeader(name: string, value: string) { headers.set(name.toLowerCase(), value); },
+      end() {},
+    } as unknown as ServerResponse;
+    await registered.routes.get('/oauth/callback/dropbox')!({
+      method: 'GET',
+      url: `/oauth/callback/dropbox?code=relay-code-native&state=${encodeURIComponent(state)}`,
+      headers: { host },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as unknown as IncomingMessage, response);
+    return { status: statusCode, location: headers.get('location') };
+  }
+
+  test('the standalone dashboard.json offers publisher_client for every publisher source', async () => {
+    const view = await dashboardJson(fixture());
+    for (const sourceId of ['gmail.email', 'google_drive.docs', 'dropbox.files']) {
+      const card = view.sources.find((source: { source_id: string }) => source.source_id === sourceId);
+      expect(card.connection.action.publisher_client).toBe(true);
+    }
+  });
+
+  test('a loopback Gateway with no publicOrigin renders the same publisher cards, enabled', async () => {
+    const body = await nativeSetupBody(fixture(), LOOPBACK_BROWSER_ORIGIN);
+    for (const id of PUBLISHER_SHEETS) expectPublisherSheet(sheet(body, id));
+    expect(body).not.toContain('id="setup-dropbox-files"');
+    expect(body).not.toContain('data-native-oauth-unavailable');
+  });
+
+  test('without any trusted origin the cards stay publisher-shaped and are marked unavailable', async () => {
+    const body = await nativeSetupBody(fixture());
+    for (const id of PUBLISHER_SHEETS) expectPublisherSheet(sheet(body, id));
+    expect(body).not.toContain('id="setup-dropbox-files"');
+    expect(body).toContain('OAuth connections are unavailable until the Gateway has a trusted public origin.');
+  });
+
+  test('a remote browser origin is not a substitute for gateway.publicOrigin', async () => {
+    const body = await nativeSetupBody(fixture(), 'https://gateway.tailnet.example');
+    expect(body).toContain('data-native-oauth-unavailable');
+    expect(body).not.toContain('https://gateway.tailnet.example/oauth/callback/');
+  });
+
+  test('one-click connect completes through the Gateway on the loopback origin OpenClaw attested', async () => {
+    const instance = fixture();
+    const registered = gateway(instance, FRESH_GATEWAY);
+    const started = await startThroughGateway(registered, FRESH_GATEWAY);
+    expect(started.status).toBe(200);
+    const authorization = new URL(started.body.authorization_url);
+    expect(authorization.searchParams.get('client_id')).toBe(PUBLISHER_APP_KEY);
+    expect(authorization.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+    const state = authorization.searchParams.get('state')!;
+    expect(statePayload(state).origin).toBe(LOOPBACK_BROWSER_ORIGIN);
+
+    // The relay bounces the browser to <origin>/oauth/callback/dropbox, which
+    // the operator's port forward delivers to the loopback Gateway.
+    const callback = await callbackThroughGateway(registered, state, 'localhost:19989');
+    expect(callback).toEqual({ status: 303, location: '/oauth/callback/dropbox/done' });
+    expect(instance.exchanges).toHaveLength(1);
+    expect(instance.exchanges[0]?.get('code')).toBe('relay-code-native');
+    expect(instance.exchanges[0]?.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+  });
+
+  test('a callback arriving on a different origin than the flow signed is refused', async () => {
+    const instance = fixture();
+    const registered = gateway(instance, FRESH_GATEWAY);
+    const started = await startThroughGateway(registered, FRESH_GATEWAY);
+    const state = new URL(started.body.authorization_url).searchParams.get('state')!;
+    const callback = await callbackThroughGateway(registered, state, '127.0.0.1:28000');
+    expect(callback.status).not.toBe(303);
+    expect(instance.exchanges).toHaveLength(0);
   });
 });
 
