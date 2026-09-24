@@ -10890,6 +10890,38 @@ import { isIP } from "node:net";
 function isApprovedSecureSourceEmbeddingProvider(provider) {
   return provider.backend === "local" || provider.backend === "cloud" && provider.provider === "venice";
 }
+function abortableDelay(ms, signal) {
+  return new Promise((resolve5) => {
+    if (signal.aborted)
+      return resolve5();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve5();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+async function fetchEmbeddingResponse(fetchImpl, provider, url, init) {
+  let attempt = 0;
+  for (;; ) {
+    const response = await fetchImpl(url, init);
+    attempt += 1;
+    if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status))
+      return response;
+    const delayMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
+    if (delayMs === undefined || init.signal.aborted) {
+      throw new TransientSourceEmbeddingError(provider, response.status, attempt);
+    }
+    await response.body?.cancel().catch(() => {
+      return;
+    });
+    await abortableDelay(delayMs, init.signal);
+    if (init.signal.aborted)
+      throw new TransientSourceEmbeddingError(provider, response.status, attempt);
+  }
+}
 
 class GeminiSourceEmbeddingProvider {
   provider = "google-gemini";
@@ -10971,7 +11003,7 @@ class GeminiSourceEmbeddingProvider {
       }));
       this.lastMediaPartsSkipped = mediaPartsSkipped;
       this.mediaPartsSkipped += mediaPartsSkipped;
-      const response = await this.fetchImpl(`${this.baseUrl}/${modelPath}:batchEmbedContents`, {
+      const response = await fetchEmbeddingResponse(this.fetchImpl, "Gemini", `${this.baseUrl}/${modelPath}:batchEmbedContents`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -11134,7 +11166,7 @@ class OpenAICompatibleSourceEmbeddingProvider {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       await this.preflight?.(controller.signal);
-      const response = await this.fetchImpl(`${this.baseUrl}/embeddings`, {
+      const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
         method: "POST",
         headers: this.requestHeaders(),
         body: JSON.stringify({
@@ -11540,7 +11572,7 @@ function normalizeOutputDimensionality(value) {
 function hashString(value) {
   return createHash7("sha256").update(value).digest("hex");
 }
-var DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS;
+var DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
 var init_embeddings = __esm(() => {
   init_operation_error();
   init_embedding_identity();
@@ -11548,6 +11580,16 @@ var init_embeddings = __esm(() => {
   MEDIA_FETCH_HEADERS = {
     Accept: "image/png,image/jpeg,image/*;q=0.8,*/*;q=0.1",
     "User-Agent": "Mozilla/5.0 (compatible; OlympusSourceIndex/0.1)"
+  };
+  TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
+  TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1000];
+  TransientSourceEmbeddingError = class TransientSourceEmbeddingError extends OperationError {
+    status;
+    constructor(provider, status, attempts) {
+      super("source_index_error", `${provider} source embedding endpoint is temporarily unavailable (HTTP ${status} after ${attempts} attempts).`, "This is a transient provider outage, not a key or model problem. Retry the same request in a few seconds.");
+      this.name = "TransientSourceEmbeddingError";
+      this.status = status;
+    }
   };
 });
 
@@ -20994,7 +21036,15 @@ var init_local_index = __esm(() => {
       const before = this.embeddingReadAuthority(provider);
       if (before.skippedReason)
         return { rows: [], skippedReason: before.skippedReason };
-      const [queryVector] = await provider.embed([{ text: trimmed }], { taskType: "RETRIEVAL_QUERY" });
+      let queryVector;
+      try {
+        [queryVector] = await provider.embed([{ text: trimmed }], { taskType: "RETRIEVAL_QUERY" });
+      } catch (error) {
+        if (error instanceof TransientSourceEmbeddingError) {
+          return { rows: [], skippedReason: "embedding_query_unavailable" };
+        }
+        throw error;
+      }
       if (!queryVector)
         return { rows: [], skippedReason: "embedding_query_vector_missing" };
       if (queryVector.length !== provider.dimension) {

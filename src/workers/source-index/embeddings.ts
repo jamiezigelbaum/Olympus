@@ -120,6 +120,74 @@ const MEDIA_FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (compatible; OlympusSourceIndex/0.1)',
 };
 
+/**
+ * Statuses a hosted embedding endpoint returns for a momentary outage or
+ * throttle. A query embedding that hits one is retried inside the provider's
+ * own time budget before anything fails (2026-09-24: a single Gemini 503 on a
+ * query embedding failed a `source_answer` whose immediate retry succeeded).
+ */
+const TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
+const TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1_000] as const;
+
+/**
+ * The embedding endpoint was temporarily unavailable after the provider's
+ * internal retries. Callers that can degrade (the query-time vector lane)
+ * catch this class; a configuration error stays a plain OperationError.
+ */
+export class TransientSourceEmbeddingError extends OperationError {
+  status: number;
+
+  constructor(provider: string, status: number, attempts: number) {
+    super(
+      'source_index_error',
+      `${provider} source embedding endpoint is temporarily unavailable (HTTP ${status} after ${attempts} attempts).`,
+      'This is a transient provider outage, not a key or model problem. Retry the same request in a few seconds.',
+    );
+    this.name = 'TransientSourceEmbeddingError';
+    this.status = status;
+  }
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
+/**
+ * POST to an embedding endpoint, retrying transient statuses with a short
+ * backoff while the caller's abort signal allows. Throws
+ * TransientSourceEmbeddingError when every attempt was transient; returns any
+ * other response (ok or not) for the caller to judge.
+ */
+async function fetchEmbeddingResponse(
+  fetchImpl: typeof fetch,
+  provider: string,
+  url: string,
+  init: RequestInit & { signal: AbortSignal },
+): Promise<Response> {
+  let attempt = 0;
+  for (;;) {
+    const response = await fetchImpl(url, init);
+    attempt += 1;
+    if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status)) return response;
+    const delayMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
+    if (delayMs === undefined || init.signal.aborted) {
+      throw new TransientSourceEmbeddingError(provider, response.status, attempt);
+    }
+    await response.body?.cancel().catch(() => undefined);
+    await abortableDelay(delayMs, init.signal);
+    if (init.signal.aborted) throw new TransientSourceEmbeddingError(provider, response.status, attempt);
+  }
+}
+
 export class GeminiSourceEmbeddingProvider implements SourceEmbeddingProvider {
   provider = 'google-gemini';
   modelId: string;
@@ -202,7 +270,7 @@ export class GeminiSourceEmbeddingProvider implements SourceEmbeddingProvider {
       }));
       this.lastMediaPartsSkipped = mediaPartsSkipped;
       this.mediaPartsSkipped += mediaPartsSkipped;
-      const response = await this.fetchImpl(`${this.baseUrl}/${modelPath}:batchEmbedContents`, {
+      const response = await fetchEmbeddingResponse(this.fetchImpl, 'Gemini', `${this.baseUrl}/${modelPath}:batchEmbedContents`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -371,7 +439,7 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       await this.preflight?.(controller.signal);
-      const response = await this.fetchImpl(`${this.baseUrl}/embeddings`, {
+      const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
         method: 'POST',
         headers: this.requestHeaders(),
         body: JSON.stringify({
