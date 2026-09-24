@@ -659,6 +659,7 @@ function makeContext(): OperationContext {
     config,
     delphi: new DelphiClient(config, createDelphiTransport(config)),
     email: new EmailClient(config, createEmailTransport(config)),
+    caller: { surface: 'cli', displayName: 'Olympus CLI' },
   };
 }
 

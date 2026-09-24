@@ -23,6 +23,7 @@ import {
 } from '../../core/oauth-relay.ts';
 import { connectPublicApiKeySource, oauthAuthorizeOrigin, safeOAuthErrorCode, startExternalOAuthSourceConnection, startOAuthSourceConnection, type OAuthFetch } from '../../core/connect.ts';
 import { OperationError } from '../../core/operation-error.ts';
+import { parseOperationCallerWire, type OperationCallerWire } from '../../core/operation-caller.ts';
 import { dropboxContentExtractionStallHours } from '../../core/ingestion-throughput.ts';
 import { createDefaultSecretStore, normalizeSecretRef, type SecretStore } from '../../core/secret-store.ts';
 import { canonicalSourceCorpusId, type SourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
@@ -862,9 +863,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const trace = createSourceAnswerTrace();
           return await runWithSourceAnswerTrace(trace, async () => {
             let requestParsed = false;
+            let caller: OperationCallerWire | undefined;
             try {
               const sourceAnswerRequest = await parseSourceIndexAnswerRequest(request);
               requestParsed = true;
+              caller = sourceAnswerRequest.caller;
               const result = await retrySqliteBusy(() => sourceAnswer.answer(sourceAnswerRequest));
               assertNoRawEmailFields(result);
               const response = json(result);
@@ -873,6 +876,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 trace,
                 outcome: 'success',
                 result,
+                ...(caller ? { caller } : {}),
               });
               return response;
             } catch (error) {
@@ -881,6 +885,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 trace,
                 outcome: classifySourceAnswerTraceOutcome(error, requestParsed, request.signal.aborted),
                 error,
+                ...(caller ? { caller } : {}),
               });
               throw error;
             }
@@ -3218,6 +3223,7 @@ async function emitSourceAnswerLatencyRecords(input: {
   outcome: SourceAnswerTraceOutcome;
   result?: Awaited<ReturnType<SourceIndexAnswerHandler['answer']>>;
   error?: unknown;
+  caller?: OperationCallerWire;
 }): Promise<void> {
   if (!input.log) return;
 
@@ -3225,7 +3231,7 @@ async function emitSourceAnswerLatencyRecords(input: {
   if (input.result) {
     const buildStartedAt = Date.now();
     try {
-      const v1 = buildSourceAnswerLatencyRecord(input.result);
+      const v1 = buildSourceAnswerLatencyRecord(input.result, undefined, input.caller);
       compatV1LoggedAt = v1.logged_at;
       recordSourceAnswerLedgerBuild(Date.now() - buildStartedAt);
       const appendStartedAt = Date.now();
@@ -3243,6 +3249,7 @@ async function emitSourceAnswerLatencyRecords(input: {
       outcome: input.outcome,
       ...(input.error !== undefined ? { error: input.error } : {}),
       ...(compatV1LoggedAt ? { compatV1LoggedAt } : {}),
+      ...(input.caller ? { caller: input.caller } : {}),
     });
     await recordSourceAnswerLatencyBestEffort(input.log, v2);
   } catch (error) {
@@ -3421,6 +3428,11 @@ async function parseSourceIndexAnswerRequest(request: Request): Promise<SourceIn
   if (timeoutMs !== undefined && timeoutMs <= 0) {
     throw new EmailSourceWorkerError(400, 'invalid_request', 'timeout_ms must be a positive number when provided.');
   }
+  const callerParse = parseOperationCallerWire(record.caller);
+  if (!callerParse.ok) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', callerParse.message);
+  }
+  const caller = callerParse.caller;
   return {
     question: record.question,
     ...(query !== undefined ? { query } : {}),
@@ -3445,6 +3457,7 @@ async function parseSourceIndexAnswerRequest(request: Request): Promise<SourceIn
     ...(includeInternalContent !== undefined ? { include_internal_content: includeInternalContent } : {}),
     ...(internalContentMaxBytes !== undefined ? { internal_content_max_bytes: internalContentMaxBytes } : {}),
     ...(timeoutMs !== undefined ? { timeout_ms: timeoutMs } : {}),
+    ...(caller ? { caller } : {}),
   };
 }
 

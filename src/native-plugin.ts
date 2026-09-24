@@ -277,6 +277,7 @@ const plugin = {
       config,
       delphi: new DelphiClient(config, createDelphiTransport(config)),
       email: new EmailClient(config, createEmailTransport(config)),
+      caller: { surface: 'native', displayName: 'OpenClaw' },
     };
 
     registerSourceWatchDeliveryRoute(api, config);

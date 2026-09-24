@@ -13,6 +13,7 @@ import {
 import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import { V0_4_PUBLIC_NATIVE_TOOLS } from './public-surface.ts';
 import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-watch.ts';
+import type { OperationCaller } from './operation-caller.ts';
 
 type SourceIndexAnswerCorpusId = string;
 type SourceIndexStatusCorpusId = string;
@@ -33,6 +34,12 @@ export interface OperationContext {
   email: EmailClient;
   /** Trusted OpenClaw tool-factory context; never sourced from tool params. */
   sourceWatchRoute?: SourceWatchAuthenticatedRoute;
+  /**
+   * Which calling agent is asking, set by the surface that built this context
+   * (never sourced from tool params). Recorded on the answer's audit entry;
+   * it does not change release policy.
+   */
+  caller?: OperationCaller;
 }
 
 export interface Operation {
@@ -269,6 +276,7 @@ export const operations: Operation[] = [
         ...(includeInternalContent !== undefined ? { includeInternalContent } : {}),
         ...(internalContentMaxBytes !== undefined ? { internalContentMaxBytes } : {}),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(ctx.caller ? { caller: ctx.caller } : {}),
       });
     },
   },
