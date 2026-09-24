@@ -105,6 +105,11 @@ import {
   V0_4_PUBLIC_CONNECT_SOURCES,
 } from './core/public-surface.ts';
 import { PUBLIC_RUNTIME_BUILD } from './core/build-flavor.ts';
+import {
+  defaultRemoteConnectionsDbPath,
+  openRemoteConnectionStore,
+  type RemoteConnectionRecord,
+} from './core/remote-connections.ts';
 
 const PUBLIC_CLI_COMMAND_NAMES = new Set<string>(V0_4_PUBLIC_CLI_COMMANDS);
 const PUBLIC_CLI_HELP_GROUPS = new Set([
@@ -115,6 +120,7 @@ const PUBLIC_CLI_HELP_GROUPS = new Set([
   'sensitivity',
   'worker',
   'connect',
+  'connections',
   'data',
   'tier',
 ]);
@@ -228,6 +234,20 @@ async function main(): Promise<void> {
     try {
       const result = await runConnect(args.slice(1));
       console.log(JSON.stringify(result, null, 2));
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
+  if (args[0] === 'connections') {
+    try {
+      console.log(JSON.stringify(runConnectionsCommand(args.slice(1)), null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
         console.error(`Error [${error.code}]: ${error.message}`);
@@ -625,6 +645,7 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
     || group === 'sensitivity'
     || group === 'worker'
     || group === 'connect'
+    || group === 'connections'
     || group === 'data'
     || group === 'tier'
   ) {
@@ -1061,6 +1082,9 @@ function printHelp(): void {
   console.log('  olympus connect venice|readwise --api-key-prompt');
   console.log('  olympus connect gemini --api-key-prompt');
   console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
+  console.log('  olympus connections add <name>');
+  console.log('  olympus connections list');
+  console.log('  olympus connections revoke <id>');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
@@ -1092,6 +1116,9 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect readwise': 'olympus connect readwise --api-key-prompt',
   'connect gemini': 'olympus connect gemini --api-key-prompt',
   'connect status': 'olympus connect status [google|gmail|google-drive|dropbox]',
+  'connections add': 'olympus connections add <name>',
+  'connections list': 'olympus connections list',
+  'connections revoke': 'olympus connections revoke <id>',
   dashboard: 'olympus dashboard [--read-only] [--no-open]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
@@ -1160,6 +1187,13 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus connect telegram|whatsapp --pair',
     '  olympus connect venice|readwise --api-key-prompt',
     '  olympus connect gemini --api-key-prompt',
+  ],
+  connections: [
+    'Usage: olympus connections <command>',
+    'Commands:',
+    '  olympus connections add <name>      Approve a remote agent; prints its URL and token once',
+    '  olympus connections list',
+    '  olympus connections revoke <id>',
   ],
   data: [
     'Usage: olympus data <command>',
@@ -2397,6 +2431,65 @@ function resolveWorkerAuthToken(
 }
 
 /** The worker auth token from worker.env or config, or a clear refusal. */
+/**
+ * Remote agent connections (`/mcp` on the worker). `add` prints the token
+ * exactly once: the store keeps only its digest, so it cannot be shown again.
+ */
+export function runConnectionsCommand(
+  args: readonly string[],
+  env: Record<string, string | undefined> = process.env,
+): Record<string, unknown> {
+  const [command, ...rest] = args;
+  const store = openRemoteConnectionStore(defaultRemoteConnectionsDbPath(env));
+  try {
+    if (command === 'add') {
+      if (rest.length !== 1 || rest[0]!.startsWith('-')) {
+        throw new OperationError('invalid_params', 'Usage: olympus connections add <name>');
+      }
+      const created = store.create(rest[0]!);
+      return {
+        kind: 'remote_connection_created',
+        connection: remoteConnectionView(created.connection),
+        url: remoteConnectionUrl(loadConfig(env)),
+        token: created.token,
+        notice: 'The token is shown once and is not stored. Paste it into the agent now; revoke with olympus connections revoke <id>.',
+      };
+    }
+    if (command === 'list') {
+      if (rest.length !== 0) throw new OperationError('invalid_params', 'Usage: olympus connections list');
+      return {
+        kind: 'remote_connections',
+        url: remoteConnectionUrl(loadConfig(env)),
+        connections: store.list().map(remoteConnectionView),
+      };
+    }
+    if (command === 'revoke') {
+      if (rest.length !== 1) throw new OperationError('invalid_params', 'Usage: olympus connections revoke <id>');
+      return { kind: 'remote_connection_revoked', connection: remoteConnectionView(store.revoke(rest[0]!)) };
+    }
+    throw new OperationError('invalid_params', `Unknown connections command: ${command ?? ''}`.trim(), 'Run olympus connections --help.');
+  } finally {
+    store.close();
+  }
+}
+
+function remoteConnectionView(connection: RemoteConnectionRecord): Record<string, unknown> {
+  return {
+    id: connection.id,
+    name: connection.displayName,
+    kind: connection.kind,
+    created_at: connection.createdAt,
+    last_used_at: connection.lastUsedAt,
+    revoked_at: connection.revokedAt,
+    status: connection.revokedAt ? 'revoked' : 'active',
+  };
+}
+
+/** The worker's own origin plus `/mcp`: loopback until a relay fronts it. */
+function remoteConnectionUrl(config: OlympusConfig): string {
+  return new URL('/mcp', config.email.baseUrl).toString();
+}
+
 export function runDashboardTokenCommand(env: Record<string, string | undefined> = process.env): string {
   const token = resolveWorkerAuthToken(env);
   if (!token) {

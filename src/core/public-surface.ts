@@ -40,6 +40,11 @@ export const V0_4_HERMES_MCP_TOOLS = [
   'source_index_status',
 ] as const;
 
+// Remote MCP (`/mcp` on the worker, reached by agents outside this machine
+// through an owner-approved connection) serves the same narrowed list Hermes
+// gets. Source watches stay native-only: their delivery needs OpenClaw routing.
+export const V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
+
 export const V0_4_PUBLIC_SKILL_DIRS = [
   'skills/ask-argus',
   'skills/ask-sources',
@@ -117,6 +122,9 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'connect readwise',
   'connect gemini',
   'connect status',
+  'connections add',
+  'connections list',
+  'connections revoke',
   'dashboard',
   'source answer',
   'source index status',
@@ -241,6 +249,7 @@ const PUBLIC_OPERATION_NAMES = {
   native: new Set<string>(V0_4_PUBLIC_NATIVE_TOOLS),
   mcp: new Set<string>(V0_4_PUBLIC_MCP_TOOLS),
   cli: new Set<string>(V0_4_PUBLIC_CLI_OPERATIONS),
+  remote: new Set<string>(V0_4_PUBLIC_REMOTE_MCP_TOOLS),
 } as const;
 
 export function isV04PublicOperation(

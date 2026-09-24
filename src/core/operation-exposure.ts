@@ -7,7 +7,7 @@ import { isV04PublicOperation } from './public-surface.ts';
  * itself is exactly how tools that only that surface can serve ended up
  * advertised on the two that cannot.
  */
-export type OperationSurface = 'native' | 'mcp' | 'cli';
+export type OperationSurface = 'native' | 'mcp' | 'cli' | 'remote';
 
 export interface OperationExposureContext {
   config: OlympusConfig;
