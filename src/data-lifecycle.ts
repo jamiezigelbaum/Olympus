@@ -32,6 +32,7 @@ import {
   type SqliteMigration,
   type SqliteMigrationResult,
 } from './core/sqlite-migrations.ts';
+import { REMOTE_CONNECTIONS_STORE_ID, resolveRemoteConnectionsDbPath } from './core/remote-connections.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import {
@@ -512,6 +513,13 @@ export function exportOlympusData(options: {
     for (const statePath of source.preservationOnlyPaths?.(options) ?? []) skipped.push(statePath);
   }
 
+  // Remote-agent connections are credentials (token digests), which an export
+  // leaves behind like every other secret. Named, so the manifest says so.
+  if (options.sourceId === undefined) {
+    const connectionsPath = resolveRemoteConnectionsDbPath(envForContext(options));
+    if (existsSync(connectionsPath)) skipped.push(connectionsPath);
+  }
+
   const configRoot = join(destination, 'config');
   makeDurableDirectory(configRoot, durabilityBoundary);
   for (const [sourcePath, destinationPath] of [
@@ -769,6 +777,15 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
   const home = resolveHome(context.homeDir);
   return [
     ...selectSources(undefined).flatMap((source) => sourceDeleteTargets(source, context)),
+    // Approved remote-agent connections. Removing the database revokes every
+    // connection token at once. Named on its own because an explicit
+    // OLYMPUS_REMOTE_CONNECTIONS_DB_PATH or XDG_DATA_HOME can put it outside
+    // the known roots below.
+    ...sqliteDeleteTargets(
+      resolveRemoteConnectionsDbPath(envForContext(context)),
+      REMOTE_CONNECTIONS_STORE_ID,
+      context,
+    ),
     ...knownOlympusDataRoots(context).map((path): DeleteTarget => ({
       path,
       kind: 'known_root',

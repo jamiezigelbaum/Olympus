@@ -17759,7 +17759,10 @@ var init_email_policy = __esm(() => {
 });
 
 // src/core/operation-caller.ts
-var init_operation_caller = () => {};
+var inProcessRemoteRequests;
+var init_operation_caller = __esm(() => {
+  inProcessRemoteRequests = new WeakSet;
+});
 
 // src/core/ingestion-throughput.ts
 var init_ingestion_throughput = __esm(() => {

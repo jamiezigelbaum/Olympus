@@ -59,7 +59,6 @@ import {
   withWorkerBearerAuth,
   workerAuthTokenFromEnv,
 } from '../http.ts';
-import type { RemoteConnectionStore } from '../../core/remote-connections.ts';
 import { createAnalyst } from '../../core/analyst.ts';
 import { createDelphiAnalystModel } from '../../core/analyst-delphi.ts';
 import { createAnthropicAnalystModel } from '../../core/analyst-anthropic.ts';
@@ -3885,11 +3884,15 @@ export async function main(): Promise<void> {
     recheckCredentials: () => bootSecretResolver.recheckNow(),
   });
   warnIfWorkerAuthDisabled('private email source worker', authToken, hostname);
-  let remoteConnections: RemoteConnectionStore | undefined;
   // Loaded here rather than at module scope: other bundles import helpers from
   // this module (the embedding drain), and the MCP SDK is not tree-shakeable.
-  const { createInProcessOperationContext, createRemoteMcpHandler, withRemoteMcpRoute } = await import('../remote-mcp.ts');
-  const { defaultRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
+  const {
+    createInProcessOperationContext,
+    createRemoteMcpHandler,
+    lazyRemoteConnectionStore,
+    withRemoteMcpRoute,
+  } = await import('../remote-mcp.ts');
+  const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
 
   const server = Bun.serve({
     hostname,
@@ -3899,15 +3902,16 @@ export async function main(): Promise<void> {
     // only; every other route keeps the worker bearer. See workers/remote-mcp.ts.
     fetch: withRemoteMcpRoute(
       createRemoteMcpHandler({
-        connections: () => {
-          remoteConnections ??= openRemoteConnectionStore(defaultRemoteConnectionsDbPath(process.env));
-          return remoteConnections;
-        },
-        makeOperationContext: (caller) => createInProcessOperationContext({
+        connections: lazyRemoteConnectionStore(
+          () => resolveRemoteConnectionsDbPath(process.env),
+          openRemoteConnectionStore,
+        ),
+        makeOperationContext: (caller, signal) => createInProcessOperationContext({
           config: olympusConfig,
           sourceIndexReadEnabled,
           workerFetch: worker.fetch,
           caller,
+          signal,
         }),
       }),
       withWorkerBearerAuth(worker.fetch, { authToken }),

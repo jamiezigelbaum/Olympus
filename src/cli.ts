@@ -106,8 +106,8 @@ import {
 } from './core/public-surface.ts';
 import { PUBLIC_RUNTIME_BUILD } from './core/build-flavor.ts';
 import {
-  defaultRemoteConnectionsDbPath,
   openRemoteConnectionStore,
+  resolveRemoteConnectionsDbPathForCli,
   type RemoteConnectionRecord,
 } from './core/remote-connections.ts';
 
@@ -2440,7 +2440,8 @@ export function runConnectionsCommand(
   env: Record<string, string | undefined> = process.env,
 ): Record<string, unknown> {
   const [command, ...rest] = args;
-  const store = openRemoteConnectionStore(defaultRemoteConnectionsDbPath(env));
+  // The worker's database, resolved from worker.env on a managed install.
+  const store = openRemoteConnectionStore(resolveRemoteConnectionsDbPathForCli(env));
   try {
     if (command === 'add') {
       if (rest.length !== 1 || rest[0]!.startsWith('-')) {
@@ -2451,6 +2452,7 @@ export function runConnectionsCommand(
         kind: 'remote_connection_created',
         connection: remoteConnectionView(created.connection),
         url: remoteConnectionUrl(loadConfig(env)),
+        db_path: store.dbPath,
         token: created.token,
         notice: 'The token is shown once and is not stored. Paste it into the agent now; revoke with olympus connections revoke <id>.',
       };
@@ -2460,6 +2462,7 @@ export function runConnectionsCommand(
       return {
         kind: 'remote_connections',
         url: remoteConnectionUrl(loadConfig(env)),
+        db_path: store.dbPath,
         connections: store.list().map(remoteConnectionView),
       };
     }

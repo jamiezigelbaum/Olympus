@@ -11318,6 +11318,7 @@ function operationCallerToWire(caller) {
     ...displayName ? { display_name: displayName } : {}
   };
 }
+var inProcessRemoteRequests = new WeakSet;
 
 // src/core/email.ts
 init_source_corpus_registry();

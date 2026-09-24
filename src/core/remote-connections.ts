@@ -20,6 +20,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { OperationError } from './operation-error.ts';
+import { readWorkerSetupEnv } from './worker-auth.ts';
 import { sanitizeCallerDisplayName } from './operation-caller.ts';
 import {
   assertSqliteSchemaCanOpen,
@@ -34,6 +35,8 @@ export const REMOTE_CONNECTION_TOKEN_PREFIX = 'olympus_conn_';
 /** How stale `last_used_at` may get before a successful call rewrites it. */
 export const REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60_000;
 
+const STORE_BUSY_TIMEOUT_MS = 10_000;
+const LAST_USED_BUSY_TIMEOUT_MS = 50;
 const CONNECTION_ID_BYTES = 9;
 const CONNECTION_SECRET_BYTES = 32;
 const CONNECTION_ID_PATTERN = /^[a-f0-9]{18}$/;
@@ -79,15 +82,68 @@ interface ConnectionRow {
   revoked_at: string | null;
 }
 
+export const REMOTE_CONNECTIONS_DB_PATH_ENV = 'OLYMPUS_REMOTE_CONNECTIONS_DB_PATH';
+
+/**
+ * Where the connection database lives for a process with this environment:
+ * an explicit `OLYMPUS_REMOTE_CONNECTIONS_DB_PATH`, else the shared Olympus
+ * data directory. The worker calls this with its own environment (the service
+ * environment with worker.env layered in).
+ */
+export function resolveRemoteConnectionsDbPath(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const explicit = env[REMOTE_CONNECTIONS_DB_PATH_ENV]?.trim();
+  if (explicit) {
+    if (!isAbsolute(explicit)) {
+      throw new TypeError(`${REMOTE_CONNECTIONS_DB_PATH_ENV} must be an absolute path.`);
+    }
+    return explicit;
+  }
+  return defaultRemoteConnectionsDbPath(env);
+}
+
+/**
+ * The database the managed worker uses, as seen from an owner's shell.
+ *
+ * The shell's XDG_DATA_HOME is not the worker's: the supervised worker runs
+ * with the service environment plus worker.env. So on a managed install the
+ * path keys come from worker.env, the way the CLI already finds the worker's
+ * auth token there. An explicit path in the shell still wins, because that is
+ * the owner saying which database they mean. With no worker.env (a source
+ * checkout, a foreground worker) the shell environment is the worker's.
+ */
+export function resolveRemoteConnectionsDbPathForCli(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const explicit = env[REMOTE_CONNECTIONS_DB_PATH_ENV]?.trim();
+  if (explicit) return resolveRemoteConnectionsDbPath({ [REMOTE_CONNECTIONS_DB_PATH_ENV]: explicit });
+  // Located only from a HOME in the environment handed in, like
+  // environmentWithWorkerSetupEnv: a scoped environment never reads the
+  // process owner's install by accident.
+  const workerEnv = env.HOME?.trim() ? readWorkerSetupEnv({ env }) : undefined;
+  if (!workerEnv) return resolveRemoteConnectionsDbPath(env);
+  return resolveRemoteConnectionsDbPath({
+    ...(env.HOME !== undefined ? { HOME: env.HOME } : {}),
+    ...(workerEnv[REMOTE_CONNECTIONS_DB_PATH_ENV] ? { [REMOTE_CONNECTIONS_DB_PATH_ENV]: workerEnv[REMOTE_CONNECTIONS_DB_PATH_ENV] } : {}),
+    ...(workerEnv.XDG_DATA_HOME ? { XDG_DATA_HOME: workerEnv.XDG_DATA_HOME } : {}),
+  });
+}
+
 export function defaultRemoteConnectionsDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
   const configured = env.XDG_DATA_HOME?.trim();
-  const dataRoot = configured || join(homedir(), '.local', 'share');
+  const dataRoot = configured || join(env.HOME?.trim() || homedir(), '.local', 'share');
   if (!isAbsolute(dataRoot)) {
     throw new TypeError('Remote connections XDG_DATA_HOME must be an absolute private data root.');
   }
   return join(dataRoot, 'openclaw', 'olympus', 'remote-connections.sqlite');
+}
+
+/** Shape check only; lets the endpoint refuse garbage without touching the store. */
+export function isWellFormedRemoteConnectionToken(token: string): boolean {
+  return TOKEN_PATTERN.test(token);
 }
 
 export function hashRemoteConnectionToken(token: string): Buffer {
@@ -103,13 +159,31 @@ export function openRemoteConnectionStore(
   const db = new Database(dbPath, { create: true });
   try {
     chmodSync(dbPath, 0o600);
-    db.exec('PRAGMA busy_timeout = 10000; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;');
+    db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
     assertSqliteSchemaCanOpen(db, REMOTE_CONNECTIONS_STORE_ID, REMOTE_CONNECTIONS_SCHEMA_VERSION);
     runSqliteMigrations(db, REMOTE_CONNECTIONS_STORE_ID, remoteConnectionMigrations());
   } catch (error) {
     closeSqliteStore(db);
     throw error;
   }
+
+  let closed = false;
+  // Last use is observability. It is written best-effort with a short lock
+  // wait, so a busy database (the CLI mid-write) never blocks or fails an
+  // authorized call; a skipped write is retried by the next call.
+  const recordLastUse = (id: string, at: string): void => {
+    if (closed) return;
+    try {
+      db.exec(`PRAGMA busy_timeout = ${LAST_USED_BUSY_TIMEOUT_MS};`);
+      try {
+        db.query('UPDATE remote_connections SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL').run(at, id);
+      } finally {
+        db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS};`);
+      }
+    } catch {
+      // Deliberately swallowed; see above.
+    }
+  };
 
   const readRow = (id: string): ConnectionRow | null =>
     db.query('SELECT * FROM remote_connections WHERE id = ?').get(id) as ConnectionRow | null;
@@ -164,18 +238,13 @@ export function openRemoteConnectionStore(
       const at = now();
       const lastUsedMs = row.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
       if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
-        try {
-          db.query('UPDATE remote_connections SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL')
-            .run(at.toISOString(), row.id);
-          row.last_used_at = at.toISOString();
-        } catch {
-          // Last-use is observability; a busy database never fails an authorized call.
-        }
+        recordLastUse(row.id, at.toISOString());
       }
       return { ok: true, connection: toRecord(row) };
     },
 
     close(): void {
+      closed = true;
       closeSqliteStore(db);
     },
   };

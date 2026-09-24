@@ -15,22 +15,33 @@
  * The connection's identity is set as the caller by the worker, never taken
  * from the client, and lands on the answer's audit ledger entry.
  */
+import { existsSync } from 'node:fs';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { OlympusConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../core/email.ts';
-import type { OperationCaller } from '../core/operation-caller.ts';
+import { markInProcessRemoteRequest, type OperationCaller } from '../core/operation-caller.ts';
 import type { OperationContext } from '../core/operations.ts';
-import type { RemoteConnectionRecord, RemoteConnectionStore } from '../core/remote-connections.ts';
+import {
+  isWellFormedRemoteConnectionToken,
+  type RemoteConnectionRecord,
+  type RemoteConnectionStore,
+} from '../core/remote-connections.ts';
 import { createOlympusMcpServer } from '../mcp/server.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
 const IN_PROCESS_WORKER_BASE_URL = 'http://olympus-worker.internal/v1';
 
 export interface RemoteMcpHandlerOptions {
-  /** Opened lazily so an unreadable store never blocks worker boot. */
-  connections: () => RemoteConnectionStore;
-  makeOperationContext: (caller: OperationCaller) => OperationContext;
+  /**
+   * Opened lazily so an unreadable store never blocks worker boot. Returns
+   * undefined when no connection database exists yet: an install that never
+   * approved a connection has nothing to authenticate against, and a probe
+   * must not create one.
+   */
+  connections: () => RemoteConnectionStore | undefined;
+  /** `signal` is the remote client's request signal; see createInProcessOperationContext. */
+  makeOperationContext: (caller: OperationCaller, signal: AbortSignal) => OperationContext;
 }
 
 export function isRemoteMcpRequest(request: Request): boolean {
@@ -53,12 +64,14 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
   return async (request: Request): Promise<Response> => {
     const token = bearerToken(request.headers.get('Authorization'));
     if (token === undefined) return unauthorized();
-    let store: RemoteConnectionStore;
+    if (!isWellFormedRemoteConnectionToken(token)) return unauthorized('invalid_token');
+    let store: RemoteConnectionStore | undefined;
     try {
       store = options.connections();
     } catch {
       return jsonResponse(503, { error: 'remote_connections_unavailable' });
     }
+    if (!store) return unauthorized('invalid_token');
     const verification = store.verifyToken(token);
     if (!verification.ok) return unauthorized('invalid_token');
     if (request.method !== 'POST') {
@@ -67,7 +80,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       return jsonResponse(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
     }
     const caller = remoteOperationCaller(verification.connection);
-    const ctx = options.makeOperationContext(caller);
+    const ctx = options.makeOperationContext(caller, request.signal);
     const server = createOlympusMcpServer('remote', () => ctx);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
@@ -79,6 +92,25 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     } finally {
       await server.close().catch(() => undefined);
     }
+  };
+}
+
+/**
+ * The worker's store accessor: opened on first use and kept open, and never
+ * created by a request. `olympus connections add` creates the database; until
+ * then every token is refused without touching the disk.
+ */
+export function lazyRemoteConnectionStore(
+  resolvePath: () => string,
+  open: (dbPath: string) => RemoteConnectionStore,
+): () => RemoteConnectionStore | undefined {
+  let store: RemoteConnectionStore | undefined;
+  return () => {
+    if (store) return store;
+    const dbPath = resolvePath();
+    if (!existsSync(dbPath)) return undefined;
+    store = open(dbPath);
+    return store;
   };
 }
 
@@ -98,6 +130,12 @@ export function createInProcessOperationContext(input: {
   sourceIndexReadEnabled: boolean;
   workerFetch: (request: Request) => Promise<Response>;
   caller: OperationCaller;
+  /**
+   * The remote client's request signal. It is joined to each in-process
+   * request, so a client that disconnects aborts its worker request the same
+   * way a disconnecting HTTP caller aborts one.
+   */
+  signal?: AbortSignal;
 }): OperationContext {
   const config: OlympusConfig = {
     ...input.config,
@@ -105,7 +143,16 @@ export function createInProcessOperationContext(input: {
     sourceIndex: { ...input.config.sourceIndex, enabled: input.sourceIndexReadEnabled },
   };
   const transport = new DirectHttpEmailTransport(
-    (url, init) => input.workerFetch(new Request(url, init)),
+    (url, init) => {
+      const signals = [init.signal, input.signal].filter((signal): signal is AbortSignal => signal != null);
+      const request = new Request(url, {
+        ...init,
+        ...(signals.length > 0 ? { signal: signals.length === 1 ? signals[0]! : AbortSignal.any(signals) } : {}),
+      });
+      // Marked so the worker accepts this request's `remote` caller; see
+      // operation-caller.ts. No HTTP request can be in this set.
+      return input.workerFetch(markInProcessRemoteRequest(request));
+    },
     undefined,
     config.email.requestTimeoutSeconds * 1000,
   );

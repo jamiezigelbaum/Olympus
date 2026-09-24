@@ -23,7 +23,12 @@ import {
 } from '../../core/oauth-relay.ts';
 import { connectPublicApiKeySource, oauthAuthorizeOrigin, safeOAuthErrorCode, startExternalOAuthSourceConnection, startOAuthSourceConnection, type OAuthFetch } from '../../core/connect.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import { parseOperationCallerWire, type OperationCallerWire } from '../../core/operation-caller.ts';
+import {
+  callerClaimsRemoteConnection,
+  isInProcessRemoteRequest,
+  parseOperationCallerWire,
+  type OperationCallerWire,
+} from '../../core/operation-caller.ts';
 import { dropboxContentExtractionStallHours } from '../../core/ingestion-throughput.ts';
 import { createDefaultSecretStore, normalizeSecretRef, type SecretStore } from '../../core/secret-store.ts';
 import { canonicalSourceCorpusId, type SourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
@@ -3433,6 +3438,15 @@ async function parseSourceIndexAnswerRequest(request: Request): Promise<SourceIn
     throw new EmailSourceWorkerError(400, 'invalid_request', callerParse.message);
   }
   const caller = callerParse.caller;
+  // Only the worker's own remote endpoint, after verifying a connection token,
+  // may attribute an answer to a connection.
+  if (caller && callerClaimsRemoteConnection(caller) && !isInProcessRemoteRequest(request)) {
+    throw new EmailSourceWorkerError(
+      400,
+      'invalid_request',
+      'caller.surface "remote" and caller.connection_id are set only by the remote MCP endpoint.',
+    );
+  }
   return {
     question: record.question,
     ...(query !== undefined ? { query } : {}),
