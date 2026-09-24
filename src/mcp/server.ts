@@ -8,11 +8,13 @@ import { loadConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
 import { createEmailTransport, EmailClient } from '../core/email.ts';
 import { sanitizeCallerDisplayName, type OperationCaller } from '../core/operation-caller.ts';
-import { shouldExposeOperation } from '../core/operation-exposure.ts';
+import { shouldExposeOperation, type OperationSurface } from '../core/operation-exposure.ts';
 import { findOperationByName, operations, OperationError } from '../core/operations.ts';
 import type { OperationContext } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
 import { listMcpTools } from './tools.ts';
+
+type McpSurface = Extract<OperationSurface, 'mcp' | 'remote'>;
 
 interface McpCallToolRequest {
   params: {
@@ -24,13 +26,14 @@ interface McpCallToolRequest {
 export async function handleMcpCallTool(
   request: McpCallToolRequest,
   makeOperationContext: () => OperationContext = makeContext,
+  surface: McpSurface = 'mcp',
 ): Promise<{ content: Array<{ type: 'text'; text: string }> }> {
   const operation = findOperationByName(request.params.name);
   if (!operation) {
     throw new OperationError('invalid_params', `Unknown Olympus operation: ${request.params.name}`);
   }
   const ctx = makeOperationContext();
-  if (!shouldExposeOperation(operation, { config: ctx.config, surface: 'mcp' })) {
+  if (!shouldExposeOperation(operation, { config: ctx.config, surface })) {
     throw new OperationError(
       'invalid_params',
       `Olympus operation is not available on this MCP surface: ${operation.name}`,
@@ -46,6 +49,27 @@ export async function handleMcpCallTool(
       },
     ],
   };
+}
+
+/**
+ * An MCP server for one surface over an already-built operation context. The
+ * remote endpoint builds one per HTTP request, with the connection's caller
+ * identity already on the context.
+ */
+export function createOlympusMcpServer(
+  surface: McpSurface,
+  makeOperationContext: () => OperationContext,
+): Server {
+  const server = new Server(
+    { name: 'olympus', version: VERSION },
+    { capabilities: { tools: {} } },
+  );
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: listMcpTools(makeOperationContext().config, surface),
+  }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) =>
+    handleMcpCallTool(request, makeOperationContext, surface));
+  return server;
 }
 
 export async function serve(): Promise<void> {

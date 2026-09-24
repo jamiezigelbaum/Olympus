@@ -234,7 +234,7 @@ var init_corpus = __esm(() => {
 function isV04PublicOperation(surface, operationName) {
   return PUBLIC_OPERATION_NAMES[surface].has(operationName);
 }
-var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_PUBLIC_SOURCE_IDS, PUBLIC_OPERATION_NAMES;
+var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_HERMES_MCP_TOOLS, V0_4_PUBLIC_REMOTE_MCP_TOOLS, V0_4_PUBLIC_SOURCE_IDS, PUBLIC_OPERATION_NAMES;
 var init_public_surface = __esm(() => {
   V0_4_PUBLIC_NATIVE_TOOLS = [
     "argus_ping",
@@ -258,6 +258,11 @@ var init_public_surface = __esm(() => {
     "olympus_doctor"
   ];
   V0_4_PUBLIC_CLI_OPERATIONS = V0_4_PUBLIC_MCP_TOOLS;
+  V0_4_HERMES_MCP_TOOLS = [
+    "source_answer",
+    "source_index_status"
+  ];
+  V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
   V0_4_PUBLIC_SOURCE_IDS = [
     "gmail.email",
     "google_drive.docs",
@@ -270,7 +275,8 @@ var init_public_surface = __esm(() => {
   PUBLIC_OPERATION_NAMES = {
     native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
     mcp: new Set(V0_4_PUBLIC_MCP_TOOLS),
-    cli: new Set(V0_4_PUBLIC_CLI_OPERATIONS)
+    cli: new Set(V0_4_PUBLIC_CLI_OPERATIONS),
+    remote: new Set(V0_4_PUBLIC_REMOTE_MCP_TOOLS)
   };
 });
 
@@ -11312,6 +11318,7 @@ function operationCallerToWire(caller) {
     ...displayName ? { display_name: displayName } : {}
   };
 }
+var inProcessRemoteRequests = new WeakSet;
 
 // src/core/email.ts
 init_source_corpus_registry();

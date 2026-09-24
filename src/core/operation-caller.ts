@@ -96,3 +96,24 @@ export function parseOperationCallerWire(
     },
   };
 }
+
+// Requests the worker's own remote MCP endpoint builds in-process after it has
+// verified a connection token. Only these may carry a `remote` caller or a
+// connection id: an ordinary worker-bearer HTTP caller cannot put a request
+// object into this set, so it cannot impersonate an approved connection on the
+// audit ledger. A WeakSet, so nothing outlives its request.
+const inProcessRemoteRequests = new WeakSet<Request>();
+
+export function markInProcessRemoteRequest(request: Request): Request {
+  inProcessRemoteRequests.add(request);
+  return request;
+}
+
+export function isInProcessRemoteRequest(request: Request): boolean {
+  return inProcessRemoteRequests.has(request);
+}
+
+/** Whether a caller claims a connection identity only the remote endpoint may assert. */
+export function callerClaimsRemoteConnection(caller: OperationCallerWire): boolean {
+  return caller.surface === 'remote' || caller.connection_id !== undefined;
+}

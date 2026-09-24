@@ -3884,12 +3884,38 @@ export async function main(): Promise<void> {
     recheckCredentials: () => bootSecretResolver.recheckNow(),
   });
   warnIfWorkerAuthDisabled('private email source worker', authToken, hostname);
+  // Loaded here rather than at module scope: other bundles import helpers from
+  // this module (the embedding drain), and the MCP SDK is not tree-shakeable.
+  const {
+    createInProcessOperationContext,
+    createRemoteMcpHandler,
+    lazyRemoteConnectionStore,
+    withRemoteMcpRoute,
+  } = await import('../remote-mcp.ts');
+  const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
 
   const server = Bun.serve({
     hostname,
     port,
     idleTimeout: 0,
-    fetch: withWorkerBearerAuth(worker.fetch, { authToken }),
+    // `/mcp` is the remote agent endpoint and authenticates connection tokens
+    // only; every other route keeps the worker bearer. See workers/remote-mcp.ts.
+    fetch: withRemoteMcpRoute(
+      createRemoteMcpHandler({
+        connections: lazyRemoteConnectionStore(
+          () => resolveRemoteConnectionsDbPath(process.env),
+          openRemoteConnectionStore,
+        ),
+        makeOperationContext: (caller, signal) => createInProcessOperationContext({
+          config: olympusConfig,
+          sourceIndexReadEnabled,
+          workerFetch: worker.fetch,
+          caller,
+          signal,
+        }),
+      }),
+      withWorkerBearerAuth(worker.fetch, { authToken }),
+    ),
   });
   sourceScheduler?.start();
   await reconcileCaptures();

@@ -265,7 +265,7 @@ var init_corpus = __esm(() => {
 });
 
 // src/core/public-surface.ts
-var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_PUBLIC_SOURCE_IDS, PUBLIC_OPERATION_NAMES;
+var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_HERMES_MCP_TOOLS, V0_4_PUBLIC_REMOTE_MCP_TOOLS, V0_4_PUBLIC_SOURCE_IDS, PUBLIC_OPERATION_NAMES;
 var init_public_surface = __esm(() => {
   V0_4_PUBLIC_NATIVE_TOOLS = [
     "argus_ping",
@@ -289,6 +289,11 @@ var init_public_surface = __esm(() => {
     "olympus_doctor"
   ];
   V0_4_PUBLIC_CLI_OPERATIONS = V0_4_PUBLIC_MCP_TOOLS;
+  V0_4_HERMES_MCP_TOOLS = [
+    "source_answer",
+    "source_index_status"
+  ];
+  V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
   V0_4_PUBLIC_SOURCE_IDS = [
     "gmail.email",
     "google_drive.docs",
@@ -301,7 +306,8 @@ var init_public_surface = __esm(() => {
   PUBLIC_OPERATION_NAMES = {
     native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
     mcp: new Set(V0_4_PUBLIC_MCP_TOOLS),
-    cli: new Set(V0_4_PUBLIC_CLI_OPERATIONS)
+    cli: new Set(V0_4_PUBLIC_CLI_OPERATIONS),
+    remote: new Set(V0_4_PUBLIC_REMOTE_MCP_TOOLS)
   };
 });
 
@@ -3460,6 +3466,88 @@ var init_sovereignty = __esm(() => {
     encrypted_cloud: 2,
     standard_cloud: 1
   };
+});
+
+// src/core/worker-auth.ts
+import { readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join4 } from "node:path";
+function workerAuthTokenFromConfig(config, options = {}) {
+  if (config.worker.authTokenSecretRefUnresolved)
+    return;
+  return optionalToken(config.worker.authToken) ?? optionalToken((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
+}
+function withWorkerAuthHeader(init, authToken) {
+  const token = optionalToken(authToken);
+  if (!token)
+    return init;
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  return {
+    ...init,
+    headers
+  };
+}
+function workerAuthTokenFromSetupEnv(options = {}) {
+  return optionalToken(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
+}
+function readWorkerSetupEnv(options = {}) {
+  const path = workerSetupEnvPath(options);
+  try {
+    const stat2 = statSync2(path, { bigint: true });
+    if (!stat2.isFile() || (stat2.mode & 0o077n) !== 0n)
+      return;
+    const key = `${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeNs}:${stat2.ctimeNs}:${stat2.mode}`;
+    const cached = setupEnvCache.get(path);
+    if (cached?.key === key)
+      return { ...cached.env };
+    const env = parseWorkerSetupEnv(readFileSync5(path, "utf8"));
+    setupEnvCache.set(path, { key, env });
+    return { ...env };
+  } catch {
+    return;
+  }
+}
+function workerSetupEnvPath(options = {}) {
+  const env = options.env ?? process.env;
+  return options.workerEnvPath ?? join4(options.homeDir ?? optionalToken(env.HOME) ?? homedir4(), ".config", "olympus", "worker.env");
+}
+function isWorkerAuthTokenPlaceholder(value) {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "replace-with-generated-token" || normalized === "change-me" || normalized === "changeme" || normalized === "placeholder";
+}
+function normalizeWorkerAuthToken(value) {
+  const trimmed = value?.trim();
+  if (isWorkerAuthTokenPlaceholder(trimmed))
+    return;
+  return trimmed ? trimmed : undefined;
+}
+function optionalToken(value) {
+  return normalizeWorkerAuthToken(value);
+}
+function parseWorkerSetupEnv(text) {
+  const env = {};
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#"))
+      continue;
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(trimmed);
+    if (!match)
+      continue;
+    env[match[1]] = unquoteEnvValue(match[2] ?? "");
+  }
+  return env;
+}
+function unquoteEnvValue(value) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+var setupEnvCache;
+var init_worker_auth = __esm(() => {
+  setupEnvCache = new Map;
 });
 // src/core/build-flavor.ts
 var PUBLIC_RUNTIME_BUILD = false;
@@ -16918,6 +17006,54 @@ var init_dropbox_files = __esm(() => {
   init_connector_store2();
 });
 
+// src/workers/credential-broker/unpaired-sources.ts
+var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
+var init_unpaired_sources = __esm(() => {
+  init_atomic_file();
+  UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
+  UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
+});
+
+// src/core/worker-service.ts
+var WORKER_LOG_TAIL_BYTES;
+var init_worker_service = __esm(() => {
+  init_atomic_file();
+  init_openclaw_executable();
+  init_operation_error();
+  init_worker_auth();
+  WORKER_LOG_TAIL_BYTES = 64 * 1024;
+});
+
+// src/core/connect.ts
+var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
+var init_connect = __esm(() => {
+  init_secret_store();
+  init_worker_service();
+  init_http_timeout();
+  init_oauth_relay();
+  init_publisher_oauth_client();
+  init_connected_handles();
+  init_unpaired_sources();
+  init_credential_broker();
+  DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
+  DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
+  OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  KNOWN_OAUTH_ERROR_CODES = new Set([
+    "invalid_request",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+    "access_denied",
+    "server_error",
+    "temporarily_unavailable",
+    "slow_down",
+    "expired_token",
+    "redirect_uri_mismatch"
+  ]);
+});
+
 // src/core/invocation-provenance.ts
 function sourceInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
@@ -17598,9 +17734,67 @@ var init_store_sync = __esm(() => {
 // src/workers/dashboard/answer-ready-coverage.ts
 var init_answer_ready_coverage = () => {};
 
+// src/core/email-policy.ts
+var FORBIDDEN_RAW_RESPONSE_KEYS;
+var init_email_policy = __esm(() => {
+  init_operation_error();
+  FORBIDDEN_RAW_RESPONSE_KEYS = new Set([
+    "body",
+    "bodies",
+    "message",
+    "messages",
+    "raw_email",
+    "raw_emails",
+    "raw_message",
+    "raw_messages",
+    "snippet",
+    "snippets",
+    "embedding",
+    "embeddings",
+    "embedding_vector",
+    "embedding_vectors",
+    "vector",
+    "vectors"
+  ]);
+});
+
+// src/core/operation-caller.ts
+var inProcessRemoteRequests;
+var init_operation_caller = __esm(() => {
+  inProcessRemoteRequests = new WeakSet;
+});
+
 // src/core/ingestion-throughput.ts
 var init_ingestion_throughput = __esm(() => {
   init_operation_error();
+});
+
+// src/core/source-index/selected-item-safety.ts
+var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
+var init_selected_item_safety = __esm(() => {
+  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
+    "body",
+    "boundedtext",
+    "chunk",
+    "chunks",
+    "content",
+    "document",
+    "html",
+    "markdown",
+    "message",
+    "messages",
+    "packet",
+    "passage",
+    "raw",
+    "rawpacket",
+    "rawsource",
+    "rawtext",
+    "snippet",
+    "sourcepacket",
+    "sourcesnippet",
+    "sourcetext",
+    "text"
+  ]);
 });
 
 // src/core/privacy-language.ts
@@ -18633,6 +18827,43 @@ var init_status = __esm(() => {
   init_secret_locations();
 });
 
+// src/core/source-watch.ts
+var SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_AVAILABLE_DELAY_MS, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, SYSTEM_CLOCK;
+var init_source_watch = __esm(() => {
+  init_sqlite_migrations();
+  SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
+  SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
+  SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
+  SOURCE_WATCH_MAX_RETENTION_MS = 365 * 24 * 60 * 60000;
+  MAX_WATCH_LIFETIME_MS = 5 * 365 * 24 * 60 * 60000;
+  MAX_SOURCE_CLOCK_SKEW_MS = 5 * 60000;
+  MAX_AVAILABLE_DELAY_MS = 24 * 60 * 60000;
+  OWNER_CONTEXT_FIELDS = new Set(["ownerId", "routeKind", "routeTargetId", "routeAccountId"]);
+  CREATE_WATCH_FIELDS = new Set([
+    "watchId",
+    "corpusId",
+    "queryText",
+    "mode",
+    "expiresAt",
+    "maxDeliveryAttempts"
+  ]);
+  CANONICAL_REF_FIELDS = new Set(["corpusId", "localItemId", "sourceVersion"]);
+  WATCH_STATUS_VALUES = new Set(["active", "completed", "cancelled", "expired"]);
+  OUTBOX_STATUS_VALUES = new Set([
+    "pending",
+    "leased",
+    "retry",
+    "delivered",
+    "dead_letter",
+    "cancelled"
+  ]);
+  ownedContexts = new WeakSet;
+  executorCapabilities = new WeakSet;
+  SYSTEM_CLOCK = Object.freeze({
+    now: () => new Date
+  });
+});
+
 // src/workers/dashboard/scheduler-markers.ts
 var OPERATOR_PAUSED_SCHEDULER_MARKERS;
 var init_scheduler_markers = __esm(() => {
@@ -18933,153 +19164,257 @@ var init_source_ingestion_ledger = __esm(() => {
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
 });
 
+// src/core/delphi.ts
+var init_delphi = __esm(() => {
+  init_operation_error();
+  init_secret_store();
+});
+
+// src/workers/credential-degradation.ts
+import { createHash as createHash12 } from "node:crypto";
+function credentialConfigFingerprint(profileId, profile) {
+  const material = JSON.stringify({
+    version: 1,
+    profile_id: profileId,
+    provider: profile.provider,
+    trust: profile.trust,
+    model: profile.model,
+    base_url: profile.baseUrl ?? null,
+    secret_ref: profile.secretRef ?? null,
+    purpose: profile.purpose ?? null
+  });
+  return createHash12("sha256").update(material, "utf8").digest("hex");
+}
+
+class WorkerBootSecretResolver {
+  failures = new Map;
+  resolved = new Map;
+  maxAttempts;
+  retryDelaysMs;
+  now;
+  schedule;
+  cancel;
+  resolveSecretRefValueSync;
+  warn;
+  constructor(options = {}) {
+    this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    this.retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
+    this.now = options.now ?? (() => new Date);
+    this.schedule = options.schedule ?? ((run, delayMs) => {
+      const timer = setTimeout(run, delayMs);
+      timer.unref?.();
+      return timer;
+    });
+    this.cancel = options.cancel ?? ((handle) => {
+      clearTimeout(handle);
+    });
+    this.resolveSecretRefValueSync = options.resolveSecretRefValueSync ?? (() => {
+      return;
+    });
+    this.warn = options.warn ?? console.warn;
+  }
+  resolveSync(secretRef, env, context) {
+    const ref = secretRef?.trim();
+    if (!ref) {
+      const lane = context.affectedProfiles?.join(",") || context.displayName;
+      this.clearResolved(context);
+      this.recordFailure(`__missing_secret_ref__:${lane}`, env, context);
+      return;
+    }
+    try {
+      const value = this.resolveSecretRefValueSync(ref, env)?.trim();
+      if (value) {
+        this.recordResolved(ref, context);
+        this.failures.delete(ref);
+        return value;
+      }
+    } catch {}
+    this.clearResolved(context, ref);
+    this.recordFailure(ref, env, context);
+    return;
+  }
+  readiness() {
+    return [...this.resolved.values()].sort((left, right) => left.binding.profileId.localeCompare(right.binding.profileId)).map((state) => ({
+      profile_id: state.binding.profileId,
+      config_fingerprint: state.binding.configFingerprint,
+      ...state.affectedCapabilities?.length ? { affected_capabilities: [...state.affectedCapabilities] } : {}
+    }));
+  }
+  status() {
+    return [...this.failures.values()].map((failure) => {
+      const item = {
+        kind: "worker_credential_degraded",
+        display_name: failure.context.displayName,
+        state: failure.state,
+        status_label: "Credential unavailable - needs your attention",
+        hint: failure.state === "resolved_restart_required" ? "Credential is now readable; restart the Olympus worker to re-enable the disabled lane." : CREDENTIAL_HINT,
+        attempts: failure.attempts,
+        max_attempts: failure.maxAttempts
+      };
+      if (failure.nextRetryAt)
+        item.next_retry_at = failure.nextRetryAt;
+      if (failure.context.affectedProfiles?.length)
+        item.affected_profiles = [...failure.context.affectedProfiles];
+      if (failure.context.affectedCapabilities?.length)
+        item.affected_capabilities = [...failure.context.affectedCapabilities];
+      return item;
+    });
+  }
+  recheckNow() {
+    for (const failure of this.failures.values()) {
+      this.tryResolveFailure(failure);
+    }
+    return this.status();
+  }
+  recordFailure(secretRef, env, context) {
+    const existing = this.failures.get(secretRef);
+    const failure = existing ?? {
+      secretRef,
+      env,
+      context,
+      attempts: 0,
+      maxAttempts: Math.max(1, this.maxAttempts),
+      state: "retrying",
+      scheduled: false
+    };
+    failure.context = mergeContext(failure.context, context);
+    this.failures.set(secretRef, failure);
+    this.warn(`Olympus worker credential unavailable: ${failure.context.displayName}. The affected lane is disabled.`);
+    if (existing)
+      return;
+    failure.attempts += 1;
+    this.scheduleRetry(failure);
+  }
+  recordResolved(secretRef, context) {
+    for (const binding of context.profileBindings ?? []) {
+      this.resolved.set(binding.profileId, {
+        secretRef,
+        binding: { ...binding },
+        ...context.affectedCapabilities?.length ? { affectedCapabilities: [...context.affectedCapabilities] } : {}
+      });
+    }
+  }
+  clearResolved(context, secretRef) {
+    const affectedProfiles = new Set(context.profileBindings?.map((binding) => binding.profileId) ?? context.affectedProfiles ?? []);
+    for (const [profileId, state] of this.resolved) {
+      if (state.secretRef === secretRef || affectedProfiles.has(profileId))
+        this.resolved.delete(profileId);
+    }
+  }
+  scheduleRetry(failure) {
+    if (failure.attempts >= failure.maxAttempts) {
+      failure.state = "stopped";
+      delete failure.nextRetryAt;
+      failure.scheduled = false;
+      this.cancelScheduledRetry(failure);
+      return;
+    }
+    if (failure.scheduled)
+      return;
+    const delayMs = this.retryDelaysMs[Math.min(failure.attempts - 1, this.retryDelaysMs.length - 1)] ?? 60000;
+    const nextRetryAt = new Date(this.now().getTime() + delayMs).toISOString();
+    failure.state = "retrying";
+    failure.nextRetryAt = nextRetryAt;
+    failure.scheduled = true;
+    failure.retryHandle = this.schedule(() => {
+      failure.scheduled = false;
+      delete failure.retryHandle;
+      this.tryResolveFailure(failure);
+    }, delayMs);
+  }
+  cancelScheduledRetry(failure) {
+    if (failure.retryHandle === undefined)
+      return;
+    const handle = failure.retryHandle;
+    delete failure.retryHandle;
+    this.cancel(handle);
+  }
+  tryResolveFailure(failure) {
+    if (!this.failures.has(failure.secretRef))
+      return;
+    try {
+      const value = this.resolveSecretRefValueSync(failure.secretRef, failure.env)?.trim();
+      failure.attempts += 1;
+      if (value) {
+        failure.state = "resolved_restart_required";
+        delete failure.nextRetryAt;
+        failure.scheduled = false;
+        this.clearResolved(failure.context, failure.secretRef);
+        return;
+      }
+    } catch {
+      failure.attempts += 1;
+    }
+    this.scheduleRetry(failure);
+  }
+}
+function mergeContext(existing, next) {
+  const merged = {
+    displayName: existing.displayName
+  };
+  const affectedProfiles = unique([
+    ...existing.affectedProfiles ?? [],
+    ...next.affectedProfiles ?? []
+  ]);
+  const affectedCapabilities = unique([
+    ...existing.affectedCapabilities ?? [],
+    ...next.affectedCapabilities ?? []
+  ]);
+  if (affectedProfiles)
+    merged.affectedProfiles = affectedProfiles;
+  if (affectedCapabilities)
+    merged.affectedCapabilities = affectedCapabilities;
+  const bindings = new Map;
+  for (const binding of [...existing.profileBindings ?? [], ...next.profileBindings ?? []]) {
+    bindings.set(binding.profileId, { ...binding });
+  }
+  if (bindings.size > 0)
+    merged.profileBindings = [...bindings.values()];
+  return merged;
+}
+function unique(values) {
+  const result = [...new Set(values.filter((value) => value.trim().length > 0))];
+  return result.length > 0 ? result : undefined;
+}
+var DEFAULT_MAX_ATTEMPTS = 3, DEFAULT_RETRY_DELAYS_MS, CREDENTIAL_HINT = "Unlock or reconnect this credential, then restart the Olympus worker or run the credential re-check route.";
+var init_credential_degradation = __esm(() => {
+  DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
+});
+
 // scripts/source-embedding-drain.ts
 init_atomic_file();
 init_config();
 init_sovereignty();
 init_secret_store();
+init_worker_auth();
+init_dropbox_files();
 import { createHash as createHash16 } from "node:crypto";
 import { existsSync as existsSync11, lstatSync as lstatSync3, mkdirSync as mkdirSync11, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname17, isAbsolute as isAbsolute3 } from "node:path";
 
-// src/core/worker-auth.ts
-import { readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { join as join4 } from "node:path";
-function workerAuthTokenFromConfig(config, options = {}) {
-  if (config.worker.authTokenSecretRefUnresolved)
-    return;
-  return optionalToken(config.worker.authToken) ?? optionalToken((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
-}
-function withWorkerAuthHeader(init, authToken) {
-  const token = optionalToken(authToken);
-  if (!token)
-    return init;
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-  return {
-    ...init,
-    headers
-  };
-}
-function workerAuthTokenFromSetupEnv(options = {}) {
-  return optionalToken(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
-}
-function readWorkerSetupEnv(options = {}) {
-  const path = workerSetupEnvPath(options);
-  try {
-    const stat2 = statSync2(path, { bigint: true });
-    if (!stat2.isFile() || (stat2.mode & 0o077n) !== 0n)
-      return;
-    const key = `${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeNs}:${stat2.ctimeNs}:${stat2.mode}`;
-    const cached = setupEnvCache.get(path);
-    if (cached?.key === key)
-      return { ...cached.env };
-    const env = parseWorkerSetupEnv(readFileSync5(path, "utf8"));
-    setupEnvCache.set(path, { key, env });
-    return { ...env };
-  } catch {
-    return;
-  }
-}
-var setupEnvCache = new Map;
-function workerSetupEnvPath(options = {}) {
-  const env = options.env ?? process.env;
-  return options.workerEnvPath ?? join4(options.homeDir ?? optionalToken(env.HOME) ?? homedir4(), ".config", "olympus", "worker.env");
-}
-function isWorkerAuthTokenPlaceholder(value) {
-  const normalized = value?.trim().toLowerCase();
-  return normalized === "replace-with-generated-token" || normalized === "change-me" || normalized === "changeme" || normalized === "placeholder";
-}
-function normalizeWorkerAuthToken(value) {
-  const trimmed = value?.trim();
-  if (isWorkerAuthTokenPlaceholder(trimmed))
-    return;
-  return trimmed ? trimmed : undefined;
-}
-function optionalToken(value) {
-  return normalizeWorkerAuthToken(value);
-}
-function parseWorkerSetupEnv(text) {
-  const env = {};
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#"))
-      continue;
-    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(trimmed);
-    if (!match)
-      continue;
-    env[match[1]] = unquoteEnvValue(match[2] ?? "");
-  }
-  return env;
-}
-function unquoteEnvValue(value) {
-  const trimmed = value.trim();
-  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-// scripts/source-embedding-drain.ts
-init_dropbox_files();
-
 // src/core/messaging-capture.ts
 init_atomic_file();
 init_secret_store();
-
-// src/workers/credential-broker/unpaired-sources.ts
-init_atomic_file();
-var UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
-var UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
-
-// src/core/messaging-capture.ts
+init_unpaired_sources();
 init_connected_handles();
 
 // src/core/messaging-pairing.ts
 init_atomic_file();
 init_secret_store();
-
-// src/core/connect.ts
-init_secret_store();
-
-// src/core/worker-service.ts
-init_atomic_file();
-init_openclaw_executable();
-init_operation_error();
-var WORKER_LOG_TAIL_BYTES = 64 * 1024;
-
-// src/core/connect.ts
-init_http_timeout();
-init_oauth_relay();
-init_publisher_oauth_client();
-init_connected_handles();
-init_credential_broker();
-var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
-var DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
-var OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
-var KNOWN_OAUTH_ERROR_CODES = new Set([
-  "invalid_request",
-  "invalid_client",
-  "invalid_grant",
-  "unauthorized_client",
-  "unsupported_grant_type",
-  "invalid_scope",
-  "access_denied",
-  "server_error",
-  "temporarily_unavailable",
-  "slow_down",
-  "expired_token",
-  "redirect_uri_mismatch"
-]);
+init_connect();
 
 // src/core/native-worker-service.ts
 init_config();
+init_worker_auth();
 
 // src/core/model-setup.ts
 init_http_timeout();
 init_embedding_identity();
 var LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
+
+// src/workers/email-source/server.ts
+init_connect();
+init_worker_auth();
 
 // src/workers/email-source/file-extraction-runtime.ts
 init_credential_broker();
@@ -19952,62 +20287,20 @@ function approvedVeniceAnalystBaseUrl(rawBaseUrl) {
 init_venice_models();
 init_sovereignty();
 
-// src/core/email-policy.ts
-init_operation_error();
-var FORBIDDEN_RAW_RESPONSE_KEYS = new Set([
-  "body",
-  "bodies",
-  "message",
-  "messages",
-  "raw_email",
-  "raw_emails",
-  "raw_message",
-  "raw_messages",
-  "snippet",
-  "snippets",
-  "embedding",
-  "embeddings",
-  "embedding_vector",
-  "embedding_vectors",
-  "vector",
-  "vectors"
-]);
 // src/workers/email-source/index.ts
+init_email_policy();
 init_publisher_oauth_client();
 init_oauth_relay();
+init_connect();
 init_operation_error();
+init_operation_caller();
 init_ingestion_throughput();
 init_secret_store();
 init_source_corpus_registry();
-
-// src/core/source-index/selected-item-safety.ts
-var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
-  "body",
-  "boundedtext",
-  "chunk",
-  "chunks",
-  "content",
-  "document",
-  "html",
-  "markdown",
-  "message",
-  "messages",
-  "packet",
-  "passage",
-  "raw",
-  "rawpacket",
-  "rawsource",
-  "rawtext",
-  "snippet",
-  "sourcepacket",
-  "sourcesnippet",
-  "sourcetext",
-  "text"
-]);
-
-// src/workers/email-source/index.ts
+init_selected_item_safety();
 init_venice_models();
 init_public_surface();
+init_unpaired_sources();
 
 // src/workers/source-index/answer-latency-log.ts
 init_answer_latency_trace();
@@ -20022,45 +20315,11 @@ init_dropbox_files();
 init_telegram_messages();
 init_embeddings();
 
-// src/core/source-watch.ts
-init_sqlite_migrations();
-var SOURCE_WATCH_MIN_LEASE_MS = 1000;
-var SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
-var SOURCE_WATCH_MIN_RETRY_MS = 1000;
-var SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
-var SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
-var SOURCE_WATCH_MAX_RETENTION_MS = 365 * 24 * 60 * 60000;
-var MAX_WATCH_LIFETIME_MS = 5 * 365 * 24 * 60 * 60000;
-var MAX_SOURCE_CLOCK_SKEW_MS = 5 * 60000;
-var MAX_AVAILABLE_DELAY_MS = 24 * 60 * 60000;
-var OWNER_CONTEXT_FIELDS = new Set(["ownerId", "routeKind", "routeTargetId", "routeAccountId"]);
-var CREATE_WATCH_FIELDS = new Set([
-  "watchId",
-  "corpusId",
-  "queryText",
-  "mode",
-  "expiresAt",
-  "maxDeliveryAttempts"
-]);
-var CANONICAL_REF_FIELDS = new Set(["corpusId", "localItemId", "sourceVersion"]);
-var WATCH_STATUS_VALUES = new Set(["active", "completed", "cancelled", "expired"]);
-var OUTBOX_STATUS_VALUES = new Set([
-  "pending",
-  "leased",
-  "retry",
-  "delivered",
-  "dead_letter",
-  "cancelled"
-]);
-var ownedContexts = new WeakSet;
-var executorCapabilities = new WeakSet;
-var SYSTEM_CLOCK = Object.freeze({
-  now: () => new Date
-});
-
 // src/workers/source-watch-runtime.ts
+init_source_watch();
 init_openclaw_executable();
 init_http_timeout();
+init_worker_auth();
 init_source_corpus_registry();
 init_router();
 var SOURCE_WATCH_DELIVERY_LEASE_MS = Math.max(SOURCE_WATCH_MIN_LEASE_MS, 60000);
@@ -20361,6 +20620,9 @@ init_vocabulary();
 
 // src/workers/email-source/index.ts
 init_mail_source_scope();
+
+// src/workers/http.ts
+init_worker_auth();
 
 // src/core/dashboard-launch.ts
 import { createHash as createHash10, randomBytes as randomBytes2 } from "node:crypto";
@@ -20958,12 +21220,7 @@ var QUERY_PLANNER_SYSTEM = "Generate up to 3 short, diverse search queries for f
 
 // src/workers/email-source/server.ts
 init_config();
-
-// src/core/delphi.ts
-init_operation_error();
-init_secret_store();
-
-// src/workers/email-source/server.ts
+init_delphi();
 init_sovereignty();
 init_source_corpus_registry();
 init_source_ingestion_policy();
@@ -20992,218 +21249,7 @@ init_secret_locations();
 init_credential_broker();
 init_types();
 init_secret_store();
-
-// src/workers/credential-degradation.ts
-import { createHash as createHash12 } from "node:crypto";
-function credentialConfigFingerprint(profileId, profile) {
-  const material = JSON.stringify({
-    version: 1,
-    profile_id: profileId,
-    provider: profile.provider,
-    trust: profile.trust,
-    model: profile.model,
-    base_url: profile.baseUrl ?? null,
-    secret_ref: profile.secretRef ?? null,
-    purpose: profile.purpose ?? null
-  });
-  return createHash12("sha256").update(material, "utf8").digest("hex");
-}
-var DEFAULT_MAX_ATTEMPTS = 3;
-var DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
-var CREDENTIAL_HINT = "Unlock or reconnect this credential, then restart the Olympus worker or run the credential re-check route.";
-
-class WorkerBootSecretResolver {
-  failures = new Map;
-  resolved = new Map;
-  maxAttempts;
-  retryDelaysMs;
-  now;
-  schedule;
-  cancel;
-  resolveSecretRefValueSync;
-  warn;
-  constructor(options = {}) {
-    this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-    this.retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
-    this.now = options.now ?? (() => new Date);
-    this.schedule = options.schedule ?? ((run, delayMs) => {
-      const timer = setTimeout(run, delayMs);
-      timer.unref?.();
-      return timer;
-    });
-    this.cancel = options.cancel ?? ((handle) => {
-      clearTimeout(handle);
-    });
-    this.resolveSecretRefValueSync = options.resolveSecretRefValueSync ?? (() => {
-      return;
-    });
-    this.warn = options.warn ?? console.warn;
-  }
-  resolveSync(secretRef, env, context) {
-    const ref = secretRef?.trim();
-    if (!ref) {
-      const lane = context.affectedProfiles?.join(",") || context.displayName;
-      this.clearResolved(context);
-      this.recordFailure(`__missing_secret_ref__:${lane}`, env, context);
-      return;
-    }
-    try {
-      const value = this.resolveSecretRefValueSync(ref, env)?.trim();
-      if (value) {
-        this.recordResolved(ref, context);
-        this.failures.delete(ref);
-        return value;
-      }
-    } catch {}
-    this.clearResolved(context, ref);
-    this.recordFailure(ref, env, context);
-    return;
-  }
-  readiness() {
-    return [...this.resolved.values()].sort((left, right) => left.binding.profileId.localeCompare(right.binding.profileId)).map((state) => ({
-      profile_id: state.binding.profileId,
-      config_fingerprint: state.binding.configFingerprint,
-      ...state.affectedCapabilities?.length ? { affected_capabilities: [...state.affectedCapabilities] } : {}
-    }));
-  }
-  status() {
-    return [...this.failures.values()].map((failure) => {
-      const item = {
-        kind: "worker_credential_degraded",
-        display_name: failure.context.displayName,
-        state: failure.state,
-        status_label: "Credential unavailable - needs your attention",
-        hint: failure.state === "resolved_restart_required" ? "Credential is now readable; restart the Olympus worker to re-enable the disabled lane." : CREDENTIAL_HINT,
-        attempts: failure.attempts,
-        max_attempts: failure.maxAttempts
-      };
-      if (failure.nextRetryAt)
-        item.next_retry_at = failure.nextRetryAt;
-      if (failure.context.affectedProfiles?.length)
-        item.affected_profiles = [...failure.context.affectedProfiles];
-      if (failure.context.affectedCapabilities?.length)
-        item.affected_capabilities = [...failure.context.affectedCapabilities];
-      return item;
-    });
-  }
-  recheckNow() {
-    for (const failure of this.failures.values()) {
-      this.tryResolveFailure(failure);
-    }
-    return this.status();
-  }
-  recordFailure(secretRef, env, context) {
-    const existing = this.failures.get(secretRef);
-    const failure = existing ?? {
-      secretRef,
-      env,
-      context,
-      attempts: 0,
-      maxAttempts: Math.max(1, this.maxAttempts),
-      state: "retrying",
-      scheduled: false
-    };
-    failure.context = mergeContext(failure.context, context);
-    this.failures.set(secretRef, failure);
-    this.warn(`Olympus worker credential unavailable: ${failure.context.displayName}. The affected lane is disabled.`);
-    if (existing)
-      return;
-    failure.attempts += 1;
-    this.scheduleRetry(failure);
-  }
-  recordResolved(secretRef, context) {
-    for (const binding of context.profileBindings ?? []) {
-      this.resolved.set(binding.profileId, {
-        secretRef,
-        binding: { ...binding },
-        ...context.affectedCapabilities?.length ? { affectedCapabilities: [...context.affectedCapabilities] } : {}
-      });
-    }
-  }
-  clearResolved(context, secretRef) {
-    const affectedProfiles = new Set(context.profileBindings?.map((binding) => binding.profileId) ?? context.affectedProfiles ?? []);
-    for (const [profileId, state] of this.resolved) {
-      if (state.secretRef === secretRef || affectedProfiles.has(profileId))
-        this.resolved.delete(profileId);
-    }
-  }
-  scheduleRetry(failure) {
-    if (failure.attempts >= failure.maxAttempts) {
-      failure.state = "stopped";
-      delete failure.nextRetryAt;
-      failure.scheduled = false;
-      this.cancelScheduledRetry(failure);
-      return;
-    }
-    if (failure.scheduled)
-      return;
-    const delayMs = this.retryDelaysMs[Math.min(failure.attempts - 1, this.retryDelaysMs.length - 1)] ?? 60000;
-    const nextRetryAt = new Date(this.now().getTime() + delayMs).toISOString();
-    failure.state = "retrying";
-    failure.nextRetryAt = nextRetryAt;
-    failure.scheduled = true;
-    failure.retryHandle = this.schedule(() => {
-      failure.scheduled = false;
-      delete failure.retryHandle;
-      this.tryResolveFailure(failure);
-    }, delayMs);
-  }
-  cancelScheduledRetry(failure) {
-    if (failure.retryHandle === undefined)
-      return;
-    const handle = failure.retryHandle;
-    delete failure.retryHandle;
-    this.cancel(handle);
-  }
-  tryResolveFailure(failure) {
-    if (!this.failures.has(failure.secretRef))
-      return;
-    try {
-      const value = this.resolveSecretRefValueSync(failure.secretRef, failure.env)?.trim();
-      failure.attempts += 1;
-      if (value) {
-        failure.state = "resolved_restart_required";
-        delete failure.nextRetryAt;
-        failure.scheduled = false;
-        this.clearResolved(failure.context, failure.secretRef);
-        return;
-      }
-    } catch {
-      failure.attempts += 1;
-    }
-    this.scheduleRetry(failure);
-  }
-}
-function mergeContext(existing, next) {
-  const merged = {
-    displayName: existing.displayName
-  };
-  const affectedProfiles = unique([
-    ...existing.affectedProfiles ?? [],
-    ...next.affectedProfiles ?? []
-  ]);
-  const affectedCapabilities = unique([
-    ...existing.affectedCapabilities ?? [],
-    ...next.affectedCapabilities ?? []
-  ]);
-  if (affectedProfiles)
-    merged.affectedProfiles = affectedProfiles;
-  if (affectedCapabilities)
-    merged.affectedCapabilities = affectedCapabilities;
-  const bindings = new Map;
-  for (const binding of [...existing.profileBindings ?? [], ...next.profileBindings ?? []]) {
-    bindings.set(binding.profileId, { ...binding });
-  }
-  if (bindings.size > 0)
-    merged.profileBindings = [...bindings.values()];
-  return merged;
-}
-function unique(values) {
-  const result = [...new Set(values.filter((value) => value.trim().length > 0))];
-  return result.length > 0 ? result : undefined;
-}
-
-// src/workers/email-source/server.ts
+init_credential_degradation();
 init_embeddings();
 init_embedding_identity();
 
@@ -22035,6 +22081,7 @@ ${task.id}`;
 }
 
 // src/workers/email-source/server.ts
+init_source_watch();
 init_source_dashboard();
 init_source_ingestion_ledger();
 init_connected_handles();
@@ -22060,6 +22107,9 @@ init_mail_source_scope();
 init_credential_broker();
 init_drive();
 init_provider_client();
+
+// src/workers/email-source/server.ts
+init_unpaired_sources();
 
 // src/workers/classification/installed-tier-classification.ts
 init_owner_config_read();
@@ -23706,6 +23756,7 @@ async function recordEmbeddingLedgerObservations(path, observations, context) {
 // scripts/source-embedding-drain.ts
 init_google_connectors();
 init_telegram_messages();
+init_credential_degradation();
 var DROPBOX_CORPUS_ID = "secure_local.dropbox.files";
 var EMAIL_CORPUS_ID = GMAIL_SECURE_CONNECTOR_CORPUS_ID;
 var WHATSAPP_CORPUS_ID = "secure_local.whatsapp.messages";
