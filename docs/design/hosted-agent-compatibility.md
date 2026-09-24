@@ -101,7 +101,7 @@ outbound link. The user never configures it.
 - **A small purpose-built relay:** the relay slice evaluated frp, rathole,
   zrok and sish. None met pass-through TLS, install-key registration and
   npm-shippable client together, so the relay is a small TypeScript service
-  with no new dependencies. See [relay.md](relay.md).
+  with no new dependencies. See `docs/design/relay.md` (added with the relay).
 - **Identity:** a key pair created at install time. The relay accepts only
   installs that have registered, and there are no user accounts.
 - **Availability:** answers work only while the user's machine and Olympus are
