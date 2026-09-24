@@ -6,6 +6,7 @@ import {
   DASHBOARD_POLICY_CSS,
   DASHBOARD_PROGRESS_CSS,
   DISPOSITIONS_CSS,
+  MODEL_SETUP_CSS,
   SETUP_JOURNEY_CSS,
 } from '../workers/dashboard/static-styles.ts';
 
@@ -27,6 +28,7 @@ export const OLYMPUS_CONTROL_UI_CSS = forShadowRoot([
   DASHBOARD_PROGRESS_CSS,
   DASHBOARD_POLICY_CSS,
   SETUP_JOURNEY_CSS,
+  MODEL_SETUP_CSS,
   BACKGROUND_CSS,
   DISPOSITIONS_CSS,
 ].join('\n')) + `

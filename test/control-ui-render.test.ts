@@ -5,6 +5,7 @@ import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/das
 import { buildDispositionsPreviewView } from '../scripts/control-ui-preview.ts';
 import { renderDashboardControlUi, renderDashboardHtmlRoute } from '../src/workers/dashboard/index.ts';
 import { renderSourceDispositionsControlUi, renderSourceDispositionsHtml } from '../src/workers/source-dispositions.ts';
+import { OLYMPUS_CONTROL_UI_CSS } from '../src/control-ui/styles.ts';
 
 describe('native Control UI rendering', () => {
   test('projects the full dashboard as an inert fragment with Gateway-owned authority', () => {
@@ -55,6 +56,26 @@ describe('native Control UI rendering', () => {
     expect(dispositions.controller).toBe('dispositions');
     expect(dispositions.body).toContain('data-dispositions-source="dropbox.files"');
     expect(dispositions.body).not.toMatch(/<script|<style|on[a-z]+\s*=/i);
+  });
+
+  // The native page carries no <style>; its one stylesheet must hold every
+  // rule a standalone page inlines, or a section silently loses its layout
+  // there (the Models cards stacked one control per line, owner, 2026-09-24).
+  test('the native stylesheet carries every rule the standalone pages inline', () => {
+    const view = buildDashboardPreviewView('full');
+    view.model_setup = buildDashboardPreviewView('models-applying').model_setup!;
+    for (const query of ['', 'setup', 'background', 'sensitivity', 'source=dropbox.files']) {
+      const html = renderDashboardHtmlRoute({
+        url: new URL(`http://worker.test/dashboard?${query}`),
+        view,
+        options: { now: DASHBOARD_PREVIEW_NOW },
+      }).html;
+      const inlined = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((match) => match[1]!).join('\n');
+      const missing = inlined.split('\n').map((line) => line.trim()).filter(Boolean)
+        .map((line) => line.replaceAll(':root', ':host').replaceAll('body {', '.olympus-control-ui {'))
+        .filter((line) => !OLYMPUS_CONTROL_UI_CSS.includes(line));
+      expect({ query, missing }).toEqual({ query, missing: [] });
+    }
   });
 });
 

@@ -80,6 +80,14 @@ test('ready models collapse to source-style rows; a model without its key keeps 
   expect(partial).toContain('Add the keys required by your privacy choice');
   expect(partial).toContain('Optional: your agent can help connect models you already run');
   expect(partial).not.toContain('class="modelextras"');
+  // One wrapping row per provider: key field, Connect and the key link side
+  // by side; the two optional controls share one row too (owner, 2026-09-24).
+  const action = segment(venice, '<div class="modelaction">', 'Get a Venice API key</a></div>');
+  expect(action).toContain('aria-label="Venice API key"');
+  expect(action).toContain('<button class="btn" type="submit">Connect</button>');
+  const tools = segment(partial, '<div class="modeltools">', '</form></div>');
+  expect(tools).toContain('Connect existing local models');
+  expect(tools).toContain('Check readiness');
 });
 
 function segment(html: string, from: string, to: string): string {
