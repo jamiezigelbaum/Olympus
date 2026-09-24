@@ -75,7 +75,7 @@ entry ("Grok asked…"), so the owner can see what each connection asked.
 | Claude Code, Codex, Hermes on the same machine | Local stdio MCP, `olympus serve` (exists). | Add the MCP server once. |
 | Claude web, desktop chat and mobile; ChatGPT; Cursor | Remote MCP, Streamable HTTP with OAuth. | Paste the connection URL, then approve. |
 | Grok and Grok Bot | Remote MCP. It is a custom connector (Business/Enterprise), or through the xAI API, which uses header auth. | Paste the URL and approve, or paste the URL and a token. |
-| Muse | OpenAPI plus a static bearer token (Muse has no OAuth or native MCP yet). | Paste the URL and token from `olympus connect muse`. |
+| Muse | OpenAPI plus a static bearer token (Muse has no OAuth or native MCP yet). | Paste the URL and token from `olympus connections add muse`. |
 
 Remote tool list: `source_answer` and `source_index_status`, the same narrowed
 list Hermes gets (`V0_4_HERMES_MCP_TOOLS`). Source watches remain native-only
@@ -130,7 +130,7 @@ and the relay client forwards to it.
   last-use times, and whether it is revoked. It lives in the worker's state, and
   raw secrets are never stored.
 - **Bearer connections**, for Muse, the Grok API and scripted clients:
-  `olympus connect <name>` prints the URL and a long random token once. The
+  `olympus connections add <name>` prints the URL and a long random token once. The
   token is revocable.
 - **OAuth 2.1** for Claude, ChatGPT and Grok connectors (MCP spec 2026-07-28):
   - Protected-resource and authorization-server metadata.
@@ -141,7 +141,7 @@ and the relay client forwards to it.
   - Short-lived access tokens and rotating refresh tokens.
 - **Proving the approver is the owner:** the approval page is often opened on a
   phone, away from the machine. It asks for a short one-time pairing code,
-  which the owner gets from the dashboard, from `olympus connect`, or by asking
+  which the owner gets from the dashboard, from `olympus connections add`, or by asking
   their OpenClaw agent. The code expires in minutes and works once.
 - **Display names** come from the client metadata ("Claude", "Grok"). The owner
   never types them.
@@ -159,7 +159,7 @@ critical-class and need an independent review receipt.
    - Proof: existing release-gate tests unchanged, plus attribution tests.
 2. **Remote MCP endpoint with bearer connections.**
    - Streamable HTTP at `/mcp` on the worker.
-   - The connection store, `olympus connect|connections list|connections revoke`,
+   - The connection store, `olympus connections add|list|revoke`,
      and a `remote` operation surface limited to the Hermes tool list.
    - Proof: an MCP SDK client over loopback, plus revocation and bad-token
      tests.
