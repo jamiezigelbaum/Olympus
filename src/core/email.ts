@@ -2,6 +2,7 @@ import { isSourceIndexReadSurfaceEnabled, type OlympusConfig } from './config.ts
 import { assertNoRawEmailFields } from './email-policy.ts';
 import { fetchWithTimeout, isAbortError } from './http-timeout.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
+import { operationCallerToWire, type OperationCaller } from './operation-caller.ts';
 import { canonicalSourceCorpusId, createSourceCorpusRegistry } from './source-corpus-registry.ts';
 import type { SourceTrustDomain } from './source-index/types.ts';
 import {
@@ -62,6 +63,8 @@ export interface SourceIndexAnswerOptions {
   includeInternalContent?: boolean;
   internalContentMaxBytes?: number;
   timeoutMs?: number;
+  /** The calling agent, for the answer's audit entry. Attribution only. */
+  caller?: OperationCaller;
 }
 
 export interface SourceAnswerSelectedItemOption {
@@ -413,6 +416,7 @@ export class EmailClient {
         ...(options.includeInternalContent !== undefined ? { include_internal_content: options.includeInternalContent } : {}),
         ...(options.internalContentMaxBytes !== undefined ? { internal_content_max_bytes: options.internalContentMaxBytes } : {}),
         ...(options.timeoutMs !== undefined ? { timeout_ms: options.timeoutMs } : {}),
+        ...(options.caller ? { caller: operationCallerToWire(options.caller) } : {}),
       }),
     }, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined);
 

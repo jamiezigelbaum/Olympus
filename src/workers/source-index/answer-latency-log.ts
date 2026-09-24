@@ -28,6 +28,7 @@ import type {
   SourceAnswerTraceSnapshot,
 } from './answer-latency-trace.ts';
 import { sourceAnswerTraceErrorClass } from './answer-latency-trace.ts';
+import type { OperationCallerWire } from '../../core/operation-caller.ts';
 
 export interface SourceAnswerLatencyRecord {
   kind: 'source_answer_latency';
@@ -47,6 +48,9 @@ export interface SourceAnswerLatencyRecord {
   };
   release_decision: string;
   released: boolean;
+  // Which calling agent asked (surface, connection id, display label). Never
+  // the question or answer.
+  caller?: OperationCallerWire;
 }
 
 export interface SourceAnswerLatencyTraceRecord {
@@ -84,6 +88,7 @@ export interface SourceAnswerLatencyTraceRecord {
   analyst_legs: SourceAnswerTraceAnalystLeg[];
   residual_analyst_orphan_count?: number;
   release_decision?: string;
+  caller?: OperationCallerWire;
   phase_ms: {
     lane_setup_ms: number;
     bulk_gate_ms: number;
@@ -126,6 +131,7 @@ export const DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
 export function buildSourceAnswerLatencyRecord(
   result: SourceIndexAnswerResult,
   now: () => Date = () => new Date(),
+  caller?: OperationCallerWire,
 ): SourceAnswerLatencyRecord {
   const audit = result.audit;
   const skipped = audit.skipped_corpora.map((skip) => ({
@@ -156,6 +162,15 @@ export function buildSourceAnswerLatencyRecord(
       : {}),
     release_decision: decision,
     released: decision === 'allow' || decision === 'redact',
+    ...(caller ? { caller: copyCaller(caller) } : {}),
+  };
+}
+
+function copyCaller(caller: OperationCallerWire): OperationCallerWire {
+  return {
+    surface: caller.surface,
+    ...(caller.connection_id ? { connection_id: caller.connection_id } : {}),
+    ...(caller.display_name ? { display_name: caller.display_name } : {}),
   };
 }
 
@@ -168,6 +183,7 @@ export function buildSourceAnswerLatencyTraceRecord(input: {
   now?: () => Date;
   sampleKind?: 'natural' | 'probe';
   compatV1LoggedAt?: string;
+  caller?: OperationCallerWire;
 }): SourceAnswerLatencyTraceRecord {
   const now = (input.now ?? (() => new Date()))();
   const latencyMs = nonNegativeMs(now.getTime() - input.trace.receivedAtMs);
@@ -244,6 +260,7 @@ export function buildSourceAnswerLatencyTraceRecord(input: {
       Math.floor(input.trace.residualAnalystOrphanCount),
     ),
     ...(input.trace.releaseDecision ? { release_decision: input.trace.releaseDecision } : {}),
+    ...(input.caller ? { caller: copyCaller(input.caller) } : {}),
     phase_ms: {
       ...fittedPhases,
       unattributed_ms: unattributedMs,

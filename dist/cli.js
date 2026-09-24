@@ -23250,16 +23250,16 @@ function evaluateReleaseGate(input) {
   if (allInstructionFlags.size > 0) {
     reasons.add("hostile_source_instruction_treated_as_data");
   }
-  const crossingToCastor = input.destination === "castor";
+  const crossingToCallingAgent = isCallingAgentDestination(input.destination);
   const secureFacts = input.facts.filter((fact) => fact.sensitivity.trustDomain === "secure_local");
-  if (crossingToCastor && secureFacts.some((fact) => fact.releaseSurface === "local_only")) {
+  if (crossingToCallingAgent && secureFacts.some((fact) => fact.releaseSurface === "local_only")) {
     return {
       decision: "needs_approval",
       reasons: [...reasons, "secure_local_fact_not_marked_for_castor_release"],
       requiredApproval: "s4_release"
     };
   }
-  if (crossingToCastor && secureFacts.length > 0) {
+  if (crossingToCallingAgent && secureFacts.length > 0) {
     reasons.add("bounded_secure_derivative_allowed");
   }
   return {
@@ -23267,6 +23267,9 @@ function evaluateReleaseGate(input) {
     reasons: [...reasons, "release_gate_passed"],
     allowedText: input.draftAnswer
   };
+}
+function isCallingAgentDestination(destination) {
+  return destination === "calling_agent" || destination === "castor";
 }
 function buildOpsecReleaseAudit(facts, decision) {
   return {
@@ -27361,14 +27364,14 @@ function releaseAnalystAnswer(input) {
   const originalScanDecision = finalDraftAnswer === originalDraftAnswer ? undefined : evaluateReleaseGate({
     facts,
     draftAnswer: originalDraftAnswer,
-    destination: "castor",
+    destination: "calling_agent",
     action: "answer",
     caller: "worker"
   });
   const finalScanDecision = () => releaseDecisionWithReason(evaluateReleaseGate({
     facts,
     draftAnswer: finalDraftAnswer,
-    destination: "castor",
+    destination: "calling_agent",
     action: "answer",
     caller: "worker"
   }), finalDraftAnswer === originalDraftAnswer ? "release_gate_passed" : "non_public_coverage_notes_sanitized");
@@ -27402,7 +27405,7 @@ function scannedUnsupportedNoContentDecision(input) {
   const scanned = evaluateReleaseGate({
     facts: input.facts,
     draftAnswer: input.originalDraftAnswer,
-    destination: "castor",
+    destination: "calling_agent",
     action: "answer",
     caller: "worker"
   });
@@ -27412,7 +27415,7 @@ function scannedUnsupportedNoContentDecision(input) {
   const safeScanned = evaluateReleaseGate({
     facts: input.facts,
     draftAnswer: input.safeUnsupportedDraft,
-    destination: "castor",
+    destination: "calling_agent",
     action: "answer",
     caller: "worker"
   });
@@ -40084,6 +40087,67 @@ var init_email_policy = __esm(() => {
   ]);
 });
 
+// src/core/operation-caller.ts
+function sanitizeCallerDisplayName(value) {
+  if (typeof value !== "string")
+    return;
+  const cleaned = value.replace(UNSAFE_LABEL_CHARS, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned)
+    return;
+  return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
+}
+function operationCallerToWire(caller) {
+  const displayName = sanitizeCallerDisplayName(caller.displayName);
+  return {
+    surface: caller.surface,
+    ...caller.connectionId ? { connection_id: caller.connectionId } : {},
+    ...displayName ? { display_name: displayName } : {}
+  };
+}
+function parseOperationCallerWire(value) {
+  if (value === undefined || value === null)
+    return { ok: true, caller: undefined };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, message: "caller must be an object when provided." };
+  }
+  const record = value;
+  const unknownFields = Object.keys(record).filter((key) => !["surface", "connection_id", "display_name"].includes(key));
+  if (unknownFields.length > 0) {
+    return { ok: false, message: `caller contains undeclared fields: ${unknownFields.sort().join(", ")}.` };
+  }
+  if (typeof record.surface !== "string" || !OPERATION_CALLER_SURFACES.includes(record.surface)) {
+    return { ok: false, message: `caller.surface must be one of: ${OPERATION_CALLER_SURFACES.join(", ")}.` };
+  }
+  let connectionId;
+  if (record.connection_id !== undefined) {
+    if (typeof record.connection_id !== "string" || record.connection_id.length === 0 || record.connection_id.length > OPERATION_CALLER_CONNECTION_ID_MAX || !CONNECTION_ID_PATTERN.test(record.connection_id)) {
+      return { ok: false, message: "caller.connection_id must be a short identifier when provided." };
+    }
+    connectionId = record.connection_id;
+  }
+  let displayName;
+  if (record.display_name !== undefined) {
+    displayName = sanitizeCallerDisplayName(record.display_name);
+    if (typeof record.display_name !== "string" || displayName === undefined) {
+      return { ok: false, message: "caller.display_name must be a non-empty string when provided." };
+    }
+  }
+  return {
+    ok: true,
+    caller: {
+      surface: record.surface,
+      ...connectionId ? { connection_id: connectionId } : {},
+      ...displayName ? { display_name: displayName } : {}
+    }
+  };
+}
+var OPERATION_CALLER_SURFACES, OPERATION_CALLER_DISPLAY_NAME_MAX = 80, OPERATION_CALLER_CONNECTION_ID_MAX = 128, CONNECTION_ID_PATTERN, UNSAFE_LABEL_CHARS;
+var init_operation_caller = __esm(() => {
+  OPERATION_CALLER_SURFACES = ["native", "mcp", "cli", "remote"];
+  CONNECTION_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
+  UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+});
+
 // src/core/source-watch.ts
 import { createHash as createHash29, randomUUID as randomUUID13 } from "node:crypto";
 import {
@@ -41351,7 +41415,8 @@ class EmailClient {
         ...options.includeInternal !== undefined ? { include_internal: options.includeInternal } : {},
         ...options.includeInternalContent !== undefined ? { include_internal_content: options.includeInternalContent } : {},
         ...options.internalContentMaxBytes !== undefined ? { internal_content_max_bytes: options.internalContentMaxBytes } : {},
-        ...options.timeoutMs !== undefined ? { timeout_ms: options.timeoutMs } : {}
+        ...options.timeoutMs !== undefined ? { timeout_ms: options.timeoutMs } : {},
+        ...options.caller ? { caller: operationCallerToWire(options.caller) } : {}
       })
     }, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined);
     const data = asRecord8(response);
@@ -42200,6 +42265,7 @@ var init_email = __esm(() => {
   init_email_policy();
   init_http_timeout();
   init_operation_error();
+  init_operation_caller();
   init_source_corpus_registry();
   init_source_watch();
   init_worker_auth();
@@ -48847,7 +48913,8 @@ var init_operations = __esm(() => {
           ...includeInternal !== undefined ? { includeInternal } : {},
           ...includeInternalContent !== undefined ? { includeInternalContent } : {},
           ...internalContentMaxBytes !== undefined ? { internalContentMaxBytes } : {},
-          ...timeoutMs !== undefined ? { timeoutMs } : {}
+          ...timeoutMs !== undefined ? { timeoutMs } : {},
+          ...ctx.caller ? { caller: ctx.caller } : {}
         });
       }
     },
@@ -67198,6 +67265,7 @@ var init_tools = __esm(() => {
 var exports_server = {};
 __export(exports_server, {
   serve: () => serve,
+  mcpOperationCaller: () => mcpOperationCaller,
   handleMcpCallTool: () => handleMcpCallTool
 });
 async function handleMcpCallTool(request, makeOperationContext = makeContext) {
@@ -67234,16 +67302,21 @@ async function serve() {
     };
   });
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    return handleMcpCallTool(request);
+    return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name));
   });
   await server.connect(new StdioServerTransport);
 }
-function makeContext() {
+function mcpOperationCaller(clientName) {
+  const displayName = sanitizeCallerDisplayName(clientName);
+  return { surface: "mcp", ...displayName ? { displayName } : {} };
+}
+function makeContext(clientName) {
   const config2 = loadConfig();
   return {
     config: config2,
     delphi: new DelphiClient(config2, createDelphiTransport(config2)),
-    email: new EmailClient(config2, createEmailTransport(config2))
+    email: new EmailClient(config2, createEmailTransport(config2)),
+    caller: mcpOperationCaller(clientName)
   };
 }
 var init_server3 = __esm(() => {
@@ -67253,6 +67326,7 @@ var init_server3 = __esm(() => {
   init_config();
   init_delphi();
   init_email();
+  init_operation_caller();
   init_operation_exposure();
   init_operations();
   init_version();
@@ -73746,7 +73820,7 @@ import {
 } from "node:fs/promises";
 import { homedir as homedir42 } from "node:os";
 import { dirname as dirname40, join as join54 } from "node:path";
-function buildSourceAnswerLatencyRecord(result, now = () => new Date) {
+function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
   const audit = result.audit;
   const skipped2 = audit.skipped_corpora.map((skip) => ({
     corpus_id: skip.corpus_id,
@@ -73773,7 +73847,15 @@ function buildSourceAnswerLatencyRecord(result, now = () => new Date) {
       }
     } : {},
     release_decision: decision,
-    released: decision === "allow" || decision === "redact"
+    released: decision === "allow" || decision === "redact",
+    ...caller ? { caller: copyCaller(caller) } : {}
+  };
+}
+function copyCaller(caller) {
+  return {
+    surface: caller.surface,
+    ...caller.connection_id ? { connection_id: caller.connection_id } : {},
+    ...caller.display_name ? { display_name: caller.display_name } : {}
   };
 }
 function buildSourceAnswerLatencyTraceRecord(input) {
@@ -73840,6 +73922,7 @@ function buildSourceAnswerLatencyTraceRecord(input) {
     })),
     residual_analyst_orphan_count: Math.max(0, Math.floor(input.trace.residualAnalystOrphanCount)),
     ...input.trace.releaseDecision ? { release_decision: input.trace.releaseDecision } : {},
+    ...input.caller ? { caller: copyCaller(input.caller) } : {},
     phase_ms: {
       ...fittedPhases,
       unattributed_ms: unattributedMs
@@ -82849,9 +82932,11 @@ function createEmailSourceWorker(options = {}) {
           const trace = createSourceAnswerTrace();
           return await runWithSourceAnswerTrace(trace, async () => {
             let requestParsed = false;
+            let caller;
             try {
               const sourceAnswerRequest = await parseSourceIndexAnswerRequest(request);
               requestParsed = true;
+              caller = sourceAnswerRequest.caller;
               const result = await retrySqliteBusy(() => sourceAnswer.answer(sourceAnswerRequest));
               assertNoRawEmailFields(result);
               const response = json(result);
@@ -82859,7 +82944,8 @@ function createEmailSourceWorker(options = {}) {
                 log: sourceAnswerLatencyLog,
                 trace,
                 outcome: "success",
-                result
+                result,
+                ...caller ? { caller } : {}
               });
               return response;
             } catch (error2) {
@@ -82867,7 +82953,8 @@ function createEmailSourceWorker(options = {}) {
                 log: sourceAnswerLatencyLog,
                 trace,
                 outcome: classifySourceAnswerTraceOutcome(error2, requestParsed, request.signal.aborted),
-                error: error2
+                error: error2,
+                ...caller ? { caller } : {}
               });
               throw error2;
             }
@@ -84393,7 +84480,7 @@ async function emitSourceAnswerLatencyRecords(input) {
   if (input.result) {
     const buildStartedAt = Date.now();
     try {
-      const v1 = buildSourceAnswerLatencyRecord(input.result);
+      const v1 = buildSourceAnswerLatencyRecord(input.result, undefined, input.caller);
       compatV1LoggedAt = v1.logged_at;
       recordSourceAnswerLedgerBuild(Date.now() - buildStartedAt);
       const appendStartedAt = Date.now();
@@ -84409,7 +84496,8 @@ async function emitSourceAnswerLatencyRecords(input) {
       trace: snapshotSourceAnswerTrace(input.trace),
       outcome: input.outcome,
       ...input.error !== undefined ? { error: input.error } : {},
-      ...compatV1LoggedAt ? { compatV1LoggedAt } : {}
+      ...compatV1LoggedAt ? { compatV1LoggedAt } : {},
+      ...input.caller ? { caller: input.caller } : {}
     });
     await recordSourceAnswerLatencyBestEffort(input.log, v2);
   } catch (error2) {
@@ -84541,6 +84629,11 @@ async function parseSourceIndexAnswerRequest(request) {
   if (timeoutMs !== undefined && timeoutMs <= 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", "timeout_ms must be a positive number when provided.");
   }
+  const callerParse = parseOperationCallerWire(record3.caller);
+  if (!callerParse.ok) {
+    throw new EmailSourceWorkerError(400, "invalid_request", callerParse.message);
+  }
+  const caller = callerParse.caller;
   return {
     question: record3.question,
     ...query !== undefined ? { query } : {},
@@ -84564,7 +84657,8 @@ async function parseSourceIndexAnswerRequest(request) {
     ...includeInternal !== undefined ? { include_internal: includeInternal } : {},
     ...includeInternalContent !== undefined ? { include_internal_content: includeInternalContent } : {},
     ...internalContentMaxBytes !== undefined ? { internal_content_max_bytes: internalContentMaxBytes } : {},
-    ...timeoutMs !== undefined ? { timeout_ms: timeoutMs } : {}
+    ...timeoutMs !== undefined ? { timeout_ms: timeoutMs } : {},
+    ...caller ? { caller } : {}
   };
 }
 async function parseSourceIndexStatusRequest(request, connectorStores = []) {
@@ -86332,6 +86426,7 @@ var init_email_source = __esm(() => {
   init_oauth_relay();
   init_connect();
   init_operation_error();
+  init_operation_caller();
   init_ingestion_throughput();
   init_secret_store();
   init_source_corpus_registry();
@@ -95723,7 +95818,8 @@ function makeContext2() {
   return {
     config: config2,
     delphi: new DelphiClient(config2, createDelphiTransport(config2)),
-    email: new EmailClient(config2, createEmailTransport(config2))
+    email: new EmailClient(config2, createEmailTransport(config2)),
+    caller: { surface: "cli", displayName: "Olympus CLI" }
   };
 }
 function parseTerminalContentRequalifyArgs(args) {

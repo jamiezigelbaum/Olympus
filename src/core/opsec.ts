@@ -41,7 +41,14 @@ export interface StructuredEvidenceFactInput {
 export type ReleaseDecisionKind = 'allow' | 'redact' | 'needs_approval' | 'deny';
 export type ReleaseApprovalKind = 'user_review' | 's4_release' | 's5_secret_use' | 'write_action';
 export type ReleaseActionClass = 'read' | 'answer' | 'persist' | 'send' | 'write' | 'delete' | 'execute';
-export type ReleaseDestination = 'argus' | 'castor' | 'user' | 'tool' | 'log' | 'memory';
+/**
+ * Where released text goes. `calling_agent` is whichever agent asked through
+ * any Olympus surface (native OpenClaw tools, stdio MCP, the CLI, or a remote
+ * connection); every one of them receives exactly the same release policy.
+ * `castor` is the original single-agent name for the same destination and is
+ * kept as an exact alias so persisted and test inputs keep their meaning.
+ */
+export type ReleaseDestination = 'argus' | 'calling_agent' | 'castor' | 'user' | 'tool' | 'log' | 'memory';
 
 export interface ReleaseRedaction {
   label: string;
@@ -155,9 +162,9 @@ export function evaluateReleaseGate(input: ReleaseGateInput): ReleaseDecision {
     reasons.add('hostile_source_instruction_treated_as_data');
   }
 
-  const crossingToCastor = input.destination === 'castor';
+  const crossingToCallingAgent = isCallingAgentDestination(input.destination);
   const secureFacts = input.facts.filter((fact) => fact.sensitivity.trustDomain === 'secure_local');
-  if (crossingToCastor && secureFacts.some((fact) => fact.releaseSurface === 'local_only')) {
+  if (crossingToCallingAgent && secureFacts.some((fact) => fact.releaseSurface === 'local_only')) {
     return {
       decision: 'needs_approval',
       reasons: [...reasons, 'secure_local_fact_not_marked_for_castor_release'],
@@ -165,7 +172,7 @@ export function evaluateReleaseGate(input: ReleaseGateInput): ReleaseDecision {
     };
   }
 
-  if (crossingToCastor && secureFacts.length > 0) {
+  if (crossingToCallingAgent && secureFacts.length > 0) {
     reasons.add('bounded_secure_derivative_allowed');
   }
 
@@ -174,6 +181,11 @@ export function evaluateReleaseGate(input: ReleaseGateInput): ReleaseDecision {
     reasons: [...reasons, 'release_gate_passed'],
     allowedText: input.draftAnswer,
   };
+}
+
+/** `castor` and `calling_agent` are one destination under two names. */
+export function isCallingAgentDestination(destination: ReleaseDestination): boolean {
+  return destination === 'calling_agent' || destination === 'castor';
 }
 
 export function buildOpsecReleaseAudit(

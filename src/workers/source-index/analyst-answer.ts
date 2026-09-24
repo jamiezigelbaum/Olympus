@@ -1893,7 +1893,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
     : evaluateReleaseGate({
         facts,
         draftAnswer: originalDraftAnswer,
-        destination: 'castor',
+        destination: 'calling_agent',
         action: 'answer',
         caller: 'worker',
       });
@@ -1902,7 +1902,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
       evaluateReleaseGate({
         facts,
         draftAnswer: finalDraftAnswer,
-        destination: 'castor',
+        destination: 'calling_agent',
         action: 'answer',
         caller: 'worker',
       }),
@@ -1954,7 +1954,7 @@ function scannedUnsupportedNoContentDecision(input: {
   const scanned = evaluateReleaseGate({
     facts: input.facts,
     draftAnswer: input.originalDraftAnswer,
-    destination: 'castor',
+    destination: 'calling_agent',
     action: 'answer',
     caller: 'worker',
   });
@@ -1964,7 +1964,7 @@ function scannedUnsupportedNoContentDecision(input: {
   const safeScanned = evaluateReleaseGate({
     facts: input.facts,
     draftAnswer: input.safeUnsupportedDraft,
-    destination: 'castor',
+    destination: 'calling_agent',
     action: 'answer',
     caller: 'worker',
   });

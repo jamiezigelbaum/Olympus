@@ -11292,6 +11292,28 @@ function assertNoRawEmailFieldsAtPath(value, path) {
 // src/core/email.ts
 init_http_timeout();
 init_operation_error();
+
+// src/core/operation-caller.ts
+var OPERATION_CALLER_DISPLAY_NAME_MAX = 80;
+var UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+function sanitizeCallerDisplayName(value) {
+  if (typeof value !== "string")
+    return;
+  const cleaned = value.replace(UNSAFE_LABEL_CHARS, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned)
+    return;
+  return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
+}
+function operationCallerToWire(caller) {
+  const displayName = sanitizeCallerDisplayName(caller.displayName);
+  return {
+    surface: caller.surface,
+    ...caller.connectionId ? { connection_id: caller.connectionId } : {},
+    ...displayName ? { display_name: displayName } : {}
+  };
+}
+
+// src/core/email.ts
 init_source_corpus_registry();
 
 // src/core/source-watch.ts
@@ -11507,7 +11529,8 @@ class EmailClient {
         ...options.includeInternal !== undefined ? { include_internal: options.includeInternal } : {},
         ...options.includeInternalContent !== undefined ? { include_internal_content: options.includeInternalContent } : {},
         ...options.internalContentMaxBytes !== undefined ? { internal_content_max_bytes: options.internalContentMaxBytes } : {},
-        ...options.timeoutMs !== undefined ? { timeout_ms: options.timeoutMs } : {}
+        ...options.timeoutMs !== undefined ? { timeout_ms: options.timeoutMs } : {},
+        ...options.caller ? { caller: operationCallerToWire(options.caller) } : {}
       })
     }, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined);
     const data = asRecord7(response);
@@ -15278,7 +15301,8 @@ var operations = [
         ...includeInternal !== undefined ? { includeInternal } : {},
         ...includeInternalContent !== undefined ? { includeInternalContent } : {},
         ...internalContentMaxBytes !== undefined ? { internalContentMaxBytes } : {},
-        ...timeoutMs !== undefined ? { timeoutMs } : {}
+        ...timeoutMs !== undefined ? { timeoutMs } : {},
+        ...ctx.caller ? { caller: ctx.caller } : {}
       });
     }
   },
@@ -16820,7 +16844,8 @@ var plugin = {
     const ctx = {
       config,
       delphi: new DelphiClient(config, createDelphiTransport(config)),
-      email: new EmailClient(config, createEmailTransport(config))
+      email: new EmailClient(config, createEmailTransport(config)),
+      caller: { surface: "native", displayName: "OpenClaw" }
     };
     registerSourceWatchDeliveryRoute(api, config);
     registerOlympusDashboardGateway(api, config);

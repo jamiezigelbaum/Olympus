@@ -5,6 +5,7 @@
 // analyst-backed handler. Changing these shapes changes what Castor sees —
 // treat with the same care as the OPSEC policy fields they carry.
 
+import type { OperationCallerWire } from '../../core/operation-caller.ts';
 import type { OpsecReleaseAudit, SourceInstructionFlag } from '../../core/opsec.ts';
 import type {
   RetrievalDegradationReason,
@@ -44,6 +45,9 @@ export interface SourceIndexAnswerRequest {
   include_internal_content?: boolean;
   internal_content_max_bytes?: number;
   timeout_ms?: number;
+  // The calling agent, recorded on the answer's audit ledger entry. Attribution
+  // only: release policy is identical for every calling agent.
+  caller?: OperationCallerWire;
 }
 
 export interface SourceAnswerSelectedItem {

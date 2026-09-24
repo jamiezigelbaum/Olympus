@@ -7,6 +7,7 @@ import {
 import { loadConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
 import { createEmailTransport, EmailClient } from '../core/email.ts';
+import { sanitizeCallerDisplayName, type OperationCaller } from '../core/operation-caller.ts';
 import { shouldExposeOperation } from '../core/operation-exposure.ts';
 import { findOperationByName, operations, OperationError } from '../core/operations.ts';
 import type { OperationContext } from '../core/operations.ts';
@@ -67,17 +68,26 @@ export async function serve(): Promise<void> {
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    return handleMcpCallTool(request);
+    // The stdio client names itself during initialize (e.g. "claude-code").
+    // Self-reported, so it is an audit label only, never an authorization.
+    return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name));
   });
 
   await server.connect(new StdioServerTransport());
 }
 
-function makeContext(): OperationContext {
+/** The stdio MCP caller identity; the client's self-reported name is a label only. */
+export function mcpOperationCaller(clientName?: string): OperationCaller {
+  const displayName = sanitizeCallerDisplayName(clientName);
+  return { surface: 'mcp', ...(displayName ? { displayName } : {}) };
+}
+
+function makeContext(clientName?: string): OperationContext {
   const config = loadConfig();
   return {
     config,
     delphi: new DelphiClient(config, createDelphiTransport(config)),
     email: new EmailClient(config, createEmailTransport(config)),
+    caller: mcpOperationCaller(clientName),
   };
 }
