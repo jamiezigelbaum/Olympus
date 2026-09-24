@@ -84,6 +84,14 @@ export interface NativeProcessServiceOptions<TSettings extends NativeProcessStar
    * exit without an exact-instance readiness receipt stays a startup failure.
    */
   restartOnCleanExit?: boolean;
+  /**
+   * How long a ready child must stay up before restart backoff resets.
+   * Default 0: readiness resets it at once (the historical behavior). A
+   * service whose readiness proves only that the process started (not that
+   * its real work survived) sets this, so a child that crashes seconds after
+   * ready keeps climbing the backoff instead of restarting at the first delay.
+   */
+  stableUptimeMs?: number;
 }
 
 /** OpenClaw replacement starts have a five-second deadline. Keep the host
@@ -118,6 +126,8 @@ interface ServiceLifetime<TSettings extends NativeProcessStartSettings> {
   stopping: boolean;
   restartAttempt: number;
   restartTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Resets backoff once a ready child has stayed up for `stableUptimeMs`. */
+  stableTimer: ReturnType<typeof setTimeout> | undefined;
   cleanupPromise: Promise<void> | undefined;
 }
 
@@ -162,6 +172,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
   const restartOnCleanExit = options.restartOnCleanExit ?? true;
+  const stableUptimeMs = options.stableUptimeMs ?? 0;
   const spawnChild = options.spawn ?? spawnProcess;
   let generation = 0;
   let current: ServiceLifetime<TSettings> | undefined;
@@ -258,6 +269,10 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       // to terminate descendants before any replacement can be scheduled.
       if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady) return;
       lifetime.childReady = false;
+      if (lifetime.stableTimer) {
+        clearTimeout(lifetime.stableTimer);
+        lifetime.stableTimer = undefined;
+      }
       if (!restartOnCleanExit && code === 0 && signal === null) {
         // Opt-in completion: finished work is not a crash, so no replacement is
         // scheduled and health stays clear. Descendant cleanup is still
@@ -299,7 +314,16 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     }
     if (spawnFailed || childExited(child)) throw new Error(`Olympus ${options.label} exited during startup.`);
     lifetime.childReady = true;
-    lifetime.restartAttempt = 0;
+    if (stableUptimeMs > 0) {
+      if (lifetime.stableTimer) clearTimeout(lifetime.stableTimer);
+      lifetime.stableTimer = setTimeout(() => {
+        lifetime.stableTimer = undefined;
+        if (isCurrent(lifetime) && lifetime.child === child && lifetime.childReady) lifetime.restartAttempt = 0;
+      }, stableUptimeMs);
+      lifetime.stableTimer.unref?.();
+    } else {
+      lifetime.restartAttempt = 0;
+    }
     clearFailure(lifetime);
     lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
   };
@@ -319,6 +343,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         stopping: false,
         restartAttempt: 0,
         restartTimer: undefined,
+        stableTimer: undefined,
         cleanupPromise: undefined,
       };
       current = lifetime;
@@ -351,6 +376,10 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     if (lifetime.restartTimer) {
       clearTimeout(lifetime.restartTimer);
       lifetime.restartTimer = undefined;
+    }
+    if (lifetime.stableTimer) {
+      clearTimeout(lifetime.stableTimer);
+      lifetime.stableTimer = undefined;
     }
     // A failed signal retains both the lifetime and exact child/PGID. No new
     // start may pass this boundary until a later stop establishes cleanup.

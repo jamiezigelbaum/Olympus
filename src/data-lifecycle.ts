@@ -184,7 +184,7 @@ export interface DataDeleteResult {
 export interface DataDeleteCustody {
   requirement: 'source_disconnected' | 'worker_inactive';
   ready: boolean;
-  observed: 'disconnected' | 'connected' | WorkerServiceState | 'unknown_registry';
+  observed: 'disconnected' | 'connected' | WorkerServiceState | 'unknown_registry' | 'relay_running';
   next_action?: string;
 }
 
@@ -644,6 +644,8 @@ export function deleteOlympusDataWithCustody(options: {
   dryRun?: boolean;
   connectedRegistry?: ConnectedHandleRegistry;
   workerState?: WorkerServiceState;
+  /** A remote-access relay child is running (it would recreate its keys and keep forwarding). */
+  relayRunning?: boolean;
 } & LifecyclePathContext): DataDeleteWithCustodyResult {
   const custody = dataDeleteCustody(options);
   if (options.dryRun !== true && !custody.ready) {
@@ -651,7 +653,9 @@ export function deleteOlympusDataWithCustody(options: {
       'invalid_params',
       custody.requirement === 'source_disconnected'
         ? `Disconnect ${options.sourceId} before deleting its local data.`
-        : 'Stop or uninstall the Olympus worker before deleting local data.',
+        : custody.observed === 'relay_running'
+          ? 'Turn remote access off before deleting local data: the relay process is still running.'
+          : 'Stop or uninstall the Olympus worker before deleting local data.',
       custody.next_action,
     );
   }
@@ -666,6 +670,7 @@ export function dataDeleteCustody(options: {
   sourceId?: string;
   connectedRegistry?: ConnectedHandleRegistry;
   workerState?: WorkerServiceState;
+  relayRunning?: boolean;
 }): DataDeleteCustody {
   if (options.all === true && options.sourceId) {
     throw new OperationError('invalid_params', 'Use either --all or --source, not both.');
@@ -708,6 +713,17 @@ export function dataDeleteCustody(options: {
 
   const workerState = options.workerState;
   const ready = workerState === 'inactive' || workerState === 'missing';
+  // Like the worker, the remote-access relay child must be down: it holds its
+  // keys and state under the data root and would keep forwarding to (and
+  // re-creating) what the delete removes.
+  if (ready && options.all === true && options.relayRunning === true) {
+    return {
+      requirement: 'worker_inactive',
+      ready: false,
+      observed: 'relay_running',
+      next_action: 'Run openclaw config set plugins.entries.olympus.config.remote.enabled false (or stop the OpenClaw Gateway), check olympus connections status, then retry.',
+    };
+  }
   return {
     requirement: 'worker_inactive',
     ready,

@@ -206,7 +206,9 @@ cannot name another record.
   the CA's *current* agreement (the directory's `meta.termsOfService`) with
   `olympus connections terms --accept`. Until then the relay session stays
   up and `olympus connections status` reports `awaiting_terms` with the
-  agreement's URL. A new agreement from the CA needs a new acceptance.
+  agreement's URL. A new agreement from the CA needs a new acceptance. A CA
+  that publishes no agreement URL is accepted against no URL, so issuance can
+  proceed; if it later publishes one, the owner is asked again.
 
 ## Plugin wiring
 
@@ -230,6 +232,11 @@ the rest of the plugin.
   (`olympus __relay-service-run`), because the child terminates internet TLS
   and parses hosted agents' HTTP; it gets no Gateway or worker credentials.
   The shared process kernel owns start, stop, restart backoff and health.
+  Readiness proves only that the child started, so backoff resets only after
+  60 seconds up (`stableUptimeMs`); a child that crashes soon after start keeps
+  backing off instead of reconnecting to the relay every 250 ms. A crash
+  withdraws the public URL at once, before the relaunch. `olympus data delete
+  --all` refuses while the relay child runs, as it does for a running worker.
 - **State.** `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/connect-relay/`
   (0700, files 0600) holds the keys and certificate, plus `status.json` (what
   the service and child report), `relay-auth` (below) and `acme-terms.json`.

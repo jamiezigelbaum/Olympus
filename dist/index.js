@@ -9998,6 +9998,7 @@ function createNativeProcessService(options) {
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
   const restartOnCleanExit = options.restartOnCleanExit ?? true;
+  const stableUptimeMs = options.stableUptimeMs ?? 0;
   const spawnChild = options.spawn ?? spawnProcess;
   let generation = 0;
   let current;
@@ -10080,6 +10081,10 @@ function createNativeProcessService(options) {
       if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
         return;
       lifetime.childReady = false;
+      if (lifetime.stableTimer) {
+        clearTimeout(lifetime.stableTimer);
+        lifetime.stableTimer = undefined;
+      }
       if (!restartOnCleanExit && code === 0 && signal === null) {
         completeCleanExit(lifetime, child).catch(() => {
           reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
@@ -10116,7 +10121,18 @@ function createNativeProcessService(options) {
     if (spawnFailed || childExited(child))
       throw new Error(`Olympus ${options.label} exited during startup.`);
     lifetime.childReady = true;
-    lifetime.restartAttempt = 0;
+    if (stableUptimeMs > 0) {
+      if (lifetime.stableTimer)
+        clearTimeout(lifetime.stableTimer);
+      lifetime.stableTimer = setTimeout(() => {
+        lifetime.stableTimer = undefined;
+        if (isCurrent(lifetime) && lifetime.child === child && lifetime.childReady)
+          lifetime.restartAttempt = 0;
+      }, stableUptimeMs);
+      lifetime.stableTimer.unref?.();
+    } else {
+      lifetime.restartAttempt = 0;
+    }
     clearFailure(lifetime);
     lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
   };
@@ -10136,6 +10152,7 @@ function createNativeProcessService(options) {
         stopping: false,
         restartAttempt: 0,
         restartTimer: undefined,
+        stableTimer: undefined,
         cleanupPromise: undefined
       };
       current = lifetime;
@@ -10169,6 +10186,10 @@ function createNativeProcessService(options) {
     if (lifetime.restartTimer) {
       clearTimeout(lifetime.restartTimer);
       lifetime.restartTimer = undefined;
+    }
+    if (lifetime.stableTimer) {
+      clearTimeout(lifetime.stableTimer);
+      lifetime.stableTimer = undefined;
     }
     const cleanup = terminateChild(lifetime, stopGraceMs).then(() => {
       if (retiring === lifetime)
@@ -13384,12 +13405,15 @@ function ensureRemoteAccessDir(dir) {
   raChmodSync(dir, 448);
   return dir;
 }
-function writePrivateJson(path, value) {
-  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(4).toString("hex")}`;
-  raWriteFileSync(temporary, `${JSON.stringify(value, null, 2)}
-`, { mode: 384 });
+function writePrivateText(path, text) {
+  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(8).toString("hex")}`;
+  raWriteFileSync(temporary, text, { mode: 384, flag: "wx" });
   raChmodSync(temporary, 384);
   raRenameSync(temporary, path);
+}
+function writePrivateJson(path, value) {
+  writePrivateText(path, `${JSON.stringify(value, null, 2)}
+`);
 }
 function readPrivateFile(path) {
   try {
@@ -13457,6 +13481,7 @@ function loopbackWorkerOrigin(value) {
 var SERVICE_ID7 = "olympus-remote-relay";
 var SERVICE_LABEL5 = "remote relay";
 var DEFAULT_STARTUP_TIMEOUT_MS4 = 15000;
+var DEFAULT_STABLE_UPTIME_MS = 60000;
 var CHILD_ENV_PASSTHROUGH = ["HOME", "XDG_DATA_HOME", "PATH", "TMPDIR", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"];
 function createNativeRelayService(options) {
   let lastStatusDir;
@@ -13477,6 +13502,7 @@ function createNativeRelayService(options) {
     ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
     ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
     defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4,
+    stableUptimeMs: options.stableUptimeMs ?? DEFAULT_STABLE_UPTIME_MS,
     prepareStart: async (input) => {
       const settings = prepareRelayStart(relayFreshConfig(input.context.config, input.initialConfig), options);
       lastStatusDir = settings.statusDir;
@@ -13560,6 +13586,7 @@ function prepareRelayStart(config, options) {
       statusDir,
       instanceId,
       readinessProbe: async (child) => {
+        watchExit(child, statusDir, instanceId);
         const reported = readRemoteAccessStatus(statusDir);
         return reported?.instance_id === instanceId && reported.pid === child.pid;
       }
@@ -13575,6 +13602,25 @@ function workerOrigin(config, env) {
     }
   }
   return loopbackWorkerOrigin(config.email.baseUrl);
+}
+var watchedChildren = new WeakSet;
+function watchExit(child, statusDir, instanceId) {
+  if (watchedChildren.has(child))
+    return;
+  watchedChildren.add(child);
+  child.once("exit", () => {
+    try {
+      const status = readRemoteAccessStatus(statusDir);
+      if (!status || status.instance_id !== instanceId || status.relay?.state === "stopped")
+        return;
+      writeRemoteAccessStatus(statusDir, {
+        ...status,
+        updated_at: new Date().toISOString(),
+        public_base_url: null,
+        relay: { state: "offline", reason: "the relay process exited; Olympus restarts it", retry_in_ms: null }
+      });
+    } catch {}
+  });
 }
 function clearStalePublicUrl(statusDir, instanceId) {
   if (!statusDir || !instanceId)

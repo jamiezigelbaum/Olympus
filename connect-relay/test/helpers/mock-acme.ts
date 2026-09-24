@@ -28,6 +28,8 @@ export interface MockAcme {
   readonly directoryUrl: string;
   readonly issued: string[];
   readonly accounts: number;
+  /** Publish a different subscriber agreement (a path under the server). */
+  setTermsOfService(path: string): void;
   close(): Promise<void>;
 }
 
@@ -42,6 +44,7 @@ export async function startMockAcme(options: {
   const certificates = new Map<string, string>();
   const issued: string[] = [];
   let base = '';
+  let termsPath = '/terms/v1.pdf';
   let counter = 0;
   const id = () => String(++counter);
 
@@ -64,7 +67,7 @@ export async function startMockAcme(options: {
         newNonce: `${base}/new-nonce`,
         newAccount: `${base}/new-account`,
         newOrder: `${base}/new-order`,
-        meta: { termsOfService: `${base}/terms/v1.pdf` },
+        meta: { termsOfService: `${base}${termsPath}` },
       });
     }
     if (req.url === '/new-nonce') {
@@ -173,6 +176,9 @@ export async function startMockAcme(options: {
     issued,
     get accounts() {
       return accounts.size;
+    },
+    setTermsOfService(path) {
+      termsPath = path;
     },
     close: () =>
       new Promise<void>((resolve) => {

@@ -26,6 +26,13 @@ import { applyWorkerSetupEnv } from './worker-auth.ts';
 const SERVICE_ID = 'olympus-remote-relay';
 const SERVICE_LABEL = 'remote relay';
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
+/**
+ * Readiness proves only that the child started and wrote its status, not that
+ * the relay session survives, so backoff resets only after a minute up: a
+ * child that crashes seconds after start keeps backing off instead of
+ * reconnecting to the relay four times a second.
+ */
+const DEFAULT_STABLE_UPTIME_MS = 60_000;
 /** Only what the child needs: it handles internet traffic and gets no credentials. */
 const CHILD_ENV_PASSTHROUGH = ['HOME', 'XDG_DATA_HOME', 'PATH', 'TMPDIR', 'LANG', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS'] as const;
 
@@ -42,6 +49,8 @@ export interface NativeRelayServiceOptions {
   readinessPollMs?: number;
   stopGraceMs?: number;
   restartDelaysMs?: readonly number[];
+  /** Uptime after which restart backoff resets (default 60 s). */
+  stableUptimeMs?: number;
 }
 
 interface RelayLaunchSettings extends NativeProcessStartSettings {
@@ -86,6 +95,7 @@ export function createNativeRelayService(options: NativeRelayServiceOptions): Na
     ...(options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {}),
     ...(options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {}),
     defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
+    stableUptimeMs: options.stableUptimeMs ?? DEFAULT_STABLE_UPTIME_MS,
     prepareStart: async (input) => {
       const settings = prepareRelayStart(relayFreshConfig(input.context.config, input.initialConfig), options);
       lastStatusDir = settings.statusDir;
@@ -177,6 +187,7 @@ function prepareRelayStart(
       statusDir,
       instanceId,
       readinessProbe: async (child) => {
+        watchExit(child, statusDir, instanceId);
         const reported = readRemoteAccessStatus(statusDir);
         return reported?.instance_id === instanceId && reported.pid === child.pid;
       },
@@ -198,6 +209,32 @@ function workerOrigin(config: OlympusConfig, env: NodeJS.ProcessEnv): string | u
     }
   }
   return loopbackWorkerOrigin(config.email.baseUrl);
+}
+
+const watchedChildren = new WeakSet<object>();
+
+/**
+ * When the child exits (a crash, or a stop), withdraw its public URL and
+ * online state at once, so the worker stops advertising OAuth for the whole
+ * restart backoff rather than until the replacement writes.
+ */
+function watchExit(child: { once(event: 'exit', listener: () => void): unknown }, statusDir: string, instanceId: string): void {
+  if (watchedChildren.has(child)) return;
+  watchedChildren.add(child);
+  child.once('exit', () => {
+    try {
+      const status = readRemoteAccessStatus(statusDir);
+      if (!status || status.instance_id !== instanceId || status.relay?.state === 'stopped') return;
+      writeRemoteAccessStatus(statusDir, {
+        ...status,
+        updated_at: new Date().toISOString(),
+        public_base_url: null,
+        relay: { state: 'offline', reason: 'the relay process exited; Olympus restarts it', retry_in_ms: null },
+      });
+    } catch {
+      // Advisory: the replacement's start rewrites the status anyway.
+    }
+  });
 }
 
 function clearStalePublicUrl(statusDir: string | undefined, instanceId: string | undefined): void {

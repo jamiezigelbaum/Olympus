@@ -137,11 +137,16 @@ export function ensureRemoteAccessDir(dir: string): string {
   return dir;
 }
 
-function writePrivateJson(path: string, value: unknown): void {
-  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(4).toString('hex')}`;
-  raWriteFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+/** Atomic 0600 write: an exclusively created, randomly named temporary, then rename. */
+function writePrivateText(path: string, text: string): void {
+  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(8).toString('hex')}`;
+  raWriteFileSync(temporary, text, { mode: 0o600, flag: 'wx' });
   raChmodSync(temporary, 0o600);
   raRenameSync(temporary, path);
+}
+
+function writePrivateJson(path: string, value: unknown): void {
+  writePrivateText(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 /** A regular file owned by this user, not a symlink; otherwise undefined. */
@@ -308,10 +313,7 @@ export function loadOrCreateRelayAuthSecret(dir: string): string {
   const existing = readPrivateFile(path)?.trim();
   if (existing && /^[A-Za-z0-9_-]{43}$/.test(existing)) return existing;
   const secret = raRandomBytes(32).toString('base64url');
-  const temporary = `${path}.tmp.${process.pid}`;
-  raWriteFileSync(temporary, `${secret}\n`, { mode: 0o600 });
-  raChmodSync(temporary, 0o600);
-  raRenameSync(temporary, path);
+  writePrivateText(path, `${secret}\n`);
   return secret;
 }
 
@@ -578,6 +580,12 @@ function nextStep(view: RemoteAccessStatusView): string | null {
   if (view.certificate.state === 'failed') return 'The certificate could not be obtained yet; Olympus retries automatically.';
   if (view.certificate.state !== 'serving') return 'Olympus is obtaining its certificate.';
   return null;
+}
+
+/** A relay child is running for this install (per its status and a live pid). */
+export function relayProcessRunning(dir: string, isAlive: (pid: number) => boolean = processIsAlive): boolean {
+  const status = readRemoteAccessStatus(dir);
+  return status?.mode === 'relay' && status.pid !== null && status.relay?.state !== 'stopped' && isAlive(status.pid);
 }
 
 function processIsAlive(pid: number): boolean {

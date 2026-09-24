@@ -116,6 +116,7 @@ import {
   readRemoteAccessStatus,
   readTermsAcceptance,
   recordTermsAcceptance,
+  relayProcessRunning,
   remoteAccessDirForCli,
   remoteAccessStatusView,
   resolveRemoteAccessUrls,
@@ -2341,6 +2342,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
       all: options.all,
       dryRun: options.dryRun,
       workerState,
+      relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env)),
     });
   }
   if (command === '--help' || command === '-h') {
@@ -2593,7 +2595,11 @@ export async function runConnectionsTermsCommand(
   const dir = remoteAccessDirForCli(env);
   const status = readRemoteAccessStatus(dir);
   let termsUrl = status?.terms_url ?? undefined;
-  if (!termsUrl) {
+  // The relay child asked its CA and found no agreement URL: there is nothing
+  // to show, but consent is still recorded (against no URL) so issuance can
+  // proceed instead of waiting forever.
+  const caNamesNone = !termsUrl && status?.certificate?.state === 'awaiting_terms';
+  if (!termsUrl && !caNamesNone) {
     const fetchTerms = dependencies.fetchTerms ?? (async () => {
       const { fetchTermsOfService } = await import('../connect-relay/client/acme.ts');
       const { LETS_ENCRYPT_DIRECTORY } = await import('../connect-relay/client/connect.ts');
@@ -2611,29 +2617,30 @@ export async function runConnectionsTermsCommand(
       );
     }
   }
-  if (!termsUrl) {
-    throw new OperationError('config_error', 'The certificate authority did not name a subscriber agreement.');
-  }
+  const acceptance = readTermsAcceptance(dir);
   if (accept) {
-    const acceptance = recordTermsAcceptance(dir, termsUrl, dependencies.now?.() ?? new Date());
+    const recorded = recordTermsAcceptance(dir, termsUrl, dependencies.now?.() ?? new Date());
     return {
       kind: 'remote_access_terms',
-      url: termsUrl,
+      url: termsUrl ?? null,
       accepted: true,
-      accepted_at: acceptance.accepted_at,
-      notice: 'Accepted. Olympus will now request this install\'s certificate from Let\'s Encrypt through the relay.',
+      accepted_at: recorded.accepted_at,
+      notice: termsUrl
+        ? 'Accepted. Olympus will now request this install\'s certificate through the relay.'
+        : 'Accepted. The certificate authority publishes no agreement URL, so this records consent to its terms as it states them; if it later publishes an agreement, you will be asked again.',
     };
   }
-  const acceptance = readTermsAcceptance(dir);
-  const accepted = acceptance?.terms_url === termsUrl;
+  const accepted = acceptance !== undefined && (termsUrl === undefined || acceptance.terms_url === termsUrl);
   return {
     kind: 'remote_access_terms',
-    url: termsUrl,
+    url: termsUrl ?? null,
     accepted,
     accepted_at: accepted ? acceptance!.accepted_at : null,
     notice: accepted
       ? 'Already accepted.'
-      : 'Remote access needs a certificate from Let\'s Encrypt for this install\'s own hostname, which means agreeing to its Subscriber Agreement. Read it at the url above; to accept, run olympus connections terms --accept.',
+      : termsUrl
+        ? 'Remote access needs a certificate for this install\'s own hostname, which means agreeing to the certificate authority\'s Subscriber Agreement. Read it at the url above; to accept, run olympus connections terms --accept.'
+        : 'Remote access needs a certificate for this install\'s own hostname. The certificate authority publishes no agreement URL; to consent to its terms and continue, run olympus connections terms --accept.',
   };
 }
 

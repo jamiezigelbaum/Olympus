@@ -33,6 +33,7 @@ setDefaultTimeout(60_000);
 const ZONE = 'connect.olympus.test';
 const CONTROL_HOST = `relay.${ZONE}`;
 const CHILD = join(import.meta.dir, 'fixtures', 'relay', 'relay-runtime-child.ts');
+const CRASHING_CHILD = join(import.meta.dir, 'fixtures', 'relay', 'crashing-relay-child.ts');
 
 let ca: TestCa;
 let acme: MockAcme;
@@ -92,21 +93,27 @@ function fixtureRoot() {
   return { root, dataHome, workerEnvPath, dir: remoteAccessDir({ XDG_DATA_HOME: dataHome }) };
 }
 
-function relayService(workerEnvPath: string, remote: Record<string, unknown>) {
+function relayService(
+  workerEnvPath: string,
+  remote: Record<string, unknown>,
+  overrides: { executablePath?: string; restartDelaysMs?: number[]; stableUptimeMs?: number; childEnv?: Record<string, string> } = {},
+) {
   const service = createNativeRelayService({
     initialPluginConfig: { remote, email: { baseUrl: workerBaseUrl } },
     moduleUrl: import.meta.url,
-    executablePath: CHILD,
+    executablePath: overrides.executablePath ?? CHILD,
     workerEnvPath,
     childEnv: {
       TEST_RELAY_PORT: String(relay.port),
       TEST_RELAY_CA: ca.cert,
       TEST_ACME_DIRECTORY: acme.directoryUrl,
+      ...overrides.childEnv,
     },
     startupTimeoutMs: 20_000,
     readinessPollMs: 20,
     stopGraceMs: 2_000,
-    restartDelaysMs: [50],
+    restartDelaysMs: overrides.restartDelaysMs ?? [50],
+    ...(overrides.stableUptimeMs !== undefined ? { stableUptimeMs: overrides.stableUptimeMs } : {}),
   });
   services.push(service);
   return service;
@@ -212,6 +219,80 @@ describe('native relay service', () => {
     expect(second.public_base_url).toBe(first.public_base_url);
     // Fresh certificate on disk: no second order.
     expect(acme.issued.length).toBe(issued);
+  });
+
+  test('a child that crashes soon after ready keeps backing off instead of hammering the relay', async () => {
+    const spawns = async (stableUptimeMs: number | undefined) => {
+      const { root, workerEnvPath } = fixtureRoot();
+      const log = join(root, 'spawns.log');
+      writeFileSync(log, '');
+      const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE }, {
+        executablePath: CRASHING_CHILD,
+        restartDelaysMs: [100, 800, 5_000],
+        childEnv: { TEST_SPAWN_LOG: log },
+        ...(stableUptimeMs !== undefined ? { stableUptimeMs } : {}),
+      });
+      await service.start({});
+      await Bun.sleep(3_500);
+      await service.stop();
+      return readFileSync(log, 'utf8').trim().split('\n').map(Number);
+    };
+    // Default: readiness does not reset backoff, so the delays climb
+    // (100 ms, 800 ms, then 5 s): at most three starts in 3.5 s.
+    const backedOff = await spawns(undefined);
+    expect(backedOff.length).toBeGreaterThanOrEqual(2);
+    expect(backedOff.length).toBeLessThanOrEqual(3);
+    if (backedOff.length === 3) expect(backedOff[2]! - backedOff[1]!).toBeGreaterThan(backedOff[1]! - backedOff[0]!);
+    // Control: resetting at readiness restarts at the first delay every time.
+    const hammering = await spawns(0);
+    expect(hammering.length).toBeGreaterThanOrEqual(4);
+  });
+
+  test('a crash withdraws the public URL at once, before the backoff relaunch', async () => {
+    const { dataHome, workerEnvPath, dir } = fixtureRoot();
+    recordTermsAcceptance(dir, acme.directoryUrl.replace('/directory', '/terms/v1.pdf'));
+    const publicUrls = createRemotePublicUrlSource({ XDG_DATA_HOME: dataHome }, { minIntervalMs: 0 });
+    const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE }, { restartDelaysMs: [3_000] });
+    await service.start({});
+    const first = await until(() => readRemoteAccessStatus(dir), (s) => s.public_base_url !== null);
+    expect(publicUrls.current()).toBeDefined();
+
+    process.kill(first.pid!, 'SIGKILL');
+    const down = await until(() => readRemoteAccessStatus(dir), (s) => s.public_base_url === null, 2_000);
+    // Still the crashed instance: the replacement has not started yet.
+    expect(down.instance_id).toBe(first.instance_id);
+    expect(down.relay).toMatchObject({ state: 'offline' });
+    expect(publicUrls.current()).toBeUndefined();
+
+    const back = await until(() => readRemoteAccessStatus(dir), (s) => s.instance_id !== first.instance_id && s.public_base_url !== null);
+    expect(back.public_base_url).toBe(first.public_base_url);
+  });
+
+  test('a subscriber agreement the CA changes mid-session needs a new acceptance before any order', async () => {
+    const { workerEnvPath, dir } = fixtureRoot();
+    const v1 = acme.directoryUrl.replace('/directory', '/terms/v1.pdf');
+    const v2 = acme.directoryUrl.replace('/directory', '/terms/v2.pdf');
+    const issued = acme.issued.length;
+    try {
+      const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE });
+      await service.start({});
+      await until(() => readRemoteAccessStatus(dir), (s) => s.certificate?.state === 'awaiting_terms' && s.terms_url === v1);
+
+      // The CA publishes v2 while the owner is still reading v1.
+      acme.setTermsOfService('/terms/v2.pdf');
+      recordTermsAcceptance(dir, v1);
+      const renewed = await until(() => readRemoteAccessStatus(dir), (s) => s.terms_url === v2);
+      expect(renewed.certificate?.state).toBe('awaiting_terms');
+      expect(renewed.public_base_url).toBeNull();
+      await Bun.sleep(300);
+      expect(acme.issued.length).toBe(issued);
+
+      recordTermsAcceptance(dir, v2);
+      await until(() => readRemoteAccessStatus(dir), (s) => s.public_base_url !== null);
+      expect(acme.issued.length).toBe(issued + 1);
+    } finally {
+      acme.setTermsOfService('/terms/v1.pdf');
+    }
   });
 
   test('refuses a relay and a manual public URL together, by name, and starts nothing', async () => {

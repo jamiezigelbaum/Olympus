@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RELAY_AUTH_HEADER as CLIENT_RELAY_AUTH_HEADER } from '../connect-relay/client/local-endpoint.ts';
 import { runConnectionsCommand, runConnectionsTermsCommand } from '../src/cli.ts';
 import { configFromPluginConfig } from '../src/core/config.ts';
+import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
 import {
   createRelayRequestVerifier,
   createRemotePublicUrlSource,
@@ -12,6 +13,8 @@ import {
   loadOrCreateRelayAuthSecret,
   readTermsAcceptance,
   RELAY_AUTH_HEADER,
+  relayProcessRunning,
+  termsAccepted,
   remoteAccessDir,
   resolveRemoteAccessMode,
   writeRemoteAccessStatus,
@@ -155,6 +158,8 @@ describe('relay header trust', () => {
     // The relay's local endpoint.
     expect(verify(request({ 'x-olympus-relay': '1', [RELAY_AUTH_HEADER]: secret }))).toBe(true);
     expect(RELAY_AUTH_HEADER).toBe(CLIENT_RELAY_AUTH_HEADER);
+    // Written through the exclusive, randomly named temporary: nothing left behind.
+    expect(readdirSync(remoteAccessDir(dataEnv)).filter((name) => name.includes('.tmp.'))).toEqual([]);
   });
 });
 
@@ -275,9 +280,52 @@ describe('olympus connections terms', () => {
     await expect(runConnectionsTermsCommand(['--yes'], env)).rejects.toThrow('Usage: olympus connections terms [--accept]');
   });
 
+  test('a CA that publishes no agreement URL is not a dead end', async () => {
+    const { env, dir } = home();
+    // The relay child asked its CA and got no agreement URL.
+    writeRemoteAccessStatus(dir, relayStatus({
+      terms_url: null,
+      public_base_url: null,
+      certificate: { state: 'awaiting_terms', not_after: null, reason: null, retry_in_ms: null },
+    }));
+    const fetchTerms = async () => { throw new Error('must not substitute another CA\'s agreement'); };
+    expect(await runConnectionsTermsCommand([], env, { fetchTerms })).toMatchObject({
+      url: null,
+      accepted: false,
+      notice: expect.stringContaining('olympus connections terms --accept'),
+    });
+    expect(termsAccepted(dir, undefined)).toBe(false);
+    expect(await runConnectionsTermsCommand(['--accept'], env, { fetchTerms })).toMatchObject({ url: null, accepted: true });
+    // What the relay child asks before ordering: now yes, but a later real
+    // agreement from the CA still needs its own acceptance.
+    expect(termsAccepted(dir, undefined)).toBe(true);
+    expect(termsAccepted(dir, 'https://ca.example/agreement-v1.pdf')).toBe(false);
+  });
+
   test('asks the CA directory when the relay has not reported an agreement yet', async () => {
     const { env } = home();
     const shown = await runConnectionsTermsCommand([], env, { fetchTerms: async () => 'https://letsencrypt.org/documents/LE-SA-v1.5.pdf' });
     expect(shown).toMatchObject({ url: 'https://letsencrypt.org/documents/LE-SA-v1.5.pdf', accepted: false });
+  });
+});
+
+describe('data delete --all and the relay', () => {
+  test('refuses while the relay child runs, like a running worker', () => {
+    const { dir, root } = home();
+    writeRemoteAccessStatus(dir, relayStatus());
+    expect(relayProcessRunning(dir)).toBe(true);
+    expect(dataDeleteCustody({ all: true, workerState: 'inactive', relayRunning: true })).toMatchObject({
+      ready: false,
+      observed: 'relay_running',
+      next_action: expect.stringContaining('remote.enabled false'),
+    });
+    expect(() => deleteOlympusDataWithCustody({ all: true, workerState: 'inactive', relayRunning: true, homeDir: join(root, 'home') }))
+      .toThrow('Turn remote access off');
+
+    writeRemoteAccessStatus(dir, relayStatus({ relay: { state: 'stopped', reason: null, retry_in_ms: null } }));
+    expect(relayProcessRunning(dir)).toBe(false);
+    writeRemoteAccessStatus(dir, relayStatus({ pid: 2 ** 22 + 12345 }));
+    expect(relayProcessRunning(dir)).toBe(false);
+    expect(dataDeleteCustody({ all: true, workerState: 'inactive', relayRunning: false })).toMatchObject({ ready: true });
   });
 });

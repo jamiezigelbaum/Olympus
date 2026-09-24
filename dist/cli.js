@@ -53702,6 +53702,7 @@ __export(exports_remote_access, {
   remoteAccessStatusView: () => remoteAccessStatusView,
   remoteAccessDirForCli: () => remoteAccessDirForCli,
   remoteAccessDir: () => remoteAccessDir,
+  relayProcessRunning: () => relayProcessRunning,
   recordTermsAcceptance: () => recordTermsAcceptance,
   readTermsAcceptance: () => readTermsAcceptance,
   readRemoteAccessStatus: () => readRemoteAccessStatus,
@@ -53781,12 +53782,15 @@ function ensureRemoteAccessDir(dir) {
   raChmodSync(dir, 448);
   return dir;
 }
-function writePrivateJson2(path, value) {
-  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(4).toString("hex")}`;
-  raWriteFileSync(temporary, `${JSON.stringify(value, null, 2)}
-`, { mode: 384 });
+function writePrivateText(path, text) {
+  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(8).toString("hex")}`;
+  raWriteFileSync(temporary, text, { mode: 384, flag: "wx" });
   raChmodSync(temporary, 384);
   raRenameSync(temporary, path);
+}
+function writePrivateJson2(path, value) {
+  writePrivateText(path, `${JSON.stringify(value, null, 2)}
+`);
 }
 function readPrivateFile(path) {
   try {
@@ -53882,11 +53886,8 @@ function loadOrCreateRelayAuthSecret(dir) {
   if (existing && /^[A-Za-z0-9_-]{43}$/.test(existing))
     return existing;
   const secret = raRandomBytes(32).toString("base64url");
-  const temporary = `${path}.tmp.${process.pid}`;
-  raWriteFileSync(temporary, `${secret}
-`, { mode: 384 });
-  raChmodSync(temporary, 384);
-  raRenameSync(temporary, path);
+  writePrivateText(path, `${secret}
+`);
   return secret;
 }
 function createRelayRequestVerifier(env = process.env, options = {}) {
@@ -54054,6 +54055,10 @@ function nextStep(view) {
   if (view.certificate.state !== "serving")
     return "Olympus is obtaining its certificate.";
   return null;
+}
+function relayProcessRunning(dir, isAlive = processIsAlive) {
+  const status = readRemoteAccessStatus(dir);
+  return status?.mode === "relay" && status.pid !== null && status.relay?.state !== "stopped" && isAlive(status.pid);
 }
 function processIsAlive(pid) {
   try {
@@ -97318,7 +97323,7 @@ function deleteOlympusData(options) {
 function deleteOlympusDataWithCustody(options) {
   const custody = dataDeleteCustody(options);
   if (options.dryRun !== true && !custody.ready) {
-    throw new OperationError("invalid_params", custody.requirement === "source_disconnected" ? `Disconnect ${options.sourceId} before deleting its local data.` : "Stop or uninstall the Olympus worker before deleting local data.", custody.next_action);
+    throw new OperationError("invalid_params", custody.requirement === "source_disconnected" ? `Disconnect ${options.sourceId} before deleting its local data.` : custody.observed === "relay_running" ? "Turn remote access off before deleting local data: the relay process is still running." : "Stop or uninstall the Olympus worker before deleting local data.", custody.next_action);
   }
   return {
     ...deleteOlympusData(options),
@@ -97357,6 +97362,14 @@ function dataDeleteCustody(options) {
   }
   const workerState = options.workerState;
   const ready = workerState === "inactive" || workerState === "missing";
+  if (ready && options.all === true && options.relayRunning === true) {
+    return {
+      requirement: "worker_inactive",
+      ready: false,
+      observed: "relay_running",
+      next_action: "Run openclaw config set plugins.entries.olympus.config.remote.enabled false (or stop the OpenClaw Gateway), check olympus connections status, then retry."
+    };
+  }
   return {
     requirement: "worker_inactive",
     ready,
@@ -101678,7 +101691,8 @@ async function runDataCommand(args) {
     return deleteOlympusDataWithCustody({
       all: options.all,
       dryRun: options.dryRun,
-      workerState
+      workerState,
+      relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env))
     });
   }
   if (command === "--help" || command === "-h") {
@@ -101866,7 +101880,8 @@ async function runConnectionsTermsCommand(args, env = process.env, dependencies 
   const dir = remoteAccessDirForCli(env);
   const status = readRemoteAccessStatus(dir);
   let termsUrl = status?.terms_url ?? undefined;
-  if (!termsUrl) {
+  const caNamesNone = !termsUrl && status?.certificate?.state === "awaiting_terms";
+  if (!termsUrl && !caNamesNone) {
     const fetchTerms = dependencies.fetchTerms ?? (async () => {
       const { fetchTermsOfService: fetchTermsOfService2 } = await Promise.resolve().then(() => (init_acme(), exports_acme));
       const { LETS_ENCRYPT_DIRECTORY: LETS_ENCRYPT_DIRECTORY2 } = await Promise.resolve().then(() => (init_connect2(), exports_connect));
@@ -101879,27 +101894,24 @@ async function runConnectionsTermsCommand(args, env = process.env, dependencies 
       throw new OperationError("config_error", "Could not read the Let's Encrypt subscriber agreement URL from its directory.", "Check the network and retry; the agreement is published at https://letsencrypt.org/repository/.");
     }
   }
-  if (!termsUrl) {
-    throw new OperationError("config_error", "The certificate authority did not name a subscriber agreement.");
-  }
+  const acceptance = readTermsAcceptance(dir);
   if (accept) {
-    const acceptance2 = recordTermsAcceptance(dir, termsUrl, dependencies.now?.() ?? new Date);
+    const recorded = recordTermsAcceptance(dir, termsUrl, dependencies.now?.() ?? new Date);
     return {
       kind: "remote_access_terms",
-      url: termsUrl,
+      url: termsUrl ?? null,
       accepted: true,
-      accepted_at: acceptance2.accepted_at,
-      notice: "Accepted. Olympus will now request this install's certificate from Let's Encrypt through the relay."
+      accepted_at: recorded.accepted_at,
+      notice: termsUrl ? "Accepted. Olympus will now request this install's certificate through the relay." : "Accepted. The certificate authority publishes no agreement URL, so this records consent to its terms as it states them; if it later publishes an agreement, you will be asked again."
     };
   }
-  const acceptance = readTermsAcceptance(dir);
-  const accepted = acceptance?.terms_url === termsUrl;
+  const accepted = acceptance !== undefined && (termsUrl === undefined || acceptance.terms_url === termsUrl);
   return {
     kind: "remote_access_terms",
-    url: termsUrl,
+    url: termsUrl ?? null,
     accepted,
     accepted_at: accepted ? acceptance.accepted_at : null,
-    notice: accepted ? "Already accepted." : "Remote access needs a certificate from Let's Encrypt for this install's own hostname, which means agreeing to its Subscriber Agreement. Read it at the url above; to accept, run olympus connections terms --accept."
+    notice: accepted ? "Already accepted." : termsUrl ? "Remote access needs a certificate for this install's own hostname, which means agreeing to the certificate authority's Subscriber Agreement. Read it at the url above; to accept, run olympus connections terms --accept." : "Remote access needs a certificate for this install's own hostname. The certificate authority publishes no agreement URL; to consent to its terms and continue, run olympus connections terms --accept."
   };
 }
 function remoteConnectionView(connection) {
