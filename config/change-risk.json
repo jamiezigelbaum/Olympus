@@ -47,6 +47,7 @@
   ],
   "criticalPrefixes": [
     "exchange/",
+    "connect-relay/",
     ".changes/",
     ".github/",
     ".githooks/",

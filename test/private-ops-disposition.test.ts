@@ -24,7 +24,7 @@ test('Slice 3 private-ops disposition is exact and live-proven', () => {
     kind: 'olympus_private_ops_disposition_proof',
     schema_version: 1,
     entries: 427,
-    canonical_docs: 24,
+    canonical_docs: 25,
     live_proof: 'passed',
     content_free: true,
   });
