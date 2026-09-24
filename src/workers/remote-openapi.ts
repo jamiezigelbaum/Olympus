@@ -52,9 +52,10 @@ export interface RemoteOpenApiHandlerOptions extends RemoteMcpHandlerOptions {
    * The public origin agents reach this install at (the relay address, once
    * it exists). Never derived from the request's Host header. Without one the
    * spec names a relative server, which resolves against the URL the agent
-   * fetched the spec from.
+   * fetched the spec from. A function is asked per request (the worker's live
+   * source, which follows the relay).
    */
-  publicBaseUrl?: string;
+  publicBaseUrl?: string | (() => string | undefined);
 }
 
 export function isRemoteOpenApiRequest(request: Request): boolean {
@@ -71,15 +72,25 @@ export function withRemoteOpenApiRoutes(
 }
 
 export function createRemoteOpenApiHandler(options: RemoteOpenApiHandlerOptions): (request: Request) => Promise<Response> {
-  const serverUrl = publicServerUrl(options.publicBaseUrl);
-  // Static, so built once; the ETag lets a re-fetch skip the body.
-  const specText = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-  const specEtag = `"${createHash('sha256').update(specText).digest('base64url').slice(0, 27)}"`;
+  const configured = options.publicBaseUrl;
+  // A fixed value is validated up front, as before; a live one per request.
+  if (typeof configured !== 'function') publicServerUrl(configured);
+  // Built once per server URL; the ETag lets a re-fetch skip the body.
+  let spec: { serverUrl: string; text: string; etag: string } | undefined;
+  const currentSpec = () => {
+    const serverUrl = typeof configured === 'function' ? livePublicServerUrl(configured()) : publicServerUrl(configured);
+    if (spec?.serverUrl !== serverUrl) {
+      const text = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
+      spec = { serverUrl, text, etag: `"${createHash('sha256').update(text).digest('base64url').slice(0, 27)}"` };
+    }
+    return spec;
+  };
   return async (request: Request): Promise<Response> => {
     const { pathname } = new URL(request.url);
     let response: Response;
     if (pathname === REMOTE_OPENAPI_SPEC_PATH) {
-      response = serveSpec(request, specText, specEtag);
+      const { text, etag } = currentSpec();
+      response = serveSpec(request, text, etag);
     } else {
       const name = TOOL_PATH_PATTERN.exec(pathname)?.[1];
       response = name === undefined
@@ -210,6 +221,15 @@ function operationErrorResponse(error: unknown): Response {
     });
   }
   return jsonResponse(500, { error: 'internal_error', message: 'Olympus could not complete this request.' });
+}
+
+/** A live value that is not a plain https origin (a loopback dev URL) falls back to relative. */
+function livePublicServerUrl(publicBaseUrl: string | undefined): string {
+  try {
+    return publicServerUrl(publicBaseUrl);
+  } catch {
+    return '/';
+  }
 }
 
 function publicServerUrl(publicBaseUrl: string | undefined): string {

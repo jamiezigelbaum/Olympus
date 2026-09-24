@@ -33,6 +33,7 @@ import { deleteOlympusData, exportOlympusData } from '../src/data-lifecycle.ts';
 import { createRemoteOpenApiHandler, withRemoteOpenApiRoutes } from '../src/workers/remote-openapi.ts';
 import { readBoundedRequestText } from '../src/workers/remote-request-body.ts';
 import { parseRemotePublicBaseUrl, type RemotePublicUrls } from '../src/core/remote-public-url.ts';
+import { createRelayRequestVerifier, loadOrCreateRelayAuthSecret, RELAY_AUTH_HEADER, remoteAccessDir } from '../src/core/remote-access.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
@@ -124,6 +125,8 @@ let clock: number;
 let handle: (request: Request) => Promise<Response>;
 let cimdDocs: Record<string, unknown>;
 let sleeps: number[];
+/** The per-install secret the relay's local endpoint sends; see core/remote-access.ts. */
+let relaySecret: string;
 
 interface AssembleOptions {
   publicBaseUrl?: string | undefined;
@@ -162,9 +165,12 @@ function assemble(options: AssembleOptions = {}): void {
         signal,
       }),
   };
+  const relayEnv = { XDG_DATA_HOME: join(dir, 'data') };
+  relaySecret = loadOrCreateRelayAuthSecret(remoteAccessDir(relayEnv));
   handle = withRemoteOAuthRoutes(
     createRemoteOAuthHandler({
       publicUrls,
+      trustRelayHeaders: createRelayRequestVerifier(relayEnv),
       connections: () => store,
       resolveClientMetadata,
       now: () => clock,
@@ -671,7 +677,12 @@ describe('pairing codes', () => {
     }).toString();
     return url;
   };
-  const relayed = (address: string) => ({ 'x-olympus-relay': '1', 'x-forwarded-for': address });
+  const relayed = (address: string) => ({ 'x-olympus-relay': '1', 'x-forwarded-for': address, [RELAY_AUTH_HEADER]: relaySecret });
+  const forged = (address: string, auth?: string) => ({
+    'x-olympus-relay': '1',
+    'x-forwarded-for': address,
+    ...(auth === undefined ? {} : { [RELAY_AUTH_HEADER]: auth }),
+  });
   const openFrom = async (headers: Record<string, string>) => {
     const response = await fetch(authorizeUrlFor(), { redirect: 'manual', headers });
     const html = await response.text();
@@ -732,6 +743,28 @@ describe('pairing codes', () => {
     const ok = await submitConsent(page, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code }, { Origin: base, ...headers });
     expect(ok.status).toBe(303);
     expect(sleeps).toEqual([2000]);
+  });
+
+  test('a direct loopback caller that forges the relay headers is still one direct caller', async () => {
+    // Without the relay's secret (or with a wrong one), rotating the forged
+    // agent address does not buy fresh per-caller slots or a fresh pacing
+    // budget: every such request is the shared `direct` caller.
+    for (let i = 0; i < 8; i += 1) expect((await openFrom(forged(`203.0.113.${i + 1}`))).response.status).toBe(200);
+    expect((await openFrom(forged('203.0.113.99'))).response.status).toBe(429);
+    expect((await openFrom(forged('203.0.113.98', 'A'.repeat(43)))).response.status).toBe(429);
+    expect((await openFrom({})).response.status).toBe(429);
+    // The real relay (with the secret) still gets per-address slots.
+    expect((await openFrom(relayed('198.51.100.20'))).response.status).toBe(200);
+  });
+
+  test('forged relay headers do not dodge pairing pacing', async () => {
+    const guess = async (headers: Record<string, string>) => {
+      const page = await openFrom(headers);
+      return submitConsent(page, { action: 'approve', pairing_code: 'AAAA-AAAA-AAAA' }, { Origin: base, ...headers });
+    };
+    for (let i = 0; i < 4; i += 1) await guess(forged(`203.0.113.${i + 1}`));
+    // One doubling sequence for the single direct caller, not four fresh ones.
+    expect(sleeps).toEqual([1000, 2000, 4000]);
   });
 
   test('one caller can hold at most eight waiting approvals', async () => {

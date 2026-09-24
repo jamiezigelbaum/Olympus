@@ -33,7 +33,7 @@ import {
   type RemoteConnectionStore,
 } from '../core/remote-connections.ts';
 import { isWellFormedOAuthAccessToken } from '../core/remote-oauth-store.ts';
-import type { RemotePublicUrls } from '../core/remote-public-url.ts';
+import { currentRemotePublicUrls, type RemotePublicUrls, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
 import { createOlympusMcpServer } from '../mcp/server.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
 
@@ -48,8 +48,8 @@ export interface RemoteMcpHandlerOptions {
    * must not create one.
    */
   connections: () => RemoteConnectionStore | undefined;
-  /** The configured public URLs; undefined when OAuth is off (bearer connections only). */
-  publicUrls?: RemotePublicUrls | undefined;
+  /** The configured public URLs (or a live source); undefined when OAuth is off (bearer connections only). */
+  publicUrls?: RemotePublicUrlsSource;
   /** `signal` is the remote client's request signal; see createInProcessOperationContext. */
   makeOperationContext: (caller: OperationCaller, signal: AbortSignal) => OperationContext;
 }
@@ -124,7 +124,7 @@ export function authenticateRemoteRequest(
   request: Request,
   options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls'>,
 ): { ok: true; connection: Pick<RemoteConnectionRecord, 'id' | 'displayName'> } | { ok: false; response: Response } {
-  const urls = options.publicUrls;
+  const urls = currentRemotePublicUrls(options.publicUrls);
   const refuse = (error?: 'invalid_token') => ({ ok: false as const, response: unauthorized(error, urls) });
   const token = bearerToken(request.headers.get('Authorization'));
   if (token === undefined) return refuse();

@@ -3894,13 +3894,18 @@ export async function main(): Promise<void> {
   } = await import('../remote-mcp.ts');
   const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
   const { resolveRemotePublicUrls } = await import('../../core/remote-public-url.ts');
+  const { createRelayRequestVerifier, createRemotePublicUrlSource } = await import('../../core/remote-access.ts');
   const { createRemoteOAuthHandler, withRemoteOAuthRoutes } = await import('../remote-oauth/handler.ts');
-  // OAuth for hosted agents is on only with a configured public base URL.
+  // OAuth for hosted agents is on only with a public base URL: a manual
+  // OLYMPUS_PUBLIC_BASE_URL (fixed for this process), else what the relay
+  // service reports in status.json, followed live without a restart.
   const remotePublic = resolveRemotePublicUrls(process.env);
   if (!remotePublic.enabled && remotePublic.reason === 'invalid') {
     console.warn(`[olympus] remote agent OAuth is off: ${remotePublic.detail ?? 'invalid public base URL'}`);
   }
-  const remotePublicUrls = remotePublic.enabled ? remotePublic.urls : undefined;
+  const remotePublicSource = createRemotePublicUrlSource(process.env);
+  const remotePublicUrls = () => remotePublicSource.current();
+  const trustRelayHeaders = createRelayRequestVerifier(process.env);
   const remoteConnections = lazyRemoteConnectionStore(
     () => resolveRemoteConnectionsDbPath(process.env),
     openRemoteConnectionStore,
@@ -3921,7 +3926,7 @@ export async function main(): Promise<void> {
   const { createRemoteOpenApiHandler, withRemoteOpenApiRoutes } = await import('../remote-openapi.ts');
   const remoteOpenApi = createRemoteOpenApiHandler({
     ...remoteAgentOptions,
-    ...(remotePublicUrls ? { publicBaseUrl: remotePublicUrls.origin } : {}),
+    publicBaseUrl: () => remotePublicUrls()?.origin,
   });
 
   const server = Bun.serve({
@@ -3936,6 +3941,7 @@ export async function main(): Promise<void> {
     fetch: withRemoteOAuthRoutes(
       createRemoteOAuthHandler({
         publicUrls: remotePublicUrls,
+        trustRelayHeaders,
         connections: () => remoteConnections({ create: true })!,
       }),
       withRemoteOpenApiRoutes(remoteOpenApi, withRemoteMcpRoute(

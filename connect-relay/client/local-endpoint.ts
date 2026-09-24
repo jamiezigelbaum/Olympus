@@ -29,6 +29,15 @@ export const DEFAULT_ALLOWED_PATHS = [
   '/connect/revoke',
 ] as const;
 
+/**
+ * Proves to the worker that a request came through this endpoint. Loopback is
+ * shared by every local process, so `x-olympus-relay` alone is forgeable; the
+ * worker trusts the relay's forwarding headers only alongside this per-install
+ * secret, which lives 0600 in the install's state directory. Any inbound copy
+ * is dropped with the other `x-olympus-relay*` headers.
+ */
+export const RELAY_AUTH_HEADER = 'x-olympus-relay-auth';
+
 export interface LocalEndpointOptions {
   readonly key: string | Buffer;
   readonly cert: string | Buffer;
@@ -41,6 +50,8 @@ export interface LocalEndpointOptions {
   readonly onRequest?: (localSourcePort: number | undefined) => void;
   /** Called when that request's response has finished or been abandoned. */
   readonly onResponseDone?: (localSourcePort: number | undefined) => void;
+  /** Per-install secret sent as `x-olympus-relay-auth` on every forwarded request. */
+  readonly relayAuth?: string;
   /** TLS handshake deadline (Node honors it; the relay client adds a portable first-request deadline). */
   readonly handshakeTimeoutMs?: number;
 }
@@ -85,7 +96,7 @@ export function allowedForwardPath(rawUrl: string | undefined, allowed: readonly
   return `${url.pathname}${url.search}`;
 }
 
-function forwardedHeaders(incoming: IncomingHttpHeaders, peer: string | undefined): OutgoingHttpHeaders {
+function forwardedHeaders(incoming: IncomingHttpHeaders, peer: string | undefined, relayAuth: string | undefined): OutgoingHttpHeaders {
   const headers: OutgoingHttpHeaders = {};
   const connectionTokens = new Set(
     String(incoming.connection ?? '')
@@ -99,6 +110,7 @@ function forwardedHeaders(incoming: IncomingHttpHeaders, peer: string | undefine
     headers[lower] = value;
   }
   headers['x-olympus-relay'] = '1';
+  if (relayAuth) headers[RELAY_AUTH_HEADER] = relayAuth;
   headers['x-forwarded-proto'] = 'https';
   if (typeof incoming.host === 'string') headers['x-forwarded-host'] = incoming.host;
   if (peer) headers['x-forwarded-for'] = peer;
@@ -129,7 +141,7 @@ export async function startLocalEndpoint(options: LocalEndpointOptions): Promise
         port: target.port || 80,
         method: req.method,
         path,
-        headers: forwardedHeaders(req.headers, peer),
+        headers: forwardedHeaders(req.headers, peer, options.relayAuth),
       },
       (upstreamRes) => {
         const headers: OutgoingHttpHeaders = {};

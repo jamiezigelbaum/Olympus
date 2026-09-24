@@ -2499,6 +2499,26 @@
             }
           }
         }
+      },
+      "remote": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Remote access for hosted agents (Claude, ChatGPT, Grok, Muse). Off by default. Choose one address: the Olympus connect relay (relayHost) or your own tunnel (publicBaseUrl), never both.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Turn on remote access. Olympus then keeps the relay session open (or uses publicBaseUrl) and prints the public URLs from olympus connections."
+          },
+          "relayHost": {
+            "type": "string",
+            "description": "The connect relay zone, for example connect.olympusplugin.ai. No default until the Olympus relay is public. Leave unset when publicBaseUrl is set."
+          },
+          "publicBaseUrl": {
+            "type": "string",
+            "description": "Manual https origin for a tunnel you run yourself (for example a Cloudflare quick tunnel), with no path. Leave unset when relayHost is set."
+          }
+        }
       }
     }
   },
@@ -2549,6 +2569,10 @@
       "label": "Worker Auth Token",
       "sensitive": true,
       "help": "Bearer token for Olympus worker HTTP endpoints. Marked sensitive so Control UI and config reads redact it instead of rendering it in the clear."
+    },
+    "remote": {
+      "label": "Remote access",
+      "help": "Lets hosted agents reach this Olympus. Before the first certificate, accept the Let's Encrypt subscriber agreement with olympus connections terms."
     }
   },
   "activation": {

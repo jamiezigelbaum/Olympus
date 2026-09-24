@@ -15,6 +15,7 @@ import {
 import { createNativeTelegramService } from './core/native-telegram-service.ts';
 import { createNativeWhatsAppService } from './core/native-whatsapp-service.ts';
 import { createNativeEmbeddingDrainService } from './core/native-embedding-drain-service.ts';
+import { createNativeRelayService } from './core/native-relay-service.ts';
 import {
   SOURCE_WATCH_DELIVERY_HEADLINE,
   SOURCE_WATCH_DELIVERY_ROUTE,
@@ -256,6 +257,7 @@ const plugin = {
       moduleUrl: import.meta.url,
     });
     const transcriptionCleanupService = createNativeTranscriptionCleanupService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url });
+    const relayService = createNativeRelayService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url });
     if (api.registerService) {
       api.registerService(backgroundNativeProcessService(workerRegistration));
       api.registerService(backgroundNativeProcessService(telegramService));
@@ -263,6 +265,7 @@ const plugin = {
       api.registerService(backgroundNativeProcessService(whatsappService));
       api.registerService(backgroundNativeProcessService(embeddingDrainService));
       api.registerService(transcriptionCleanupService);
+      api.registerService(backgroundNativeProcessService(relayService));
     } else if (
       config.worker.service.enabled
       || config.worker.telegramCapture.enabled
@@ -270,6 +273,7 @@ const plugin = {
       || config.worker.whatsappCapture.enabled
       || config.worker.embeddingDrain.enabled
       || config.worker.transcriptionCleanup.enabled
+      || config.remote?.enabled
     ) {
       throw new Error('This OpenClaw host does not support native Olympus services.');
     }
