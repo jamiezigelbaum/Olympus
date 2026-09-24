@@ -68,8 +68,11 @@ export const DEFAULT_LIMITS: RelayLimits = {
   clientHelloTimeoutMs: 5_000,
   maxClientHelloBytes: 16_384 + 5 * 4,
   attachTimeoutMs: 10_000,
-  maxConcurrentPerInstall: 32,
-  maxConcurrentPerInstallPerAddress: 6,
+  // The install endpoint speaks HTTP/1.1: one connection per in-flight
+  // request plus one SSE stream per MCP session, so one vendor egress address
+  // legitimately needs several.
+  maxConcurrentPerInstall: 64,
+  maxConcurrentPerInstallPerAddress: 16,
   dataHandshakesPerAddress: { capacity: 200, refillPerSecond: 50 },
   newConnectionsPerInstall: { capacity: 30, refillPerSecond: 5 },
   controlConnectionsPerIp: { capacity: 30, refillPerSecond: 0.5 },
@@ -100,6 +103,8 @@ export interface PendingConnection {
   readonly socket: Socket;
   readonly clientHello: Buffer;
   readonly timer: ReturnType<typeof setTimeout>;
+  /** Frees this connection's per-install and per-address slots (idempotent). */
+  readonly releaseSlot: () => void;
 }
 
 export type ForwardTap = (direction: 'to-install' | 'to-agent', chunk: Buffer) => void;
@@ -272,13 +277,19 @@ function route(socket: Socket, serverName: string, clientHello: Buffer, deps: Pu
     reject(socket, TLS_ALERT.internalError);
     return;
   }
-  socket.once('close', releaseAddress);
   const connId = newConnId();
   deps.active.set(label, (deps.active.get(label) ?? 0) + 1);
-  socket.once('close', () => {
+  let slotHeld = true;
+  const releaseSlot = () => {
+    if (!slotHeld) return;
+    slotHeld = false;
+    releaseAddress();
     const remaining = (deps.active.get(label) ?? 1) - 1;
     if (remaining > 0) deps.active.set(label, remaining);
     else deps.active.delete(label);
+  };
+  socket.once('close', () => {
+    releaseSlot();
     const pending = deps.pending.get(connId);
     if (pending) {
       clearTimeout(pending.timer);
@@ -290,7 +301,7 @@ function route(socket: Socket, serverName: string, clientHello: Buffer, deps: Pu
     deps.log('public_attach_timeout', { installId: label });
     reject(socket, TLS_ALERT.internalError);
   }, deps.limits.attachTimeoutMs);
-  deps.pending.set(connId, { installId: label, socket, clientHello, timer });
+  deps.pending.set(connId, { installId: label, socket, clientHello, timer, releaseSlot });
   session.send({ type: 'open', connId, ...(socket.remoteAddress ? { remoteAddress: socket.remoteAddress } : {}) });
 }
 
@@ -308,6 +319,9 @@ export function splice(
   clearTimeout(pending.timer);
   const agent = pending.socket;
   propagateClose(agent, data);
+  // The slot is free as soon as either half closes, not after the drain grace.
+  data.once('close', pending.releaseSlot);
+  agent.once('end', pending.releaseSlot);
   agent.setTimeout(limits.splicedIdleTimeoutMs, () => {
     agent.destroy();
     data.destroy();

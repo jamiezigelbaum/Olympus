@@ -415,11 +415,25 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     // removal stays counted and is retried on the next sweep.
     for (const installId of config.registry.pendingAddressRemovals()) {
       if (!globalDnsCalls.take('relay')) break;
+      const hostname = hostnameFor(installId, zone);
       try {
-        await config.dns.removeAddress(hostnameFor(installId, zone));
-        config.registry.addressRemoved(installId);
+        await config.dns.removeAddress(hostname);
       } catch {
-        // Retried next sweep.
+        continue; // Retried next sweep.
+      }
+      if (config.registry.pendingAddressRemovals().includes(installId)) {
+        config.registry.addressRemoved(installId);
+        continue;
+      }
+      // The install re-registered while the removal was in flight and
+      // reclaimed the record we just deleted: put it back, or record that it
+      // is gone so the next publish re-creates it.
+      if (!config.registry.get(installId)?.hasAddressRecord) continue;
+      try {
+        if (!globalDnsCalls.take('relay')) throw new Error('no DNS budget');
+        await config.dns.ensureAddress(hostname);
+      } catch {
+        config.registry.addressLost(installId);
       }
     }
     return expired.map((record) => record.installId);

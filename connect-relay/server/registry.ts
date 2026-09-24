@@ -44,6 +44,8 @@ export interface InstallRegistry {
   pendingAddressRemovals(): string[];
   /** The address record for `installId` is gone from DNS. */
   addressRemoved(installId: string): void;
+  /** A live install's address record was deleted from DNS; the next publish re-creates it. */
+  addressLost(installId: string): void;
   size(): number;
   /** Resolves when every accepted change is durable. */
   flush(): Promise<void>;
@@ -51,7 +53,7 @@ export interface InstallRegistry {
 
 type LogEntry =
   | { op: 'register'; installId: string; publicKey: string; at: number }
-  | { op: 'seen' | 'activate' | 'address' | 'remove' | 'address-removed' | 'orphan-address'; installId: string; at: number };
+  | { op: 'seen' | 'activate' | 'address' | 'remove' | 'address-removed' | 'orphan-address' | 'address-lost'; installId: string; at: number };
 
 /** Rewrites of `seen` are throttled: a daily resolution is enough for a 90-day expiry. */
 const SEEN_RESOLUTION_MS = 24 * 60 * 60_000;
@@ -135,6 +137,13 @@ export class MemoryInstallRegistry implements InstallRegistry {
     this.append(entry);
   }
 
+  addressLost(installId: string): void {
+    if (!this.records.get(installId)?.hasAddressRecord) return;
+    const entry: LogEntry = { op: 'address-lost', installId, at: this.now() };
+    this.apply(entry);
+    this.append(entry);
+  }
+
   size(): number {
     return this.records.size;
   }
@@ -178,6 +187,12 @@ export class MemoryInstallRegistry implements InstallRegistry {
         if (!this.orphanAddresses.has(entry.installId)) {
           this.orphanAddresses.add(entry.installId);
           this.addressRecords += 1;
+        }
+        return;
+      case 'address-lost':
+        if (record?.hasAddressRecord) {
+          delete record.hasAddressRecord;
+          this.addressRecords -= 1;
         }
         return;
       case 'address-removed':

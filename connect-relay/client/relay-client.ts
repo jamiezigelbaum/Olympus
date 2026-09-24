@@ -45,6 +45,13 @@ export interface RelayClientOptions {
    * cannot hold install slots.
    */
   readonly firstRequestTimeoutMs?: number;
+  /**
+   * A data connection with no request in flight for this long is closed
+   * (default 30 s). Keep-alive idleness is enforced here because Bun's HTTP
+   * server does not close idle keep-alive connections; a response still
+   * streaming (e.g. an SSE stream) counts as in flight and is never cut.
+   */
+  readonly idleTimeoutMs?: number;
   readonly identity: InstallIdentity;
   /** Loopback Olympus worker; defaults to `http://127.0.0.1:28090`. */
   readonly target?: string;
@@ -68,7 +75,7 @@ export class RelayClient implements AcmeDnsPublisher {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly dnsWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly peers = new Map<number, string>();
-  private readonly firstRequestTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private readonly connectionTimers = new Map<number, { inFlight: number; timer?: ReturnType<typeof setTimeout>; expire: () => void }>();
   private readonly dataSockets = new Set<net.Socket>();
   private sequence = 0;
   private dataConnections = 0;
@@ -111,10 +118,17 @@ export class RelayClient implements AcmeDnsPublisher {
       ...(this.options.allowedPaths ? { allowedPaths: this.options.allowedPaths } : {}),
       peerAddress: (port) => (port === undefined ? undefined : this.peers.get(port)),
       onRequest: (port) => {
-        if (port === undefined) return;
-        const timer = this.firstRequestTimers.get(port);
-        if (timer) clearTimeout(timer);
-        this.firstRequestTimers.delete(port);
+        const state = port === undefined ? undefined : this.connectionTimers.get(port);
+        if (!state) return;
+        state.inFlight += 1;
+        if (state.timer) clearTimeout(state.timer);
+        delete state.timer;
+      },
+      onResponseDone: (port) => {
+        const state = port === undefined ? undefined : this.connectionTimers.get(port);
+        if (!state) return;
+        state.inFlight = Math.max(0, state.inFlight - 1);
+        if (state.inFlight === 0) state.timer = setTimeout(state.expire, this.options.idleTimeoutMs ?? 30_000);
       },
       handshakeTimeoutMs: this.options.firstRequestTimeoutMs ?? 10_000,
     });
@@ -326,12 +340,16 @@ export class RelayClient implements AcmeDnsPublisher {
           const port = local.localPort;
           if (port !== undefined) {
             if (remoteAddress) this.peers.set(port, remoteAddress);
-            this.firstRequestTimers.set(port, setTimeout(destroyBoth, this.options.firstRequestTimeoutMs ?? 10_000));
+            this.connectionTimers.set(port, {
+              inFlight: 0,
+              timer: setTimeout(destroyBoth, this.options.firstRequestTimeoutMs ?? 10_000),
+              expire: destroyBoth,
+            });
             local.once('close', () => {
               this.peers.delete(port);
-              const timer = this.firstRequestTimers.get(port);
-              if (timer) clearTimeout(timer);
-              this.firstRequestTimers.delete(port);
+              const state = this.connectionTimers.get(port);
+              if (state?.timer) clearTimeout(state.timer);
+              this.connectionTimers.delete(port);
             });
           }
           // A relay-side rejection arrives as one JSON error line; the agent's

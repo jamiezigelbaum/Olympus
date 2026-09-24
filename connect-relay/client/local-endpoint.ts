@@ -33,6 +33,8 @@ export interface LocalEndpointOptions {
   readonly peerAddress?: (localSourcePort: number | undefined) => string | undefined;
   /** Called when a request arrives, with the loopback source port of its connection. */
   readonly onRequest?: (localSourcePort: number | undefined) => void;
+  /** Called when that request's response has finished or been abandoned. */
+  readonly onResponseDone?: (localSourcePort: number | undefined) => void;
   /** TLS handshake deadline (Node honors it; the relay client adds a portable first-request deadline). */
   readonly handshakeTimeoutMs?: number;
 }
@@ -104,7 +106,9 @@ export async function startLocalEndpoint(options: LocalEndpointOptions): Promise
     throw new Error('the relay client only forwards to a loopback http:// worker');
   }
   const server = https.createServer({ key: options.key, cert: options.cert, minVersion: 'TLSv1.2', handshakeTimeout: options.handshakeTimeoutMs ?? 10_000 }, (req, res) => {
-    options.onRequest?.(req.socket.remotePort);
+    const sourcePort = req.socket.remotePort;
+    options.onRequest?.(sourcePort);
+    res.once('close', () => options.onResponseDone?.(sourcePort));
     const path = allowedForwardPath(req.url, allowed);
     if (!path) {
       res.writeHead(404, { 'content-type': 'application/json' });
