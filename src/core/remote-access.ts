@@ -21,10 +21,20 @@
  * Nothing here imports the relay client, so the Gateway and worker bundles do
  * not carry it.
  */
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+// Distinct local names keep the bundler from renumbering the bundle's other
+// `node:*` bindings, so the committed dist/ diff stays the size of the change.
+import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from 'node:crypto';
+import {
+  chmodSync as raChmodSync,
+  lstatSync as raLstatSync,
+  mkdirSync as raMkdirSync,
+  readFileSync as raReadFileSync,
+  renameSync as raRenameSync,
+  statSync as raStatSync,
+  writeFileSync as raWriteFileSync,
+} from 'node:fs';
+import { homedir as raHomedir } from 'node:os';
+import { isAbsolute as raIsAbsolute, join as raJoin } from 'node:path';
 import type { OlympusConfig } from './config.ts';
 import {
   parseRemotePublicBaseUrl,
@@ -96,13 +106,13 @@ export function resolveRemoteAccessMode(remote: OlympusConfig['remote']): Remote
 /** `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus`, the worker's data root. */
 export function olympusDataDir(env: Record<string, string | undefined> = process.env): string {
   const configured = env.XDG_DATA_HOME?.trim();
-  const dataRoot = configured || join(env.HOME?.trim() || homedir(), '.local', 'share');
-  if (!isAbsolute(dataRoot)) throw new TypeError('XDG_DATA_HOME must be an absolute private data root.');
-  return join(dataRoot, 'openclaw', 'olympus');
+  const dataRoot = configured || raJoin(env.HOME?.trim() || raHomedir(), '.local', 'share');
+  if (!raIsAbsolute(dataRoot)) throw new TypeError('XDG_DATA_HOME must be an absolute private data root.');
+  return raJoin(dataRoot, 'openclaw', 'olympus');
 }
 
 export function remoteAccessDir(env: Record<string, string | undefined> = process.env): string {
-  return join(olympusDataDir(env), REMOTE_ACCESS_DIR_NAME);
+  return raJoin(olympusDataDir(env), REMOTE_ACCESS_DIR_NAME);
 }
 
 /**
@@ -118,28 +128,28 @@ export function remoteAccessDirForCli(env: Record<string, string | undefined> = 
 
 /** Create (0700) and check the directory; never follow a symlink or another user's directory. */
 export function ensureRemoteAccessDir(dir: string): string {
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const stat = lstatSync(dir);
+  raMkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stat = raLstatSync(dir);
   if (!stat.isDirectory() || stat.isSymbolicLink() || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
     throw new Error('the remote access state directory must be a directory owned by this user');
   }
-  chmodSync(dir, 0o700);
+  raChmodSync(dir, 0o700);
   return dir;
 }
 
 function writePrivateJson(path: string, value: unknown): void {
-  const temporary = `${path}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(temporary, 0o600);
-  renameSync(temporary, path);
+  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(4).toString('hex')}`;
+  raWriteFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  raChmodSync(temporary, 0o600);
+  raRenameSync(temporary, path);
 }
 
 /** A regular file owned by this user, not a symlink; otherwise undefined. */
 function readPrivateFile(path: string): string | undefined {
   try {
-    const stat = lstatSync(path);
+    const stat = raLstatSync(path);
     if (!stat.isFile() || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) return undefined;
-    return readFileSync(path, 'utf8');
+    return raReadFileSync(path, 'utf8');
   } catch {
     return undefined;
   }
@@ -157,7 +167,7 @@ function cachedFileReader<T>(path: () => string, parse: (text: string) => T | un
     let file: string;
     try {
       file = path();
-      const stat = statSync(file, { bigint: true });
+      const stat = raStatSync(file, { bigint: true });
       const next = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
       if (next === key) return value;
       key = next;
@@ -220,7 +230,7 @@ export function emptyRemoteAccessStatus(mode: RemoteAccessStatusFile['mode'], no
 
 export function writeRemoteAccessStatus(dir: string, status: RemoteAccessStatusFile): void {
   ensureRemoteAccessDir(dir);
-  writePrivateJson(join(dir, STATUS_FILE), status);
+  writePrivateJson(raJoin(dir, STATUS_FILE), status);
 }
 
 function parseStatus(text: string): RemoteAccessStatusFile | undefined {
@@ -233,7 +243,7 @@ function parseStatus(text: string): RemoteAccessStatusFile | undefined {
 }
 
 export function readRemoteAccessStatus(dir: string): RemoteAccessStatusFile | undefined {
-  const text = readPrivateFile(join(dir, STATUS_FILE));
+  const text = readPrivateFile(raJoin(dir, STATUS_FILE));
   return text === undefined ? undefined : parseStatus(text);
 }
 
@@ -275,7 +285,7 @@ export function createRemotePublicUrlSource(
   }
   const dir = remoteAccessDir(env);
   const read = cachedFileReader(
-    () => join(dir, STATUS_FILE),
+    () => raJoin(dir, STATUS_FILE),
     (text) => {
       const status = parseStatus(text);
       if (!status || status.error || status.mode === 'off' || !status.public_base_url) return undefined;
@@ -294,14 +304,14 @@ export function createRemotePublicUrlSource(
 /** The relay child's secret: created once, 0600, never logged. */
 export function loadOrCreateRelayAuthSecret(dir: string): string {
   ensureRemoteAccessDir(dir);
-  const path = join(dir, RELAY_AUTH_FILE);
+  const path = raJoin(dir, RELAY_AUTH_FILE);
   const existing = readPrivateFile(path)?.trim();
   if (existing && /^[A-Za-z0-9_-]{43}$/.test(existing)) return existing;
-  const secret = randomBytes(32).toString('base64url');
+  const secret = raRandomBytes(32).toString('base64url');
   const temporary = `${path}.tmp.${process.pid}`;
-  writeFileSync(temporary, `${secret}\n`, { mode: 0o600 });
-  chmodSync(temporary, 0o600);
-  renameSync(temporary, path);
+  raWriteFileSync(temporary, `${secret}\n`, { mode: 0o600 });
+  raChmodSync(temporary, 0o600);
+  raRenameSync(temporary, path);
   return secret;
 }
 
@@ -318,7 +328,7 @@ export function createRelayRequestVerifier(
 ): (request: Request) => boolean {
   const dir = remoteAccessDir(env);
   const secret = cachedFileReader(
-    () => join(dir, RELAY_AUTH_FILE),
+    () => raJoin(dir, RELAY_AUTH_FILE),
     (text) => {
       const value = text.trim();
       return /^[A-Za-z0-9_-]{43}$/.test(value) ? Buffer.from(value) : undefined;
@@ -332,7 +342,7 @@ export function createRelayRequestVerifier(
     const expected = secret();
     if (!presented || !expected) return false;
     const actual = Buffer.from(presented);
-    return actual.length === expected.length && timingSafeEqual(actual, expected);
+    return actual.length === expected.length && raTimingSafeEqual(actual, expected);
   };
 }
 
@@ -345,7 +355,7 @@ export interface TermsAcceptance {
 }
 
 export function readTermsAcceptance(dir: string): TermsAcceptance | undefined {
-  const text = readPrivateFile(join(dir, TERMS_FILE));
+  const text = readPrivateFile(raJoin(dir, TERMS_FILE));
   if (text === undefined) return undefined;
   try {
     const value = JSON.parse(text) as TermsAcceptance;
@@ -358,7 +368,7 @@ export function readTermsAcceptance(dir: string): TermsAcceptance | undefined {
 export function recordTermsAcceptance(dir: string, termsUrl: string | undefined, now = new Date()): TermsAcceptance {
   ensureRemoteAccessDir(dir);
   const acceptance: TermsAcceptance = { terms_url: termsUrl ?? null, accepted_at: now.toISOString() };
-  writePrivateJson(join(dir, TERMS_FILE), acceptance);
+  writePrivateJson(raJoin(dir, TERMS_FILE), acceptance);
   return acceptance;
 }
 
@@ -469,7 +479,7 @@ export interface RemoteAccessStatusView {
   kind: 'remote_access_status';
   schema: typeof REMOTE_ACCESS_STATUS_SCHEMA;
   remote_enabled: boolean;
-  mode: 'off' | 'manual' | 'relay' | 'unknown';
+  mode: 'off' | 'manual' | 'relay';
   error: string | null;
   public_base_url: string | null;
   public_base_url_source: PublicBaseUrlSource | null;
@@ -508,7 +518,8 @@ export function remoteAccessStatusView(input: {
   const { status, urls } = input;
   const isAlive = input.isAlive ?? processIsAlive;
   const acceptance = readTermsAcceptance(input.dir);
-  const mode = status ? status.mode : 'unknown';
+  // No status file: the relay service never ran with remote access on.
+  const mode = status ? status.mode : 'off';
   let relayState: RemoteAccessStatusView['relay']['state'] = status?.relay?.state ?? null;
   if (status?.mode === 'relay' && status.pid !== null && relayState !== 'stopped' && !isAlive(status.pid)) {
     relayState = 'not_running';
@@ -554,10 +565,10 @@ export function remoteAccessStatusView(input: {
 
 function nextStep(view: RemoteAccessStatusView): string | null {
   if (view.error) return view.error;
-  if (view.mode === 'unknown' && !view.public_base_url) {
-    return 'Remote access has not reported yet. Turn it on with openclaw config set plugins.entries.olympus.config.remote.enabled true (plus remote.relayHost or remote.publicBaseUrl), then restart the Gateway.';
+  if (view.mode === 'off' && !view.public_base_url) {
+    return 'Remote access is off, so hosted agents cannot reach this Olympus (local agents are unaffected). '
+      + 'To turn it on: openclaw config set plugins.entries.olympus.config.remote.enabled true, plus remote.relayHost (the Olympus relay) or remote.publicBaseUrl (your own tunnel).';
   }
-  if (view.mode === 'off' && !view.public_base_url) return 'Remote access is off. Hosted agents cannot reach this Olympus; local agents are unaffected.';
   if (view.mode !== 'relay') return null;
   if (view.certificate.state === 'awaiting_terms') {
     return 'Read the Let\'s Encrypt subscriber agreement (terms.url), then accept it with olympus connections terms --accept.';

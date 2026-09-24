@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
-import { statSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// Distinct local names: see core/remote-access.ts (keeps the dist/ diff small).
+import { randomUUID as relayRandomUUID } from 'node:crypto';
+import { statSync as relayStatSync } from 'node:fs';
+import { isAbsolute as relayIsAbsolute } from 'node:path';
+import { fileURLToPath as relayFileURLToPath } from 'node:url';
 import { configFromPluginConfig, type OlympusConfig } from './config.ts';
 import {
   createNativeProcessService,
@@ -59,7 +60,8 @@ interface RelayLaunchSettings extends NativeProcessStartSettings {
  *
  * This adapter owns the remote-access decision. Every start (initial, config
  * reload of `remote.*`, or `email.baseUrl`) writes status.json first, so the
- * CLI and worker always see the current mode: `off` and `manual` start no
+ * CLI and worker always see the current mode (`off` writes only over an
+ * earlier state): `off` and `manual` start no
  * child; a conflict is reported to host health by name and starts nothing;
  * `relay` starts the child, which is ready once it has written its own status
  * for this exact instance and pid. Stop clears the public base URL if the
@@ -85,7 +87,7 @@ export function createNativeRelayService(options: NativeRelayServiceOptions): Na
     ...(options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {}),
     defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
     prepareStart: async (input) => {
-      const settings = prepareRelayStart(freshConfig(input.context.config, input.initialConfig), options);
+      const settings = prepareRelayStart(relayFreshConfig(input.context.config, input.initialConfig), options);
       lastStatusDir = settings.statusDir;
       lastInstanceId = settings.launch?.instanceId;
       return settings.launch;
@@ -120,7 +122,9 @@ function prepareRelayStart(
   };
 
   if (mode.mode === 'off') {
-    writeRemoteAccessStatus(statusDir, status({ mode: 'off' }));
+    // Clear what an earlier mode reported; an install that never turned remote
+    // access on gets no state directory at all.
+    if (readRemoteAccessStatus(statusDir)) writeRemoteAccessStatus(statusDir, status({ mode: 'off' }));
     return { statusDir, launch: undefined };
   }
   if (mode.mode === 'error') return fail(mode.error, 'off');
@@ -138,7 +142,7 @@ function prepareRelayStart(
   if (!localUrl) {
     return fail('the relay forwards only to a loopback http worker; email.baseUrl is not one.', 'relay');
   }
-  const instanceId = randomUUID();
+  const instanceId = relayRandomUUID();
   const childEnv: NodeJS.ProcessEnv = {};
   for (const name of CHILD_ENV_PASSTHROUGH) if (env[name]) childEnv[name] = env[name];
   Object.assign(childEnv, options.childEnv ?? {}, {
@@ -150,7 +154,7 @@ function prepareRelayStart(
   let executablePath: string;
   try {
     command = resolveBunRuntimePath(config.worker.service.runtimePath, env);
-    executablePath = resolveExecutablePath(options.executablePath ?? fileURLToPath(new URL('./cli.js', options.moduleUrl)));
+    executablePath = resolveExecutablePath(options.executablePath ?? relayFileURLToPath(new URL('./cli.js', options.moduleUrl)));
   } catch {
     return fail('the Bun runtime or the packaged Olympus CLI could not be found.', 'relay');
   }
@@ -214,14 +218,14 @@ function clearStalePublicUrl(statusDir: string | undefined, instanceId: string |
 }
 
 function resolveExecutablePath(path: string): string {
-  if (!isAbsolute(path) || !statSync(path).isFile()) throw new Error('Olympus CLI is unavailable.');
+  if (!relayIsAbsolute(path) || !relayStatSync(path).isFile()) throw new Error('Olympus CLI is unavailable.');
   return path;
 }
 
-function freshConfig(contextConfig: unknown, initialPluginConfig: unknown): OlympusConfig {
-  const root = asRecord(contextConfig);
-  const entries = asRecord(asRecord(root?.plugins)?.entries);
-  const olympus = asRecord(entries?.olympus);
+function relayFreshConfig(contextConfig: unknown, initialPluginConfig: unknown): OlympusConfig {
+  const root = relayConfigRecord(contextConfig);
+  const entries = relayConfigRecord(relayConfigRecord(root?.plugins)?.entries);
+  const olympus = relayConfigRecord(entries?.olympus);
   let pluginConfig: unknown;
   if (entries) {
     // A removed plugin entry disables remote access instead of resurrecting
@@ -240,7 +244,7 @@ function freshConfig(contextConfig: unknown, initialPluginConfig: unknown): Olym
   }
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
+function relayConfigRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
