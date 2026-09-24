@@ -456,7 +456,7 @@ Olympus runs on another machine, your agent runs `olympus dashboard --no-open`
 and gives you the returned opening link for the browser connection you configured. You do not need the plugin's
 installation directory or its worker token.
 
-The link expires after two minutes and works once. Open it promptly; if it has
+The link expires after fifteen minutes and works once. Open it promptly; if it has
 expired or was already used, ask your agent to run `olympus dashboard` again.
 The browser clears the link's ticket and keeps an HttpOnly control session;
 the durable worker token never enters the URL or browser storage. Treat an

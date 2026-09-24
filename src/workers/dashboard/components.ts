@@ -439,7 +439,7 @@ export function dashboardControlGate(input: DashboardControlGateInput): string {
     + `<button class="btn primary" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Get opening link</button></div>`
     + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">`
     + `<h4>Open dashboard controls</h4>`
-    + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after two minutes.</p>`
+    + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.</p>`
     + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>`
     + `<button class="btn primary" type="button" data-copy-target="#${promptId}">Copy prompt</button>`
     + `<span class="copystatus" data-copy-status aria-live="polite"></span>`
