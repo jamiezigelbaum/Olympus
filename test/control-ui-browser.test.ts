@@ -127,6 +127,48 @@ describe('OAuth browser handoff', () => {
     });
   }
 
+  test('opening one setup sheet closes the others and moves focus into it', () => {
+    const root = document.createElement('div');
+    const sheet = (id: string, inner = '') => `<div class="sheet" id="${id}" aria-hidden="true"><h4>${id}</h4>${inner}</div>`;
+    root.innerHTML = ['gmail', 'drive', 'dropbox'].map((id) =>
+      `<button type="button" data-sheet-toggle="#${id}" aria-controls="${id}" aria-expanded="false">Connect</button>`).join('')
+      + sheet('gmail') + sheet('drive', '<button type="button" id="nested" data-sheet-toggle="#dropbox" aria-expanded="false">More</button>')
+      + sheet('dropbox');
+    document.body.append(root);
+    const controller = mountDashboardController({
+      root, transport: { control: noControl }, navigate() {}, async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/?view=setup', canWrite: false,
+      signal: new AbortController().signal, pollIntervalMs: 0,
+    });
+    const toggle = (id: string) => root.querySelector<HTMLButtonElement>(`button[data-sheet-toggle="#${id}"]`)!;
+    const state = () => ['gmail', 'drive', 'dropbox'].map((id) => [
+      id, root.querySelector(`#${id}`)!.classList.contains('on'), root.querySelector(`#${id}`)!.getAttribute('aria-hidden'),
+      toggle(id).getAttribute('aria-expanded'),
+    ]);
+
+    toggle('gmail').click();
+    expect(state()).toEqual([['gmail', true, 'false', 'true'], ['drive', false, 'true', 'false'], ['dropbox', false, 'true', 'false']]);
+    expect(document.activeElement).toBe(root.querySelector('#gmail'));
+    expect(root.querySelector('#gmail')!.getAttribute('tabindex')).toBe('-1');
+
+    toggle('drive').click();
+    expect(state()).toEqual([['gmail', false, 'true', 'false'], ['drive', true, 'false', 'true'], ['dropbox', false, 'true', 'false']]);
+    expect(document.activeElement).toBe(root.querySelector('#drive'));
+
+    // A toggle inside an open sheet keeps its own sheet open.
+    root.querySelector<HTMLButtonElement>('#nested')!.click();
+    expect(root.querySelector('#drive')!.classList.contains('on')).toBe(true);
+    expect(root.querySelector('#dropbox')!.classList.contains('on')).toBe(true);
+    expect(root.querySelector('#nested')!.getAttribute('aria-expanded')).toBe('true');
+
+    // Closing one sheet leaves every other sheet as it was.
+    toggle('dropbox').click();
+    expect(root.querySelector('#dropbox')!.classList.contains('on')).toBe(false);
+    expect(root.querySelector('#nested')!.getAttribute('aria-expanded')).toBe('false');
+    expect(root.querySelector('#drive')!.classList.contains('on')).toBe(true);
+    controller.dispose();
+  });
+
   test('uses OpenClaw native handoff without opening a WebKit popup', async () => {
     const { root, form } = oauthFormRoot();
     const authorizationUrl = 'https://accounts.google.com/o/oauth2/auth?state=oauth-state&code=auth-code';
