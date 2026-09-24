@@ -7,31 +7,36 @@
  * treat it exactly like a bearer connection, and revoking it kills every access
  * and refresh token issued under it.
  *
- * Only SHA-256 digests of tokens and pairing codes are stored. Access tokens
- * are opaque, live one hour, and are bound to the protected resource they were
- * issued for. Refresh tokens rotate on every use; presenting a used one again
- * is treated as theft and revokes the whole grant.
+ * Only SHA-256 digests of tokens and pairing-code secrets are stored. Access
+ * tokens are opaque, live one hour, and are bound to the protected resource
+ * they were issued for. Refresh tokens rotate on every use. Presenting a used
+ * one again is treated as theft and revokes the whole grant, except within a
+ * short grace window, where the same successor pair is returned (concurrent
+ * refreshes, or a retry after a lost response). The grace window lives in this
+ * process's memory only; no raw token is ever written to disk.
  *
  * Pairing codes are minted by `olympus connections pair` and prove that the
- * person approving on the (public) consent page is the owner. They expire in
- * ten minutes, work once, and are protected by a per-code and a global failure
- * lockout.
+ * person approving on the (public) consent page is the owner. A code is a
+ * public selector plus a secret (`SSSS-XXXX-XXXX`): wrong secrets count only
+ * against the code their selector names, an unknown selector or a malformed
+ * code burns nothing, and a code dies after a few wrong secrets. Codes expire
+ * in ten minutes and work once. Request pacing (per address and global) lives
+ * in the HTTP handler, which slows guessing down without closing pairing.
  *
  * Plain functions over a factory, like remote-connections.ts: this module is
  * reachable from the bundled CLI.
  */
 import type { Database } from 'bun:sqlite';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { SqliteMigration } from './sqlite-migrations.ts';
 
 export const REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600;
 export const REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
 export const REMOTE_PAIRING_CODE_TTL_MS = 10 * 60_000;
-/** Failed approvals, anywhere, that burn every pairing code live at the time. */
-export const REMOTE_PAIRING_CODE_MAX_FAILURES = 10;
-/** Failed approvals within the window that lock all pairing until they age out. */
-export const REMOTE_PAIRING_GLOBAL_MAX_FAILURES = 20;
-export const REMOTE_PAIRING_GLOBAL_WINDOW_MS = 15 * 60_000;
+/** Wrong secrets presented with one code's selector before that code dies. */
+export const REMOTE_PAIRING_CODE_MAX_FAILURES = 5;
+/** How long a just-rotated refresh token still returns its successor pair. */
+export const REMOTE_OAUTH_REFRESH_GRACE_MS = 45_000;
 /** Registered (DCR) clients kept at most; unused ones are pruned first. */
 export const REMOTE_OAUTH_MAX_REGISTERED_CLIENTS = 500;
 
@@ -42,18 +47,26 @@ const REFRESH_TOKEN_PATTERN = /^olympus_rt_[A-Za-z0-9_-]{43}$/;
 const REGISTERED_CLIENT_ID_PATTERN = /^olympus_client_[a-f0-9]{24}$/;
 
 // Crockford-style: no 0/O, 1/I/L or U, so a code read off a terminal and typed
-// on a phone survives. 30 symbols x 10 characters is about 49 bits.
+// on a phone survives. A 4-symbol selector (about 20 bits, public-ish: it only
+// names the code) plus an 8-symbol secret (about 39 bits); with at most five
+// wrong secrets per code, a guess succeeds with odds of about 1 in 10^11.
 const PAIRING_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
-const PAIRING_CODE_LENGTH = 10;
+const PAIRING_SELECTOR_LENGTH = 4;
+const PAIRING_SECRET_LENGTH = 8;
+const PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
 const UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600_000;
 
 export interface MintedPairingCode {
-  /** Shown once, formatted `XXXXX-XXXXX`. */
+  /** Shown once, formatted `SSSS-XXXX-XXXX`. */
   code: string;
   expiresAt: string;
 }
 
-export type PairingCodeCheck = { ok: true } | { ok: false; reason: 'invalid' | 'locked' };
+/**
+ * `malformed`: not shaped like a code (burns nothing). `unknown`: no live code
+ * has that selector (burns nothing). `wrong_secret`: counted against that code.
+ */
+export type PairingCodeCheck = { ok: true } | { ok: false; reason: 'malformed' | 'unknown' | 'wrong_secret' };
 
 export interface RegisteredOAuthClient {
   clientId: string;
@@ -124,15 +137,15 @@ function digest(value: string): Buffer {
   return createHash('sha256').update(value, 'utf8').digest();
 }
 
-function randomPairingCode(): string {
+function randomPairingSymbols(length: number): string {
   // Rejection sampling keeps every symbol equally likely.
   const limit = 256 - (256 % PAIRING_ALPHABET.length);
   let out = '';
-  while (out.length < PAIRING_CODE_LENGTH) {
-    for (const byte of randomBytes(PAIRING_CODE_LENGTH * 2)) {
+  while (out.length < length) {
+    for (const byte of randomBytes(length * 2)) {
       if (byte >= limit) continue;
       out += PAIRING_ALPHABET[byte % PAIRING_ALPHABET.length];
-      if (out.length === PAIRING_CODE_LENGTH) break;
+      if (out.length === length) break;
     }
   }
   return out;
@@ -157,11 +170,21 @@ interface ClientRow {
   created_at: string;
 }
 
+interface RefreshGrace {
+  tokens: IssuedOAuthTokens;
+  successorRefreshHash: Buffer;
+  connectionId: string;
+  clientId: string;
+  expiresAt: number;
+}
+
 export function createRemoteOAuthStore(
   db: Database,
   now: () => Date,
   recordLastUse: (connectionId: string, at: Date) => void,
 ): RemoteOAuthStore {
+  // Keyed by the hex digest of a just-used refresh token. Memory only.
+  const refreshGrace = new Map<string, RefreshGrace>();
   const readToken = (token: string, kind: 'access' | 'refresh'): TokenRow | null =>
     db.query(`
       SELECT t.token_hash, t.connection_id, t.kind, t.resource, t.client_id, t.expires_at, t.used_at,
@@ -188,6 +211,7 @@ export function createRemoteOAuthStore(
   };
 
   const revokeGrant = (connectionId: string): void => {
+    for (const [key, entry] of refreshGrace) if (entry.connectionId === connectionId) refreshGrace.delete(key);
     db.transaction(() => {
       db.query("UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND kind = 'oauth' AND revoked_at IS NULL")
         .run(now().toISOString(), connectionId);
@@ -205,38 +229,45 @@ export function createRemoteOAuthStore(
   return {
     mintPairingCode(): MintedPairingCode {
       const at = now();
-      const code = randomPairingCode();
       const expiresAt = new Date(at.getTime() + REMOTE_PAIRING_CODE_TTL_MS).toISOString();
-      db.transaction(() => {
-        db.query('DELETE FROM remote_pairing_codes WHERE expires_at <= ?').run(at.toISOString());
-        db.query('INSERT INTO remote_pairing_codes (code_hash, created_at, expires_at) VALUES (?, ?, ?)')
-          .run(digest(code), at.toISOString(), expiresAt);
+      return db.transaction((): MintedPairingCode => {
+        db.query('DELETE FROM remote_pairing_codes WHERE expires_at <= ? OR used_at IS NOT NULL').run(at.toISOString());
+        // A selector must name exactly one live code.
+        for (let attempt = 0; attempt < 16; attempt += 1) {
+          const selector = randomPairingSymbols(PAIRING_SELECTOR_LENGTH);
+          const secret = randomPairingSymbols(PAIRING_SECRET_LENGTH);
+          const inserted = db.query(`
+            INSERT OR IGNORE INTO remote_pairing_codes (selector, secret_hash, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+          `).run(selector, digest(secret), at.toISOString(), expiresAt);
+          if (inserted.changes === 1) {
+            return { code: `${selector}-${secret.slice(0, 4)}-${secret.slice(4)}`, expiresAt };
+          }
+        }
+        throw new Error('Could not mint a unique pairing code.');
       })();
-      return { code: `${code.slice(0, 5)}-${code.slice(5)}`, expiresAt };
     },
 
     checkPairingCode(input: string): PairingCodeCheck {
-      const at = now();
-      const atIso = at.toISOString();
-      const windowStart = new Date(at.getTime() - REMOTE_PAIRING_GLOBAL_WINDOW_MS).toISOString();
+      const normalized = normalizePairingCode(input);
+      if (!normalized) return { ok: false, reason: 'malformed' };
+      const selector = normalized.slice(0, PAIRING_SELECTOR_LENGTH);
+      const presented = digest(normalized.slice(PAIRING_SELECTOR_LENGTH));
+      const atIso = now().toISOString();
       return db.transaction((): PairingCodeCheck => {
-        db.query('DELETE FROM remote_pairing_failures WHERE at <= ?').run(windowStart);
-        const failures = (db.query('SELECT COUNT(*) AS n FROM remote_pairing_failures').get() as { n: number }).n;
-        if (failures >= REMOTE_PAIRING_GLOBAL_MAX_FAILURES) return { ok: false, reason: 'locked' };
-        const normalized = normalizePairingCode(input);
-        if (normalized) {
-          const consumed = db.query(`
-            UPDATE remote_pairing_codes SET used_at = ?
-            WHERE code_hash = ? AND used_at IS NULL AND expires_at > ? AND failed_attempts < ?
-          `).run(atIso, digest(normalized), atIso, REMOTE_PAIRING_CODE_MAX_FAILURES);
-          if (consumed.changes === 1) return { ok: true };
+        const row = db.query(`
+          SELECT secret_hash FROM remote_pairing_codes
+          WHERE selector = ? AND used_at IS NULL AND expires_at > ? AND failed_attempts < ?
+        `).get(selector, atIso, REMOTE_PAIRING_CODE_MAX_FAILURES) as { secret_hash: Uint8Array } | null;
+        if (!row) return { ok: false, reason: 'unknown' };
+        const stored = Buffer.from(row.secret_hash);
+        if (stored.length !== presented.length || !timingSafeEqual(stored, presented)) {
+          db.query('UPDATE remote_pairing_codes SET failed_attempts = failed_attempts + 1 WHERE selector = ?').run(selector);
+          return { ok: false, reason: 'wrong_secret' };
         }
-        db.query('INSERT INTO remote_pairing_failures (at) VALUES (?)').run(atIso);
-        // A wrong guess cannot say which code it aimed at, so it counts against
-        // every code live right now.
-        db.query('UPDATE remote_pairing_codes SET failed_attempts = failed_attempts + 1 WHERE used_at IS NULL AND expires_at > ?')
-          .run(atIso);
-        return { ok: false, reason: 'invalid' };
+        const consumed = db.query('UPDATE remote_pairing_codes SET used_at = ? WHERE selector = ? AND used_at IS NULL')
+          .run(atIso, selector);
+        return consumed.changes === 1 ? { ok: true } : { ok: false, reason: 'unknown' };
       })();
     },
 
@@ -302,7 +333,24 @@ export function createRemoteOAuthStore(
         if (!row) return { ok: false, reason: 'unknown' };
         if (row.revoked_at !== null) return { ok: false, reason: 'revoked' };
         if (row.used_at !== null) {
+          const key = Buffer.from(row.token_hash).toString('hex');
+          const grace = refreshGrace.get(key);
+          if (grace && grace.expiresAt > at.getTime() && grace.clientId === input.clientId) {
+            // Concurrent refreshes, or a retry after a lost response: the
+            // successor pair stands as long as nobody has rotated it yet.
+            const successor = db.query(
+              "SELECT used_at FROM remote_oauth_tokens WHERE token_hash = ? AND kind = 'refresh'",
+            ).get(grace.successorRefreshHash) as { used_at: string | null } | null;
+            if (successor && successor.used_at === null) {
+              return {
+                ok: true,
+                connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
+                tokens: grace.tokens,
+              };
+            }
+          }
           // Rotation reuse: someone holds a copy of an old refresh token.
+          refreshGrace.delete(key);
           revokeGrant(row.connection_id);
           return { ok: false, reason: 'reused' };
         }
@@ -313,6 +361,14 @@ export function createRemoteOAuthStore(
         // The previous access token retires with its refresh token.
         db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ? AND kind = 'access'").run(row.connection_id);
         const tokens = issueTokens(row.connection_id, row.client_id, row.resource, at);
+        for (const [key, entry] of refreshGrace) if (entry.expiresAt <= at.getTime()) refreshGrace.delete(key);
+        refreshGrace.set(Buffer.from(row.token_hash).toString('hex'), {
+          tokens,
+          successorRefreshHash: digest(tokens.refreshToken),
+          connectionId: row.connection_id,
+          clientId: row.client_id,
+          expiresAt: at.getTime() + REMOTE_OAUTH_REFRESH_GRACE_MS,
+        });
         return {
           ok: true,
           connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
@@ -385,14 +441,13 @@ export function remoteOAuthSchemaMigration(version: number): SqliteMigration {
         );
 
         CREATE TABLE remote_pairing_codes (
-          code_hash BLOB PRIMARY KEY,
+          selector TEXT PRIMARY KEY,
+          secret_hash BLOB NOT NULL,
           created_at TEXT NOT NULL,
           expires_at TEXT NOT NULL,
           used_at TEXT,
           failed_attempts INTEGER NOT NULL DEFAULT 0
         );
-
-        CREATE TABLE remote_pairing_failures (at TEXT NOT NULL);
       `);
     },
   };

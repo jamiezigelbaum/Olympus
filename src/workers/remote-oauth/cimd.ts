@@ -50,6 +50,8 @@ export interface CimdFetchOptions {
   /** Connect here instead of 443 (tests with a local server). */
   portOverride?: number;
   timeoutMs?: number;
+  /** Consulted on a cache miss only, before fetching: false refuses (rate limit). */
+  allowFetch?: () => boolean;
 }
 
 /** Whether a client_id is shaped like a metadata document URL. */
@@ -125,6 +127,9 @@ export function createClientMetadataResolver(options: CimdFetchOptions & { now?:
     if (hit && hit.expiresAt > now()) return hit.value;
     cache.delete(clientId);
     const url = parseClientIdMetadataUrl(clientId);
+    if (options.allowFetch && !options.allowFetch()) {
+      throw new ClientMetadataError('too many new apps are connecting right now. Try again in a minute.');
+    }
     const fetched = await fetchPinnedJson(url, options);
     const value = validateClientMetadataDocument(fetched.body, clientId);
     if (cache.size >= CIMD_CACHE_MAX_ENTRIES) {

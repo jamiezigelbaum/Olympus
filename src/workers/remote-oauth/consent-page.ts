@@ -23,6 +23,14 @@ export interface ConsentPageInput {
   attemptsLeft?: number;
 }
 
+function hostnameOf(host: string): string {
+  try {
+    return new URL(`https://${host}`).hostname;
+  } catch {
+    return host;
+  }
+}
+
 export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -68,6 +76,8 @@ main { max-width: 26rem; margin: 0 auto; padding: 2rem 1rem 3rem; }
 h1 { font-size: 1.35rem; line-height: 1.3; margin: 0 0 1rem; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
 .name { font-weight: 600; font-size: 1.1rem; overflow-wrap: anywhere; }
+.host { font: 600 1.1rem/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: .35rem; overflow-wrap: anywhere; }
+.host.unverified { color: var(--warn-fg); font-family: system-ui, sans-serif; }
 .meta { color: var(--muted); font-size: .92rem; margin: .25rem 0 0; overflow-wrap: anywhere; }
 .warn { background: var(--warn-bg); color: var(--warn-fg); border-radius: 10px; padding: .75rem; font-size: .92rem; margin-bottom: 1rem; }
 .err { color: var(--err); font-weight: 600; margin: 0 0 .75rem; }
@@ -87,9 +97,15 @@ p.small { color: var(--muted); font-size: .85rem; margin-top: 1.25rem; }
 export function renderConsentPage(input: ConsentPageInput): { body: string; headers: Record<string, string> } {
   const nonce = randomBytes(16).toString('base64');
   const name = escapeHtml(input.clientName);
+  // The host that publishes the client's metadata is the one fact a stranger
+  // cannot fake, so it sits right under the name, as large as the name.
   const provenance = input.verifiedHost
-    ? `Identity published by <strong>${escapeHtml(input.verifiedHost)}</strong>`
-    : 'Name supplied by the app itself, not verified';
+    ? `<div class="host">${escapeHtml(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>`
+    : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
+  const redirectHostname = hostnameOf(input.redirectHost);
+  const mismatchWarning = input.verifiedHost && !input.loopbackRedirect && redirectHostname !== input.verifiedHost
+    ? `<div class="warn">This app is published by <strong>${escapeHtml(input.verifiedHost)}</strong> but sends you back to <strong>${escapeHtml(input.redirectHost)}</strong>. Approve only if you expected that.</div>`
+    : '';
   const loopbackWarning = input.loopbackRedirect
     ? `<div class="warn">This app returns to <strong>${escapeHtml(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>`
     : '';
@@ -110,17 +126,17 @@ export function renderConsentPage(input: ConsentPageInput): { body: string; head
 <h1>Connect ${name} to Olympus?</h1>
 <div class="card">
 <div class="name">${name}</div>
-<p class="meta">${provenance}</p>
+${provenance}
 <p class="meta">After you approve, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
 </div>
-${loopbackWarning}
+${mismatchWarning}${loopbackWarning}
 <p>${name} will be able to ask Olympus questions under your privacy rules. Private sources stay private, and you can remove it any time with <code>olympus connections revoke</code>.</p>
 <form method="post" action="/connect/authorize">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
 ${error}
 <label for="pairing_code">Pairing code</label>
-<input type="text" id="pairing_code" name="pairing_code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" maxlength="16" placeholder="XXXXX-XXXXX" required>
+<input type="text" id="pairing_code" name="pairing_code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" maxlength="20" placeholder="ABCD-EFGH-JKMN" required>
 <p class="hint">Get one by running <code>olympus connections pair</code> on the computer running Olympus, or by asking your OpenClaw agent. Codes last 10 minutes and work once.</p>
 <div class="actions">
 <button class="approve" type="submit" name="action" value="approve">Approve</button>

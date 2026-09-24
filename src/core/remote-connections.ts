@@ -24,6 +24,7 @@ import { readWorkerSetupEnv } from './worker-auth.ts';
 import { sanitizeCallerDisplayName } from './operation-caller.ts';
 import {
   assertSqliteSchemaCanOpen,
+  readSqliteSchemaVersion,
   runSqliteMigrations,
   type SqliteMigration,
 } from './sqlite-migrations.ts';
@@ -90,6 +91,21 @@ interface ConnectionRow {
 }
 
 export const REMOTE_CONNECTIONS_DB_PATH_ENV = 'OLYMPUS_REMOTE_CONNECTIONS_DB_PATH';
+
+/**
+ * Where the schema v1 database is copied before migration 2 (OAuth grants)
+ * rewrites it. An older Olympus refuses a v2 database by design, so rolling
+ * back to one means restoring this copy while the worker is stopped:
+ *
+ *   cp remote-connections.sqlite.pre-v2.bak remote-connections.sqlite
+ *   rm -f remote-connections.sqlite-wal remote-connections.sqlite-shm
+ *
+ * Connections approved after the upgrade (OAuth grants, new bearer tokens)
+ * are not in the copy; revoked ones are active again, so revoke them anew.
+ */
+export function remoteConnectionsPreV2BackupPath(dbPath: string): string {
+  return `${dbPath}.pre-v2.bak`;
+}
 
 /**
  * Where the connection database lives for a process with this environment:
@@ -168,6 +184,7 @@ export function openRemoteConnectionStore(
     chmodSync(dbPath, 0o600);
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
     assertSqliteSchemaCanOpen(db, REMOTE_CONNECTIONS_STORE_ID, REMOTE_CONNECTIONS_SCHEMA_VERSION);
+    backupBeforeOAuthMigration(db, dbPath);
     runSqliteMigrations(db, REMOTE_CONNECTIONS_STORE_ID, remoteConnectionMigrations());
   } catch (error) {
     closeSqliteStore(db);
@@ -308,6 +325,19 @@ function remoteConnectionMigrations(): SqliteMigration[] {
       `);
     },
   }, remoteOAuthSchemaMigration(2)];
+}
+
+/**
+ * A consistent copy (VACUUM INTO reads through the WAL) of a v1 database,
+ * taken once, before migration 2 runs. An existing copy is never overwritten:
+ * the first one is the pre-upgrade state.
+ */
+function backupBeforeOAuthMigration(db: Database, dbPath: string): void {
+  if (readSqliteSchemaVersion(db, REMOTE_CONNECTIONS_STORE_ID) !== 1) return;
+  const backupPath = remoteConnectionsPreV2BackupPath(dbPath);
+  if (existsSync(backupPath)) return;
+  db.query('VACUUM INTO ?').run(backupPath);
+  chmodSync(backupPath, 0o600);
 }
 
 function hardenPrivateDatabasePath(dbPath: string): void {

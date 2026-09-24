@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -23,10 +23,15 @@ import { defaultConfig } from '../src/core/config.ts';
 import { runConnectionsCommand } from '../src/cli.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import {
+  REMOTE_OAUTH_REFRESH_GRACE_MS,
   REMOTE_PAIRING_CODE_MAX_FAILURES,
-  REMOTE_PAIRING_GLOBAL_MAX_FAILURES,
   normalizePairingCode,
 } from '../src/core/remote-oauth-store.ts';
+import { assertSqliteSchemaCanOpen, readSqliteSchemaVersion } from '../src/core/sqlite-migrations.ts';
+import { remoteConnectionsPreV2BackupPath } from '../src/core/remote-connections.ts';
+import { deleteOlympusData, exportOlympusData } from '../src/data-lifecycle.ts';
+import { createRemoteOpenApiHandler, withRemoteOpenApiRoutes } from '../src/workers/remote-openapi.ts';
+import { readBoundedRequestText } from '../src/workers/remote-request-body.ts';
 import { parseRemotePublicBaseUrl, type RemotePublicUrls } from '../src/core/remote-public-url.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
@@ -118,6 +123,7 @@ let urls: RemotePublicUrls;
 let clock: number;
 let handle: (request: Request) => Promise<Response>;
 let cimdDocs: Record<string, unknown>;
+let sleeps: number[];
 
 interface AssembleOptions {
   publicBaseUrl?: string | undefined;
@@ -144,27 +150,33 @@ function assemble(options: AssembleOptions = {}): void {
     if (!document) throw new ClientMetadataError('Client metadata fetch returned HTTP 404.');
     return validateClientMetadataDocument(document, clientId);
   };
+  const agentOptions = {
+    connections: () => store,
+    publicUrls,
+    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) =>
+      createInProcessOperationContext({
+        config: defaultConfig(),
+        sourceIndexReadEnabled: true,
+        workerFetch: worker.fetch,
+        caller,
+        signal,
+      }),
+  };
   handle = withRemoteOAuthRoutes(
     createRemoteOAuthHandler({
       publicUrls,
       connections: () => store,
       resolveClientMetadata,
       now: () => clock,
+      sleep: async (ms) => { sleeps.push(ms); },
       ...(options.registrationBurst !== undefined ? { registrationBurst: options.registrationBurst } : {}),
     }),
-    withRemoteMcpRoute(
-      createRemoteMcpHandler({
-        connections: () => store,
-        publicUrls,
-        makeOperationContext: (caller, signal) => createInProcessOperationContext({
-          config: defaultConfig(),
-          sourceIndexReadEnabled: true,
-          workerFetch: worker.fetch,
-          caller,
-          signal,
-        }),
-      }),
-      withWorkerBearerAuth(worker.fetch, { authToken: WORKER_TOKEN }),
+    withRemoteOpenApiRoutes(
+      createRemoteOpenApiHandler(agentOptions),
+      withRemoteMcpRoute(
+        createRemoteMcpHandler(agentOptions),
+        withWorkerBearerAuth(worker.fetch, { authToken: WORKER_TOKEN }),
+      ),
     ),
   );
 }
@@ -175,6 +187,7 @@ beforeEach(() => {
   clock = Date.parse('2026-09-24T12:00:00.000Z');
   store = openRemoteConnectionStore(dbPath, { now: () => new Date(clock) });
   ledger = [];
+  sleeps = [];
   cimdDocs = { [CLAUDE_CIMD_URL]: CLAUDE_CIMD, [CHATGPT_CIMD.client_id]: CHATGPT_CIMD };
   server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => handle(request) });
   base = `http://127.0.0.1:${server.port}`;
@@ -373,7 +386,8 @@ describe('end to end with the MCP SDK OAuth client', () => {
     expect(provider.authorizationUrl!.searchParams.get('resource')).toBe(urls.resource);
     const page = await openConsent(provider.authorizationUrl!);
     expect(page.html).toContain('Connect Claude to Olympus?');
-    expect(page.html).toContain('Identity published by <strong>claude.ai</strong>');
+    expect(page.html).toContain('<div class="name">Claude</div>\n<div class="host">claude.ai</div>');
+    expect(page.html).not.toContain('sends you back to');
     expect(page.html).toContain('you return to <strong>claude.ai</strong>');
     const approved = await submitConsent(page, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code });
     const callback = new URL(approved.headers.get('location')!);
@@ -444,6 +458,17 @@ describe('metadata and discovery', () => {
     // DNS rebinding: an attacker's page reaching loopback still carries its own Host.
     expect((await get('/.well-known/oauth-authorization-server', { host: 'evil.example' })).status).toBe(421);
     expect((await get('/connect/authorize', { host: 'rebind.attacker.example:8123' })).status).toBe(421);
+  });
+
+  test('loopback Host names are accepted in every form; lookalikes are not', async () => {
+    assemble({ publicBaseUrl: 'https://abc123.connect.olympusplugin.ai' });
+    const get = (host: string) => handle(new Request('http://127.0.0.1:8123/.well-known/oauth-authorization-server', { headers: { host } }));
+    for (const host of ['127.0.0.1:8123', 'localhost:8123', '[::1]:8123', 'LOCALHOST:8123', '127.0.0.1', 'ABC123.connect.olympusplugin.ai']) {
+      expect((await get(host)).status, host).toBe(200);
+    }
+    for (const host of ['localhost.evil.example', '127.0.0.1.nip.io:8123', 'abc123.connect.olympusplugin.ai.evil.example', '127.0.0.2:8123', 'other.connect.olympusplugin.ai']) {
+      expect((await get(host)).status, host).toBe(421);
+    }
   });
 
   test('with no public base URL, OAuth is off and bearer connections still work', async () => {
@@ -533,7 +558,7 @@ describe('authorization request validation', () => {
     const page = await openConsent(authorizeUrl({ client_id, redirect_uri: 'https://grok.com/connectors/oauth/callback' }));
     expect(page.html).not.toContain('<script>');
     expect(page.html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;&quot;x');
-    expect(page.html).toContain('not verified');
+    expect(page.html).toContain('Not verified');
     const csp = page.response.headers.get('content-security-policy') ?? '';
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("default-src 'none'");
@@ -557,6 +582,20 @@ describe('authorization request validation', () => {
     const ok = await submitConsent(page, fields);
     expect(ok.status).toBe(303);
     expect(new URL(ok.headers.get('location')!).searchParams.get('code')).toBeTruthy();
+  });
+
+  test('a redirect off the publishing host is called out', async () => {
+    cimdDocs['https://apps.example/client.json'] = {
+      client_id: 'https://apps.example/client.json',
+      client_name: 'Example',
+      redirect_uris: ['https://callback.other.example/cb'],
+    };
+    const page = await openConsent(authorizeUrl({
+      client_id: 'https://apps.example/client.json',
+      redirect_uri: 'https://callback.other.example/cb',
+    }));
+    expect(page.html).toContain('<div class="host">apps.example</div>');
+    expect(page.html).toContain('published by <strong>apps.example</strong> but sends you back to <strong>callback.other.example</strong>');
   });
 
   test('deny sends access_denied back to the client', async () => {
@@ -583,54 +622,124 @@ describe('authorization request validation', () => {
 });
 
 describe('pairing codes', () => {
-  test('codes are typable, high-entropy and single-use', async () => {
+  test('codes are a selector plus a secret, typable, and single-use', async () => {
     const minted = store.oauth.mintPairingCode();
-    expect(minted.code).toMatch(/^[A-HJKMNP-TV-Z2-9]{5}-[A-HJKMNP-TV-Z2-9]{5}$/);
-    expect(normalizePairingCode(minted.code.toLowerCase().replace('-', ' '))).toBe(minted.code.replace('-', ''));
+    expect(minted.code).toMatch(/^[A-HJKMNP-TV-Z2-9]{4}-[A-HJKMNP-TV-Z2-9]{4}-[A-HJKMNP-TV-Z2-9]{4}$/);
+    const compact = minted.code.replaceAll('-', '');
+    expect(normalizePairingCode(minted.code.toLowerCase().replaceAll('-', ' '))).toBe(compact);
     expect(store.oauth.checkPairingCode(minted.code.toLowerCase())).toEqual({ ok: true });
-    expect(store.oauth.checkPairingCode(minted.code)).toEqual({ ok: false, reason: 'invalid' });
-    // Only digests are stored.
-    const raw = readFileSync(dbPath);
-    expect(raw.includes(Buffer.from(minted.code.replace('-', '')))).toBe(false);
+    expect(store.oauth.checkPairingCode(minted.code)).toEqual({ ok: false, reason: 'unknown' });
+    // Only the secret's digest is stored.
+    expect(readFileSync(dbPath).includes(Buffer.from(compact.slice(4)))).toBe(false);
   });
 
   test('codes expire after ten minutes', () => {
     const minted = store.oauth.mintPairingCode();
     clock += 10 * 60_000;
-    expect(store.oauth.checkPairingCode(minted.code)).toEqual({ ok: false, reason: 'invalid' });
+    expect(store.oauth.checkPairingCode(minted.code)).toEqual({ ok: false, reason: 'unknown' });
   });
 
-  test('wrong guesses burn live codes, then lock all pairing for the window', () => {
-    const live = store.oauth.mintPairingCode();
-    for (let i = 0; i < REMOTE_PAIRING_CODE_MAX_FAILURES; i += 1) store.oauth.checkPairingCode('AAAAA-AAAAA');
-    expect(store.oauth.checkPairingCode(live.code)).toEqual({ ok: false, reason: 'invalid' });
-    for (let i = REMOTE_PAIRING_CODE_MAX_FAILURES + 1; i < REMOTE_PAIRING_GLOBAL_MAX_FAILURES; i += 1) {
-      store.oauth.checkPairingCode('AAAAA-AAAAA');
+  test('wrong secrets count only against the code their selector names', () => {
+    const target = store.oauth.mintPairingCode();
+    const other = store.oauth.mintPairingCode();
+    const selector = target.code.slice(0, 4);
+    const wrongSecret = target.code.endsWith('A') ? `${selector}-BBBB-BBBB` : `${selector}-AAAA-AAAA`;
+    for (let i = 0; i < REMOTE_PAIRING_CODE_MAX_FAILURES; i += 1) {
+      expect(store.oauth.checkPairingCode(wrongSecret)).toEqual({ ok: false, reason: 'wrong_secret' });
     }
-    const fresh = store.oauth.mintPairingCode();
-    expect(store.oauth.checkPairingCode(fresh.code)).toEqual({ ok: false, reason: 'locked' });
-    clock += 15 * 60_000 + 1;
-    expect(store.oauth.checkPairingCode(fresh.code)).toEqual({ ok: false, reason: 'invalid' }); // expired meanwhile
-    expect(store.oauth.checkPairingCode(store.oauth.mintPairingCode().code)).toEqual({ ok: true });
+    // That code is dead, even with its right secret; the other is untouched.
+    expect(store.oauth.checkPairingCode(target.code)).toEqual({ ok: false, reason: 'unknown' });
+    expect(store.oauth.checkPairingCode(other.code)).toEqual({ ok: true });
   });
 
-  test('one approval page allows five wrong codes, then sends access_denied', async () => {
+  test('unknown selectors and malformed input burn nothing', () => {
+    const live = store.oauth.mintPairingCode();
+    const foreign = live.code.startsWith('A') ? 'BBBB-BBBB-BBBB' : 'AAAA-AAAA-AAAA';
+    for (let i = 0; i < 50; i += 1) {
+      expect(store.oauth.checkPairingCode(foreign)).toEqual({ ok: false, reason: 'unknown' });
+      expect(store.oauth.checkPairingCode('0000-OOOO-1111')).toEqual({ ok: false, reason: 'malformed' });
+      expect(store.oauth.checkPairingCode(live.code.slice(0, -1))).toEqual({ ok: false, reason: 'malformed' });
+    }
+    expect(store.oauth.checkPairingCode(live.code)).toEqual({ ok: true });
+  });
+
+  const authorizeUrlFor = () => {
     const url = new URL(`${base}/connect/authorize`);
     url.search = new URLSearchParams({
       response_type: 'code', client_id: CLAUDE_CIMD_URL, redirect_uri: CLAUDE_CIMD.redirect_uris[0]!,
       code_challenge: 'x'.repeat(43), code_challenge_method: 'S256', state: 's',
     }).toString();
-    const page = await openConsent(url);
+    return url;
+  };
+  const relayed = (address: string) => ({ 'x-olympus-relay': '1', 'x-forwarded-for': address });
+  const openFrom = async (headers: Record<string, string>) => {
+    const response = await fetch(authorizeUrlFor(), { redirect: 'manual', headers });
+    const html = await response.text();
+    return {
+      response,
+      requestId: /name="request_id" value="([^"]+)"/.exec(html)?.[1] ?? '',
+      csrf: /name="csrf" value="([^"]+)"/.exec(html)?.[1] ?? '',
+      cookie: (response.headers.get('set-cookie') ?? '').split(';')[0] ?? '',
+    };
+  };
+
+  test('one approval page allows five wrong codes, then sends access_denied; typos do not count', async () => {
+    const page = await openConsent(authorizeUrlFor());
+    const typo = await submitConsent(page, { action: 'approve', pairing_code: 'ABC' });
+    expect(typo.status).toBe(400);
+    expect(await typo.text()).toContain('looks like');
     for (let i = 0; i < 4; i += 1) {
-      const retry = await submitConsent(page, { action: 'approve', pairing_code: 'AAAAA-AAAAA' });
+      const retry = await submitConsent(page, { action: 'approve', pairing_code: 'AAAA-AAAA-AAAA' });
       expect(retry.status).toBe(400);
       expect(await retry.text()).toContain('not valid');
     }
-    const last = await submitConsent(page, { action: 'approve', pairing_code: 'AAAAA-AAAAA' });
+    const last = await submitConsent(page, { action: 'approve', pairing_code: 'AAAA-AAAA-AAAA' });
     expect(last.status).toBe(303);
     expect(new URL(last.headers.get('location')!).searchParams.get('error')).toBe('access_denied');
     const after = await submitConsent(page, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code });
     expect(after.status).toBe(400);
+  });
+
+  test('wrong codes slow their sender down, never close pairing for someone else', async () => {
+    const attacker = relayed('203.0.113.9');
+    const owner = relayed('198.51.100.20');
+    const guess = async (headers: Record<string, string>, code = 'AAAA-AAAA-AAAA') => {
+      const page = await openFrom(headers);
+      return submitConsent(page, { action: 'approve', pairing_code: code }, { Origin: base, ...headers });
+    };
+    for (let i = 0; i < 5; i += 1) await guess(attacker);
+    // 0s, then doubling: 1s, 2s, 4s, 8s.
+    expect(sleeps).toEqual([1000, 2000, 4000, 8000]);
+    const refused = await guess(attacker);
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain('Wait 16 seconds');
+    // The owner, from another address, is not held at all.
+    sleeps = [];
+    const ownerTry = await guess(owner, store.oauth.mintPairingCode().code);
+    expect(ownerTry.status).toBe(303);
+    expect(sleeps).toEqual([]);
+  });
+
+  test('past a global threshold every check pays a small delay, but still runs', async () => {
+    for (let i = 0; i < 21; i += 1) {
+      const headers = relayed(`203.0.113.${i + 1}`);
+      const page = await openFrom(headers);
+      await submitConsent(page, { action: 'approve', pairing_code: 'AAAA-AAAA-AAAA' }, { Origin: base, ...headers });
+    }
+    sleeps = [];
+    const headers = relayed('198.51.100.20');
+    const page = await openFrom(headers);
+    const ok = await submitConsent(page, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code }, { Origin: base, ...headers });
+    expect(ok.status).toBe(303);
+    expect(sleeps).toEqual([2000]);
+  });
+
+  test('one caller can hold at most eight waiting approvals', async () => {
+    const flooder = relayed('203.0.113.50');
+    for (let i = 0; i < 8; i += 1) expect((await openFrom(flooder)).response.status).toBe(200);
+    expect((await openFrom(flooder)).response.status).toBe(429);
+    expect((await openFrom(relayed('198.51.100.20'))).response.status).toBe(200);
+    expect((await openFrom({})).response.status).toBe(200);
   });
 
   test('olympus connections pair mints a code and says whether OAuth is on', () => {
@@ -641,7 +750,7 @@ describe('pairing codes', () => {
     };
     const off = runConnectionsCommand(['pair'], env) as { code: string; oauth_enabled: boolean; url: string | null };
     expect(off).toMatchObject({ kind: 'remote_pairing_code', oauth_enabled: false, url: null });
-    expect(off.code).toMatch(/^[A-Z2-9]{5}-[A-Z2-9]{5}$/);
+    expect(off.code).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
     const on = runConnectionsCommand(['pair'], { ...env, OLYMPUS_PUBLIC_BASE_URL: 'https://abc.connect.olympusplugin.ai' });
     expect(on).toMatchObject({ oauth_enabled: true, url: 'https://abc.connect.olympusplugin.ai/mcp' });
     expect(() => runConnectionsCommand(['pair', 'extra'], env)).toThrow('Usage: olympus connections pair');
@@ -664,12 +773,68 @@ describe('tokens', () => {
     // Another client cannot use it.
     expect((await refresh(rotated.refresh_token, CHATGPT_CIMD.client_id)).status).toBe(400);
 
+    // Past the grace window, replaying the used token is theft.
+    clock += REMOTE_OAUTH_REFRESH_GRACE_MS + 1;
     const replay = await refresh(first.refresh_token);
     expect(replay.status).toBe(400);
     expect(await replay.json()).toMatchObject({ error: 'invalid_grant' });
     expect(store.list()[0]!.revokedAt).not.toBeNull();
     expect((await mcpInitialize(`Bearer ${rotated.access_token}`)).status).toBe(401);
     expect((await refresh(rotated.refresh_token)).status).toBe(400);
+  });
+
+  test('concurrent refreshes and a retry after a lost response get the same successor pair', async () => {
+    const first = await claudeGrant();
+    const refresh = () => tokenRequest({
+      grant_type: 'refresh_token', refresh_token: first.refresh_token, client_id: CLAUDE_CIMD_URL, resource: urls.resource,
+    }).then(async (response) => ({ status: response.status, body: await response.json() as Record<string, string> }));
+    const [a, b] = await Promise.all([refresh(), refresh()]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(b.body.refresh_token).toBe(a.body.refresh_token);
+    expect(b.body.access_token).toBe(a.body.access_token);
+    // The response was lost; the client retries with the old token 30s later.
+    clock += 30_000;
+    const retry = await refresh();
+    expect(retry.body.refresh_token).toBe(a.body.refresh_token);
+    expect((await mcpInitialize(`Bearer ${a.body.access_token}`)).status).toBe(200);
+    expect(store.list()[0]!.revokedAt).toBeNull();
+    // Once the successor has itself been rotated, the old token is theft again.
+    const next = await tokenRequest({
+      grant_type: 'refresh_token', refresh_token: a.body.refresh_token!, client_id: CLAUDE_CIMD_URL,
+    });
+    expect(next.status).toBe(200);
+    expect((await refresh()).status).toBe(400);
+    expect(store.list()[0]!.revokedAt).not.toBeNull();
+  });
+
+  test('the grace window answers only the same client', async () => {
+    const first = await claudeGrant();
+    const refresh = (clientId: string) => tokenRequest({
+      grant_type: 'refresh_token', refresh_token: first.refresh_token, client_id: clientId,
+    });
+    expect((await refresh(CLAUDE_CIMD_URL)).status).toBe(200);
+    expect((await refresh(CHATGPT_CIMD.client_id)).status).toBe(400);
+    expect(store.list()[0]!.revokedAt).not.toBeNull();
+  });
+
+  test('OAuth access tokens open the OpenAPI tool path too, with the same audience binding', async () => {
+    const tokens = await claudeGrant();
+    const call = (token: string) => fetch(`${base}/api/v1/tools/source_answer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ question: 'what changed?' }),
+    });
+    expect((await call(tokens.access_token)).status).toBe(200);
+    const trace = ledger.find((r): r is SourceAnswerLatencyTraceRecord => r.kind === 'source_answer_latency_trace');
+    expect(trace?.caller).toMatchObject({ surface: 'remote', display_name: 'Claude' });
+    const unauth = await fetch(`${base}/api/v1/tools/source_answer`, { method: 'POST' });
+    expect(unauth.status).toBe(401);
+    expect(unauth.headers.get('WWW-Authenticate')).toContain(`resource_metadata="${base}/.well-known/oauth-protected-resource/mcp"`);
+    assemble({ publicBaseUrl: 'https://moved.example' });
+    expect((await call(tokens.access_token)).status).toBe(401);
+    assemble({ publicBaseUrl: undefined });
+    expect((await call(tokens.access_token)).status).toBe(401);
   });
 
   test('access tokens expire after an hour', async () => {
@@ -753,6 +918,40 @@ describe('tokens', () => {
   });
 });
 
+describe('request bodies on the unauthenticated routes', () => {
+  test('an oversized chunked body is refused without buffering it all', async () => {
+    let pulled = 0;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        if (pulled > 10_000) { controller.close(); return; }
+        controller.enqueue(new Uint8Array(4096).fill(97));
+      },
+    });
+    const response = await fetch(`${base}/connect/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: endless,
+      // @ts-expect-error Bun streams request bodies with duplex half
+      duplex: 'half',
+    });
+    expect(response.status).toBe(400);
+    expect(pulled).toBeLessThan(1000);
+  });
+
+  test('a body that stalls gives up at the deadline', async () => {
+    const stalled = new Request('http://127.0.0.1/connect/token', {
+      method: 'POST',
+      body: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array([97])); } }),
+      // @ts-expect-error Bun streams request bodies with duplex half
+      duplex: 'half',
+    });
+    const started = Date.now();
+    expect(await readBoundedRequestText(stalled, 1024, { deadlineMs: 50 })).toEqual({ ok: false, reason: 'timeout' });
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+});
+
 describe('dynamic client registration', () => {
   test('registers public clients with https or loopback redirects, and is rate-limited', async () => {
     assemble({ registrationBurst: 2 });
@@ -810,6 +1009,22 @@ describe('client metadata documents (CIMD) fetch', () => {
     await expect(attempt('https://[::1]/meta.json')).rejects.toThrow('private or reserved');
   });
 
+  test('a cached document costs no fetch budget', async () => {
+    let budgetAsked = 0;
+    let fetched = 0;
+    const clientId = 'https://client.example/meta.json';
+    const resolve = createClientMetadataResolver({
+      resolve: async () => { fetched += 1; return ['127.0.0.1']; },
+      allowFetch: () => { budgetAsked += 1; return budgetAsked === 1; },
+      timeoutMs: 200,
+    });
+    // First miss spends the budget (then fails on the private address); the
+    // second miss is refused by the budget before resolving anything.
+    await expect(resolve(clientId)).rejects.toThrow('private or reserved');
+    await expect(resolve(clientId)).rejects.toThrow('too many new apps');
+    expect(fetched).toBe(1);
+  });
+
   test('document validation', () => {
     expect(() => validateClientMetadataDocument({ ...CLAUDE_CIMD, client_id: 'https://evil.example/x' }, CLAUDE_CIMD_URL))
       .toThrow('does not match');
@@ -853,8 +1068,10 @@ describe('client metadata documents (CIMD) fetch', () => {
 
     afterEach(() => { tlsServer?.stop(true); tlsServer = undefined; });
 
+    let budget = 0;
     const resolverTo = (answer: string, overrides: { ca?: string } = {}) => createClientMetadataResolver({
       resolve: async () => [answer],
+      allowFetch: () => { budget += 1; return true; },
       isAllowedAddress: (address) => address === '127.0.0.1', // the test server; production refuses loopback
       ca: overrides.ca ?? cert,
       portOverride: tlsServer!.port!,
@@ -868,6 +1085,8 @@ describe('client metadata documents (CIMD) fetch', () => {
       expect(await resolve(clientId)).toMatchObject({ clientName: 'Example', clientIdHost: 'client.example' });
       expect(await resolve(clientId)).toMatchObject({ clientName: 'Example' });
       expect(requests).toEqual([{ host: 'client.example', path: '/meta.json' }]);
+      // The cache hit spent nothing from the fetch budget.
+      expect(budget).toBe(1);
     });
 
     test.if(openssl)('a certificate for another name, a redirect, or an oversized body is refused', async () => {
@@ -909,9 +1128,59 @@ describe('connection database migration', () => {
       const check = new Database(legacyPath);
       expect((check.query("SELECT version FROM schema_version WHERE store_id = 'remote-connections'").get() as { version: number }).version).toBe(2);
       check.close();
+      // Something approved after the upgrade, which the rollback will not keep.
+      upgraded.create('Later');
     } finally {
       upgraded.close();
     }
+
+    // Rollback: an older build refuses the v2 database outright...
+    const refused = new Database(legacyPath);
+    expect(() => assertSqliteSchemaCanOpen(refused, 'remote-connections', 1)).toThrow('only knows schema_version 1');
+    refused.close();
+    // ...so the documented restore puts the pre-migration copy back.
+    const backup = remoteConnectionsPreV2BackupPath(legacyPath);
+    expect(statSync(backup).mode & 0o777).toBe(0o600);
+    copyFileSync(backup, legacyPath);
+    rmSync(`${legacyPath}-wal`, { force: true });
+    rmSync(`${legacyPath}-shm`, { force: true });
+
+    // What a v1 build does on open: the version gate, then its v1 queries.
+    const v1Build = new Database(legacyPath);
+    try {
+      expect(readSqliteSchemaVersion(v1Build, 'remote-connections')).toBe(1);
+      expect(() => assertSqliteSchemaCanOpen(v1Build, 'remote-connections', 1)).not.toThrow();
+      const rows = v1Build.query('SELECT id, display_name, kind, token_hash FROM remote_connections').all() as Array<{
+        display_name: string; kind: string; token_hash: Uint8Array;
+      }>;
+      expect(rows.map((r) => [r.display_name, r.kind])).toEqual([['Muse', 'bearer']]);
+      expect(Buffer.from(rows[0]!.token_hash).equals(Buffer.from(row.token_hash as Uint8Array))).toBe(true);
+      v1Build.exec("INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at) VALUES ('aa', 'x', 'bearer', x'00', 'now')");
+    } finally {
+      v1Build.close();
+    }
+
+    // A second upgrade migrates again and keeps the first backup untouched.
+    const before = readFileSync(backup);
+    const again = openRemoteConnectionStore(legacyPath);
+    expect(again.verifyToken(token)).toMatchObject({ ok: true });
+    again.close();
+    expect(readFileSync(backup).equals(before)).toBe(true);
+  });
+
+  test('the pre-migration backup is left out of exports and removed by data delete --all', () => {
+    const home = join(dir, 'lifecycle-home');
+    mkdirSync(home, { recursive: true });
+    const path = join(dir, 'outside-roots', 'remote-connections.sqlite');
+    mkdirSync(join(dir, 'outside-roots'), { mode: 0o700 });
+    writeFileSync(remoteConnectionsPreV2BackupPath(path), 'backup', { mode: 0o600 });
+    openRemoteConnectionStore(path).close();
+    const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share'), OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: path };
+    const exported = exportOlympusData({ destination: join(dir, 'export'), homeDir: home, env });
+    expect(exported.skipped).toContain(remoteConnectionsPreV2BackupPath(path));
+    deleteOlympusData({ all: true, homeDir: home, env });
+    expect(existsSync(remoteConnectionsPreV2BackupPath(path))).toBe(false);
+    expect(existsSync(path)).toBe(false);
   });
 
   test('a bearer token naming an OAuth grant id is refused without error', async () => {

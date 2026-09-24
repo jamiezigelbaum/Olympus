@@ -161,7 +161,8 @@ and the relay client forwards to it.
 - **Routes:** `/.well-known/oauth-protected-resource[/mcp]`,
   `/.well-known/oauth-authorization-server`, and `/connect/authorize`,
   `/connect/token`, `/connect/register`, `/connect/revoke`. The relay's local
-  endpoint must forward `/connect/*` as well as `/mcp` and `/.well-known/*`.
+  endpoint forwards exactly these, plus `/mcp`, `/openapi.json` and
+  `/api/v1/tools/*`.
 - **Clients:** Claude (web, desktop, mobile) and ChatGPT identify themselves
   with Client ID Metadata Documents; Grok registers dynamically. Both paths are
   served. Every client is public (PKCE S256, `token_endpoint_auth_method`
@@ -169,12 +170,27 @@ and the relay client forwards to it.
 - **Grants are connections:** an approved grant is a `remote_connections` row
   of kind `oauth`, so `olympus connections list|revoke` and audit attribution
   are unchanged. Access tokens are opaque, live one hour and are bound to the
-  resource; refresh tokens rotate, and replaying a used one revokes the grant.
-  Only digests are stored.
-- **Pairing:** `olympus connections pair` prints a 10-character code
-  (about 49 bits, no ambiguous characters) that expires in 10 minutes and works
-  once. One approval page allows five wrong codes; ten wrong codes anywhere burn
-  every live code; twenty in 15 minutes pause all pairing.
+  resource, on `/mcp` and the OpenAPI tool paths alike. Refresh tokens rotate;
+  for 45 seconds a just-used one returns the same successor pair (concurrent
+  refreshes, a lost response), and after that, or once the successor has
+  rotated, replaying it revokes the grant. Only digests are stored.
+- **Pairing:** `olympus connections pair` prints `SSSS-XXXX-XXXX`: a public
+  selector naming the code plus a secret (about 39 bits), no ambiguous
+  characters, valid 10 minutes, single use. Five wrong secrets for one selector
+  kill that code only; unknown selectors and malformed input burn nothing.
+  Guessing is paced, never locked: each caller's wrong codes double its wait
+  (up to a minute), and past 20 wrong codes in 15 minutes every check waits
+  two seconds. A caller (the address the relay reports) holds at most eight
+  waiting approvals.
+- **Schema v2 and rollback:** opening the connection database with this build
+  first copies a v1 database to `remote-connections.sqlite.pre-v2.bak`, then
+  migrates. An older build refuses v2, so a downgrade restores that copy with
+  the worker stopped (`cp …pre-v2.bak remote-connections.sqlite`, remove the
+  `-wal`/`-shm` files); connections made since the upgrade are lost and
+  connections revoked since then return, so re-check `olympus connections list`.
+  This is manual rather than part of `olympus worker upgrade` rollback: that
+  rollback covers a failed upgrade, before the lazily opened database has
+  migrated.
 - **Host and Origin:** the unauthenticated OAuth routes answer only the public
   host or a loopback name, which defeats DNS rebinding. The approval form also
   needs a same-origin browser, a CSRF token and a matching SameSite=Strict

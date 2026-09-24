@@ -6,9 +6,15 @@ describe('local endpoint path allowlist', () => {
     expect(allowedForwardPath('/mcp', DEFAULT_ALLOWED_PATHS)).toBe('/mcp');
     expect(allowedForwardPath('/mcp/abc?x=1', DEFAULT_ALLOWED_PATHS)).toBe('/mcp/abc?x=1');
     expect(allowedForwardPath('/.well-known/oauth-protected-resource/mcp', DEFAULT_ALLOWED_PATHS)).toBe('/.well-known/oauth-protected-resource/mcp');
+    expect(allowedForwardPath('/.well-known/oauth-authorization-server', DEFAULT_ALLOWED_PATHS)).toBe('/.well-known/oauth-authorization-server');
+    for (const path of ['/connect/authorize?client_id=x', '/connect/token', '/connect/register', '/connect/revoke']) {
+      expect(allowedForwardPath(path, DEFAULT_ALLOWED_PATHS)).toBe(path);
+    }
+    expect(allowedForwardPath('/api/v1/tools/source_answer', DEFAULT_ALLOWED_PATHS)).toBe('/api/v1/tools/source_answer');
     for (const refused of [
       '/', '/dashboard', '/mcpx', '//mcp', 'mcp', 'http://evil/mcp', '/mcp/../dashboard', '/mcp/./x',
       '/mcp%2f..%2fdashboard', '/mcp/%2e%2e/dashboard', '/mcp\\..\\dashboard', '/MCP', undefined,
+      '/connect', '/connect/', '/connect/other', '/connect/authorizex', '/connect/../dashboard', '/api/v1', '/api/v1/other',
     ]) {
       expect(allowedForwardPath(refused, DEFAULT_ALLOWED_PATHS)).toBeUndefined();
     }

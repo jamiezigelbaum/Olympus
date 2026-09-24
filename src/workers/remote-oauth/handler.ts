@@ -34,6 +34,7 @@ import {
   isClientIdMetadataUrl,
   type ClientMetadata,
 } from './cimd.ts';
+import { readBoundedRequestText } from '../remote-request-body.ts';
 import { renderConsentErrorPage, renderConsentPage } from './consent-page.ts';
 import { isAcceptableRedirectUri, isLoopbackRedirectUri, redirectHost, redirectUriMatches } from './redirect-uris.ts';
 
@@ -51,10 +52,21 @@ const ROUTED_PATHS = new Set<string>(Object.values(REMOTE_OAUTH_PATHS));
 const AUTHORIZATION_CODE_TTL_MS = 60_000;
 const CONSENT_REQUEST_TTL_MS = 10 * 60_000;
 const CONSENT_MAX_ATTEMPTS = 5;
-const MAX_PENDING_CONSENTS = 64;
+const MAX_PENDING_CONSENTS = 256;
+/** Waiting approvals one caller (relay-reported address) may hold. */
+const MAX_PENDING_CONSENTS_PER_CALLER = 8;
+/** Pacing for pairing-code checks: see pairingPacer. */
+const PAIRING_FAILURE_WINDOW_MS = 15 * 60_000;
+const PAIRING_PER_CALLER_MAX_DELAY_MS = 60_000;
+const PAIRING_GLOBAL_FAILURES_BEFORE_DELAY = 20;
+const PAIRING_GLOBAL_DELAY_MS = 2_000;
+/** Longer than this and the page asks the person to come back instead of holding the request. */
+const PAIRING_MAX_HELD_MS = 10_000;
+const PAIRING_MAX_TRACKED_CALLERS = 1024;
 const MAX_LIVE_CODES = 256;
 const MAX_FORM_BYTES = 8 * 1024;
 const MAX_REGISTRATION_BYTES = 16 * 1024;
+export const CONNECT_BODY_DEADLINE_MS = 10_000;
 const PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/;
 const PKCE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
@@ -68,6 +80,8 @@ export interface RemoteOAuthHandlerOptions {
   now?: () => number;
   /** Registrations allowed in a burst, refilled over an hour. */
   registrationBurst?: number;
+  /** How the handler waits out a pairing delay; tests record instead of sleeping. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 interface ResolvedClient {
@@ -78,6 +92,7 @@ interface ResolvedClient {
 }
 
 interface PendingConsent {
+  caller: string;
   client: ResolvedClient;
   redirectUri: string;
   codeChallenge: string;
@@ -140,11 +155,14 @@ export function authorizationServerMetadata(urls: RemotePublicUrls): Record<stri
 export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (request: Request) => Promise<Response> {
   const urls = options.publicUrls;
   const now = options.now ?? Date.now;
-  const resolveClientMetadata = options.resolveClientMetadata ?? createClientMetadataResolver();
+  const registrations = tokenBucket(options.registrationBurst ?? 10, 3_600_000, now);
+  // Only a cache miss costs a fetch, so only a miss spends from this bucket.
+  const metadataFetches = tokenBucket(30, 60_000, now);
+  const resolveClientMetadata = options.resolveClientMetadata
+    ?? createClientMetadataResolver({ allowFetch: () => metadataFetches.take() });
   const pending = new Map<string, PendingConsent>();
   const codes = new Map<string, IssuedCode>();
-  const registrations = tokenBucket(options.registrationBurst ?? 10, 3_600_000, now);
-  const metadataFetches = tokenBucket(30, 60_000, now);
+  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))));
 
   const sweep = (): void => {
     const at = now();
@@ -154,7 +172,6 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
 
   const resolveClient = async (clientId: string): Promise<ResolvedClient | string> => {
     if (isClientIdMetadataUrl(clientId)) {
-      if (!metadataFetches.take()) return 'Too many new apps are connecting right now. Try again in a minute.';
       try {
         const metadata = await resolveClientMetadata(clientId);
         return {
@@ -210,12 +227,16 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       return fail('invalid_target', 'The requested resource is not this Olympus.');
     }
     sweep();
-    if (pending.size >= MAX_PENDING_CONSENTS) {
-      return errorPage(429, 'Too many approvals are waiting. Try again in a few minutes.');
+    const caller = callerKey(request);
+    let callerPending = 0;
+    for (const entry of pending.values()) if (entry.caller === caller) callerPending += 1;
+    if (callerPending >= MAX_PENDING_CONSENTS_PER_CALLER || pending.size >= MAX_PENDING_CONSENTS) {
+      return errorPage(429, 'Too many approvals are waiting. Finish or close one, or try again in a few minutes.');
     }
     const requestId = randomBytes(16).toString('hex');
     const csrf = randomBytes(32).toString('base64url');
     const entry: PendingConsent = {
+      caller,
       client,
       redirectUri,
       codeChallenge,
@@ -229,7 +250,13 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     return consentPage(requestId, entry, u);
   };
 
-  const consentPage = (requestId: string, entry: PendingConsent, u: RemotePublicUrls, error?: string): Response => {
+  const consentPage = (
+    requestId: string,
+    entry: PendingConsent,
+    u: RemotePublicUrls,
+    error?: string,
+    showAttempts = true,
+  ): Response => {
     const page = renderConsentPage({
       requestId,
       csrf: entry.csrf,
@@ -238,7 +265,8 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       redirectHost: redirectHost(entry.redirectUri),
       redirectOrigin: new URL(entry.redirectUri).origin,
       loopbackRedirect: isLoopbackRedirectUri(entry.redirectUri),
-      ...(error ? { error, attemptsLeft: CONSENT_MAX_ATTEMPTS - entry.attempts } : {}),
+      ...(error ? { error } : {}),
+      ...(error && showAttempts ? { attemptsLeft: CONSENT_MAX_ATTEMPTS - entry.attempts } : {}),
     });
     const headers = new Headers(page.headers);
     headers.append('Set-Cookie', consentCookie(requestId, entry.csrf, u.secure, CONSENT_REQUEST_TTL_MS / 1000));
@@ -267,11 +295,20 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     const action = form.get('action');
     if (action === 'deny') return finish({ error: 'access_denied', error_description: 'The owner denied the request.' });
     if (action !== 'approve') return errorPage(400, 'The approval form was malformed.');
+    const caller = callerKey(request);
+    const wait = pacer.delayFor(caller);
+    if (wait > PAIRING_MAX_HELD_MS) {
+      return consentPage(requestId, entry, u,
+        `Too many wrong codes were tried from here. Wait ${Math.ceil(wait / 1000)} seconds, then try again.`, false);
+    }
+    await pacer.hold(wait);
     const check = options.connections().oauth.checkPairingCode(form.get('pairing_code') ?? '');
     if (!check.ok) {
-      if (check.reason === 'locked') {
-        return consentPage(requestId, entry, u, 'Too many wrong codes were tried recently, so pairing is paused for a few minutes.');
+      if (check.reason === 'malformed') {
+        // A typo is not a guess: it names no code, burns nothing, and costs no delay.
+        return consentPage(requestId, entry, u, 'A pairing code looks like ABCD-EFGH-JKMN (12 letters and digits).', false);
       }
+      pacer.recordFailure(caller);
       entry.attempts += 1;
       if (entry.attempts >= CONSENT_MAX_ATTEMPTS) {
         return finish({ error: 'access_denied', error_description: 'Too many wrong pairing codes.' });
@@ -439,6 +476,72 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
   };
 }
 
+/**
+ * Who is asking, for pacing and slot limits: the agent address the relay
+ * reports, else one shared key for everything arriving directly (loopback, or
+ * a tunnel that does not set the relay's header). The relay's local endpoint
+ * drops any inbound copy of these headers before setting its own, so behind
+ * the relay they cannot be forged; direct callers share one bucket.
+ */
+function callerKey(request: Request): string {
+  if (request.headers.get('x-olympus-relay') !== '1') return 'direct';
+  const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
+  return forwarded ? `relay:${forwarded.slice(0, 64)}` : 'direct';
+}
+
+/**
+ * Slows pairing-code guessing without ever closing pairing. Each caller's
+ * wrong codes double its wait before the next check (1s, 2s, 4s… up to a
+ * minute); once more than a threshold of wrong codes have arrived from
+ * anywhere in the window, every check also waits a couple of seconds. The
+ * owner, arriving from their own address with no failures, only ever pays the
+ * small global delay.
+ */
+function pairingPacer(now: () => number, sleep: (ms: number) => Promise<void>): {
+  delayFor(caller: string): number;
+  hold(ms: number): Promise<void>;
+  recordFailure(caller: string): void;
+} {
+  const callers = new Map<string, { failures: number[]; nextAt: number }>();
+  let global: number[] = [];
+  const prune = (at: number): void => {
+    const cutoff = at - PAIRING_FAILURE_WINDOW_MS;
+    global = global.filter((t) => t > cutoff);
+    for (const [key, entry] of callers) {
+      entry.failures = entry.failures.filter((t) => t > cutoff);
+      if (entry.failures.length === 0 && entry.nextAt <= at) callers.delete(key);
+    }
+  };
+  return {
+    delayFor(caller) {
+      const at = now();
+      prune(at);
+      const own = Math.max(0, (callers.get(caller)?.nextAt ?? 0) - at);
+      return own + (global.length > PAIRING_GLOBAL_FAILURES_BEFORE_DELAY ? PAIRING_GLOBAL_DELAY_MS : 0);
+    },
+    async hold(ms) {
+      if (ms > 0) await sleep(ms);
+    },
+    recordFailure(caller) {
+      const at = now();
+      global.push(at);
+      if (global.length > 10_000) global = global.slice(-10_000);
+      let entry = callers.get(caller);
+      if (!entry) {
+        if (callers.size >= PAIRING_MAX_TRACKED_CALLERS) {
+          const oldest = callers.keys().next().value;
+          if (oldest !== undefined) callers.delete(oldest);
+        }
+        entry = { failures: [], nextAt: 0 };
+        callers.set(caller, entry);
+      }
+      entry.failures.push(at);
+      const delay = Math.min(PAIRING_PER_CALLER_MAX_DELAY_MS, 1000 * 2 ** (entry.failures.length - 1));
+      entry.nextAt = at + delay;
+    },
+  };
+}
+
 function hostAllowed(request: Request, urls: RemotePublicUrls): boolean {
   const host = (request.headers.get('host') ?? new URL(request.url).host).toLowerCase();
   if (host === urls.host) return true;
@@ -494,12 +597,10 @@ function singleParams(params: URLSearchParams): SingleParams | undefined {
   return { get: (key) => out.get(key) ?? null };
 }
 
+/** Unauthenticated callers get a small cap and a deadline, not an open socket. */
 async function readBounded(request: Request, maxBytes: number): Promise<string | undefined> {
-  const declared = Number(request.headers.get('content-length') ?? '0');
-  if (Number.isFinite(declared) && declared > maxBytes) return undefined;
-  const buffer = await request.arrayBuffer();
-  if (buffer.byteLength > maxBytes) return undefined;
-  return new TextDecoder().decode(buffer);
+  const body = await readBoundedRequestText(request, maxBytes, { deadlineMs: CONNECT_BODY_DEADLINE_MS });
+  return body.ok ? body.text : undefined;
 }
 
 async function readForm(request: Request): Promise<SingleParams | undefined> {

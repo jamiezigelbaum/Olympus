@@ -3919,7 +3919,10 @@ export async function main(): Promise<void> {
   // `/openapi.json` and `/api/v1/tools/<name>`: the same remote surface as
   // `/mcp`, as REST for agents that take an OpenAPI spec (Muse).
   const { createRemoteOpenApiHandler, withRemoteOpenApiRoutes } = await import('../remote-openapi.ts');
-  const remoteOpenApi = createRemoteOpenApiHandler(remoteAgentOptions);
+  const remoteOpenApi = createRemoteOpenApiHandler({
+    ...remoteAgentOptions,
+    ...(remotePublicUrls ? { publicBaseUrl: remotePublicUrls.origin } : {}),
+  });
 
   const server = Bun.serve({
     hostname,
