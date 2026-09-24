@@ -46,7 +46,8 @@ describe('CSR', () => {
     const path = join(ca.dir, 'unit.der');
     writeFileSync(path, der);
     const text = execFileSync('openssl', ['req', '-inform', 'DER', '-in', path, '-noout', '-verify', '-text'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    expect(text).toContain(`CN=${HOST}`);
+    // OpenSSL 3.0 prints `CN = host`; 3.2+ prints `CN=host`.
+    expect(text).toMatch(new RegExp(`CN ?= ?${HOST.replaceAll('.', '\\.')}`));
     expect(text).toContain(`DNS:${HOST}`);
     expect(text).toContain('ecdsa-with-SHA256');
   });
