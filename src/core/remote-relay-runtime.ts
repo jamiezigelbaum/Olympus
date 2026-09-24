@@ -69,10 +69,12 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
     certificate: { state: 'none', not_after: null, reason: null, retry_in_ms: null },
   };
   let stopped = false;
+  // Set once a certificate is served. A renewal that fails or waits for the
+  // agreement keeps the current certificate serving, so the address stays.
+  let servedHostname: string | undefined;
   const write = () => {
     status.updated_at = new Date().toISOString();
-    const serving = status.certificate?.state === 'serving' && status.hostname;
-    status.public_base_url = !stopped && serving ? `https://${status.hostname}` : null;
+    status.public_base_url = !stopped && servedHostname ? `https://${servedHostname}` : null;
     writeRemoteAccessStatus(dir, status);
   };
   write();
@@ -89,13 +91,17 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
   };
   const onCertificate = (next: CertificateStatus) => {
     if (stopped) return;
+    const serving = next.state === 'serving' ? next : next.state === 'awaiting_terms' ? next.serving : undefined;
+    if (serving) {
+      servedHostname = serving.hostname;
+      status.hostname = serving.hostname;
+    }
     status.certificate = {
       state: next.state,
-      not_after: next.state === 'serving' ? next.notAfter : status.certificate?.not_after ?? null,
+      not_after: serving?.notAfter ?? status.certificate?.not_after ?? null,
       reason: next.state === 'failed' ? next.reason : null,
       retry_in_ms: next.state === 'failed' ? next.retryInMs : null,
     };
-    if (next.state === 'serving') status.hostname = next.hostname;
     if (next.state === 'awaiting_terms') status.terms_url = next.termsUrl ?? null;
     write();
   };

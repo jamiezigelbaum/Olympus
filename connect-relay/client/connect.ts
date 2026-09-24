@@ -27,7 +27,12 @@ export const LETS_ENCRYPT_DIRECTORY = 'https://acme-v02.api.letsencrypt.org/dire
  */
 export type CertificateStatus =
   | { state: 'none' }
-  | { state: 'awaiting_terms'; termsUrl: string | undefined }
+  | {
+      state: 'awaiting_terms';
+      termsUrl: string | undefined;
+      /** A still-valid certificate kept serving while the renewal waits. */
+      serving?: { hostname: string; notAfter: string };
+    }
   | { state: 'issuing' }
   | { state: 'serving'; hostname: string; notAfter: string }
   | { state: 'failed'; reason: string; retryInMs: number };
@@ -126,12 +131,12 @@ export async function startConnect(options: ConnectOptions): Promise<ConnectHand
     options.onCertificate?.(next);
   };
 
-  const serve = async (pem: string, hostname: string) => {
+  const serve = async (pem: string, hostname: string): Promise<{ hostname: string; notAfter: string }> => {
     if (pem !== served) {
       await client.setCertificate({ key: tlsKeyPem, cert: pem });
       served = pem;
     }
-    report({ state: 'serving', hostname, notAfter: certificateNotAfter(pem) });
+    return { hostname, notAfter: certificateNotAfter(pem) };
   };
 
   const agreed = async (): Promise<{ ok: boolean; termsUrl: string | undefined }> => {
@@ -149,8 +154,8 @@ export async function startConnect(options: ConnectOptions): Promise<ConnectHand
       if (!terms.ok) {
         // Never order without consent. A still-valid certificate keeps serving
         // while the renewal waits for the user.
-        if (pem && certificateIsValid(pem, hostname)) await serve(pem, hostname);
-        report({ state: 'awaiting_terms', termsUrl: terms.termsUrl });
+        const serving = pem && certificateIsValid(pem, hostname) ? await serve(pem, hostname) : undefined;
+        report({ state: 'awaiting_terms', termsUrl: terms.termsUrl, ...(serving ? { serving } : {}) });
         return;
       }
       report({ state: 'issuing' });
@@ -168,7 +173,7 @@ export async function startConnect(options: ConnectOptions): Promise<ConnectHand
       writePrivateFile(certPath, pem);
     }
     failures = 0;
-    await serve(pem!, hostname);
+    report({ state: 'serving', ...(await serve(pem!, hostname)) });
   };
 
   const check = (): Promise<void> => {
