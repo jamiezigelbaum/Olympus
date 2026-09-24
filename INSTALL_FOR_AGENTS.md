@@ -1551,15 +1551,21 @@ ready, direct the operator to finish that section before connecting sources.
 posture, model prerequisites, worker health, and successful plugin/tool and
 selected-dashboard activation from Steps 1–5. No connected source is required.
 Resolve and verify the selected dashboard as described below. The final reply
-must contain the actual clickable link, even if the dashboard is already open.
-Replace `<verified-dashboard-url>` with the real operator-facing address; never
-send the placeholder, a host-only loopback URL, or only a terminal command.
+must tell the operator exactly where to open it: the **Olympus** sidebar entry
+when they are chatting in the Control UI that shows it, otherwise the actual
+clickable link. Never send the placeholder, a host-only loopback URL, or only a
+terminal command.
 
-**Which link.** When the operator reaches OpenClaw through its Control UI and
-the native Olympus page is available (the default for this artifact), the link
-is the native page `/plugin?plugin=olympus&id=dashboard` on the Gateway origin
-the operator's browser is already using. It needs no ticket and does not
-expire. Use the standalone `olympus dashboard` opening link only when native
+**Where to open it.** When the operator is chatting with you in the OpenClaw
+Control UI and the native Olympus page is available (the default for this
+artifact, once the Step 5 Custom plugin UI opt-in is on), the dashboard is the
+**Olympus** entry already in the sidebar of the page they are looking at. Point
+them there and send no link: do not ask for the address in their browser's
+address bar just to build one. Confirm the page is registered with
+`plugins.controlUi.list` (olympus listed, no diagnostics). When they chat from
+another channel (Telegram, a terminal, a remote agent), the link is the native
+page `/plugin?plugin=olympus&id=dashboard` on the Gateway origin they use; it needs no
+ticket and does not expire. Use the standalone `olympus dashboard` opening link only when native
 UI is unavailable, the operator declined the Step 5 Custom plugin UI opt-in,
 or the operator explicitly chose direct access. Concretely,
 a "host-only loopback URL" is any `127.0.0.1`, `localhost` or `[::1]` address
@@ -1571,7 +1577,10 @@ Gateway origin, read `gateway.publicOrigin` or ask them for the address in
 their browser's address bar; do not guess one.
 
 Deliver this required user-facing handoff **verbatim**. Change nothing but
-the `<verified-dashboard-url>` placeholder: no reworded sentences, no
+the first line's `[Open your Olympus dashboard](<verified-dashboard-url>).`,
+which becomes `Open **Olympus** in the sidebar on the left.` when you pointed
+the operator at the sidebar entry above, and otherwise keeps the link with
+the placeholder replaced: no reworded sentences, no
 "optional" or "you pick which ones, if any" framing, no Labs or settings
 caveats. If a caveat seems necessary, the dashboard is not verified yet;
 resolve it first, as described below. Only for the standalone fallback, one
@@ -1634,9 +1643,10 @@ a tier or add a standing rule only on the operator's instruction, with
 rules stay in its **Choose mail** picker.
 
 This candidate artifact includes native Control UI support. On OpenClaw
-**2026.9.2**, use **Olympus** in the Control UI sidebar. For the final reply,
-resolve that page against the same Gateway origin the operator is actually
-using: `/plugin?plugin=olympus&id=dashboard`. Copy the working page's URL; do
+**2026.9.2** and later, use **Olympus** in the Control UI sidebar. When the
+operator chats from the Control UI, the sidebar entry is the handoff. Only when
+a link is needed, resolve that page against the same Gateway origin the
+operator is actually using: `/plugin?plugin=olympus&id=dashboard`. Copy the working page's URL; do
 not assume port 18789, reuse the agent host's localhost origin for a remote
 operator, or link only to the OpenClaw chat homepage. Verify that the page loads
 and exposes Setup, Home, and Background before handing it over. Native plugin pages need

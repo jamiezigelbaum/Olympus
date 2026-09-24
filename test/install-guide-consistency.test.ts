@@ -68,6 +68,17 @@ describe('pilot installation entry points', () => {
     expect(resolution).toBeLessThan(document.indexOf('\nolympus sensitivity validate'));
   });
 
+  test('a Control UI operator is pointed at the Olympus sidebar entry, not asked for an address', () => {
+    // 2026-09-24 beta.5 fresh install: the agent asked the operator for the
+    // address in their browser's address bar while Olympus was already in
+    // the sidebar of the page they were chatting in.
+    const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const where = document.slice(document.indexOf('**Where to open it.**'), document.indexOf('Deliver this required user-facing handoff'));
+    expect(where).toContain('**Olympus** entry already in the sidebar');
+    expect(where).toContain('do not ask for the address');
+    expect(document).toContain('which becomes `Open **Olympus** in the sidebar on the left.`');
+  });
+
   test('the agent guide requires provider readiness before source Connect', () => {
     const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const receipt = document.indexOf('**Pre-source completion receipt — mandatory before inviting Connect.**');
@@ -98,7 +109,7 @@ describe('pilot installation entry points', () => {
     const handoffRules = document.slice(handoff - 3000, handoff).replace(/\s+/g, ' ');
     expect(handoffRules).toContain('Deliver this required user-facing handoff **verbatim**');
     expect(handoffRules).toContain('`/plugin?plugin=olympus&id=dashboard` on the Gateway origin');
-    expect(handoffRules).toContain('It needs no ticket and does not expire.');
+    expect(handoffRules).toContain('it needs no ticket and does not expire.');
     expect(handoffRules).toContain('`http://127.0.0.1:8010/…`');
     expect(document).toContain('Sources are the point of');
     expect(document).toContain('dashboard\nhandoff that lets them choose is required');
