@@ -23,19 +23,20 @@ hosted-agent connection slices.
 - **Settings page (#89).** The plugin's Settings page no longer shows
   "Unsupported schema node": the config schema is written out without `$ref`,
   and accepts exactly the same configs.
-- **Answers during provider blips (#89).** Question embeddings retry HTTP 429,
-  5xx and network errors twice within the existing time limit, honouring
-  `Retry-After` when it fits. If the provider is still unavailable, the answer
+- **Answers during provider blips (#89).** Embedding requests retry HTTP 429,
+  500, 502, 503, 504 and network errors twice within the existing time limit.
+  A `Retry-After` that fits the limit replaces the normal wait; one that does
+  not ends the retries at once. If the provider is still unavailable, the answer
   continues on keyword search and reports the skipped semantic lane with its
   cause (`embedding_query_unavailable:<status|network|timeout>`). Key and
   permission errors still fail with their own message.
 - **Hosted agents, preview (#84, #85, #86).** Every source answer records which
-  surface asked (OpenClaw, MCP client, CLI or a remote connection) in its
-  content-free ledger. `olympus connections add|list|revoke` issues revocable
+  surface asked (OpenClaw, MCP client, CLI or a remote connection), when the
+  caller identifies itself, in its content-free ledger. `olympus connections add|list|revoke` issues revocable
   tokens for a remote MCP endpoint at the worker's `/mcp`, offering
-  `source_answer` and `source_index_status` only. The worker still listens on
-  loopback only, so nothing is reachable from outside the host unless the
-  owner exposes it.
+  `source_answer` and `source_index_status` only; `data delete --all` removes
+  them too. The worker still listens on loopback by default, so nothing is
+  reachable from outside the host unless the owner exposes it.
 
 ## 0.4.0-beta.4 - 2026-09-23
 
