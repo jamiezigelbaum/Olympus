@@ -98,16 +98,21 @@ outbound link. The user never configures it.
     challenge but never holds its private key.
   - The relay routes by SNI and forwards encrypted bytes, so it cannot read
     questions or answers.
-- **Built on an existing tunnel, not a new protocol:** frp, rathole, zrok or
-  sish, chosen during the relay slice.
+- **A small purpose-built relay:** the relay slice evaluated frp, rathole,
+  zrok and sish. None met pass-through TLS, install-key registration and
+  npm-shippable client together, so the relay is a small TypeScript service
+  with no new dependencies. See [relay.md](relay.md).
 - **Identity:** a key pair created at install time. The relay accepts only
   installs that have registered, and there are no user accounts.
 - **Availability:** answers work only while the user's machine and Olympus are
   running. Otherwise the relay returns a clear "Olympus is offline" error. Local
   surfaces never depend on the relay.
-- **Certificates at scale:** put `connect.olympusplugin.ai` on the Public
-  Suffix List, so per-install certificates don't hit Let's Encrypt's
-  per-domain weekly limit. Request this early, because approval takes weeks.
+- **Certificates at scale:** Let's Encrypt allows about 50 new certificates
+  per registered domain per week (renewals are exempt). File Let's Encrypt's
+  rate-limit override request early, because it takes weeks. Separately, list
+  `connect.olympusplugin.ai` on the Public Suffix List for tenant isolation
+  (cookies), not for rate limits, because the PSL rejects rate-limit
+  motivated entries.
 - **Operating cost:**
   - One or two small servers, about €20–40/month total.
   - A wildcard DNS record.
@@ -173,7 +178,7 @@ critical-class and need an independent review receipt.
 6. **Onboarding:**
    - A dashboard "Connect an agent" panel and install-guide steps.
    - Per-vendor instruction skills.
-   - Public Suffix List request.
+   - Let's Encrypt rate-limit override and Public Suffix List requests.
 7. **End-to-end proof** with no paid plans:
    - Claude Free on the web and phone.
    - Muse on its free tier, if it allows custom connectors.
