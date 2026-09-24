@@ -24,13 +24,15 @@ import { readWorkerSetupEnv } from './worker-auth.ts';
 import { sanitizeCallerDisplayName } from './operation-caller.ts';
 import {
   assertSqliteSchemaCanOpen,
+  readSqliteSchemaVersion,
   runSqliteMigrations,
   type SqliteMigration,
 } from './sqlite-migrations.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
+import { createRemoteOAuthStore, remoteOAuthSchemaMigration, type RemoteOAuthStore } from './remote-oauth-store.ts';
 
 export const REMOTE_CONNECTIONS_STORE_ID = 'remote-connections';
-export const REMOTE_CONNECTIONS_SCHEMA_VERSION = 1;
+export const REMOTE_CONNECTIONS_SCHEMA_VERSION = 2;
 export const REMOTE_CONNECTION_TOKEN_PREFIX = 'olympus_conn_';
 /** How stale `last_used_at` may get before a successful call rewrites it. */
 export const REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60_000;
@@ -42,12 +44,15 @@ const CONNECTION_SECRET_BYTES = 32;
 const CONNECTION_ID_PATTERN = /^[a-f0-9]{18}$/;
 const TOKEN_PATTERN = /^olympus_conn_([a-f0-9]{18})_([A-Za-z0-9_-]{43})$/;
 
-export type RemoteConnectionKind = 'bearer';
+/** `bearer`: a token from `olympus connections add`. `oauth`: an OAuth grant. */
+export type RemoteConnectionKind = 'bearer' | 'oauth';
 
 export interface RemoteConnectionRecord {
   id: string;
   displayName: string;
   kind: RemoteConnectionKind;
+  /** The OAuth client the grant was issued to (oauth connections only). */
+  clientId: string | null;
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
@@ -69,6 +74,8 @@ export interface RemoteConnectionStore {
   list(): RemoteConnectionRecord[];
   revoke(id: string): RemoteConnectionRecord;
   verifyToken(token: string): RemoteConnectionVerification;
+  /** OAuth grants, tokens, registered clients and pairing codes (same database). */
+  readonly oauth: RemoteOAuthStore;
   close(): void;
 }
 
@@ -76,13 +83,29 @@ interface ConnectionRow {
   id: string;
   display_name: string;
   kind: string;
-  token_hash: Uint8Array;
+  token_hash: Uint8Array | null;
+  client_id: string | null;
   created_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
 }
 
 export const REMOTE_CONNECTIONS_DB_PATH_ENV = 'OLYMPUS_REMOTE_CONNECTIONS_DB_PATH';
+
+/**
+ * Where the schema v1 database is copied before migration 2 (OAuth grants)
+ * rewrites it. An older Olympus refuses a v2 database by design, so rolling
+ * back to one means restoring this copy while the worker is stopped:
+ *
+ *   cp remote-connections.sqlite.pre-v2.bak remote-connections.sqlite
+ *   rm -f remote-connections.sqlite-wal remote-connections.sqlite-shm
+ *
+ * Connections approved after the upgrade (OAuth grants, new bearer tokens)
+ * are not in the copy; revoked ones are active again, so revoke them anew.
+ */
+export function remoteConnectionsPreV2BackupPath(dbPath: string): string {
+  return `${dbPath}.pre-v2.bak`;
+}
 
 /**
  * Where the connection database lives for a process with this environment:
@@ -161,6 +184,7 @@ export function openRemoteConnectionStore(
     chmodSync(dbPath, 0o600);
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
     assertSqliteSchemaCanOpen(db, REMOTE_CONNECTIONS_STORE_ID, REMOTE_CONNECTIONS_SCHEMA_VERSION);
+    backupBeforeOAuthMigration(db, dbPath);
     runSqliteMigrations(db, REMOTE_CONNECTIONS_STORE_ID, remoteConnectionMigrations());
   } catch (error) {
     closeSqliteStore(db);
@@ -191,6 +215,14 @@ export function openRemoteConnectionStore(
   return {
     dbPath,
 
+    oauth: createRemoteOAuthStore(db, now, (id, at) => {
+      const row = readRow(id);
+      const lastUsedMs = row?.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
+      if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
+        recordLastUse(id, at.toISOString());
+      }
+    }),
+
     create(displayName: string): CreatedRemoteConnection {
       const name = requireDisplayName(displayName);
       const id = randomBytes(CONNECTION_ID_BYTES).toString('hex');
@@ -215,8 +247,12 @@ export function openRemoteConnectionStore(
       if (typeof id !== 'string' || !CONNECTION_ID_PATTERN.test(id)) {
         throw new OperationError('invalid_params', 'Connection id must be the id shown by olympus connections list.');
       }
-      db.query('UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
-        .run(now().toISOString(), id);
+      db.transaction(() => {
+        db.query('UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+          .run(now().toISOString(), id);
+        // An OAuth grant's access and refresh tokens die with it.
+        db.query('DELETE FROM remote_oauth_tokens WHERE connection_id = ?').run(id);
+      })();
       const row = readRow(id);
       if (!row) {
         throw new OperationError('invalid_params', `No remote connection has id ${id}.`, 'Run olympus connections list.');
@@ -229,18 +265,19 @@ export function openRemoteConnectionStore(
       if (!match) return { ok: false, reason: 'malformed' };
       const row = readRow(match[1]!);
       const presented = hashRemoteConnectionToken(token);
-      // Compare against a fixed dummy when the id is unknown so both paths do
-      // the same digest work.
-      const stored = row ? Buffer.from(row.token_hash) : Buffer.alloc(presented.length);
+      // Compare against a fixed dummy when the id is unknown (or names an OAuth
+      // grant, which has no bearer secret) so every path does the same work.
+      const bearer = row && row.kind === 'bearer' && row.token_hash ? row : null;
+      const stored = bearer ? Buffer.from(bearer.token_hash!) : Buffer.alloc(presented.length);
       const equal = stored.length === presented.length && timingSafeEqual(stored, presented);
-      if (!row || !equal) return { ok: false, reason: 'unknown' };
-      if (row.revoked_at !== null) return { ok: false, reason: 'revoked' };
+      if (!bearer || !equal) return { ok: false, reason: 'unknown' };
+      if (bearer.revoked_at !== null) return { ok: false, reason: 'revoked' };
       const at = now();
-      const lastUsedMs = row.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
+      const lastUsedMs = bearer.last_used_at ? Date.parse(bearer.last_used_at) : Number.NaN;
       if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
-        recordLastUse(row.id, at.toISOString());
+        recordLastUse(bearer.id, at.toISOString());
       }
-      return { ok: true, connection: toRecord(row) };
+      return { ok: true, connection: toRecord(bearer) };
     },
 
     close(): void {
@@ -254,7 +291,8 @@ function toRecord(row: ConnectionRow): RemoteConnectionRecord {
   return {
     id: row.id,
     displayName: row.display_name,
-    kind: 'bearer',
+    kind: row.kind === 'oauth' ? 'oauth' : 'bearer',
+    clientId: row.client_id ?? null,
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at,
     revokedAt: row.revoked_at,
@@ -271,7 +309,7 @@ function requireDisplayName(value: unknown): string {
 
 function remoteConnectionMigrations(): SqliteMigration[] {
   return [{
-    version: REMOTE_CONNECTIONS_SCHEMA_VERSION,
+    version: 1,
     name: 'create_remote_connections',
     up(db) {
       db.exec(`
@@ -286,7 +324,20 @@ function remoteConnectionMigrations(): SqliteMigration[] {
         );
       `);
     },
-  }];
+  }, remoteOAuthSchemaMigration(2)];
+}
+
+/**
+ * A consistent copy (VACUUM INTO reads through the WAL) of a v1 database,
+ * taken once, before migration 2 runs. An existing copy is never overwritten:
+ * the first one is the pre-upgrade state.
+ */
+function backupBeforeOAuthMigration(db: Database, dbPath: string): void {
+  if (readSqliteSchemaVersion(db, REMOTE_CONNECTIONS_STORE_ID) !== 1) return;
+  const backupPath = remoteConnectionsPreV2BackupPath(dbPath);
+  if (existsSync(backupPath)) return;
+  db.query('VACUUM INTO ?').run(backupPath);
+  chmodSync(backupPath, 0o600);
 }
 
 function hardenPrivateDatabasePath(dbPath: string): void {

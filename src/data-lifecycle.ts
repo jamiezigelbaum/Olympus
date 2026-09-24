@@ -32,7 +32,11 @@ import {
   type SqliteMigration,
   type SqliteMigrationResult,
 } from './core/sqlite-migrations.ts';
-import { REMOTE_CONNECTIONS_STORE_ID, resolveRemoteConnectionsDbPath } from './core/remote-connections.ts';
+import {
+  REMOTE_CONNECTIONS_STORE_ID,
+  remoteConnectionsPreV2BackupPath,
+  resolveRemoteConnectionsDbPath,
+} from './core/remote-connections.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import {
@@ -517,7 +521,9 @@ export function exportOlympusData(options: {
   // leaves behind like every other secret. Named, so the manifest says so.
   if (options.sourceId === undefined) {
     const connectionsPath = resolveRemoteConnectionsDbPath(envForContext(options));
-    if (existsSync(connectionsPath)) skipped.push(connectionsPath);
+    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath)]) {
+      if (existsSync(path)) skipped.push(path);
+    }
   }
 
   const configRoot = join(destination, 'config');
@@ -781,11 +787,7 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     // connection token at once. Named on its own because an explicit
     // OLYMPUS_REMOTE_CONNECTIONS_DB_PATH or XDG_DATA_HOME can put it outside
     // the known roots below.
-    ...sqliteDeleteTargets(
-      resolveRemoteConnectionsDbPath(envForContext(context)),
-      REMOTE_CONNECTIONS_STORE_ID,
-      context,
-    ),
+    ...remoteConnectionsDeleteTargets(context),
     ...knownOlympusDataRoots(context).map((path): DeleteTarget => ({
       path,
       kind: 'known_root',
@@ -838,6 +840,13 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
       allowRecursive: false,
     })),
   ];
+}
+
+/** The connection database, its sidecars, and its pre-migration backup. */
+function remoteConnectionsDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
+  const dbPath = resolveRemoteConnectionsDbPath(envForContext(context));
+  const targets = sqliteDeleteTargets(dbPath, REMOTE_CONNECTIONS_STORE_ID, context);
+  return [...targets, { ...targets[1]!, path: remoteConnectionsPreV2BackupPath(dbPath) }];
 }
 
 function sqliteDeleteTargets(

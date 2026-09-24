@@ -3,9 +3,14 @@
  * outside this machine that hold an owner-approved connection.
  *
  * Auth boundary, both directions:
- * - `/mcp` accepts ONLY a connection token (`Authorization: Bearer
- *   olympus_conn_…`) that the connection store verifies. The worker's own
- *   shared bearer is not a connection token, so it cannot reach `/mcp`.
+ * - `/mcp` (and the OpenAPI tool paths, through the same check) accept ONLY a
+ *   connection credential the connection store verifies: a bearer connection
+ *   token (`olympus_conn_…`), or, when a public base URL is configured, an
+ *   OAuth access token (`olympus_at_…`) issued for exactly this resource (see
+ *   workers/remote-oauth). The worker's own shared bearer is neither, so it
+ *   cannot reach them. A 401 names the protected-resource metadata (RFC 9728)
+ *   whenever OAuth is on, which is how Claude, ChatGPT and Grok discover where
+ *   to ask the owner for approval.
  * - Every other worker route stays behind `withWorkerBearerAuth`, which
  *   accepts only the worker bearer, so a connection token reaches nothing else.
  *
@@ -27,6 +32,8 @@ import {
   type RemoteConnectionRecord,
   type RemoteConnectionStore,
 } from '../core/remote-connections.ts';
+import { isWellFormedOAuthAccessToken } from '../core/remote-oauth-store.ts';
+import type { RemotePublicUrls } from '../core/remote-public-url.ts';
 import { createOlympusMcpServer } from '../mcp/server.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
 
@@ -41,6 +48,8 @@ export interface RemoteMcpHandlerOptions {
    * must not create one.
    */
   connections: () => RemoteConnectionStore | undefined;
+  /** The configured public URLs; undefined when OAuth is off (bearer connections only). */
+  publicUrls?: RemotePublicUrls | undefined;
   /** `signal` is the remote client's request signal; see createInProcessOperationContext. */
   makeOperationContext: (caller: OperationCaller, signal: AbortSignal) => OperationContext;
 }
@@ -63,18 +72,8 @@ export function withRemoteMcpRoute(
 
 export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (request: Request) => Promise<Response> {
   return async (request: Request): Promise<Response> => {
-    const token = bearerToken(request.headers.get('Authorization'));
-    if (token === undefined) return unauthorized();
-    if (!isWellFormedRemoteConnectionToken(token)) return unauthorized('invalid_token');
-    let store: RemoteConnectionStore | undefined;
-    try {
-      store = options.connections();
-    } catch {
-      return jsonResponse(503, { error: 'remote_connections_unavailable' });
-    }
-    if (!store) return unauthorized('invalid_token');
-    const verification = store.verifyToken(token);
-    if (!verification.ok) return unauthorized('invalid_token');
+    const verification = authenticateRemoteRequest(request, options);
+    if (!verification.ok) return verification.response;
     if (request.method !== 'POST') {
       // Stateless server: no standalone SSE stream (GET) and no session to end
       // (DELETE). A 405 is how Streamable HTTP says so.
@@ -115,21 +114,56 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
  * created by a request. `olympus connections add` creates the database; until
  * then every token is refused without touching the disk.
  */
+/**
+ * The one credential check every remote agent route uses (`/mcp` and the
+ * OpenAPI tool paths): a bearer connection token, or an OAuth access token
+ * bound to this install's configured resource. Refusals are 401s carrying the
+ * RFC 9728 pointer when OAuth is on.
+ */
+export function authenticateRemoteRequest(
+  request: Request,
+  options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls'>,
+): { ok: true; connection: Pick<RemoteConnectionRecord, 'id' | 'displayName'> } | { ok: false; response: Response } {
+  const urls = options.publicUrls;
+  const refuse = (error?: 'invalid_token') => ({ ok: false as const, response: unauthorized(error, urls) });
+  const token = bearerToken(request.headers.get('Authorization'));
+  if (token === undefined) return refuse();
+  const oauthToken = urls !== undefined && isWellFormedOAuthAccessToken(token);
+  if (!oauthToken && !isWellFormedRemoteConnectionToken(token)) return refuse('invalid_token');
+  let store: RemoteConnectionStore | undefined;
+  try {
+    store = options.connections();
+  } catch {
+    return { ok: false, response: jsonResponse(503, { error: 'remote_connections_unavailable' }) };
+  }
+  if (!store) return refuse('invalid_token');
+  if (oauthToken) {
+    // Audience binding: only a token issued for this resource opens it.
+    const verification = store.oauth.verifyAccessToken(token, urls!.resource);
+    return verification.ok ? { ok: true, connection: verification.connection } : refuse('invalid_token');
+  }
+  const verification = store.verifyToken(token);
+  return verification.ok ? { ok: true, connection: verification.connection } : refuse('invalid_token');
+}
+
 export function lazyRemoteConnectionStore(
   resolvePath: () => string,
   open: (dbPath: string) => RemoteConnectionStore,
-): () => RemoteConnectionStore | undefined {
+): (options?: { create?: boolean }) => RemoteConnectionStore | undefined {
   let store: RemoteConnectionStore | undefined;
-  return () => {
+  // `create` is for the OAuth endpoints only, which run only when the owner
+  // configured a public base URL: a hosted agent registers before the owner
+  // pairs it, so the database must exist by then. `/mcp` never creates it.
+  return (options = {}) => {
     if (store) return store;
     const dbPath = resolvePath();
-    if (!existsSync(dbPath)) return undefined;
+    if (!options.create && !existsSync(dbPath)) return undefined;
     store = open(dbPath);
     return store;
   };
 }
 
-export function remoteOperationCaller(connection: RemoteConnectionRecord): OperationCaller {
+export function remoteOperationCaller(connection: Pick<RemoteConnectionRecord, 'id' | 'displayName'>): OperationCaller {
   return { surface: 'remote', connectionId: connection.id, displayName: connection.displayName };
 }
 
@@ -185,12 +219,15 @@ export function bearerToken(header: string | null): string | undefined {
   return match?.[1];
 }
 
-export function unauthorized(error?: 'invalid_token'): Response {
-  // Shaped for the OAuth slice: RFC 6750 challenge now, a resource_metadata
-  // parameter (RFC 9728) once protected-resource metadata is served.
-  const challenge = error
-    ? `Bearer realm="olympus", error="${error}", error_description="The connection token is not valid or has been revoked."`
-    : 'Bearer realm="olympus"';
+export function unauthorized(error?: 'invalid_token', urls?: RemotePublicUrls): Response {
+  // RFC 6750 challenge; with OAuth on, the RFC 9728 resource_metadata pointer
+  // is what starts a hosted agent's authorization flow.
+  const parts = ['realm="olympus"'];
+  if (urls) parts.push(`resource_metadata="${urls.protectedResourceMetadataUrl}"`);
+  if (error) {
+    parts.push(`error="${error}"`, 'error_description="The connection token is not valid or has been revoked."');
+  }
+  const challenge = `Bearer ${parts.join(', ')}`;
   return jsonResponse(401, { error: error ?? 'unauthorized' }, { 'WWW-Authenticate': challenge });
 }
 

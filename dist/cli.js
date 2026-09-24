@@ -7361,6 +7361,7 @@ var init_public_surface = __esm(() => {
     "connect gemini",
     "connect status",
     "connections add",
+    "connections pair",
     "connections list",
     "connections revoke",
     "dashboard",
@@ -9745,11 +9746,316 @@ function closeSqliteStore(db, options = {}) {
   db.close();
 }
 
+// src/core/remote-oauth-store.ts
+import { createHash as createHash5, randomBytes as randomBytes5, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+function isWellFormedOAuthAccessToken(token) {
+  return ACCESS_TOKEN_PATTERN.test(token);
+}
+function isWellFormedOAuthRefreshToken(token) {
+  return REFRESH_TOKEN_PATTERN.test(token);
+}
+function isRegisteredOAuthClientId(value) {
+  return REGISTERED_CLIENT_ID_PATTERN.test(value);
+}
+function normalizePairingCode(input) {
+  if (typeof input !== "string" || input.length > 64)
+    return;
+  const compact = input.toUpperCase().replace(/[\s-]/g, "");
+  if (compact.length !== PAIRING_CODE_LENGTH)
+    return;
+  for (const char of compact)
+    if (!PAIRING_ALPHABET.includes(char))
+      return;
+  return compact;
+}
+function digest(value) {
+  return createHash5("sha256").update(value, "utf8").digest();
+}
+function randomPairingSymbols(length) {
+  const limit = 256 - 256 % PAIRING_ALPHABET.length;
+  let out = "";
+  while (out.length < length) {
+    for (const byte of randomBytes5(length * 2)) {
+      if (byte >= limit)
+        continue;
+      out += PAIRING_ALPHABET[byte % PAIRING_ALPHABET.length];
+      if (out.length === length)
+        break;
+    }
+  }
+  return out;
+}
+function createRemoteOAuthStore(db, now, recordLastUse) {
+  const refreshGrace = new Map;
+  const readToken = (token, kind) => db.query(`
+      SELECT t.token_hash, t.connection_id, t.kind, t.resource, t.client_id, t.expires_at, t.used_at,
+             c.display_name, c.revoked_at
+      FROM remote_oauth_tokens t JOIN remote_connections c ON c.id = t.connection_id
+      WHERE t.token_hash = ? AND t.kind = ?
+    `).get(digest(token), kind);
+  const issueTokens = (connectionId, clientId, resource, at) => {
+    const accessToken = `${REMOTE_OAUTH_ACCESS_TOKEN_PREFIX}${randomBytes5(32).toString("base64url")}`;
+    const refreshToken = `${REMOTE_OAUTH_REFRESH_TOKEN_PREFIX}${randomBytes5(32).toString("base64url")}`;
+    const insert = db.query(`
+      INSERT INTO remote_oauth_tokens (token_hash, connection_id, kind, resource, client_id, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const createdAt = at.toISOString();
+    insert.run(digest(accessToken), connectionId, "access", resource, clientId, createdAt, new Date(at.getTime() + REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString());
+    insert.run(digest(refreshToken), connectionId, "refresh", resource, clientId, createdAt, new Date(at.getTime() + REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString());
+    db.query("DELETE FROM remote_oauth_tokens WHERE expires_at <= ?").run(createdAt);
+    return { accessToken, refreshToken, expiresIn: REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS };
+  };
+  const revokeGrant = (connectionId) => {
+    for (const [key, entry] of refreshGrace)
+      if (entry.connectionId === connectionId)
+        refreshGrace.delete(key);
+    db.transaction(() => {
+      db.query("UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND kind = 'oauth' AND revoked_at IS NULL").run(now().toISOString(), connectionId);
+      db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ?").run(connectionId);
+    })();
+  };
+  const toClient = (row) => ({
+    clientId: row.client_id,
+    clientName: row.client_name,
+    redirectUris: JSON.parse(row.redirect_uris),
+    createdAt: row.created_at
+  });
+  return {
+    mintPairingCode() {
+      const at = now();
+      const expiresAt = new Date(at.getTime() + REMOTE_PAIRING_CODE_TTL_MS).toISOString();
+      return db.transaction(() => {
+        db.query("DELETE FROM remote_pairing_codes WHERE expires_at <= ? OR used_at IS NOT NULL").run(at.toISOString());
+        for (let attempt = 0;attempt < 16; attempt += 1) {
+          const selector = randomPairingSymbols(PAIRING_SELECTOR_LENGTH);
+          const secret = randomPairingSymbols(PAIRING_SECRET_LENGTH);
+          const inserted = db.query(`
+            INSERT OR IGNORE INTO remote_pairing_codes (selector, secret_hash, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+          `).run(selector, digest(secret), at.toISOString(), expiresAt);
+          if (inserted.changes === 1) {
+            return { code: `${selector}-${secret.slice(0, 4)}-${secret.slice(4)}`, expiresAt };
+          }
+        }
+        throw new Error("Could not mint a unique pairing code.");
+      })();
+    },
+    checkPairingCode(input) {
+      const normalized = normalizePairingCode(input);
+      if (!normalized)
+        return { ok: false, reason: "malformed" };
+      const selector = normalized.slice(0, PAIRING_SELECTOR_LENGTH);
+      const presented = digest(normalized.slice(PAIRING_SELECTOR_LENGTH));
+      const atIso = now().toISOString();
+      return db.transaction(() => {
+        const row = db.query(`
+          SELECT secret_hash FROM remote_pairing_codes
+          WHERE selector = ? AND used_at IS NULL AND expires_at > ? AND failed_attempts < ?
+        `).get(selector, atIso, REMOTE_PAIRING_CODE_MAX_FAILURES);
+        if (!row)
+          return { ok: false, reason: "unknown" };
+        const stored = Buffer.from(row.secret_hash);
+        if (stored.length !== presented.length || !timingSafeEqual2(stored, presented)) {
+          db.query("UPDATE remote_pairing_codes SET failed_attempts = failed_attempts + 1 WHERE selector = ?").run(selector);
+          return { ok: false, reason: "wrong_secret" };
+        }
+        const consumed = db.query("UPDATE remote_pairing_codes SET used_at = ? WHERE selector = ? AND used_at IS NULL").run(atIso, selector);
+        return consumed.changes === 1 ? { ok: true } : { ok: false, reason: "unknown" };
+      })();
+    },
+    registerClient(input) {
+      const at = now();
+      return db.transaction(() => {
+        const count = db.query("SELECT COUNT(*) AS n FROM remote_oauth_clients").get().n;
+        if (count >= REMOTE_OAUTH_MAX_REGISTERED_CLIENTS) {
+          db.query(`
+            DELETE FROM remote_oauth_clients
+            WHERE created_at <= ?
+              AND client_id NOT IN (SELECT client_id FROM remote_connections WHERE client_id IS NOT NULL)
+          `).run(new Date(at.getTime() - UNUSED_CLIENT_PRUNE_AGE_MS).toISOString());
+          const after = db.query("SELECT COUNT(*) AS n FROM remote_oauth_clients").get().n;
+          if (after >= REMOTE_OAUTH_MAX_REGISTERED_CLIENTS)
+            return "capacity";
+        }
+        const clientId = `olympus_client_${randomBytes5(12).toString("hex")}`;
+        const createdAt = at.toISOString();
+        db.query("INSERT INTO remote_oauth_clients (client_id, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?)").run(clientId, input.clientName, JSON.stringify(input.redirectUris), createdAt);
+        return { clientId, clientName: input.clientName, redirectUris: [...input.redirectUris], createdAt };
+      })();
+    },
+    getRegisteredClient(clientId) {
+      if (!isRegisteredOAuthClientId(clientId))
+        return;
+      const row = db.query("SELECT * FROM remote_oauth_clients WHERE client_id = ?").get(clientId);
+      return row ? toClient(row) : undefined;
+    },
+    createGrant(input) {
+      const at = now();
+      return db.transaction(() => {
+        const id = randomBytes5(9).toString("hex");
+        db.query(`
+          INSERT INTO remote_connections (id, display_name, kind, token_hash, client_id, created_at)
+          VALUES (?, ?, 'oauth', NULL, ?, ?)
+        `).run(id, input.displayName, input.clientId, at.toISOString());
+        const tokens = issueTokens(id, input.clientId, input.resource, at);
+        return { connection: { id, displayName: input.displayName, clientId: input.clientId }, tokens };
+      })();
+    },
+    verifyAccessToken(token, resource) {
+      if (!isWellFormedOAuthAccessToken(token))
+        return { ok: false, reason: "unknown" };
+      const row = readToken(token, "access");
+      if (!row)
+        return { ok: false, reason: "unknown" };
+      const at = now();
+      if (row.revoked_at !== null)
+        return { ok: false, reason: "revoked" };
+      if (Date.parse(row.expires_at) <= at.getTime())
+        return { ok: false, reason: "expired" };
+      if (row.resource !== resource)
+        return { ok: false, reason: "wrong_audience" };
+      recordLastUse(row.connection_id, at);
+      return { ok: true, connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id } };
+    },
+    refresh(input) {
+      if (!isWellFormedOAuthRefreshToken(input.refreshToken))
+        return { ok: false, reason: "unknown" };
+      const at = now();
+      return db.transaction(() => {
+        const row = readToken(input.refreshToken, "refresh");
+        if (!row)
+          return { ok: false, reason: "unknown" };
+        if (row.revoked_at !== null)
+          return { ok: false, reason: "revoked" };
+        if (row.used_at !== null) {
+          const key = Buffer.from(row.token_hash).toString("hex");
+          const grace = refreshGrace.get(key);
+          if (grace && grace.expiresAt > at.getTime() && grace.clientId === input.clientId) {
+            const successor = db.query("SELECT used_at FROM remote_oauth_tokens WHERE token_hash = ? AND kind = 'refresh'").get(grace.successorRefreshHash);
+            if (successor && successor.used_at === null) {
+              return {
+                ok: true,
+                connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
+                tokens: grace.tokens
+              };
+            }
+          }
+          refreshGrace.delete(key);
+          revokeGrant(row.connection_id);
+          return { ok: false, reason: "reused" };
+        }
+        if (Date.parse(row.expires_at) <= at.getTime())
+          return { ok: false, reason: "expired" };
+        if (row.client_id !== input.clientId)
+          return { ok: false, reason: "client_mismatch" };
+        if (row.resource !== input.resource)
+          return { ok: false, reason: "wrong_audience" };
+        db.query("UPDATE remote_oauth_tokens SET used_at = ? WHERE token_hash = ?").run(at.toISOString(), row.token_hash);
+        db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ? AND kind = 'access'").run(row.connection_id);
+        const tokens = issueTokens(row.connection_id, row.client_id, row.resource, at);
+        for (const [key, entry] of refreshGrace)
+          if (entry.expiresAt <= at.getTime())
+            refreshGrace.delete(key);
+        refreshGrace.set(Buffer.from(row.token_hash).toString("hex"), {
+          tokens,
+          successorRefreshHash: digest(tokens.refreshToken),
+          connectionId: row.connection_id,
+          clientId: row.client_id,
+          expiresAt: at.getTime() + REMOTE_OAUTH_REFRESH_GRACE_MS
+        });
+        return {
+          ok: true,
+          connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
+          tokens
+        };
+      })();
+    },
+    revokeToken(token) {
+      if (isWellFormedOAuthRefreshToken(token)) {
+        const row = readToken(token, "refresh");
+        if (row)
+          revokeGrant(row.connection_id);
+        return;
+      }
+      if (isWellFormedOAuthAccessToken(token)) {
+        db.query("DELETE FROM remote_oauth_tokens WHERE token_hash = ? AND kind = 'access'").run(digest(token));
+      }
+    },
+    revokeGrant
+  };
+}
+function remoteOAuthSchemaMigration(version) {
+  return {
+    version,
+    name: "add_oauth_grants",
+    up(db) {
+      db.exec(`
+        CREATE TABLE remote_connections_v2 (
+          id TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('bearer', 'oauth')),
+          token_hash BLOB UNIQUE,
+          client_id TEXT,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT,
+          revoked_at TEXT,
+          CHECK ((kind = 'bearer' AND token_hash IS NOT NULL)
+              OR (kind = 'oauth' AND token_hash IS NULL AND client_id IS NOT NULL))
+        );
+        INSERT INTO remote_connections_v2 (id, display_name, kind, token_hash, created_at, last_used_at, revoked_at)
+          SELECT id, display_name, kind, token_hash, created_at, last_used_at, revoked_at FROM remote_connections;
+        DROP TABLE remote_connections;
+        ALTER TABLE remote_connections_v2 RENAME TO remote_connections;
+
+        CREATE TABLE remote_oauth_tokens (
+          token_hash BLOB PRIMARY KEY,
+          connection_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('access', 'refresh')),
+          resource TEXT NOT NULL,
+          client_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT
+        );
+        CREATE INDEX remote_oauth_tokens_connection ON remote_oauth_tokens(connection_id);
+
+        CREATE TABLE remote_oauth_clients (
+          client_id TEXT PRIMARY KEY,
+          client_name TEXT NOT NULL,
+          redirect_uris TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE remote_pairing_codes (
+          selector TEXT PRIMARY KEY,
+          secret_hash BLOB NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT,
+          failed_attempts INTEGER NOT NULL DEFAULT 0
+        );
+      `);
+    }
+  };
+}
+var REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600, REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, REMOTE_PAIRING_CODE_MAX_FAILURES = 5, REMOTE_OAUTH_REFRESH_GRACE_MS = 45000, REMOTE_OAUTH_MAX_REGISTERED_CLIENTS = 500, REMOTE_OAUTH_ACCESS_TOKEN_PREFIX = "olympus_at_", REMOTE_OAUTH_REFRESH_TOKEN_PREFIX = "olympus_rt_", ACCESS_TOKEN_PATTERN, REFRESH_TOKEN_PATTERN, REGISTERED_CLIENT_ID_PATTERN, PAIRING_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789", PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  ACCESS_TOKEN_PATTERN = /^olympus_at_[A-Za-z0-9_-]{43}$/;
+  REFRESH_TOKEN_PATTERN = /^olympus_rt_[A-Za-z0-9_-]{43}$/;
+  REGISTERED_CLIENT_ID_PATTERN = /^olympus_client_[a-f0-9]{24}$/;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
 // src/core/remote-connections.ts
 var exports_remote_connections = {};
 __export(exports_remote_connections, {
   resolveRemoteConnectionsDbPathForCli: () => resolveRemoteConnectionsDbPathForCli,
   resolveRemoteConnectionsDbPath: () => resolveRemoteConnectionsDbPath,
+  remoteConnectionsPreV2BackupPath: () => remoteConnectionsPreV2BackupPath,
   openRemoteConnectionStore: () => openRemoteConnectionStore,
   isWellFormedRemoteConnectionToken: () => isWellFormedRemoteConnectionToken,
   hashRemoteConnectionToken: () => hashRemoteConnectionToken,
@@ -9761,10 +10067,13 @@ __export(exports_remote_connections, {
   REMOTE_CONNECTIONS_DB_PATH_ENV: () => REMOTE_CONNECTIONS_DB_PATH_ENV
 });
 import { Database } from "bun:sqlite";
-import { createHash as createHash5, randomBytes as randomBytes5, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createHash as createHash6, randomBytes as randomBytes6, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 import { chmodSync as chmodSync3, existsSync as existsSync12, lstatSync as lstatSync6, mkdirSync as mkdirSync8 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
 import { dirname as dirname12, isAbsolute as isAbsolute4, join as join15 } from "node:path";
+function remoteConnectionsPreV2BackupPath(dbPath) {
+  return `${dbPath}.pre-v2.bak`;
+}
 function resolveRemoteConnectionsDbPath(env = process.env) {
   const explicit = env[REMOTE_CONNECTIONS_DB_PATH_ENV]?.trim();
   if (explicit) {
@@ -9800,7 +10109,7 @@ function isWellFormedRemoteConnectionToken(token) {
   return TOKEN_PATTERN.test(token);
 }
 function hashRemoteConnectionToken(token) {
-  return createHash5("sha256").update(token, "utf8").digest();
+  return createHash6("sha256").update(token, "utf8").digest();
 }
 function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), options = {}) {
   const now = options.now ?? (() => new Date);
@@ -9810,6 +10119,7 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
     chmodSync3(dbPath, 384);
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
     assertSqliteSchemaCanOpen(db, REMOTE_CONNECTIONS_STORE_ID, REMOTE_CONNECTIONS_SCHEMA_VERSION);
+    backupBeforeOAuthMigration(db, dbPath);
     runSqliteMigrations(db, REMOTE_CONNECTIONS_STORE_ID, remoteConnectionMigrations());
   } catch (error) {
     closeSqliteStore(db);
@@ -9831,10 +10141,17 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
   const readRow = (id) => db.query("SELECT * FROM remote_connections WHERE id = ?").get(id);
   return {
     dbPath,
+    oauth: createRemoteOAuthStore(db, now, (id, at) => {
+      const row = readRow(id);
+      const lastUsedMs = row?.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
+      if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
+        recordLastUse(id, at.toISOString());
+      }
+    }),
     create(displayName) {
       const name = requireDisplayName(displayName);
-      const id = randomBytes5(CONNECTION_ID_BYTES).toString("hex");
-      const secret = randomBytes5(CONNECTION_SECRET_BYTES).toString("base64url");
+      const id = randomBytes6(CONNECTION_ID_BYTES).toString("hex");
+      const secret = randomBytes6(CONNECTION_SECRET_BYTES).toString("base64url");
       const token = `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret}`;
       const createdAt = now().toISOString();
       db.query(`
@@ -9853,7 +10170,10 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
       if (typeof id !== "string" || !CONNECTION_ID_PATTERN2.test(id)) {
         throw new OperationError("invalid_params", "Connection id must be the id shown by olympus connections list.");
       }
-      db.query("UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(now().toISOString(), id);
+      db.transaction(() => {
+        db.query("UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(now().toISOString(), id);
+        db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ?").run(id);
+      })();
       const row = readRow(id);
       if (!row) {
         throw new OperationError("invalid_params", `No remote connection has id ${id}.`, "Run olympus connections list.");
@@ -9866,18 +10186,19 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
         return { ok: false, reason: "malformed" };
       const row = readRow(match[1]);
       const presented = hashRemoteConnectionToken(token);
-      const stored = row ? Buffer.from(row.token_hash) : Buffer.alloc(presented.length);
-      const equal = stored.length === presented.length && timingSafeEqual2(stored, presented);
-      if (!row || !equal)
+      const bearer = row && row.kind === "bearer" && row.token_hash ? row : null;
+      const stored = bearer ? Buffer.from(bearer.token_hash) : Buffer.alloc(presented.length);
+      const equal = stored.length === presented.length && timingSafeEqual3(stored, presented);
+      if (!bearer || !equal)
         return { ok: false, reason: "unknown" };
-      if (row.revoked_at !== null)
+      if (bearer.revoked_at !== null)
         return { ok: false, reason: "revoked" };
       const at = now();
-      const lastUsedMs = row.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
+      const lastUsedMs = bearer.last_used_at ? Date.parse(bearer.last_used_at) : Number.NaN;
       if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
-        recordLastUse(row.id, at.toISOString());
+        recordLastUse(bearer.id, at.toISOString());
       }
-      return { ok: true, connection: toRecord(row) };
+      return { ok: true, connection: toRecord(bearer) };
     },
     close() {
       closed = true;
@@ -9889,7 +10210,8 @@ function toRecord(row) {
   return {
     id: row.id,
     displayName: row.display_name,
-    kind: "bearer",
+    kind: row.kind === "oauth" ? "oauth" : "bearer",
+    clientId: row.client_id ?? null,
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at,
     revokedAt: row.revoked_at
@@ -9904,7 +10226,7 @@ function requireDisplayName(value) {
 }
 function remoteConnectionMigrations() {
   return [{
-    version: REMOTE_CONNECTIONS_SCHEMA_VERSION,
+    version: 1,
     name: "create_remote_connections",
     up(db) {
       db.exec(`
@@ -9919,7 +10241,16 @@ function remoteConnectionMigrations() {
         );
       `);
     }
-  }];
+  }, remoteOAuthSchemaMigration(2)];
+}
+function backupBeforeOAuthMigration(db, dbPath) {
+  if (readSqliteSchemaVersion(db, REMOTE_CONNECTIONS_STORE_ID) !== 1)
+    return;
+  const backupPath = remoteConnectionsPreV2BackupPath(dbPath);
+  if (existsSync12(backupPath))
+    return;
+  db.query("VACUUM INTO ?").run(backupPath);
+  chmodSync3(backupPath, 384);
 }
 function hardenPrivateDatabasePath(dbPath) {
   if (!isAbsolute4(dbPath)) {
@@ -9943,12 +10274,13 @@ function hardenPrivateDatabasePath(dbPath) {
     }
   }
 }
-var REMOTE_CONNECTIONS_STORE_ID = "remote-connections", REMOTE_CONNECTIONS_SCHEMA_VERSION = 1, REMOTE_CONNECTION_TOKEN_PREFIX = "olympus_conn_", REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60000, STORE_BUSY_TIMEOUT_MS = 1e4, LAST_USED_BUSY_TIMEOUT_MS = 50, CONNECTION_ID_BYTES = 9, CONNECTION_SECRET_BYTES = 32, CONNECTION_ID_PATTERN2, TOKEN_PATTERN, REMOTE_CONNECTIONS_DB_PATH_ENV = "OLYMPUS_REMOTE_CONNECTIONS_DB_PATH";
+var REMOTE_CONNECTIONS_STORE_ID = "remote-connections", REMOTE_CONNECTIONS_SCHEMA_VERSION = 2, REMOTE_CONNECTION_TOKEN_PREFIX = "olympus_conn_", REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60000, STORE_BUSY_TIMEOUT_MS = 1e4, LAST_USED_BUSY_TIMEOUT_MS = 50, CONNECTION_ID_BYTES = 9, CONNECTION_SECRET_BYTES = 32, CONNECTION_ID_PATTERN2, TOKEN_PATTERN, REMOTE_CONNECTIONS_DB_PATH_ENV = "OLYMPUS_REMOTE_CONNECTIONS_DB_PATH";
 var init_remote_connections = __esm(() => {
   init_operation_error();
   init_worker_auth();
   init_operation_caller();
   init_sqlite_migrations();
+  init_remote_oauth_store();
   CONNECTION_ID_PATTERN2 = /^[a-f0-9]{18}$/;
   TOKEN_PATTERN = /^olympus_conn_([a-f0-9]{18})_([A-Za-z0-9_-]{43})$/;
 });
@@ -10362,7 +10694,7 @@ var init_provider_client = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 function createDropboxSourceConnector(options) {
   const account = requireNonEmpty(options.account, "Dropbox source connector account");
   const credentialHandle = options.credentialHandle?.trim() || DEFAULT_CREDENTIAL_HANDLE;
@@ -10706,7 +11038,7 @@ function resumedPageOffset(cursor, page) {
   return cursor.pageDigest === metadataPageDigest(page) ? cursor.itemOffset : 0;
 }
 function metadataPageDigest(page) {
-  return createHash6("sha256").update(JSON.stringify({
+  return createHash7("sha256").update(JSON.stringify({
     entries: page.entries,
     cursor: page.cursor?.trim() || null,
     hasMore: Boolean(page.hasMore)
@@ -10721,7 +11053,7 @@ function providerItemIdFromLocalItemId(localItemId, account) {
 }
 function deletedProviderItemId(entry) {
   const ref = entry.pathLower || entry.pathDisplay || entry.name;
-  return `deleted:${createHash6("sha256").update(ref).digest("hex").slice(0, 32)}`;
+  return `deleted:${createHash7("sha256").update(ref).digest("hex").slice(0, 32)}`;
 }
 function listRootPath(rootFolderPath, approvedScopeKey, account) {
   const explicit = rootFolderPath?.trim();
@@ -10883,7 +11215,7 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
@@ -11635,7 +11967,7 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString(value) {
-  return createHash7("sha256").update(value).digest("hex");
+  return createHash8("sha256").update(value).digest("hex");
 }
 var DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
 var init_embeddings = __esm(() => {
@@ -11660,7 +11992,7 @@ var init_embeddings = __esm(() => {
 });
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
   const text = input.text?.trim() ?? "";
   if (!text) {
@@ -11721,7 +12053,7 @@ function dedupeFindings(findings) {
   return unique;
 }
 function hashFinding(type, matchedText) {
-  return createHash8("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash9("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-05-22", SECRET_PATTERNS, REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
@@ -11838,7 +12170,7 @@ function ownedByThisUser(stat2) {
 var init_owner_config_read = () => {};
 
 // src/core/sensitivity-map.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 import { chmodSync as chmodSync4, existsSync as existsSync13, lstatSync as lstatSync7, readFileSync as readFileSync15 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
 import { dirname as dirname13, join as join16 } from "node:path";
@@ -12034,7 +12366,7 @@ function sensitivityMapRevision(map) {
       match: category.match
     }))
   });
-  return `v${map.schemaVersion}:${createHash9("sha256").update(canonical).digest("hex").slice(0, 16)}`;
+  return `v${map.schemaVersion}:${createHash10("sha256").update(canonical).digest("hex").slice(0, 16)}`;
 }
 function categoryMatches(category, input) {
   return category.match.keywords.some((keyword) => input.textHaystack.includes(keyword.toLowerCase())) || category.match.senderPatterns.some((pattern) => input.sender.includes(pattern.toLowerCase())) || category.match.pathPatterns.some((pattern) => input.path.includes(pattern.toLowerCase()));
@@ -15238,7 +15570,7 @@ var init_reactions = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash10, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash11, randomUUID as randomUUID4 } from "node:crypto";
 import { existsSync as existsSync15, lstatSync as lstatSync8, mkdirSync as mkdirSync10, statSync as statSync6 } from "node:fs";
 import { dirname as dirname15 } from "node:path";
 import { Database as Database3 } from "bun:sqlite";
@@ -16237,11 +16569,11 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash10("sha256");
+  const digest2 = createHash11("sha256");
   for (const row of rows)
-    digest.update(`${row.chunk_pk}\x00${row.content_hash}
+    digest2.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
-  return digest.digest("hex");
+  return digest2.digest("hex");
 }
 function connectorStoreEmbedSummary(corpusId, trustDomain, provider, chunksSeen, chunksEmbedded, chunksSkipped) {
   return {
@@ -16318,7 +16650,7 @@ function namesOnlyKept(db, itemPks) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash10("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash11("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function connectorStoreItemText(item) {
   return textFromRawItem(item);
@@ -17591,7 +17923,7 @@ function requireNonEmpty2(value, label) {
   return text;
 }
 function hashString2(value) {
-  return createHash10("sha256").update(value).digest("hex");
+  return createHash11("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -18930,7 +19262,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash10("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash11("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -19577,8 +19909,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash10("sha256");
-      const outputDigest = createHash10("sha256");
+      const inputDigest = createHash11("sha256");
+      const outputDigest = createHash11("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -19648,8 +19980,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash10("sha256");
-      const outputDigest = createHash10("sha256");
+      const inputDigest = createHash11("sha256");
+      const outputDigest = createHash11("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -22871,7 +23203,7 @@ var init_connector_store2 = __esm(() => {
 });
 
 // src/workers/dropbox-files/provider-store-sync.ts
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 function createDropboxProviderStoreSyncHandler(options) {
   const account = required2(options.account, "Dropbox connector-store account");
   if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
@@ -23001,7 +23333,7 @@ function createDropboxProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash11("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash12("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: dropboxScopedCheckpoint(sync.cursor, connectorId, options.scope !== undefined)
       };
@@ -23013,7 +23345,7 @@ function dropboxConnectorIdForScope(account, approvedScopeKey, scope) {
   const normalizedAccount = required2(account, "Dropbox connector account");
   const normalizedScope = required2(approvedScopeKey, "Dropbox approved scope key");
   const approvedScopeIdentity = scope ? `\x00${required2(scope.generation, "Dropbox approved scope generation")}` + `\x00${required2(scope.revision, "Dropbox approved scope revision")}` : "";
-  const scopeHash = createHash11("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
+  const scopeHash = createHash12("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
   return `dropbox.files.${scopeHash}`;
 }
 function dropboxScopedCheckpoint(cursor, connectorId, scoped) {
@@ -23276,14 +23608,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash12("sha256").update(block).digest());
+    blockDigests.push(createHash13("sha256").update(block).digest());
   }
-  return createHash12("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash13("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -28204,7 +28536,7 @@ function sourceInvocationProvenance(value) {
 }
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash13, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash14, randomUUID as randomUUID6 } from "node:crypto";
 import { existsSync as existsSync18, readFileSync as readFileSync17 } from "node:fs";
 import { dirname as dirname17, join as join21 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -28223,7 +28555,7 @@ function connectedSourceScopeAccountGeneration(sourceId, capability, registry, p
   if (handles.length !== 1)
     return;
   const handle = handles[0];
-  const generation = createHash13("sha256").update(JSON.stringify([
+  const generation = createHash14("sha256").update(JSON.stringify([
     sourceId,
     handle.handle,
     handle.providerAccountId ?? "",
@@ -28382,7 +28714,7 @@ function readState(path) {
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest = createHash13("sha256").update(raw).digest("hex");
+  const digest2 = createHash14("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -28395,7 +28727,7 @@ function readState(path) {
       throw new Error("duplicate");
     return { kind: "valid", state: { version: 1, approvals } };
   } catch {
-    return { kind: "malformed", digest };
+    return { kind: "malformed", digest: digest2 };
   }
 }
 function parseApproval(value) {
@@ -28452,7 +28784,7 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash14, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash15, randomUUID as randomUUID7 } from "node:crypto";
 import { existsSync as existsSync19, readFileSync as readFileSync18 } from "node:fs";
 import { dirname as dirname18, join as join22 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
@@ -28546,7 +28878,7 @@ function assertMailSourceScopeApproved(input) {
 }
 function mailScopeOwnerTierRules(scope) {
   return scope.alwaysPrivateSenders.map((sender) => ({
-    id: `mail-scope-always-private-${createHash14("sha256").update(sender).digest("hex").slice(0, 12)}`,
+    id: `mail-scope-always-private-${createHash15("sha256").update(sender).digest("hex").slice(0, 12)}`,
     source: MAIL_SCOPE_RULE_SOURCE,
     match: { kind: "sender", value: sender },
     tier: "secure",
@@ -28764,7 +29096,7 @@ function readState2(path) {
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest = createHash14("sha256").update(raw).digest("hex");
+  const digest2 = createHash15("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -28777,7 +29109,7 @@ function readState2(path) {
       throw new Error("duplicate");
     return { kind: "valid", state: { version: 1, approvals } };
   } catch {
-    return { kind: "malformed", digest };
+    return { kind: "malformed", digest: digest2 };
   }
 }
 function parseApproval2(value) {
@@ -29286,7 +29618,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 import { homedir as homedir18 } from "node:os";
 import { join as join23 } from "node:path";
 
@@ -29954,7 +30286,7 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash15("sha256").update(value).digest("hex");
+  return createHash16("sha256").update(value).digest("hex");
 }
 var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS;
 var init_gmail = __esm(() => {
@@ -30002,7 +30334,7 @@ var init_gmail_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-live-sync.ts
-import { createHash as createHash16 } from "node:crypto";
+import { createHash as createHash17 } from "node:crypto";
 function createGmailConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGmailLiveSyncConfig(env);
@@ -30165,8 +30497,8 @@ function scopedTraversal(connector, connectorId) {
 function gmailCursorConnectorId(account, scope) {
   if (!scope)
     return GMAIL_PROVIDER;
-  const digest = createHash16("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
-  return `${GMAIL_SCOPED_CONNECTOR_PREFIX}${digest}`;
+  const digest2 = createHash17("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  return `${GMAIL_SCOPED_CONNECTOR_PREFIX}${digest2}`;
 }
 function encodeCheckpoint(envelope) {
   if (!envelope.head)
@@ -30261,7 +30593,7 @@ function taskOutcome(input) {
   };
 }
 function gmailReceiptDigest(receipt) {
-  return createHash16("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash17("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError(error) {
   if (error instanceof TypeError)
@@ -30294,7 +30626,7 @@ var init_gmail_live_sync = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash17 } from "node:crypto";
+import { createHash as createHash18 } from "node:crypto";
 import { homedir as homedir19 } from "node:os";
 import { join as join24 } from "node:path";
 
@@ -30937,7 +31269,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString4(value) {
-  return createHash17("sha256").update(value).digest("hex");
+  return createHash18("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = "secure_local.drive.docs", GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET", GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GOOGLE_DRIVE_DAILY_REQUEST_BUDGET = 3000, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED, GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE = "google_drive.personal", GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA;
 var init_drive = __esm(() => {
@@ -30998,7 +31330,7 @@ var init_drive_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/drive-live-sync.ts
-import { createHash as createHash18 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 function createGoogleDriveConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGoogleDriveLiveSyncConfig(env);
@@ -31152,8 +31484,8 @@ function scopedTraversal2(connector, connectorId) {
 function googleDriveCursorConnectorId(account, scope) {
   if (!scope)
     return GOOGLE_DRIVE_PROVIDER;
-  const digest = createHash18("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
-  return `${GOOGLE_DRIVE_PROVIDER}.scope.${digest}`;
+  const digest2 = createHash19("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  return `${GOOGLE_DRIVE_PROVIDER}.scope.${digest2}`;
 }
 function googleDriveScopedCheckpoint(cursor, connectorId) {
   return `${GOOGLE_DRIVE_SCOPED_CHECKPOINT_PREFIX}${connectorId.slice(`${GOOGLE_DRIVE_PROVIDER}.scope.`.length)}:` + Buffer.from(cursor).toString("base64url");
@@ -31241,7 +31573,7 @@ function taskOutcome2(input) {
   };
 }
 function googleDriveReceiptDigest(receipt) {
-  return createHash18("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash19("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError2(error) {
   if (error instanceof TypeError)
@@ -31390,7 +31722,7 @@ var init_corpus_adapter2 = __esm(() => {
   LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID = LEGACY_TELEGRAM_MESSAGES_CORPUS_ID;
 });
 // src/workers/telegram-messages/capture-spool-connector.ts
-import { createHash as createHash19 } from "node:crypto";
+import { createHash as createHash20 } from "node:crypto";
 import { existsSync as existsSync21, lstatSync as lstatSync9, readFileSync as readFileSync20, readdirSync } from "node:fs";
 import { homedir as homedir21 } from "node:os";
 import { join as join26 } from "node:path";
@@ -31788,7 +32120,7 @@ function normalizeBudget(value) {
   return value;
 }
 function sha256(value) {
-  return createHash19("sha256").update(value).digest("hex");
+  return createHash20("sha256").update(value).digest("hex");
 }
 function telegramConversationKind(chatType) {
   switch (chatType?.toLowerCase()) {
@@ -32264,7 +32596,7 @@ var init_corpus_adapter3 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { createHash as createHash20 } from "node:crypto";
+import { createHash as createHash21 } from "node:crypto";
 import { mkdirSync as mkdirSync13, readFileSync as readFileSync21 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
 import { dirname as dirname20, join as join27 } from "node:path";
@@ -32644,7 +32976,7 @@ function rawItem(input) {
       ...input.authoredAt ? { authoredAt: input.authoredAt } : {},
       ...input.updatedAt ? { updatedAt: input.updatedAt } : {},
       ...input.metadata,
-      contentHash: createHash20("sha256").update(JSON.stringify({
+      contentHash: createHash21("sha256").update(JSON.stringify({
         text: input.text,
         title: input.title,
         author: input.author,
@@ -32842,7 +33174,7 @@ var init_live_control = __esm(() => {
 });
 
 // src/workers/readwise/live-sync.ts
-import { createHash as createHash21 } from "node:crypto";
+import { createHash as createHash22 } from "node:crypto";
 function createReadwiseConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultReadwiseLiveSyncConfig(env);
@@ -33010,7 +33342,7 @@ function taskOutcome3(input) {
   };
 }
 function readwiseReceiptDigest(receipt) {
-  return createHash21("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash22("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function emptyEmbedSummary(store, provider) {
   return {
@@ -33605,7 +33937,7 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
-import { createHash as createHash22 } from "node:crypto";
+import { createHash as createHash23 } from "node:crypto";
 import { homedir as homedir24 } from "node:os";
 import { join as join29 } from "node:path";
 function createXBookmarksSourceConnector(options) {
@@ -33715,7 +34047,7 @@ function xBookmarkRawItemFromPost(post, account, folderMemberships, fetchedAt) {
       ...folders.length > 0 ? { folders, folderIds, folderNames } : {},
       ...post.lang ? { language: post.lang } : {},
       ...post.mediaUrls?.length ? { mediaUrls: [...post.mediaUrls] } : {},
-      contentHash: createHash22("sha256").update(JSON.stringify({ text, title, url, folders })).digest("hex")
+      contentHash: createHash23("sha256").update(JSON.stringify({ text, title, url, folders })).digest("hex")
     }),
     fetchedAt
   };
@@ -33765,7 +34097,7 @@ var init_connector3 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash23, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash24, randomUUID as randomUUID8 } from "node:crypto";
 import { chmodSync as chmodSync8, lstatSync as lstatSync10, mkdirSync as mkdirSync14 } from "node:fs";
 import { homedir as homedir25 } from "node:os";
 import { dirname as dirname21, join as join30 } from "node:path";
@@ -34582,7 +34914,7 @@ function rateLimitStatus(row) {
   };
 }
 function hashResourceId(resourceId) {
-  return createHash23("sha256").update(resourceId).digest("hex");
+  return createHash24("sha256").update(resourceId).digest("hex");
 }
 function utcDayFrom(date) {
   return date.toISOString().slice(0, 10);
@@ -34702,7 +35034,7 @@ var init_live_control2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash24, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash25, randomUUID as randomUUID9 } from "node:crypto";
 import { chmodSync as chmodSync9, mkdirSync as mkdirSync15 } from "node:fs";
 import { homedir as homedir26 } from "node:os";
 import { dirname as dirname22, join as join31 } from "node:path";
@@ -36863,7 +37195,7 @@ function normalizeFolderFacetRefreshCounts(counts) {
   };
 }
 function reconcileCompatibilityHash(limits, providerUserId, coverageScope, windowBoundaryAlgorithmVersion) {
-  return createHash24("sha256").update(JSON.stringify({
+  return createHash25("sha256").update(JSON.stringify({
     algorithm: RECONCILE_ALGORITHM_VERSION,
     providerUserId,
     coverageScope,
@@ -36886,7 +37218,7 @@ function recoveryPolicy() {
   };
 }
 function sha256Json(value) {
-  return createHash24("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash25("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function normalizeOptionalSha2562(value, label) {
   if (value === undefined)
@@ -37099,7 +37431,7 @@ var init_reconcile_state = __esm(() => {
 });
 
 // src/workers/x-bookmarks/api-connector.ts
-import { createHash as createHash25 } from "node:crypto";
+import { createHash as createHash26 } from "node:crypto";
 function createXBookmarksApiSourceConnector(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultXBookmarksLiveSyncConfig(env);
@@ -37802,7 +38134,7 @@ function classifyXBookmarksProviderWindowBoundary(error, context, policy = X_BOO
   const matchedCode = error.providerErrorCode && approvedCodes.has(error.providerErrorCode) ? error.providerErrorCode : undefined;
   if (!matchedType && !matchedCode)
     return;
-  const fingerprintSha256 = createHash25("sha256").update(JSON.stringify({
+  const fingerprintSha256 = createHash26("sha256").update(JSON.stringify({
     kind: "x_provider_window_boundary",
     algorithm_version: algorithmVersion,
     http_status: error.status,
@@ -38000,7 +38332,7 @@ var init_api_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash26, randomUUID as randomUUID10 } from "node:crypto";
+import { createHash as createHash27, randomUUID as randomUUID10 } from "node:crypto";
 import {
   chmodSync as chmodSync10,
   existsSync as existsSync22,
@@ -38048,7 +38380,7 @@ async function runXBookmarksWindowDiagnostic(options) {
     kind: "x_bookmarks_window_diagnostic",
     version: 1,
     generated_at: attemptedAt.toISOString(),
-    account_sha256: createHash26("sha256").update(account).digest("hex"),
+    account_sha256: createHash27("sha256").update(account).digest("hex"),
     page_size: config.reconcilePageSize,
     max_pages_per_traversal: MAX_DIAGNOSTIC_PAGES,
     probes: [freshRoot, identicalCursorRetry, idOnlyTraversal, richTraversal],
@@ -38071,7 +38403,7 @@ async function runXBookmarksWindowDiagnostic(options) {
   return {
     report,
     report_path: options.reportPath,
-    report_sha256: createHash26("sha256").update(reportJson).digest("hex")
+    report_sha256: createHash27("sha256").update(reportJson).digest("hex")
   };
 }
 async function diagnosticClient(options, env) {
@@ -38670,7 +39002,7 @@ var init_live_sync2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash27, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash28, randomUUID as randomUUID11 } from "node:crypto";
 import {
   chmodSync as chmodSync11,
   renameSync as renameSync5,
@@ -38872,7 +39204,7 @@ function sameFolderFacetAuthorityReading(atGate, atRestore) {
   return atGate.leaseGeneration === atRestore.leaseGeneration;
 }
 function contentRecoveryEmbeddingJournalId(restoreItems) {
-  const inputSha256 = createHash27("sha256").update(JSON.stringify(restoreItems)).digest("hex");
+  const inputSha256 = createHash28("sha256").update(JSON.stringify(restoreItems)).digest("hex");
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
@@ -38983,7 +39315,7 @@ function writeReceipt(pathValue, receipt) {
   }
 }
 function sha256Json2(value) {
-  return createHash27("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash28("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function requireNonEmpty3(value, label) {
   const normalized = value.trim();
@@ -39922,7 +40254,7 @@ var init_store_sync2 = __esm(() => {
 });
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash28 } from "node:crypto";
+import { createHash as createHash29 } from "node:crypto";
 function isFileExtractionSourceError(value) {
   if (!value || typeof value !== "object")
     return false;
@@ -39965,7 +40297,7 @@ var init_file_extraction_source = __esm(() => {
       this.errorKind = errorKind;
       this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
       this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash28("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      const errorHash = options.detailForHash === undefined ? undefined : createHash29("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
     }
@@ -40493,7 +40825,7 @@ var init_email_policy = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash30, randomUUID as randomUUID13 } from "node:crypto";
+import { createHash as createHash31, randomUUID as randomUUID13 } from "node:crypto";
 import {
   chmodSync as chmodSync12,
   existsSync as existsSync25,
@@ -40543,7 +40875,7 @@ function createSourceWatchExecutorCapability(input) {
 }
 function sourceWatchDeliveryKey(watchId, ref) {
   const canonical = requireCanonicalRef(ref);
-  return createHash30("sha256").update(JSON.stringify([
+  return createHash31("sha256").update(JSON.stringify([
     requireId(watchId, "watchId"),
     canonical.corpusId,
     canonical.localItemId,
@@ -41609,7 +41941,7 @@ function addMilliseconds(timestamp2, deltaMs) {
   return new Date(Date.parse(timestamp2) + deltaMs).toISOString();
 }
 function sha2562(value) {
-  return createHash30("sha256").update(value, "utf8").digest("hex");
+  return createHash31("sha256").update(value, "utf8").digest("hex");
 }
 var SOURCE_WATCH_STORE_ID = "source-watch", SOURCE_WATCH_SCHEMA_VERSION = 1, SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, SOURCE_WATCH_OWNER_HEADER = "X-Olympus-Source-Watch-Owner", SOURCE_WATCH_ROUTE_KIND_HEADER = "X-Olympus-Source-Watch-Route-Kind", SOURCE_WATCH_ROUTE_TARGET_HEADER = "X-Olympus-Source-Watch-Route-Target", SOURCE_WATCH_ROUTE_ACCOUNT_HEADER = "X-Olympus-Source-Watch-Route-Account", SOURCE_WATCH_MAX_QUERY_LENGTH = 4096, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_LOCAL_ITEM_ID_LENGTH = 4096, MAX_SOURCE_VERSION_LENGTH = 1024, MAX_DELIVERY_ATTEMPTS = 100, MAX_AVAILABLE_DELAY_MS, MAX_PAGE_SIZE = 100, MAX_MAINTENANCE_BATCH = 1000, MAX_CURSOR_LENGTH2 = 1024, DEFAULT_MAX_DELIVERY_ATTEMPTS = 5, DEFAULT_PAGE_SIZE = 50, SAFE_ID, SAFE_TOKEN, SAFE_HASH, SAFE_UUID, SAFE_CHANNEL_TARGET, SAFE_CANONICAL_REF, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, OWNED_SCHEMA_OBJECTS, REQUIRED_COLUMNS, SYSTEM_CLOCK;
 var init_source_watch = __esm(() => {
@@ -42782,7 +43114,7 @@ var init_setup_preflight = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash31 } from "node:crypto";
+import { createHash as createHash32 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -42794,7 +43126,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash31("sha256").update(material, "utf8").digest("hex");
+  return createHash32("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -43928,7 +44260,7 @@ var init_credential_health = __esm(() => {
 
 // src/workers/classification/secret-locations.ts
 import { Database as Database9 } from "bun:sqlite";
-import { createHash as createHash32 } from "node:crypto";
+import { createHash as createHash33 } from "node:crypto";
 import { chmodSync as chmodSync13, closeSync as closeSync9, existsSync as existsSync27, mkdirSync as mkdirSync20, openSync as openSync9 } from "node:fs";
 import { dirname as dirname27 } from "node:path";
 
@@ -43971,7 +44303,7 @@ class SecretLocationsIndex {
     const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
     const locator = input.locator?.trim() && detectSecretFindingKinds(input.locator).length === 0 ? input.locator.trim().slice(0, 1000) : null;
     const folderKeys = [...new Set((input.folderKeys ?? []).map((key) => key.trim()).filter(Boolean))].sort();
-    const contentHash = input.text !== undefined ? createHash32("sha256").update(input.text, "utf8").digest("hex") : null;
+    const contentHash = input.text !== undefined ? createHash33("sha256").update(input.text, "utf8").digest("hex") : null;
     const existing = this.get(input.identity);
     if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
       return false;
@@ -44041,7 +44373,7 @@ class SecretLocationsIndex {
   }
 }
 function secretLocationRef(location) {
-  return `secret:${createHash32("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
+  return `secret:${createHash33("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
 }
 function secretLocationWithinScope(location, scope) {
   if (scope.accountScope && location.accountScope !== scope.accountScope)
@@ -49658,11 +49990,11 @@ var init_delphi_scorer = __esm(() => {
 
 // src/workers/classification/sniffer-store.ts
 import { Database as Database12 } from "bun:sqlite";
-import { createHash as createHash35 } from "node:crypto";
+import { createHash as createHash36 } from "node:crypto";
 import { chmodSync as chmodSync15, existsSync as existsSync34, mkdirSync as mkdirSync25 } from "node:fs";
 import { dirname as dirname34 } from "node:path";
 function snifferMaterialHash(pass, material) {
-  return createHash35("sha256").update(`${pass}
+  return createHash36("sha256").update(`${pass}
 ${material}`).digest("hex");
 }
 
@@ -49866,7 +50198,7 @@ var init_sniffer_store = __esm(() => {
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash36 } from "node:crypto";
+import { createHash as createHash37 } from "node:crypto";
 function snifferTierKey(verdict) {
   return verdict.tier === "personal" && verdict.confidence >= SNIFFER_PERSONAL_MIN_CONFIDENCE && !SNIFFER_HARD_CATEGORIES.has(verdict.category) ? "private" : "secure";
 }
@@ -50049,7 +50381,7 @@ var init_sniffer = __esm(() => {
     `{"verdicts":[{"i":<item number>,"tier":"personal"|"private","category":${SNIFFER_CATEGORIES.map((c) => `"${c}"`).join("|")},"confidence":<number from 0 to 1>}]}`
   ].join(`
 `);
-  SNIFFER_PROMPT_VERSION = `p-${createHash36("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash37("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
 });
 
 // src/workers/classification/sniffer-lane.ts
@@ -50792,7 +51124,7 @@ var init_tier_move = __esm(() => {
 });
 
 // src/workers/classification/tier-migration.ts
-import { createHash as createHash37 } from "node:crypto";
+import { createHash as createHash38 } from "node:crypto";
 import { chmodSync as chmodSync17, existsSync as existsSync35, mkdirSync as mkdirSync27, readFileSync as readFileSync30, renameSync as renameSync8, writeFileSync as writeFileSync9 } from "node:fs";
 import { homedir as homedir38 } from "node:os";
 import { dirname as dirname37, join as join48 } from "node:path";
@@ -50842,7 +51174,7 @@ function findPlan(statePath, planId) {
   return plan;
 }
 function sha2564(text) {
-  return createHash37("sha256").update(text, "utf8").digest("hex");
+  return createHash38("sha256").update(text, "utf8").digest("hex");
 }
 function tierMigrationBatchKey(selector) {
   return sha2564(`tier-migration-batch\x00${normalizeSelector(selector)}`).slice(0, 32);
@@ -52025,8 +52357,8 @@ function purgeTargets(plan, lanes) {
   }
   const copies = targets.reduce((sum2, target) => sum2 + target.superseded.length, 0);
   const namesOnly = targets.reduce((sum2, target) => sum2 + target.namesOnly.length, 0);
-  const digest = sha2564(JSON.stringify(canonical({ planId: plan.planId, copies, chunks, namesOnly, namesOnlyChunks }))).slice(0, 16);
-  return { targets, chunks, namesOnlyChunks, digest };
+  const digest2 = sha2564(JSON.stringify(canonical({ planId: plan.planId, copies, chunks, namesOnly, namesOnlyChunks }))).slice(0, 16);
+  return { targets, chunks, namesOnlyChunks, digest: digest2 };
 }
 function chunkCountIn(lane, corpusId, proposal) {
   const domain = lane.set.domainForCorpus(corpusId);
@@ -52041,24 +52373,24 @@ async function purgeTierMigration(options) {
   if (plan.state === "running" && plan.lock && processAlive(plan.lock.pid) && plan.lock.pid !== process.pid) {
     throw new OperationError("invalid_request", `Plan ${plan.planId} is running; purge after it stops.`);
   }
-  const { targets, chunks, namesOnlyChunks, digest } = purgeTargets(plan, options.lanes);
+  const { targets, chunks, namesOnlyChunks, digest: digest2 } = purgeTargets(plan, options.lanes);
   const copyCount = targets.reduce((sum2, target) => sum2 + target.superseded.length, 0);
   const namesOnlyCount = targets.reduce((sum2, target) => sum2 + target.namesOnly.length, 0);
-  const counted = { planId: plan.planId, copies: copyCount, chunks, namesOnlyCopies: namesOnlyCount, namesOnlyChunks, digest };
+  const counted = { planId: plan.planId, copies: copyCount, chunks, namesOnlyCopies: namesOnlyCount, namesOnlyChunks, digest: digest2 };
   if (!options.approve)
     return { ...counted, approved: false };
-  if (options.expect !== digest) {
-    throw new OperationError("invalid_request", `The purge counts changed since the dry run (digest ${digest}${options.expect ? `, expected ${options.expect}` : ""}).`, `Run olympus tier migrate purge --plan ${plan.planId} to see the counts, then approve with --expect <digest>.`);
+  if (options.expect !== digest2) {
+    throw new OperationError("invalid_request", `The purge counts changed since the dry run (digest ${digest2}${options.expect ? `, expected ${options.expect}` : ""}).`, `Run olympus tier migrate purge --plan ${plan.planId} to see the counts, then approve with --expect <digest>.`);
   }
   if (copyCount === 0 && namesOnlyCount === 0)
     return { ...counted, approved: true };
-  const approvalEntryId = `tier-migration-purge-approval:${plan.planId}:${digest}`;
+  const approvalEntryId = `tier-migration-purge-approval:${plan.planId}:${digest2}`;
   const total = (counts) => Object.values(counts).reduce((sum2, count) => sum2 + count, 0);
   await appendEmbeddingLedgerEntryOnce(options.paths.embeddingLedgerPath, {
     entry_id: approvalEntryId,
     recorded_at: now().toISOString(),
     kind: "invalidation",
-    what: `The owner approved purging what tier migration plan ${plan.planId} kept hidden (counts digest ${digest}): ` + `${copyCount} superseded copy(ies) with ${total(chunks)} chunk(s) and their vectors, and the ${total(namesOnlyChunks)} chunk(s) ` + `and vectors held in ${namesOnlyCount} names-only copy(ies) a split move left. Current content copies are not touched.`,
+    what: `The owner approved purging what tier migration plan ${plan.planId} kept hidden (counts digest ${digest2}): ` + `${copyCount} superseded copy(ies) with ${total(chunks)} chunk(s) and their vectors, and the ${total(namesOnlyChunks)} chunk(s) ` + `and vectors held in ${namesOnlyCount} names-only copy(ies) a split move left. Current content copies are not touched.`,
     scope: { corpora: [...new Set([...Object.keys(chunks), ...Object.keys(namesOnlyChunks)])].sort() },
     ...options.why?.trim() ? { why: options.why.trim() } : {},
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
@@ -52107,7 +52439,7 @@ async function purgeTierMigration(options) {
       lane.set.ledger.markMigrationProposal(plan.planId, proposal.identity, { status: "purged" });
     }
   }
-  const invalidationEntryId = `tier-migration-purge:${plan.planId}:${digest}`;
+  const invalidationEntryId = `tier-migration-purge:${plan.planId}:${digest2}`;
   await appendEmbeddingLedgerEntryOnce(options.paths.embeddingLedgerPath, {
     entry_id: invalidationEntryId,
     recorded_at: now().toISOString(),
@@ -52392,7 +52724,7 @@ __export(exports_tier_migration_cli, {
   runTierMigrateCommand: () => runTierMigrateCommand,
   TIER_MIGRATE_USAGE: () => TIER_MIGRATE_USAGE
 });
-import { createHash as createHash38 } from "node:crypto";
+import { createHash as createHash39 } from "node:crypto";
 async function runTierMigrateCommand(args, context = {}) {
   const [command, ...rest] = args;
   const flags = parseFlags(rest);
@@ -52571,7 +52903,7 @@ async function installedInputs(env, options) {
   }
   const sensitivityMap = mapRead.status === "ok" ? mapRead.map : undefined;
   const rules = loadOwnerTierRules({ env, allowMissing: true });
-  const rulesDigest = createHash38("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
+  const rulesDigest = createHash39("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
   const revision = `map:${sensitivityMapRevision(sensitivityMap)};rules:${rules.length > 0 ? rulesDigest : "none"}`;
   const base = {
     ...sensitivityMap ? { sensitivityMap } : {},
@@ -53286,6 +53618,71 @@ var init_source_scheduler_state = __esm(() => {
       this.code = code;
     }
   };
+});
+
+// src/core/remote-public-url.ts
+var exports_remote_public_url = {};
+__export(exports_remote_public_url, {
+  resolveRemotePublicUrls: () => resolveRemotePublicUrls,
+  parseRemotePublicBaseUrl: () => parseRemotePublicBaseUrl,
+  isConfiguredResource: () => isConfiguredResource,
+  REMOTE_PUBLIC_BASE_URL_ENV: () => REMOTE_PUBLIC_BASE_URL_ENV,
+  REMOTE_MCP_RESOURCE_PATH: () => REMOTE_MCP_RESOURCE_PATH
+});
+function parseRemotePublicBaseUrl(value) {
+  const raw = value?.trim();
+  if (!raw)
+    return { enabled: false, reason: "not_configured" };
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} is not a URL.` };
+  }
+  if (url.username || url.password) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not carry credentials.` };
+  }
+  if (url.search || url.hash || raw.includes("?") || raw.includes("#")) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not have a query or fragment.` };
+  }
+  if (url.pathname !== "/" && url.pathname !== "") {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must be an origin such as https://example.com, with no path.` };
+  }
+  const secure = url.protocol === "https:";
+  if (!secure && !(url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname))) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must use https (plain http is allowed only on a loopback host).` };
+  }
+  const origin = url.origin;
+  return {
+    enabled: true,
+    urls: {
+      origin,
+      host: url.host.toLowerCase(),
+      issuer: origin,
+      resource: `${origin}${REMOTE_MCP_RESOURCE_PATH}`,
+      protectedResourceMetadataUrl: `${origin}/.well-known/oauth-protected-resource${REMOTE_MCP_RESOURCE_PATH}`,
+      secure
+    }
+  };
+}
+function resolveRemotePublicUrls(env = process.env) {
+  return parseRemotePublicBaseUrl(env[REMOTE_PUBLIC_BASE_URL_ENV]);
+}
+function isConfiguredResource(value, urls) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || value.includes("#"))
+    return false;
+  const path = parsed.pathname.length > 1 ? parsed.pathname.replace(/\/$/, "") : parsed.pathname;
+  return `${parsed.origin}${path}` === urls.resource;
+}
+var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL", REMOTE_MCP_RESOURCE_PATH = "/mcp", LOOPBACK_HOSTNAMES;
+var init_remote_public_url = __esm(() => {
+  LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 
 // node_modules/zod/v4/core/core.js
@@ -68528,7 +68925,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync19, mkdirSync as mkdirSync29 } from "node:fs";
-import { createHash as createHash39, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash40, randomUUID as randomUUID16 } from "node:crypto";
 import { homedir as homedir41 } from "node:os";
 import { dirname as dirname39, join as join50 } from "node:path";
 import { Database as Database15 } from "bun:sqlite";
@@ -69588,7 +69985,7 @@ function makeJobId() {
   return `fx_${randomUUID16()}`;
 }
 function hashString5(value) {
-  return createHash39("sha256").update(value).digest("hex");
+  return createHash40("sha256").update(value).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -71348,9 +71745,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer5 } from "node:buffer";
-import { createHash as createHash40 } from "node:crypto";
+import { createHash as createHash41 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash40("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash41("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -71976,7 +72373,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash41 } from "node:crypto";
+import { createHash as createHash42 } from "node:crypto";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
     return { allowed: true };
@@ -72455,7 +72852,7 @@ function retryable(errorKind, error2) {
 }
 function hashError(error2) {
   const detail = error2 instanceof Error ? `${error2.name}:${error2.message}` : String(error2);
-  return createHash41("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash42("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error2) {
   const message = error2 instanceof Error ? error2.message : "";
@@ -72570,7 +72967,7 @@ function summarizeEgressDestinations(values) {
   return { egressDestination: "venice_mixed_approved" };
 }
 function hashToken(value) {
-  return createHash41("sha256").update(value).digest("hex");
+  return createHash42("sha256").update(value).digest("hex");
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS;
 var init_runner = __esm(() => {
@@ -74442,7 +74839,7 @@ var init_answer_latency_log = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash42 } from "node:crypto";
+import { createHash as createHash43 } from "node:crypto";
 import { readFileSync as readFileSync32 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir44 } from "node:os";
@@ -74916,7 +75313,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2565(value) {
-  return createHash42("sha256").update(value, "utf8").digest("hex");
+  return createHash43("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -77443,7 +77840,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash43 } from "node:crypto";
+import { createHash as createHash44 } from "node:crypto";
 function escapeHtml(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -77503,14 +77900,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash43("sha256").update(normalised).digest("hex");
+  return createHash44("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml(input.title) : `<a class="lead" href="${escapeHtml(leadHref)}">${escapeHtml(input.title)}</a> <span class="crumb">/</span> ${escapeHtml(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash43("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash44("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -80677,7 +81074,7 @@ var init_control_ui_contract = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac3, randomBytes as randomBytes7, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes8, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -80988,7 +81385,7 @@ function dashboardControlExpiresAtMs(parts) {
 function mintDashboardControlSession(authToken, origin, nowMs) {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes7(24).toString("base64url"),
+    nonce: randomBytes8(24).toString("base64url"),
     issuedSeconds: nowSeconds,
     originTag: dashboardControlOriginTag(authToken, origin)
   };
@@ -81111,7 +81508,7 @@ function verifyGatewayCallbackPeerHeader(value, authToken) {
   const expected = createHmac3("sha256", authToken).update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${peer}`).digest("base64url");
   const presentedBytes = Buffer.from(presented, "ascii");
   const expectedBytes = Buffer.from(expected, "ascii");
-  if (presentedBytes.length !== expectedBytes.length || !timingSafeEqual3(presentedBytes, expectedBytes))
+  if (presentedBytes.length !== expectedBytes.length || !timingSafeEqual4(presentedBytes, expectedBytes))
     return;
   return peer;
 }
@@ -81222,7 +81619,7 @@ function constantTimeStringEqual(actual, expected) {
   const expectedPadded = new Uint8Array(maxLength);
   actualPadded.set(actualBytes.slice(0, maxLength));
   expectedPadded.set(expectedBytes.slice(0, maxLength));
-  return timingSafeEqual3(actualPadded, expectedPadded) && actualBytes.byteLength === expectedBytes.byteLength;
+  return timingSafeEqual4(actualPadded, expectedPadded) && actualBytes.byteLength === expectedBytes.byteLength;
 }
 function workerAuthRequiredResponse() {
   return new Response(JSON.stringify({
@@ -82903,7 +83300,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash44 } from "node:crypto";
+import { createHash as createHash45 } from "node:crypto";
 function parseStructuredChatScope(value) {
   const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -82931,7 +83328,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash44("sha256").update(value).digest("hex");
+  return createHash45("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -83136,7 +83533,7 @@ function safeDetail(value) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash45, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { createHash as createHash46, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
 import { readFileSync as readFileSync36, statSync as statSync11 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
 import { join as join58, resolve as resolve9 } from "node:path";
@@ -86175,7 +86572,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual4(createHash45("sha256").update(expected).digest(), createHash45("sha256").update(state).digest());
+  return timingSafeEqual5(createHash46("sha256").update(expected).digest(), createHash46("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -87101,7 +87498,7 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash46 } from "node:crypto";
+import { createHash as createHash47 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -87788,7 +88185,7 @@ function createCanonicalDropboxSchedulerSource(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash46("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash47("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -88348,7 +88745,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash46("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash47("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -90202,7 +90599,7 @@ var init_webStandardStreamableHttp = __esm(() => {
 });
 
 // src/workers/remote-request-body.ts
-async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BODY_BYTES) {
+async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BODY_BYTES, options = {}) {
   const declared = request.headers.get("Content-Length");
   if (declared !== null) {
     const length = Number(declared);
@@ -90214,9 +90611,20 @@ async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BOD
   const reader = request.body.getReader();
   const chunks = [];
   let total = 0;
+  let timer;
+  const deadline = options.deadlineMs === undefined ? undefined : new Promise((resolve10) => {
+    timer = setTimeout(() => resolve10("timeout"), options.deadlineMs);
+  });
   try {
     for (;; ) {
-      const { done, value } = await reader.read();
+      const next = deadline ? await Promise.race([reader.read(), deadline]) : await reader.read();
+      if (next === "timeout") {
+        await reader.cancel().catch(() => {
+          return;
+        });
+        return { ok: false, reason: "timeout" };
+      }
+      const { done, value } = next;
       if (done)
         break;
       total += value.byteLength;
@@ -90233,6 +90641,8 @@ async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BOD
       return;
     });
     return { ok: false, reason: "unreadable" };
+  } finally {
+    clearTimeout(timer);
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
@@ -90268,6 +90678,7 @@ __export(exports_remote_mcp, {
   createRemoteMcpHandler: () => createRemoteMcpHandler,
   createInProcessOperationContext: () => createInProcessOperationContext,
   bearerToken: () => bearerToken,
+  authenticateRemoteRequest: () => authenticateRemoteRequest,
   REMOTE_MCP_PATH: () => REMOTE_MCP_PATH
 });
 import { existsSync as existsSync41 } from "node:fs";
@@ -90280,22 +90691,9 @@ function withRemoteMcpRoute(remoteMcp, rest) {
 }
 function createRemoteMcpHandler(options) {
   return async (request) => {
-    const token = bearerToken(request.headers.get("Authorization"));
-    if (token === undefined)
-      return unauthorized();
-    if (!isWellFormedRemoteConnectionToken(token))
-      return unauthorized("invalid_token");
-    let store;
-    try {
-      store = options.connections();
-    } catch {
-      return jsonResponse(503, { error: "remote_connections_unavailable" });
-    }
-    if (!store)
-      return unauthorized("invalid_token");
-    const verification = store.verifyToken(token);
+    const verification = authenticateRemoteRequest(request, options);
     if (!verification.ok)
-      return unauthorized("invalid_token");
+      return verification.response;
     if (request.method !== "POST") {
       return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "POST" });
     }
@@ -90324,13 +90722,37 @@ function createRemoteMcpHandler(options) {
     }
   };
 }
+function authenticateRemoteRequest(request, options) {
+  const urls = options.publicUrls;
+  const refuse2 = (error2) => ({ ok: false, response: unauthorized(error2, urls) });
+  const token = bearerToken(request.headers.get("Authorization"));
+  if (token === undefined)
+    return refuse2();
+  const oauthToken = urls !== undefined && isWellFormedOAuthAccessToken(token);
+  if (!oauthToken && !isWellFormedRemoteConnectionToken(token))
+    return refuse2("invalid_token");
+  let store;
+  try {
+    store = options.connections();
+  } catch {
+    return { ok: false, response: jsonResponse(503, { error: "remote_connections_unavailable" }) };
+  }
+  if (!store)
+    return refuse2("invalid_token");
+  if (oauthToken) {
+    const verification2 = store.oauth.verifyAccessToken(token, urls.resource);
+    return verification2.ok ? { ok: true, connection: verification2.connection } : refuse2("invalid_token");
+  }
+  const verification = store.verifyToken(token);
+  return verification.ok ? { ok: true, connection: verification.connection } : refuse2("invalid_token");
+}
 function lazyRemoteConnectionStore(resolvePath2, open6) {
   let store;
-  return () => {
+  return (options = {}) => {
     if (store)
       return store;
     const dbPath = resolvePath2();
-    if (!existsSync41(dbPath))
+    if (!options.create && !existsSync41(dbPath))
       return;
     store = open6(dbPath);
     return store;
@@ -90366,8 +90788,14 @@ function bearerToken(header) {
   const match = /^Bearer ([^\s]+)$/i.exec(header.trim());
   return match?.[1];
 }
-function unauthorized(error2) {
-  const challenge = error2 ? `Bearer realm="olympus", error="${error2}", error_description="The connection token is not valid or has been revoked."` : 'Bearer realm="olympus"';
+function unauthorized(error2, urls) {
+  const parts = ['realm="olympus"'];
+  if (urls)
+    parts.push(`resource_metadata="${urls.protectedResourceMetadataUrl}"`);
+  if (error2) {
+    parts.push(`error="${error2}"`, 'error_description="The connection token is not valid or has been revoked."');
+  }
+  const challenge = `Bearer ${parts.join(", ")}`;
   return jsonResponse(401, { error: error2 ?? "unauthorized" }, { "WWW-Authenticate": challenge });
 }
 function jsonResponse(status, body, headers = {}) {
@@ -90383,8 +90811,1147 @@ var init_remote_mcp = __esm(() => {
   init_email();
   init_operation_caller();
   init_remote_connections();
+  init_remote_oauth_store();
   init_server3();
   init_remote_request_body();
+});
+
+// src/workers/remote-oauth/redirect-uris.ts
+function isAcceptableRedirectUri(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_REDIRECT_URI_LENGTH)
+    return false;
+  if (value.includes("#"))
+    return false;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.username || url.password)
+    return false;
+  if (url.protocol === "https:")
+    return url.hostname.length > 0;
+  return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname);
+}
+function isLoopbackRedirectUri(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname);
+  } catch {
+    return false;
+  }
+}
+function redirectUriMatches(requested, registered2) {
+  if (!isAcceptableRedirectUri(requested))
+    return false;
+  if (registered2.includes(requested))
+    return true;
+  if (!isLoopbackRedirectUri(requested))
+    return false;
+  const want = new URL(requested);
+  return registered2.some((candidate) => {
+    if (!isLoopbackRedirectUri(candidate))
+      return false;
+    const have = new URL(candidate);
+    return have.hostname === want.hostname && have.pathname === want.pathname && have.search === want.search;
+  });
+}
+function redirectHost(value) {
+  try {
+    return new URL(value).host;
+  } catch {
+    return value;
+  }
+}
+var LOOPBACK_HOSTNAMES2, MAX_REDIRECT_URI_LENGTH = 2048;
+var init_redirect_uris = __esm(() => {
+  LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "[::1]", "localhost"]);
+});
+
+// src/workers/remote-oauth/cimd.ts
+import { lookup as lookup2 } from "node:dns/promises";
+import { isIP as isIP2 } from "node:net";
+import { connect as tlsConnect } from "node:tls";
+function isClientIdMetadataUrl(clientId) {
+  return clientId.startsWith("https://");
+}
+function parseClientIdMetadataUrl(clientId) {
+  if (clientId.length > MAX_URL_LENGTH)
+    throw new ClientMetadataError("client_id is too long.");
+  let url;
+  try {
+    url = new URL(clientId);
+  } catch {
+    throw new ClientMetadataError("client_id is not a URL.");
+  }
+  if (url.protocol !== "https:")
+    throw new ClientMetadataError("client_id must use https.");
+  if (url.username || url.password)
+    throw new ClientMetadataError("client_id must not carry credentials.");
+  if (url.hash || clientId.includes("#"))
+    throw new ClientMetadataError("client_id must not have a fragment.");
+  if (url.port !== "")
+    throw new ClientMetadataError("client_id must use the default https port.");
+  if (url.pathname === "/" || url.pathname === "")
+    throw new ClientMetadataError("client_id must have a path.");
+  if (/(^|\/)\.\.?(\/|$)/.test(url.pathname))
+    throw new ClientMetadataError("client_id must not have dot segments.");
+  return url;
+}
+function validateClientMetadataDocument(document2, clientId) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2)) {
+    throw new ClientMetadataError("Client metadata is not a JSON object.");
+  }
+  const doc2 = document2;
+  if (doc2.client_id !== clientId)
+    throw new ClientMetadataError("Client metadata client_id does not match its URL.");
+  if ("client_secret" in doc2 || "client_secret_expires_at" in doc2) {
+    throw new ClientMetadataError("Client metadata must not contain a client secret.");
+  }
+  const method = doc2.token_endpoint_auth_method;
+  const supported = Array.isArray(doc2.token_endpoint_auth_methods_supported) ? doc2.token_endpoint_auth_methods_supported : [];
+  if (method !== undefined && method !== "none" && !supported.includes("none")) {
+    throw new ClientMetadataError("Olympus accepts public clients only (token_endpoint_auth_method none).");
+  }
+  const redirectUris = doc2.redirect_uris;
+  if (!Array.isArray(redirectUris) || redirectUris.length === 0 || redirectUris.length > MAX_REDIRECT_URIS) {
+    throw new ClientMetadataError("Client metadata must list redirect_uris.");
+  }
+  for (const uri of redirectUris) {
+    if (typeof uri !== "string" || !isAcceptableRedirectUri(uri)) {
+      throw new ClientMetadataError("Client metadata lists a redirect URI that is not https or loopback.");
+    }
+  }
+  const host = new URL(clientId).hostname;
+  return {
+    clientId,
+    clientName: sanitizeCallerDisplayName(doc2.client_name) ?? host,
+    redirectUris,
+    clientIdHost: host
+  };
+}
+function createClientMetadataResolver(options = {}) {
+  const now = options.now ?? Date.now;
+  const cache = new Map;
+  return async (clientId) => {
+    const hit = cache.get(clientId);
+    if (hit && hit.expiresAt > now())
+      return hit.value;
+    cache.delete(clientId);
+    const url = parseClientIdMetadataUrl(clientId);
+    if (options.allowFetch && !options.allowFetch()) {
+      throw new ClientMetadataError("too many new apps are connecting right now. Try again in a minute.");
+    }
+    const fetched = await fetchPinnedJson(url, options);
+    const value = validateClientMetadataDocument(fetched.body, clientId);
+    if (cache.size >= CIMD_CACHE_MAX_ENTRIES) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined)
+        cache.delete(oldest);
+    }
+    const ttl = Math.min(CIMD_CACHE_MAX_TTL_MS, Math.max(CIMD_CACHE_MIN_TTL_MS, fetched.maxAgeMs ?? CIMD_CACHE_MAX_TTL_MS));
+    cache.set(clientId, { value, expiresAt: now() + ttl });
+    return value;
+  };
+}
+async function defaultResolve(hostname) {
+  const answers = await lookup2(hostname, { all: true, verbatim: true });
+  return answers.map((answer) => answer.address);
+}
+async function fetchPinnedJson(url, options = {}) {
+  const allowed = options.isAllowedAddress ?? isPublicAddress;
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const timeoutMs = options.timeoutMs ?? CIMD_FETCH_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  let addresses;
+  if (isIP2(hostname)) {
+    addresses = [hostname];
+  } else {
+    try {
+      addresses = await withTimeout((options.resolve ?? defaultResolve)(hostname), timeoutMs);
+    } catch {
+      throw new ClientMetadataError("Client metadata host did not resolve.");
+    }
+  }
+  if (addresses.length === 0)
+    throw new ClientMetadataError("Client metadata host did not resolve.");
+  if (!addresses.every((address2) => allowed(address2))) {
+    throw new ClientMetadataError("Client metadata host resolves to a private or reserved address.");
+  }
+  const address = addresses[0];
+  const raw = await tlsGet({
+    address,
+    port: options.portOverride ?? 443,
+    servername: isIP2(hostname) ? undefined : hostname,
+    hostHeader: url.host,
+    path: `${url.pathname}${url.search}`,
+    ca: options.ca,
+    remainingMs: Math.max(1, deadline - Date.now())
+  });
+  const response = parseHttpResponse(raw);
+  if (response.status !== 200) {
+    throw new ClientMetadataError(`Client metadata fetch returned HTTP ${response.status}.`);
+  }
+  let body;
+  try {
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(response.body));
+  } catch {
+    throw new ClientMetadataError("Client metadata is not valid JSON.");
+  }
+  return { body, maxAgeMs: parseMaxAge(response.headers.get("cache-control")) };
+}
+function withTimeout(promise2, ms) {
+  return new Promise((resolve10, reject) => {
+    const timer = setTimeout(() => reject(new Error("timeout")), ms);
+    promise2.then((value) => {
+      clearTimeout(timer);
+      resolve10(value);
+    }, (error2) => {
+      clearTimeout(timer);
+      reject(error2);
+    });
+  });
+}
+function tlsGet(input) {
+  return new Promise((resolve10, reject) => {
+    const chunks = [];
+    let size = 0;
+    let settled = false;
+    let socket;
+    const finish2 = (error2) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      socket?.destroy();
+      if (error2)
+        reject(error2);
+      else
+        resolve10(Buffer.concat(chunks));
+    };
+    const timer = setTimeout(() => finish2(new ClientMetadataError("Client metadata fetch timed out.")), input.remainingMs);
+    try {
+      socket = tlsConnect({
+        host: input.address,
+        port: input.port,
+        ...input.servername ? { servername: input.servername } : {},
+        ...input.ca ? { ca: [input.ca] } : {},
+        ALPNProtocols: ["http/1.1"],
+        rejectUnauthorized: true
+      }, () => {
+        socket.write(`GET ${input.path} HTTP/1.1\r
+Host: ${input.hostHeader}\r
+Accept: application/json\r
+` + `User-Agent: Olympus-OAuth/1\r
+Accept-Encoding: identity\r
+Connection: close\r
+\r
+`);
+      });
+    } catch {
+      finish2(new ClientMetadataError("Client metadata host could not be reached."));
+      return;
+    }
+    socket.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > CIMD_MAX_BYTES + 16 * 1024) {
+        finish2(new ClientMetadataError("Client metadata is too large."));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    socket.on("end", () => finish2());
+    socket.on("close", () => finish2());
+    socket.on("error", () => finish2(new ClientMetadataError("Client metadata host could not be reached securely.")));
+  });
+}
+function parseHttpResponse(raw) {
+  const headerEnd = raw.indexOf(`\r
+\r
+`);
+  if (headerEnd < 0)
+    throw new ClientMetadataError("Client metadata response was incomplete.");
+  const lines = raw.subarray(0, headerEnd).toString("latin1").split(`\r
+`);
+  const statusMatch = /^HTTP\/1\.[01] (\d{3})/.exec(lines[0] ?? "");
+  if (!statusMatch)
+    throw new ClientMetadataError("Client metadata response was not HTTP/1.1.");
+  const headers = new Headers;
+  for (const line of lines.slice(1)) {
+    const colon = line.indexOf(":");
+    if (colon <= 0)
+      continue;
+    try {
+      headers.append(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
+    } catch {
+      throw new ClientMetadataError("Client metadata response had a malformed header.");
+    }
+  }
+  const rest = raw.subarray(headerEnd + 4);
+  let body;
+  if ((headers.get("transfer-encoding") ?? "").toLowerCase().includes("chunked")) {
+    body = decodeChunked(rest);
+  } else if (headers.has("content-length")) {
+    const length = Number(headers.get("content-length"));
+    if (!Number.isInteger(length) || length < 0 || length > rest.length) {
+      throw new ClientMetadataError("Client metadata response was truncated.");
+    }
+    body = rest.subarray(0, length);
+  } else {
+    body = rest;
+  }
+  if (body.length > CIMD_MAX_BYTES)
+    throw new ClientMetadataError("Client metadata is too large.");
+  return { status: Number(statusMatch[1]), headers, body };
+}
+function decodeChunked(data) {
+  const parts = [];
+  let offset = 0;
+  for (;; ) {
+    const lineEnd = data.indexOf(`\r
+`, offset);
+    if (lineEnd < 0)
+      throw new ClientMetadataError("Client metadata response was truncated.");
+    const size = Number.parseInt(data.subarray(offset, lineEnd).toString("latin1").split(";")[0].trim(), 16);
+    if (!Number.isFinite(size) || size < 0)
+      throw new ClientMetadataError("Client metadata response was malformed.");
+    if (size === 0)
+      break;
+    const start = lineEnd + 2;
+    if (start + size > data.length)
+      throw new ClientMetadataError("Client metadata response was truncated.");
+    parts.push(data.subarray(start, start + size));
+    offset = start + size + 2;
+  }
+  return Buffer.concat(parts);
+}
+function parseMaxAge(cacheControl) {
+  if (!cacheControl)
+    return;
+  if (/no-store|no-cache/i.test(cacheControl))
+    return 0;
+  const match = /max-age=(\d+)/i.exec(cacheControl);
+  return match ? Number(match[1]) * 1000 : undefined;
+}
+function isPublicAddress(address) {
+  const bare = address.replace(/^\[|\]$/g, "").split("%")[0];
+  const family = isIP2(bare);
+  if (family === 4)
+    return isPublicIPv4(bare);
+  if (family === 6)
+    return isPublicIPv6(bare);
+  return false;
+}
+function ipv4ToInt(address) {
+  return address.split(".").reduce((acc, part) => (acc << 8) + Number(part), 0) >>> 0;
+}
+function isPublicIPv4(address) {
+  const value = ipv4ToInt(address);
+  return !BLOCKED_IPV4.some(([base, bits]) => {
+    const mask = bits === 0 ? 0 : 4294967295 << 32 - bits >>> 0;
+    return (value & mask) === (ipv4ToInt(base) & mask);
+  });
+}
+function expandIPv6(address) {
+  let text = address.toLowerCase();
+  const dotted = /(\d+\.\d+\.\d+\.\d+)$/.exec(text);
+  if (dotted) {
+    const value = ipv4ToInt(dotted[1]);
+    text = `${text.slice(0, -dotted[1].length)}${(value >>> 16).toString(16)}:${(value & 65535).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2)
+    return;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 1 && missing !== 0)
+    return;
+  if (missing < 0)
+    return;
+  const groups = [...head, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...tail].map((group) => Number.parseInt(group, 16));
+  return groups.length === 8 && groups.every((group) => Number.isInteger(group) && group >= 0 && group <= 65535) ? groups : undefined;
+}
+function isPublicIPv6(address) {
+  const g = expandIPv6(address);
+  if (!g)
+    return false;
+  const embeddedV4 = (hi, lo) => `${hi >>> 8}.${hi & 255}.${lo >>> 8}.${lo & 255}`;
+  if (g.every((group) => group === 0))
+    return false;
+  if (g.slice(0, 7).every((group) => group === 0) && g[7] === 1)
+    return false;
+  if (g.slice(0, 5).every((group) => group === 0) && (g[5] === 65535 || g[5] === 0)) {
+    return isPublicIPv4(embeddedV4(g[6], g[7]));
+  }
+  if (g[0] === 100 && g[1] === 65435) {
+    if (g[2] === 1)
+      return false;
+    return isPublicIPv4(embeddedV4(g[6], g[7]));
+  }
+  if (g[0] === 8194)
+    return isPublicIPv4(embeddedV4(g[1], g[2]));
+  const first = g[0];
+  if ((first & 65024) === 64512)
+    return false;
+  if ((first & 65472) === 65152)
+    return false;
+  if ((first & 65472) === 65216)
+    return false;
+  if ((first & 65280) === 65280)
+    return false;
+  if (first === 8193 && g[1] === 3512)
+    return false;
+  if (first === 8193 && g[1] < 512)
+    return false;
+  if (first === 256 && g[1] === 0 && g[2] === 0 && g[3] === 0)
+    return false;
+  if ((first & 57344) !== 8192)
+    return false;
+  return true;
+}
+var CIMD_FETCH_TIMEOUT_MS = 5000, CIMD_MAX_BYTES, CIMD_CACHE_MAX_TTL_MS, CIMD_CACHE_MIN_TTL_MS = 30000, CIMD_CACHE_MAX_ENTRIES = 128, MAX_REDIRECT_URIS = 20, MAX_URL_LENGTH = 2048, ClientMetadataError, BLOCKED_IPV4;
+var init_cimd = __esm(() => {
+  init_operation_caller();
+  init_redirect_uris();
+  CIMD_MAX_BYTES = 64 * 1024;
+  CIMD_CACHE_MAX_TTL_MS = 5 * 60000;
+  ClientMetadataError = class ClientMetadataError extends Error {
+  };
+  BLOCKED_IPV4 = [
+    ["0.0.0.0", 8],
+    ["10.0.0.0", 8],
+    ["100.64.0.0", 10],
+    ["127.0.0.0", 8],
+    ["169.254.0.0", 16],
+    ["172.16.0.0", 12],
+    ["192.0.0.0", 24],
+    ["192.0.2.0", 24],
+    ["192.88.99.0", 24],
+    ["192.168.0.0", 16],
+    ["198.18.0.0", 15],
+    ["198.51.100.0", 24],
+    ["203.0.113.0", 24],
+    ["224.0.0.0", 4],
+    ["240.0.0.0", 4]
+  ];
+});
+
+// src/workers/remote-oauth/consent-page.ts
+import { randomBytes as randomBytes9 } from "node:crypto";
+function hostnameOf(host) {
+  try {
+    return new URL(`https://${host}`).hostname;
+  } catch {
+    return host;
+  }
+}
+function escapeHtml4(value) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function consentSecurityHeaders(nonce, redirectOrigin) {
+  const formAction = redirectOrigin ? `'self' ${redirectOrigin}` : "'self'";
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": [
+      "default-src 'none'",
+      `style-src 'nonce-${nonce}'`,
+      `form-action ${formAction}`,
+      "frame-ancestors 'none'",
+      "base-uri 'none'"
+    ].join("; "),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+    "Cross-Origin-Opener-Policy": "same-origin"
+  };
+}
+function renderConsentPage(input) {
+  const nonce = randomBytes9(16).toString("base64");
+  const name = escapeHtml4(input.clientName);
+  const provenance = input.verifiedHost ? `<div class="host">${escapeHtml4(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
+  const redirectHostname = hostnameOf(input.redirectHost);
+  const mismatchWarning = input.verifiedHost && !input.loopbackRedirect && redirectHostname !== input.verifiedHost ? `<div class="warn">This app is published by <strong>${escapeHtml4(input.verifiedHost)}</strong> but sends you back to <strong>${escapeHtml4(input.redirectHost)}</strong>. Approve only if you expected that.</div>` : "";
+  const loopbackWarning = input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml4(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : "";
+  const error2 = input.error ? `<p class="err" role="alert">${escapeHtml4(input.error)}${input.attemptsLeft !== undefined ? ` ${input.attemptsLeft} ${input.attemptsLeft === 1 ? "try" : "tries"} left.` : ""}</p>` : "";
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Connect to Olympus</title>
+<style nonce="${nonce}">${STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Connect ${name} to Olympus?</h1>
+<div class="card">
+<div class="name">${name}</div>
+${provenance}
+<p class="meta">After you approve, you return to <strong>${escapeHtml4(input.redirectHost)}</strong></p>
+</div>
+${mismatchWarning}${loopbackWarning}
+<p>${name} will be able to ask Olympus questions under your privacy rules. Private sources stay private, and you can remove it any time with <code>olympus connections revoke</code>.</p>
+<form method="post" action="/connect/authorize">
+<input type="hidden" name="request_id" value="${escapeHtml4(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml4(input.csrf)}">
+${error2}
+<label for="pairing_code">Pairing code</label>
+<input type="text" id="pairing_code" name="pairing_code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" maxlength="20" placeholder="ABCD-EFGH-JKMN" required>
+<p class="hint">Get one by running <code>olympus connections pair</code> on the computer running Olympus, or by asking your OpenClaw agent. Codes last 10 minutes and work once.</p>
+<div class="actions">
+<button class="approve" type="submit" name="action" value="approve">Approve</button>
+<button class="deny" type="submit" name="action" value="deny" formnovalidate>Deny</button>
+</div>
+</form>
+<p class="small">Olympus runs on your own computer. This page was served by it.</p>
+</main>
+</body>
+</html>`;
+  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
+}
+function renderConsentErrorPage(message) {
+  const nonce = randomBytes9(16).toString("base64");
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Olympus could not connect this app</title>
+<style nonce="${nonce}">${STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Olympus could not connect this app</h1>
+<div class="card"><p>${escapeHtml4(message)}</p></div>
+<p class="small">Close this page and try adding the connector again.</p>
+</main>
+</body>
+</html>`;
+  return { body, headers: consentSecurityHeaders(nonce) };
+}
+var STYLE = `
+:root { color-scheme: light dark; --fg: #1a1a1a; --muted: #5c5c5c; --bg: #fafaf8; --card: #ffffff;
+  --line: #deded8; --accent: #1f4fd1; --warn-bg: #fff4d6; --warn-fg: #6b4a00; --err: #b3261e; }
+@media (prefers-color-scheme: dark) { :root { --fg: #ededea; --muted: #a8a8a2; --bg: #141413; --card: #1d1d1b;
+  --line: #34342f; --accent: #8fb0ff; --warn-bg: #3a2f10; --warn-fg: #f3d68a; --err: #ff8a80; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 26rem; margin: 0 auto; padding: 2rem 1rem 3rem; }
+h1 { font-size: 1.35rem; line-height: 1.3; margin: 0 0 1rem; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
+.name { font-weight: 600; font-size: 1.1rem; overflow-wrap: anywhere; }
+.host { font: 600 1.1rem/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: .35rem; overflow-wrap: anywhere; }
+.host.unverified { color: var(--warn-fg); font-family: system-ui, sans-serif; }
+.meta { color: var(--muted); font-size: .92rem; margin: .25rem 0 0; overflow-wrap: anywhere; }
+.warn { background: var(--warn-bg); color: var(--warn-fg); border-radius: 10px; padding: .75rem; font-size: .92rem; margin-bottom: 1rem; }
+.err { color: var(--err); font-weight: 600; margin: 0 0 .75rem; }
+label { display: block; font-weight: 600; margin-bottom: .35rem; }
+input[type=text] { width: 100%; font: 600 1.35rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em;
+  padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg);
+  text-transform: uppercase; }
+.hint { color: var(--muted); font-size: .88rem; margin: .4rem 0 1.25rem; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+.actions { display: flex; gap: .75rem; }
+button { flex: 1; font: 600 1rem/1 system-ui, sans-serif; padding: .85rem 1rem; border-radius: 10px; cursor: pointer; }
+.approve { background: var(--accent); color: #fff; border: 0; }
+.deny { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+p.small { color: var(--muted); font-size: .85rem; margin-top: 1.25rem; }
+`;
+var init_consent_page = () => {};
+
+// src/workers/remote-oauth/handler.ts
+var exports_handler = {};
+__export(exports_handler, {
+  withRemoteOAuthRoutes: () => withRemoteOAuthRoutes,
+  protectedResourceMetadata: () => protectedResourceMetadata,
+  isRemoteOAuthRequest: () => isRemoteOAuthRequest,
+  createRemoteOAuthHandler: () => createRemoteOAuthHandler,
+  authorizationServerMetadata: () => authorizationServerMetadata,
+  REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
+  CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
+});
+import { createHash as createHash48, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+function isRemoteOAuthRequest(request) {
+  return ROUTED_PATHS.has(new URL(request.url).pathname);
+}
+function withRemoteOAuthRoutes(oauth, rest) {
+  return (request) => isRemoteOAuthRequest(request) ? oauth(request) : rest(request);
+}
+function protectedResourceMetadata(urls) {
+  return {
+    resource: urls.resource,
+    authorization_servers: [urls.issuer],
+    bearer_methods_supported: ["header"],
+    resource_name: "Olympus"
+  };
+}
+function authorizationServerMetadata(urls) {
+  return {
+    issuer: urls.issuer,
+    authorization_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.authorize}`,
+    token_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.token}`,
+    registration_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.register}`,
+    revocation_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.revoke}`,
+    response_types_supported: ["code"],
+    response_modes_supported: ["query"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    code_challenge_methods_supported: ["S256"],
+    token_endpoint_auth_methods_supported: ["none"],
+    revocation_endpoint_auth_methods_supported: ["none"],
+    client_id_metadata_document_supported: true,
+    authorization_response_iss_parameter_supported: true
+  };
+}
+function createRemoteOAuthHandler(options) {
+  const urls = options.publicUrls;
+  const now = options.now ?? Date.now;
+  const registrations = tokenBucket(options.registrationBurst ?? 10, 3600000, now);
+  const metadataFetches = tokenBucket(30, 60000, now);
+  const resolveClientMetadata = options.resolveClientMetadata ?? createClientMetadataResolver({ allowFetch: () => metadataFetches.take() });
+  const pending = new Map;
+  const codes = new Map;
+  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve10) => setTimeout(resolve10, ms))));
+  const sweep = () => {
+    const at = now();
+    for (const [id, entry] of pending)
+      if (entry.expiresAt <= at)
+        pending.delete(id);
+    for (const [hash2, entry] of codes)
+      if (entry.expiresAt <= at)
+        codes.delete(hash2);
+  };
+  const resolveClient = async (clientId) => {
+    if (isClientIdMetadataUrl(clientId)) {
+      try {
+        const metadata = await resolveClientMetadata(clientId);
+        return {
+          clientId: metadata.clientId,
+          clientName: metadata.clientName,
+          redirectUris: metadata.redirectUris,
+          verifiedHost: metadata.clientIdHost
+        };
+      } catch (error2) {
+        return error2 instanceof ClientMetadataError ? `This app's identity could not be checked: ${error2.message}` : "This app's identity could not be checked.";
+      }
+    }
+    const registered2 = options.connections().oauth.getRegisteredClient(clientId);
+    if (!registered2)
+      return "This app is not registered with Olympus.";
+    return {
+      clientId: registered2.clientId,
+      clientName: registered2.clientName,
+      redirectUris: registered2.redirectUris,
+      verifiedHost: undefined
+    };
+  };
+  const authorizeGet = async (request, u) => {
+    const params = new URL(request.url).searchParams;
+    const single = singleParams(params);
+    if (!single)
+      return errorPage(400, "The request repeated a parameter.");
+    const clientId = single.get("client_id");
+    const redirectUri = single.get("redirect_uri");
+    if (!clientId)
+      return errorPage(400, "The request did not name an app (client_id).");
+    if (!redirectUri)
+      return errorPage(400, "The request did not say where to return (redirect_uri).");
+    const client = await resolveClient(clientId);
+    if (typeof client === "string")
+      return errorPage(400, client);
+    if (!redirectUriMatches(redirectUri, client.redirectUris)) {
+      return errorPage(400, "The return address is not one this app registered.");
+    }
+    const state = single.get("state") ?? undefined;
+    const fail = (error2, description) => redirectWithParams(redirectUri, { error: error2, error_description: description, state, iss: u.issuer });
+    if (single.get("response_type") !== "code")
+      return fail("unsupported_response_type", "Only response_type=code is supported.");
+    const codeChallenge = single.get("code_challenge");
+    if (!codeChallenge || !PKCE_CHALLENGE_PATTERN.test(codeChallenge)) {
+      return fail("invalid_request", "A PKCE code_challenge is required.");
+    }
+    if (single.get("code_challenge_method") !== "S256") {
+      return fail("invalid_request", "code_challenge_method must be S256.");
+    }
+    const requestedResource = single.get("resource");
+    if (requestedResource !== null && !isConfiguredResource(requestedResource, u)) {
+      return fail("invalid_target", "The requested resource is not this Olympus.");
+    }
+    sweep();
+    const caller = callerKey(request);
+    let callerPending = 0;
+    for (const entry2 of pending.values())
+      if (entry2.caller === caller)
+        callerPending += 1;
+    if (callerPending >= MAX_PENDING_CONSENTS_PER_CALLER || pending.size >= MAX_PENDING_CONSENTS) {
+      return errorPage(429, "Too many approvals are waiting. Finish or close one, or try again in a few minutes.");
+    }
+    const requestId = randomBytes10(16).toString("hex");
+    const csrf = randomBytes10(32).toString("base64url");
+    const entry = {
+      caller,
+      client,
+      redirectUri,
+      codeChallenge,
+      resource: u.resource,
+      state,
+      csrf,
+      attempts: 0,
+      expiresAt: now() + CONSENT_REQUEST_TTL_MS
+    };
+    pending.set(requestId, entry);
+    return consentPage(requestId, entry, u);
+  };
+  const consentPage = (requestId, entry, u, error2, showAttempts = true) => {
+    const page = renderConsentPage({
+      requestId,
+      csrf: entry.csrf,
+      clientName: entry.client.clientName,
+      verifiedHost: entry.client.verifiedHost,
+      redirectHost: redirectHost(entry.redirectUri),
+      redirectOrigin: new URL(entry.redirectUri).origin,
+      loopbackRedirect: isLoopbackRedirectUri(entry.redirectUri),
+      ...error2 ? { error: error2 } : {},
+      ...error2 && showAttempts ? { attemptsLeft: CONSENT_MAX_ATTEMPTS - entry.attempts } : {}
+    });
+    const headers = new Headers(page.headers);
+    headers.append("Set-Cookie", consentCookie(requestId, entry.csrf, u.secure, CONSENT_REQUEST_TTL_MS / 1000));
+    return new Response(page.body, { status: error2 ? 400 : 200, headers });
+  };
+  const authorizePost = async (request, u) => {
+    if (!sameOriginFormPost(request))
+      return errorPage(403, "This approval did not come from the Olympus page.");
+    const form = await readForm(request);
+    if (!form)
+      return errorPage(400, "The approval form was malformed.");
+    const requestId = form.get("request_id") ?? "";
+    sweep();
+    const entry = /^[a-f0-9]{32}$/.test(requestId) ? pending.get(requestId) : undefined;
+    if (!entry)
+      return errorPage(400, "This approval has expired. Start again from the app.");
+    const csrf = form.get("csrf") ?? "";
+    const cookie = readCookie(request, consentCookieName(requestId)) ?? "";
+    if (!constantTimeEqual(csrf, entry.csrf) || !constantTimeEqual(cookie, entry.csrf)) {
+      return errorPage(403, "This approval did not come from the Olympus page.");
+    }
+    const finish2 = (params) => {
+      pending.delete(requestId);
+      const response = redirectWithParams(entry.redirectUri, { ...params, state: entry.state, iss: u.issuer });
+      response.headers.append("Set-Cookie", consentCookie(requestId, "", u.secure, 0));
+      return response;
+    };
+    const action = form.get("action");
+    if (action === "deny")
+      return finish2({ error: "access_denied", error_description: "The owner denied the request." });
+    if (action !== "approve")
+      return errorPage(400, "The approval form was malformed.");
+    const caller = callerKey(request);
+    const wait = pacer.delayFor(caller);
+    if (wait > PAIRING_MAX_HELD_MS) {
+      return consentPage(requestId, entry, u, `Too many wrong codes were tried from here. Wait ${Math.ceil(wait / 1000)} seconds, then try again.`, false);
+    }
+    await pacer.hold(wait);
+    const check = options.connections().oauth.checkPairingCode(form.get("pairing_code") ?? "");
+    if (!check.ok) {
+      if (check.reason === "malformed") {
+        return consentPage(requestId, entry, u, "A pairing code looks like ABCD-EFGH-JKMN (12 letters and digits).", false);
+      }
+      pacer.recordFailure(caller);
+      entry.attempts += 1;
+      if (entry.attempts >= CONSENT_MAX_ATTEMPTS) {
+        return finish2({ error: "access_denied", error_description: "Too many wrong pairing codes." });
+      }
+      return consentPage(requestId, entry, u, "That pairing code is not valid, has expired, or was already used.");
+    }
+    if (codes.size >= MAX_LIVE_CODES)
+      sweep();
+    const code = randomBytes10(32).toString("base64url");
+    codes.set(sha2566(code), {
+      clientId: entry.client.clientId,
+      displayName: entry.client.clientName,
+      redirectUri: entry.redirectUri,
+      codeChallenge: entry.codeChallenge,
+      resource: entry.resource,
+      expiresAt: now() + AUTHORIZATION_CODE_TTL_MS
+    });
+    return finish2({ code });
+  };
+  const token = async (request, u) => {
+    const form = await readForm(request);
+    if (!form)
+      return oauthError(400, "invalid_request", "The token request must be a form with each parameter once.");
+    const grantType = form.get("grant_type");
+    const clientId = form.get("client_id");
+    const resource = form.get("resource");
+    if (resource !== null && !isConfiguredResource(resource, u)) {
+      return oauthError(400, "invalid_target", "The requested resource is not this Olympus.");
+    }
+    if (!clientId)
+      return oauthError(400, "invalid_request", "client_id is required.");
+    const store = options.connections();
+    if (grantType === "authorization_code") {
+      const code = form.get("code");
+      const verifier = form.get("code_verifier");
+      const redirectUri = form.get("redirect_uri");
+      if (!code || !verifier || !redirectUri) {
+        return oauthError(400, "invalid_request", "code, code_verifier and redirect_uri are required.");
+      }
+      if (!PKCE_VERIFIER_PATTERN.test(verifier))
+        return oauthError(400, "invalid_grant", "The code verifier is malformed.");
+      const hash2 = sha2566(code);
+      const issued = codes.get(hash2);
+      if (!issued || issued.expiresAt <= now()) {
+        codes.delete(hash2);
+        return oauthError(400, "invalid_grant", "The authorization code is invalid or expired.");
+      }
+      if (issued.connectionId !== undefined) {
+        codes.delete(hash2);
+        store.oauth.revokeGrant(issued.connectionId);
+        return oauthError(400, "invalid_grant", "The authorization code was already used.");
+      }
+      if (issued.clientId !== clientId || issued.redirectUri !== redirectUri) {
+        codes.delete(hash2);
+        return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
+      }
+      if (!constantTimeEqual(createHash48("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+        codes.delete(hash2);
+        return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
+      }
+      const granted = store.oauth.createGrant({ clientId, displayName: issued.displayName, resource: issued.resource });
+      issued.connectionId = granted.connection.id;
+      return tokenResponse(granted.tokens);
+    }
+    if (grantType === "refresh_token") {
+      const refreshToken = form.get("refresh_token");
+      if (!refreshToken)
+        return oauthError(400, "invalid_request", "refresh_token is required.");
+      const result = store.oauth.refresh({ refreshToken, clientId, resource: u.resource });
+      if (!result.ok)
+        return oauthError(400, "invalid_grant", "The refresh token is invalid, expired, or revoked.");
+      return tokenResponse(result.tokens);
+    }
+    return oauthError(400, "unsupported_grant_type", "Supported grants: authorization_code, refresh_token.");
+  };
+  const register = async (request) => {
+    if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
+      return oauthError(400, "invalid_client_metadata", "Registration must be application/json.");
+    }
+    const text = await readBounded(request, MAX_REGISTRATION_BYTES);
+    if (text === undefined)
+      return oauthError(400, "invalid_client_metadata", "Registration is too large.");
+    let body;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return oauthError(400, "invalid_client_metadata", "Registration is not JSON.");
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return oauthError(400, "invalid_client_metadata", "Registration must be a JSON object.");
+    }
+    const metadata = body;
+    const redirectUris = metadata.redirect_uris;
+    if (!Array.isArray(redirectUris) || redirectUris.length === 0 || redirectUris.length > 10 || !redirectUris.every((uri) => typeof uri === "string" && isAcceptableRedirectUri(uri))) {
+      return oauthError(400, "invalid_redirect_uri", "redirect_uris must list https or loopback URLs.");
+    }
+    const grantTypes = metadata.grant_types;
+    if (grantTypes !== undefined && (!Array.isArray(grantTypes) || !grantTypes.includes("authorization_code"))) {
+      return oauthError(400, "invalid_client_metadata", "Olympus issues authorization_code grants.");
+    }
+    if (!registrations.take()) {
+      return oauthError(429, "temporarily_unavailable", "Too many registrations. Try again later.", { "Retry-After": "600" });
+    }
+    const uris = redirectUris;
+    const clientName = sanitizeCallerDisplayName(metadata.client_name) ?? redirectHost(uris[0]);
+    const registered2 = options.connections().oauth.registerClient({ clientName, redirectUris: uris });
+    if (registered2 === "capacity") {
+      return oauthError(503, "temporarily_unavailable", "Olympus has too many registered apps.");
+    }
+    return jsonResponse2(201, {
+      client_id: registered2.clientId,
+      client_id_issued_at: Math.floor(Date.parse(registered2.createdAt) / 1000),
+      client_name: registered2.clientName,
+      redirect_uris: registered2.redirectUris,
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none"
+    });
+  };
+  const revoke = async (request) => {
+    const form = await readForm(request);
+    const tokenValue = form?.get("token");
+    if (!form || !tokenValue)
+      return oauthError(400, "invalid_request", "token is required.");
+    options.connections().oauth.revokeToken(tokenValue);
+    return new Response(null, { status: 200, headers: { "Cache-Control": "no-store" } });
+  };
+  return async (request) => {
+    if (!urls)
+      return jsonResponse2(404, { error: "not_found" });
+    if (!hostAllowed(request, urls))
+      return jsonResponse2(421, { error: "misdirected_request" });
+    const { pathname } = new URL(request.url);
+    const method = request.method;
+    try {
+      switch (pathname) {
+        case REMOTE_OAUTH_PATHS.protectedResource:
+        case REMOTE_OAUTH_PATHS.protectedResourceMcp:
+          if (method === "OPTIONS")
+            return metadataPreflight();
+          if (method !== "GET")
+            return methodNotAllowed("GET, OPTIONS");
+          return metadataResponse(protectedResourceMetadata(urls));
+        case REMOTE_OAUTH_PATHS.authorizationServer:
+          if (method === "OPTIONS")
+            return metadataPreflight();
+          if (method !== "GET")
+            return methodNotAllowed("GET, OPTIONS");
+          return metadataResponse(authorizationServerMetadata(urls));
+        case REMOTE_OAUTH_PATHS.authorize:
+          if (method === "GET")
+            return await authorizeGet(request, urls);
+          if (method === "POST")
+            return await authorizePost(request, urls);
+          return methodNotAllowed("GET, POST");
+        case REMOTE_OAUTH_PATHS.token:
+          if (method !== "POST")
+            return methodNotAllowed("POST");
+          return await token(request, urls);
+        case REMOTE_OAUTH_PATHS.register:
+          if (method !== "POST")
+            return methodNotAllowed("POST");
+          return await register(request);
+        case REMOTE_OAUTH_PATHS.revoke:
+          if (method !== "POST")
+            return methodNotAllowed("POST");
+          return await revoke(request);
+        default:
+          return jsonResponse2(404, { error: "not_found" });
+      }
+    } catch {
+      return jsonResponse2(500, { error: "server_error" });
+    }
+  };
+}
+function callerKey(request) {
+  if (request.headers.get("x-olympus-relay") !== "1")
+    return "direct";
+  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  return forwarded ? `relay:${forwarded.slice(0, 64)}` : "direct";
+}
+function pairingPacer(now, sleep4) {
+  const callers = new Map;
+  let global = [];
+  const prune = (at) => {
+    const cutoff = at - PAIRING_FAILURE_WINDOW_MS;
+    global = global.filter((t) => t > cutoff);
+    for (const [key, entry] of callers) {
+      entry.failures = entry.failures.filter((t) => t > cutoff);
+      if (entry.failures.length === 0 && entry.nextAt <= at)
+        callers.delete(key);
+    }
+  };
+  return {
+    delayFor(caller) {
+      const at = now();
+      prune(at);
+      const own = Math.max(0, (callers.get(caller)?.nextAt ?? 0) - at);
+      return own + (global.length > PAIRING_GLOBAL_FAILURES_BEFORE_DELAY ? PAIRING_GLOBAL_DELAY_MS : 0);
+    },
+    async hold(ms) {
+      if (ms > 0)
+        await sleep4(ms);
+    },
+    recordFailure(caller) {
+      const at = now();
+      global.push(at);
+      if (global.length > 1e4)
+        global = global.slice(-1e4);
+      let entry = callers.get(caller);
+      if (!entry) {
+        if (callers.size >= PAIRING_MAX_TRACKED_CALLERS) {
+          const oldest = callers.keys().next().value;
+          if (oldest !== undefined)
+            callers.delete(oldest);
+        }
+        entry = { failures: [], nextAt: 0 };
+        callers.set(caller, entry);
+      }
+      entry.failures.push(at);
+      const delay = Math.min(PAIRING_PER_CALLER_MAX_DELAY_MS, 1000 * 2 ** (entry.failures.length - 1));
+      entry.nextAt = at + delay;
+    }
+  };
+}
+function hostAllowed(request, urls) {
+  const host = (request.headers.get("host") ?? new URL(request.url).host).toLowerCase();
+  if (host === urls.host)
+    return true;
+  let hostname;
+  try {
+    hostname = new URL(`http://${host}`).hostname;
+  } catch {
+    return false;
+  }
+  return LOOPBACK_HOSTNAMES3.has(hostname);
+}
+function sameOriginFormPost(request) {
+  const site = request.headers.get("sec-fetch-site");
+  if (site !== null && site !== "same-origin")
+    return false;
+  const origin = request.headers.get("origin");
+  if (origin === null)
+    return true;
+  const host = request.headers.get("host") ?? new URL(request.url).host;
+  try {
+    return new URL(origin).host.toLowerCase() === host.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+function tokenBucket(capacity, refillWindowMs, now) {
+  let tokens = capacity;
+  let last = now();
+  return {
+    take() {
+      const at = now();
+      tokens = Math.min(capacity, tokens + (at - last) / refillWindowMs * capacity);
+      last = at;
+      if (tokens < 1)
+        return false;
+      tokens -= 1;
+      return true;
+    }
+  };
+}
+function singleParams(params) {
+  const out = new Map;
+  for (const [key, value] of params) {
+    if (out.has(key))
+      return;
+    out.set(key, value);
+  }
+  return { get: (key) => out.get(key) ?? null };
+}
+async function readBounded(request, maxBytes) {
+  const body = await readBoundedRequestText(request, maxBytes, { deadlineMs: CONNECT_BODY_DEADLINE_MS });
+  return body.ok ? body.text : undefined;
+}
+async function readForm(request) {
+  if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/x-www-form-urlencoded")) {
+    return;
+  }
+  const text = await readBounded(request, MAX_FORM_BYTES);
+  if (text === undefined)
+    return;
+  return singleParams(new URLSearchParams(text));
+}
+function readCookie(request, name) {
+  for (const part of (request.headers.get("cookie") ?? "").split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name)
+      return rest.join("=");
+  }
+  return;
+}
+function consentCookieName(requestId) {
+  return `olympus_consent_${requestId}`;
+}
+function consentCookie(requestId, value, secure, maxAgeSeconds) {
+  return `${consentCookieName(requestId)}=${value}; Path=/connect; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
+}
+function constantTimeEqual(left, right) {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && a.length > 0 && timingSafeEqual6(a, b);
+}
+function sha2566(value) {
+  return createHash48("sha256").update(value).digest("hex");
+}
+function redirectWithParams(redirectUri, params) {
+  const target = new URL(redirectUri);
+  for (const [key, value] of Object.entries(params))
+    if (value !== undefined)
+      target.searchParams.set(key, value);
+  return new Response(null, {
+    status: 303,
+    headers: { Location: target.toString(), "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" }
+  });
+}
+function errorPage(status, message) {
+  const page = renderConsentErrorPage(message);
+  return new Response(page.body, { status, headers: page.headers });
+}
+function tokenResponse(tokens) {
+  return jsonResponse2(200, {
+    access_token: tokens.accessToken,
+    token_type: "Bearer",
+    expires_in: tokens.expiresIn,
+    refresh_token: tokens.refreshToken
+  }, { Pragma: "no-cache" });
+}
+function oauthError(status, error2, description, headers = {}) {
+  return jsonResponse2(status, { error: error2, error_description: description }, headers);
+}
+function metadataResponse(body) {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "public, max-age=300",
+      "Access-Control-Allow-Origin": "*"
+    }
+  });
+}
+function metadataPreflight() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET",
+      "Access-Control-Allow-Headers": "mcp-protocol-version",
+      "Access-Control-Max-Age": "600"
+    }
+  });
+}
+function methodNotAllowed(allow) {
+  return jsonResponse2(405, { error: "method_not_allowed" }, { Allow: allow });
+}
+function jsonResponse2(status, body, headers = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }
+  });
+}
+var REMOTE_OAUTH_PATHS, ROUTED_PATHS, AUTHORIZATION_CODE_TTL_MS = 60000, CONSENT_REQUEST_TTL_MS, CONSENT_MAX_ATTEMPTS = 5, MAX_PENDING_CONSENTS = 256, MAX_PENDING_CONSENTS_PER_CALLER = 8, PAIRING_FAILURE_WINDOW_MS, PAIRING_PER_CALLER_MAX_DELAY_MS = 60000, PAIRING_GLOBAL_FAILURES_BEFORE_DELAY = 20, PAIRING_GLOBAL_DELAY_MS = 2000, PAIRING_MAX_HELD_MS = 1e4, PAIRING_MAX_TRACKED_CALLERS = 1024, MAX_LIVE_CODES = 256, MAX_FORM_BYTES, MAX_REGISTRATION_BYTES, CONNECT_BODY_DEADLINE_MS = 1e4, PKCE_VERIFIER_PATTERN, PKCE_CHALLENGE_PATTERN, LOOPBACK_HOSTNAMES3;
+var init_handler = __esm(() => {
+  init_operation_caller();
+  init_remote_public_url();
+  init_cimd();
+  init_remote_request_body();
+  init_consent_page();
+  init_redirect_uris();
+  REMOTE_OAUTH_PATHS = {
+    protectedResource: "/.well-known/oauth-protected-resource",
+    protectedResourceMcp: "/.well-known/oauth-protected-resource/mcp",
+    authorizationServer: "/.well-known/oauth-authorization-server",
+    authorize: "/connect/authorize",
+    token: "/connect/token",
+    register: "/connect/register",
+    revoke: "/connect/revoke"
+  };
+  ROUTED_PATHS = new Set(Object.values(REMOTE_OAUTH_PATHS));
+  CONSENT_REQUEST_TTL_MS = 10 * 60000;
+  PAIRING_FAILURE_WINDOW_MS = 15 * 60000;
+  MAX_FORM_BYTES = 8 * 1024;
+  MAX_REGISTRATION_BYTES = 16 * 1024;
+  PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/;
+  PKCE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+  LOOPBACK_HOSTNAMES3 = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 
 // src/workers/remote-openapi.ts
@@ -90399,7 +91966,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash47 } from "node:crypto";
+import { createHash as createHash49 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -90410,7 +91977,7 @@ function withRemoteOpenApiRoutes(openApi, rest) {
 function createRemoteOpenApiHandler(options) {
   const serverUrl = publicServerUrl(options.publicBaseUrl);
   const specText = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-  const specEtag = `"${createHash47("sha256").update(specText).digest("base64url").slice(0, 27)}"`;
+  const specEtag = `"${createHash49("sha256").update(specText).digest("base64url").slice(0, 27)}"`;
   return async (request) => {
     const { pathname } = new URL(request.url);
     let response;
@@ -90436,22 +92003,9 @@ function serveSpec(request, specText, etag) {
   return new Response(specText, { status: 200, headers });
 }
 async function callTool(request, name, options) {
-  const token = bearerToken(request.headers.get("Authorization"));
-  if (token === undefined)
-    return unauthorized();
-  if (!isWellFormedRemoteConnectionToken(token))
-    return unauthorized("invalid_token");
-  let store;
-  try {
-    store = options.connections();
-  } catch {
-    return jsonResponse(503, { error: "remote_connections_unavailable" });
-  }
-  if (!store)
-    return unauthorized("invalid_token");
-  const verification = store.verifyToken(token);
+  const verification = authenticateRemoteRequest(request, options);
   if (!verification.ok)
-    return unauthorized("invalid_token");
+    return verification.response;
   if (request.method !== "POST") {
     return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "POST" });
   }
@@ -90624,7 +92178,6 @@ var init_remote_openapi = __esm(() => {
   init_operation_error();
   init_operation_exposure();
   init_operations();
-  init_remote_connections();
   init_remote_mcp();
   init_remote_request_body();
   REMOTE_OPENAPI_MAX_BODY_BYTES = REMOTE_REQUEST_MAX_BODY_BYTES;
@@ -93002,9 +94555,17 @@ async function main() {
     withRemoteMcpRoute: withRemoteMcpRoute2
   } = await Promise.resolve().then(() => (init_remote_mcp(), exports_remote_mcp));
   const { resolveRemoteConnectionsDbPath: resolveRemoteConnectionsDbPath2, openRemoteConnectionStore: openRemoteConnectionStore2 } = await Promise.resolve().then(() => (init_remote_connections(), exports_remote_connections));
-  const { createRemoteOpenApiHandler: createRemoteOpenApiHandler2, withRemoteOpenApiRoutes: withRemoteOpenApiRoutes2 } = await Promise.resolve().then(() => (init_remote_openapi(), exports_remote_openapi));
-  const remoteOpenApi = createRemoteOpenApiHandler2({
-    connections: lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2),
+  const { resolveRemotePublicUrls: resolveRemotePublicUrls2 } = await Promise.resolve().then(() => (init_remote_public_url(), exports_remote_public_url));
+  const { createRemoteOAuthHandler: createRemoteOAuthHandler2, withRemoteOAuthRoutes: withRemoteOAuthRoutes2 } = await Promise.resolve().then(() => (init_handler(), exports_handler));
+  const remotePublic = resolveRemotePublicUrls2(process.env);
+  if (!remotePublic.enabled && remotePublic.reason === "invalid") {
+    console.warn(`[olympus] remote agent OAuth is off: ${remotePublic.detail ?? "invalid public base URL"}`);
+  }
+  const remotePublicUrls = remotePublic.enabled ? remotePublic.urls : undefined;
+  const remoteConnections = lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2);
+  const remoteAgentOptions = {
+    connections: remoteConnections,
+    publicUrls: remotePublicUrls,
     makeOperationContext: (caller, signal) => createInProcessOperationContext2({
       config: olympusConfig,
       sourceIndexReadEnabled,
@@ -93012,21 +94573,20 @@ async function main() {
       caller,
       signal
     })
+  };
+  const { createRemoteOpenApiHandler: createRemoteOpenApiHandler2, withRemoteOpenApiRoutes: withRemoteOpenApiRoutes2 } = await Promise.resolve().then(() => (init_remote_openapi(), exports_remote_openapi));
+  const remoteOpenApi = createRemoteOpenApiHandler2({
+    ...remoteAgentOptions,
+    ...remotePublicUrls ? { publicBaseUrl: remotePublicUrls.origin } : {}
   });
   const server = Bun.serve({
     hostname,
     port,
     idleTimeout: 0,
-    fetch: withRemoteOpenApiRoutes2(remoteOpenApi, withRemoteMcpRoute2(createRemoteMcpHandler2({
-      connections: lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2),
-      makeOperationContext: (caller, signal) => createInProcessOperationContext2({
-        config: olympusConfig,
-        sourceIndexReadEnabled,
-        workerFetch: worker.fetch,
-        caller,
-        signal
-      })
-    }), withWorkerBearerAuth(worker.fetch, { authToken })))
+    fetch: withRemoteOAuthRoutes2(createRemoteOAuthHandler2({
+      publicUrls: remotePublicUrls,
+      connections: () => remoteConnections({ create: true })
+    }), withRemoteOpenApiRoutes2(remoteOpenApi, withRemoteMcpRoute2(createRemoteMcpHandler2(remoteAgentOptions), withWorkerBearerAuth(worker.fetch, { authToken }))))
   });
   sourceScheduler?.start();
   await reconcileCaptures();
@@ -93987,7 +95547,7 @@ init_messaging_pairing();
 init_messaging_capture();
 init_config();
 init_dashboard_launch();
-import { randomBytes as randomBytes8 } from "node:crypto";
+import { randomBytes as randomBytes11 } from "node:crypto";
 import { readFileSync as readFileSync38, openSync as openSync11, closeSync as closeSync11, writeSync as writeSync2 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -94011,7 +95571,7 @@ init_sovereignty();
 init_pairing_session_paths();
 init_public_source_capabilities();
 init_worker_service();
-import { createHash as createHash29, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash30, randomUUID as randomUUID12 } from "node:crypto";
 import {
   closeSync as closeSync8,
   existsSync as existsSync24,
@@ -94215,8 +95775,10 @@ function exportOlympusData(options) {
   }
   if (options.sourceId === undefined) {
     const connectionsPath = resolveRemoteConnectionsDbPath(envForContext(options));
-    if (existsSync24(connectionsPath))
-      skipped.push(connectionsPath);
+    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath)]) {
+      if (existsSync24(path))
+        skipped.push(path);
+    }
   }
   const configRoot = join35(destination, "config");
   makeDurableDirectory(configRoot, durabilityBoundary);
@@ -94364,7 +95926,7 @@ function allDeleteTargets(context) {
   const home = resolveHome(context.homeDir);
   return [
     ...selectSources(undefined).flatMap((source) => sourceDeleteTargets(source, context)),
-    ...sqliteDeleteTargets(resolveRemoteConnectionsDbPath(envForContext(context)), REMOTE_CONNECTIONS_STORE_ID, context),
+    ...remoteConnectionsDeleteTargets(context),
     ...knownOlympusDataRoots(context).map((path) => ({
       path,
       kind: "known_root",
@@ -94398,6 +95960,11 @@ function sourceDeleteTargets(source, context) {
       allowRecursive: false
     }))
   ];
+}
+function remoteConnectionsDeleteTargets(context) {
+  const dbPath = resolveRemoteConnectionsDbPath(envForContext(context));
+  const targets = sqliteDeleteTargets(dbPath, REMOTE_CONNECTIONS_STORE_ID, context);
+  return [...targets, { ...targets[1], path: remoteConnectionsPreV2BackupPath(dbPath) }];
 }
 function sqliteDeleteTargets(sqlitePath, sqliteStoreId, context) {
   const externalSourcePath = !isInsideKnownOlympusRoot(sqlitePath, context);
@@ -94531,7 +96098,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   };
 }
 function sha256File(path) {
-  const hash = createHash29("sha256");
+  const hash = createHash30("sha256");
   const descriptor = openSync8(path, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
@@ -94779,7 +96346,7 @@ init_version();
 
 // src/core/lifecycle.ts
 init_atomic_file();
-import { createHash as createHash34 } from "node:crypto";
+import { createHash as createHash35 } from "node:crypto";
 import { spawnSync as spawnSync6 } from "node:child_process";
 import { existsSync as existsSync33, lstatSync as lstatSync15, mkdirSync as mkdirSync24, readFileSync as readFileSync29 } from "node:fs";
 import { homedir as homedir34, platform as osPlatform2 } from "node:os";
@@ -94788,7 +96355,7 @@ import { dirname as dirname32, isAbsolute as isAbsolute7, join as join44 } from 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash33, randomUUID as randomUUID14 } from "node:crypto";
+import { createHash as createHash34, randomUUID as randomUUID14 } from "node:crypto";
 import { spawnSync as spawnSync5 } from "node:child_process";
 import {
   chmodSync as chmodSync14,
@@ -94816,7 +96383,7 @@ function prepareWorkerUpgradeArtifact(options) {
   if (artifactBytes.byteLength <= 0 || artifactBytes.byteLength > MAX_UPGRADE_ARTIFACT_BYTES) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
-  const artifactSha256 = createHash33("sha256").update(artifactBytes).digest("hex");
+  const artifactSha256 = createHash34("sha256").update(artifactBytes).digest("hex");
   const snapshotDir = mkdtempSync(join42(tmpdir3(), ".olympus-artifact-snapshot-"));
   const artifactPath = join42(snapshotDir, "artifact.tgz");
   const descriptor = openSync10(artifactPath, "wx", 384);
@@ -95066,26 +96633,26 @@ function syncVersionTree(root) {
   syncDirectorySync(root);
 }
 function versionTreeDigest(root) {
-  const digest = createHash33("sha256");
-  hashVersionTree(root, "", digest);
-  return digest.digest("hex");
+  const digest2 = createHash34("sha256");
+  hashVersionTree(root, "", digest2);
+  return digest2.digest("hex");
 }
-function hashVersionTree(root, relativeRoot, digest) {
+function hashVersionTree(root, relativeRoot, digest2) {
   const entries = readdirSync4(root, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of entries) {
     const relativePath = relativeRoot ? `${relativeRoot}/${entry.name}` : entry.name;
     const path = join42(root, entry.name);
     const stats = lstatSync13(path);
     if (stats.isDirectory() && !stats.isSymbolicLink()) {
-      digest.update(`d\x00${relativePath}\x00${stats.mode & 511}\x00`);
-      hashVersionTree(path, relativePath, digest);
+      digest2.update(`d\x00${relativePath}\x00${stats.mode & 511}\x00`);
+      hashVersionTree(path, relativePath, digest2);
       continue;
     }
     if (!stats.isFile() || stats.isSymbolicLink()) {
       throw new OperationError("config_error", `Managed upgrade version contains an unsafe entry: ${relativePath}`);
     }
-    digest.update(`f\x00${relativePath}\x00${stats.mode & 511}\x00${stats.size}\x00`);
-    digest.update(readFileSync27(path));
+    digest2.update(`f\x00${relativePath}\x00${stats.mode & 511}\x00${stats.size}\x00`);
+    digest2.update(readFileSync27(path));
   }
 }
 function publishVersionTree(staging, workingDirectory, versionsDir, syncDirectory2 = syncDirectorySync) {
@@ -95877,7 +97444,7 @@ function assertRegularFile2(path, label) {
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);
 }
 function sha2563(value) {
-  return createHash34("sha256").update(value).digest("hex");
+  return createHash35("sha256").update(value).digest("hex");
 }
 
 // src/cli.ts
@@ -96470,7 +98037,7 @@ function parseFlags2(args, allowed) {
 
 // src/core/setup.ts
 init_privacy_language();
-import { randomBytes as randomBytes6 } from "node:crypto";
+import { randomBytes as randomBytes7 } from "node:crypto";
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { homedir as homedir39 } from "node:os";
 init_operation_error();
@@ -96725,7 +98292,7 @@ function repairHint(platform2, dependency) {
   return platform2 === "darwin" ? "Install Go from https://go.dev/doc/install or with brew install go." : "Install Go from https://go.dev/doc/install or your OS package manager.";
 }
 function generateWorkerToken() {
-  return randomBytes6(32).toString("base64url");
+  return randomBytes7(32).toString("base64url");
 }
 function shellQuote2(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -96741,6 +98308,7 @@ init_gmail();
 init_drive();
 init_public_surface();
 init_remote_connections();
+init_remote_public_url();
 var PUBLIC_CLI_COMMAND_NAMES = new Set(V0_4_PUBLIC_CLI_COMMANDS);
 var PUBLIC_CLI_HELP_GROUPS = new Set([
   "argus",
@@ -97583,6 +99151,7 @@ function printHelp() {
   console.log("  olympus connect gemini --api-key-prompt");
   console.log("  olympus connect status [google|gmail|google-drive|dropbox]");
   console.log("  olympus connections add <name>");
+  console.log("  olympus connections pair");
   console.log("  olympus connections list");
   console.log("  olympus connections revoke <id>");
   console.log("  olympus data export --output <dir> [--source <id>]");
@@ -97617,6 +99186,7 @@ var PUBLIC_LEAF_USAGE = {
   "connect gemini": "olympus connect gemini --api-key-prompt",
   "connect status": "olympus connect status [google|gmail|google-drive|dropbox]",
   "connections add": "olympus connections add <name>",
+  "connections pair": "olympus connections pair",
   "connections list": "olympus connections list",
   "connections revoke": "olympus connections revoke <id>",
   dashboard: "olympus dashboard [--read-only] [--no-open]",
@@ -97691,6 +99261,7 @@ var COMMAND_GROUP_HELP = {
     "Usage: olympus connections <command>",
     "Commands:",
     "  olympus connections add <name>      Approve a remote agent; prints its URL and token once",
+    "  olympus connections pair            Print a one-time code to approve Claude, ChatGPT or Grok",
     "  olympus connections list",
     "  olympus connections revoke <id>"
   ],
@@ -98130,7 +99701,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes8(32).toString("base64url");
+  return randomBytes11(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};
@@ -98746,6 +100317,21 @@ function runConnectionsCommand(args, env = process.env) {
         notice: "The token is shown once and is not stored. Paste it into the agent now; revoke with olympus connections revoke <id>."
       };
     }
+    if (command === "pair") {
+      if (rest.length !== 0)
+        throw new OperationError("invalid_params", "Usage: olympus connections pair");
+      const publicUrls = resolveRemotePublicUrls(environmentWithWorkerSetupEnv({ env }));
+      const minted = store.oauth.mintPairingCode();
+      return {
+        kind: "remote_pairing_code",
+        code: minted.code,
+        expires_at: minted.expiresAt,
+        oauth_enabled: publicUrls.enabled,
+        url: publicUrls.enabled ? publicUrls.urls.resource : null,
+        db_path: store.dbPath,
+        notice: publicUrls.enabled ? "Type this code on the Olympus approval page that opens when you add the URL as a connector. It works once and expires in 10 minutes." : `OAuth approval is off until ${REMOTE_PUBLIC_BASE_URL_ENV} gives this install a public https address. Bearer connections (olympus connections add) still work.`
+      };
+    }
     if (command === "list") {
       if (rest.length !== 0)
         throw new OperationError("invalid_params", "Usage: olympus connections list");
@@ -98772,6 +100358,7 @@ function remoteConnectionView(connection) {
     id: connection.id,
     name: connection.displayName,
     kind: connection.kind,
+    ...connection.clientId ? { client_id: connection.clientId } : {},
     created_at: connection.createdAt,
     last_used_at: connection.lastUsedAt,
     revoked_at: connection.revokedAt,

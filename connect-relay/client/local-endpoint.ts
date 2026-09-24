@@ -19,8 +19,14 @@ import type { AddressInfo } from 'node:net';
 export const DEFAULT_ALLOWED_PATHS = [
   '/mcp',
   '/openapi.json',
+  '/api/v1/tools',
   '/.well-known/oauth-protected-resource',
   '/.well-known/oauth-authorization-server',
+  // The OAuth approval flow hosted agents run (workers/remote-oauth).
+  '/connect/authorize',
+  '/connect/token',
+  '/connect/register',
+  '/connect/revoke',
 ] as const;
 
 export interface LocalEndpointOptions {

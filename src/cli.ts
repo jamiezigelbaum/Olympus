@@ -71,6 +71,7 @@ import {
 import {
   applyWorkerSetupEnv,
   dashboardQueryTokenFromWorkerAuthToken,
+  environmentWithWorkerSetupEnv,
   withWorkerAuthHeader,
   normalizeWorkerAuthToken,
   workerAuthTokenFromConfig,
@@ -110,6 +111,7 @@ import {
   resolveRemoteConnectionsDbPathForCli,
   type RemoteConnectionRecord,
 } from './core/remote-connections.ts';
+import { REMOTE_PUBLIC_BASE_URL_ENV, resolveRemotePublicUrls } from './core/remote-public-url.ts';
 
 const PUBLIC_CLI_COMMAND_NAMES = new Set<string>(V0_4_PUBLIC_CLI_COMMANDS);
 const PUBLIC_CLI_HELP_GROUPS = new Set([
@@ -1083,6 +1085,7 @@ function printHelp(): void {
   console.log('  olympus connect gemini --api-key-prompt');
   console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
   console.log('  olympus connections add <name>');
+  console.log('  olympus connections pair');
   console.log('  olympus connections list');
   console.log('  olympus connections revoke <id>');
   console.log('  olympus data export --output <dir> [--source <id>]');
@@ -1117,6 +1120,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect gemini': 'olympus connect gemini --api-key-prompt',
   'connect status': 'olympus connect status [google|gmail|google-drive|dropbox]',
   'connections add': 'olympus connections add <name>',
+  'connections pair': 'olympus connections pair',
   'connections list': 'olympus connections list',
   'connections revoke': 'olympus connections revoke <id>',
   dashboard: 'olympus dashboard [--read-only] [--no-open]',
@@ -1192,6 +1196,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Usage: olympus connections <command>',
     'Commands:',
     '  olympus connections add <name>      Approve a remote agent; prints its URL and token once',
+    '  olympus connections pair            Print a one-time code to approve Claude, ChatGPT or Grok',
     '  olympus connections list',
     '  olympus connections revoke <id>',
   ],
@@ -2458,6 +2463,24 @@ export function runConnectionsCommand(
         notice: 'The token is shown once and is not stored. Paste it into the agent now; revoke with olympus connections revoke <id>.',
       };
     }
+    if (command === 'pair') {
+      if (rest.length !== 0) throw new OperationError('invalid_params', 'Usage: olympus connections pair');
+      // The public address the worker serves OAuth on, from worker.env on a
+      // managed install. Minted either way: the code is harmless until then.
+      const publicUrls = resolveRemotePublicUrls(environmentWithWorkerSetupEnv({ env }));
+      const minted = store.oauth.mintPairingCode();
+      return {
+        kind: 'remote_pairing_code',
+        code: minted.code,
+        expires_at: minted.expiresAt,
+        oauth_enabled: publicUrls.enabled,
+        url: publicUrls.enabled ? publicUrls.urls.resource : null,
+        db_path: store.dbPath,
+        notice: publicUrls.enabled
+          ? 'Type this code on the Olympus approval page that opens when you add the URL as a connector. It works once and expires in 10 minutes.'
+          : `OAuth approval is off until ${REMOTE_PUBLIC_BASE_URL_ENV} gives this install a public https address. Bearer connections (olympus connections add) still work.`,
+      };
+    }
     if (command === 'list') {
       if (rest.length !== 0) throw new OperationError('invalid_params', 'Usage: olympus connections list');
       return {
@@ -2483,6 +2506,7 @@ function remoteConnectionView(connection: RemoteConnectionRecord): Record<string
     id: connection.id,
     name: connection.displayName,
     kind: connection.kind,
+    ...(connection.clientId ? { client_id: connection.clientId } : {}),
     created_at: connection.createdAt,
     last_used_at: connection.lastUsedAt,
     revoked_at: connection.revokedAt,
