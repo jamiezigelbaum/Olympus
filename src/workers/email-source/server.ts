@@ -3893,45 +3893,53 @@ export async function main(): Promise<void> {
     withRemoteMcpRoute,
   } = await import('../remote-mcp.ts');
   const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
-  // `/openapi.json` and `/api/v1/tools/<name>`: the same remote surface as
-  // `/mcp`, as REST for agents that take an OpenAPI spec (Muse).
-  const { createRemoteOpenApiHandler, withRemoteOpenApiRoutes } = await import('../remote-openapi.ts');
-  const remoteOpenApi = createRemoteOpenApiHandler({
-    connections: lazyRemoteConnectionStore(
-      () => resolveRemoteConnectionsDbPath(process.env),
-      openRemoteConnectionStore,
-    ),
-    makeOperationContext: (caller, signal) => createInProcessOperationContext({
+  const { resolveRemotePublicUrls } = await import('../../core/remote-public-url.ts');
+  const { createRemoteOAuthHandler, withRemoteOAuthRoutes } = await import('../remote-oauth/handler.ts');
+  // OAuth for hosted agents is on only with a configured public base URL.
+  const remotePublic = resolveRemotePublicUrls(process.env);
+  if (!remotePublic.enabled && remotePublic.reason === 'invalid') {
+    console.warn(`[olympus] remote agent OAuth is off: ${remotePublic.detail ?? 'invalid public base URL'}`);
+  }
+  const remotePublicUrls = remotePublic.enabled ? remotePublic.urls : undefined;
+  const remoteConnections = lazyRemoteConnectionStore(
+    () => resolveRemoteConnectionsDbPath(process.env),
+    openRemoteConnectionStore,
+  );
+  const remoteAgentOptions = {
+    connections: remoteConnections,
+    publicUrls: remotePublicUrls,
+    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => createInProcessOperationContext({
       config: olympusConfig,
       sourceIndexReadEnabled,
       workerFetch: worker.fetch,
       caller,
       signal,
     }),
-  });
+  };
+  // `/openapi.json` and `/api/v1/tools/<name>`: the same remote surface as
+  // `/mcp`, as REST for agents that take an OpenAPI spec (Muse).
+  const { createRemoteOpenApiHandler, withRemoteOpenApiRoutes } = await import('../remote-openapi.ts');
+  const remoteOpenApi = createRemoteOpenApiHandler(remoteAgentOptions);
 
   const server = Bun.serve({
     hostname,
     port,
     idleTimeout: 0,
-    // `/mcp` is the remote agent endpoint and authenticates connection tokens
-    // only; every other route keeps the worker bearer. See workers/remote-mcp.ts.
-    fetch: withRemoteOpenApiRoutes(remoteOpenApi, withRemoteMcpRoute(
-      createRemoteMcpHandler({
-        connections: lazyRemoteConnectionStore(
-          () => resolveRemoteConnectionsDbPath(process.env),
-          openRemoteConnectionStore,
-        ),
-        makeOperationContext: (caller, signal) => createInProcessOperationContext({
-          config: olympusConfig,
-          sourceIndexReadEnabled,
-          workerFetch: worker.fetch,
-          caller,
-          signal,
-        }),
+    // Remote agent routes authenticate connection credentials only (bearer
+    // connection tokens, or OAuth access tokens bound to this resource); the
+    // OAuth metadata and `/connect/*` routes serve the approval flow; every
+    // other route keeps the worker bearer. See workers/remote-mcp.ts,
+    // workers/remote-openapi.ts and workers/remote-oauth/handler.ts.
+    fetch: withRemoteOAuthRoutes(
+      createRemoteOAuthHandler({
+        publicUrls: remotePublicUrls,
+        connections: () => remoteConnections({ create: true })!,
       }),
-      withWorkerBearerAuth(worker.fetch, { authToken }),
-    )),
+      withRemoteOpenApiRoutes(remoteOpenApi, withRemoteMcpRoute(
+        createRemoteMcpHandler(remoteAgentOptions),
+        withWorkerBearerAuth(worker.fetch, { authToken }),
+      )),
+    ),
   });
   sourceScheduler?.start();
   await reconcileCaptures();

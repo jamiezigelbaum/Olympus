@@ -32,8 +32,7 @@ import {
   operationToolSchema,
   type Operation,
 } from '../core/operations.ts';
-import { isWellFormedRemoteConnectionToken, type RemoteConnectionStore } from '../core/remote-connections.ts';
-import { bearerToken, jsonResponse, remoteOperationCaller, unauthorized, type RemoteMcpHandlerOptions } from './remote-mcp.ts';
+import { authenticateRemoteRequest, jsonResponse, remoteOperationCaller, type RemoteMcpHandlerOptions } from './remote-mcp.ts';
 import { isJsonContentType, readBoundedRequestText, REMOTE_REQUEST_MAX_BODY_BYTES } from './remote-request-body.ts';
 
 export const REMOTE_OPENAPI_SPEC_PATH = '/openapi.json';
@@ -107,18 +106,8 @@ function serveSpec(request: Request, specText: string, etag: string): Response {
 async function callTool(request: Request, name: string, options: RemoteOpenApiHandlerOptions): Promise<Response> {
   // Authentication first, exactly as `/mcp` does it, so an unauthenticated
   // probe learns nothing about which tool names exist.
-  const token = bearerToken(request.headers.get('Authorization'));
-  if (token === undefined) return unauthorized();
-  if (!isWellFormedRemoteConnectionToken(token)) return unauthorized('invalid_token');
-  let store: RemoteConnectionStore | undefined;
-  try {
-    store = options.connections();
-  } catch {
-    return jsonResponse(503, { error: 'remote_connections_unavailable' });
-  }
-  if (!store) return unauthorized('invalid_token');
-  const verification = store.verifyToken(token);
-  if (!verification.ok) return unauthorized('invalid_token');
+  const verification = authenticateRemoteRequest(request, options);
+  if (!verification.ok) return verification.response;
   if (request.method !== 'POST') {
     return jsonResponse(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
   }

@@ -123,6 +123,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'connect gemini',
   'connect status',
   'connections add',
+  'connections pair',
   'connections list',
   'connections revoke',
   'dashboard',

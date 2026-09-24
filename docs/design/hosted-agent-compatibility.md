@@ -151,6 +151,36 @@ and the relay client forwards to it.
 - **Display names** come from the client metadata ("Claude", "Grok"). The owner
   never types them.
 
+### OAuth as built (slice 4)
+
+- **Switch:** OAuth is on only when `OLYMPUS_PUBLIC_BASE_URL` (an https origin)
+  is set in the worker's environment. The issuer (`<origin>`), the resource
+  (`<origin>/mcp`) and every metadata URL come from it, never from `Host` or
+  forwarding headers. Unset, the routes answer 404 and bearer connections work
+  as before.
+- **Routes:** `/.well-known/oauth-protected-resource[/mcp]`,
+  `/.well-known/oauth-authorization-server`, and `/connect/authorize`,
+  `/connect/token`, `/connect/register`, `/connect/revoke`. The relay's local
+  endpoint must forward `/connect/*` as well as `/mcp` and `/.well-known/*`.
+- **Clients:** Claude (web, desktop, mobile) and ChatGPT identify themselves
+  with Client ID Metadata Documents; Grok registers dynamically. Both paths are
+  served. Every client is public (PKCE S256, `token_endpoint_auth_method`
+  `none`), and every authorization response carries the RFC 9207 `iss`.
+- **Grants are connections:** an approved grant is a `remote_connections` row
+  of kind `oauth`, so `olympus connections list|revoke` and audit attribution
+  are unchanged. Access tokens are opaque, live one hour and are bound to the
+  resource; refresh tokens rotate, and replaying a used one revokes the grant.
+  Only digests are stored.
+- **Pairing:** `olympus connections pair` prints a 10-character code
+  (about 49 bits, no ambiguous characters) that expires in 10 minutes and works
+  once. One approval page allows five wrong codes; ten wrong codes anywhere burn
+  every live code; twenty in 15 minutes pause all pairing.
+- **Host and Origin:** the unauthenticated OAuth routes answer only the public
+  host or a loopback name, which defeats DNS rebinding. The approval form also
+  needs a same-origin browser, a CSRF token and a matching SameSite=Strict
+  cookie. `/mcp` keeps no Origin rule, because it is bearer-only, sends no CORS
+  headers, and hosted agents call it from their servers.
+
 ## Build sequence
 
 Each slice is its own pull request. Security, auth and install surfaces are

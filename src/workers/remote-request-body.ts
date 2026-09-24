@@ -4,7 +4,8 @@
  * body before anyone can measure it, and a chunked body carries no
  * Content-Length to refuse up front, so an authenticated caller could make the
  * worker hold an arbitrarily large body in memory. This reads the stream
- * itself and stops at the cap.
+ * itself and stops at the cap, and, when given a deadline (the unauthenticated
+ * OAuth routes: the worker runs with no idle timeout), gives up at it.
  */
 
 /** A tool call is a question plus filters: a few KiB. Nothing legitimate nears this. */
@@ -12,11 +13,12 @@ export const REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
 
 export type BoundedBodyResult =
   | { ok: true; text: string }
-  | { ok: false; reason: 'too_large' | 'unreadable' };
+  | { ok: false; reason: 'too_large' | 'unreadable' | 'timeout' };
 
 export async function readBoundedRequestText(
   request: Request,
   maxBytes: number = REMOTE_REQUEST_MAX_BODY_BYTES,
+  options: { deadlineMs?: number } = {},
 ): Promise<BoundedBodyResult> {
   const declared = request.headers.get('Content-Length');
   if (declared !== null) {
@@ -27,9 +29,18 @@ export async function readBoundedRequestText(
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = options.deadlineMs === undefined
+    ? undefined
+    : new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), options.deadlineMs); });
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const next = deadline ? await Promise.race([reader.read(), deadline]) : await reader.read();
+      if (next === 'timeout') {
+        await reader.cancel().catch(() => undefined);
+        return { ok: false, reason: 'timeout' };
+      }
+      const { done, value } = next;
       if (done) break;
       total += value.byteLength;
       if (total > maxBytes) {
@@ -41,6 +52,8 @@ export async function readBoundedRequestText(
   } catch {
     await reader.cancel().catch(() => undefined);
     return { ok: false, reason: 'unreadable' };
+  } finally {
+    clearTimeout(timer);
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
