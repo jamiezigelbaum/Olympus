@@ -461,6 +461,20 @@ export function parseDashboardControlParams(value: unknown): OlympusDashboardCon
       acknowledge: true,
     };
   }
+  if (action === 'mint_agent_pairing_code') {
+    exactRecord(outer, ['action']);
+    return { action };
+  }
+  if (action === 'create_agent_key') {
+    const record = exactRecord(outer, ['action', 'name']);
+    return { action, name: boundedString(record.name, 128, 'name') };
+  }
+  if (action === 'revoke_agent_connection') {
+    const record = exactRecord(outer, ['action', 'connection_id']);
+    const connectionId = boundedString(record.connection_id, 64, 'connection_id', false);
+    if (!/^[a-f0-9]{18}$/.test(connectionId)) throw new DashboardGatewayInvalidRequestError('connection_id is not a connection id.');
+    return { action, connection_id: connectionId };
+  }
   throw new DashboardGatewayInvalidRequestError('Unknown Olympus dashboard control action.');
 }
 
@@ -815,6 +829,12 @@ function dashboardControlWorkerRequest(params: OlympusDashboardControlParams): {
       return { path: '/dashboard/disconnect', body: { source_id: params.source_id, acknowledge: true } };
     case 'unpair':
       return { path: '/dashboard/unpair', body: { source_id: params.source_id, acknowledge: true } };
+    case 'mint_agent_pairing_code':
+      return { path: '/dashboard/agents/pairing-code', body: {} };
+    case 'create_agent_key':
+      return { path: '/dashboard/agents/keys', body: { name: params.name } };
+    case 'revoke_agent_connection':
+      return { path: '/dashboard/agents/revoke', body: { connection_id: params.connection_id } };
   }
 }
 

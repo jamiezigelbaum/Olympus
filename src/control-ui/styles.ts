@@ -1,5 +1,6 @@
 import { DASHBOARD_THEME_CSS } from '../workers/dashboard/theme.ts';
 import {
+  AGENT_CONNECT_CSS,
   BACKGROUND_CSS,
   DASHBOARD_LANE_CSS,
   DASHBOARD_NAV_CSS,
@@ -29,6 +30,7 @@ export const OLYMPUS_CONTROL_UI_CSS = forShadowRoot([
   DASHBOARD_POLICY_CSS,
   SETUP_JOURNEY_CSS,
   MODEL_SETUP_CSS,
+  AGENT_CONNECT_CSS,
   BACKGROUND_CSS,
   DISPOSITIONS_CSS,
 ].join('\n')) + `

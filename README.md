@@ -312,6 +312,34 @@ cards carry **Unpair** instead: it stops new reads and deletes this computer's
 pairing session, keeping indexed messages and captured media, and leaves the
 linked device in place at the provider for you to remove there.
 
+### Connect other agents
+
+Open the dashboard's **Setup** page and press **Connect an agent**. Pick the
+agent you use and follow its steps; every address and snippet has a copy
+button.
+
+- **Claude** (web, desktop and phone), **ChatGPT**, **Grok** and **Grok Bot**:
+  add the Olympus address as a custom connector, then approve it on the Olympus
+  approval page with a one-time code from **Get pairing code**.
+- **Muse** and the **Grok API**: paste the address, then press **Create key**
+  and give the agent the key. The key is shown once.
+- **Claude Code** and **Codex** on this computer: copy the prompt (or the
+  `olympus serve` command) into the agent. This works without remote access.
+
+Agents in the cloud reach Olympus only when remote access is on; the Agents
+section says whether it is. Every connected agent gets the same privacy rules
+as your OpenClaw agent. It never sees Private source text or Secrets. For
+Private items it receives only answers that Venice or a local model reasoned
+out, with each item's title, path, source and author. The same
+section lists connected agents with when each was added and last used, and
+**Revoke** removes one. `olympus connections list|revoke|pair|add` does the
+same from a terminal.
+
+Each agent's steps end with a short instruction that tells it when to ask
+Olympus. Paste it into Claude project instructions, Grok Bot skills or Muse
+instructions, or load the packaged Agent Skills folder
+[`integrations/agent-skills/ask-olympus/`](integrations/agent-skills/ask-olympus/SKILL.md).
+
 ### Using Olympus from other agents (MCP)
 
 `olympus serve` exposes the same sanitized read operations — `source_answer`,

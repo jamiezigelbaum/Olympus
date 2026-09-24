@@ -91,6 +91,7 @@ export function withWorkerBearerAuth(
   const basePath = normalizeBasePath(options.basePath ?? '/v1');
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
+  const agentMintAllowed = agentMintLimiter(now);
   return async (request: Request): Promise<Response> => {
     const presentedAuthorization = request.headers.get('Authorization');
     const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
@@ -193,6 +194,9 @@ export function withWorkerBearerAuth(
       return fetchHandler(request);
     }
     if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
+      // The Gateway bridge holds the bearer for every operator it serves, so
+      // its mints share one budget.
+      if (isAgentMintRoute(request) && !agentMintAllowed('bearer')) return agentMintLimitedResponse();
       return fetchHandler(isGatewayPublicOriginContextRoute(request)
         ? withGatewayPublicOriginContext(request, presentedGatewayPublicOrigin)
         : request);
@@ -229,6 +233,9 @@ export function withWorkerBearerAuth(
     if (isDashboardControlRoute(request)) {
       const authorization = authorizeDashboardControlSession(request, authToken, now(), true);
       if (authorization.status === 'allowed') {
+        if (isAgentMintRoute(request) && !agentMintAllowed(`session:${authorization.sessionId}`)) {
+          return agentMintLimitedResponse();
+        }
         return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
       }
       if (authorization.status === 'origin_mismatch' || authorization.status === 'csrf_mismatch') {
@@ -385,6 +392,51 @@ function dashboardControlLockedResponse(): Response {
   });
 }
 
+/** Minting a pairing code or a connection key: rate limited per control session. */
+const AGENT_MINT_PATHS = new Set(['/dashboard/agents/pairing-code', '/dashboard/agents/keys']);
+export const AGENT_MINT_LIMIT = 10;
+export const AGENT_MINT_WINDOW_MS = 10 * 60_000;
+const AGENT_MINT_MAX_KEYS = 256;
+
+function isAgentMintRoute(request: Request): boolean {
+  return request.method === 'POST' && AGENT_MINT_PATHS.has(new URL(request.url).pathname);
+}
+
+/**
+ * A sliding window per control session (or the Gateway bearer): enough for a
+ * person setting up several agents, not for a script minting codes to guess
+ * against. In memory, per worker process; a restart forgets it.
+ */
+function agentMintLimiter(now: () => number): (key: string) => boolean {
+  const recent = new Map<string, number[]>();
+  return (key) => {
+    const at = now();
+    const kept = (recent.get(key) ?? []).filter((time) => at - time < AGENT_MINT_WINDOW_MS);
+    if (kept.length >= AGENT_MINT_LIMIT) {
+      recent.set(key, kept);
+      return false;
+    }
+    kept.push(at);
+    recent.delete(key);
+    recent.set(key, kept);
+    if (recent.size > AGENT_MINT_MAX_KEYS) recent.delete(recent.keys().next().value!);
+    return true;
+  };
+}
+
+function agentMintLimitedResponse(): Response {
+  return new Response(JSON.stringify({
+    ok: false,
+    error: {
+      code: 'agent_mint_rate_limited',
+      message: 'Too many pairing codes or keys in the last few minutes. Wait a few minutes, then try again.',
+    },
+  }), {
+    status: 429,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Retry-After': '600' },
+  });
+}
+
 function isDashboardControlRoute(request: Request): boolean {
   if (request.method !== 'POST') return false;
   return new Set([
@@ -397,6 +449,9 @@ function isDashboardControlRoute(request: Request): boolean {
     '/dashboard/embedding-priority',
     '/dashboard/disconnect',
     '/dashboard/unpair',
+    '/dashboard/agents/pairing-code',
+    '/dashboard/agents/keys',
+    '/dashboard/agents/revoke',
   ]).has(new URL(request.url).pathname);
 }
 

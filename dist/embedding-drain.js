@@ -20712,6 +20712,38 @@ init_phases();
 init_scheduler_markers();
 init_vocabulary();
 
+// src/core/agent-instructions.ts
+var AGENT_SKILL_DESCRIPTION = "Ask Olympus, the owner's private search over their own email, files, " + "messages, notes and saved reading, whenever a question may be answered from their own records.";
+var AGENT_INSTRUCTION_TEXT = [
+  "Olympus is my private search over my own email, files, messages, notes, bookmarks and saved reading. " + "You can ask it through its source_answer tool.",
+  "",
+  "Ask Olympus whenever my question might be answered from my own records: what someone told me, " + "what a document or contract says, or when something happened. " + "If you are not sure, ask it anyway. You do not need me to mention Olympus.",
+  "",
+  "Ask one question at a time, in plain words, and wait for each answer before asking the next. " + "Answers can take a minute.",
+  "",
+  "Pass on what Olympus answers with its citations, and say plainly what it could not find. " + "Do not guess past it or fill gaps from memory.",
+  "",
+  "Use source_index_status only to check which of my sources are ready."
+].join(`
+`);
+
+// src/workers/dashboard/agents.ts
+var LOCAL_AGENT_PROMPT = [
+  "Add Olympus to this coding agent as a local MCP server.",
+  "Find the installed plugin with `openclaw plugins inspect olympus --json` and take `plugin.rootDir`.",
+  "Then run the one command for this tool:",
+  "- Claude Code: `claude mcp add olympus -- <rootDir>/bin/olympus serve`",
+  "- Codex: `codex mcp add olympus -- <rootDir>/bin/olympus serve`",
+  "Do not change any other configuration. Afterwards, list the Olympus tools to confirm source_answer is there."
+].join(`
+`);
+var CODEX_SNIPPET = [
+  "[mcp_servers.olympus]",
+  'command = "<plugin folder>/bin/olympus"',
+  'args = ["serve"]'
+].join(`
+`);
+
 // src/workers/dashboard/pages/setup.ts
 init_source_dashboard();
 init_vocabulary();
@@ -20860,6 +20892,8 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
 
 // src/workers/http.ts
 var DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+var AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
+var AGENT_MINT_WINDOW_MS = 10 * 60000;
 
 // src/workers/embedding-ledger.ts
 import { homedir as homedir15 } from "node:os";
@@ -21126,6 +21160,9 @@ class LaneSampleStore {
   }
 }
 var backgroundLaneSampleStore = new LaneSampleStore;
+
+// src/workers/agent-connections.ts
+init_operation_caller();
 
 // src/workers/email-source/index.ts
 init_source_dashboard();

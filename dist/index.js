@@ -13836,6 +13836,8 @@ var DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 var DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin";
 var DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer";
 var DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1";
+var AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
+var AGENT_MINT_WINDOW_MS = 10 * 60000;
 function createGatewayCallbackPeerHeader(peer, authToken) {
   const normalized = normalizeGatewayCallbackPeer(peer);
   const signature = createHmac("sha256", authToken).update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${normalized}`).digest("base64url");
@@ -16593,6 +16595,21 @@ function parseDashboardControlParams(value) {
       acknowledge: true
     };
   }
+  if (action === "mint_agent_pairing_code") {
+    exactRecord(outer, ["action"]);
+    return { action };
+  }
+  if (action === "create_agent_key") {
+    const record = exactRecord(outer, ["action", "name"]);
+    return { action, name: boundedString(record.name, 128, "name") };
+  }
+  if (action === "revoke_agent_connection") {
+    const record = exactRecord(outer, ["action", "connection_id"]);
+    const connectionId = boundedString(record.connection_id, 64, "connection_id", false);
+    if (!/^[a-f0-9]{18}$/.test(connectionId))
+      throw new DashboardGatewayInvalidRequestError("connection_id is not a connection id.");
+    return { action, connection_id: connectionId };
+  }
   throw new DashboardGatewayInvalidRequestError("Unknown Olympus dashboard control action.");
 }
 function resolveGatewayPublicOrigin(value) {
@@ -16878,6 +16895,12 @@ function dashboardControlWorkerRequest(params) {
       return { path: "/dashboard/disconnect", body: { source_id: params.source_id, acknowledge: true } };
     case "unpair":
       return { path: "/dashboard/unpair", body: { source_id: params.source_id, acknowledge: true } };
+    case "mint_agent_pairing_code":
+      return { path: "/dashboard/agents/pairing-code", body: {} };
+    case "create_agent_key":
+      return { path: "/dashboard/agents/keys", body: { name: params.name } };
+    case "revoke_agent_connection":
+      return { path: "/dashboard/agents/revoke", body: { connection_id: params.connection_id } };
   }
 }
 function parseDashboardReadResult(value, expectedCanWrite) {

@@ -9,6 +9,7 @@
  * number on it comes from vocabulary.ts, which reads only fields the worker
  * actually produces.
  */
+import type { DashboardAgentsView } from '../../agent-connections.ts';
 import type { DashboardSourceCard, SourceDashboardViewModel } from '../../source-dashboard.ts';
 import {
   dashboardAttentionLine,
@@ -71,6 +72,8 @@ export interface DashboardPageOptions extends DashboardVocabularyOptions {
   canWrite?: boolean;
   /** Native OAuth needs a trusted Gateway public origin for its callback. */
   nativeOAuthAvailable?: boolean;
+  /** Remote agent connections and remote access, for Setup's Agents section. */
+  agents?: DashboardAgentsView;
   /** Private builds retain the append-only embedding decision ledger. */
 }
 

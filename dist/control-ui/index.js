@@ -50,7 +50,7 @@ function mountDashboardController(options) {
     return "Request failed.";
   }
   function applyWriteCapability() {
-    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind]," + "form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check]").forEach((form) => {
+    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind]," + "form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind]").forEach((form) => {
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
       form.querySelectorAll('button,input:not([type="hidden"])').forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
@@ -405,6 +405,112 @@ function mountDashboardController(options) {
     say(form, typeof statusMessage === "string" ? statusMessage : released ? successMessage(params.action) : unreleasedMessage(params.action));
     await refreshNow(false, released);
   }
+  function agentParams(form) {
+    const kind = form.dataset.agentKind;
+    if (kind === "pair")
+      return { action: "mint_agent_pairing_code" };
+    if (kind === "key")
+      return { action: "create_agent_key", name: formRecord(form).name || "" };
+    if (kind === "revoke")
+      return { action: "revoke_agent_connection", connection_id: formRecord(form).connection_id || "" };
+    return;
+  }
+  function showAgentSecret(form, value, note) {
+    const holder = form.closest("[data-agent-step]") || form.parentElement || form;
+    const slot = holder.querySelector("[data-agent-secret-slot]");
+    const field = slot?.querySelector("[data-agent-secret]");
+    if (!slot || !field)
+      return;
+    field.value = value;
+    const noteSlot = slot.querySelector("[data-agent-secret-note]");
+    if (noteSlot)
+      noteSlot.textContent = note;
+    slot.hidden = false;
+    field.focus();
+    field.select();
+  }
+  function clearAgentSecret(slot) {
+    slot.querySelectorAll("[data-agent-secret]").forEach((field) => {
+      field.value = "";
+    });
+    const noteSlot = slot.querySelector("[data-agent-secret-note]");
+    if (noteSlot)
+      noteSlot.textContent = "";
+    slot.hidden = true;
+  }
+  async function refreshAgentList() {
+    const current = query("[data-agent-connections-list]");
+    if (!current || disposed || options.signal.aborted)
+      return;
+    let result;
+    try {
+      result = await options.refresh();
+    } catch {
+      return;
+    }
+    if (!result || disposed || options.signal.aborted)
+      return;
+    const next = document.createElement("template");
+    next.innerHTML = result.body;
+    const fresh = next.content.querySelector("[data-agent-connections-list]");
+    if (!fresh)
+      return;
+    current.innerHTML = fresh.innerHTML;
+    applyWriteCapability();
+  }
+  async function submitAgentControl(form) {
+    if (!canWrite && !csrfToken) {
+      say(form, options.authority === "worker-session" ? "Unlock dashboard controls above first." : "Your OpenClaw connection has read-only access.");
+      return;
+    }
+    const params = agentParams(form);
+    if (!params || pendingForms.has(form))
+      return;
+    if (params.action === "revoke_agent_connection" && !window.confirm(form.dataset.confirmation || "Revoke this connection?"))
+      return;
+    setFormPending(form, true, params.action === "revoke_agent_connection" ? "Revoking…" : "Working…");
+    let result;
+    try {
+      result = await options.transport.control(params);
+    } catch {
+      say(form, "Could not reach Olympus.");
+      return;
+    } finally {
+      setFormPending(form, false);
+    }
+    if (result.status === 401 || result.status === 403) {
+      if (options.authority === "worker-session") {
+        csrfToken = "";
+        say(form, "The control session expired — unlock controls in Setup, then try again.");
+      } else {
+        canWrite = false;
+        applyWriteCapability();
+        say(form, "Your write access expired. Reconnect with operator.write access, then try again.");
+      }
+      return;
+    }
+    if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+      say(form, errorMessage(result));
+      return;
+    }
+    if (params.action === "mint_agent_pairing_code" && typeof result.body.code === "string") {
+      say(form, "");
+      showAgentSecret(form, result.body.code, "Type this code on the Olympus approval page. It works once and expires in 10 minutes.");
+      return;
+    }
+    if (params.action === "create_agent_key" && typeof result.body.token === "string") {
+      say(form, "");
+      showAgentSecret(form, result.body.token, "Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again.");
+      await refreshAgentList();
+      return;
+    }
+    const statusMessage = result.body.status_message;
+    say(form, typeof statusMessage === "string" ? statusMessage : "Revoked.");
+    form.querySelectorAll("button").forEach((button) => {
+      button.disabled = true;
+    });
+    await refreshAgentList();
+  }
   function copyText(node) {
     if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)
       return node.value;
@@ -535,6 +641,11 @@ function mountDashboardController(options) {
         unlock(form);
       return;
     }
+    if (form.hasAttribute("data-agent-kind")) {
+      event.preventDefault();
+      submitAgentControl(form);
+      return;
+    }
     if (!form.matches("[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind],[data-model-check]"))
       return;
     event.preventDefault();
@@ -572,6 +683,14 @@ function mountDashboardController(options) {
         startedFromSheet.add(form);
         form.requestSubmit();
       }
+      return;
+    }
+    const done = target.closest("[data-agent-secret-done]");
+    if (done) {
+      const slot = done.closest("[data-agent-secret-slot]");
+      if (slot)
+        clearAgentSecret(slot);
+      refreshAgentList();
       return;
     }
     const copy = target.closest("[data-copy-target]");
@@ -2358,6 +2477,26 @@ var DISPOSITIONS_CSS = `
         .finder-footer { grid-row: 3; }
       }
 `;
+var AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 4px 0 0; }
+.agentchoice { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.agentchoice > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 8px; align-items: baseline; font-size: 13px; color: var(--t2); }
+.agentchoice > summary::-webkit-details-marker { display: none; }
+.agentchoice > summary::after { content: '\\25B8'; margin-left: auto; color: var(--t4); transition: transform .12s ease; }
+.agentchoice[open] > summary::after { transform: rotate(90deg); }
+.agentchoice > summary:hover .name, .agentchoice > summary:focus-visible .name { color: var(--link); }
+.agentchoice > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; border-radius: 8px; }
+.agentchoice > summary .name { font-weight: 600; }
+.agentchoice .agentbody { padding: 2px 14px 14px; }
+.agentchoice .agentbody > p { margin: 0 0 10px; }
+.agentchoice .steps li { margin-bottom: 14px; }
+.agentchoice .steps .rowform { margin-top: 8px; }
+.agentchoice .steps .hint { display: block; margin: 6px 0 0; }
+.agentsecret { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.agentsecret[hidden] { display: none; }
+.agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
+.agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
+#agents { margin-top: 26px; }
+.promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`;
 var MODEL_SETUP_CSS = `
 .modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{border:1px solid var(--border,#333);border-radius:12px;padding:16px 18px;min-width:0}
 .modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:12.5px}
@@ -2383,6 +2522,7 @@ var OLYMPUS_CONTROL_UI_CSS = forShadowRoot([
   DASHBOARD_POLICY_CSS,
   SETUP_JOURNEY_CSS,
   MODEL_SETUP_CSS,
+  AGENT_CONNECT_CSS,
   BACKGROUND_CSS,
   DISPOSITIONS_CSS
 ].join(`

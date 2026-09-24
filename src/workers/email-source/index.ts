@@ -174,6 +174,11 @@ import {
   writeEmbeddingOperatorOverride,
 } from '../dashboard/embedding-runtime.ts';
 import { readBackgroundRuntime } from '../dashboard/background-runtime.ts';
+import {
+  dashboardAgentsView,
+  handleDashboardAgentRequest,
+  type DashboardAgentConnectionsBackend,
+} from '../agent-connections.ts';
 import type { DashboardBackgroundPageOptions } from '../dashboard/pages/background.ts';
 import {
   DASHBOARD_SAVED_SECRET_FIELD_VALUE,
@@ -557,6 +562,8 @@ export interface EmailSourceWorkerOptions {
   /** Instance nonce supplied by the managed service supervisor. */
   serviceInstanceId?: string;
   recheckCredentials?: () => WorkerCredentialDegradation[];
+  /** Remote agent connections behind the Setup page's "Connect an agent" panel. */
+  agentConnections?: DashboardAgentConnectionsBackend;
   basePath?: string;
 }
 
@@ -685,6 +692,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   close(): void;
 } {
   const connector = options.connector ?? new GogcliEmailConnectorStub();
+  const agentConnections = options.agentConnections;
   const sourceAnswer = options.sourceAnswer;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
@@ -1007,6 +1015,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           });
         }
 
+        const agentResponse = await handleDashboardAgentRequest(request, url.pathname, agentConnections);
+        if (agentResponse) return agentResponse;
+
         if (request.method === 'GET' && url.pathname === '/dashboard/auth-check') {
           return json({ ok: true });
         }
@@ -1318,6 +1329,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             backgroundRuntime,
             ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
             ...(dashboardUi ? { nativeOAuthAvailable: dashboardUi.nativeOAuthAvailable } : {}),
+            ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
           };
           if (dashboardUi) {
             return json(renderDashboardControlUi({
