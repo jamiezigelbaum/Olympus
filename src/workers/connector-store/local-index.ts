@@ -7609,7 +7609,7 @@ export class LocalConnectorStore {
       // answer reports a skipped semantic lane instead of failing outright.
       // Configuration errors still throw: they need the operator.
       if (error instanceof TransientSourceEmbeddingError) {
-        return { rows: [], skippedReason: 'embedding_query_unavailable' };
+        return { rows: [], skippedReason: `embedding_query_unavailable:${error.reason}` };
       }
       throw error;
     }
