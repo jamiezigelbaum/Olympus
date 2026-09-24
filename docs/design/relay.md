@@ -1,7 +1,7 @@
 # Olympus connect relay
 
-Status: slice 5 of the hosted-agent compatibility design
-(`docs/design/hosted-agent-compatibility.md`, PR #84, not yet on `main`). Code: [`connect-relay/`](../../connect-relay). Nothing here is
+Status: slice 5 of
+[hosted-agent compatibility](hosted-agent-compatibility.md). Code: [`connect-relay/`](../../connect-relay). Nothing here is
 deployed yet.
 
 A hosted agent (Claude, Grok, Muse) calls
@@ -44,8 +44,9 @@ install ──TLS(SNI=relay.zone)─┘  control session: hello/register, open, 
 
 - **One port.** The relay listens on port 443 and reads only the cleartext
   ClientHello:
-  - SNI equal to `relay.<zone>` goes to the relay's own control plane, which
-    serves the relay's own certificate.
+  - SNI equal to `relay.<zone>` (sessions) or `data.relay.<zone>` (data
+    connections) goes to the relay's own control plane, which serves the
+    relay's own certificate for both names.
   - SNI `<install-id>.<zone>` is spliced byte for byte.
   - Anything else gets a TLS alert.
 - **Data connections, not a multiplexer.** For each public connection, the
@@ -54,6 +55,23 @@ install ──TLS(SNI=relay.zone)─┘  control session: hello/register, open, 
   that `connId`. TCP handles backpressure, and there is no framing layer to get
   wrong. The cost is one extra round trip per connection. A pre-opened pool is
   a later optimization.
+- **TLS inside TLS.** A data connection is TLS from the install to the
+  relay's data host, and the relay terminates only that outer layer. Inside it
+  are the agent's own TLS records, end to end with the install's certificate.
+  The relay decrypts the outer layer and sees inner ciphertext; it never holds
+  a key for the inner layer.
+- **Separate budgets for sessions and data.** Data connections exist because
+  public traffic arrived, so they must not spend the budget an install needs
+  for its session.
+  - The control host has a per-address *rate* (session setup only; outsiders
+    cannot cause it).
+  - The data host has a per-address *concurrency* cap. Attaches are further
+    bounded by live pending connection ids and the per-install limits.
+  - Before the ClientHello, the relay caps connections per address and
+    overall, and parses only once a whole TLS record has arrived, so a
+    byte-by-byte trickle costs one parse per record.
+  - Per-address limits key IPv6 by /64. When an AAAA record is published the
+    relay listens dual-stack on `::`, and refuses to start IPv4-only.
 - **Identity.**
   - The install key is Ed25519. The install id is `base32(sha256(SPKI))[:32]`,
     so an id cannot be claimed with a different key.
@@ -62,14 +80,23 @@ install ──TLS(SNI=relay.zone)─┘  control session: hello/register, open, 
   - `hello` is refused for ids that never registered.
   - Signatures are domain-separated and bound to the nonce, so they cannot be
     replayed.
-  - The registry stores only the id, the public key and the registration time.
-    It stores no IP address and no account.
+  - The registry stores only the id, the public key, and registration,
+    last-seen, and activation times. It stores no IP address and no account.
+  - Registrations are rate-limited per address and relay-wide. A registration
+    that never starts certificate issuance expires after 24 hours; one with no
+    session for 90 days expires with its address record. The store is an
+    append-only JSON-lines log, compacted on start, so no request rewrites the
+    whole file.
 - **Local TLS endpoint.** It forwards only the remote agent surface: `/mcp`,
   `/openapi.json` and the OAuth `/.well-known/*` metadata.
   - The worker's other loopback routes (dashboard, local APIs) assume a local
     caller. Everything outside the allowlist gets a local 404 and never reaches
     the worker.
   - Dot segments and encoded separators are refused rather than normalized.
+  - The client opens at most 64 concurrent data connections (configurable),
+    and it accepts a `ready` hostname only if it equals
+    `<own install id>.<configured zone>`. Key material lives in a dedicated
+    `connect-relay/` subdirectory (0700) of the state directory.
   - Forwarding headers from the internet are dropped. The endpoint sets
     `x-olympus-relay: 1`, `x-forwarded-proto`, `x-forwarded-host` and
     `x-forwarded-for`, taking the agent address from the relay's `open`. The
@@ -141,8 +168,11 @@ one thing: the TXT value `base64url(sha256(keyAuthorization))`, and only at the
 name it derives itself, `_acme-challenge.<install-id>.<zone>`. An install
 cannot name another record.
 
-- **Limits on DNS requests:** requests are rate-limited per install, and at
-  most 4 values can be outstanding.
+- **Limits on DNS requests:** publishes and clears share a per-install
+  budget, at most 4 values can be outstanding, and all provider calls share a
+  relay-wide budget. A clear is accepted only for a value the same session
+  published, so clears cannot drive provider calls on their own. Explicit
+  address records have a relay-wide cap.
 - **Cleanup:** values are cleared after validation, and again when the session
   ends.
 - **Explicit address record per install:** before the first TXT record, the
@@ -167,9 +197,15 @@ cannot name another record.
 | Attach deadline after `open` | 10 s |
 | Concurrent public connections per install | 32 |
 | New public connections per install | burst 30, 5/s |
-| Control connections per source IP | burst 30, 1 per 2 s |
-| Registrations per source IP | 5, then 5/hour |
-| ACME TXT publishes per install | 10, then 10/hour; 4 outstanding |
+| Control-host connections (session setup) per address | burst 30, 1 per 2 s |
+| Data-host connections per address (concurrent) | 512 |
+| Pre-ClientHello connections per address / listener total | 32 / 50,000 |
+| Registrations per address / relay-wide | 5, then 5/hour / 200, then 200/hour |
+| ACME TXT publishes and clears per install | 10, then 10/hour; 4 outstanding |
+| DNS provider calls, relay-wide | burst 120, 2/s |
+| Explicit address records | 50,000 |
+| Registration expiry: no issuance / no session | 24 hours / 90 days |
+| Client data connections | 64 |
 | Session idle (install pings every 30 s) | 90 s |
 | Spliced connection idle | 15 min |
 | Global pending / sessions / registry | 5,000 / 20,000 / 100,000 |
@@ -233,6 +269,7 @@ Nothing below has been executed. It is what deployment needs from Jamie.
      never pasted into chat.
    - Records:
      - `relay.connect.olympusplugin.ai A <ip>` (DNS only, not proxied);
+     - `data.relay.connect.olympusplugin.ai A <ip>` (DNS only);
      - `*.connect.olympusplugin.ai A <ip>` (DNS only);
      - optional `CAA 0 issue "letsencrypt.org"` at `connect.olympusplugin.ai`.
    - The relay creates per-install explicit records itself.
@@ -254,15 +291,19 @@ Nothing below has been executed. It is what deployment needs from Jamie.
    - Copy `connect-relay/` at the released SHA to
      `/opt/olympus-connect-relay/connect-relay`.
    - It needs no `node_modules`: the service uses only `node:` built-ins.
-2. **Relay certificate for `relay.connect.olympusplugin.ai`.** Any ACME client
-   using Cloudflare DNS-01 works, for example
-   `certbot certonly --dns-cloudflare -d relay.connect.olympusplugin.ai`.
+2. **Relay certificate for `relay.connect.olympusplugin.ai` and
+   `data.relay.connect.olympusplugin.ai`.** Any ACME client using Cloudflare
+   DNS-01 works, for example
+   `certbot certonly --dns-cloudflare -d relay.connect.olympusplugin.ai -d data.relay.connect.olympusplugin.ai`.
    - Point `RELAY_CONTROL_CERT_PATH` at the chain.
    - Copy the key to `/etc/olympus-connect-relay/credentials/control-key.pem`
      (0600, root).
-   - The renewal deploy hook runs
+   - **Renewal:** certbot's systemd timer renews the certificate
+     automatically, about 30 days before expiry. Its deploy hook
+     (`/etc/letsencrypt/renewal-hooks/deploy/olympus-connect-relay`) copies the
+     new key into the credentials directory, then runs
      `systemctl restart olympus-connect-relay`. Installs reconnect with backoff
-     within about a minute.
+     within about a minute. Check it once with `certbot renew --dry-run`.
 3. **Configuration and secrets.**
    - `/etc/olympus-connect-relay/relay.env` from `deploy/relay.env.example`.
    - The Cloudflare token goes in
@@ -287,11 +328,12 @@ Nothing below has been executed. It is what deployment needs from Jamie.
 
 ### Operate
 
-- **State.** The registry is `/var/lib/olympus-connect-relay/registry.json`.
+- **State.** The registry is `/var/lib/olympus-connect-relay/registry.jsonl`.
   Back it up. Losing it forces installs to re-register, which they do
   automatically on the `unregistered` error.
-- **Removing an install.** Delete its entry and its DNS records, then restart.
-  An admin revoke command is a follow-up.
+- **Removing an install.** Append
+  `{"op":"remove","installId":"<id>","at":<ms>}` to the registry, delete its
+  DNS records, then restart. An admin revoke command is a follow-up.
 - **Incidents.** A spike in `public_rejected_limit` means an abusive agent or
   a misbehaving install. Adjust the limits in `server/public-path.ts` and
   record a disposition.

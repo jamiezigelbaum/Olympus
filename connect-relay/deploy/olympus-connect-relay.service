@@ -19,7 +19,7 @@ LoadCredential=cloudflare-api-token:/etc/olympus-connect-relay/credentials/cloud
 LoadCredential=control-key.pem:/etc/olympus-connect-relay/credentials/control-key.pem
 Environment=RELAY_CLOUDFLARE_API_TOKEN_FILE=%d/cloudflare-api-token
 Environment=RELAY_CONTROL_KEY_PATH=%d/control-key.pem
-Environment=RELAY_REGISTRY_PATH=/var/lib/olympus-connect-relay/registry.json
+Environment=RELAY_REGISTRY_PATH=/var/lib/olympus-connect-relay/registry.jsonl
 StateDirectory=olympus-connect-relay
 StateDirectoryMode=0700
 ExecStart=/usr/local/bin/bun server/main.ts
@@ -50,6 +50,12 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 # MemoryDenyWriteExecute is left off: Bun's JIT needs writable executable memory.
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ProtectProc=invisible
+ProcSubset=pid
+MemoryMax=1G
+TasksMax=512
 UMask=0077
 
 [Install]
