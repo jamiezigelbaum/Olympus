@@ -16,6 +16,7 @@ import {
   signInstallMessage,
   type ClientSessionMessage,
 } from '../shared/protocol.ts';
+import { propagateClose } from '../shared/bridge.ts';
 import type { AcmeDnsPublisher } from './acme.ts';
 import type { InstallIdentity } from './identity.ts';
 import { startLocalEndpoint, type LocalEndpoint } from './local-endpoint.ts';
@@ -38,6 +39,12 @@ export interface RelayClientOptions {
   readonly zone: string;
   /** Concurrent data connections the relay may make this install open (default 64). */
   readonly maxDataConnections?: number;
+  /**
+   * A data connection whose agent has not completed TLS and sent a first
+   * request within this time is closed (default 10 s), so stalled handshakes
+   * cannot hold install slots.
+   */
+  readonly firstRequestTimeoutMs?: number;
   readonly identity: InstallIdentity;
   /** Loopback Olympus worker; defaults to `http://127.0.0.1:28090`. */
   readonly target?: string;
@@ -61,6 +68,7 @@ export class RelayClient implements AcmeDnsPublisher {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly dnsWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly peers = new Map<number, string>();
+  private readonly firstRequestTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private readonly dataSockets = new Set<net.Socket>();
   private sequence = 0;
   private dataConnections = 0;
@@ -102,6 +110,13 @@ export class RelayClient implements AcmeDnsPublisher {
       target: this.options.target ?? 'http://127.0.0.1:28090',
       ...(this.options.allowedPaths ? { allowedPaths: this.options.allowedPaths } : {}),
       peerAddress: (port) => (port === undefined ? undefined : this.peers.get(port)),
+      onRequest: (port) => {
+        if (port === undefined) return;
+        const timer = this.firstRequestTimers.get(port);
+        if (timer) clearTimeout(timer);
+        this.firstRequestTimers.delete(port);
+      },
+      handshakeTimeoutMs: this.options.firstRequestTimeoutMs ?? 10_000,
     });
     const previous = this.endpoint;
     this.endpoint = next;
@@ -306,14 +321,18 @@ export class RelayClient implements AcmeDnsPublisher {
           data.destroy();
           local.destroy();
         };
-        local.on('error', destroyBoth);
-        data.on('close', () => local.destroy());
-        local.on('close', () => data.destroy());
+        propagateClose(data, local);
         local.once('connect', () => {
           const port = local.localPort;
-          if (port !== undefined && remoteAddress) {
-            this.peers.set(port, remoteAddress);
-            local.once('close', () => this.peers.delete(port));
+          if (port !== undefined) {
+            if (remoteAddress) this.peers.set(port, remoteAddress);
+            this.firstRequestTimers.set(port, setTimeout(destroyBoth, this.options.firstRequestTimeoutMs ?? 10_000));
+            local.once('close', () => {
+              this.peers.delete(port);
+              const timer = this.firstRequestTimers.get(port);
+              if (timer) clearTimeout(timer);
+              this.firstRequestTimers.delete(port);
+            });
           }
           // A relay-side rejection arrives as one JSON error line; the agent's
           // TLS stream always starts with a handshake record (0x16).

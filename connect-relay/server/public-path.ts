@@ -12,6 +12,7 @@ import type { Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { INSTALL_ID_PATTERN, newConnId, type OpenMessage } from '../shared/protocol.ts';
 import { parseClientHello, TLS_ALERT, tlsAlertRecord } from '../shared/sni.ts';
+import { propagateClose } from '../shared/bridge.ts';
 import { addressKey, type KeyedCounter, type KeyedTokenBuckets } from '../shared/rate-limit.ts';
 
 export interface RelayLimits {
@@ -22,6 +23,13 @@ export interface RelayLimits {
   attachTimeoutMs: number;
   /** Open plus pending public connections per install. */
   maxConcurrentPerInstall: number;
+  /**
+   * The same, from one source address (IPv6 by /64), so one address cannot
+   * hold all of an install's slots.
+   */
+  maxConcurrentPerInstallPerAddress: number;
+  /** TLS handshakes per address on the data host. */
+  dataHandshakesPerAddress: { capacity: number; refillPerSecond: number };
   newConnectionsPerInstall: { capacity: number; refillPerSecond: number };
   controlConnectionsPerIp: { capacity: number; refillPerSecond: number };
   registrationsPerIp: { capacity: number; refillPerSecond: number };
@@ -61,6 +69,8 @@ export const DEFAULT_LIMITS: RelayLimits = {
   maxClientHelloBytes: 16_384 + 5 * 4,
   attachTimeoutMs: 10_000,
   maxConcurrentPerInstall: 32,
+  maxConcurrentPerInstallPerAddress: 6,
+  dataHandshakesPerAddress: { capacity: 200, refillPerSecond: 50 },
   newConnectionsPerInstall: { capacity: 30, refillPerSecond: 5 },
   controlConnectionsPerIp: { capacity: 30, refillPerSecond: 0.5 },
   registrationsPerIp: { capacity: 5, refillPerSecond: 5 / 3600 },
@@ -126,6 +136,8 @@ export interface PublicPathDeps {
   readonly controlBuckets: KeyedTokenBuckets;
   readonly preHello: KeyedCounter;
   readonly dataConnections: KeyedCounter;
+  readonly perInstallAddress: KeyedCounter;
+  readonly dataHandshakeBuckets: KeyedTokenBuckets;
   isRegistered(installId: string): boolean;
   session(installId: string): LiveSession | undefined;
   toControlPlane(socket: Socket, buffered: Buffer, plane: 'control' | 'data'): void;
@@ -222,6 +234,11 @@ function route(socket: Socket, serverName: string, clientHello: Buffer, deps: Pu
     return;
   }
   if (serverName === deps.dataHost) {
+    if (!deps.dataHandshakeBuckets.take(address)) {
+      deps.log('data_rejected_limit');
+      socket.destroy();
+      return;
+    }
     const releaseData = deps.dataConnections.tryAcquire(address, deps.limits.maxDataConnectionsPerAddress);
     if (!releaseData) {
       deps.log('data_rejected_limit');
@@ -245,15 +262,17 @@ function route(socket: Socket, serverName: string, clientHello: Buffer, deps: Pu
     reject(socket, TLS_ALERT.internalError);
     return;
   }
-  if (
-    (deps.active.get(label) ?? 0) >= deps.limits.maxConcurrentPerInstall ||
-    deps.pending.size >= deps.limits.maxPendingTotal ||
-    !deps.newConnectionBuckets.take(label)
-  ) {
+  const releaseAddress =
+    (deps.active.get(label) ?? 0) < deps.limits.maxConcurrentPerInstall && deps.pending.size < deps.limits.maxPendingTotal
+      ? deps.perInstallAddress.tryAcquire(`${label}|${address}`, deps.limits.maxConcurrentPerInstallPerAddress)
+      : undefined;
+  if (!releaseAddress || !deps.newConnectionBuckets.take(label)) {
+    releaseAddress?.();
     deps.log('public_rejected_limit', { installId: label });
     reject(socket, TLS_ALERT.internalError);
     return;
   }
+  socket.once('close', releaseAddress);
   const connId = newConnId();
   deps.active.set(label, (deps.active.get(label) ?? 0) + 1);
   socket.once('close', () => {
@@ -288,15 +307,11 @@ export function splice(
 ): void {
   clearTimeout(pending.timer);
   const agent = pending.socket;
-  const destroyBoth = () => {
+  propagateClose(agent, data);
+  agent.setTimeout(limits.splicedIdleTimeoutMs, () => {
     agent.destroy();
     data.destroy();
-  };
-  agent.on('error', destroyBoth);
-  data.on('error', destroyBoth);
-  agent.on('close', () => data.destroy());
-  data.on('close', () => agent.destroy());
-  agent.setTimeout(limits.splicedIdleTimeoutMs, destroyBoth);
+  });
   if (tap) {
     tap('to-install', pending.clientHello);
     agent.on('data', (chunk: Buffer) => tap('to-install', chunk));

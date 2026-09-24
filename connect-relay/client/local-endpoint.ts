@@ -31,6 +31,10 @@ export interface LocalEndpointOptions {
   readonly allowedPaths?: readonly string[];
   /** Maps the loopback source port of a piped data connection to the agent's address. */
   readonly peerAddress?: (localSourcePort: number | undefined) => string | undefined;
+  /** Called when a request arrives, with the loopback source port of its connection. */
+  readonly onRequest?: (localSourcePort: number | undefined) => void;
+  /** TLS handshake deadline (Node honors it; the relay client adds a portable first-request deadline). */
+  readonly handshakeTimeoutMs?: number;
 }
 
 export interface LocalEndpoint {
@@ -99,7 +103,8 @@ export async function startLocalEndpoint(options: LocalEndpointOptions): Promise
   if (target.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname)) {
     throw new Error('the relay client only forwards to a loopback http:// worker');
   }
-  const server = https.createServer({ key: options.key, cert: options.cert, minVersion: 'TLSv1.2' }, (req, res) => {
+  const server = https.createServer({ key: options.key, cert: options.cert, minVersion: 'TLSv1.2', handshakeTimeout: options.handshakeTimeoutMs ?? 10_000 }, (req, res) => {
+    options.onRequest?.(req.socket.remotePort);
     const path = allowedForwardPath(req.url, allowed);
     if (!path) {
       res.writeHead(404, { 'content-type': 'application/json' });
@@ -137,6 +142,8 @@ export async function startLocalEndpoint(options: LocalEndpointOptions): Promise
     req.pipe(upstream);
   });
   server.on('upgrade', (_req, socket) => socket.destroy());
+  server.headersTimeout = 15_000;
+  server.requestTimeout = 60_000;
   server.on('tlsClientError', () => {});
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   return {

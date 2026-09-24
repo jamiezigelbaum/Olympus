@@ -34,6 +34,7 @@ import {
   type RelaySessionMessage,
 } from '../shared/protocol.ts';
 import { KeyedCounter, KeyedTokenBuckets, addressKey } from '../shared/rate-limit.ts';
+import { propagateClose } from '../shared/bridge.ts';
 import { TLS_ALERT } from '../shared/sni.ts';
 import type { DnsProvider } from './dns.ts';
 import {
@@ -109,6 +110,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const globalDnsCalls = new KeyedTokenBuckets(limits.dnsCallsGlobal);
   const preHello = new KeyedCounter();
   const dataConnections = new KeyedCounter();
+  const perInstallAddress = new KeyedCounter();
+  const dataHandshakeBuckets = new KeyedTokenBuckets(limits.dataHandshakesPerAddress);
   const acmeBuckets = new KeyedTokenBuckets(limits.acmeDnsPerInstall);
   const openSockets = new Set<Socket>();
   const track = (socket: Socket) => {
@@ -145,14 +148,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       upstream.pipe(socket);
       socket.resume();
     });
-    const destroyBoth = () => {
-      socket.destroy();
-      upstream.destroy();
-    };
-    socket.on('error', destroyBoth);
-    upstream.on('error', destroyBoth);
-    socket.on('close', () => upstream.destroy());
-    upstream.on('close', () => socket.destroy());
+    propagateClose(socket, upstream);
   };
 
   const publicServer = net.createServer((socket) => {
@@ -168,6 +164,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       controlBuckets,
       preHello,
       dataConnections,
+      perInstallAddress,
+      dataHandshakeBuckets,
       isRegistered: (installId) => config.registry.get(installId) !== undefined,
       session: (installId) => sessions.get(installId),
       toControlPlane,
@@ -403,15 +401,26 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   }
 
   const sweep = async (now = Date.now()): Promise<string[]> => {
-    const expired = config.registry.expire(now, {
-      unactivatedMs: limits.unactivatedRegistrationTtlMs,
-      inactiveMs: limits.inactiveRegistrationTtlMs,
-    });
+    const expired = config.registry.expire(
+      now,
+      { unactivatedMs: limits.unactivatedRegistrationTtlMs, inactiveMs: limits.inactiveRegistrationTtlMs },
+      (installId) => sessions.has(installId),
+    );
     for (const record of expired) {
       log('registration_expired', { installId: record.installId });
       const live = sessions.get(record.installId);
       if (live) live.socket.end(encodeLine({ type: 'error', code: 'unregistered', message: 'registration expired' }));
-      if (record.hasAddressRecord) await config.dns.removeAddress(hostnameFor(record.installId, zone)).catch(() => {});
+    }
+    // Address records are removed within the DNS budget; a failed or deferred
+    // removal stays counted and is retried on the next sweep.
+    for (const installId of config.registry.pendingAddressRemovals()) {
+      if (!globalDnsCalls.take('relay')) break;
+      try {
+        await config.dns.removeAddress(hostnameFor(installId, zone));
+        config.registry.addressRemoved(installId);
+      } catch {
+        // Retried next sweep.
+      }
     }
     return expired.map((record) => record.installId);
   };

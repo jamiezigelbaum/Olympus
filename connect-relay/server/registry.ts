@@ -35,8 +35,15 @@ export interface InstallRegistry {
   activate(installId: string): void;
   markAddressRecord(installId: string): void;
   addressRecordCount(): number;
-  /** Removes expired registrations and returns them. */
-  expire(now: number, ttl: { unactivatedMs: number; inactiveMs: number }): InstallRecord[];
+  /**
+   * Removes expired registrations and returns them. An install with a live
+   * session (`isLive`) is never expired as unactivated.
+   */
+  expire(now: number, ttl: { unactivatedMs: number; inactiveMs: number }, isLive?: (installId: string) => boolean): InstallRecord[];
+  /** Address records of removed installs that still exist in DNS (still counted against the cap). */
+  pendingAddressRemovals(): string[];
+  /** The address record for `installId` is gone from DNS. */
+  addressRemoved(installId: string): void;
   size(): number;
   /** Resolves when every accepted change is durable. */
   flush(): Promise<void>;
@@ -44,7 +51,7 @@ export interface InstallRegistry {
 
 type LogEntry =
   | { op: 'register'; installId: string; publicKey: string; at: number }
-  | { op: 'seen' | 'activate' | 'address' | 'remove'; installId: string; at: number };
+  | { op: 'seen' | 'activate' | 'address' | 'remove' | 'address-removed' | 'orphan-address'; installId: string; at: number };
 
 /** Rewrites of `seen` are throttled: a daily resolution is enough for a 90-day expiry. */
 const SEEN_RESOLUTION_MS = 24 * 60 * 60_000;
@@ -52,6 +59,7 @@ const SEEN_RESOLUTION_MS = 24 * 60 * 60_000;
 export class MemoryInstallRegistry implements InstallRegistry {
   protected readonly records = new Map<string, InstallRecord>();
   private addressRecords = 0;
+  protected readonly orphanAddresses = new Set<string>();
 
   constructor(
     private readonly maxInstalls = 100_000,
@@ -100,10 +108,11 @@ export class MemoryInstallRegistry implements InstallRegistry {
     return this.addressRecords;
   }
 
-  expire(now: number, ttl: { unactivatedMs: number; inactiveMs: number }): InstallRecord[] {
+  expire(now: number, ttl: { unactivatedMs: number; inactiveMs: number }, isLive: (installId: string) => boolean = () => false): InstallRecord[] {
     const expired: InstallRecord[] = [];
     for (const record of this.records.values()) {
-      const unactivated = record.activatedAt === undefined && now - record.registeredAt > ttl.unactivatedMs;
+      const unactivated =
+        record.activatedAt === undefined && now - record.registeredAt > ttl.unactivatedMs && !isLive(record.installId);
       const inactive = now - record.lastSeenAt > ttl.inactiveMs;
       if (unactivated || inactive) expired.push(record);
     }
@@ -113,6 +122,17 @@ export class MemoryInstallRegistry implements InstallRegistry {
       this.append(entry);
     }
     return expired;
+  }
+
+  pendingAddressRemovals(): string[] {
+    return [...this.orphanAddresses];
+  }
+
+  addressRemoved(installId: string): void {
+    if (!this.orphanAddresses.has(installId)) return;
+    const entry: LogEntry = { op: 'address-removed', installId, at: this.now() };
+    this.apply(entry);
+    this.append(entry);
   }
 
   size(): number {
@@ -133,6 +153,8 @@ export class MemoryInstallRegistry implements InstallRegistry {
           publicKey: entry.publicKey,
           registeredAt: entry.at,
           lastSeenAt: entry.at,
+          // A returning install reclaims its not-yet-removed address record.
+          ...(this.orphanAddresses.delete(entry.installId) ? { hasAddressRecord: true } : {}),
         });
         return;
       case 'seen':
@@ -148,8 +170,18 @@ export class MemoryInstallRegistry implements InstallRegistry {
         }
         return;
       case 'remove':
-        if (record?.hasAddressRecord) this.addressRecords -= 1;
+        // The address record stays counted until DNS confirms its removal.
+        if (record?.hasAddressRecord) this.orphanAddresses.add(entry.installId);
         this.records.delete(entry.installId);
+        return;
+      case 'orphan-address':
+        if (!this.orphanAddresses.has(entry.installId)) {
+          this.orphanAddresses.add(entry.installId);
+          this.addressRecords += 1;
+        }
+        return;
+      case 'address-removed':
+        if (this.orphanAddresses.delete(entry.installId)) this.addressRecords -= 1;
         return;
     }
   }
@@ -196,6 +228,7 @@ export class FileInstallRegistry extends MemoryInstallRegistry {
       if (record.activatedAt !== undefined) lines.push(JSON.stringify({ op: 'activate', installId: record.installId, at: record.activatedAt }));
       if (record.hasAddressRecord) lines.push(JSON.stringify({ op: 'address', installId: record.installId, at: record.registeredAt }));
     }
+    for (const installId of this.orphanAddresses) lines.push(JSON.stringify({ op: 'orphan-address', installId, at: 0 }));
     const temporary = `${this.path}.tmp.${process.pid}`;
     writeFileSync(temporary, lines.length ? `${lines.join('\n')}\n` : '', { mode: 0o600 });
     renameSync(temporary, this.path);
