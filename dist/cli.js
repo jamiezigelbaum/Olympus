@@ -10890,6 +10890,31 @@ import { isIP } from "node:net";
 function isApprovedSecureSourceEmbeddingProvider(provider) {
   return provider.backend === "local" || provider.backend === "cloud" && provider.provider === "venice";
 }
+function transientEmbeddingMessage(provider, reason, attempts, budgetMs) {
+  const tries = `${attempts} attempt${attempts === 1 ? "" : "s"}`;
+  if (reason === 429) {
+    return {
+      message: `${provider} source embedding endpoint refused the request with HTTP 429 (rate limit or quota) after ${tries}.`,
+      suggestion: "The provider is throttling this account or its quota may be exhausted. Check the provider quota and billing before retrying; the key and model are not implicated."
+    };
+  }
+  if (reason === "network") {
+    return {
+      message: `${provider} source embedding endpoint could not be reached (network error after ${tries}).`,
+      suggestion: "A connection or DNS failure, not a key or model problem. Retry the same request shortly; if it persists, check the Gateway host network."
+    };
+  }
+  if (reason === "timeout") {
+    return {
+      message: `${provider} source embedding endpoint did not answer within its ${budgetMs}ms budget (${tries}).`,
+      suggestion: "The provider was slow or unavailable, not misconfigured. Retry the same request shortly."
+    };
+  }
+  return {
+    message: `${provider} source embedding endpoint is temporarily unavailable (HTTP ${reason} after ${tries}).`,
+    suggestion: "This is a transient provider outage, not a key or model problem. Retry the same request in a few seconds."
+  };
+}
 function abortableDelay(ms, signal) {
   return new Promise((resolve5) => {
     if (signal.aborted)
@@ -10903,23 +10928,57 @@ function abortableDelay(ms, signal) {
     signal.addEventListener("abort", done, { once: true });
   });
 }
-async function fetchEmbeddingResponse(fetchImpl, provider, url, init) {
+function retryAfterMs(response, nowMs = Date.now()) {
+  const value = response.headers.get("retry-after")?.trim();
+  if (!value)
+    return;
+  if (/^\d+$/.test(value))
+    return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - nowMs);
+}
+async function discardBody(response) {
+  await response.body?.cancel().catch(() => {
+    return;
+  });
+}
+async function fetchEmbeddingResponse(fetchImpl, provider, url, init, budget) {
+  const timedOut = (attempts) => new TransientSourceEmbeddingError(provider, "timeout", attempts, budget.budgetMs);
   let attempt = 0;
   for (;; ) {
-    const response = await fetchImpl(url, init);
-    attempt += 1;
-    if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status))
-      return response;
-    const delayMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
-    if (delayMs === undefined || init.signal.aborted) {
-      throw new TransientSourceEmbeddingError(provider, response.status, attempt);
+    let reason;
+    let waitMs;
+    try {
+      const response = await fetchImpl(url, init);
+      attempt += 1;
+      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status))
+        return response;
+      reason = response.status;
+      const backoffMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
+      const requestedMs = retryAfterMs(response);
+      await discardBody(response);
+      if (backoffMs !== undefined) {
+        waitMs = requestedMs ?? backoffMs;
+        if (Date.now() + waitMs >= budget.deadlineAtMs)
+          waitMs = undefined;
+      }
+    } catch (error) {
+      if (error instanceof TransientSourceEmbeddingError)
+        throw error;
+      if (init.signal.aborted)
+        throw timedOut(attempt + 1);
+      attempt += 1;
+      reason = "network";
+      waitMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
     }
-    await response.body?.cancel().catch(() => {
-      return;
-    });
-    await abortableDelay(delayMs, init.signal);
+    if (waitMs === undefined) {
+      throw new TransientSourceEmbeddingError(provider, reason, attempt, budget.budgetMs);
+    }
     if (init.signal.aborted)
-      throw new TransientSourceEmbeddingError(provider, response.status, attempt);
+      throw timedOut(attempt);
+    await abortableDelay(waitMs, init.signal);
+    if (init.signal.aborted)
+      throw timedOut(attempt);
   }
 }
 
@@ -10985,6 +11044,7 @@ class GeminiSourceEmbeddingProvider {
       return [];
     const controller = new AbortController;
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
       const modelPath = `models/${this.modelId}`;
       let mediaPartsSkipped = 0;
@@ -11013,7 +11073,7 @@ class GeminiSourceEmbeddingProvider {
           requests
         }),
         signal: controller.signal
-      });
+      }, budget);
       if (!response.ok) {
         throw new OperationError("source_index_error", `Gemini source embedding endpoint returned HTTP ${response.status}.`, "Check the configured Gemini API key, model, and source-index embedding policy.");
       }
@@ -11028,6 +11088,8 @@ class GeminiSourceEmbeddingProvider {
     } catch (error) {
       if (error instanceof OperationError)
         throw error;
+      if (controller.signal.aborted)
+        throw new TransientSourceEmbeddingError("Gemini", "timeout", 1, this.timeoutMs);
       throw new OperationError("source_index_error", "Gemini source embedding endpoint failed.", error instanceof Error ? error.message : "Check the configured cloud embedding provider.");
     } finally {
       clearTimeout(timeout);
@@ -11164,6 +11226,7 @@ class OpenAICompatibleSourceEmbeddingProvider {
       return [];
     const controller = new AbortController;
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
       await this.preflight?.(controller.signal);
       const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
@@ -11176,7 +11239,7 @@ class OpenAICompatibleSourceEmbeddingProvider {
         }),
         redirect: "error",
         signal: controller.signal
-      });
+      }, budget);
       if (!response.ok) {
         throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned HTTP ${response.status}.`, "Check the configured source-index embedding endpoint, model, and credential.");
       }
@@ -11194,6 +11257,8 @@ class OpenAICompatibleSourceEmbeddingProvider {
     } catch (error) {
       if (error instanceof OperationError)
         throw error;
+      if (controller.signal.aborted)
+        throw new TransientSourceEmbeddingError(this.provider, "timeout", 1, this.timeoutMs);
       throw new OperationError("source_index_error", `${this.provider} source embedding endpoint failed.`, error instanceof Error ? error.message : "Check the configured source-index embedding endpoint.");
     } finally {
       clearTimeout(timeout);
@@ -11584,11 +11649,12 @@ var init_embeddings = __esm(() => {
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
   TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1000];
   TransientSourceEmbeddingError = class TransientSourceEmbeddingError extends OperationError {
-    status;
-    constructor(provider, status, attempts) {
-      super("source_index_error", `${provider} source embedding endpoint is temporarily unavailable (HTTP ${status} after ${attempts} attempts).`, "This is a transient provider outage, not a key or model problem. Retry the same request in a few seconds.");
+    reason;
+    constructor(provider, reason, attempts, budgetMs = 0) {
+      const { message, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
+      super("source_index_error", message, suggestion);
       this.name = "TransientSourceEmbeddingError";
-      this.status = status;
+      this.reason = reason;
     }
   };
 });
@@ -21041,7 +21107,7 @@ var init_local_index = __esm(() => {
         [queryVector] = await provider.embed([{ text: trimmed }], { taskType: "RETRIEVAL_QUERY" });
       } catch (error) {
         if (error instanceof TransientSourceEmbeddingError) {
-          return { rows: [], skippedReason: "embedding_query_unavailable" };
+          return { rows: [], skippedReason: `embedding_query_unavailable:${error.reason}` };
         }
         throw error;
       }
@@ -40872,11 +40938,11 @@ class LocalSourceWatchStore {
     const deliveryKey = requireHash(input.deliveryKey, "deliveryKey");
     const leaseToken = requireUuid(input.leaseToken, "leaseToken");
     const leaseGeneration = requirePositiveInteger(input.leaseGeneration, "leaseGeneration");
-    const retryAfterMs = requireBoundedInteger(input.retryAfterMs, SOURCE_WATCH_MIN_RETRY_MS, SOURCE_WATCH_MAX_RETRY_MS, "retryAfterMs");
+    const retryAfterMs2 = requireBoundedInteger(input.retryAfterMs, SOURCE_WATCH_MIN_RETRY_MS, SOURCE_WATCH_MAX_RETRY_MS, "retryAfterMs");
     const errorKind = requireToken(input.errorKind, "errorKind");
     const errorHash = requireHash(input.errorHash, "errorHash");
     const now = this.now();
-    const retryAt = addMilliseconds(now, retryAfterMs);
+    const retryAt = addMilliseconds(now, retryAfterMs2);
     return this.db.transaction(() => {
       const row = this.requireOutboxRow(deliveryKey);
       requireNotBefore(now, row.updated_at, "delivery failure recording");
@@ -84533,13 +84599,13 @@ function createEmailSourceWorker(options = {}) {
           }, 503);
         }
         if (isCredentialRefreshBusyError(error2)) {
-          const retryAfterMs = error2.retryAfterMs ?? CREDENTIAL_REFRESH_BUSY_RETRY_MS;
+          const retryAfterMs2 = error2.retryAfterMs ?? CREDENTIAL_REFRESH_BUSY_RETRY_MS;
           return json({
             error: {
               code: "credential_refresh_busy",
               message: "The credential is being refreshed by another process; retry shortly.",
               retryable: true,
-              retry_at: new Date(Date.now() + retryAfterMs).toISOString()
+              retry_at: new Date(Date.now() + retryAfterMs2).toISOString()
             },
             policy: { raw_email_exposed: false }
           }, 503);
