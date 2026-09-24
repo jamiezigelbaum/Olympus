@@ -171,6 +171,22 @@ critical-class and need an independent review receipt.
 3. **OpenAPI view.**
    - `/openapi.json` and a matching REST call path, generated from the same
      operations table, for Muse.
+   - As built: OpenAPI 3.1 at `GET /openapi.json`, served without a token
+     (Muse reads the spec from a URL and writes its own client before the
+     owner pastes the token; the document is rendered with the neutral
+     identity and default corpus registry, so it names nothing about the
+     install). Calls are `POST /api/v1/tools/<name>`, one path per remote
+     operation, behind the same connection token, exposure filter and
+     in-process path as `/mcp`. The server entry is relative until the relay
+     supplies a public origin; it never comes from the Host header. The spec
+     is identical on every install (fixed API version, full remote list), and
+     CORS is intentionally absent: Muse fetches from its VM, server-side, and
+     no browser page needs to read either path. Both remote endpoints read
+     request bodies through a bounded stream reader (256 KiB).
+   - Open: Muse's HTTP timeout is unpublished. `source_answer` can take
+     minutes, so an async submit/poll pair (`POST` returns a job id, `GET`
+     polls it) is the follow-up if end-to-end proof shows synchronous calls
+     cut off.
 4. **OAuth 2.1 authorization server** with the pairing code approval page.
 5. **Relay client** in the plugin, plus **relay service** code and deployment
    config.

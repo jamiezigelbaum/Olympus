@@ -28,6 +28,7 @@ import {
   type RemoteConnectionStore,
 } from '../core/remote-connections.ts';
 import { createOlympusMcpServer } from '../mcp/server.ts';
+import { readBoundedRequestText } from './remote-request-body.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
 const IN_PROCESS_WORKER_BASE_URL = 'http://olympus-worker.internal/v1';
@@ -79,6 +80,19 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       // (DELETE). A 405 is how Streamable HTTP says so.
       return jsonResponse(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
     }
+    // Bounded read: the SDK's own `req.json()` would buffer any size of body.
+    const body = await readBoundedRequestText(request);
+    if (!body.ok) {
+      return body.reason === 'too_large'
+        ? jsonResponse(413, { error: 'payload_too_large' })
+        : jsonResponse(400, { error: 'invalid_request' });
+    }
+    let parsedBody: unknown;
+    try {
+      parsedBody = JSON.parse(body.text);
+    } catch {
+      // Left undefined: the transport then answers its own JSON-RPC parse error.
+    }
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
     const server = createOlympusMcpServer('remote', () => ctx);
@@ -88,6 +102,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       await server.connect(transport);
       return await transport.handleRequest(request, {
         authInfo: { token: '', clientId: verification.connection.id, scopes: [] },
+        ...(parsedBody !== undefined ? { parsedBody } : {}),
       });
     } finally {
       await server.close().catch(() => undefined);
@@ -164,13 +179,13 @@ export function createInProcessOperationContext(input: {
   };
 }
 
-function bearerToken(header: string | null): string | undefined {
+export function bearerToken(header: string | null): string | undefined {
   if (!header) return undefined;
   const match = /^Bearer ([^\s]+)$/i.exec(header.trim());
   return match?.[1];
 }
 
-function unauthorized(error?: 'invalid_token'): Response {
+export function unauthorized(error?: 'invalid_token'): Response {
   // Shaped for the OAuth slice: RFC 6750 challenge now, a resource_metadata
   // parameter (RFC 9728) once protected-resource metadata is served.
   const challenge = error
@@ -179,7 +194,7 @@ function unauthorized(error?: 'invalid_token'): Response {
   return jsonResponse(401, { error: error ?? 'unauthorized' }, { 'WWW-Authenticate': challenge });
 }
 
-function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+export function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers },

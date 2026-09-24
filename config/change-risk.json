@@ -17,6 +17,7 @@
     "src/cli.ts",
     "src/core/contracts.ts",
     "src/core/public-surface.ts",
+    "src/core/remote-connections.ts",
     "src/core/source-index/types.ts",
     "src/core/worker-service.ts",
     "src/native-plugin.ts",
@@ -52,7 +53,8 @@
     ".githooks/",
     "config/sovereignty/",
     "docs/ops/",
-    "scripts/ops/"
+    "scripts/ops/",
+    "src/workers/remote-"
   ],
   "criticalCodeTerms": [
     "auth",
