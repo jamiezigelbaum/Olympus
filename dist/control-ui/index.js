@@ -428,6 +428,26 @@ function mountDashboardController(options) {
       noteSlot.textContent = "";
     slot.hidden = true;
   }
+  async function refreshAgentList() {
+    const current = query("[data-agent-connections-list]");
+    if (!current || disposed || options.signal.aborted)
+      return;
+    let result;
+    try {
+      result = await options.refresh();
+    } catch {
+      return;
+    }
+    if (!result || disposed || options.signal.aborted)
+      return;
+    const next = document.createElement("template");
+    next.innerHTML = result.body;
+    const fresh = next.content.querySelector("[data-agent-connections-list]");
+    if (!fresh)
+      return;
+    current.innerHTML = fresh.innerHTML;
+    applyWriteCapability();
+  }
   async function submitAgentControl(form) {
     if (!canWrite && !csrfToken) {
       say(form, options.authority === "worker-session" ? "Unlock dashboard controls above first." : "Your OpenClaw connection has read-only access.");
@@ -471,6 +491,7 @@ function mountDashboardController(options) {
     if (params.action === "create_agent_key" && typeof result.body.token === "string") {
       say(form, "");
       showAgentSecret(form, result.body.token, "Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again.");
+      await refreshAgentList();
       return;
     }
     const statusMessage = result.body.status_message;
@@ -478,7 +499,7 @@ function mountDashboardController(options) {
     form.querySelectorAll("button").forEach((button) => {
       button.disabled = true;
     });
-    await refreshNow(false, true);
+    await refreshAgentList();
   }
   function copyText(node) {
     if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)
@@ -648,7 +669,7 @@ function mountDashboardController(options) {
       const slot = done.closest("[data-agent-secret-slot]");
       if (slot)
         clearAgentSecret(slot);
-      refreshNow(false, true);
+      refreshAgentList();
       return;
     }
     const copy = target.closest("[data-copy-target]");

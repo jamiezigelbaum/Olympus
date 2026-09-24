@@ -528,6 +528,30 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     slot.hidden = true;
   }
 
+  /**
+   * Re-reads the page and swaps in only the connected-agents list. A full
+   * refresh is held off while the sheet has fields (and must not replace a
+   * key on screen), so after Create key, Done or Revoke the list alone is
+   * brought up to date.
+   */
+  async function refreshAgentList(): Promise<void> {
+    const current = query<HTMLElement>('[data-agent-connections-list]');
+    if (!current || disposed || options.signal.aborted) return;
+    let result: OlympusDashboardReadResult | undefined;
+    try {
+      result = await options.refresh();
+    } catch {
+      return;
+    }
+    if (!result || disposed || options.signal.aborted) return;
+    const next = document.createElement('template');
+    next.innerHTML = result.body;
+    const fresh = next.content.querySelector('[data-agent-connections-list]');
+    if (!fresh) return;
+    current.innerHTML = fresh.innerHTML;
+    applyWriteCapability();
+  }
+
   async function submitAgentControl(form: HTMLFormElement): Promise<void> {
     if (!canWrite && !csrfToken) {
       say(form, options.authority === 'worker-session'
@@ -572,12 +596,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (params.action === 'create_agent_key' && typeof result.body.token === 'string') {
       say(form, '');
       showAgentSecret(form, result.body.token, 'Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again.');
+      await refreshAgentList();
       return;
     }
     const statusMessage = result.body.status_message;
     say(form, typeof statusMessage === 'string' ? statusMessage : 'Revoked.');
     form.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = true; });
-    await refreshNow(false, true);
+    await refreshAgentList();
   }
 
   function copyText(node: Element): string {
@@ -752,7 +777,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (done) {
       const slot = done.closest<HTMLElement>('[data-agent-secret-slot]');
       if (slot) clearAgentSecret(slot);
-      void refreshNow(false, true);
+      void refreshAgentList();
       return;
     }
     const copy = target.closest<HTMLElement>('[data-copy-target]');

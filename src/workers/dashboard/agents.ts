@@ -54,15 +54,15 @@ const AGENTS: readonly AgentChoice[] = [
     label: 'Claude',
     detail: 'web, desktop and phone',
     method: 'oauth',
-    add: 'In Claude, open Settings, then Connectors, and choose Add custom connector. Name it Olympus and paste this address as the URL:',
-    approve: 'Choose Add, then Connect. An Olympus approval page opens, on your phone too.',
-    instructionsWhere: 'Paste this into a Claude project\'s instructions, or add the Olympus skill under Settings, then Capabilities.',
+    add: 'In Claude, open Customize, then Connectors. Choose +, then Add custom connector, name it Olympus, and paste this address as the URL:',
+    approve: 'Choose Add, then Connect on the Olympus connector. An Olympus approval page opens, on your phone too.',
+    instructionsWhere: 'Paste this into a Claude project\'s instructions.',
   },
   {
     id: 'chatgpt',
     label: 'ChatGPT',
     method: 'oauth',
-    add: 'In ChatGPT, open Settings, then Apps & Connectors, and create a connector (turn on Developer mode under Advanced if ChatGPT asks). Name it Olympus, choose OAuth, and paste this address as the URL:',
+    add: 'In ChatGPT, open Settings, then Apps, and turn on Developer mode under Advanced settings. Then create a connector, name it Olympus, choose OAuth, and paste this address as the URL:',
     approve: 'Choose Create. An Olympus approval page opens.',
     instructionsWhere: 'Paste this into a ChatGPT project\'s instructions, or into your custom instructions.',
   },
@@ -70,8 +70,8 @@ const AGENTS: readonly AgentChoice[] = [
     id: 'grok',
     label: 'Grok or Grok Bot',
     method: 'oauth',
-    add: 'In Grok, open Settings, then Connectors, and add a custom connector. On a team, an admin adds it once and every Grok Bot can use it. Paste this address as the URL:',
-    approve: 'Save the connector and connect it. An Olympus approval page opens.',
+    add: 'In Grok, go to grok.com/connectors, choose New Connector, then Custom, and paste this address as the MCP server URL:',
+    approve: 'Continue to sign in. An Olympus approval page opens.',
     instructionsWhere: 'Paste this into your Grok Bot\'s skills or into Grok\'s custom instructions.',
   },
   {
@@ -80,8 +80,8 @@ const AGENTS: readonly AgentChoice[] = [
     method: 'key',
     keyName: 'Muse',
     address: 'openapi',
-    add: 'In Muse, add a custom connector from an OpenAPI address, and paste this address:',
-    keyUse: 'When Muse asks how to sign in, choose a bearer token and paste the key.',
+    add: 'In Muse, ask it to create a custom connector for Olympus, and give it this OpenAPI address:',
+    keyUse: 'When Muse asks for credentials, give it the key as a bearer token.',
     instructionsWhere: 'Paste this into Muse\'s instructions for the Olympus connector.',
   },
   {
@@ -143,7 +143,9 @@ export function renderDashboardAgentsSection(input: DashboardAgentsSectionInput)
       action: { label: 'Connect an agent', kind: 'none', sheet: AGENT_CONNECT_SHEET_ID, primary: true },
     }),
     connectSheet(view.remoteAccess),
-    connectionList(view, input.now),
+    // Its own region so the controller can re-read the list after a key,
+    // Done or Revoke without replacing an open sheet or a shown key.
+    `<div data-agent-connections-list>${connectionList(view, input.now)}</div>`,
   ].join('\n');
 }
 
@@ -164,7 +166,7 @@ function connectSheet(access: DashboardRemoteAccess): string {
   const choices = AGENTS.map((agent) => agentChoice(agent, access)).join('');
   return `<div class="sheet" id="${AGENT_CONNECT_SHEET_ID}" aria-hidden="true">`
     + `<h4>Connect an agent</h4>`
-    + `<p>Pick the agent you use. It can ask Olympus questions, and it never sees Private source text or Secrets.</p>`
+    + `<p>Pick the agent you use. It never sees Private source text or Secrets. For Private items it receives only answers that Venice or a local model reasoned out, with their titles.</p>`
     + `<div class="agentpick">${choices}</div>`
     + `</div>`;
 }

@@ -13429,6 +13429,8 @@ var DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 var DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin";
 var DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer";
 var DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1";
+var AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
+var AGENT_MINT_WINDOW_MS = 10 * 60000;
 function createGatewayCallbackPeerHeader(peer, authToken) {
   const normalized = normalizeGatewayCallbackPeer(peer);
   const signature = createHmac("sha256", authToken).update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${normalized}`).digest("base64url");

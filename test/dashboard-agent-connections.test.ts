@@ -22,7 +22,9 @@ import { AGENT_INSTRUCTION_TEXT, AGENT_SKILL_PATH, agentSkillMarkdown } from '..
 import { requestDashboardControl, parseDashboardControlParams } from '../src/core/control-ui-gateway.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { withWorkerBearerAuth } from '../src/workers/http.ts';
+import { AGENT_MINT_LIMIT, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { allowedForwardPath, DEFAULT_ALLOWED_PATHS } from '../connect-relay/client/local-endpoint.ts';
+import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
 import {
   DASHBOARD_AGENT_CONTROL_PATHS,
   dashboardAgentsView,
@@ -190,6 +192,62 @@ describe('agent control routes carry dashboard custody', () => {
   });
 });
 
+describe('agent routes refuse remote-agent credentials and the relay never forwards them', () => {
+  test('a connection key or an OAuth access token is not a dashboard credential', async () => {
+    const store = fixtureStore();
+    const guarded = guardedWorker(backend(store));
+    const key = store.create('Muse').token;
+    const grant = store.oauth.createGrant({ clientId: 'https://claude.ai/oauth/client.json', displayName: 'Claude', resource: `${PUBLIC}/mcp` });
+    for (const token of [key, grant.tokens.accessToken, grant.tokens.refreshToken]) {
+      for (const path of DASHBOARD_AGENT_CONTROL_PATHS) {
+        const body = path.endsWith('keys') ? { name: 'Evil' } : path.endsWith('revoke') ? { connection_id: grant.connection.id } : {};
+        const response = await guarded(post(path, body, { Authorization: `Bearer ${token}`, Origin: ORIGIN }));
+        expect(response.status).toBe(401);
+      }
+    }
+    expect(store.list().map((record) => [record.displayName, record.revokedAt]).sort()).toEqual([['Claude', null], ['Muse', null]]);
+  });
+
+  test('no /dashboard path is ever on the relay allowlist, however it is spelled', () => {
+    expect((DEFAULT_ALLOWED_PATHS as readonly string[]).some((path) => path.startsWith('/dashboard') || path === '/')).toBe(false);
+    const probes = [
+      ...V0_4_PUBLIC_DASHBOARD_ROUTES.map((route) => route.path),
+      ...DASHBOARD_AGENT_CONTROL_PATHS,
+      '/dashboard?setup',
+      '/mcp/../dashboard/agents/keys',
+      '/mcp/%2e%2e/dashboard/agents/keys',
+      '/api/v1/tools/..%2F..%2Fdashboard/agents/keys',
+      '/connect/authorize/../../dashboard/agents/pairing-code',
+      '//dashboard/agents/keys',
+      '/DASHBOARD/agents/keys',
+    ];
+    for (const probe of probes) {
+      const forwarded = allowedForwardPath(probe, DEFAULT_ALLOWED_PATHS);
+      expect(forwarded === undefined || !forwarded.toLowerCase().includes('dashboard')).toBe(true);
+    }
+  });
+});
+
+describe('minting is rate limited per control session', () => {
+  test('refuses the mint past the limit and leaves revoke alone', async () => {
+    const store = fixtureStore();
+    const guarded = guardedWorker(backend(store));
+    const { cookie, csrf } = await controlSession(guarded);
+    const custody = { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf };
+    for (let index = 0; index < AGENT_MINT_LIMIT; index++) {
+      const path = index % 2 === 0 ? '/dashboard/agents/pairing-code' : '/dashboard/agents/keys';
+      const response = await guarded(post(path, index % 2 === 0 ? {} : { name: `Agent ${index}` }, custody));
+      expect(response.status).toBe(200);
+    }
+    const limited = await guarded(post('/dashboard/agents/keys', { name: 'One too many' }, custody));
+    expect(limited.status).toBe(429);
+    expect(((await limited.json()) as { error: { code: string } }).error.code).toBe('agent_mint_rate_limited');
+    expect(store.list().some((record) => record.displayName === 'One too many')).toBe(false);
+    const first = store.list()[0]!;
+    expect((await guarded(post('/dashboard/agents/revoke', { connection_id: first.id }, custody))).status).toBe(200);
+  });
+});
+
 describe('pairing codes', () => {
   test('are minted from the same store the approval page checks, once', async () => {
     const store = fixtureStore();
@@ -319,6 +377,28 @@ describe('the panel', () => {
     expect(html).not.toContain(muse.token);
   });
 
+  test('a hostile connection name is escaped in the list', () => {
+    const hostile = '<img src=x onerror="alert(1)">\'"&';
+    const html = renderDashboardAgentsSection({
+      view: { remoteAccess: REMOTE_ON, connections: [{ id: 'e'.repeat(18), name: hostile, kind: 'bearer', createdAt: NOW.toISOString(), lastUsedAt: null }] },
+      now: NOW,
+    });
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('onerror="');
+    expect(html).toContain('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;');
+    const doc = new Window().document;
+    doc.body.innerHTML = html;
+    expect(doc.querySelector('img')).toBeNull();
+    const row = doc.querySelector('[data-agent-connection]')!;
+    expect(row.querySelector('.name')!.textContent).toBe(hostile);
+    expect(row.querySelector('form')!.getAttribute('data-confirmation')).toContain(hostile);
+    // And through the store, as the worker renders it.
+    const store = fixtureStore();
+    store.create(hostile);
+    const viaStore = renderDashboardAgentsSection({ view: dashboardAgentsView(backend(store)), now: NOW });
+    expect(viaStore).not.toContain('<img');
+  });
+
   test('an unreadable connection list is not shown as empty', () => {
     const view = dashboardAgentsView({ store: () => { throw new Error('locked'); }, remoteAccess: () => REMOTE_ON });
     expect(view.unavailable).toBe(true);
@@ -423,6 +503,36 @@ describe('the controller shows a secret once', () => {
     await Bun.sleep(0);
     expect(claude.querySelector('[data-action-message]')!.textContent).toBe('Remote access is off.');
     expect(claude.querySelector<HTMLElement>('[data-agent-secret-slot]')!.hidden).toBe(true);
+  });
+
+  test('after Create key the list is refreshed while the key stays on screen', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = renderDashboardAgentsSection({ view: { remoteAccess: REMOTE_ON, connections: [] }, now: NOW });
+    document.body.append(root);
+    const abort = new AbortController();
+    cleanups.push(() => abort.abort());
+    const refreshed = renderDashboardAgentsSection({
+      view: { remoteAccess: REMOTE_ON, connections: [{ id: 'f'.repeat(18), name: 'Muse', kind: 'bearer', createdAt: NOW.toISOString(), lastUsedAt: null }] },
+      now: NOW,
+    });
+    mountDashboardController({
+      root,
+      transport: { control: async () => ({ status: 200, body: { ok: true, token: 'olympus_conn_secret' } }) },
+      navigate: () => undefined,
+      refresh: async () => ({ status: 200, title: 'Olympus', body: refreshed, controller: 'dashboard', can_write: true, signature: 'next', poll_interval_ms: 1000 }),
+      returnUrl: 'https://gateway.test/',
+      canWrite: true,
+      signal: abort.signal,
+      pollIntervalMs: 0,
+    });
+    // The sheet is open with fields in it: a full refresh would be held off.
+    root.querySelector<HTMLElement>('[data-sheet-toggle="#agent-connect"]')!.click();
+    const muse = root.querySelector<HTMLElement>('[data-agent="muse"]')!;
+    muse.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!.requestSubmit();
+    for (let tick = 0; tick < 5; tick++) await Bun.sleep(0);
+    expect(root.querySelector('[data-agent-connection]')?.getAttribute('data-agent-connection')).toBe('f'.repeat(18));
+    expect(muse.querySelector<HTMLInputElement>('[data-agent-secret]')!.value).toBe('olympus_conn_secret');
+    expect(root.querySelector('#agent-connect')!.classList.contains('on')).toBe(true);
   });
 
   test('Revoke asks first and does nothing when declined', async () => {

@@ -76296,6 +76296,26 @@ function mountDashboardController(options) {
       noteSlot.textContent = "";
     slot.hidden = true;
   }
+  async function refreshAgentList() {
+    const current = query("[data-agent-connections-list]");
+    if (!current || disposed || options.signal.aborted)
+      return;
+    let result;
+    try {
+      result = await options.refresh();
+    } catch {
+      return;
+    }
+    if (!result || disposed || options.signal.aborted)
+      return;
+    const next = document.createElement("template");
+    next.innerHTML = result.body;
+    const fresh = next.content.querySelector("[data-agent-connections-list]");
+    if (!fresh)
+      return;
+    current.innerHTML = fresh.innerHTML;
+    applyWriteCapability();
+  }
   async function submitAgentControl(form) {
     if (!canWrite && !csrfToken) {
       say(form, options.authority === "worker-session" ? "Unlock dashboard controls above first." : "Your OpenClaw connection has read-only access.");
@@ -76339,6 +76359,7 @@ function mountDashboardController(options) {
     if (params.action === "create_agent_key" && typeof result.body.token === "string") {
       say(form, "");
       showAgentSecret(form, result.body.token, "Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again.");
+      await refreshAgentList();
       return;
     }
     const statusMessage = result.body.status_message;
@@ -76346,7 +76367,7 @@ function mountDashboardController(options) {
     form.querySelectorAll("button").forEach((button) => {
       button.disabled = true;
     });
-    await refreshNow(false, true);
+    await refreshAgentList();
   }
   function copyText(node) {
     if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)
@@ -76516,7 +76537,7 @@ function mountDashboardController(options) {
       const slot = done.closest("[data-agent-secret-slot]");
       if (slot)
         clearAgentSecret(slot);
-      refreshNow(false, true);
+      refreshAgentList();
       return;
     }
     const copy = target.closest("[data-copy-target]");
@@ -80671,7 +80692,7 @@ function renderDashboardAgentsSection(input) {
       action: { label: "Connect an agent", kind: "none", sheet: AGENT_CONNECT_SHEET_ID, primary: true }
     }),
     connectSheet(view.remoteAccess),
-    connectionList(view, input.now)
+    `<div data-agent-connections-list>${connectionList(view, input.now)}</div>`
   ].join(`
 `);
 }
@@ -80681,7 +80702,7 @@ function remoteAccessRow(access) {
 }
 function connectSheet(access) {
   const choices = AGENTS.map((agent) => agentChoice(agent, access)).join("");
-  return `<div class="sheet" id="${AGENT_CONNECT_SHEET_ID}" aria-hidden="true">` + `<h4>Connect an agent</h4>` + `<p>Pick the agent you use. It can ask Olympus questions, and it never sees Private source text or Secrets.</p>` + `<div class="agentpick">${choices}</div>` + `</div>`;
+  return `<div class="sheet" id="${AGENT_CONNECT_SHEET_ID}" aria-hidden="true">` + `<h4>Connect an agent</h4>` + `<p>Pick the agent you use. It never sees Private source text or Secrets. For Private items it receives only answers that Venice or a local model reasoned out, with their titles.</p>` + `<div class="agentpick">${choices}</div>` + `</div>`;
 }
 function agentChoice(agent, access) {
   const detail = agent.detail ? ` <span class="hint">${escapeHtml(agent.detail)}</span>` : "";
@@ -80783,15 +80804,15 @@ var init_agents = __esm(() => {
       label: "Claude",
       detail: "web, desktop and phone",
       method: "oauth",
-      add: "In Claude, open Settings, then Connectors, and choose Add custom connector. Name it Olympus and paste this address as the URL:",
-      approve: "Choose Add, then Connect. An Olympus approval page opens, on your phone too.",
-      instructionsWhere: "Paste this into a Claude project's instructions, or add the Olympus skill under Settings, then Capabilities."
+      add: "In Claude, open Customize, then Connectors. Choose +, then Add custom connector, name it Olympus, and paste this address as the URL:",
+      approve: "Choose Add, then Connect on the Olympus connector. An Olympus approval page opens, on your phone too.",
+      instructionsWhere: "Paste this into a Claude project's instructions."
     },
     {
       id: "chatgpt",
       label: "ChatGPT",
       method: "oauth",
-      add: "In ChatGPT, open Settings, then Apps & Connectors, and create a connector (turn on Developer mode under Advanced if ChatGPT asks). Name it Olympus, choose OAuth, and paste this address as the URL:",
+      add: "In ChatGPT, open Settings, then Apps, and turn on Developer mode under Advanced settings. Then create a connector, name it Olympus, choose OAuth, and paste this address as the URL:",
       approve: "Choose Create. An Olympus approval page opens.",
       instructionsWhere: "Paste this into a ChatGPT project's instructions, or into your custom instructions."
     },
@@ -80799,8 +80820,8 @@ var init_agents = __esm(() => {
       id: "grok",
       label: "Grok or Grok Bot",
       method: "oauth",
-      add: "In Grok, open Settings, then Connectors, and add a custom connector. On a team, an admin adds it once and every Grok Bot can use it. Paste this address as the URL:",
-      approve: "Save the connector and connect it. An Olympus approval page opens.",
+      add: "In Grok, go to grok.com/connectors, choose New Connector, then Custom, and paste this address as the MCP server URL:",
+      approve: "Continue to sign in. An Olympus approval page opens.",
       instructionsWhere: "Paste this into your Grok Bot's skills or into Grok's custom instructions."
     },
     {
@@ -80809,8 +80830,8 @@ var init_agents = __esm(() => {
       method: "key",
       keyName: "Muse",
       address: "openapi",
-      add: "In Muse, add a custom connector from an OpenAPI address, and paste this address:",
-      keyUse: "When Muse asks how to sign in, choose a bearer token and paste the key.",
+      add: "In Muse, ask it to create a custom connector for Olympus, and give it this OpenAPI address:",
+      keyUse: "When Muse asks for credentials, give it the key as a bearer token.",
       instructionsWhere: "Paste this into Muse's instructions for the Olympus connector."
     },
     {
@@ -81434,6 +81455,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
+  const agentMintAllowed = agentMintLimiter(now);
   return async (request) => {
     const presentedAuthorization = request.headers.get("Authorization");
     const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
@@ -81508,6 +81530,8 @@ function withWorkerBearerAuth(fetchHandler, options) {
       return fetchHandler(request);
     }
     if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
+      if (isAgentMintRoute(request) && !agentMintAllowed("bearer"))
+        return agentMintLimitedResponse();
       return fetchHandler(isGatewayPublicOriginContextRoute(request) ? withGatewayPublicOriginContext(request, presentedGatewayPublicOrigin) : request);
     }
     if (isDashboardControlReadRoute(request)) {
@@ -81533,6 +81557,9 @@ function withWorkerBearerAuth(fetchHandler, options) {
     if (isDashboardControlRoute(request)) {
       const authorization = authorizeDashboardControlSession(request, authToken, now(), true);
       if (authorization.status === "allowed") {
+        if (isAgentMintRoute(request) && !agentMintAllowed(`session:${authorization.sessionId}`)) {
+          return agentMintLimitedResponse();
+        }
         return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
       }
       if (authorization.status === "origin_mismatch" || authorization.status === "csrf_mismatch") {
@@ -81670,6 +81697,38 @@ function dashboardControlLockedResponse() {
       "Cache-Control": "no-store",
       "Set-Cookie": `${DASHBOARD_CONTROL_COOKIE}=; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=0`
     }
+  });
+}
+function isAgentMintRoute(request) {
+  return request.method === "POST" && AGENT_MINT_PATHS.has(new URL(request.url).pathname);
+}
+function agentMintLimiter(now) {
+  const recent = new Map;
+  return (key) => {
+    const at = now();
+    const kept = (recent.get(key) ?? []).filter((time3) => at - time3 < AGENT_MINT_WINDOW_MS);
+    if (kept.length >= AGENT_MINT_LIMIT) {
+      recent.set(key, kept);
+      return false;
+    }
+    kept.push(at);
+    recent.delete(key);
+    recent.set(key, kept);
+    if (recent.size > AGENT_MINT_MAX_KEYS)
+      recent.delete(recent.keys().next().value);
+    return true;
+  };
+}
+function agentMintLimitedResponse() {
+  return new Response(JSON.stringify({
+    ok: false,
+    error: {
+      code: "agent_mint_rate_limited",
+      message: "Too many pairing codes or keys in the last few minutes. Wait a few minutes, then try again."
+    }
+  }), {
+    status: 429,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "Retry-After": "600" }
   });
 }
 function isDashboardControlRoute(request) {
@@ -82018,11 +82077,13 @@ function optionalEnv(value) {
   const trimmed2 = value?.trim();
   return trimmed2 ? trimmed2 : undefined;
 }
-var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2";
+var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256;
 var init_http = __esm(() => {
   init_worker_auth();
   init_dashboard_launch();
   DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+  AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
+  AGENT_MINT_WINDOW_MS = 10 * 60000;
 });
 
 // src/workers/dashboard/pages/embedding-ledger.ts
