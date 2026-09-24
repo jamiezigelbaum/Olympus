@@ -1,5 +1,6 @@
 import { MODEL_SETUP_CSS, renderModelSetup } from '../model-setup.ts';
-import { SETUP_JOURNEY_CSS } from '../static-styles.ts';
+import { AGENT_CONNECT_CSS, SETUP_JOURNEY_CSS } from '../static-styles.ts';
+import { renderDashboardAgentsSection } from '../agents.ts';
 export { SETUP_JOURNEY_CSS };
 /**
  * First run: what is connecting, what is available to connect, and the way to
@@ -132,6 +133,9 @@ export function renderDashboardSetupPage(
       promptText: CONNECTOR_PROMPT,
       copyButtonLabel: CONNECTOR_SHEET_COPY_LABEL,
     }),
+    ...(options?.agents
+      ? [renderDashboardAgentsSection({ view: options.agents, now: new Date(view.generated_at) })]
+      : []),
   ].join('\n');
   return pageShell({
     title: 'Olympus',
@@ -150,7 +154,7 @@ export function renderDashboardSetupPage(
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...(options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }),
     },
-    styles: [DASHBOARD_NAV_CSS, SETUP_JOURNEY_CSS, MODEL_SETUP_CSS],
+    styles: [DASHBOARD_NAV_CSS, SETUP_JOURNEY_CSS, MODEL_SETUP_CSS, AGENT_CONNECT_CSS],
     ...(options?.format === undefined ? {} : { format: options.format }),
   });
 }

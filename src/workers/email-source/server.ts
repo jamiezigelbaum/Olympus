@@ -317,6 +317,7 @@ import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
+import { remoteAccessFromEnv, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
@@ -3787,7 +3788,14 @@ export async function main(): Promise<void> {
       };
     },
   } : undefined;
+  // Assigned once the remote agent routes are built below, so the Setup
+  // page's agent panel reads the very store handle `/mcp` and OAuth use.
+  let dashboardAgentStore: DashboardAgentConnectionsBackend['store'] | undefined;
   const worker = createEmailSourceWorker({
+    agentConnections: {
+      store: (options) => dashboardAgentStore?.(options),
+      remoteAccess: () => remoteAccessFromEnv(process.env),
+    },
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
@@ -3905,6 +3913,7 @@ export async function main(): Promise<void> {
     () => resolveRemoteConnectionsDbPath(process.env),
     openRemoteConnectionStore,
   );
+  dashboardAgentStore = remoteConnections;
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,

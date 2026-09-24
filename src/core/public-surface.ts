@@ -189,6 +189,11 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/embedding-priority' },
   { method: 'POST', path: '/dashboard/disconnect' },
   { method: 'POST', path: '/dashboard/unpair' },
+  // Remote agent connections: mint a pairing code, create a key (shown once),
+  // revoke. Same control-session custody as every route above.
+  { method: 'POST', path: '/dashboard/agents/pairing-code' },
+  { method: 'POST', path: '/dashboard/agents/keys' },
+  { method: 'POST', path: '/dashboard/agents/revoke' },
 ] as const;
 
 export const V0_4_CANONICAL_DOCUMENTS = [
@@ -237,6 +242,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'config/sovereignty/presets/no-sensitive.json',
   'config/hermes/olympus.mcp.yaml',
   'integrations/hermes/ask-sources/SKILL.md',
+  'integrations/agent-skills/ask-olympus/SKILL.md',
   'docs/QUICKSTART.md',
   'docs/CONTRACTS.md',
   'docs/SOURCE_CAPABILITIES.md',

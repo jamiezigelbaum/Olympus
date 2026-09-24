@@ -349,3 +349,26 @@ export const DISPOSITIONS_CSS = `
         .finder-footer { grid-row: 3; }
       }
 `;
+
+
+/* Setup's Agents section: the agent picker is a list of disclosures inside the
+   Connect an agent sheet, and a pairing code or key is shown once in a
+   read-only field beside its own Copy and Done. */
+export const AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 4px 0 0; }
+.agentchoice { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.agentchoice > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 8px; align-items: baseline; font-size: 13px; color: var(--t2); }
+.agentchoice > summary::-webkit-details-marker { display: none; }
+.agentchoice > summary::after { content: '\\25B8'; margin-left: auto; color: var(--t4); transition: transform .12s ease; }
+.agentchoice[open] > summary::after { transform: rotate(90deg); }
+.agentchoice > summary:hover .name, .agentchoice > summary:focus-visible .name { color: var(--link); }
+.agentchoice > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; border-radius: 8px; }
+.agentchoice > summary .name { font-weight: 600; }
+.agentchoice .agentbody { padding: 2px 14px 14px; }
+.agentchoice .agentbody > p { margin: 0 0 10px; }
+.agentchoice .steps li { margin-bottom: 14px; }
+.agentchoice .steps .rowform { margin-top: 8px; }
+.agentchoice .steps .hint { display: block; margin: 6px 0 0; }
+.agentsecret { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.agentsecret[hidden] { display: none; }
+.agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
+.agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }`;

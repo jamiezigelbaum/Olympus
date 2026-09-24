@@ -101,7 +101,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function applyWriteCapability(): void {
     root.querySelectorAll<HTMLFormElement>(
       'form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind],'
-        + 'form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check]',
+        + 'form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind]',
     ).forEach((form) => {
       // A form whose request is still outstanding keeps its submit controls
       // disabled, so a second click cannot issue a second transport call,
@@ -494,6 +494,92 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     await refreshNow(false, released);
   }
 
+  /**
+   * Agent connections: a pairing code or a key is shown ONCE, in a read-only
+   * field whose value is set here and never reflected into markup. A field
+   * whose value differs from its default holds the poll off, so the page is
+   * not replaced under the owner until they press Done.
+   */
+  function agentParams(form: HTMLFormElement): OlympusDashboardControlParams | undefined {
+    const kind = form.dataset.agentKind;
+    if (kind === 'pair') return { action: 'mint_agent_pairing_code' };
+    if (kind === 'key') return { action: 'create_agent_key', name: formRecord(form).name || '' };
+    if (kind === 'revoke') return { action: 'revoke_agent_connection', connection_id: formRecord(form).connection_id || '' };
+    return undefined;
+  }
+
+  function showAgentSecret(form: HTMLFormElement, value: string, note: string): void {
+    const holder = form.closest('[data-agent-step]') || form.parentElement || form;
+    const slot = holder.querySelector<HTMLElement>('[data-agent-secret-slot]');
+    const field = slot?.querySelector<HTMLInputElement>('[data-agent-secret]');
+    if (!slot || !field) return;
+    field.value = value;
+    const noteSlot = slot.querySelector('[data-agent-secret-note]');
+    if (noteSlot) noteSlot.textContent = note;
+    slot.hidden = false;
+    field.focus();
+    field.select();
+  }
+
+  function clearAgentSecret(slot: HTMLElement): void {
+    slot.querySelectorAll<HTMLInputElement>('[data-agent-secret]').forEach((field) => { field.value = ''; });
+    const noteSlot = slot.querySelector('[data-agent-secret-note]');
+    if (noteSlot) noteSlot.textContent = '';
+    slot.hidden = true;
+  }
+
+  async function submitAgentControl(form: HTMLFormElement): Promise<void> {
+    if (!canWrite && !csrfToken) {
+      say(form, options.authority === 'worker-session'
+        ? 'Unlock dashboard controls above first.'
+        : 'Your OpenClaw connection has read-only access.');
+      return;
+    }
+    const params = agentParams(form);
+    if (!params || pendingForms.has(form)) return;
+    if (params.action === 'revoke_agent_connection'
+      && !window.confirm(form.dataset.confirmation || 'Revoke this connection?')) return;
+    setFormPending(form, true, params.action === 'revoke_agent_connection' ? 'Revoking…' : 'Working…');
+    let result: OlympusDashboardControlResult;
+    try {
+      result = await options.transport.control(params);
+    } catch {
+      say(form, 'Could not reach Olympus.');
+      return;
+    } finally {
+      setFormPending(form, false);
+    }
+    if (result.status === 401 || result.status === 403) {
+      if (options.authority === 'worker-session') {
+        csrfToken = '';
+        say(form, 'The control session expired — unlock controls in Setup, then try again.');
+      } else {
+        canWrite = false;
+        applyWriteCapability();
+        say(form, 'Your write access expired. Reconnect with operator.write access, then try again.');
+      }
+      return;
+    }
+    if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+      say(form, errorMessage(result));
+      return;
+    }
+    if (params.action === 'mint_agent_pairing_code' && typeof result.body.code === 'string') {
+      say(form, '');
+      showAgentSecret(form, result.body.code, 'Type this code on the Olympus approval page. It works once and expires in 10 minutes.');
+      return;
+    }
+    if (params.action === 'create_agent_key' && typeof result.body.token === 'string') {
+      say(form, '');
+      showAgentSecret(form, result.body.token, 'Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again.');
+      return;
+    }
+    const statusMessage = result.body.status_message;
+    say(form, typeof statusMessage === 'string' ? statusMessage : 'Revoked.');
+    form.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = true; });
+    await refreshNow(false, true);
+  }
+
   function copyText(node: Element): string {
     if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) return node.value;
     return (node as HTMLElement).innerText || node.textContent || '';
@@ -623,6 +709,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       else void unlock(form);
       return;
     }
+    if (form.hasAttribute('data-agent-kind')) {
+      event.preventDefault();
+      void submitAgentControl(form);
+      return;
+    }
     if (!form.matches(
       '[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind],[data-model-check]',
     )) return;
@@ -655,6 +746,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         startedFromSheet.add(form);
         form.requestSubmit();
       }
+      return;
+    }
+    const done = target.closest<HTMLElement>('[data-agent-secret-done]');
+    if (done) {
+      const slot = done.closest<HTMLElement>('[data-agent-secret-slot]');
+      if (slot) clearAgentSecret(slot);
+      void refreshNow(false, true);
       return;
     }
     const copy = target.closest<HTMLElement>('[data-copy-target]');

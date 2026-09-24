@@ -195,6 +195,19 @@ export type OlympusDashboardControlParams =
       action: 'unpair';
       source_id: OlympusDashboardUnpairSourceId;
       acknowledge: true;
+    }
+  | {
+      /** One-time code for approving Claude, ChatGPT or Grok. Shown once. */
+      action: 'mint_agent_pairing_code';
+    }
+  | {
+      /** A bearer connection for Muse, the Grok API or a script. Its token is shown once. */
+      action: 'create_agent_key';
+      name: string;
+    }
+  | {
+      action: 'revoke_agent_connection';
+      connection_id: string;
     };
 
 export interface OlympusDashboardControlResult {

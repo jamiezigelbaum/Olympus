@@ -397,6 +397,9 @@ function isDashboardControlRoute(request: Request): boolean {
     '/dashboard/embedding-priority',
     '/dashboard/disconnect',
     '/dashboard/unpair',
+    '/dashboard/agents/pairing-code',
+    '/dashboard/agents/keys',
+    '/dashboard/agents/revoke',
   ]).has(new URL(request.url).pathname);
 }
 

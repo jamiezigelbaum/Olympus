@@ -1237,6 +1237,9 @@ export function standaloneDashboardControllerScript(
         if (action === 'set_embedding_priority') return ['/dashboard/embedding-priority', withoutAction(params)];
         if (action === 'disconnect') return ['/dashboard/disconnect', withoutAction(params)];
         if (action === 'unpair') return ['/dashboard/unpair', withoutAction(params)];
+        if (action === 'mint_agent_pairing_code') return ['/dashboard/agents/pairing-code', {}];
+        if (action === 'create_agent_key') return ['/dashboard/agents/keys', withoutAction(params)];
+        if (action === 'revoke_agent_connection') return ['/dashboard/agents/revoke', withoutAction(params)];
         return null;
       }
       function withoutAction(params) {
