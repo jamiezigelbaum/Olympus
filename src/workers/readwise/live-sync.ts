@@ -10,11 +10,11 @@ import {
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
 import {
+  syncAndEmbedFromConnector,
   type ConnectorStoreSyncAndEmbedSummary,
   type ConnectorStoreSyncOptions,
   type LocalConnectorStore,
 } from '../connector-store/index.ts';
-import { connectorStoreEmbeddingDeferredReason } from '../connector-store/local-index.ts';
 import type { SourceConnector } from '../../core/contracts.ts';
 import {
   mergedTieredLaneRun,
@@ -23,7 +23,7 @@ import {
   type TieredStoreSet,
 } from '../connector-store/tiered-store-set.ts';
 import type { CredentialBroker } from '../credential-broker/index.ts';
-import { TransientSourceEmbeddingError, type SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import { ReadwiseApiError, type ReadwiseApiClientOptions } from './api.ts';
 import {
   READWISE_CONNECTOR_ID,
@@ -142,32 +142,10 @@ export interface ReadwiseStoreReconcileRequest {
   provenance?: SourceInvocationProvenance;
 }
 
-/**
- * One pass of the lane's embedding task: counts only, and why a store was
- * deferred when its provider did not answer.
- */
-export interface ReadwiseStoreEmbedOutcome {
-  counts: {
-    chunks_seen: number;
-    chunks_embedded: number;
-    chunks_skipped: number;
-    /** Tier stores whose provider did not answer this pass; their chunks stay queued. */
-    stores_deferred: number;
-  };
-  /** The first deferral reason, counts-only (`embedding_provider_unavailable:<reason>`). */
-  deferred_reason?: string;
-}
-
 export interface ReadwiseConnectorStoreSyncHandler {
   sync(): Promise<ReadwiseConnectorStoreSyncResult>;
   pull(request?: ReadwiseStorePullRequest): Promise<ReadwiseConnectorStoreTaskOutcome>;
   reconcile(request?: ReadwiseStoreReconcileRequest): Promise<ReadwiseConnectorStoreTaskOutcome>;
-  /**
-   * Embed chunks that have no vector yet, in every Readwise tier store, up to
-   * `limit` per store. The pull and reconcile never embed (owner decision,
-   * 2026-09-24: decouple embedding from sync); this is the only embedding path.
-   */
-  embedPending?(request?: { limit?: number }): Promise<ReadwiseStoreEmbedOutcome>;
   lastStoreRunCompletedAt(): string | undefined;
   requestBudgetStatus(): ReadwiseRequestBudgetStatus;
 }
@@ -230,20 +208,24 @@ export function createReadwiseConnectorStoreSyncHandler(
   // placement in its own store; a NEW item is routed by its recorded tiers
   // (raised to Private, or Secrets, by what its text says).
   //
-  // The traversal commits items and chunks only. Embedding is the lane's own
-  // task (embedPending): a Venice embedding timeout inside the reconcile once
-  // held the lane for thirteen minutes and then failed it with every item
-  // already committed (live, 2026-09-24).
+  // The traversal commits items and chunks and queues every listed item for
+  // the store's embedding sweep (the scheduler's generic embedding task,
+  // withEmbeddingSweep). It never embeds: a Venice embedding timeout inside
+  // the reconcile once held the lane for thirteen minutes and then failed it
+  // with every item already committed (live, 2026-09-24).
   const runLane = async (
     connector: SourceConnector,
     sync: ConnectorStoreSyncOptions,
     commitCursor = true,
   ): Promise<ReadwiseLaneRun> => {
     if (!tierSet) {
-      return {
-        sync: await options.store.syncFromConnector(connector, sync),
-        embed: emptyEmbedSummary(options.store, options.embeddingProvider),
-      };
+      return syncAndEmbedFromConnector({
+        store: options.store,
+        connector,
+        embeddingProvider: options.embeddingProvider,
+        sync,
+        embed: false,
+      });
     }
     const run = await tierSet.sync(connector, sync, { commitCursor, embed: false });
     const merged = mergedTieredLaneRun(run, 'internal');
@@ -366,35 +348,6 @@ export function createReadwiseConnectorStoreSyncHandler(
         resumed: false,
         warnings: [],
       });
-    },
-
-    async embedPending(request: { limit?: number } = {}): Promise<ReadwiseStoreEmbedOutcome> {
-      const limit = request.limit;
-      const legs = tierSet
-        ? (await tierSet.embedPending(limit !== undefined ? { limit } : {})).legs
-        : [await (async () => {
-          try {
-            return {
-              embed: await options.store.embedChunks({
-                provider: options.embeddingProvider,
-                ...(limit !== undefined ? { limit } : {}),
-              }),
-            };
-          } catch (error) {
-            if (!(error instanceof TransientSourceEmbeddingError)) throw error;
-            return { deferredReason: connectorStoreEmbeddingDeferredReason(error) };
-          }
-        })()];
-      const deferred = legs.filter((leg) => leg.deferredReason !== undefined);
-      return {
-        counts: {
-          chunks_seen: legs.reduce((sum, leg) => sum + (leg.embed?.chunksSeen ?? 0), 0),
-          chunks_embedded: legs.reduce((sum, leg) => sum + (leg.embed?.chunksEmbedded ?? 0), 0),
-          chunks_skipped: legs.reduce((sum, leg) => sum + (leg.embed?.chunksSkipped ?? 0), 0),
-          stores_deferred: deferred.length,
-        },
-        ...(deferred[0]?.deferredReason ? { deferred_reason: deferred[0].deferredReason } : {}),
-      };
     },
 
     lastStoreRunCompletedAt: () => options.store.status().lastSyncRun?.completedAt,

@@ -12,7 +12,12 @@ import {
 } from './dropbox-files/index.ts';
 import type { DropboxProviderStoreSyncHandler } from './dropbox-files/provider-store-sync.ts';
 import type { FileExtractionRunner } from './file-extraction/runner.ts';
-import type { LocalConnectorStore } from './connector-store/index.ts';
+import {
+  EMBEDDING_PROVIDER_UNAVAILABLE_REASON,
+  embedQueuedChunks,
+  type ConnectorStoreEmbeddingTarget,
+  type LocalConnectorStore,
+} from './connector-store/index.ts';
 import {
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -28,12 +33,6 @@ import {
   type GoogleDriveConnectorStoreTaskOutcome,
   type GoogleDriveLiveSyncConfig,
 } from './google-connectors/index.ts';
-import {
-  READWISE_STORE_EMBED_FRESHNESS_THRESHOLD_MS,
-  READWISE_STORE_EMBED_INTERVAL_MS,
-  READWISE_STORE_EMBED_MAX_BACKOFF_MS,
-  READWISE_STORE_EMBED_MAX_CHUNKS,
-} from './readwise/live-control.ts';
 import {
   READWISE_DAILY_REQUEST_GUARD_REASON,
   READWISE_LIBRARY_CORPUS_ID,
@@ -249,6 +248,11 @@ export interface SourceSchedulerSource {
   freshnessThresholdHours: number;
   tasks: SourceSchedulerTask[];
   lastSyncCompletedAt?(): string | undefined;
+  /**
+   * Set by withEmbeddingSweep: the degraded reason a successful sync task
+   * carries while one of this source's stores has embedding deferred.
+   */
+  embeddingDeferredReason?(): string | undefined;
 }
 
 export interface SourceWatchSchedulerPass {
@@ -679,7 +683,10 @@ export class SourceScheduler {
       const degradedReason = retryAt?.degradedReason
         ?? (zeroChangeRuns !== undefined && zeroChangeRuns >= this.zeroChangeDegradeRuns
           ? LANE_NOT_ADVANCING_DEGRADED_REASON
-          : undefined);
+          : undefined)
+        // A sync that committed and then could not embed succeeded, and says
+        // why it is not whole: the store's embedding is deferred.
+        ?? (runningTask.kind === 'sync' ? state.source.embeddingDeferredReason?.() : undefined);
       const configuredIntervalMs = taskIntervalMs(state.source, state.task);
       const effectiveIntervalMs = retryAt?.effectiveIntervalMs ?? configuredIntervalMs;
       const nextRunAt = retryAt?.at
@@ -1245,49 +1252,95 @@ export function createReadwiseSchedulerSource(input: {
               }
             },
       },
-      ...(input.liveSync.embedPending ? [readwiseEmbedTask(input.liveSync, liveConfig)] : []),
     ],
     lastSyncCompletedAt: () => input.liveSync?.lastStoreRunCompletedAt(),
   };
 }
 
+/** How often a source's embedding sweep looks for queued items, while the provider answers. */
+export const EMBEDDING_SWEEP_INTERVAL_MS = 60_000;
+/** The longest a sweep backs off while its provider does not answer. */
+export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60_000;
+/** Items per store per sweep pass. */
+export const EMBEDDING_SWEEP_MAX_ITEMS = 64;
+const EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
+
 /**
- * The Readwise lane's embedding task: the one path that embeds its chunks.
+ * Give every source that embeds one embedding sweep, built here once for all
+ * of them rather than per source.
  *
- * A pass that the provider did not answer is not a failure of anything the
- * owner can act on — the items are in, keyword search serves them, and the
- * chunks stay queued — so it returns a deferral: the next pass waits twice as
- * long as the last, up to READWISE_STORE_EMBED_MAX_BACKOFF_MS, and the first
- * pass that answers returns the task to its own interval.
+ * `targetsFor(source)` names the stores the source embeds into, with the
+ * identity each embeds with (tier legs included), resolved on every pass so a
+ * store opened later is swept too. It returns undefined for a source that
+ * embeds nothing. A source that already declares its own embed task (Dropbox)
+ * keeps it and gets no sweep.
+ *
+ * The sweep embeds only items a sync queued on a store (a deferral, or a lane
+ * whose syncs never embed, like Readwise), so it never widens what a lane
+ * embeds. Its task:
+ *   - reports progress only when it embedded a chunk;
+ *   - while a provider does not answer, succeeds with degraded reason
+ *     EMBEDDING_PROVIDER_UNAVAILABLE_REASON and doubles its interval up to
+ *     EMBEDDING_SWEEP_MAX_BACKOFF_MS; the first pass that answers resets both;
+ *   - and the source's sync tasks carry the same degraded reason while any of
+ *     its stores is deferred, so a sync that committed and then could not
+ *     embed says so instead of reading healthy.
+ *
+ * A source exists only while its credential is connected, so a disconnected
+ * source has no sweep; its queued items wait for the reconnect's first pass.
  */
-function readwiseEmbedTask(
-  liveSync: ReadwiseConnectorStoreSyncHandler,
-  liveConfig: ReadwiseLiveSyncConfig,
+export function withEmbeddingSweep(
+  sources: readonly SourceSchedulerSource[],
+  targetsFor: (source: SourceSchedulerSource) => (() => readonly ConnectorStoreEmbeddingTarget[]) | undefined,
+): SourceSchedulerSource[] {
+  return sources.map((source) => {
+    if (source.tasks.some((task) => task.kind === 'embed')) return source;
+    const targets = targetsFor(source);
+    if (!targets) return source;
+    return {
+      ...source,
+      tasks: [...source.tasks, embeddingSweepTask(source, targets)],
+      embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
+        ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
+        : undefined,
+    };
+  });
+}
+
+function embeddingSweepTask(
+  source: SourceSchedulerSource,
+  targets: () => readonly ConnectorStoreEmbeddingTarget[],
 ): SourceSchedulerTask {
-  const intervalMs = liveConfig.storeEmbedIntervalMs ?? READWISE_STORE_EMBED_INTERVAL_MS;
-  const limit = liveConfig.storeEmbedMaxChunks ?? READWISE_STORE_EMBED_MAX_CHUNKS;
   return {
-    id: 'readwise.library_embeddings',
+    id: `${source.sourceId}_embeddings`,
     kind: 'embed',
     writer: true,
-    intervalMs,
-    freshnessThresholdMs: READWISE_STORE_EMBED_FRESHNESS_THRESHOLD_MS,
+    intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
+    freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context?: SourceSchedulerTaskRunContext) => {
-      const outcome = await liveSync.embedPending!({ limit });
-      const counts = { ...outcome.counts };
-      const result = progressFromCounts(counts);
-      if (outcome.counts.stores_deferred === 0) return result;
-      const previousMs = context?.effectiveIntervalMs ?? intervalMs;
+      const runs = await embedQueuedChunks(targets(), { maxItems: EMBEDDING_SWEEP_MAX_ITEMS });
+      const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
+      const counts = {
+        chunks_embedded: runs.reduce((sum, run) => sum + run.chunksEmbedded, 0),
+        items_queued: targets().reduce((sum, target) => sum + target.store.queuedEmbeddingItemIds().length, 0),
+        stores_deferred: deferred,
+        stores_busy: runs.filter((run) => run.busy === true).length,
+      };
+      const status: SourceSchedulerTaskRunResult['status'] = counts.chunks_embedded > 0 ? 'progress' : 'idle';
+      if (deferred === 0) return { status, counts };
+      const previousMs = context?.effectiveIntervalMs ?? EMBEDDING_SWEEP_INTERVAL_MS;
       const backoffMs = Math.min(
-        Math.max(previousMs, intervalMs) * 2,
-        READWISE_STORE_EMBED_MAX_BACKOFF_MS,
+        Math.max(previousMs, EMBEDDING_SWEEP_INTERVAL_MS) * 2,
+        EMBEDDING_SWEEP_MAX_BACKOFF_MS,
       );
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();
       return {
-        ...result,
+        status,
+        counts,
         retryAt: {
           at: new Date(attemptedAt + backoffMs).toISOString(),
           effectiveIntervalMs: backoffMs,
+          degradedReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON,
         },
       };
     },

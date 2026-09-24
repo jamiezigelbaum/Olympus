@@ -146,6 +146,7 @@ export const DASHBOARD_GUARD_CONSEQUENCES: Readonly<Record<string, string>> = {
   credential_session_latched: 'the credential session is latched by another run',
   config_missing_folder_argument: 'this sync is configured without the folder it needs',
   reconcile_incomplete: 'the last reconcile did not cover everything it was asked to',
+  embedding_provider_unavailable: 'the embedding provider is not answering, so new chunks wait for embedding and the lane retries with backoff; keyword search still answers',
 };
 
 /** The two drain states that are a switch somebody threw, not a fault. */

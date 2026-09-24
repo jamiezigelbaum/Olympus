@@ -1039,6 +1039,12 @@ async function sourceSchedulerStatusCheck(deps: DoctorDeps): Promise<DoctorCheck
     if (typeof source.corpus_id === 'string') schedulerCorpusIds.add(source.corpus_id);
     if (source.stale_sync_anomaly === true) problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
+    // A store whose embedding is deferred reads healthy everywhere else: its
+    // sync succeeded and keyword search answers. Say so once per source, so
+    // chunks waiting on a provider that does not answer are never silent.
+    if (tasks.some((taskEntry) => asRecord(taskEntry).degraded_reason === 'embedding_provider_unavailable')) {
+      problems.push(`${sourceId} embedding is deferred: the embedding provider is not answering, so new chunks wait and the sweep retries with backoff`);
+    }
     for (const taskEntry of tasks) {
       const task = asRecord(taskEntry);
       const taskId = typeof task.id === 'string' ? task.id : 'unknown_task';

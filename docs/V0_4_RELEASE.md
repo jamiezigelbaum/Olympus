@@ -28,11 +28,18 @@ testers have exercised the normal product journey without custom engineering.
   hybrid answers; decouple embedding from sync; keep vectors." Both Readwise
   tier stores declare `hybrid_primary`; the Private store embeds only on the
   approved private (Venice) lane and is answered by the secure route as
-  before. Pull and reconcile commit items without embedding, and the lane's
-  own embedding task embeds chunks with no vector, backing off when the
-  provider does not answer. A provider timeout during any connector-store sync
-  now defers embedding instead of failing the sync. No model, endpoint or
-  epoch changes; no existing vector is invalidated or re-embedded.
+  before. Pull and reconcile commit items without embedding and queue them
+  for the scheduler's embedding sweep, which every source that embeds now
+  has (built once in the scheduler; Dropbox keeps its own embed tasks). A
+  provider timeout during any connector-store sync now queues the unembedded
+  items for that sweep instead of failing the sync; the sync and the sweep
+  report `embedding_provider_unavailable` while it lasts (Background page,
+  source page, doctor), and the sweep backs off up to 30 minutes. Every
+  embedder on a store holds one cross-process per-store lease, so the sweep
+  and the external drain never embed the same chunks twice. The sweep embeds
+  only queued items, so no lane's embedding scope widens; the queue is in
+  memory and a restart relies on the next traversal to re-queue. No model,
+  endpoint or epoch changes; no existing vector is invalidated or re-embedded.
 
 - **2026-09-23 — One public beta, no structured beta testing.** The owner
   ends structured beta testing. The latest Olympus is published as a single

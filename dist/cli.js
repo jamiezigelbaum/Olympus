@@ -15781,6 +15781,33 @@ function exclusionCounts(tally) {
 function connectorStoreEmbeddingDeferredReason(error) {
   return `embedding_provider_unavailable:${error.reason}`;
 }
+async function embedQueuedChunks(targets, options = {}) {
+  const runs = [];
+  for (const { store, provider } of targets) {
+    const localItemIds = store.queuedEmbeddingItemIds(options.maxItems);
+    if (localItemIds.length === 0) {
+      runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0 });
+      continue;
+    }
+    try {
+      const embed = await store.embedChunks({ provider, localItemIds });
+      store.completeQueuedEmbedding(localItemIds);
+      store.setEmbeddingDeferral(undefined);
+      runs.push({ corpusId: store.corpusId, itemsAttempted: localItemIds.length, chunksEmbedded: embed.chunksEmbedded });
+    } catch (error) {
+      if (error instanceof FileLeaseBusyError) {
+        runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, busy: true });
+        continue;
+      }
+      if (!(error instanceof TransientSourceEmbeddingError))
+        throw error;
+      const deferredReason = connectorStoreEmbeddingDeferredReason(error);
+      store.setEmbeddingDeferral(deferredReason);
+      runs.push({ corpusId: store.corpusId, itemsAttempted: localItemIds.length, chunksEmbedded: 0, deferredReason });
+    }
+  }
+  return runs;
+}
 function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
   const modelId = requireNonEmpty2(options.modelId, "Connector store embedding model id");
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
@@ -15824,9 +15851,14 @@ async function syncAndEmbedFromConnector(options) {
   };
   const sync = await options.store.syncFromConnector(connector, options.sync);
   const selectedIds = [...localItemIds];
+  const emptyEmbed = () => connectorStoreEmbedSummary(options.store.corpusId, options.store.trustDomain, options.embeddingProvider, 0, 0, 0);
+  if (options.embed === false) {
+    options.store.queueEmbedding(selectedIds);
+    return { sync, embed: emptyEmbed() };
+  }
   const selectedBatches = selectedIds.length === 0 ? [[]] : [...batched(selectedIds, MAX_SELECTED_EMBED_ITEM_IDS)];
   let embed;
-  for (const localItemIdBatch of selectedBatches) {
+  for (const [batchIndex, localItemIdBatch] of selectedBatches.entries()) {
     let batch;
     try {
       batch = await options.store.embedChunks({
@@ -15834,17 +15866,17 @@ async function syncAndEmbedFromConnector(options) {
         localItemIds: localItemIdBatch
       });
     } catch (error) {
+      const unembedded = selectedBatches.slice(batchIndex).flat();
+      if (error instanceof FileLeaseBusyError) {
+        options.store.queueEmbedding(unembedded);
+        return { sync, embed: { ...embed ?? emptyEmbed(), deferredReason: "embedding_lane_busy" } };
+      }
       if (!(error instanceof TransientSourceEmbeddingError))
         throw error;
       const deferredReason = connectorStoreEmbeddingDeferredReason(error);
+      options.store.queueEmbedding(unembedded, deferredReason);
       console.warn(`[olympus:connector-store] embedding_deferred corpus_id=${options.store.corpusId} reason=${deferredReason}`);
-      return {
-        sync,
-        embed: {
-          ...embed ?? connectorStoreEmbedSummary(options.store.corpusId, options.store.trustDomain, options.embeddingProvider, 0, 0, 0),
-          deferredReason
-        }
-      };
+      return { sync, embed: { ...embed ?? emptyEmbed(), deferredReason } };
     }
     embed = embed ? {
       ...embed,
@@ -17955,7 +17987,7 @@ function errorMessage2(error) {
 function nowIso2() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -17974,6 +18006,7 @@ var init_local_index = __esm(() => {
   init_chunk_selection();
   init_reactions();
   init_corpus();
+  init_file_lease();
   init_embeddings();
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
@@ -18055,6 +18088,8 @@ var init_local_index = __esm(() => {
     tierLedgerOwned;
     tierLedgerDisabled;
     boundLedgerHandle;
+    embeddingQueue = new Set;
+    embeddingDeferral;
     constructor(options) {
       this.corpusId = requireNonEmpty2(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty2(options.dbPath, "Connector store db path");
@@ -21029,7 +21064,32 @@ var init_local_index = __esm(() => {
         return chunks.length + 1;
       })();
     }
+    queueEmbedding(localItemIds, deferredReason) {
+      for (const localItemId of localItemIds)
+        this.embeddingQueue.add(localItemId);
+      if (deferredReason !== undefined)
+        this.embeddingDeferral = deferredReason;
+    }
+    queuedEmbeddingItemIds(limit) {
+      const ids = [...this.embeddingQueue];
+      return limit === undefined ? ids : ids.slice(0, Math.max(0, limit));
+    }
+    completeQueuedEmbedding(localItemIds) {
+      for (const localItemId of localItemIds)
+        this.embeddingQueue.delete(localItemId);
+    }
+    embeddingDeferredReason() {
+      return this.embeddingDeferral;
+    }
+    setEmbeddingDeferral(reason) {
+      this.embeddingDeferral = reason;
+    }
     async embedChunks(options) {
+      if (this.dbPath === ":memory:")
+        return this.embedChunksUnderLease(options);
+      return withFileLease(`${this.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`, () => this.embedChunksUnderLease(options), { acquireTimeoutMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS });
+    }
+    async embedChunksUnderLease(options) {
       const provider = options.provider;
       if (options.modelId && options.modelId !== provider.modelId) {
         throw new Error(`Connector store ${this.corpusId} embedding provider is ${provider.modelId}, ` + `not requested model ${options.modelId}.`);
@@ -22389,40 +22449,18 @@ class TieredStoreSet {
   secrets() {
     return this.secretLocations;
   }
-  async embedPending(options = {}) {
-    const legs = [];
-    for (const domain of TIER_DOMAIN_ORDER) {
-      const provider = this.legs.get(domain)?.spec.embeddingProvider;
-      if (!provider)
-        continue;
-      const store = this.store(domain);
-      if (!store)
-        continue;
-      try {
-        const embed = await store.embedChunks({
-          provider,
-          ...options.limit !== undefined ? { limit: options.limit } : {}
-        });
-        legs.push({ trustDomain: domain, corpusId: store.corpusId, embed });
-      } catch (error) {
-        if (!(error instanceof TransientSourceEmbeddingError))
-          throw error;
-        legs.push({
-          trustDomain: domain,
-          corpusId: store.corpusId,
-          deferredReason: connectorStoreEmbeddingDeferredReason(error)
-        });
-      }
-    }
-    return { legs };
-  }
   async runLeg(domain, store, connector, sync, embed = true) {
-    const provider = embed ? this.legs.get(domain)?.spec.embeddingProvider : undefined;
+    const provider = this.legs.get(domain)?.spec.embeddingProvider;
     if (!provider) {
       return { trustDomain: domain, corpusId: store.corpusId, sync: await store.syncFromConnector(connector, sync) };
     }
-    const result = await syncAndEmbedFromConnector({ store, connector, embeddingProvider: provider, sync });
-    return { trustDomain: domain, corpusId: store.corpusId, sync: result.sync, embed: result.embed };
+    const result = await syncAndEmbedFromConnector({ store, connector, embeddingProvider: provider, sync, embed });
+    return {
+      trustDomain: domain,
+      corpusId: store.corpusId,
+      sync: result.sync,
+      ...embed ? { embed: result.embed } : {}
+    };
   }
 }
 function createLaneTieredStoreSet(options) {
@@ -22924,7 +22962,6 @@ var init_tiered_store_set = __esm(() => {
   init_engine();
   init_tier_classifier();
   init_tier_ledger();
-  init_embeddings();
   init_local_index();
   init_tier_placement();
   TIER_DOMAIN_ORDER = ["public_safe", "internal", "secure_local"];
@@ -33201,9 +33238,7 @@ function defaultReadwiseLiveSyncConfig(env = process.env) {
     storePullFreshnessThresholdMs: positiveIntegerEnv3(env.OLYMPUS_SOURCE_INDEX_READWISE_STORE_PULL_STALE_SECONDS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS / 1000) * 1000,
     storePullMaxItems: boundedPositiveIntegerEnv3(env.OLYMPUS_SOURCE_INDEX_READWISE_STORE_PULL_MAX_ITEMS, READWISE_STORE_PULL_MAX_ITEMS, 1, 1e4),
     storeReconcileIntervalMs: positiveIntegerEnv3(env.OLYMPUS_SOURCE_INDEX_READWISE_STORE_RECONCILE_INTERVAL_SECONDS, READWISE_STORE_RECONCILE_INTERVAL_MS / 1000) * 1000,
-    storeReconcileFreshnessThresholdMs: positiveIntegerEnv3(env.OLYMPUS_SOURCE_INDEX_READWISE_STORE_RECONCILE_STALE_SECONDS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS / 1000) * 1000,
-    storeEmbedIntervalMs: positiveIntegerEnv3(env.OLYMPUS_SOURCE_INDEX_READWISE_STORE_EMBED_INTERVAL_SECONDS, READWISE_STORE_EMBED_INTERVAL_MS / 1000) * 1000,
-    storeEmbedMaxChunks: boundedPositiveIntegerEnv3(env.OLYMPUS_SOURCE_INDEX_READWISE_STORE_EMBED_MAX_CHUNKS, READWISE_STORE_EMBED_MAX_CHUNKS, 1, 1e4)
+    storeReconcileFreshnessThresholdMs: positiveIntegerEnv3(env.OLYMPUS_SOURCE_INDEX_READWISE_STORE_RECONCILE_STALE_SECONDS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS / 1000) * 1000
   };
 }
 function positiveIntegerEnv3(value, fallback) {
@@ -33222,14 +33257,12 @@ function boundedPositiveIntegerEnv3(value, fallback, minimum, maximum) {
   }
   return parsed;
 }
-var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_PULL_MAX_ITEMS = 200, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, READWISE_STORE_EMBED_INTERVAL_MS = 60000, READWISE_STORE_EMBED_MAX_BACKOFF_MS, READWISE_STORE_EMBED_MAX_CHUNKS = 256, READWISE_STORE_EMBED_FRESHNESS_THRESHOLD_MS, READWISE_DAILY_REQUEST_GUARD_REASON = "readwise_daily_api_request_guard";
+var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_PULL_MAX_ITEMS = 200, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, READWISE_DAILY_REQUEST_GUARD_REASON = "readwise_daily_api_request_guard";
 var init_live_control = __esm(() => {
   READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
   READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-  READWISE_STORE_EMBED_MAX_BACKOFF_MS = 30 * 60000;
-  READWISE_STORE_EMBED_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 
 // src/workers/readwise/live-sync.ts
@@ -33259,10 +33292,13 @@ function createReadwiseConnectorStoreSyncHandler(options) {
   }
   const runLane = async (connector, sync, commitCursor = true) => {
     if (!tierSet) {
-      return {
-        sync: await options.store.syncFromConnector(connector, sync),
-        embed: emptyEmbedSummary(options.store, options.embeddingProvider)
-      };
+      return syncAndEmbedFromConnector({
+        store: options.store,
+        connector,
+        embeddingProvider: options.embeddingProvider,
+        sync,
+        embed: false
+      });
     }
     const run = await tierSet.sync(connector, sync, { commitCursor, embed: false });
     const merged = mergedTieredLaneRun(run, "internal");
@@ -33358,33 +33394,6 @@ function createReadwiseConnectorStoreSyncHandler(options) {
         warnings: []
       });
     },
-    async embedPending(request = {}) {
-      const limit = request.limit;
-      const legs = tierSet ? (await tierSet.embedPending(limit !== undefined ? { limit } : {})).legs : [await (async () => {
-        try {
-          return {
-            embed: await options.store.embedChunks({
-              provider: options.embeddingProvider,
-              ...limit !== undefined ? { limit } : {}
-            })
-          };
-        } catch (error) {
-          if (!(error instanceof TransientSourceEmbeddingError))
-            throw error;
-          return { deferredReason: connectorStoreEmbeddingDeferredReason(error) };
-        }
-      })()];
-      const deferred = legs.filter((leg) => leg.deferredReason !== undefined);
-      return {
-        counts: {
-          chunks_seen: legs.reduce((sum2, leg) => sum2 + (leg.embed?.chunksSeen ?? 0), 0),
-          chunks_embedded: legs.reduce((sum2, leg) => sum2 + (leg.embed?.chunksEmbedded ?? 0), 0),
-          chunks_skipped: legs.reduce((sum2, leg) => sum2 + (leg.embed?.chunksSkipped ?? 0), 0),
-          stores_deferred: deferred.length
-        },
-        ...deferred[0]?.deferredReason ? { deferred_reason: deferred[0].deferredReason } : {}
-      };
-    },
     lastStoreRunCompletedAt: () => options.store.status().lastSyncRun?.completedAt,
     requestBudgetStatus: () => requestBudget.status()
   };
@@ -33469,9 +33478,8 @@ function boundedMaxItems3(value, fallback) {
 }
 var READWISE_STORE_PULL_RECEIPT_KIND = "readwise_connector_store_pull_receipt", READWISE_STORE_RECONCILE_RECEIPT_KIND = "readwise_connector_store_reconcile_receipt", READWISE_RESUME_REJECTED_WARNING = "readwise_store_resume_cursor_rejected";
 var init_live_sync = __esm(() => {
-  init_local_index();
+  init_connector_store();
   init_tiered_store_set();
-  init_embeddings();
   init_api();
   init_connector2();
   init_live_control();
@@ -48696,6 +48704,9 @@ async function sourceSchedulerStatusCheck(deps) {
     if (source.stale_sync_anomaly === true)
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
+    if (tasks.some((taskEntry) => asRecord9(taskEntry).degraded_reason === "embedding_provider_unavailable")) {
+      problems.push(`${sourceId} embedding is deferred: the embedding provider is not answering, so new chunks wait and the sweep retries with backoff`);
+    }
     for (const taskEntry of tasks) {
       const task = asRecord9(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
@@ -81529,7 +81540,8 @@ var init_attention = __esm(() => {
     credential_refresh_busy: "another refresh of this credential is in flight",
     credential_session_latched: "the credential session is latched by another run",
     config_missing_folder_argument: "this sync is configured without the folder it needs",
-    reconcile_incomplete: "the last reconcile did not cover everything it was asked to"
+    reconcile_incomplete: "the last reconcile did not cover everything it was asked to",
+    embedding_provider_unavailable: "the embedding provider is not answering, so new chunks wait for embedding and the lane retries with backoff; keyword search still answers"
   };
   DASHBOARD_DRAIN_CONSEQUENCES = {
     held: "the extraction lane is held, so no new text is being extracted",
@@ -89943,7 +89955,7 @@ class SourceScheduler {
       const zeroChangeRuns = nextZeroChangeRuns(state.lastResult?.counts, result.counts);
       const normalizedResult = normalizeTaskResult(zeroChangeRuns === undefined ? result : { ...result, counts: { ...result.counts, zero_change_runs: zeroChangeRuns } });
       const retryAt = normalizeRetryAt(result.retryAt, completedAt);
-      const degradedReason = retryAt?.degradedReason ?? (zeroChangeRuns !== undefined && zeroChangeRuns >= this.zeroChangeDegradeRuns ? LANE_NOT_ADVANCING_DEGRADED_REASON : undefined);
+      const degradedReason = retryAt?.degradedReason ?? (zeroChangeRuns !== undefined && zeroChangeRuns >= this.zeroChangeDegradeRuns ? LANE_NOT_ADVANCING_DEGRADED_REASON : undefined) ?? (runningTask.kind === "sync" ? state.source.embeddingDeferredReason?.() : undefined);
       const configuredIntervalMs = taskIntervalMs(state.source, state.task);
       const effectiveIntervalMs = retryAt?.effectiveIntervalMs ?? configuredIntervalMs;
       const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
@@ -90416,35 +90428,54 @@ function createReadwiseSchedulerSource(input) {
             throw readwiseSchedulerFailure(error2);
           }
         }
-      },
-      ...input.liveSync.embedPending ? [readwiseEmbedTask(input.liveSync, liveConfig)] : []
+      }
     ],
     lastSyncCompletedAt: () => input.liveSync?.lastStoreRunCompletedAt()
   };
 }
-function readwiseEmbedTask(liveSync, liveConfig) {
-  const intervalMs = liveConfig.storeEmbedIntervalMs ?? READWISE_STORE_EMBED_INTERVAL_MS;
-  const limit = liveConfig.storeEmbedMaxChunks ?? READWISE_STORE_EMBED_MAX_CHUNKS;
+function withEmbeddingSweep(sources, targetsFor) {
+  return sources.map((source) => {
+    if (source.tasks.some((task) => task.kind === "embed"))
+      return source;
+    const targets = targetsFor(source);
+    if (!targets)
+      return source;
+    return {
+      ...source,
+      tasks: [...source.tasks, embeddingSweepTask(source, targets)],
+      embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined) ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON : undefined
+    };
+  });
+}
+function embeddingSweepTask(source, targets) {
   return {
-    id: "readwise.library_embeddings",
+    id: `${source.sourceId}_embeddings`,
     kind: "embed",
     writer: true,
-    intervalMs,
-    freshnessThresholdMs: READWISE_STORE_EMBED_FRESHNESS_THRESHOLD_MS,
+    intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
+    freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context) => {
-      const outcome = await liveSync.embedPending({ limit });
-      const counts = { ...outcome.counts };
-      const result = progressFromCounts(counts);
-      if (outcome.counts.stores_deferred === 0)
-        return result;
-      const previousMs = context?.effectiveIntervalMs ?? intervalMs;
-      const backoffMs = Math.min(Math.max(previousMs, intervalMs) * 2, READWISE_STORE_EMBED_MAX_BACKOFF_MS);
+      const runs = await embedQueuedChunks(targets(), { maxItems: EMBEDDING_SWEEP_MAX_ITEMS });
+      const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
+      const counts = {
+        chunks_embedded: runs.reduce((sum2, run) => sum2 + run.chunksEmbedded, 0),
+        items_queued: targets().reduce((sum2, target) => sum2 + target.store.queuedEmbeddingItemIds().length, 0),
+        stores_deferred: deferred,
+        stores_busy: runs.filter((run) => run.busy === true).length
+      };
+      const status = counts.chunks_embedded > 0 ? "progress" : "idle";
+      if (deferred === 0)
+        return { status, counts };
+      const previousMs = context?.effectiveIntervalMs ?? EMBEDDING_SWEEP_INTERVAL_MS;
+      const backoffMs = Math.min(Math.max(previousMs, EMBEDDING_SWEEP_INTERVAL_MS) * 2, EMBEDDING_SWEEP_MAX_BACKOFF_MS);
       const attemptedAt = Date.parse(context?.attemptedAt ?? "") || Date.now();
       return {
-        ...result,
+        status,
+        counts,
         retryAt: {
           at: new Date(attemptedAt + backoffMs).toISOString(),
-          effectiveIntervalMs: backoffMs
+          effectiveIntervalMs: backoffMs,
+          degradedReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         }
       };
     }
@@ -91076,14 +91107,14 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SourceSchedulerTaskFailure, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SourceSchedulerTaskFailure, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 64, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS;
 var init_source_scheduler = __esm(() => {
   init_config();
   init_operation_error();
   init_source_ingestion_policy();
   init_dropbox_files();
+  init_connector_store();
   init_google_connectors();
-  init_live_control();
   init_readwise();
   init_embeddings();
   init_x_bookmarks();
@@ -91117,6 +91148,8 @@ var init_source_scheduler = __esm(() => {
       this.counts = options.counts ? sanitizeSchedulerCounts(options.counts) : undefined;
     }
   };
+  EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60000;
+  EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
   HONEST_SCHEDULER_ERROR_KINDS = new Set([
     "api_request_guard",
     "config_missing_folder_argument",
@@ -96441,14 +96474,25 @@ async function main() {
         ...whatsappLiveMaxItems !== undefined ? { maxItems: whatsappLiveMaxItems } : {}
       }))
     ].filter((source) => source !== undefined);
+    const sweptSources = withEmbeddingSweep(sources, (source) => {
+      const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
+      corpusIds.add(source.corpusId);
+      const targets = () => connectorStores.flatMap((store) => {
+        if (!corpusIds.has(store.corpusId))
+          return [];
+        const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
+        return provider ? [{ store, provider }] : [];
+      });
+      return targets().length > 0 ? targets : undefined;
+    });
     return {
       decisions,
       sources: sourceWatchPass ? attachSourceWatchSchedulerTask({
-        sources,
+        sources: sweptSources,
         selectedSourceIds: olympusConfig.worker.scheduler.sourceIds,
         intervalMs: olympusConfig.worker.scheduler.syncIntervalSeconds * 1000,
         pass: sourceWatchPass
-      }) : sources
+      }) : sweptSources
     };
   };
   const schedulerAssembly = schedulerSourcesForHandles(connectedHandles);

@@ -103,6 +103,7 @@ import {
   type SourceIndexActivationMode,
   type SourceIndexCorpusDefinition,
 } from '../../core/source-index/corpus.ts';
+import { FileLeaseBusyError, withFileLease } from '../../core/file-lease.ts';
 import {
   cosineSimilarity,
   decodeEmbedding,
@@ -1156,11 +1157,87 @@ export interface ConnectorStoreSyncAndEmbedOptions {
   connector: SourceConnector;
   embeddingProvider: SourceEmbeddingProvider;
   sync?: ConnectorStoreSyncOptions;
+  /**
+   * false: commit the sync and queue every listed item for the store's
+   * embedding sweep instead of embedding inline. A lane whose embedding must
+   * never hold or fail its sync sets this.
+   */
+  embed?: boolean;
 }
 
 /** The deferral marker a transient embedding failure leaves on a summary. */
 export function connectorStoreEmbeddingDeferredReason(error: TransientSourceEmbeddingError): string {
   return `embedding_provider_unavailable:${error.reason}`;
+}
+
+/**
+ * The scheduler's degraded-reason token while a store's embedding is deferred
+ * because its provider does not answer. Self-healing: the sweep retries with
+ * backoff and keyword search keeps answering meanwhile.
+ */
+export const EMBEDDING_PROVIDER_UNAVAILABLE_REASON = 'embedding_provider_unavailable';
+
+/** Suffix of the per-store embedding lease file (see LocalConnectorStore.embedChunks). */
+export const CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = '.embedding';
+
+/** How long an embedder waits for another to finish on the same store before giving up. */
+export const CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120_000;
+
+/** One store and the identity it embeds with, for embedQueuedChunks. */
+export interface ConnectorStoreEmbeddingTarget {
+  store: LocalConnectorStore;
+  provider: SourceEmbeddingProvider;
+}
+
+export interface ConnectorStoreQueuedEmbedStoreRun {
+  corpusId: string;
+  itemsAttempted: number;
+  chunksEmbedded: number;
+  /** Set when the provider did not answer; the items stay queued. */
+  deferredReason?: string;
+  /** Another embedder held this store's lease for the whole wait; nothing was lost. */
+  busy?: boolean;
+}
+
+/**
+ * The source-neutral embedding sweep: embed the chunks of items syncs queued
+ * on each store (LocalConnectorStore.queueEmbedding), at most `maxItems` items
+ * per store per call.
+ *
+ * Only queued items are embedded, so a sweep never widens what a lane embeds.
+ * A chunk already embedded at its current content is skipped by the store.
+ * A provider that does not answer defers that store (its items stay queued and
+ * the store reports the deferral); another embedder holding the store's lease
+ * is reported as busy; any other fault throws.
+ */
+export async function embedQueuedChunks(
+  targets: readonly ConnectorStoreEmbeddingTarget[],
+  options: { maxItems?: number } = {},
+): Promise<ConnectorStoreQueuedEmbedStoreRun[]> {
+  const runs: ConnectorStoreQueuedEmbedStoreRun[] = [];
+  for (const { store, provider } of targets) {
+    const localItemIds = store.queuedEmbeddingItemIds(options.maxItems);
+    if (localItemIds.length === 0) {
+      runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0 });
+      continue;
+    }
+    try {
+      const embed = await store.embedChunks({ provider, localItemIds });
+      store.completeQueuedEmbedding(localItemIds);
+      store.setEmbeddingDeferral(undefined);
+      runs.push({ corpusId: store.corpusId, itemsAttempted: localItemIds.length, chunksEmbedded: embed.chunksEmbedded });
+    } catch (error) {
+      if (error instanceof FileLeaseBusyError) {
+        runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, busy: true });
+        continue;
+      }
+      if (!(error instanceof TransientSourceEmbeddingError)) throw error;
+      const deferredReason = connectorStoreEmbeddingDeferredReason(error);
+      store.setEmbeddingDeferral(deferredReason);
+      runs.push({ corpusId: store.corpusId, itemsAttempted: localItemIds.length, chunksEmbedded: 0, deferredReason });
+    }
+  }
+  return runs;
 }
 
 export interface ConnectorStoreSyncAndEmbedSummary {
@@ -1983,6 +2060,15 @@ export class LocalConnectorStore {
   private tierLedgerOwned: boolean | undefined;
   private tierLedgerDisabled: boolean | undefined;
   private boundLedgerHandle: TierLedger | undefined;
+  /**
+   * Items a sync handed to this store's embedding sweep instead of embedding
+   * them itself: deferred by a provider that did not answer, or left for the
+   * sweep by a lane whose syncs never embed. In memory only; see
+   * queueEmbedding.
+   */
+  private readonly embeddingQueue = new Set<string>();
+  /** Set while the last embedding attempt on this store was deferred; cleared by a sweep pass that answers. */
+  private embeddingDeferral: string | undefined;
 
   constructor(options: LocalConnectorStoreOptions) {
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
@@ -6803,7 +6889,60 @@ export class LocalConnectorStore {
   // (chunk, model_id) with a content_hash guard: re-running with unchanged
   // content embeds nothing. secure_local stores ONLY accept a LOCAL provider
   // (cloud embedding is never eligible for secure_local chunks).
+  /**
+   * Queue items for this store's embedding sweep (embedQueuedChunks).
+   *
+   * In memory: a worker restart drops the queue, and the next traversal that
+   * lists those items hands them over again. Nothing here widens what is
+   * embedded: only items a sync would itself have embedded are ever queued.
+   */
+  queueEmbedding(localItemIds: Iterable<string>, deferredReason?: string): void {
+    for (const localItemId of localItemIds) this.embeddingQueue.add(localItemId);
+    if (deferredReason !== undefined) this.embeddingDeferral = deferredReason;
+  }
+
+  /** The queued items, oldest first, at most `limit`. */
+  queuedEmbeddingItemIds(limit?: number): string[] {
+    const ids = [...this.embeddingQueue];
+    return limit === undefined ? ids : ids.slice(0, Math.max(0, limit));
+  }
+
+  /** Items whose chunks were embedded (or no longer exist) leave the queue. */
+  completeQueuedEmbedding(localItemIds: Iterable<string>): void {
+    for (const localItemId of localItemIds) this.embeddingQueue.delete(localItemId);
+  }
+
+  /** Why embedding on this store is currently deferred, when it is. */
+  embeddingDeferredReason(): string | undefined {
+    return this.embeddingDeferral;
+  }
+
+  /** @internal Set by the sweep; see embedQueuedChunks. */
+  setEmbeddingDeferral(reason: string | undefined): void {
+    this.embeddingDeferral = reason;
+  }
+
+  /**
+   * Embed chunks with no current vector.
+   *
+   * ONE EMBEDDER PER STORE. Every embedding path (a sync's inline embed, the
+   * scheduler's embedding sweep, a Dropbox embed task, the external drain's
+   * /source/index/embed call or its direct mode) runs under the same
+   * cross-process file lease on this store, so two of them can never embed the
+   * same chunks at once and pay twice. The chunks still pending are read under
+   * the lease, so a caller that waited finds the other's work already done. A
+   * caller that cannot get the lease within the wait gets FileLeaseBusyError.
+   */
   async embedChunks(options: ConnectorStoreEmbedOptions): Promise<ConnectorStoreEmbedSummary> {
+    if (this.dbPath === ':memory:') return this.embedChunksUnderLease(options);
+    return withFileLease(
+      `${this.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`,
+      () => this.embedChunksUnderLease(options),
+      { acquireTimeoutMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS },
+    );
+  }
+
+  private async embedChunksUnderLease(options: ConnectorStoreEmbedOptions): Promise<ConnectorStoreEmbedSummary> {
     const provider = options.provider;
     if (options.modelId && options.modelId !== provider.modelId) {
       throw new Error(
@@ -8543,11 +8682,23 @@ export async function syncAndEmbedFromConnector(
   };
   const sync = await options.store.syncFromConnector(connector, options.sync);
   const selectedIds = [...localItemIds];
+  const emptyEmbed = () => connectorStoreEmbedSummary(
+    options.store.corpusId,
+    options.store.trustDomain,
+    options.embeddingProvider,
+    0,
+    0,
+    0,
+  );
+  if (options.embed === false) {
+    options.store.queueEmbedding(selectedIds);
+    return { sync, embed: emptyEmbed() };
+  }
   const selectedBatches = selectedIds.length === 0
     ? [[]]
     : [...batched(selectedIds, MAX_SELECTED_EMBED_ITEM_IDS)];
   let embed: ConnectorStoreEmbedSummary | undefined;
-  for (const localItemIdBatch of selectedBatches) {
+  for (const [batchIndex, localItemIdBatch] of selectedBatches.entries()) {
     let batch: ConnectorStoreEmbedSummary;
     try {
       batch = await options.store.embedChunks({
@@ -8555,6 +8706,15 @@ export async function syncAndEmbedFromConnector(
         localItemIds: localItemIdBatch,
       });
     } catch (error) {
+      // Everything this sync would still have embedded goes to the store's
+      // embedding sweep, which retries it with backoff (embedQueuedChunks).
+      const unembedded = selectedBatches.slice(batchIndex).flat();
+      if (error instanceof FileLeaseBusyError) {
+        // Another embedder holds this store and is already working: hand these
+        // items to the sweep; nothing is deferred.
+        options.store.queueEmbedding(unembedded);
+        return { sync, embed: { ...(embed ?? emptyEmbed()), deferredReason: 'embedding_lane_busy' } };
+      }
       // The sync above already committed. An embedding provider that stopped
       // answering (a Venice 30s timeout, live 2026-09-24) used to fail the
       // whole sync task after its items had landed, so the lane read as
@@ -8564,23 +8724,11 @@ export async function syncAndEmbedFromConnector(
       // Configuration and write faults still throw — they need a person.
       if (!(error instanceof TransientSourceEmbeddingError)) throw error;
       const deferredReason = connectorStoreEmbeddingDeferredReason(error);
+      options.store.queueEmbedding(unembedded, deferredReason);
       console.warn(
         `[olympus:connector-store] embedding_deferred corpus_id=${options.store.corpusId} reason=${deferredReason}`,
       );
-      return {
-        sync,
-        embed: {
-          ...(embed ?? connectorStoreEmbedSummary(
-            options.store.corpusId,
-            options.store.trustDomain,
-            options.embeddingProvider,
-            0,
-            0,
-            0,
-          )),
-          deferredReason,
-        },
-      };
+      return { sync, embed: { ...(embed ?? emptyEmbed()), deferredReason } };
     }
     embed = embed
       ? {

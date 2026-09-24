@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import {
   createConnectorStoreCorpusAdapter,
+  embedQueuedChunks,
 } from '../src/workers/connector-store/index.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
 import {
@@ -210,18 +211,18 @@ describe('Readwise thin connector and canonical store', () => {
     try {
       const first = await sync.sync();
       const unembeddedStatus = store.status();
-      // The sync commits items and chunks only (owner decision 2026-09-24:
-      // decouple embedding from sync); the lane's embedding task embeds them.
-      const embedded = await sync.embedPending!();
+      // The sync commits items and chunks and queues them (owner decision
+      // 2026-09-24: decouple embedding from sync); the embedding sweep embeds.
+      const embedded = await embedQueuedChunks([{ store, provider }]);
       const firstStatus = store.status();
       const second = await sync.sync();
       const secondStatus = store.status();
-      const reEmbedded = await sync.embedPending!();
+      const reEmbedded = await embedQueuedChunks([{ store, provider }]);
 
       expect(unembeddedStatus.counts).toMatchObject({ chunks: 2, embeddedChunks: 0 });
-      expect(embedded.counts).toMatchObject({ chunks_embedded: 2, stores_deferred: 0 });
+      expect(embedded).toEqual([expect.objectContaining({ chunksEmbedded: 2 })]);
       // Nothing already embedded at its current content is embedded again.
-      expect(reEmbedded.counts).toMatchObject({ chunks_embedded: 0, stores_deferred: 0 });
+      expect(reEmbedded).toEqual([expect.objectContaining({ chunksEmbedded: 0 })]);
 
       expect(first).toMatchObject({
         status: 'progress',
@@ -361,7 +362,6 @@ describe('Readwise thin connector and canonical store', () => {
       expect(sourceFor(handle)?.tasks.map((task) => task.id)).toEqual([
         'readwise.library_store_pull',
         expect.any(String),
-        'readwise.library_embeddings',
       ]);
       const sync = lane.syncForHandle(handle);
       expect(lane.syncForHandle(handle)).toBe(sync);

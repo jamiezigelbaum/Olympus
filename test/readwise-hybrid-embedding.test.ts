@@ -17,9 +17,14 @@ import { parseSensitivityMap, USER_FACING_TIER_MAPPING } from '../src/core/sensi
 import { createSourceCorpusRegistry, defaultSourceCorpusRegistryConfig } from '../src/core/source-corpus-registry.ts';
 import {
   LocalConnectorStore,
+  createConnectorStoreContentProvider,
   createConnectorStoreCorpusAdapter,
+  embedQueuedChunks,
   syncAndEmbedFromConnector,
+  type ConnectorStoreEmbeddingTarget,
 } from '../src/workers/connector-store/index.ts';
+import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
+import { buildEvidencePack } from '../src/core/evidence-pack.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
 import {
   READWISE_LIBRARY_CORPUS_ID,
@@ -34,8 +39,14 @@ import {
   DeterministicSourceEmbeddingProvider,
   TransientSourceEmbeddingError,
   type SourceEmbeddingInput,
+  type SourceEmbeddingTaskType,
 } from '../src/workers/source-index/embeddings.ts';
-import { SourceScheduler, createReadwiseSchedulerSource } from '../src/workers/source-scheduler.ts';
+import {
+  SourceScheduler,
+  createReadwiseSchedulerSource,
+  withEmbeddingSweep,
+  type SourceSchedulerSource,
+} from '../src/workers/source-scheduler.ts';
 import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
 import { RecordingProvider } from './helpers/tier-fixtures.ts';
 
@@ -180,10 +191,18 @@ describe('a provider timeout during sync never fails the sync (shared connector-
     expect(run.sync.itemsIndexed).toBe(2);
     expect(run.embed.deferredReason).toBe('embedding_provider_unavailable:timeout');
     expect(store.status().counts).toMatchObject({ items: 2, chunks: 2, embeddedChunks: 0 });
+    // Nothing is dropped: both items wait for the store's sweep, and the store
+    // says its embedding is deferred.
+    expect(store.queuedEmbeddingItemIds().sort()).toEqual(['personal:a', 'personal:b']);
+    expect(store.embeddingDeferredReason()).toBe('embedding_provider_unavailable:timeout');
 
-    // The provider comes back: the queued chunks embed, once.
+    // The provider comes back: the sweep embeds the queued chunks, once.
     provider.down = false;
-    expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(2);
+    expect(await embedQueuedChunks([{ store, provider }])).toEqual([
+      expect.objectContaining({ chunksEmbedded: 2 }),
+    ]);
+    expect(store.queuedEmbeddingItemIds()).toEqual([]);
+    expect(store.embeddingDeferredReason()).toBeUndefined();
     expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(0);
     expect(store.status().counts).toMatchObject({ embeddedChunks: 2 });
   });
@@ -258,11 +277,17 @@ describe('Readwise: sync commits, the embedding task embeds with backoff, nothin
       maxTransientRetries: 1,
       now: () => clock.now,
       stateStore,
-      sources: [createReadwiseSchedulerSource({
+      sources: withEmbeddingSweep([createReadwiseSchedulerSource({
         config: defaultConfig(),
         liveSync: handler,
         liveConfig: defaultReadwiseLiveSyncConfig({}),
-      })!],
+      })!], () => () => {
+        // The worker's registry: each mounted store with the identity it embeds with.
+        const targets: ConnectorStoreEmbeddingTarget[] = [{ store, provider: cloud }];
+        const secureStore = lane.newStores.secure_local?.current();
+        if (secureStore) targets.push({ store: secureStore, provider: venice });
+        return targets;
+      }),
     });
     closers.push(() => scheduler.stop());
     const task = (id: string) => scheduler.status().sources[0]!.tasks.find((entry) => entry.id === id)!;
@@ -282,36 +307,47 @@ describe('Readwise: sync commits, the embedding task embeds with backoff, nothin
     expect(store.status().counts.embeddedChunks).toBe(store.status().counts.chunks);
     expect(cloud.inputs.some((input) => input.includes('acme'))).toBe(false);
 
-    // The embedding task did not fail: it deferred, and doubled its interval.
+    // The embedding sweep did not fail: it deferred, said why, and doubled its
+    // interval. It reports progress only for chunks it actually embedded.
     const deferred = task('readwise.library_embeddings');
     expect(deferred.kind).toBe('embed');
     expect(deferred.consecutive_failures).toBe(0);
     expect(deferred.last_result?.counts).toMatchObject({ stores_deferred: 1 });
+    expect(deferred.degraded_reason).toBe('embedding_provider_unavailable');
     expect(deferred.effective_interval_seconds).toBe(120);
 
-    // Venice stays down through the next due pass: the backoff doubles again.
-    clock.now = new Date(clock.now.getTime() + 121_000);
+    // Venice stays down through the next due pass: the backoff doubles again,
+    // and a sync that runs meanwhile says the store's embedding is deferred.
+    clock.now = new Date(clock.now.getTime() + 15 * 60_000 + 1_000);
     await scheduler.runDueTasks();
     expect(task('readwise.library_embeddings').effective_interval_seconds).toBe(240);
     expect(task('readwise.library_embeddings').consecutive_failures).toBe(0);
+    expect(task('readwise.library_store_pull').consecutive_failures).toBe(0);
+    expect(task('readwise.library_store_pull').degraded_reason).toBe('embedding_provider_unavailable');
 
-    // Venice comes back: the queued Private chunks embed, the interval resets.
+    // Venice comes back: the queued Private chunks embed, the interval and the
+    // degraded reason reset, and the progress is real.
     venice.down = false;
     clock.now = new Date(clock.now.getTime() + 241_000);
     await scheduler.runDueTasks();
     const caughtUp = task('readwise.library_embeddings');
     expect(caughtUp.effective_interval_seconds).toBe(60);
+    expect(caughtUp.degraded_reason).toBeUndefined();
+    expect(caughtUp.last_result?.status).toBe('progress');
     expect(caughtUp.last_result?.counts).toMatchObject({ stores_deferred: 0 });
     expect(secure.status().counts.embeddedChunks).toBe(secure.status().counts.chunks);
     expect(venice.inputs.some((input) => input.includes('acme'))).toBe(true);
 
-    // No duplicate embeddings: another pass, and another sync of the same
-    // items, embed nothing that already has a vector at its content.
+    // An idle sweep reports idle, not progress.
+    clock.now = new Date(clock.now.getTime() + 61_000);
+    await scheduler.runDueTasks();
+    expect(task('readwise.library_embeddings').last_result?.status).toBe('idle');
+
+    // No duplicate embeddings: another sync of the same items and another
+    // sweep embed nothing that already has a vector at its content.
     const embeddedInputs = venice.inputs.length + cloud.inputs.length;
-    const again = await handler.embedPending!({ limit: 256 });
-    expect(again.counts).toMatchObject({ chunks_embedded: 0, stores_deferred: 0 });
     await handler.pull();
-    await handler.embedPending!({ limit: 256 });
+    await embedQueuedChunks([{ store, provider: cloud }, { store: secure, provider: venice }]);
     expect(venice.inputs.length + cloud.inputs.length).toBe(embeddedInputs);
   });
 
@@ -405,5 +441,188 @@ describe('Readwise answers are hybrid in both tiers', () => {
     expect((hybrid.laneAudits ?? []).map((audit) => audit.laneType)).toEqual(
       expect.arrayContaining([expect.stringMatching(/semantic|hybrid/)]),
     );
+  });
+});
+
+describe('the generic embedding sweep recovers any lane that deferred inline (chat lanes, tier legs)', () => {
+  test('a chat-style lane that embeds inline: the sync succeeds degraded, the sweep catches up, the degraded reason clears', async () => {
+    const root = workspace();
+    const store = new LocalConnectorStore({
+      dbPath: join(root, 'chat.sqlite'),
+      corpusId: 'secure_local.fixture.messages',
+      family: 'readwise',
+      trustDomain: 'secure_local',
+    });
+    closers.push(() => store.close());
+    const provider = privateProvider();
+    const items = [readwiseItem('m1', 'First message.'), readwiseItem('m2', 'Second message.')];
+    const source: SourceSchedulerSource = {
+      sourceId: 'fixture.messages',
+      corpusId: store.corpusId,
+      cadence: 'continuous',
+      intervalMs: 5 * 60_000,
+      freshnessThresholdHours: 26,
+      tasks: [{
+        id: 'fixture.messages_store_pull',
+        kind: 'sync',
+        writer: true,
+        run: async () => {
+          const run = await syncAndEmbedFromConnector({
+            store, connector: listConnector(items), embeddingProvider: provider, sync: { fetchContent: true },
+          });
+          return { status: 'progress', counts: { items_indexed: run.sync.itemsIndexed } };
+        },
+      }],
+    };
+    const clock = { now: new Date('2026-09-24T12:00:00.000Z') };
+    const stateStore = new LocalSourceSchedulerStateStore(':memory:');
+    closers.push(() => stateStore.close());
+    const scheduler = new SourceScheduler({
+      enabled: true,
+      tickMs: 60_000,
+      errorBackoffMs: 60_000,
+      maxTransientRetries: 1,
+      now: () => clock.now,
+      stateStore,
+      sources: withEmbeddingSweep([source], () => () => [{ store, provider }]),
+    });
+    closers.push(() => scheduler.stop());
+    const task = (id: string) => scheduler.status().sources[0]!.tasks.find((entry) => entry.id === id)!;
+
+    await scheduler.runDueTasks();
+    expect(task('fixture.messages_store_pull').consecutive_failures).toBe(0);
+    expect(task('fixture.messages_store_pull').degraded_reason).toBe('embedding_provider_unavailable');
+    expect(task('fixture.messages_embeddings').degraded_reason).toBe('embedding_provider_unavailable');
+    expect(store.queuedEmbeddingItemIds()).toHaveLength(2);
+
+    provider.down = false;
+    clock.now = new Date(clock.now.getTime() + 121_000);
+    await scheduler.runDueTasks();
+    expect(store.status().counts).toMatchObject({ chunks: 2, embeddedChunks: 2 });
+    expect(task('fixture.messages_embeddings').degraded_reason).toBeUndefined();
+
+    clock.now = new Date(clock.now.getTime() + 5 * 60_000 + 1_000);
+    await scheduler.runDueTasks();
+    expect(task('fixture.messages_store_pull').degraded_reason).toBeUndefined();
+  });
+
+  test('a source that declares its own embed task keeps it and gets no second sweep', () => {
+    const store = { embeddingDeferredReason: () => undefined, queuedEmbeddingItemIds: () => [] };
+    const source: SourceSchedulerSource = {
+      sourceId: 'dropbox.files',
+      corpusId: 'secure_local.dropbox.files',
+      cadence: 'continuous',
+      intervalMs: 60_000,
+      freshnessThresholdHours: 26,
+      tasks: [{ id: 'dropbox.files_embeddings', kind: 'embed', writer: true, run: async () => ({ status: 'idle' }) }],
+    };
+    const [swept] = withEmbeddingSweep([source], () => () => [{ store, provider: cloudProvider() } as never]);
+    expect(swept!.tasks.map((entry) => entry.id)).toEqual(['dropbox.files_embeddings']);
+  });
+});
+
+describe('one embedder per store', () => {
+  test('two embedders on the same store never embed the same chunk twice', async () => {
+    const root = workspace();
+    const store = new LocalConnectorStore({
+      dbPath: join(root, 'shared.sqlite'),
+      corpusId: 'internal.fixture.library',
+      family: 'readwise',
+      trustDomain: 'internal',
+    });
+    closers.push(() => store.close());
+    await store.syncFromConnector(listConnector([
+      readwiseItem('a', 'Alpha text.'),
+      readwiseItem('b', 'Beta text.'),
+      readwiseItem('c', 'Gamma text.'),
+    ]), { fetchContent: true });
+    const slow = cloudProvider();
+    const original = slow.embed.bind(slow);
+    slow.embed = async (inputs) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return original(inputs);
+    };
+
+    // The drain's call and the scheduler's sweep, at once, on one store.
+    const [first, second] = await Promise.all([
+      store.embedChunks({ provider: slow }),
+      store.embedChunks({ provider: slow }),
+    ]);
+
+    expect(first.chunksEmbedded + second.chunksEmbedded).toBe(3);
+    expect(slow.inputs).toHaveLength(3);
+  });
+});
+
+/** A Venice-shaped private identity: approved for Private stores, semantic like the deterministic provider. */
+class VenicePrivateProvider extends DeterministicSourceEmbeddingProvider {
+  override provider = 'venice';
+  override backend = 'cloud' as unknown as 'local';
+  readonly taskTypes: SourceEmbeddingTaskType[] = [];
+
+  override async embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
+    this.taskTypes.push(options.taskType);
+    return super.embed(inputs, options);
+  }
+}
+
+class RecordingCloudProvider extends DeterministicSourceEmbeddingProvider {
+  override provider = 'google-gemini';
+  override backend = 'cloud' as unknown as 'local';
+  calls = 0;
+
+  override async embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
+    this.calls += 1;
+    return super.embed(inputs, options);
+  }
+}
+
+describe('Readwise Private (readwise-secure) answers hybrid end to end', () => {
+  test('Venice embeds the query, a cloud identity is refused, and a vector-only hit reaches the evidence', async () => {
+    const root = workspace();
+    const secure = new LocalConnectorStore({
+      dbPath: join(root, 'readwise-secure.sqlite'),
+      corpusId: 'secure_local.readwise.library',
+      family: 'readwise',
+      trustDomain: 'secure_local',
+    });
+    closers.push(() => secure.close());
+    const conceptGroups = [['equanimity', 'stoicism', 'stoic']];
+    const venice = new VenicePrivateProvider({ modelId: 'venice-private-embed', conceptGroups });
+    const cloud = new RecordingCloudProvider({ modelId: 'gemini-embedding-2', conceptGroups });
+    await secure.syncFromConnector(listConnector([
+      readwiseItem('hl-stoic', 'My therapist said stoicism helps with the diagnosis.'),
+      readwiseItem('hl-city', 'A city is a machine for memory.'),
+    ]), { fetchContent: true });
+    await secure.embedChunks({ provider: venice });
+    venice.taskTypes.length = 0;
+
+    const definitions = createSourceCorpusRegistry(defaultSourceCorpusRegistryConfig()).definitions();
+    const secureDefinition = definitions.find((definition) => definition.corpusId === 'secure_local.readwise.library')!;
+    expect(secureDefinition.activationMode).toBe('hybrid_primary');
+    const registry = buildSourceIndexCorpusRegistry([secureDefinition]);
+    const evidence = (provider: VenicePrivateProvider | RecordingCloudProvider) => buildEvidencePack({
+      question: 'What did I note about equanimity?',
+      searchQuery: 'equanimity',
+      maxResults: 5,
+      searchContext: { allowedTrustDomains: ['secure_local'] },
+      registry,
+      adapters: {
+        [secure.corpusId]: createConnectorStoreCorpusAdapter({ store: secure, embeddingProvider: provider, retrievalMode: 'hybrid' }),
+      },
+      contentProviders: { [secure.corpusId]: createConnectorStoreContentProvider({ store: secure }) },
+    });
+
+    // Venice: the query is embedded on the private identity and the
+    // vector-only hit (no keyword overlap) is in the evidence.
+    const privatePack = await evidence(venice);
+    expect(venice.taskTypes).toContain('RETRIEVAL_QUERY');
+    expect(privatePack.candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId)).toContain('hl-stoic');
+
+    // A cloud identity is refused for the Private store: it never embeds the
+    // query, and no vector hit comes back.
+    const cloudPack = await evidence(cloud);
+    expect(cloud.calls).toBe(0);
+    expect(cloudPack.candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId)).not.toContain('hl-stoic');
   });
 });

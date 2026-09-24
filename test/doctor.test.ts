@@ -1588,6 +1588,41 @@ describe('runDoctor', () => {
     expect(scheduler.detail).toContain('3 consecutive failures');
   });
 
+  test('names a source whose embedding is deferred, once, even while every sync succeeds', async () => {
+    const config = enabledEmailConfig();
+    config.worker.scheduler.enabled = true;
+    config.worker.scheduler.maxTransientRetries = 3;
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': { status: 'ok', configured: true },
+      '/v1/source/index/status': {
+        kind: 'source_index_status',
+        corpora: [dropboxCorpusReport()],
+      },
+      '/v1/source/scheduler/status': {
+        kind: 'source_scheduler_status',
+        enabled: true,
+        running: true,
+        generated_at: '2026-07-02T12:00:00.000Z',
+        sources: [{
+          source_id: 'dropbox.files',
+          corpus_id: 'secure_local.dropbox.files',
+          stale_sync_anomaly: false,
+          tasks: [
+            { id: 'dropbox.files_pull', kind: 'sync', running: false, consecutive_failures: 0, degraded_reason: 'embedding_provider_unavailable' },
+            { id: 'dropbox.files_embeddings', kind: 'embed', running: false, consecutive_failures: 0, degraded_reason: 'embedding_provider_unavailable' },
+          ],
+        }],
+      },
+    });
+
+    const result = await runDoctor(doctorDeps({ config, delphi: healthyDelphi(), fetchImpl }));
+
+    const scheduler = checkByName(result.checks, 'source_scheduler_status');
+    expect(scheduler.ok).toBe(false);
+    expect(scheduler.detail).toContain('dropbox.files embedding is deferred: the embedding provider is not answering');
+    expect(scheduler.detail.match(/embedding is deferred/g)).toHaveLength(1);
+  });
+
   test('flags connected handles that have no active sync lane', async () => {
     const config = enabledEmailConfig();
     config.worker.scheduler.enabled = true;
