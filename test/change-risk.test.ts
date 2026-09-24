@@ -111,6 +111,18 @@ describe('change risk', () => {
     expect(classifyChange(trustRouting, config).criticalFiles).toEqual([...trustRouting].sort());
   });
 
+  test('remote agent endpoints and the connection store are critical', () => {
+    // Every file here decides who outside this machine may call Olympus and
+    // what they reach: connection-token auth, the remote routes, the store.
+    const remoteSurfaces = [
+      'src/core/remote-connections.ts',
+      'src/workers/remote-mcp.ts',
+      'src/workers/remote-openapi.ts',
+      'src/workers/remote-request-body.ts',
+    ];
+    expect(classifyChange(remoteSurfaces, config).criticalFiles).toEqual([...remoteSurfaces].sort());
+  });
+
   test('rejects a stale configuration schema instead of guessing', () => {
     const stale = { ...config, schemaVersion: 1 } as unknown as ChangeRiskConfig;
     expect(() => classifyChange(['AGENTS.md'], stale)).toThrow(/Unsupported change-risk configuration/);

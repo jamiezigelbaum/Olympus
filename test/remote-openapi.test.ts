@@ -28,9 +28,12 @@ import {
 import {
   buildRemoteOpenApiSpec,
   createRemoteOpenApiHandler,
+  REMOTE_OPENAPI_API_VERSION,
   REMOTE_OPENAPI_MAX_BODY_BYTES,
   withRemoteOpenApiRoutes,
 } from '../src/workers/remote-openapi.ts';
+import { readBoundedRequestText } from '../src/workers/remote-request-body.ts';
+import { VERSION } from '../src/version.ts';
 import type {
   SourceAnswerLatencyLedgerRecord,
   SourceAnswerLatencyTraceRecord,
@@ -100,13 +103,9 @@ let ledger: SourceAnswerLatencyLedgerRecord[];
 let answered: number;
 let answerFailure: Error | undefined;
 let base: string;
+let sourceIndexReadEnabled: boolean;
 
-beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'olympus-remote-openapi-'));
-  store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
-  ledger = [];
-  answered = 0;
-  answerFailure = undefined;
+function startServer(): void {
   const worker = createEmailSourceWorker({
     sourceAnswer: {
       async answer() {
@@ -123,7 +122,7 @@ beforeEach(() => {
     makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) =>
       createInProcessOperationContext({
         config: ownerConfig(),
-        sourceIndexReadEnabled: true,
+        sourceIndexReadEnabled,
         workerFetch: worker.fetch,
         caller,
         signal,
@@ -138,6 +137,16 @@ beforeEach(() => {
   );
   server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch });
   base = `http://127.0.0.1:${server.port}`;
+}
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'olympus-remote-openapi-'));
+  store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
+  ledger = [];
+  answered = 0;
+  answerFailure = undefined;
+  sourceIndexReadEnabled = true;
+  startServer();
 });
 
 afterEach(() => {
@@ -233,7 +242,7 @@ describe('OpenAPI document', () => {
     expect(status.body).not.toContain('attacker.example');
     expect(status.body).not.toContain('127.0.0.1');
 
-    const configured = buildRemoteOpenApiSpec(defaultConfig(), { serverUrl: 'https://abc.connect.olympusplugin.ai' });
+    const configured = buildRemoteOpenApiSpec({ serverUrl: 'https://abc.connect.olympusplugin.ai' });
     expect(configured.servers).toEqual([{ url: 'https://abc.connect.olympusplugin.ai' }]);
     expect(() => createRemoteOpenApiHandler({
       connections: () => store,
@@ -412,6 +421,120 @@ describe('REST call path', () => {
   });
 });
 
+describe('review fixes', () => {
+  test('a chunked body over the cap is refused with 413 on both remote endpoints', async () => {
+    const { token } = store.create('Chunked');
+    const big = JSON.stringify({ question: 'x'.repeat(4 * 1024 * 1024) });
+    for (const path of ['/api/v1/tools/source_answer', '/mcp']) {
+      const response = await rawChunkedPost(server.port!, path, token, big);
+      expect({ path, status: response.status }).toEqual({ path, status: 413 });
+    }
+    expect(answered).toBe(0);
+  });
+
+  test('the bounded reader stops pulling once the cap is passed', async () => {
+    const chunk = new Uint8Array(64 * 1024).fill(0x61);
+    let pulled = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += chunk.byteLength;
+        if (pulled > 4 * 1024 * 1024) controller.close();
+        else controller.enqueue(chunk);
+      },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    const request = new Request('http://worker.test/api/v1/tools/source_answer', {
+      method: 'POST',
+      body: stream,
+      // @ts-expect-error Bun and undici need duplex for a streamed body.
+      duplex: 'half',
+    });
+    expect(await readBoundedRequestText(request, REMOTE_OPENAPI_MAX_BODY_BYTES)).toEqual({ ok: false, reason: 'too_large' });
+    expect(cancelled).toBe(true);
+    expect(pulled).toBeLessThanOrEqual(REMOTE_OPENAPI_MAX_BODY_BYTES + 3 * chunk.byteLength);
+  });
+
+  test('a declared oversized /mcp body is refused before the transport sees it', async () => {
+    const { token } = store.create('Mcp');
+    const response = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: { pad: 'x'.repeat(REMOTE_OPENAPI_MAX_BODY_BYTES) } }),
+    });
+    expect(response.status).toBe(413);
+  });
+
+  test('undeclared keys are refused centrally, for every operation', async () => {
+    const { token } = store.create('Keys');
+    const status = await call('source_index_status', `Bearer ${token}`, { corpus_id: 'internal.email', surprise: true });
+    expect(status.status).toBe(400);
+    expect(await status.json()).toMatchObject({ error: 'invalid_request' });
+    const caller = await call('source_index_status', `Bearer ${token}`, { caller: { surface: 'native' } });
+    expect(caller.status).toBe(400);
+  });
+
+  test('a tool call must be application/json', async () => {
+    const { token } = store.create('Types');
+    for (const contentType of ['text/plain', 'application/x-www-form-urlencoded', 'application/jsonx', '']) {
+      const response = await fetch(`${base}/api/v1/tools/source_index_status`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, ...(contentType ? { 'Content-Type': contentType } : {}) },
+        body: '{}',
+      });
+      expect({ contentType, status: response.status }).toEqual({ contentType, status: 415 });
+    }
+    const withCharset = await fetch(`${base}/api/v1/tools/source_index_status`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' },
+      body: '{}',
+    });
+    expect(withCharset.status).toBe(200);
+  });
+
+  test('the spec is the same on every install: fixed API version, full remote list, nosniff, ETag', async () => {
+    const enabled = await fetch(`${base}/openapi.json`);
+    const enabledText = await enabled.text();
+    expect(enabled.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    const etag = enabled.headers.get('ETag');
+    expect(etag).toBeTruthy();
+    const spec = JSON.parse(enabledText);
+    expect(spec.info.version).toBe(REMOTE_OPENAPI_API_VERSION);
+    expect(enabledText).not.toContain(`"${VERSION}"`);
+    const revalidated = await fetch(`${base}/openapi.json`, { headers: { 'If-None-Match': etag! } });
+    expect(revalidated.status).toBe(304);
+
+    server.stop(true);
+    sourceIndexReadEnabled = false;
+    startServer();
+    const disabled = await fetch(`${base}/openapi.json`);
+    expect(await disabled.text()).toBe(enabledText);
+    const { token } = store.create('Disabled');
+    const call503 = await call('source_answer', `Bearer ${token}`, { question: 'q' });
+    expect(call503.status).toBe(503);
+    expect(await call503.json()).toMatchObject({ error: 'operation_unavailable' });
+    expect(answered).toBe(0);
+  });
+
+  test('error responses carry nosniff too', async () => {
+    const { token } = store.create('Nosniff');
+    const responses = [
+      await call('source_answer', undefined, { question: 'q' }),
+      await call('no_such_tool', `Bearer ${token}`),
+      await call('source_answer', `Bearer ${token}`, {}),
+      await fetch(`${base}/openapi.json`, { method: 'POST' }),
+    ];
+    for (const response of responses) {
+      expect({ status: response.status, nosniff: response.headers.get('X-Content-Type-Options') })
+        .toEqual({ status: response.status, nosniff: 'nosniff' });
+    }
+  });
+});
+
 describe('olympus connections CLI', () => {
   test('add and list show the OpenAPI URL alongside the MCP URL', () => {
     const env = {
@@ -425,6 +548,49 @@ describe('olympus connections CLI', () => {
     expect(runConnectionsCommand(['list'], env)).toMatchObject({ openapi_url: 'http://127.0.0.1:8123/openapi.json' });
   });
 });
+
+/** A chunked POST with no Content-Length, so only the stream says how big it is. */
+function rawChunkedPost(port: number, path: string, token: string, body: string): Promise<{ status: number }> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1');
+    let data = '';
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      const match = /^HTTP\/1\.1 (\d{3})/.exec(data);
+      if (!match) return;
+      settled = true;
+      socket.destroy();
+      resolve({ status: Number(match[1]) });
+    };
+    socket.on('data', (chunk) => { data += chunk.toString('utf8'); settle(); });
+    socket.on('error', (error) => { if (!settled) { settle(); if (!settled) reject(error); } });
+    socket.on('close', () => { if (!settled) reject(new Error(`no status line for ${path}`)); });
+    socket.write([
+      `POST ${path} HTTP/1.1`,
+      'Host: 127.0.0.1',
+      `Authorization: Bearer ${token}`,
+      'Content-Type: application/json',
+      'Accept: application/json, text/event-stream',
+      'Transfer-Encoding: chunked',
+      '',
+      '',
+    ].join('\r\n'));
+    const bytes = Buffer.from(body);
+    const size = 64 * 1024;
+    let offset = 0;
+    const writeNext = () => {
+      while (offset < bytes.length && !settled && !socket.destroyed) {
+        const piece = bytes.subarray(offset, offset + size);
+        offset += piece.length;
+        const ok = socket.write(Buffer.concat([Buffer.from(`${piece.length.toString(16)}\r\n`), piece, Buffer.from('\r\n')]));
+        if (!ok) { socket.once('drain', writeNext); return; }
+      }
+      if (!settled && !socket.destroyed && offset >= bytes.length) socket.write('0\r\n\r\n');
+    };
+    writeNext();
+  });
+}
 
 /** A raw HTTP/1.1 request, so the path and Host reach the server exactly as written. */
 function rawRequest(

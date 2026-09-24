@@ -11,13 +11,17 @@
  *   and runs through the same in-process operation context, so the answer is
  *   attributed to the connection and nothing else becomes reachable.
  *
- * The spec is served without a token. It is static and data-free: it is
- * rendered with the neutral identity and the default corpus registry, so it
- * names no owner, assistant, or configured source, and it carries no token.
- * Muse builds its connector by reading the spec from a URL before the owner
- * pastes the token into its credential store, so a spec behind the token
- * would stop the connector being built at all.
+ * The spec is served without a token. It is static and data-free: every
+ * install serves the same document (neutral identity, default corpus
+ * registry, the full remote list whatever this install has enabled, a fixed
+ * API version rather than the package version), so it names no owner,
+ * assistant, configured source, or build. Muse builds its connector by reading
+ * the spec from a URL before the owner pastes the token into its credential
+ * store, so a spec behind the token would stop the connector being built.
+ * No CORS headers: Muse fetches server-side from its VM, and no browser page
+ * needs to read this.
  */
+import { createHash } from 'node:crypto';
 import { defaultConfig, type OlympusConfig } from '../core/config.ts';
 import { OperationError, type OperationErrorCode } from '../core/operation-error.ts';
 import { exposedOperations, shouldExposeOperation } from '../core/operation-exposure.ts';
@@ -29,13 +33,18 @@ import {
   type Operation,
 } from '../core/operations.ts';
 import { isWellFormedRemoteConnectionToken, type RemoteConnectionStore } from '../core/remote-connections.ts';
-import { VERSION } from '../version.ts';
 import { bearerToken, jsonResponse, remoteOperationCaller, unauthorized, type RemoteMcpHandlerOptions } from './remote-mcp.ts';
+import { isJsonContentType, readBoundedRequestText, REMOTE_REQUEST_MAX_BODY_BYTES } from './remote-request-body.ts';
 
 export const REMOTE_OPENAPI_SPEC_PATH = '/openapi.json';
 export const REMOTE_OPENAPI_TOOLS_PREFIX = '/api/v1/tools/';
-/** A question plus filters is a few KiB; anything near this is not a tool call. */
-export const REMOTE_OPENAPI_MAX_BODY_BYTES = 256 * 1024;
+export const REMOTE_OPENAPI_MAX_BODY_BYTES = REMOTE_REQUEST_MAX_BODY_BYTES;
+/**
+ * The REST API's own version, not the package's: bump it when a path, a
+ * parameter, or a response shape changes. A fixed value keeps the
+ * unauthenticated spec from naming the installed build.
+ */
+export const REMOTE_OPENAPI_API_VERSION = '1.0.0';
 
 const TOOL_PATH_PATTERN = /^\/api\/v1\/tools\/([a-z][a-z0-9_]{0,63})$/;
 
@@ -64,26 +73,35 @@ export function withRemoteOpenApiRoutes(
 
 export function createRemoteOpenApiHandler(options: RemoteOpenApiHandlerOptions): (request: Request) => Promise<Response> {
   const serverUrl = publicServerUrl(options.publicBaseUrl);
+  // Static, so built once; the ETag lets a re-fetch skip the body.
+  const specText = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
+  const specEtag = `"${createHash('sha256').update(specText).digest('base64url').slice(0, 27)}"`;
   return async (request: Request): Promise<Response> => {
     const { pathname } = new URL(request.url);
-    if (pathname === REMOTE_OPENAPI_SPEC_PATH) return serveSpec(request, options, serverUrl);
-    const name = TOOL_PATH_PATTERN.exec(pathname)?.[1];
-    if (name === undefined) return jsonResponse(404, { error: 'not_found' });
-    return callTool(request, name, options);
+    let response: Response;
+    if (pathname === REMOTE_OPENAPI_SPEC_PATH) {
+      response = serveSpec(request, specText, specEtag);
+    } else {
+      const name = TOOL_PATH_PATTERN.exec(pathname)?.[1];
+      response = name === undefined
+        ? jsonResponse(404, { error: 'not_found' })
+        : await callTool(request, name, options);
+    }
+    response.headers.set('X-Content-Type-Options', 'nosniff');
+    return response;
   };
 }
 
-function serveSpec(request: Request, options: RemoteOpenApiHandlerOptions, serverUrl: string): Response {
+function serveSpec(request: Request, specText: string, etag: string): Response {
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     return jsonResponse(405, { error: 'method_not_allowed' }, { Allow: 'GET, HEAD' });
   }
-  // Exposure follows the context the calls run with, so the spec lists exactly
-  // what a call can reach. The caller is a placeholder: nothing runs.
-  const config = options.makeOperationContext({ surface: 'remote' }, new AbortController().signal).config;
-  return new Response(JSON.stringify(buildRemoteOpenApiSpec(config, { serverUrl })), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
-  });
+  const headers = { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', ETag: etag };
+  const ifNoneMatch = request.headers.get('If-None-Match');
+  if (ifNoneMatch && ifNoneMatch.split(',').some((tag) => tag.trim() === etag || tag.trim() === '*')) {
+    return new Response(null, { status: 304, headers });
+  }
+  return new Response(specText, { status: 200, headers });
 }
 
 async function callTool(request: Request, name: string, options: RemoteOpenApiHandlerOptions): Promise<Response> {
@@ -104,15 +122,32 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
   if (request.method !== 'POST') {
     return jsonResponse(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
   }
+  // As the MCP transport does: a tool call is JSON or it is refused.
+  if (!isJsonContentType(request.headers.get('Content-Type'))) {
+    return jsonResponse(415, { error: 'unsupported_media_type', message: 'Content-Type must be application/json.' });
+  }
 
   const ctx = options.makeOperationContext(remoteOperationCaller(verification.connection), request.signal);
   const operation = findOperationByName(name);
-  if (!operation || !shouldExposeOperation(operation, { config: ctx.config, surface: 'remote' })) {
+  if (!operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: 'remote' })) {
     return jsonResponse(404, { error: 'unknown_operation', message: `No Olympus operation named ${name} is available here.` });
+  }
+  // On the published list, but this install has it switched off.
+  if (!shouldExposeOperation(operation, { config: ctx.config, surface: 'remote' })) {
+    return jsonResponse(503, { error: 'operation_unavailable', message: `${name} is not enabled on this Olympus install.` });
   }
 
   const params = await readParams(request);
   if (!params.ok) return params.response;
+  // Declared parameters only, checked here for every operation rather than
+  // left to each handler: `caller` in particular is set from the token.
+  const undeclared = Object.keys(params.value)
+    .filter((key) => !Object.prototype.hasOwnProperty.call(operation.params, key))
+    .sort();
+  if (undeclared.length > 0) {
+    const names = undeclared.slice(0, 10).map((key) => JSON.stringify(key.slice(0, 64))).join(', ');
+    return invalidRequest(`Undeclared parameters: ${names}. Remove them and retry.`);
+  }
 
   try {
     const result = await operation.handler(ctx, params.value);
@@ -125,19 +160,16 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
 async function readParams(
   request: Request,
 ): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; response: Response }> {
-  const declared = Number(request.headers.get('Content-Length') ?? '0');
-  if (Number.isFinite(declared) && declared > REMOTE_OPENAPI_MAX_BODY_BYTES) {
-    return { ok: false, response: jsonResponse(413, { error: 'payload_too_large' }) };
+  const body = await readBoundedRequestText(request);
+  if (!body.ok) {
+    return {
+      ok: false,
+      response: body.reason === 'too_large'
+        ? jsonResponse(413, { error: 'payload_too_large' })
+        : invalidRequest('The request body could not be read as UTF-8.'),
+    };
   }
-  let text: string;
-  try {
-    text = await request.text();
-  } catch {
-    return { ok: false, response: invalidRequest('The request body could not be read.') };
-  }
-  if (Buffer.byteLength(text) > REMOTE_OPENAPI_MAX_BODY_BYTES) {
-    return { ok: false, response: jsonResponse(413, { error: 'payload_too_large' }) };
-  }
+  const text = body.text;
   if (text.trim() === '') return { ok: true, value: {} };
   let parsed: unknown;
   try {
@@ -205,12 +237,9 @@ function publicServerUrl(publicBaseUrl: string | undefined): string {
  * JSON Schema 2020-12, the dialect the MCP tool schemas already use, so each
  * operation's parameter schema carries over unchanged.
  */
-export function buildRemoteOpenApiSpec(
-  config: OlympusConfig,
-  options: { serverUrl?: string } = {},
-): Record<string, unknown> {
-  const exposed = exposedOperations(operations, { config, surface: 'remote' });
-  const rendering = neutralRenderingConfig(config);
+export function buildRemoteOpenApiSpec(options: { serverUrl?: string } = {}): Record<string, unknown> {
+  const rendering = neutralSpecConfig();
+  const exposed = exposedOperations(operations, { config: rendering, surface: 'remote' });
   const paths = Object.fromEntries(exposed.map((operation) => [
     `${REMOTE_OPENAPI_TOOLS_PREFIX}${operation.name}`,
     { post: openApiOperation(operation, rendering) },
@@ -219,7 +248,7 @@ export function buildRemoteOpenApiSpec(
     openapi: '3.1.0',
     info: {
       title: 'Olympus',
-      version: VERSION,
+      version: REMOTE_OPENAPI_API_VERSION,
       description: [
         'Ask the owner\'s Olympus source index questions, under the same privacy rules as their own assistant.',
         'Authenticate every call with the connection token from `olympus connections add <name>` as a bearer token.',
@@ -289,16 +318,14 @@ function openApiOperation(operation: Operation, config: OlympusConfig): Record<s
 }
 
 /**
- * The spec is served without a token, so it is rendered as any install would
- * render it: the neutral identity and the default corpus registry.
+ * The spec is served without a token, so it describes no install: the
+ * defaults (neutral identity, default corpus registry) with the source index
+ * on, so the path list is the whole remote surface whatever this install has
+ * enabled. A call to an operation this install has off fails at runtime.
  */
-function neutralRenderingConfig(config: OlympusConfig): OlympusConfig {
+function neutralSpecConfig(): OlympusConfig {
   const neutral = defaultConfig();
-  return {
-    ...config,
-    identity: neutral.identity,
-    sourceIndex: { ...config.sourceIndex, corpusRegistry: neutral.sourceIndex.corpusRegistry },
-  };
+  return { ...neutral, sourceIndex: { ...neutral.sourceIndex, enabled: true } };
 }
 
 function firstSentence(text: string): string {

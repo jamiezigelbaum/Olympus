@@ -90085,6 +90085,61 @@ var init_webStandardStreamableHttp = __esm(() => {
   init_types2();
 });
 
+// src/workers/remote-request-body.ts
+async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BODY_BYTES) {
+  const declared = request.headers.get("Content-Length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (Number.isFinite(length) && length > maxBytes)
+      return { ok: false, reason: "too_large" };
+  }
+  if (!request.body)
+    return { ok: true, text: "" };
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;; ) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {
+          return;
+        });
+        return { ok: false, reason: "too_large" };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    await reader.cancel().catch(() => {
+      return;
+    });
+    return { ok: false, reason: "unreadable" };
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return { ok: true, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  }
+}
+function isJsonContentType(header) {
+  if (!header)
+    return false;
+  return header.split(";", 1)[0].trim().toLowerCase() === "application/json";
+}
+var REMOTE_REQUEST_MAX_BODY_BYTES;
+var init_remote_request_body = __esm(() => {
+  REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
+});
+
 // src/workers/remote-mcp.ts
 var exports_remote_mcp = {};
 __export(exports_remote_mcp, {
@@ -90128,6 +90183,14 @@ function createRemoteMcpHandler(options) {
     if (request.method !== "POST") {
       return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "POST" });
     }
+    const body = await readBoundedRequestText(request);
+    if (!body.ok) {
+      return body.reason === "too_large" ? jsonResponse(413, { error: "payload_too_large" }) : jsonResponse(400, { error: "invalid_request" });
+    }
+    let parsedBody;
+    try {
+      parsedBody = JSON.parse(body.text);
+    } catch {}
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
     const server = createOlympusMcpServer("remote", () => ctx);
@@ -90135,7 +90198,8 @@ function createRemoteMcpHandler(options) {
     try {
       await server.connect(transport);
       return await transport.handleRequest(request, {
-        authInfo: { token: "", clientId: verification.connection.id, scopes: [] }
+        authInfo: { token: "", clientId: verification.connection.id, scopes: [] },
+        ...parsedBody !== undefined ? { parsedBody } : {}
       });
     } finally {
       await server.close().catch(() => {
@@ -90204,6 +90268,7 @@ var init_remote_mcp = __esm(() => {
   init_operation_caller();
   init_remote_connections();
   init_server3();
+  init_remote_request_body();
 });
 
 // src/workers/remote-openapi.ts
@@ -90215,8 +90280,10 @@ __export(exports_remote_openapi, {
   buildRemoteOpenApiSpec: () => buildRemoteOpenApiSpec,
   REMOTE_OPENAPI_TOOLS_PREFIX: () => REMOTE_OPENAPI_TOOLS_PREFIX,
   REMOTE_OPENAPI_SPEC_PATH: () => REMOTE_OPENAPI_SPEC_PATH,
-  REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES
+  REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
+  REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
+import { createHash as createHash47 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -90226,25 +90293,31 @@ function withRemoteOpenApiRoutes(openApi, rest) {
 }
 function createRemoteOpenApiHandler(options) {
   const serverUrl = publicServerUrl(options.publicBaseUrl);
+  const specText = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
+  const specEtag = `"${createHash47("sha256").update(specText).digest("base64url").slice(0, 27)}"`;
   return async (request) => {
     const { pathname } = new URL(request.url);
-    if (pathname === REMOTE_OPENAPI_SPEC_PATH)
-      return serveSpec(request, options, serverUrl);
-    const name = TOOL_PATH_PATTERN.exec(pathname)?.[1];
-    if (name === undefined)
-      return jsonResponse(404, { error: "not_found" });
-    return callTool(request, name, options);
+    let response;
+    if (pathname === REMOTE_OPENAPI_SPEC_PATH) {
+      response = serveSpec(request, specText, specEtag);
+    } else {
+      const name = TOOL_PATH_PATTERN.exec(pathname)?.[1];
+      response = name === undefined ? jsonResponse(404, { error: "not_found" }) : await callTool(request, name, options);
+    }
+    response.headers.set("X-Content-Type-Options", "nosniff");
+    return response;
   };
 }
-function serveSpec(request, options, serverUrl) {
+function serveSpec(request, specText, etag) {
   if (request.method !== "GET" && request.method !== "HEAD") {
     return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "GET, HEAD" });
   }
-  const config2 = options.makeOperationContext({ surface: "remote" }, new AbortController().signal).config;
-  return new Response(JSON.stringify(buildRemoteOpenApiSpec(config2, { serverUrl })), {
-    status: 200,
-    headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" }
-  });
+  const headers = { "Content-Type": "application/json", "Cache-Control": "no-cache", ETag: etag };
+  const ifNoneMatch = request.headers.get("If-None-Match");
+  if (ifNoneMatch && ifNoneMatch.split(",").some((tag) => tag.trim() === etag || tag.trim() === "*")) {
+    return new Response(null, { status: 304, headers });
+  }
+  return new Response(specText, { status: 200, headers });
 }
 async function callTool(request, name, options) {
   const token = bearerToken(request.headers.get("Authorization"));
@@ -90266,14 +90339,25 @@ async function callTool(request, name, options) {
   if (request.method !== "POST") {
     return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "POST" });
   }
+  if (!isJsonContentType(request.headers.get("Content-Type"))) {
+    return jsonResponse(415, { error: "unsupported_media_type", message: "Content-Type must be application/json." });
+  }
   const ctx = options.makeOperationContext(remoteOperationCaller(verification.connection), request.signal);
   const operation = findOperationByName(name);
-  if (!operation || !shouldExposeOperation(operation, { config: ctx.config, surface: "remote" })) {
+  if (!operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: "remote" })) {
     return jsonResponse(404, { error: "unknown_operation", message: `No Olympus operation named ${name} is available here.` });
+  }
+  if (!shouldExposeOperation(operation, { config: ctx.config, surface: "remote" })) {
+    return jsonResponse(503, { error: "operation_unavailable", message: `${name} is not enabled on this Olympus install.` });
   }
   const params = await readParams(request);
   if (!params.ok)
     return params.response;
+  const undeclared = Object.keys(params.value).filter((key) => !Object.prototype.hasOwnProperty.call(operation.params, key)).sort();
+  if (undeclared.length > 0) {
+    const names = undeclared.slice(0, 10).map((key) => JSON.stringify(key.slice(0, 64))).join(", ");
+    return invalidRequest(`Undeclared parameters: ${names}. Remove them and retry.`);
+  }
   try {
     const result = await operation.handler(ctx, params.value);
     return jsonResponse(200, result ?? null);
@@ -90282,19 +90366,14 @@ async function callTool(request, name, options) {
   }
 }
 async function readParams(request) {
-  const declared = Number(request.headers.get("Content-Length") ?? "0");
-  if (Number.isFinite(declared) && declared > REMOTE_OPENAPI_MAX_BODY_BYTES) {
-    return { ok: false, response: jsonResponse(413, { error: "payload_too_large" }) };
+  const body = await readBoundedRequestText(request);
+  if (!body.ok) {
+    return {
+      ok: false,
+      response: body.reason === "too_large" ? jsonResponse(413, { error: "payload_too_large" }) : invalidRequest("The request body could not be read as UTF-8.")
+    };
   }
-  let text;
-  try {
-    text = await request.text();
-  } catch {
-    return { ok: false, response: invalidRequest("The request body could not be read.") };
-  }
-  if (Buffer.byteLength(text) > REMOTE_OPENAPI_MAX_BODY_BYTES) {
-    return { ok: false, response: jsonResponse(413, { error: "payload_too_large" }) };
-  }
+  const text = body.text;
   if (text.trim() === "")
     return { ok: true, value: {} };
   let parsed;
@@ -90337,9 +90416,9 @@ function publicServerUrl(publicBaseUrl) {
   }
   return url.origin;
 }
-function buildRemoteOpenApiSpec(config2, options = {}) {
-  const exposed = exposedOperations(operations, { config: config2, surface: "remote" });
-  const rendering = neutralRenderingConfig(config2);
+function buildRemoteOpenApiSpec(options = {}) {
+  const rendering = neutralSpecConfig();
+  const exposed = exposedOperations(operations, { config: rendering, surface: "remote" });
   const paths = Object.fromEntries(exposed.map((operation) => [
     `${REMOTE_OPENAPI_TOOLS_PREFIX}${operation.name}`,
     { post: openApiOperation(operation, rendering) }
@@ -90348,7 +90427,7 @@ function buildRemoteOpenApiSpec(config2, options = {}) {
     openapi: "3.1.0",
     info: {
       title: "Olympus",
-      version: VERSION,
+      version: REMOTE_OPENAPI_API_VERSION,
       description: [
         "Ask the owner's Olympus source index questions, under the same privacy rules as their own assistant.",
         "Authenticate every call with the connection token from `olympus connections add <name>` as a bearer token.",
@@ -90415,28 +90494,24 @@ function openApiOperation(operation, config2) {
     }
   };
 }
-function neutralRenderingConfig(config2) {
+function neutralSpecConfig() {
   const neutral = defaultConfig();
-  return {
-    ...config2,
-    identity: neutral.identity,
-    sourceIndex: { ...config2.sourceIndex, corpusRegistry: neutral.sourceIndex.corpusRegistry }
-  };
+  return { ...neutral, sourceIndex: { ...neutral.sourceIndex, enabled: true } };
 }
 function firstSentence(text) {
   const match = /^(.+?[.!?])(\s|$)/.exec(text);
   return (match?.[1] ?? text).slice(0, 120);
 }
-var REMOTE_OPENAPI_SPEC_PATH = "/openapi.json", REMOTE_OPENAPI_TOOLS_PREFIX = "/api/v1/tools/", REMOTE_OPENAPI_MAX_BODY_BYTES, TOOL_PATH_PATTERN, CALLER_FACING_ERRORS, INTERNAL_ERROR_MESSAGES;
+var REMOTE_OPENAPI_SPEC_PATH = "/openapi.json", REMOTE_OPENAPI_TOOLS_PREFIX = "/api/v1/tools/", REMOTE_OPENAPI_MAX_BODY_BYTES, REMOTE_OPENAPI_API_VERSION = "1.0.0", TOOL_PATH_PATTERN, CALLER_FACING_ERRORS, INTERNAL_ERROR_MESSAGES;
 var init_remote_openapi = __esm(() => {
   init_config();
   init_operation_error();
   init_operation_exposure();
   init_operations();
   init_remote_connections();
-  init_version();
   init_remote_mcp();
-  REMOTE_OPENAPI_MAX_BODY_BYTES = 256 * 1024;
+  init_remote_request_body();
+  REMOTE_OPENAPI_MAX_BODY_BYTES = REMOTE_REQUEST_MAX_BODY_BYTES;
   TOOL_PATH_PATTERN = /^\/api\/v1\/tools\/([a-z][a-z0-9_]{0,63})$/;
   CALLER_FACING_ERRORS = {
     invalid_params: 400,

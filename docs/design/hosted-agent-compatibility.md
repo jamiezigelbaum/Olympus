@@ -178,7 +178,11 @@ critical-class and need an independent review receipt.
      install). Calls are `POST /api/v1/tools/<name>`, one path per remote
      operation, behind the same connection token, exposure filter and
      in-process path as `/mcp`. The server entry is relative until the relay
-     supplies a public origin; it never comes from the Host header.
+     supplies a public origin; it never comes from the Host header. The spec
+     is identical on every install (fixed API version, full remote list), and
+     CORS is intentionally absent: Muse fetches from its VM, server-side, and
+     no browser page needs to read either path. Both remote endpoints read
+     request bodies through a bounded stream reader (256 KiB).
    - Open: Muse's HTTP timeout is unpublished. `source_answer` can take
      minutes, so an async submit/poll pair (`POST` returns a job id, `GET`
      polls it) is the follow-up if end-to-end proof shows synchronous calls
