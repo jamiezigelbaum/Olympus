@@ -584,9 +584,7 @@ candidates include a Python shim plugin or `source_watch_*` delivery on
 Hermes, Hermes availability of any skill beyond the optional audited
 `ask-sources` skill, any
 `$XDG_DATA_HOME/openclaw/olympus/` rename or data migration, a Hermes analyst
-backend, and Hermes-specific ops tooling. Hosted-agent connections (Claude
-web and mobile, Grok, Muse, and other remote-MCP agents) are approved v0.5 work;
-see [hosted-agent compatibility](design/hosted-agent-compatibility.md).
+backend, and Hermes-specific ops tooling.
 
 ## Model setup for testing and v0.5
 
