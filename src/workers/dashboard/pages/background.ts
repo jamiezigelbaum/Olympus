@@ -68,6 +68,7 @@ import {
   dashboardCount,
   dashboardDuration,
   dashboardRelativeFromMs,
+  dashboardSyncKeepsFailing,
 } from '../vocabulary.ts';
 import type { DashboardPageOptions } from './home.ts';
 
@@ -667,6 +668,17 @@ function actionableConditions(
   for (const source of view.sources) {
     const schedule = source.schedule;
     if (schedule === undefined || schedule.consecutive_failures <= 0) continue;
+    // A sync that keeps failing is the owner's, booked retry or not: home, the
+    // page header and the source banner all say so, and this list must too.
+    if (dashboardSyncKeepsFailing(source)) {
+      actionable.push({
+        lane: 'Syncs',
+        words: `${source.label}'s scheduled sync keeps failing`
+          + `${schedule.last_error_kind ? ` (${maskSecrets(schedule.last_error_kind)})` : ''}, so new material is not coming in.`,
+        ...detailLink(source, basePath),
+      });
+      continue;
+    }
     const booked = Number.isFinite(Date.parse(schedule.next_run_at ?? ''));
     const retrying = (source.queue_health.retrying_tasks ?? 0) > 0;
     // A booked run or a live retry means the system is handling it. Silence is
@@ -1199,7 +1211,7 @@ function syncsLane(
   // which the checks below already call self-healing; calling it failing here
   // too put "1 source failing" beside a source page that said nothing was
   // wrong (owner-reported, 2026-09-24).
-  const persistentlyFailing = failing.filter((source) => (source.queue_health.failing_tasks ?? 0) > 0);
+  const persistentlyFailing = failing.filter((source) => dashboardSyncKeepsFailing(source));
   const retryingOnly = failing.length - persistentlyFailing.length;
   if (retryingOnly > 0) {
     facts.push(`${dashboardCount(retryingOnly)} ${plural(retryingOnly, 'source')} retrying`);
@@ -1221,7 +1233,8 @@ function syncsLane(
     const retryAt = schedule.next_run_at ? Date.parse(schedule.next_run_at) : Number.NaN;
     const booked = Number.isFinite(retryAt);
     const retrying = source.queue_health.retrying_tasks ?? 0;
-    const selfHealing = booked || retrying > 0;
+    // A booked retry is self-healing only until the sync keeps failing.
+    const selfHealing = !dashboardSyncKeepsFailing(source) && (booked || retrying > 0);
     checks.push({
       name: 'CONSECUTIVE_FAILURES',
       observed: `${source.label}: ${dashboardCount(schedule.consecutive_failures)}`,

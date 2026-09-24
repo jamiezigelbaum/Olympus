@@ -3220,7 +3220,7 @@ describe('needs-review counts each item once', () => {
 });
 
 describe('retry counters are not item counts', () => {
-  function bookmarksRetryingView(consecutiveFailures: number) {
+  function bookmarksRetryingView(consecutiveFailures: number, lastErrorKind?: string) {
     const status = fixtureStatus();
     status.corpora = [{
       corpus_id: 'internal.x.bookmarks',
@@ -3241,7 +3241,13 @@ describe('retry counters are not item counts', () => {
       sync_interval_seconds: 300,
       freshness_threshold_hours: 26,
       stale_sync_anomaly: false,
-      tasks: [{ id: 'x.sync', kind: 'sync', running: false, consecutive_failures: consecutiveFailures }],
+      tasks: [{
+        id: 'x.sync',
+        kind: 'sync',
+        running: false,
+        consecutive_failures: consecutiveFailures,
+        ...(lastErrorKind ? { last_error_kind: lastErrorKind } : {}),
+      }],
     }];
     return buildSourceDashboardViewModel({
       sourceIndexStatus: status,
@@ -3304,6 +3310,25 @@ describe('retry counters are not item counts', () => {
     expect(card?.embedding_required).toBe(false);
     expect(card?.embedding_backlog).toBeUndefined();
     expect(view.background_work?.embedding_backlog).toBeUndefined();
+  });
+
+  test('two failures in a row are still a retry; the third makes the task failing', () => {
+    const card = (failures: number) => bookmarksRetryingView(failures).sources
+      .find((source) => source.source_id === 'x.bookmarks');
+
+    expect(card(2)?.queue_health.failing_tasks).toBeUndefined();
+    expect(card(2)?.answer_readiness.state).not.toBe('needs_attention');
+    expect(card(3)?.queue_health.failing_tasks).toBe(1);
+    expect(card(3)?.answer_readiness.state).toBe('needs_attention');
+  });
+
+  test('a credential failure is failing on its first attempt', () => {
+    const card = bookmarksRetryingView(1, 'credential_missing').sources
+      .find((source) => source.source_id === 'x.bookmarks');
+
+    expect(card?.queue_health.failing_tasks).toBe(1);
+    expect(card?.queue_health.label).toBe('Needs attention');
+    expect(card?.answer_readiness.state).toBe('needs_attention');
   });
 
   test('a task that keeps failing holds the source out of answer-ready', () => {

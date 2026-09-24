@@ -5,148 +5,238 @@
 // "Embedded 959 highlights" beside an Embedding row saying the source has no
 // embedding stage, and counted Readwise items as "files".
 //
-// The card below is the live card's shape at that moment, counts only: one
-// sync task had failed once and had its retry booked.
+// Every card here is built by the worker's own view model from scheduler and
+// index status in the live shape (counts only), so `failing_tasks` and the
+// readiness ladder come from real scheduler state rather than being set by hand.
 import { describe, expect, test } from 'bun:test';
+import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { dashboardAttentionBanner } from '../src/workers/dashboard/attention.ts';
-import { dashboardBackgroundLanes } from '../src/workers/dashboard/pages/background.ts';
+import { dashboardBackgroundLanes, renderDashboardBackgroundBody } from '../src/workers/dashboard/pages/background.ts';
 import { renderDashboardDetailBody } from '../src/workers/dashboard/pages/detail.ts';
 import { dashboardStatus, dashboardSubLine } from '../src/workers/dashboard/vocabulary.ts';
-import type { DashboardSourceCard, SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
+import {
+  buildSourceDashboardViewModel,
+  type DashboardSourceCard,
+  type SourceDashboardViewModel,
+} from '../src/workers/source-dashboard.ts';
+import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
+import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 
 const NOW = new Date('2026-09-24T12:44:55.650Z');
+const SETUP = '/dashboard?setup';
 
-function readwiseCard(failures: { retrying: number; failing?: number; lastErrorKind?: string }): DashboardSourceCard {
-  const failing = failures.failing ?? 0;
-  const keepsFailing = failing > 0;
-  return {
-    corpus_id: 'internal.readwise.library',
-    source_id: 'readwise.library',
-    label: 'Readwise',
-    provider: 'readwise',
+interface TaskState {
+  failures: number;
+  errorKind?: string;
+  degradedReason?: string;
+}
+
+function readwiseView(pull: TaskState, options: { embeddingRequired?: boolean } = {}): SourceDashboardViewModel {
+  const required = options.embeddingRequired === true;
+  const corpus = (
+    corpusId: string,
+    trustDomain: 'internal' | 'secure_local',
+    counts: { items: number; text: number; chunks: number; embedded: number; itemsEmbedded: number },
+  ) => ({
+    corpus_id: corpusId,
     family: 'readwise',
-    trust_domain: 'internal',
+    trust_domain: trustDomain,
+    activation_mode: required ? 'hybrid_primary' : 'lexical_only',
+    embedding_policy: 'cloud_allowed',
     configured: true,
-    freshness: { label: 'Last checked less than 1 hour ago', hours: 0.1, threshold_hours: 26, stale: false },
-    coverage: {
-      indexed_items: 2791,
-      content_ready_items: 1651,
-      embedded_items: 2839,
-      embedded_files: 963,
-      needs_review_items: 0,
-      not_read_by_policy_items: 0,
+    provider: 'readwise',
+    read_authority: 'connector_store',
+    counts: {
+      indexed_items: counts.items,
+      items_with_text: counts.text,
+      chunks: counts.chunks,
+      embedded_chunks: counts.embedded,
+      items_embedded: counts.itemsEmbedded,
+      sync_runs: 3,
     },
-    ingestion_selection: { metadata_only_files: 0, full_ingestion_files: 2791 },
-    needs_review: { total: 0, automatic_total: 0, operator_total: 0, reasons: [] },
-    ingestion_health: {
-      coverage_percent: 59.2,
-      stuck_count: 0,
-      last_drain_activity_hours: 0.1,
-      drain_state: 'enabled',
-      drain_unit: 'olympus-source-scheduler',
-      label: '59.2% covered; no stuck work; last drain 0.1h ago',
+    embedding_parity: {
+      required,
+      chunks: counts.chunks,
+      embedded_chunks: counts.embedded,
+      missing_chunks: counts.chunks - counts.embedded,
+      refresh_needed: required && counts.embedded < counts.chunks,
     },
-    tier_composition: [
-      { trust_domain: 'internal', label: 'Personal', indexed_items: 2040, content_ready_items: 900 },
-      { trust_domain: 'secure_local', label: 'Private', indexed_items: 751, content_ready_items: 751 },
-    ],
-    queue_health: {
-      label: keepsFailing ? 'Needs attention' : 'Working now',
-      waiting: 0,
-      active: 1,
-      needs_attention: 0,
-      ...(failures.retrying > 0 ? { retrying_tasks: failures.retrying } : {}),
-      ...(keepsFailing ? { failing_tasks: failing } : {}),
-    },
-    answer_readiness: keepsFailing
-      ? { state: 'needs_attention', label: 'Needs attention before answers' }
-      : { state: 'ready', label: 'Ready for questions' },
-    connection: {
-      state: 'syncing',
-      label: 'syncing',
-      action: { kind: 'none' },
-      handles: ['readwise.personal'],
-      connected_at: '2026-09-24T12:35:28.005Z',
-    },
-    last_run: {
+    last_refresh: {
+      sync_run_id: `run-${trustDomain}`,
       status: 'completed',
       started_at: '2026-09-24T12:38:53.243Z',
       completed_at: '2026-09-24T12:38:57.214Z',
-      duration_seconds: 4,
       items_seen: 2093,
-      items_indexed: 751,
-      traversal_complete: false,
+      items_indexed: counts.items,
+      source_scope: 'readwise_live',
     },
-    last_sync_at: '2026-09-24T12:38:57.214Z',
-    schedule: {
-      running: true,
-      consecutive_failures: Math.max(failures.retrying, failing * 3),
-      last_attempt_at: '2026-09-24T12:37:20.809Z',
-      next_run_at: '2026-09-24T12:38:20.807Z',
-      ...(failures.retrying > 0 ? { last_error_kind: failures.lastErrorKind ?? 'task_failed' } : {}),
-    },
-    embedding_required: false,
-    content_arrives_extracted: true,
-    sync_now_available: true,
-    movement: {
-      first_seen_at: '2026-09-24T11:37:20.381Z',
-      metadata_sync_at: '2026-09-24T12:42:51.625Z',
-      extraction_at: '2026-09-24T12:42:51.625Z',
-      embedding_at: '2026-09-24T12:44:55.650Z',
-    },
-  } as DashboardSourceCard;
-}
-
-function viewOf(card: DashboardSourceCard): SourceDashboardViewModel {
-  return {
-    kind: 'source_dashboard',
+    item_metadata_returned: false,
+  });
+  const status = {
+    kind: 'source_index_status',
     generated_at: NOW.toISOString(),
-    sources: [card],
-    background_work: {},
-  } as unknown as SourceDashboardViewModel;
+    corpora: [
+      corpus('internal.readwise.library', 'internal', { items: 2040, text: 900, chunks: 1527, embedded: 1527, itemsEmbedded: 900 }),
+      corpus('secure_local.readwise.library', 'secure_local', { items: 751, text: 751, chunks: 5704, embedded: 1664, itemsEmbedded: 107 }),
+    ],
+  } as unknown as SourceIndexStatusResult;
+  const scheduler: SourceSchedulerStatus = {
+    kind: 'source_scheduler_status',
+    enabled: true,
+    running: true,
+    generated_at: NOW.toISOString(),
+    selected_source_ids: ['readwise.library'],
+    missing_selected_source_ids: [],
+    sources: [{
+      source_id: 'readwise.library',
+      corpus_id: 'internal.readwise.library',
+      sync_cadence: 'continuous',
+      sync_interval_seconds: 1800,
+      freshness_threshold_hours: 26,
+      freshness_hours: 0.1,
+      stale_sync_anomaly: false,
+      tasks: [
+        {
+          id: 'readwise.library_store_pull',
+          kind: 'sync',
+          interval_seconds: 900,
+          effective_interval_seconds: 900,
+          freshness_threshold_seconds: 3600,
+          stale_anomaly: false,
+          next_run_at: '2026-09-24T12:38:20.807Z',
+          running: false,
+          consecutive_failures: pull.failures,
+          last_attempt_at: '2026-09-24T12:35:28.018Z',
+          ...(pull.failures > 0 ? { last_error_kind: pull.errorKind ?? 'task_failed' } : {}),
+          ...(pull.degradedReason ? { degraded_reason: pull.degradedReason } : {}),
+        },
+        {
+          id: 'readwise.library_store_reconcile',
+          kind: 'sync',
+          interval_seconds: 86400,
+          effective_interval_seconds: 86400,
+          freshness_threshold_seconds: 93600,
+          stale_anomaly: false,
+          next_run_at: '2026-09-24T12:35:28.014Z',
+          running: true,
+          consecutive_failures: 0,
+          last_attempt_at: '2026-09-24T12:37:20.809Z',
+        },
+      ],
+    }],
+    policy: {
+      raw_source_exposed: false,
+      source_text_returned: false,
+      source_scope_keys_exposed: false,
+      counts_only: true,
+    },
+  } as unknown as SourceSchedulerStatus;
+  return buildSourceDashboardViewModel({
+    sourceIndexStatus: status,
+    schedulerStatus: scheduler,
+    sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({
+      OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED: 'true',
+      OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL: 'openai/gpt-5.5',
+    })),
+    connectedHandleRegistry: {
+      version: 1,
+      handles: [{
+        handle: 'readwise.personal',
+        provider: 'readwise',
+        accountRole: 'personal',
+        trustDomain: 'internal',
+        allowedCapabilities: ['readwise.sync'],
+        scopes: ['readwise.export:read', 'readwise.reader:read'],
+        connectedAt: '2026-09-24T12:35:28.005Z',
+      }],
+    },
+    now: NOW,
+  });
 }
 
-function syncsFacts(card: DashboardSourceCard): string {
-  return dashboardBackgroundLanes(viewOf(card), { now: NOW }).find((lane) => lane.name === 'Syncs')?.facts ?? '';
+function readwiseCard(view: SourceDashboardViewModel): DashboardSourceCard {
+  const card = view.sources.find((source) => source.source_id === 'readwise.library');
+  if (!card) throw new Error('fixture view has no Readwise card');
+  return card;
+}
+
+function syncsFacts(view: SourceDashboardViewModel): string {
+  return dashboardBackgroundLanes(view, { now: NOW }).find((lane) => lane.name === 'Syncs')?.facts ?? '';
 }
 
 describe('Readwise attention reads one way on home, the header and the page', () => {
-  test('one booked retry: Working everywhere, no banner, and the background lane says retrying', () => {
-    const card = readwiseCard({ retrying: 1 });
+  test('one booked retry: not Needs you, no banner, and the background lane says retrying', () => {
+    const view = readwiseView({ failures: 1 });
+    const card = readwiseCard(view);
 
-    expect(dashboardStatus({ source: card })).toBe('Working');
+    expect(card.queue_health.retrying_tasks).toBe(1);
+    expect(card.queue_health.failing_tasks).toBeUndefined();
+    expect(card.answer_readiness.state).not.toBe('needs_attention');
+    expect(dashboardStatus({ source: card })).not.toBe('Needs you');
     expect(dashboardSubLine(card)).not.toContain('needs attention');
-    expect(dashboardAttentionBanner(card, { now: NOW, setupPath: '/dashboard?setup' })).toBeUndefined();
-    const facts = syncsFacts(card);
+    expect(dashboardAttentionBanner(card, { now: NOW, setupPath: SETUP })).toBeUndefined();
+    const facts = syncsFacts(view);
     expect(facts).toContain('1 source retrying');
     expect(facts).not.toContain('failing');
   });
 
-  test('a sync that keeps failing: Needs you on home and a banner on the page that says why', () => {
-    const card = readwiseCard({ retrying: 1, failing: 1 });
+  test('two failures in a row are still a retry, not failing', () => {
+    const card = readwiseCard(readwiseView({ failures: 2 }));
 
+    expect(card.queue_health.failing_tasks).toBeUndefined();
+    expect(dashboardStatus({ source: card })).not.toBe('Needs you');
+    expect(dashboardAttentionBanner(card, { now: NOW, setupPath: SETUP })).toBeUndefined();
+  });
+
+  test('three failures in a row: Needs you everywhere, with a banner that says why', () => {
+    const view = readwiseView({ failures: 3 });
+    const card = readwiseCard(view);
+
+    expect(card.queue_health.failing_tasks).toBe(1);
+    expect(card.answer_readiness.state).toBe('needs_attention');
     expect(dashboardStatus({ source: card })).toBe('Needs you');
-    const banner = dashboardAttentionBanner(card, { now: NOW, setupPath: '/dashboard?setup' });
+    const banner = dashboardAttentionBanner(card, { now: NOW, setupPath: SETUP });
     expect(banner?.kind).toBe('sync_failing');
     expect(banner?.sentence).toContain("Readwise's scheduled sync keeps failing");
     expect(banner?.sentence).toContain('task_failed');
     expect(banner?.action).toMatchObject({ kind: 'sync_now', label: 'Sync now' });
-    expect(banner?.agent_prompt).toContain('Readwise');
-    const html = renderDashboardDetailBody(card, { now: NOW });
-    expect(html).toContain('class="attncard banner"');
-    expect(syncsFacts(card)).toContain('1 source failing');
+    expect(renderDashboardDetailBody(card, { now: NOW })).toContain('class="attncard banner"');
+    expect(syncsFacts(view)).toContain('1 source failing');
+  });
+
+  test('a credential failure is failing on its first attempt', () => {
+    const card = readwiseCard(readwiseView({ failures: 1, errorKind: 'credential_reauth_required' }));
+
+    expect(card.queue_health.failing_tasks).toBe(1);
+    expect(dashboardStatus({ source: card })).toBe('Needs you');
+    expect(dashboardAttentionBanner(card, { now: NOW, setupPath: SETUP })).toBeDefined();
+  });
+
+  test('the background page marks a sync that keeps failing as needs-you, booked retry or not', () => {
+    const failing = readwiseView({ failures: 3 });
+    const failingCheck = dashboardBackgroundLanes(failing, { now: NOW })
+      .find((lane) => lane.name === 'Syncs')?.checks.find((check) => check.name === 'CONSECUTIVE_FAILURES');
+    expect(failingCheck?.disposition).toBe('needs_you');
+    const html = renderDashboardBackgroundBody(failing, NOW);
+    expect(html).toContain('Readwise&#39;s scheduled sync keeps failing (task_failed)');
+
+    const retrying = readwiseView({ failures: 1 });
+    const retryCheck = dashboardBackgroundLanes(retrying, { now: NOW })
+      .find((lane) => lane.name === 'Syncs')?.checks.find((check) => check.name === 'CONSECUTIVE_FAILURES');
+    expect(retryCheck?.disposition).toBe('self_healing');
+    expect(renderDashboardBackgroundBody(retrying, NOW)).not.toContain('keeps failing');
   });
 
   test('an operator pause silences the failing banner exactly as it silences the ladder', () => {
-    const card = readwiseCard({ retrying: 1, failing: 1 });
-    card.schedule = { ...card.schedule!, degraded_reason: 'readwise_daily_api_request_guard' };
+    const card = readwiseCard(readwiseView({ failures: 3, degradedReason: 'readwise_daily_api_request_guard' }));
 
-    expect(dashboardAttentionBanner(card, { now: NOW, setupPath: '/dashboard?setup' })).toBeUndefined();
+    expect(card.answer_readiness.state).not.toBe('needs_attention');
+    expect(dashboardAttentionBanner(card, { now: NOW, setupPath: SETUP })).toBeUndefined();
   });
 
   test('a read-only reader is sent to the gate rather than handed a Sync now button', () => {
-    const card = readwiseCard({ retrying: 1, failing: 1 });
-    const banner = dashboardAttentionBanner(card, { now: NOW, setupPath: '/dashboard?setup', readOnly: true });
+    const card = readwiseCard(readwiseView({ failures: 3 }));
+    const banner = dashboardAttentionBanner(card, { now: NOW, setupPath: SETUP, readOnly: true });
 
     expect(banner?.action).toMatchObject({ kind: 'link', label: 'Sync now', hint: 'unlock controls in Setup' });
   });
@@ -154,37 +244,52 @@ describe('Readwise attention reads one way on home, the header and the page', ()
 
 describe('the Readwise page states one embedding fact and counts in its own noun', () => {
   test('a keyword-only source prints no embedded count beside its not-needed Embedding row', () => {
-    const html = renderDashboardDetailBody(readwiseCard({ retrying: 0 }), { now: NOW });
+    const view = readwiseView({ failures: 0 });
+    const card = readwiseCard(view);
+    const html = renderDashboardDetailBody(card, { now: NOW });
 
+    expect(card.embedding_required).toBe(false);
+    expect(card.embedding_backlog).toBeUndefined();
+    expect(view.background_work?.embedding_backlog).toBeUndefined();
     expect(html).toContain('no embedding stage for this source');
     expect(html).toContain('<span>Embedded</span><b>not needed · keyword search</b>');
-    expect(html).not.toMatch(/Embedded<\/span><b>[0-9,]+ highlights/);
   });
 
-  test('a source that is served from embeddings still prints its embedded count', () => {
-    const card = readwiseCard({ retrying: 0 });
-    card.embedding_required = true;
+  test('a source that is served from embeddings still prints its embedded count and backlog', () => {
+    const card = readwiseCard(readwiseView({ failures: 0 }, { embeddingRequired: true }));
     const html = renderDashboardDetailBody(card, { now: NOW });
 
-    expect(html).toContain('<span>Embedded</span><b>963 highlights</b>');
+    expect(card.embedding_required).toBe(true);
+    expect(card.embedding_backlog?.missing_chunks).toBe(4040);
+    expect(html).toMatch(/<span>Embedded<\/span><b>[0-9,]+ items<\/b>/);
   });
 
-  test('the selection counts use the source noun, never files, for Readwise', () => {
-    const html = renderDashboardDetailBody(readwiseCard({ retrying: 0 }), { now: NOW });
+  test('Readwise counts in items — it holds documents and highlights — never files', () => {
+    const html = renderDashboardDetailBody(readwiseCard(readwiseView({ failures: 0 })), { now: NOW });
 
-    expect(html).toContain('<span>Metadata only</span><b>0 highlights</b>');
-    expect(html).toContain('<span>Full ingestion</span><b>2,791 highlights</b>');
-    expect(html).not.toContain('2,791 files');
+    expect(html).toContain('<span>Indexed</span><b>2,791 items</b>');
+    expect(html).not.toContain('highlights</b>');
+    expect(html).not.toMatch(/[0-9] files/);
   });
 
-  test('a file source keeps counting files, singular included', () => {
-    const card = readwiseCard({ retrying: 0 });
-    card.family = 'file';
-    card.ingestion_selection = { metadata_only_files: 1, full_ingestion_files: 2, policy_deferred_files: 1 };
-    const html = renderDashboardDetailBody(card, { now: NOW });
+  test('the selection counts use the source noun, and a file source keeps counting files', () => {
+    const card = readwiseCard(readwiseView({ failures: 0 }));
+    const withSelection: DashboardSourceCard = {
+      ...card,
+      ingestion_selection: { metadata_only_files: 0, full_ingestion_files: 2791 },
+    };
+    const html = renderDashboardDetailBody(withSelection, { now: NOW });
+    expect(html).toContain('<span>Metadata only</span><b>0 items</b>');
+    expect(html).toContain('<span>Full ingestion</span><b>2,791 items</b>');
 
-    expect(html).toContain('<span>Metadata only</span><b>1 file</b>');
-    expect(html).toContain('<span>Full ingestion</span><b>2 files</b>');
-    expect(html).toContain('1 file selected for full ingestion is not being processed');
+    const fileCard: DashboardSourceCard = {
+      ...card,
+      family: 'file',
+      ingestion_selection: { metadata_only_files: 1, full_ingestion_files: 2, policy_deferred_files: 1 },
+    };
+    const fileHtml = renderDashboardDetailBody(fileCard, { now: NOW });
+    expect(fileHtml).toContain('<span>Metadata only</span><b>1 file</b>');
+    expect(fileHtml).toContain('<span>Full ingestion</span><b>2 files</b>');
+    expect(fileHtml).toContain('1 file selected for full ingestion is not being processed');
   });
 });

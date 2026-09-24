@@ -347,8 +347,10 @@ export function dashboardItemNoun(source: Pick<DashboardSourceCard, 'family'>): 
     case 'email':
     case 'chat':
       return 'messages';
+    // Readwise indexes Reader documents and highlights alike, so neither word
+    // alone names what is counted (owner review, 2026-09-24).
     case 'readwise':
-      return 'highlights';
+      return 'items';
     case 'x':
       return 'posts';
     case 'file':

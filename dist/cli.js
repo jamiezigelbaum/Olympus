@@ -43702,6 +43702,9 @@ function dashboardOperatorPaused(source) {
   const reason = source.schedule?.degraded_reason;
   return reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(reason);
 }
+function dashboardSyncKeepsFailing(source) {
+  return (source.queue_health.failing_tasks ?? 0) > 0 && !dashboardOperatorPaused(source);
+}
 function workingLine(source) {
   const parts = [];
   const firstIngest = source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? "first ingest" : undefined;
@@ -43909,7 +43912,7 @@ function dashboardItemNoun(source) {
     case "chat":
       return "messages";
     case "readwise":
-      return "highlights";
+      return "items";
     case "x":
       return "posts";
     case "file":
@@ -44795,6 +44798,13 @@ import { mkdirSync as mkdirSync21 } from "node:fs";
 import { homedir as homedir32 } from "node:os";
 import { dirname as dirname28, join as join38 } from "node:path";
 import { Database as Database10 } from "bun:sqlite";
+function dashboardSchedulerTaskFailing(task) {
+  if (task.consecutive_failures <= 0)
+    return false;
+  if (task.last_error_kind?.startsWith("credential_"))
+    return true;
+  return task.consecutive_failures >= DASHBOARD_PERSISTENT_FAILURE_RUNS;
+}
 function dashboardGuidedSessionAgentPrompt(source) {
   if (source === "telegram") {
     return "Connect Telegram to Olympus using the packaged olympus connect telegram --pair command. The dashboard has no Connect/Pair button or login form; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Tell me when the local pairing prompt needs my phone number, login code, or two-factor password so I can enter it there myself. Never ask me to paste a login code or password into this conversation, and never repeat one back. Then help me choose the chats Olympus may read and start the initial sync. Do not ask me to edit files, configuration, or code.";
@@ -46263,7 +46273,7 @@ function queueHealth(counts, scheduler) {
     "metadata_sync_folders_failed",
     "qa_failed_needs_operator"
   ]);
-  const failingTasks = scheduler?.tasks.filter((task) => task.consecutive_failures >= DASHBOARD_PERSISTENT_FAILURE_RUNS).length ?? 0;
+  const failingTasks = scheduler?.tasks.filter((task) => dashboardSchedulerTaskFailing(task)).length ?? 0;
   return queueHealthResult(waiting, active, needsAttention, retryingTasks, failingTasks);
 }
 function liveQueueCount(counts, gaugeKeys, jobKeys) {
@@ -80406,6 +80416,14 @@ function actionableConditions(view, options) {
     const schedule = source.schedule;
     if (schedule === undefined || schedule.consecutive_failures <= 0)
       continue;
+    if (dashboardSyncKeepsFailing(source)) {
+      actionable.push({
+        lane: "Syncs",
+        words: `${source.label}'s scheduled sync keeps failing` + `${schedule.last_error_kind ? ` (${maskSecrets(schedule.last_error_kind)})` : ""}, so new material is not coming in.`,
+        ...detailLink(source, basePath)
+      });
+      continue;
+    }
     const booked = Number.isFinite(Date.parse(schedule.next_run_at ?? ""));
     const retrying = (source.queue_health.retrying_tasks ?? 0) > 0;
     if (booked || retrying)
@@ -80763,7 +80781,7 @@ function syncsLane(view, now, basePath) {
   } else {
     facts.push(`${dashboardCount(scheduled.length - failing.length)} of ${dashboardCount(scheduled.length)} on schedule`);
   }
-  const persistentlyFailing = failing.filter((source) => (source.queue_health.failing_tasks ?? 0) > 0);
+  const persistentlyFailing = failing.filter((source) => dashboardSyncKeepsFailing(source));
   const retryingOnly = failing.length - persistentlyFailing.length;
   if (retryingOnly > 0) {
     facts.push(`${dashboardCount(retryingOnly)} ${plural2(retryingOnly, "source")} retrying`);
@@ -80785,7 +80803,7 @@ function syncsLane(view, now, basePath) {
     const retryAt = schedule.next_run_at ? Date.parse(schedule.next_run_at) : Number.NaN;
     const booked = Number.isFinite(retryAt);
     const retrying = source.queue_health.retrying_tasks ?? 0;
-    const selfHealing = booked || retrying > 0;
+    const selfHealing = !dashboardSyncKeepsFailing(source) && (booked || retrying > 0);
     checks4.push({
       name: "CONSECUTIVE_FAILURES",
       observed: `${source.label}: ${dashboardCount(schedule.consecutive_failures)}`,
@@ -81147,9 +81165,7 @@ function dashboardAttentionBanner(source, options) {
   return credentialBanner(source, options) ?? scopeApprovalBanner(source, options) ?? terminalExtractionBanner(source, options) ?? syncFailingBanner(source, options) ?? laneStuckBanner(source, options.now ?? new Date, options);
 }
 function syncFailingBanner(source, options) {
-  if ((source.queue_health.failing_tasks ?? 0) <= 0)
-    return;
-  if (dashboardOperatorPaused(source))
+  if (!dashboardSyncKeepsFailing(source))
     return;
   const errorKind = source.schedule?.last_error_kind;
   const condition = errorKind ? DASHBOARD_GUARD_CONSEQUENCES[errorKind] ?? errorKind : "nothing has reported a reason";

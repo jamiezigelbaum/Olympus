@@ -44,7 +44,7 @@ import {
   dashboardSourceProgress,
   type DashboardPhaseId,
 } from './phases.ts';
-import { dashboardCount, dashboardDuration, dashboardOperatorPaused } from './vocabulary.ts';
+import { dashboardCount, dashboardDuration, dashboardSyncKeepsFailing } from './vocabulary.ts';
 
 export type DashboardAttentionKind = 'credential' | 'scope' | 'terminal_extraction' | 'sync_failing' | 'lane_stuck';
 
@@ -180,8 +180,7 @@ function syncFailingBanner(
   source: DashboardSourceCard,
   options: DashboardAttentionOptions,
 ): DashboardAttentionBanner | undefined {
-  if ((source.queue_health.failing_tasks ?? 0) <= 0) return undefined;
-  if (dashboardOperatorPaused(source)) return undefined;
+  if (!dashboardSyncKeepsFailing(source)) return undefined;
   const errorKind = source.schedule?.last_error_kind;
   const condition = errorKind ? DASHBOARD_GUARD_CONSEQUENCES[errorKind] ?? errorKind : 'nothing has reported a reason';
   const action = syncNowAction(source, options);

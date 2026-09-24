@@ -102,6 +102,22 @@ export const DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = 'Waiting for the first sync'
  */
 export const DASHBOARD_PERSISTENT_FAILURE_RUNS = 3;
 
+/**
+ * Whether one scheduler task is failing rather than retrying itself.
+ *
+ * A credential failure is failing on its first attempt: no retry fixes a
+ * missing or expired credential, so waiting two more rounds before telling the
+ * owner only delays the one act that clears it. Every other failure kind earns
+ * the DASHBOARD_PERSISTENT_FAILURE_RUNS count first.
+ */
+export function dashboardSchedulerTaskFailing(
+  task: Pick<SourceSchedulerSourceStatus['tasks'][number], 'consecutive_failures' | 'last_error_kind'>,
+): boolean {
+  if (task.consecutive_failures <= 0) return false;
+  if (task.last_error_kind?.startsWith('credential_')) return true;
+  return task.consecutive_failures >= DASHBOARD_PERSISTENT_FAILURE_RUNS;
+}
+
 export type DashboardConnectFieldName = 'client_id' | 'client_secret' | 'api_key';
 
 /**
@@ -746,9 +762,9 @@ export interface DashboardSourceCard {
     /** Scheduler tasks currently in a retry loop, not how many times they retried. */
     retrying_tasks?: number;
     /**
-     * Of `retrying_tasks`, the ones that have failed
-     * DASHBOARD_PERSISTENT_FAILURE_RUNS or more times in a row. Only these
-     * put the source under Needs you; a task below the count is retrying itself.
+     * Of `retrying_tasks`, the ones dashboardSchedulerTaskFailing calls
+     * failing: DASHBOARD_PERSISTENT_FAILURE_RUNS or more failures in a row, or
+     * any credential failure. Only these put the source under Needs you.
      */
     failing_tasks?: number;
   };
@@ -4116,8 +4132,7 @@ function queueHealth(
     'metadata_sync_folders_failed',
     'qa_failed_needs_operator',
   ]);
-  const failingTasks = scheduler?.tasks
-    .filter((task) => task.consecutive_failures >= DASHBOARD_PERSISTENT_FAILURE_RUNS).length ?? 0;
+  const failingTasks = scheduler?.tasks.filter((task) => dashboardSchedulerTaskFailing(task)).length ?? 0;
   return queueHealthResult(waiting, active, needsAttention, retryingTasks, failingTasks);
 }
 

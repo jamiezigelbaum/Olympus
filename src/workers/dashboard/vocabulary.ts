@@ -722,6 +722,16 @@ export function dashboardOperatorPaused(source: DashboardSourceCard): boolean {
 }
 
 /**
+ * True when a scheduled sync on this card keeps failing and nothing Olympus
+ * paused itself explains it — the one predicate home, the page header, the
+ * source banner and the background page read (owner-reported, 2026-09-24).
+ * `failing_tasks` is the worker's count; see dashboardSchedulerTaskFailing.
+ */
+export function dashboardSyncKeepsFailing(source: DashboardSourceCard): boolean {
+  return (source.queue_health.failing_tasks ?? 0) > 0 && !dashboardOperatorPaused(source);
+}
+
+/**
  * The one line under a working source's name.
  *
  * Owner ruling, 2026-08-23/24, superseding the 2026-08-21 phrasing guard: the
