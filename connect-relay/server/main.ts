@@ -19,9 +19,17 @@ function secret(name: string): string {
   return file ? readFileSync(file, 'utf8').trim() : required(name);
 }
 
+// Publishing AAAA records while listening on IPv4 only would send IPv6 agents
+// to a closed port: listen on `::` (dual stack) whenever IPv6 is published.
+const listenHost = process.env.RELAY_LISTEN_HOST ?? (process.env.RELAY_PUBLIC_IPV6 ? '::' : '0.0.0.0');
+if (process.env.RELAY_PUBLIC_IPV6 && !listenHost.includes(':')) {
+  throw new Error('RELAY_PUBLIC_IPV6 is set but RELAY_LISTEN_HOST is IPv4-only; use :: or unset RELAY_LISTEN_HOST');
+}
+
 const relay = await startRelay({
   zone: required('RELAY_ZONE'),
   controlHost: required('RELAY_CONTROL_HOST'),
+  ...(process.env.RELAY_DATA_HOST ? { dataHost: process.env.RELAY_DATA_HOST } : {}),
   controlTls: {
     key: readFileSync(required('RELAY_CONTROL_KEY_PATH')),
     cert: readFileSync(required('RELAY_CONTROL_CERT_PATH')),
@@ -33,7 +41,7 @@ const relay = await startRelay({
     ...(process.env.RELAY_PUBLIC_IPV4 ? { ipv4: process.env.RELAY_PUBLIC_IPV4 } : {}),
     ...(process.env.RELAY_PUBLIC_IPV6 ? { ipv6: process.env.RELAY_PUBLIC_IPV6 } : {}),
   }),
-  listen: { host: process.env.RELAY_LISTEN_HOST ?? '0.0.0.0', port: Number(process.env.RELAY_LISTEN_PORT ?? 443) },
+  listen: { host: listenHost, port: Number(process.env.RELAY_LISTEN_PORT ?? 443) },
   // One JSON line per event. Install ids are logged; agent addresses and payloads never are.
   log: (event, fields) => console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields })),
 });

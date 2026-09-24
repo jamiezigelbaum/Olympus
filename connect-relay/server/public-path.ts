@@ -12,7 +12,7 @@ import type { Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { INSTALL_ID_PATTERN, newConnId, type OpenMessage } from '../shared/protocol.ts';
 import { parseClientHello, TLS_ALERT, tlsAlertRecord } from '../shared/sni.ts';
-import type { KeyedTokenBuckets } from '../shared/rate-limit.ts';
+import { addressKey, type KeyedCounter, type KeyedTokenBuckets } from '../shared/rate-limit.ts';
 
 export interface RelayLimits {
   /** Time allowed for a public client to send its ClientHello. */
@@ -33,6 +33,27 @@ export interface RelayLimits {
   /** A spliced connection with no bytes either way for this long is closed. */
   splicedIdleTimeoutMs: number;
   firstMessageTimeoutMs: number;
+  /** Open sockets on the public listener (`net.Server.maxConnections`). */
+  maxConnections: number;
+  /** Connections per address that have not yet delivered a ClientHello. */
+  maxPreHelloPerAddress: number;
+  /**
+   * Concurrent connections per address to the data host. Data connections are
+   * dialed by installs in answer to `open`, so their volume follows public
+   * traffic, not the install's own behavior; they get this concurrency cap
+   * instead of the control host's rate budget.
+   */
+  maxDataConnectionsPerAddress: number;
+  /** Registrations accepted relay-wide. */
+  registrationsGlobal: { capacity: number; refillPerSecond: number };
+  /** Calls to the DNS provider relay-wide. */
+  dnsCallsGlobal: { capacity: number; refillPerSecond: number };
+  /** A registration with no certificate activity is dropped after this long. */
+  unactivatedRegistrationTtlMs: number;
+  /** A registration with no session for this long is dropped, with its address record. */
+  inactiveRegistrationTtlMs: number;
+  /** Explicit per-install address records the relay will create. */
+  maxAddressRecords: number;
 }
 
 export const DEFAULT_LIMITS: RelayLimits = {
@@ -49,6 +70,14 @@ export const DEFAULT_LIMITS: RelayLimits = {
   sessionIdleTimeoutMs: 90_000,
   splicedIdleTimeoutMs: 15 * 60_000,
   firstMessageTimeoutMs: 10_000,
+  maxConnections: 50_000,
+  maxPreHelloPerAddress: 32,
+  maxDataConnectionsPerAddress: 512,
+  registrationsGlobal: { capacity: 200, refillPerSecond: 200 / 3600 },
+  dnsCallsGlobal: { capacity: 120, refillPerSecond: 2 },
+  unactivatedRegistrationTtlMs: 24 * 60 * 60_000,
+  inactiveRegistrationTtlMs: 90 * 24 * 60 * 60_000,
+  maxAddressRecords: 50_000,
 };
 
 export interface LiveSession {
@@ -73,6 +102,9 @@ export type RelayEvent =
   | 'public_attach_timeout'
   | 'public_spliced'
   | 'control_rate_limited'
+  | 'data_rejected_limit'
+  | 'public_rejected_prehello_limit'
+  | 'registration_expired'
   | 'session_ready'
   | 'session_closed'
   | 'session_replaced'
@@ -85,15 +117,18 @@ export type RelayEvent =
 export interface PublicPathDeps {
   readonly zone: string;
   readonly controlHost: string;
+  readonly dataHost: string;
   readonly limits: RelayLimits;
   readonly pending: Map<string, PendingConnection>;
   /** Open plus pending public connections, per install, across session replacement. */
   readonly active: Map<string, number>;
   readonly newConnectionBuckets: KeyedTokenBuckets;
   readonly controlBuckets: KeyedTokenBuckets;
+  readonly preHello: KeyedCounter;
+  readonly dataConnections: KeyedCounter;
   isRegistered(installId: string): boolean;
   session(installId: string): LiveSession | undefined;
-  toControlPlane(socket: Socket, buffered: Buffer): void;
+  toControlPlane(socket: Socket, buffered: Buffer, plane: 'control' | 'data'): void;
   log(event: RelayEvent, fields?: Record<string, unknown>): void;
 }
 
@@ -102,38 +137,99 @@ export function reject(socket: Socket, alert: number): void {
   setTimeout(() => socket.destroy(), 1_000).unref();
 }
 
+/** Reads byte `index` across buffered chunks without concatenating them. */
+function byteAt(chunks: readonly Buffer[], index: number): number {
+  let offset = index;
+  for (const chunk of chunks) {
+    if (offset < chunk.length) return chunk[offset]!;
+    offset -= chunk.length;
+  }
+  return -1;
+}
+
 export function handlePublicConnection(socket: Socket, deps: PublicPathDeps): void {
-  let buffered = Buffer.alloc(0);
   socket.on('error', () => socket.destroy());
+  const release = deps.preHello.tryAcquire(addressKey(socket.remoteAddress), deps.limits.maxPreHelloPerAddress);
+  if (!release) {
+    deps.log('public_rejected_prehello_limit');
+    socket.destroy();
+    return;
+  }
+  socket.once('close', release);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  // Start of the next TLS record header not yet known to be complete. The
+  // ClientHello is only parsed once a whole record has arrived, so a slow
+  // trickle costs one parse per record rather than one per byte.
+  let recordStart = 0;
   const timer = setTimeout(() => {
     deps.log('public_rejected_invalid', { reason: 'client hello timeout' });
     socket.destroy();
   }, deps.limits.clientHelloTimeoutMs);
-  const onData = (chunk: Buffer) => {
-    buffered = Buffer.concat([buffered, chunk]);
-    const hello = parseClientHello(buffered);
-    if (hello.status === 'incomplete' && buffered.length <= deps.limits.maxClientHelloBytes) return;
+  const finish = () => {
     clearTimeout(timer);
     socket.removeListener('data', onData);
     socket.pause();
-    if (hello.status !== 'ok' || !hello.serverName) {
-      deps.log('public_rejected_invalid', { reason: hello.status === 'invalid' ? hello.reason : 'no server name' });
-      reject(socket, TLS_ALERT.unrecognizedName);
+    release();
+  };
+  const onData = (chunk: Buffer) => {
+    chunks.push(chunk);
+    total += chunk.length;
+    for (;;) {
+      if (total > deps.limits.maxClientHelloBytes) {
+        finish();
+        deps.log('public_rejected_invalid', { reason: 'client hello too large' });
+        reject(socket, TLS_ALERT.unrecognizedName);
+        return;
+      }
+      if (total < recordStart + 5) return;
+      if (byteAt(chunks, recordStart) !== 0x16) break;
+      const recordEnd = recordStart + 5 + ((byteAt(chunks, recordStart + 3) << 8) | byteAt(chunks, recordStart + 4));
+      if (total < recordEnd) return;
+      const hello = parseClientHello(Buffer.concat(chunks));
+      if (hello.status === 'incomplete') {
+        recordStart = recordEnd;
+        continue;
+      }
+      finish();
+      const buffered = Buffer.concat(chunks);
+      if (hello.status !== 'ok' || !hello.serverName) {
+        deps.log('public_rejected_invalid', { reason: hello.status === 'invalid' ? hello.reason : 'no server name' });
+        reject(socket, TLS_ALERT.unrecognizedName);
+        return;
+      }
+      route(socket, hello.serverName, buffered, deps);
       return;
     }
-    route(socket, hello.serverName, buffered, deps);
+    finish();
+    deps.log('public_rejected_invalid', { reason: 'not a TLS handshake record' });
+    reject(socket, TLS_ALERT.unrecognizedName);
   };
   socket.on('data', onData);
 }
 
 function route(socket: Socket, serverName: string, clientHello: Buffer, deps: PublicPathDeps): void {
+  const address = addressKey(socket.remoteAddress);
   if (serverName === deps.controlHost) {
-    if (!deps.controlBuckets.take(socket.remoteAddress ?? 'unknown')) {
+    // Session establishment only (hello/register): an install does this on
+    // start and reconnect, and outsiders cannot make it happen.
+    if (!deps.controlBuckets.take(address)) {
       deps.log('control_rate_limited');
       socket.destroy();
       return;
     }
-    deps.toControlPlane(socket, clientHello);
+    deps.toControlPlane(socket, clientHello, 'control');
+    return;
+  }
+  if (serverName === deps.dataHost) {
+    const releaseData = deps.dataConnections.tryAcquire(address, deps.limits.maxDataConnectionsPerAddress);
+    if (!releaseData) {
+      deps.log('data_rejected_limit');
+      socket.destroy();
+      return;
+    }
+    socket.once('close', releaseData);
+    deps.toControlPlane(socket, clientHello, 'data');
     return;
   }
   const suffix = `.${deps.zone}`;

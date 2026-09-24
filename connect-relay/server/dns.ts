@@ -13,6 +13,8 @@ export interface DnsProvider {
    * during every issuance and renewal.
    */
   ensureAddress(hostname: string): Promise<void>;
+  /** Removes the explicit address record when a registration expires. */
+  removeAddress(hostname: string): Promise<void>;
   setTxt(name: string, value: string): Promise<void>;
   clearTxt(name: string, value: string): Promise<void>;
 }
@@ -23,6 +25,10 @@ export class MemoryDnsProvider implements DnsProvider {
 
   async ensureAddress(hostname: string): Promise<void> {
     this.addresses.add(hostname);
+  }
+
+  async removeAddress(hostname: string): Promise<void> {
+    this.addresses.delete(hostname);
   }
 
   async setTxt(name: string, value: string): Promise<void> {
@@ -77,6 +83,12 @@ export class CloudflareDnsProvider implements DnsProvider {
       const existing = await this.list(type, hostname);
       if (existing.some((record) => record.content === content)) continue;
       await this.call('POST', this.base, { type, name: hostname, content, ttl: 300, proxied: false });
+    }
+  }
+
+  async removeAddress(hostname: string): Promise<void> {
+    for (const type of ['A', 'AAAA']) {
+      for (const record of await this.list(type, hostname)) await this.call('DELETE', `${this.base}/${encodeURIComponent(record.id)}`);
     }
   }
 

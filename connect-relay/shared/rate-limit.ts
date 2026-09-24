@@ -36,3 +36,44 @@ export class KeyedTokenBuckets {
     }
   }
 }
+
+/** Concurrent-use counters per key (e.g. open connections per address). */
+export class KeyedCounter {
+  private readonly counts = new Map<string, number>();
+
+  /** Returns a one-shot release function, or undefined when `key` is at `max`. */
+  tryAcquire(key: string, max: number): (() => void) | undefined {
+    const current = this.counts.get(key) ?? 0;
+    if (current >= max) return undefined;
+    this.counts.set(key, current + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.counts.get(key) ?? 1) - 1;
+      if (remaining > 0) this.counts.set(key, remaining);
+      else this.counts.delete(key);
+    };
+  }
+
+  get(key: string): number {
+    return this.counts.get(key) ?? 0;
+  }
+}
+
+/**
+ * The key used for per-address limits. IPv4-mapped IPv6 collapses to IPv4, and
+ * native IPv6 is keyed by its /64: one subscriber usually holds a whole /64,
+ * so per-address limits would otherwise be trivially rotated around.
+ */
+export function addressKey(address: string | undefined): string {
+  if (!address) return 'unknown';
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+  if (mapped) return mapped[1]!;
+  if (!address.includes(':')) return address;
+  const [head = '', tail = ''] = address.split('::');
+  const left = head ? head.split(':') : [];
+  const right = tail ? tail.split(':') : [];
+  const groups = address.includes('::') ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right] : left;
+  return `${groups.slice(0, 4).map((group) => (group || '0').toLowerCase().replace(/^0+(?=.)/, '')).join(':')}::/64`;
+}

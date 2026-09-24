@@ -33,7 +33,7 @@ import {
   type RelayErrorCode,
   type RelaySessionMessage,
 } from '../shared/protocol.ts';
-import { KeyedTokenBuckets } from '../shared/rate-limit.ts';
+import { KeyedCounter, KeyedTokenBuckets, addressKey } from '../shared/rate-limit.ts';
 import { TLS_ALERT } from '../shared/sni.ts';
 import type { DnsProvider } from './dns.ts';
 import {
@@ -54,6 +54,13 @@ export interface RelayConfig {
   readonly zone: string;
   /** e.g. `relay.connect.olympusplugin.ai`; served with `controlTls`. */
   readonly controlHost: string;
+  /**
+   * Host installs dial for data connections; defaults to `data.<controlHost>`.
+   * `controlTls` must cover it too. Kept apart from `controlHost` so that
+   * public traffic, which drives data connections, cannot spend the budget an
+   * install needs to keep its session.
+   */
+  readonly dataHost?: string;
   readonly controlTls: { readonly key: string | Buffer; readonly cert: string | Buffer };
   readonly registry: InstallRegistry;
   readonly dns: DnsProvider;
@@ -62,12 +69,16 @@ export interface RelayConfig {
   /** Observes every byte the relay forwards on the public path (metrics, tests). */
   readonly tap?: ForwardTap;
   readonly log?: (event: RelayEvent, fields?: Record<string, unknown>) => void;
+  /** How often expired registrations are swept (default hourly). */
+  readonly sweepIntervalMs?: number;
 }
 
 export interface RelayHandle {
   readonly port: number;
   readonly host: string;
   onlineInstalls(): string[];
+  /** Expires unused registrations now (also runs on a timer). */
+  sweep(now?: number): Promise<string[]>;
   close(): Promise<void>;
 }
 
@@ -80,18 +91,24 @@ interface Session extends LiveSession {
 export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const zone = config.zone.toLowerCase();
   const controlHost = config.controlHost.toLowerCase();
+  const dataHost = (config.dataHost ?? `data.${controlHost}`).toLowerCase();
   if (controlHost.endsWith(`.${zone}`) && INSTALL_ID_PATTERN.test(controlHost.slice(0, -zone.length - 1))) {
     throw new Error('controlHost must not have the shape of an install hostname');
   }
+  if (dataHost === controlHost) throw new Error('dataHost must differ from controlHost');
   const limits: RelayLimits = { ...DEFAULT_LIMITS, ...config.limits };
   const log = config.log ?? (() => {});
   const sessions = new Map<string, Session>();
   const pending = new Map<string, PendingConnection>();
   const active = new Map<string, number>();
-  const loopbackPeers = new Map<number, string>();
+  const loopbackPeers = new Map<number, { peer: string; plane: 'control' | 'data' }>();
   const newConnectionBuckets = new KeyedTokenBuckets(limits.newConnectionsPerInstall);
   const controlBuckets = new KeyedTokenBuckets(limits.controlConnectionsPerIp);
   const registrationBuckets = new KeyedTokenBuckets(limits.registrationsPerIp);
+  const globalRegistrations = new KeyedTokenBuckets(limits.registrationsGlobal);
+  const globalDnsCalls = new KeyedTokenBuckets(limits.dnsCallsGlobal);
+  const preHello = new KeyedCounter();
+  const dataConnections = new KeyedCounter();
   const acmeBuckets = new KeyedTokenBuckets(limits.acmeDnsPerInstall);
   const openSockets = new Set<Socket>();
   const track = (socket: Socket) => {
@@ -102,21 +119,25 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const controlServer = tls.createServer({ key: config.controlTls.key, cert: config.controlTls.cert, minVersion: 'TLSv1.2' });
   controlServer.on('secureConnection', (socket) => {
     track(socket);
-    const peer = loopbackPeers.get(socket.remotePort ?? -1) ?? 'unknown';
-    handleControlConnection(socket, peer);
+    const origin = loopbackPeers.get(socket.remotePort ?? -1);
+    if (!origin) {
+      socket.destroy();
+      return;
+    }
+    handleControlConnection(socket, origin.peer, origin.plane);
   });
   controlServer.on('tlsClientError', () => {});
   await new Promise<void>((resolve) => controlServer.listen(0, '127.0.0.1', resolve));
   const controlPort = (controlServer.address() as AddressInfo).port;
 
-  const toControlPlane = (socket: Socket, buffered: Buffer) => {
+  const toControlPlane = (socket: Socket, buffered: Buffer, plane: 'control' | 'data') => {
     const upstream = net.connect(controlPort, '127.0.0.1');
     track(upstream);
-    const peer = socket.remoteAddress ?? 'unknown';
+    const peer = addressKey(socket.remoteAddress);
     upstream.once('connect', () => {
       const localPort = upstream.localPort;
       if (localPort !== undefined) {
-        loopbackPeers.set(localPort, peer);
+        loopbackPeers.set(localPort, { peer, plane });
         upstream.once('close', () => loopbackPeers.delete(localPort));
       }
       upstream.write(buffered);
@@ -139,24 +160,28 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     handlePublicConnection(socket, {
       zone,
       controlHost,
+      dataHost,
       limits,
       pending,
       active,
       newConnectionBuckets,
       controlBuckets,
+      preHello,
+      dataConnections,
       isRegistered: (installId) => config.registry.get(installId) !== undefined,
       session: (installId) => sessions.get(installId),
       toControlPlane,
       log,
     });
   });
+  publicServer.maxConnections = limits.maxConnections;
   const listenHost = config.listen?.host ?? '0.0.0.0';
   await new Promise<void>((resolve, reject) => {
     publicServer.once('error', reject);
     publicServer.listen(config.listen?.port ?? 443, listenHost, () => resolve());
   });
 
-  function handleControlConnection(socket: TLSSocket, peer: string): void {
+  function handleControlConnection(socket: TLSSocket, peer: string, plane: 'control' | 'data'): void {
     const nonce = newNonce();
     let session: Session | undefined;
     let attached: PendingConnection | undefined;
@@ -198,6 +223,10 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           fail('bad_request', 'installId is malformed');
           return 'stop';
         }
+        if ((message.type === 'attach') !== (plane === 'data')) {
+          fail('bad_request', plane === 'data' ? 'the data host only accepts attach' : 'attach must use the data host');
+          return 'stop';
+        }
         if (message.type === 'attach') {
           const connId = typeof message.connId === 'string' ? message.connId : '';
           const record = config.registry.get(installId);
@@ -236,12 +265,12 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
             return 'stop';
           }
           if (!config.registry.get(installId)) {
-            if (!registrationBuckets.take(peer)) {
+            if (!registrationBuckets.take(peer) || !globalRegistrations.take('relay')) {
               log('register_rejected', { reason: 'rate limited' });
-              fail('rate_limited', 'too many registrations from this address');
+              fail('rate_limited', 'too many registrations; try again later');
               return 'stop';
             }
-            if (!config.registry.register({ installId, publicKey, registeredAt: new Date().toISOString() })) {
+            if (!config.registry.register(installId, publicKey)) {
               fail('capacity', 'relay registry is full');
               return 'stop';
             }
@@ -298,6 +327,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       previous.socket.end(encodeLine({ type: 'error', code: 'replaced', message: 'a newer session replaced this one' }));
     }
     sessions.set(installId, session);
+    config.registry.seen(installId);
     sendSession(session, { type: 'ready', installId, hostname: hostnameFor(installId, zone) });
     log('session_ready', { installId });
     return session;
@@ -326,6 +356,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
 
   function handleSessionMessage(session: Session, message: Record<string, unknown>): void {
     if (message.type === 'ping') {
+      config.registry.seen(session.installId);
       sendSession(session, { type: 'pong' });
       return;
     }
@@ -339,16 +370,25 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       // publish under its own `_acme-challenge.<install-id>` name.
       const name = acmeChallengeName(session.installId, zone);
       if (message.type === 'acme-dns-clear') {
+        // Only values this session published, so clears cannot drive provider calls on their own.
+        if (!session.publishedTxt.has(value)) return respond(false, 'value was not published by this session');
+        if (!acmeBuckets.take(session.installId) || !globalDnsCalls.take('relay')) return respond(false, 'rate_limited');
         session.publishedTxt.delete(value);
         void config.dns.clearTxt(name, value).then(() => respond(true), () => respond(false, 'dns provider error'));
         return;
       }
       if (session.publishedTxt.size >= 4) return respond(false, 'too many outstanding challenge values');
+      const record = config.registry.get(session.installId);
+      if (!record) return respond(false, 'install is not registered');
+      const needsAddress = !record.hasAddressRecord;
+      if (needsAddress && config.registry.addressRecordCount() >= limits.maxAddressRecords) return respond(false, 'capacity');
       if (!acmeBuckets.take(session.installId)) return respond(false, 'rate_limited');
+      if (!globalDnsCalls.take('relay') || (needsAddress && !globalDnsCalls.take('relay'))) return respond(false, 'rate_limited');
       session.publishedTxt.add(value);
+      config.registry.activate(session.installId);
       log('acme_dns', { installId: session.installId });
-      void config.dns
-        .ensureAddress(hostnameFor(session.installId, zone))
+      const hostname = hostnameFor(session.installId, zone);
+      void (needsAddress ? config.dns.ensureAddress(hostname).then(() => config.registry.markAddressRecord(session.installId)) : Promise.resolve())
         .then(() => config.dns.setTxt(name, value))
         .then(
           () => respond(true),
@@ -362,17 +402,36 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     sendSession(session, { type: 'error', code: 'bad_request', message: 'unknown message type' });
   }
 
+  const sweep = async (now = Date.now()): Promise<string[]> => {
+    const expired = config.registry.expire(now, {
+      unactivatedMs: limits.unactivatedRegistrationTtlMs,
+      inactiveMs: limits.inactiveRegistrationTtlMs,
+    });
+    for (const record of expired) {
+      log('registration_expired', { installId: record.installId });
+      const live = sessions.get(record.installId);
+      if (live) live.socket.end(encodeLine({ type: 'error', code: 'unregistered', message: 'registration expired' }));
+      if (record.hasAddressRecord) await config.dns.removeAddress(hostnameFor(record.installId, zone)).catch(() => {});
+    }
+    return expired.map((record) => record.installId);
+  };
+  const sweepTimer = setInterval(() => void sweep(), config.sweepIntervalMs ?? 60 * 60_000);
+  sweepTimer.unref?.();
+
   return {
     port: (publicServer.address() as AddressInfo).port,
     host: listenHost,
     onlineInstalls: () => [...sessions.keys()],
+    sweep,
     close: async () => {
+      clearInterval(sweepTimer);
       for (const socket of openSockets) socket.destroy();
       for (const waiting of pending.values()) clearTimeout(waiting.timer);
       await Promise.all([
         new Promise<void>((resolve) => publicServer.close(() => resolve())),
         new Promise<void>((resolve) => controlServer.close(() => resolve())),
       ]);
+      await config.registry.flush();
     },
   };
 }

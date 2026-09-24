@@ -68,19 +68,23 @@ function parseHelloBody(body: Buffer): ClientHelloResult {
       const listEnd = start + 2 + body.readUInt16BE(start);
       if (listEnd > end) return invalid('bad server_name list');
       let entry = start + 2;
+      let hostName: string | undefined;
       while (entry + 3 <= listEnd) {
         const nameType = body[entry]!;
         const nameLength = body.readUInt16BE(entry + 1);
         const nameEnd = entry + 3 + nameLength;
         if (nameEnd > listEnd) return invalid('bad server_name entry');
         if (nameType === NAME_TYPE_HOST) {
+          // RFC 6066 section 3: at most one name of each type.
+          if (hostName !== undefined) return invalid('more than one host_name');
           const name = body.subarray(entry + 3, nameEnd).toString('latin1');
           if (!/^[A-Za-z0-9.-]{1,253}$/.test(name)) return invalid('server name is not a hostname');
-          return { status: 'ok', serverName: name.toLowerCase() };
+          hostName = name.toLowerCase();
         }
         entry = nameEnd;
       }
-      return { status: 'ok', serverName: undefined };
+      if (entry !== listEnd) return invalid('bad server_name list');
+      return { status: 'ok', serverName: hostName };
     }
     at = end;
   }
