@@ -8,7 +8,7 @@ import { join } from 'node:path';
 export interface TestCa {
   readonly dir: string;
   readonly cert: string;
-  issue(hostname: string): { key: string; cert: string };
+  issue(hostname: string, ...extraNames: string[]): { key: string; cert: string };
   signCsr(der: Buffer): string;
   cleanup(): void;
 }
@@ -41,12 +41,12 @@ export function createTestCa(): TestCa {
   return {
     dir,
     cert: readFileSync(join(dir, 'ca.crt'), 'utf8'),
-    issue(hostname) {
+    issue(hostname, ...extraNames) {
       const base = `issued-${++counter}`;
       openssl(
         [
           'req', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-keyout', `${base}.key`,
-          '-out', `${base}.csr`, '-subj', `/CN=${hostname}`, '-addext', `subjectAltName=DNS:${hostname}`,
+          '-out', `${base}.csr`, '-subj', `/CN=${hostname}`, '-addext', `subjectAltName=${[hostname, ...extraNames].map((name) => `DNS:${name}`).join(',')}`,
         ],
         dir,
       );

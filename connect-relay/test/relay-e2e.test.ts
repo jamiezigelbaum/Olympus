@@ -4,14 +4,16 @@
  * reaches the fake worker; the relay only ever forwards ciphertext.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import tls from 'node:tls';
 import http, { type IncomingHttpHeaders } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startConnect, type ConnectHandle } from '../client/connect.ts';
 import { loadOrCreateIdentity } from '../client/identity.ts';
+import { RelayClient } from '../client/relay-client.ts';
 import {
   PROTOCOL_VERSION,
   acmeChallengeName,
@@ -21,18 +23,23 @@ import {
   spkiOf,
 } from '../shared/protocol.ts';
 import { tlsAlertRecord, TLS_ALERT } from '../shared/sni.ts';
-import { MemoryDnsProvider } from '../server/dns.ts';
+import { MemoryDnsProvider, type DnsProvider } from '../server/dns.ts';
 import type { RelayLimits } from '../server/public-path.ts';
-import { MemoryInstallRegistry } from '../server/registry.ts';
+import { FileInstallRegistry, MemoryInstallRegistry, type InstallRegistry } from '../server/registry.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
 import { startMockAcme, type MockAcme } from './helpers/mock-acme.ts';
-import { agentRequest, captureClientHello, openControl, rawExchange } from './helpers/net.ts';
+import { agentRequest, captureClientHello, holdOpen, openControl, rawExchange, syntheticClientHello, trickle } from './helpers/net.ts';
 import { createTestCa, type TestCa } from './helpers/pki.ts';
 
 const ZONE = 'connect.olympus.test';
 const CONTROL_HOST = `relay.${ZONE}`;
+const DATA_HOST = `data.${CONTROL_HOST}`;
 const REQUEST_MARKER = 'agent-question-7f3a91c2-plaintext';
 const RESPONSE_MARKER = 'olympus-answer-5bd204e8-plaintext';
+
+/** Deterministic 8 MiB body for the backpressure test. */
+const BIG = Buffer.alloc(8 * 1024 * 1024);
+for (let i = 0; i < BIG.length; i += 4) BIG.writeUInt32LE((i * 2654435761) >>> 0, i);
 
 let ca: TestCa;
 let acme: MockAcme;
@@ -50,15 +57,19 @@ function newStateDir(): string {
   return dir;
 }
 
-async function makeRelay(limits: Partial<RelayLimits> = {}, tap?: (direction: 'to-install' | 'to-agent', chunk: Buffer) => void) {
-  const registry = new MemoryInstallRegistry();
-  const controlTls = ca.issue(CONTROL_HOST);
+async function makeRelay(
+  limits: Partial<RelayLimits> = {},
+  tap?: (direction: 'to-install' | 'to-agent', chunk: Buffer) => void,
+  overrides: { dns?: DnsProvider; registry?: InstallRegistry } = {},
+) {
+  const registry = overrides.registry ?? new MemoryInstallRegistry();
+  const controlTls = ca.issue(CONTROL_HOST, DATA_HOST);
   const relay = await startRelay({
     zone: ZONE,
     controlHost: CONTROL_HOST,
     controlTls,
     registry,
-    dns,
+    dns: overrides.dns ?? dns,
     listen: { host: '127.0.0.1', port: 0 },
     limits,
     ...(tap ? { tap } : {}),
@@ -67,12 +78,14 @@ async function makeRelay(limits: Partial<RelayLimits> = {}, tap?: (direction: 't
   return { relay, registry };
 }
 
-async function connectInstall(relay: RelayHandle, stateDir = newStateDir()) {
+async function connectInstall(relay: RelayHandle, stateDir = newStateDir(), extra: { maxDataConnections?: number } = {}) {
   const handle = await startConnect({
+    ...extra,
     stateDir,
     relayHost: '127.0.0.1',
     relayPort: relay.port,
     controlServerName: CONTROL_HOST,
+    zone: ZONE,
     ca: ca.cert,
     target: workerUrl,
     heartbeatMs: 1_000,
@@ -100,6 +113,11 @@ beforeAll(async () => {
     req.on('data', (chunk) => chunks.push(chunk));
     req.on('end', () => {
       workerRequests.push({ url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('utf8') });
+      if (req.url === '/mcp/big') {
+        res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(BIG.length) });
+        res.end(BIG);
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ answer: RESPONSE_MARKER, path: req.url }));
     });
@@ -132,7 +150,7 @@ describe('connect relay end to end', () => {
     expect(dns.addresses.has(hostname)).toBe(true);
     expect(dns.lookupTxt(acmeChallengeName(installId, ZONE))).toEqual([]);
     for (const file of ['install-key.pem', 'acme-account-key.pem', 'tls-key.pem', 'tls-cert.pem']) {
-      expect(statSync(join(stateDir, file)).mode & 0o777).toBe(0o600);
+      expect(statSync(join(stateDir, 'connect-relay', file)).mode & 0o777).toBe(0o600);
     }
 
     const before = workerRequests.length;
@@ -294,12 +312,12 @@ describe('install authentication', () => {
     const pendingAgent = rawExchange(relay.port, await captureClientHello(`${owner.installId}.${ZONE}`));
     const open = await control.next();
     expect(open.type).toBe('open');
-    const hijack = openControl(relay.port, CONTROL_HOST, ca.cert);
+    const hijack = openControl(relay.port, DATA_HOST, ca.cert);
     challenge = await hijack.next();
     hijack.send({ type: 'attach', v: PROTOCOL_VERSION, installId: owner.installId, connId: open.connId, sig: signInstallMessage(attacker.privateKey, 'attach', String(challenge.nonce), owner.installId, String(open.connId)) });
     expect(await hijack.next()).toMatchObject({ type: 'error', code: 'bad_signature' });
     // Nor guess a connection id, even with the right key.
-    const guess = openControl(relay.port, CONTROL_HOST, ca.cert);
+    const guess = openControl(relay.port, DATA_HOST, ca.cert);
     challenge = await guess.next();
     const guessed = 'A'.repeat(22);
     guess.send({ type: 'attach', v: PROTOCOL_VERSION, installId: owner.installId, connId: guessed, sig: signInstallMessage(owner.privateKey, 'attach', String(challenge.nonce), owner.installId, guessed) });
@@ -348,5 +366,258 @@ describe('install authentication', () => {
     const id = installIdForPublicKey(spkiOf(publicKey));
     expect(id).toMatch(/^[a-z2-7]{32}$/);
     expect(installIdForPublicKey(spkiOf(generateKeyPairSync('ed25519').publicKey))).not.toBe(id);
+  });
+});
+
+async function registerRaw(relay: RelayHandle) {
+  const identity = loadOrCreateIdentity(newStateDir());
+  const control = openControl(relay.port, CONTROL_HOST, ca.cert);
+  const challenge = await control.next();
+  control.send({
+    type: 'register',
+    v: PROTOCOL_VERSION,
+    installId: identity.installId,
+    publicKey: identity.publicKeySpki,
+    sig: signInstallMessage(identity.privateKey, 'register', String(challenge.nonce), identity.installId),
+  });
+  const ready = await control.next();
+  return { identity, control, ready };
+}
+
+class CountingDns extends MemoryDnsProvider {
+  calls = 0;
+  override async ensureAddress(hostname: string) {
+    this.calls += 1;
+    return super.ensureAddress(hostname);
+  }
+  override async setTxt(name: string, value: string) {
+    this.calls += 1;
+    return super.setTxt(name, value);
+  }
+  override async clearTxt(name: string, value: string) {
+    this.calls += 1;
+    return super.clearTxt(name, value);
+  }
+}
+
+describe('abuse resistance', () => {
+  test('public traffic above the control budget does not starve the install (data host has its own limit)', async () => {
+    // One session establishment per 2 s per address. Every agent below comes
+    // from the same address as the install, and far faster than that.
+    const { relay } = await makeRelay({
+      controlConnectionsPerIp: { capacity: 2, refillPerSecond: 0.5 },
+      newConnectionsPerInstall: { capacity: 100, refillPerSecond: 100 },
+    });
+    const { hostname } = await connectInstall(relay);
+    const started = Date.now();
+    for (let i = 0; i < 20; i += 1) {
+      const response = await agentRequest({ port: relay.port, servername: hostname, ca: ca.cert, path: '/mcp' });
+      expect(response.status).toBe(200);
+    }
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(relay.onlineInstalls()).toContain(hostname.split('.')[0]!);
+  });
+
+  test('attach is only accepted on the data host, and session setup only on the control host', async () => {
+    const { relay } = await makeRelay();
+    const { identity, control } = await registerRaw(relay);
+    const wrongPlane = openControl(relay.port, CONTROL_HOST, ca.cert);
+    const challenge = await wrongPlane.next();
+    const connId = 'A'.repeat(22);
+    wrongPlane.send({ type: 'attach', v: PROTOCOL_VERSION, installId: identity.installId, connId, sig: signInstallMessage(identity.privateKey, 'attach', String(challenge.nonce), identity.installId, connId) });
+    expect(await wrongPlane.next()).toMatchObject({ type: 'error', code: 'bad_request' });
+    const dataPlane = openControl(relay.port, DATA_HOST, ca.cert);
+    const dataChallenge = await dataPlane.next();
+    dataPlane.send({ type: 'hello', v: PROTOCOL_VERSION, installId: identity.installId, sig: signInstallMessage(identity.privateKey, 'hello', String(dataChallenge.nonce), identity.installId) });
+    expect(await dataPlane.next()).toMatchObject({ type: 'error', code: 'bad_request' });
+    control.destroy();
+  });
+
+  test('clear floods cannot reach the DNS provider, and DNS calls have a relay-wide budget', async () => {
+    const counting = new CountingDns();
+    const { relay } = await makeRelay({ dnsCallsGlobal: { capacity: 2, refillPerSecond: 0 } }, undefined, { dns: counting });
+    const first = await registerRaw(relay);
+    for (let i = 0; i < 50; i += 1) first.control.send({ type: 'acme-dns-clear', id: `c${i}`, value: String(i).padStart(43, 'Z') });
+    for (let i = 0; i < 50; i += 1) expect(await first.control.next()).toMatchObject({ type: 'acme-dns-result', ok: false });
+    expect(counting.calls).toBe(0);
+    // A first publish needs the address record plus the TXT: two calls, the whole budget.
+    first.control.send({ type: 'acme-dns-set', id: 'p1', value: 'D'.repeat(43) });
+    expect(await first.control.next()).toMatchObject({ ok: true });
+    const second = await registerRaw(relay);
+    second.control.send({ type: 'acme-dns-set', id: 'p2', value: 'E'.repeat(43) });
+    expect(await second.control.next()).toMatchObject({ ok: false, error: 'rate_limited' });
+    expect(counting.calls).toBe(2);
+    first.control.destroy();
+    second.control.destroy();
+  });
+
+  test('registrations have a relay-wide rate and address records a relay-wide cap', async () => {
+    const { relay } = await makeRelay({ registrationsGlobal: { capacity: 1, refillPerSecond: 0 }, maxAddressRecords: 0 });
+    const first = await registerRaw(relay);
+    expect(first.ready).toMatchObject({ type: 'ready' });
+    first.control.send({ type: 'acme-dns-set', id: 'x', value: 'F'.repeat(43) });
+    expect(await first.control.next()).toMatchObject({ ok: false, error: 'capacity' });
+    const second = await registerRaw(relay);
+    expect(second.ready).toMatchObject({ type: 'error', code: 'rate_limited' });
+    first.control.destroy();
+  });
+
+  test('registrations that never start issuance, or go quiet, expire with their address record', async () => {
+    const counting = new CountingDns();
+    const { relay, registry } = await makeRelay({}, undefined, { dns: counting });
+    const idle = await registerRaw(relay);
+    const active = await registerRaw(relay);
+    active.control.send({ type: 'acme-dns-set', id: 'a', value: 'G'.repeat(43) });
+    expect(await active.control.next()).toMatchObject({ ok: true });
+    const hostname = `${active.identity.installId}.${ZONE}`;
+    expect(counting.addresses.has(hostname)).toBe(true);
+
+    const day = 24 * 60 * 60_000;
+    expect(await relay.sweep(Date.now() + day + 60_000)).toEqual([idle.identity.installId]);
+    expect(registry.get(idle.identity.installId)).toBeUndefined();
+    expect(await idle.control.next()).toMatchObject({ type: 'error', code: 'unregistered' });
+    expect(registry.get(active.identity.installId)).toBeDefined();
+
+    expect(await relay.sweep(Date.now() + 91 * day)).toEqual([active.identity.installId]);
+    expect(counting.addresses.has(hostname)).toBe(false);
+    active.control.destroy();
+  });
+
+  test('the file registry is append-only, survives a torn line, and replays expiry state', async () => {
+    const dir = newStateDir();
+    const path = join(dir, 'registry.jsonl');
+    const identity = loadOrCreateIdentity(newStateDir());
+    const registry = new FileInstallRegistry(path);
+    registry.register(identity.installId, identity.publicKeySpki);
+    registry.activate(identity.installId);
+    registry.markAddressRecord(identity.installId);
+    await registry.flush();
+    const lines = readFileSync(path, 'utf8').trim().split('\n');
+    expect(lines.map((line) => JSON.parse(line).op)).toEqual(['register', 'activate', 'address']);
+    appendFileSync(path, '{"op":"seen","installId":"trunc');
+    const reopened = new FileInstallRegistry(path);
+    expect(reopened.get(identity.installId)).toMatchObject({ installId: identity.installId, hasAddressRecord: true });
+    expect(reopened.get(identity.installId)?.activatedAt).toBeNumber();
+    expect(reopened.addressRecordCount()).toBe(1);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe('before the ClientHello', () => {
+  test('a hello that never finishes times out; pre-hello connections are capped per address', async () => {
+    const { relay } = await makeRelay({ clientHelloTimeoutMs: 300, maxPreHelloPerAddress: 2 });
+    const a = holdOpen(relay.port);
+    const b = holdOpen(relay.port, Buffer.from([0x16, 0x03, 0x01]));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const c = holdOpen(relay.port);
+    const third = await c.closed;
+    expect(third.afterMs).toBeLessThan(250);
+    const [first, second] = await Promise.all([a.closed, b.closed]);
+    for (const result of [first, second]) {
+      expect(result.afterMs).toBeGreaterThanOrEqual(250);
+      expect(result.received.length).toBe(0);
+    }
+  });
+
+  test('oversized, SNI-less, multi-name, and non-TLS hellos get unrecognized_name', async () => {
+    const { relay } = await makeRelay({ maxClientHelloBytes: 64 });
+    const alert = tlsAlertRecord(TLS_ALERT.unrecognizedName);
+    expect(await rawExchange(relay.port, await captureClientHello(`${'b'.repeat(32)}.${ZONE}`))).toEqual(alert);
+    const { relay: normal } = await makeRelay();
+    expect(await rawExchange(normal.port, await captureClientHello(''))).toEqual(alert);
+    expect(await rawExchange(normal.port, syntheticClientHello([CONTROL_HOST, `${'c'.repeat(32)}.${ZONE}`]))).toEqual(alert);
+    expect(await rawExchange(normal.port, Buffer.from('GET / HTTP/1.1\r\nHost: x\r\n\r\n'))).toEqual(alert);
+  });
+
+  test('a byte-at-a-time hello is still routed', async () => {
+    const { relay } = await makeRelay();
+    const reply = await trickle(relay.port, await captureClientHello(`${'d'.repeat(32)}.${ZONE}`));
+    expect(reply).toEqual(tlsAlertRecord(TLS_ALERT.unrecognizedName));
+  });
+
+  test('random garbage never takes the relay down', async () => {
+    const { relay } = await makeRelay({ clientHelloTimeoutMs: 300, maxPreHelloPerAddress: 100 });
+    const { hostname } = await connectInstall(relay);
+    const hello = await captureClientHello(hostname);
+    await Promise.all(
+      Array.from({ length: 60 }, (_, i) => {
+        const mutated = Buffer.from(hello);
+        for (let j = 0; j < 8; j += 1) mutated[Math.floor(Math.random() * mutated.length)] = Math.floor(Math.random() * 256);
+        return rawExchange(relay.port, i % 2 ? mutated : randomBytes(1 + Math.floor(Math.random() * 600)), 3_000).catch(() => {});
+      }),
+    );
+    const response = await agentRequest({ port: relay.port, servername: hostname, ca: ca.cert, path: '/mcp' });
+    expect(response.status).toBe(200);
+  });
+});
+
+describe('flow control and client limits', () => {
+  test('a large response through a slow reader arrives intact (pause/resume backpressure)', async () => {
+    const { relay } = await makeRelay();
+    const { hostname } = await connectInstall(relay);
+    const body = await new Promise<Buffer>((resolve, reject) => {
+      const socket = tls.connect({ host: '127.0.0.1', port: relay.port, servername: hostname, ca: ca.cert }, () => {
+        socket.write(`GET /mcp/big HTTP/1.1\r\nHost: ${hostname}\r\nConnection: close\r\n\r\n`);
+      });
+      const chunks: Buffer[] = [];
+      let received = 0;
+      socket.on('data', (chunk: Buffer) => {
+        chunks.push(chunk);
+        received += chunk.length;
+        if (received % 5 === 0 || chunks.length % 16 === 0) {
+          socket.pause();
+          setTimeout(() => socket.resume(), 5);
+        }
+      });
+      socket.on('error', reject);
+      socket.on('end', () => {
+        const all = Buffer.concat(chunks);
+        resolve(all.subarray(all.indexOf('\r\n\r\n') + 4));
+      });
+    });
+    expect(body.length).toBe(BIG.length);
+    expect(createHash('sha256').update(body).digest('hex')).toBe(createHash('sha256').update(BIG).digest('hex'));
+  });
+
+  test('the relay cannot make the install open more than its data-connection cap', async () => {
+    const { relay } = await makeRelay({ attachTimeoutMs: 400 });
+    const { handle, hostname } = await connectInstall(relay, newStateDir(), { maxDataConnections: 1 });
+    const held = tls.connect({ host: '127.0.0.1', port: relay.port, servername: hostname, ca: ca.cert });
+    held.on('error', () => {});
+    await new Promise((resolve) => held.once('secureConnect', resolve));
+    expect(handle.client.activeDataConnections).toBe(1);
+    const hello = await captureClientHello(hostname);
+    const refused = await Promise.all([rawExchange(relay.port, hello), rawExchange(relay.port, hello)]);
+    for (const reply of refused) expect(reply).toEqual(tlsAlertRecord(TLS_ALERT.internalError));
+    expect(handle.client.activeDataConnections).toBe(1);
+    held.destroy();
+  });
+
+  test('the client refuses a ready message that names another hostname', async () => {
+    const tlsMaterial = ca.issue(CONTROL_HOST);
+    const fake = tls.createServer({ key: tlsMaterial.key, cert: tlsMaterial.cert }, (socket) => {
+      socket.write(`${JSON.stringify({ type: 'challenge', v: PROTOCOL_VERSION, nonce: 'n' })}\n`);
+      socket.once('data', () => socket.write(`${JSON.stringify({ type: 'ready', installId: 'x', hostname: 'victim.example.com' })}\n`));
+      socket.on('error', () => {});
+    });
+    await new Promise<void>((resolve) => fake.listen(0, '127.0.0.1', resolve));
+    const statuses: string[] = [];
+    const client = new RelayClient({
+      relayHost: '127.0.0.1',
+      relayPort: (fake.address() as AddressInfo).port,
+      controlServerName: CONTROL_HOST,
+      zone: ZONE,
+      ca: ca.cert,
+      identity: loadOrCreateIdentity(newStateDir()),
+      backoff: { minMs: 50, maxMs: 50 },
+      onStatus: (status) => statuses.push(status.state === 'offline' ? `offline:${status.reason}` : status.state),
+    });
+    client.start();
+    await until(() => statuses.filter((status) => status.startsWith('offline')).length >= 2);
+    await client.stop();
+    fake.close();
+    expect(statuses).not.toContain('online');
+    expect(statuses).toContain('offline:relay announced an unexpected hostname');
+    expect(client.hostname).toBeUndefined();
   });
 });

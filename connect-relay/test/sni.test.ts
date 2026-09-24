@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { parseClientHello, tlsAlertRecord } from '../shared/sni.ts';
-import { captureClientHello } from './helpers/net.ts';
+import { randomBytes } from 'node:crypto';
+import { captureClientHello, syntheticClientHello } from './helpers/net.ts';
 
 /** Re-frames one handshake message across records of at most `size` bytes. */
 function refragment(record: Buffer, size: number): Buffer {
@@ -39,5 +40,20 @@ describe('ClientHello SNI parser', () => {
 
   test('alerts are well-formed fatal TLS alert records', () => {
     expect([...tlsAlertRecord(112)]).toEqual([0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 112]);
+  });
+
+  test('rejects a server_name list with two host names (RFC 6066 section 3)', () => {
+    expect(parseClientHello(syntheticClientHello(['a.example'])).status).toBe('ok');
+    expect(parseClientHello(syntheticClientHello(['a.example', 'b.example']))).toMatchObject({ status: 'invalid' });
+  });
+
+  test('never throws on mutated or random input', async () => {
+    const hello = await captureClientHello('abcdefghijklmnopqrstuvwxyz234567.connect.olympus.test');
+    for (let i = 0; i < 5_000; i += 1) {
+      const input = i % 3 === 0 ? randomBytes(Math.floor(Math.random() * 400)) : Buffer.from(hello);
+      if (i % 3 !== 0) for (let j = 0; j < 1 + (i % 7); j += 1) input[Math.floor(Math.random() * input.length)] = Math.floor(Math.random() * 256);
+      const cut = i % 5 === 0 ? input.subarray(0, Math.floor(Math.random() * input.length)) : input;
+      expect(['ok', 'invalid', 'incomplete']).toContain(parseClientHello(cut).status);
+    }
   });
 });

@@ -135,3 +135,62 @@ function dechunk(body: string): string {
     rest = rest.slice(lineEnd + 2 + size + 2);
   }
 }
+
+/** A minimal synthetic ClientHello carrying the given host_name entries (for malformed-SNI cases). */
+export function syntheticClientHello(hostNames: readonly string[]): Buffer {
+  const entries = Buffer.concat(
+    hostNames.map((name) => {
+      const header = Buffer.from([0, 0, 0]);
+      header.writeUInt16BE(name.length, 1);
+      return Buffer.concat([header, Buffer.from(name, 'latin1')]);
+    }),
+  );
+  const list = Buffer.concat([Buffer.from([entries.length >> 8, entries.length & 0xff]), entries]);
+  const extension = Buffer.concat([Buffer.from([0, 0, list.length >> 8, list.length & 0xff]), list]);
+  const body = Buffer.concat([
+    Buffer.from([0x03, 0x03]),
+    Buffer.alloc(32, 7),
+    Buffer.from([0]),
+    Buffer.from([0, 2, 0x13, 0x01]),
+    Buffer.from([1, 0]),
+    Buffer.from([extension.length >> 8, extension.length & 0xff]),
+    extension,
+  ]);
+  const handshake = Buffer.concat([Buffer.from([1, body.length >> 16, (body.length >> 8) & 0xff, body.length & 0xff]), body]);
+  return Buffer.concat([Buffer.from([0x16, 0x03, 0x01, handshake.length >> 8, handshake.length & 0xff]), handshake]);
+}
+
+/** Opens a raw socket that sends `bytes` (possibly nothing) and reports how and when it closed. */
+export function holdOpen(port: number, bytes?: Buffer): { closed: Promise<{ afterMs: number; received: Buffer }>; destroy(): void } {
+  const started = Date.now();
+  const socket = net.connect(port, '127.0.0.1', () => {
+    if (bytes) socket.write(bytes);
+  });
+  const chunks: Buffer[] = [];
+  socket.on('data', (chunk: Buffer) => chunks.push(chunk));
+  socket.on('error', () => {});
+  return {
+    closed: new Promise((resolve) => socket.on('close', () => resolve({ afterMs: Date.now() - started, received: Buffer.concat(chunks) }))),
+    destroy: () => socket.destroy(),
+  };
+}
+
+/** Sends `bytes` one byte per `intervalMs`, then returns what the server sent before closing. */
+export function trickle(port: number, bytes: Buffer, intervalMs = 1): Promise<Buffer> {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, '127.0.0.1');
+    const chunks: Buffer[] = [];
+    let index = 0;
+    const timer = setInterval(() => {
+      if (index >= bytes.length || socket.destroyed) return clearInterval(timer);
+      socket.write(bytes.subarray(index, index + 1));
+      index += 1;
+    }, intervalMs);
+    socket.on('data', (chunk: Buffer) => chunks.push(chunk));
+    socket.on('error', () => {});
+    socket.on('close', () => {
+      clearInterval(timer);
+      resolve(Buffer.concat(chunks));
+    });
+  });
+}
