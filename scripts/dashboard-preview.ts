@@ -249,6 +249,16 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
     view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'missing' }).getStatus();
     return view;
   }
+  if (state === 'models-applying') {
+    // The owner's beta.5 fresh install (2026-09-24): the Gemini key saved and
+    // applying, Venice still waiting for its key.
+    const view = buildDashboardPreviewView('fresh');
+    view.model_setup = new ModelSetupService({
+      config: loadSovereigntyPreset('private-cloud-only'),
+      credentialState: (_id, profile) => (profile.provider === 'google-gemini' ? 'applying' : 'missing'),
+    }).getStatus();
+    return view;
+  }
   if (state === 'first-install') {
     // The owner's first-install test (2026-09-23): model keys in, Dropbox and
     // Google Drive connected with their folders not yet chosen, Readwise
@@ -751,7 +761,7 @@ if (import.meta.main) {
     }
     const state = url.pathname.replace(/^\//, '') || 'partial';
     const states = [
-      'models', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
+      'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
       'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
       'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
     ];
@@ -800,7 +810,7 @@ if (import.meta.main) {
   },
   });
   console.log(`dashboard preview listening on http://127.0.0.1:${port}`);
-  console.log('  states: /models /first-install /gmail-scope-pending /tier-migration /fresh /partial /full /dropbox-initial /dropbox-update');
+  console.log('  states: /models /models-applying /first-install /gmail-scope-pending /tier-migration /fresh /partial /full /dropbox-initial /dropbox-update');
   console.log('  mail scope picker: /mail-picker (add ?approved for a saved scope)');
   console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');
   console.log('  publisher-app one-click cards (add ?setup): /connect-dropbox-publisher /connect-google-publisher');

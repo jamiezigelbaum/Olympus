@@ -374,3 +374,22 @@ export const AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 
 .agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
 #agents { margin-top: 26px; }
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`;
+
+/**
+ * Models section layout, shared by the standalone Setup page and the native
+ * Control UI (src/control-ui/styles.ts). A card reads as three lines at most:
+ * name and state, what the model is for, then one wrapping action row (key
+ * field, Connect, and the "Get a key" link side by side).
+ */
+export const MODEL_SETUP_CSS = `
+.modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{border:1px solid var(--border,#333);border-radius:12px;padding:16px 18px;min-width:0}
+.modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:12.5px}
+.modelcard p{margin:6px 0 0}.source-model-gate{border:0;padding:0;margin:0;min-width:0}.source-model-gate[disabled]{opacity:.5}
+.modelaction{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:12px}
+.modelaction form{display:flex;flex:1 1 320px;flex-wrap:wrap;align-items:center;gap:8px;margin:0;min-width:0}
+.modelaction input[type=password]{flex:1 1 180px;min-width:0;width:auto}.modelaction a{white-space:nowrap}.modelaction .modelnote{color:var(--t3)}
+.modelcards .modelrow,.modelcards .sheet{margin:0}.modelcards .sheet .modelaction{margin:0}
+.modeltools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 16px}.modeltools p{margin:0;flex-basis:100%}
+.modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
+.modelextras{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin:-12px 0 24px}
+`;

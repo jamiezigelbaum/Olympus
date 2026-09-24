@@ -1,5 +1,5 @@
-import { MODEL_SETUP_CSS, renderModelSetup } from '../model-setup.ts';
-import { AGENT_CONNECT_CSS, SETUP_JOURNEY_CSS } from '../static-styles.ts';
+import { renderModelSetup } from '../model-setup.ts';
+import { AGENT_CONNECT_CSS, MODEL_SETUP_CSS, SETUP_JOURNEY_CSS } from '../static-styles.ts';
 import { renderDashboardAgentsSection } from '../agents.ts';
 export { SETUP_JOURNEY_CSS };
 /**

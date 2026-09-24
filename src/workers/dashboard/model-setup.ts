@@ -1,15 +1,6 @@
 import type { ModelSetupCard, ModelSetupView } from '../../core/model-setup.ts';
 import { connectorSheet, escapeHtml } from './components.ts';
 
-export const MODEL_SETUP_CSS = `
-.modelcards{display:grid;gap:12px;margin:16px 0 24px}.modelcard{border:1px solid var(--border,#333);border-radius:12px;padding:18px}
-.modelcard header{display:flex;justify-content:space-between;gap:16px}.modelcard form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}
-.modelcard input[type=password]{flex:1;min-width:160px}.modelcard p{margin:8px 0}.source-model-gate{border:0;padding:0;margin:0;min-width:0}.source-model-gate[disabled]{opacity:.5}
-.modelcards .modelrow,.modelcards .sheet{margin:0}.modelcards .sheet form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 10px}
-.modelcards .sheet input[type=password]{flex:1;min-width:160px}
-.modelextras{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin:-12px 0 24px}.modelextras form{display:inline-flex;align-items:center;gap:8px}
-`;
-
 export const LOCAL_MODELS_SETUP_PROMPT = 'Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer and embedding endpoints and their exact model IDs on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured models and embedding dimensions, run olympus doctor, then send me back to Models in Setup and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.';
 
 const LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>';
@@ -28,10 +19,9 @@ export function renderModelSetup(view: ModelSetupView | undefined): string {
     if (card.id === 'local') {
       action = `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`;
     } else {
-      action = card.state === 'applying'
-        ? '<p>Key saved. Olympus is applying the configuration or waiting for another required key.</p>'
-        : modelKeyForm(card);
-      action += modelKeyLink(card);
+      action = modelKeyAction(card, card.state === 'applying'
+        ? '<span class="modelnote">Key saved. Olympus is applying the configuration or waiting for another required key.</span>'
+        : modelKeyForm(card));
     }
     return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml(card.label)}</b><span role="status">${state}</span></header>`
       + `<p>${escapeHtml(card.detail)}</p>${action}</section>`;
@@ -45,8 +35,10 @@ export function renderModelSetup(view: ModelSetupView | undefined): string {
       + (localCard ? '' : `<button type="button" class="btn quiet" ${LOCAL_MODELS_TOGGLE}`)
       + `${CHECK_FORM_OPEN}<button class="btn quiet" type="submit">Check readiness</button>${CHECK_FORM_TAIL}`
       + '</div>'
-    : (localCard ? '' : `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`)
-      + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}`;
+    : '<div class="modeltools">'
+      + (localCard ? '' : `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`)
+      + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}`
+      + '</div>';
   return '<section aria-label="Models"><div class="sect">Models</div>'
     + (view.ready
       ? '<p class="quiet" role="status">Models are ready. You can connect sources below.</p>'
@@ -73,7 +65,7 @@ function readyModelRow(card: ModelSetupCard): string {
   const sheetId = `model-key-${card.id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
   return `${head}<button type="button" class="btn quiet" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button></div>`
     + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>`
-    + `<p>${escapeHtml(card.detail)} Saved keys are not displayed.</p>${modelKeyForm(card)}${modelKeyLink(card)}</div>`;
+    + `<p>${escapeHtml(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
 }
 
 function modelKeyForm(card: ModelSetupCard): string {
@@ -83,7 +75,8 @@ function modelKeyForm(card: ModelSetupCard): string {
     + '<button class="btn" type="submit">Connect</button><span data-action-message role="status"></span></form>';
 }
 
-function modelKeyLink(card: ModelSetupCard): string {
+/** One wrapping row: the key form (or the saved-key note) and the "Get a key" link beside it. */
+function modelKeyAction(card: ModelSetupCard, lead: string): string {
   const href = card.id === 'gemini' ? 'https://aistudio.google.com/apikey' : 'https://venice.ai';
-  return `<p><a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></p>`;
+  return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
 }
