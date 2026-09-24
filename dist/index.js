@@ -573,7 +573,7 @@ var init_source_corpus_registry = __esm(() => {
       provider: "readwise",
       family: "readwise",
       trustDomain: "internal",
-      activationMode: "lexical_only",
+      activationMode: "hybrid_primary",
       capabilities: ["answer", "status", "sync"],
       description: "S1/internal Readwise saved library. The former public-safe corpus id resolves here as an input alias."
     },
@@ -583,7 +583,7 @@ var init_source_corpus_registry = __esm(() => {
       provider: "readwise",
       family: "readwise",
       trustDomain: "secure_local",
-      activationMode: "lexical_only",
+      activationMode: "hybrid_primary",
       capabilities: ["answer", "status"],
       createdOnDemand: true,
       description: "Readwise items raised to Private by per-item four-tier classification (for example a private highlight)."
@@ -8184,12 +8184,14 @@ var init_connector = __esm(() => {
 });
 
 // src/workers/readwise/live-control.ts
-var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS;
+var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, READWISE_STORE_EMBED_MAX_BACKOFF_MS, READWISE_STORE_EMBED_FRESHNESS_THRESHOLD_MS;
 var init_live_control = __esm(() => {
   READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
   READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+  READWISE_STORE_EMBED_MAX_BACKOFF_MS = 30 * 60000;
+  READWISE_STORE_EMBED_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
@@ -8197,14 +8199,16 @@ var init_tiered_store_set = __esm(() => {
   init_engine();
   init_tier_classifier();
   init_tier_ledger();
+  init_embeddings();
   init_local_index();
   init_tier_placement();
 });
 
 // src/workers/readwise/live-sync.ts
 var init_live_sync = __esm(() => {
-  init_connector_store();
+  init_local_index();
   init_tiered_store_set();
+  init_embeddings();
   init_api();
   init_connector();
   init_live_control();

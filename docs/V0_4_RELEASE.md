@@ -21,6 +21,19 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-24 — Readwise answers hybrid on its existing vectors.** Owner
+  decision, recorded in the embedding ledger as
+  `decision-2026-09-24-readwise-hybrid` (committed backfill in
+  `src/workers/embedding-ledger.ts`): "Readwise: use existing embeddings for
+  hybrid answers; decouple embedding from sync; keep vectors." Both Readwise
+  tier stores declare `hybrid_primary`; the Private store embeds only on the
+  approved private (Venice) lane and is answered by the secure route as
+  before. Pull and reconcile commit items without embedding, and the lane's
+  own embedding task embeds chunks with no vector, backing off when the
+  provider does not answer. A provider timeout during any connector-store sync
+  now defers embedding instead of failing the sync. No model, endpoint or
+  epoch changes; no existing vector is invalidated or re-embedded.
+
 - **2026-09-23 — One public beta, no structured beta testing.** The owner
   ends structured beta testing. The latest Olympus is published as a single
   GitHub prerelease (`v0.4.0-beta.3`, from main `83093b76`) and is the only

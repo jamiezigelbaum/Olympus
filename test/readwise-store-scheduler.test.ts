@@ -61,6 +61,7 @@ describe('Readwise dark store: bounded slices, resume, reconcile, and the daily 
     expect(source.tasks.map((task) => task.id)).toEqual([
       'readwise.library_store_pull',
       'readwise.library_store_reconcile',
+      'readwise.library_embeddings',
     ]);
     const scheduler = new SourceScheduler({
       enabled: true,

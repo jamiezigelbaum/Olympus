@@ -55,7 +55,9 @@ describe('config-driven source corpus registry', () => {
       'secure_local.whatsapp.messages': 'hybrid_shadow',
       'internal.x.bookmarks': 'hybrid_shadow',
       'internal.drive.docs': 'hybrid_primary',
-      'internal.readwise.library': 'lexical_only',
+      // Owner decision 2026-09-24: Readwise answers hybrid in both tiers.
+      'internal.readwise.library': 'hybrid_primary',
+      'secure_local.readwise.library': 'hybrid_primary',
       'internal.telegram.messages': 'hybrid_primary',
       'secure_local.telegram.protected.messages': 'hybrid_primary',
     });

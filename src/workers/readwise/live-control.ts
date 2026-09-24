@@ -7,6 +7,17 @@ export const READWISE_STORE_PULL_MAX_ITEMS = 200;
 export const READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60_000;
 export const READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
 
+/**
+ * The lane's embedding task (owner decision 2026-09-24: decouple embedding from
+ * sync). It embeds chunks that have no vector yet, a bounded batch per store per
+ * pass, every minute while there is work. A provider that does not answer backs
+ * the task off, doubling up to the cap, and a pass that answers resets it.
+ */
+export const READWISE_STORE_EMBED_INTERVAL_MS = 60_000;
+export const READWISE_STORE_EMBED_MAX_BACKOFF_MS = 30 * 60_000;
+export const READWISE_STORE_EMBED_MAX_CHUNKS = 256;
+export const READWISE_STORE_EMBED_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
+
 export const READWISE_DAILY_REQUEST_GUARD_REASON = 'readwise_daily_api_request_guard';
 
 export interface ReadwiseLiveSyncConfig {
@@ -16,6 +27,10 @@ export interface ReadwiseLiveSyncConfig {
   storePullMaxItems: number;
   storeReconcileIntervalMs: number;
   storeReconcileFreshnessThresholdMs: number;
+  /** Absent: READWISE_STORE_EMBED_INTERVAL_MS. */
+  storeEmbedIntervalMs?: number;
+  /** Chunks per tier store per embedding pass. Absent: READWISE_STORE_EMBED_MAX_CHUNKS. */
+  storeEmbedMaxChunks?: number;
 }
 
 export function defaultReadwiseLiveSyncConfig(
@@ -44,6 +59,16 @@ export function defaultReadwiseLiveSyncConfig(
       env.OLYMPUS_SOURCE_INDEX_READWISE_STORE_RECONCILE_STALE_SECONDS,
       READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS / 1_000,
     ) * 1_000,
+    storeEmbedIntervalMs: positiveIntegerEnv(
+      env.OLYMPUS_SOURCE_INDEX_READWISE_STORE_EMBED_INTERVAL_SECONDS,
+      READWISE_STORE_EMBED_INTERVAL_MS / 1_000,
+    ) * 1_000,
+    storeEmbedMaxChunks: boundedPositiveIntegerEnv(
+      env.OLYMPUS_SOURCE_INDEX_READWISE_STORE_EMBED_MAX_CHUNKS,
+      READWISE_STORE_EMBED_MAX_CHUNKS,
+      1,
+      10_000,
+    ),
   };
 }
 

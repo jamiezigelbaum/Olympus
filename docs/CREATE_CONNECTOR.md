@@ -236,9 +236,10 @@ Two distinct behaviors, both present in the repo — pick the right one:
     `src/workers/readwise/corpus-adapter.ts`, which sets
     `storageProfileInput: {cloudEmbeddingApproved: true, cloudQueryApproved: false}`
     and a `defaultSensitivity`. (Open question 5: when is the wrapper required?)
-- [ ] Activation mode: `lexical_only` until you have a reason. Readwise and
-      Drive-docs are `lexical_only`; X bookmarks is `hybrid_shadow`; Telegram
-      is `hybrid_primary`.
+- [ ] Activation mode: `lexical_only` until you have a reason. Private
+      Drive-docs is `lexical_only`; X bookmarks is `hybrid_shadow`; Telegram
+      and Readwise are `hybrid_primary` (Readwise since the owner's
+      2026-09-24 decision, recorded in the embedding ledger).
 
 ---
 

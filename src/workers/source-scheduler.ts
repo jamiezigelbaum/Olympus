@@ -29,6 +29,12 @@ import {
   type GoogleDriveLiveSyncConfig,
 } from './google-connectors/index.ts';
 import {
+  READWISE_STORE_EMBED_FRESHNESS_THRESHOLD_MS,
+  READWISE_STORE_EMBED_INTERVAL_MS,
+  READWISE_STORE_EMBED_MAX_BACKOFF_MS,
+  READWISE_STORE_EMBED_MAX_CHUNKS,
+} from './readwise/live-control.ts';
+import {
   READWISE_DAILY_REQUEST_GUARD_REASON,
   READWISE_LIBRARY_CORPUS_ID,
   ReadwiseRequestBudgetError,
@@ -1239,8 +1245,52 @@ export function createReadwiseSchedulerSource(input: {
               }
             },
       },
+      ...(input.liveSync.embedPending ? [readwiseEmbedTask(input.liveSync, liveConfig)] : []),
     ],
     lastSyncCompletedAt: () => input.liveSync?.lastStoreRunCompletedAt(),
+  };
+}
+
+/**
+ * The Readwise lane's embedding task: the one path that embeds its chunks.
+ *
+ * A pass that the provider did not answer is not a failure of anything the
+ * owner can act on — the items are in, keyword search serves them, and the
+ * chunks stay queued — so it returns a deferral: the next pass waits twice as
+ * long as the last, up to READWISE_STORE_EMBED_MAX_BACKOFF_MS, and the first
+ * pass that answers returns the task to its own interval.
+ */
+function readwiseEmbedTask(
+  liveSync: ReadwiseConnectorStoreSyncHandler,
+  liveConfig: ReadwiseLiveSyncConfig,
+): SourceSchedulerTask {
+  const intervalMs = liveConfig.storeEmbedIntervalMs ?? READWISE_STORE_EMBED_INTERVAL_MS;
+  const limit = liveConfig.storeEmbedMaxChunks ?? READWISE_STORE_EMBED_MAX_CHUNKS;
+  return {
+    id: 'readwise.library_embeddings',
+    kind: 'embed',
+    writer: true,
+    intervalMs,
+    freshnessThresholdMs: READWISE_STORE_EMBED_FRESHNESS_THRESHOLD_MS,
+    run: async (context?: SourceSchedulerTaskRunContext) => {
+      const outcome = await liveSync.embedPending!({ limit });
+      const counts = { ...outcome.counts };
+      const result = progressFromCounts(counts);
+      if (outcome.counts.stores_deferred === 0) return result;
+      const previousMs = context?.effectiveIntervalMs ?? intervalMs;
+      const backoffMs = Math.min(
+        Math.max(previousMs, intervalMs) * 2,
+        READWISE_STORE_EMBED_MAX_BACKOFF_MS,
+      );
+      const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();
+      return {
+        ...result,
+        retryAt: {
+          at: new Date(attemptedAt + backoffMs).toISOString(),
+          effectiveIntervalMs: backoffMs,
+        },
+      };
+    },
   };
 }
 

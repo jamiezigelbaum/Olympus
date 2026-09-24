@@ -72,9 +72,10 @@ import {
   type TierLedger,
   type TierPlacementPlan,
 } from '../classification/tier-ledger.ts';
-import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import { TransientSourceEmbeddingError, type SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
   TierLedgerUnavailableError,
+  connectorStoreEmbeddingDeferredReason,
   connectorStoreItemText,
   syncAndEmbedFromConnector,
   type ConnectorStoreEmbedSummary,
@@ -196,6 +197,18 @@ export interface TieredStoreRoutingCounts {
   movesQueued: number;
   routedDeletions: number;
   contentUnreadHeld: number;
+}
+
+/** One leg's share of an embedPending call: its counts, or why it was deferred. */
+export interface TieredStoreLegEmbedRun {
+  trustDomain: SourceTrustDomain;
+  corpusId: string;
+  embed?: ConnectorStoreEmbedSummary;
+  deferredReason?: string;
+}
+
+export interface TieredStoreEmbedRun {
+  legs: TieredStoreLegEmbedRun[];
 }
 
 export interface TieredStoreSetRun {
@@ -387,23 +400,33 @@ export class TieredStoreSet {
   async sync(
     connector: SourceConnector,
     sync: ConnectorStoreSyncOptions = {},
-    options: { commitCursor?: boolean } = {},
+    options: {
+      commitCursor?: boolean;
+      /**
+       * false: commit items only and leave every leg's new chunks queued for
+       * the lane's embedding task (embedPending). A lane whose embedding runs
+       * on its own schedule sets this so a slow provider can never hold, or
+       * fail, its sync.
+       */
+      embed?: boolean;
+    } = {},
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];
     const ran = new Set<SourceTrustDomain>();
+    const embed = options.embed !== false;
     for (const domain of TIER_DOMAIN_ORDER) {
       const store = this.store(domain);
       if (!store) continue;
-      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }));
+      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }, embed));
       ran.add(domain);
     }
     for (const domain of TIER_DOMAIN_ORDER) {
       if (ran.has(domain) || !run.routedDomains.has(domain)) continue;
       const store = this.store(domain, { create: true })!;
-      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }));
+      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }, embed));
     }
     run.finalize();
     const cursor = legRuns[0]?.sync.cursor;
@@ -504,13 +527,49 @@ export class TieredStoreSet {
     return this.secretLocations;
   }
 
+  /**
+   * Embed chunks that have no vector yet, in every leg that exists and has an
+   * embedding identity — the lane's embedding drain, source-neutral.
+   *
+   * Each leg embeds on its own identity (a Private leg on the approved private
+   * lane), up to `limit` chunks per leg per call. A chunk already embedded at
+   * its current content is skipped by the store, so nothing is re-embedded. A
+   * provider that stops answering defers that leg with a counts-only reason
+   * and the other legs still run; any other fault throws.
+   */
+  async embedPending(options: { limit?: number } = {}): Promise<TieredStoreEmbedRun> {
+    const legs: TieredStoreLegEmbedRun[] = [];
+    for (const domain of TIER_DOMAIN_ORDER) {
+      const provider = this.legs.get(domain)?.spec.embeddingProvider;
+      if (!provider) continue;
+      const store = this.store(domain);
+      if (!store) continue;
+      try {
+        const embed = await store.embedChunks({
+          provider,
+          ...(options.limit !== undefined ? { limit: options.limit } : {}),
+        });
+        legs.push({ trustDomain: domain, corpusId: store.corpusId, embed });
+      } catch (error) {
+        if (!(error instanceof TransientSourceEmbeddingError)) throw error;
+        legs.push({
+          trustDomain: domain,
+          corpusId: store.corpusId,
+          deferredReason: connectorStoreEmbeddingDeferredReason(error),
+        });
+      }
+    }
+    return { legs };
+  }
+
   private async runLeg(
     domain: SourceTrustDomain,
     store: LocalConnectorStore,
     connector: SourceConnector,
     sync: ConnectorStoreSyncOptions,
+    embed = true,
   ): Promise<TieredStoreLegRun> {
-    const provider = this.legs.get(domain)?.spec.embeddingProvider;
+    const provider = embed ? this.legs.get(domain)?.spec.embeddingProvider : undefined;
     if (!provider) {
       return { trustDomain: domain, corpusId: store.corpusId, sync: await store.syncFromConnector(connector, sync) };
     }
@@ -837,6 +896,7 @@ export function mergedTieredLaneRun(
   const embedded = legs.filter((leg) => leg.embed !== undefined);
   if (embedded.length === 0) return { sync };
   const base = lane.embed ?? embedded[0]!.embed!;
+  const deferredEmbed = embedded.find((leg) => leg.embed!.deferredReason !== undefined)?.embed!.deferredReason;
   return {
     sync,
     embed: {
@@ -844,6 +904,7 @@ export function mergedTieredLaneRun(
       chunksSeen: embedded.reduce((total, leg) => total + leg.embed!.chunksSeen, 0),
       chunksEmbedded: embedded.reduce((total, leg) => total + leg.embed!.chunksEmbedded, 0),
       chunksSkipped: embedded.reduce((total, leg) => total + leg.embed!.chunksSkipped, 0),
+      ...(deferredEmbed ? { deferredReason: deferredEmbed } : {}),
     },
   };
 }

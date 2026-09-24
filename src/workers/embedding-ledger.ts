@@ -520,4 +520,22 @@ export const EMBEDDING_LEDGER_BACKFILL: readonly EmbeddingLedgerEntry[] = PUBLIC
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: 'complete',
   },
+  {
+    entry_id: 'decision-2026-09-24-readwise-hybrid',
+    recorded_at: '2026-09-24T13:30:00.000Z',
+    kind: 'model_decision',
+    what: 'Readwise: use existing embeddings for hybrid answers; decouple embedding from sync; keep '
+      + 'vectors. Both Readwise tier stores (Personal and Private) now answer with semantic plus keyword '
+      + 'retrieval on the models they already embed with — the Personal store on its cloud identity, the '
+      + 'Private store on the approved private (Venice) lane — and embedding runs in the lane\'s own '
+      + 'embedding task instead of inside the pull and reconcile.',
+    scope: { corpora: ['readwise', 'readwise-secure'] },
+    why: 'The Readwise stores were declared keyword-only while the sync embedded every chunk inline, so '
+      + 'the vectors were paid for and never used, and a Venice embedding timeout failed the whole sync '
+      + '(live, 2026-09-24). No model, endpoint or epoch changes, no existing vector is invalidated or '
+      + 're-embedded; only chunks with no vector yet are embedded, by the embedding task, with backoff '
+      + 'when the provider does not answer.',
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+    status: 'complete',
+  },
 ];

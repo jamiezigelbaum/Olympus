@@ -1135,6 +1135,13 @@ export interface ConnectorStoreEmbedSummary {
   chunksSeen: number;
   chunksEmbedded: number;
   chunksSkipped: number;
+  /**
+   * Set when the embedding provider stopped answering part-way (a transient
+   * outage or timeout that outlived its own retries). What was embedded before
+   * it stays; the rest stays queued as chunks with no vector, for the lane's
+   * embedding task or drain to finish later. A counts-only marker.
+   */
+  deferredReason?: string;
   policy: {
     rawSourceExposed: false;
     sourceTextReturned: false;
@@ -1149,6 +1156,11 @@ export interface ConnectorStoreSyncAndEmbedOptions {
   connector: SourceConnector;
   embeddingProvider: SourceEmbeddingProvider;
   sync?: ConnectorStoreSyncOptions;
+}
+
+/** The deferral marker a transient embedding failure leaves on a summary. */
+export function connectorStoreEmbeddingDeferredReason(error: TransientSourceEmbeddingError): string {
+  return `embedding_provider_unavailable:${error.reason}`;
 }
 
 export interface ConnectorStoreSyncAndEmbedSummary {
@@ -8536,10 +8548,40 @@ export async function syncAndEmbedFromConnector(
     : [...batched(selectedIds, MAX_SELECTED_EMBED_ITEM_IDS)];
   let embed: ConnectorStoreEmbedSummary | undefined;
   for (const localItemIdBatch of selectedBatches) {
-    const batch = await options.store.embedChunks({
-      provider: options.embeddingProvider,
-      localItemIds: localItemIdBatch,
-    });
+    let batch: ConnectorStoreEmbedSummary;
+    try {
+      batch = await options.store.embedChunks({
+        provider: options.embeddingProvider,
+        localItemIds: localItemIdBatch,
+      });
+    } catch (error) {
+      // The sync above already committed. An embedding provider that stopped
+      // answering (a Venice 30s timeout, live 2026-09-24) used to fail the
+      // whole sync task after its items had landed, so the lane read as
+      // failing and its pull starved behind retries. The vectors are not the
+      // sync's to finish: the chunks stay queued with no vector, and the
+      // lane's embedding task or drain picks them up with its own backoff.
+      // Configuration and write faults still throw — they need a person.
+      if (!(error instanceof TransientSourceEmbeddingError)) throw error;
+      const deferredReason = connectorStoreEmbeddingDeferredReason(error);
+      console.warn(
+        `[olympus:connector-store] embedding_deferred corpus_id=${options.store.corpusId} reason=${deferredReason}`,
+      );
+      return {
+        sync,
+        embed: {
+          ...(embed ?? connectorStoreEmbedSummary(
+            options.store.corpusId,
+            options.store.trustDomain,
+            options.embeddingProvider,
+            0,
+            0,
+            0,
+          )),
+          deferredReason,
+        },
+      };
+    }
     embed = embed
       ? {
         ...embed,
