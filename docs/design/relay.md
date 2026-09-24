@@ -202,9 +202,47 @@ cannot name another record.
   lifetime remains. The window is proportional, so it survives Let's Encrypt
   moving to shorter lifetimes.
 - **Subscriber agreement:** creating the ACME account accepts the CA's
-  subscriber agreement, so `obtainCertificate` refuses to run unless the caller
-  passes `termsOfServiceAgreed: true`. The wiring follow-up must show that
-  agreement to the user.
+  subscriber agreement, so no order is placed until the owner has accepted
+  the CA's *current* agreement (the directory's `meta.termsOfService`) with
+  `olympus connections terms --accept`. Until then the relay session stays
+  up and `olympus connections status` reports `awaiting_terms` with the
+  agreement's URL. A new agreement from the CA needs a new acceptance.
+
+## Plugin wiring
+
+Remote access is opt-in plugin config, off by default:
+
+```sh
+openclaw config set plugins.entries.olympus.config.remote.enabled true
+openclaw config set plugins.entries.olympus.config.remote.relayHost connect.olympusplugin.ai
+# or, for a tunnel you run yourself, instead of relayHost:
+openclaw config set plugins.entries.olympus.config.remote.publicBaseUrl https://<your-tunnel>
+```
+
+`relayHost` has no default until the relay is deployed. `relayHost` and
+`publicBaseUrl` are mutually exclusive, and so is either with an
+`OLYMPUS_PUBLIC_BASE_URL` in worker.env; a conflict turns remote access off
+(named in Gateway service health and in `olympus connections status`), never
+the rest of the plugin.
+
+- **Service.** `olympus-remote-relay` is a native service beside the worker
+  (`src/core/native-relay-service.ts`). It runs the client in its own Bun child
+  (`olympus __relay-service-run`), because the child terminates internet TLS
+  and parses hosted agents' HTTP; it gets no Gateway or worker credentials.
+  The shared process kernel owns start, stop, restart backoff and health.
+- **State.** `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/connect-relay/`
+  (0700, files 0600) holds the keys and certificate, plus `status.json` (what
+  the service and child report), `relay-auth` (below) and `acme-terms.json`.
+- **Public base URL.** The child publishes `public_base_url` in status.json
+  once the session is up and a certificate is served, and clears it on stop.
+  The worker reads it per request (re-read only when the file changes, stat
+  at most once a second), so issuer, resource and OpenAPI `servers` follow the
+  relay without a worker restart; a restart would cut in-flight answers and
+  drop pending OAuth approvals. They still never come from `Host`.
+- **Forwarding trust.** The local endpoint adds `x-olympus-relay-auth`, a
+  per-install secret from `relay-auth`, and strips any inbound copy. The
+  worker believes `x-olympus-relay`/`x-forwarded-for` only alongside that
+  secret; any other loopback caller is one shared `direct` caller.
 
 ### Limits (defaults, `server/public-path.ts`)
 
@@ -359,15 +397,9 @@ Nothing below has been executed. It is what deployment needs from Jamie.
 
 ## Follow-ups
 
-1. **Wiring (after the `/mcp` slice merges).** Move `connect-relay/client` and
-   `connect-relay/shared` into `src/connect/`, then:
-   - start `startConnect` from `registerService`;
-   - print the URL from `olympus connect`;
-   - show the Let's Encrypt subscriber agreement at opt-in;
-   - add relay status to the dashboard.
-
-   The client stays outside `src/` until then, so the public-surface guard
-   needs no allowlist entry for an unwired module.
+1. **Wiring: done** (see [Plugin wiring](#plugin-wiring)). The client stays
+   in `connect-relay/client`, imported by the relay child. The dashboard's
+   relay status reads the `olympus connections status` JSON.
 2. **Coordinate with the `/mcp` slice.** The worker must accept
    `Host: <id>.<zone>` (DNS-rebinding allowlist), and it must treat
    `x-olympus-relay: 1` as a remote caller. That header is trustworthy only
