@@ -74,9 +74,16 @@ describe('pilot installation entry points', () => {
     // the sidebar of the page they were chatting in.
     const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const where = document.slice(document.indexOf('**Where to open it.**'), document.indexOf('Deliver this required user-facing handoff'));
-    expect(where).toContain('**Olympus** entry already in the sidebar');
-    expect(where).toContain('do not ask for the address');
-    expect(document).toContain('which becomes `Open **Olympus** in the sidebar on the left.`');
+    const flat = where.replace(/\s+/g, ' ');
+    expect(flat).toContain('**Olympus** entry already in the Control UI sidebar');
+    expect(flat).toContain('do not ask for the address');
+    expect(flat).toContain('`plugins.controlUi.status` shows it activated');
+    expect(flat).toContain('If you cannot tell which channel they use, treat it as another channel.');
+    const afterWhere = document.slice(document.indexOf('**Where to open it.**')).replace(/\s+/g, ' ');
+    // The address-bar question survives only for the link case.
+    expect(afterWhere).toContain('and a link is needed (never for the sidebar handoff), read `gateway.publicOrigin` or ask them for the address');
+    expect(document.replace(/\s+/g, ' ')).toContain('which becomes `Open **Olympus** in the Control UI sidebar.`');
+    expect(document).toContain('> Olympus is installed. [Open your Olympus dashboard](<verified-dashboard-url>).');
   });
 
   test('the agent guide requires provider readiness before source Connect', () => {

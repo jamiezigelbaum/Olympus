@@ -1556,13 +1556,14 @@ when they are chatting in the Control UI that shows it, otherwise the actual
 clickable link. Never send the placeholder, a host-only loopback URL, or only a
 terminal command.
 
-**Where to open it.** When the operator is chatting with you in the OpenClaw
-Control UI and the native Olympus page is available (the default for this
-artifact, once the Step 5 Custom plugin UI opt-in is on), the dashboard is the
-**Olympus** entry already in the sidebar of the page they are looking at. Point
-them there and send no link: do not ask for the address in their browser's
-address bar just to build one. Confirm the page is registered with
-`plugins.controlUi.list` (olympus listed, no diagnostics). When they chat from
+**Where to open it.** Decide from your own session: if the operator's
+messages reach you through the OpenClaw Control UI (webchat), and Step 5's
+activation receipt holds (`plugins.controlUi.list` names olympus with no
+diagnostics and `plugins.controlUi.status` shows it activated in their
+browser), the dashboard is the **Olympus** entry already in the Control UI
+sidebar of the page they are looking at. Point them there and send no link: do
+not ask for the address in their browser's address bar. If you cannot tell
+which channel they use, treat it as another channel. When they chat from
 another channel (Telegram, a terminal, a remote agent), the link is the native
 page `/plugin?plugin=olympus&id=dashboard` on the Gateway origin they use; it needs no
 ticket and does not expire. Use the standalone `olympus dashboard` opening link only when native
@@ -1573,12 +1574,13 @@ whose host is not the machine the operator's browser runs on: the worker's
 `http://127.0.0.1:8010/…` and a Gateway loopback origin qualify unless you
 have confirmed the operator browses from the Olympus host itself (or through
 a tunnel that forwards that exact port). If you do not know the operator's
-Gateway origin, read `gateway.publicOrigin` or ask them for the address in
-their browser's address bar; do not guess one.
+Gateway origin and a link is needed (never for the sidebar handoff), read
+`gateway.publicOrigin` or ask them for the address in their browser's address
+bar; do not guess one.
 
 Deliver this required user-facing handoff **verbatim**. Change nothing but
 the first line's `[Open your Olympus dashboard](<verified-dashboard-url>).`,
-which becomes `Open **Olympus** in the sidebar on the left.` when you pointed
+which becomes `Open **Olympus** in the Control UI sidebar.` when you pointed
 the operator at the sidebar entry above, and otherwise keeps the link with
 the placeholder replaced: no reworded sentences, no
 "optional" or "you pick which ones, if any" framing, no Labs or settings
@@ -1644,8 +1646,9 @@ rules stay in its **Choose mail** picker.
 
 This candidate artifact includes native Control UI support. On OpenClaw
 **2026.9.2** and later, use **Olympus** in the Control UI sidebar. When the
-operator chats from the Control UI, the sidebar entry is the handoff. Only when
-a link is needed, resolve that page against the same Gateway origin the
+operator chats from the Control UI, the sidebar entry is the handoff, proven by
+Step 5's in-browser `plugins.controlUi.status` activation rather than by
+loading a URL. Only when a link is needed, resolve that page against the same Gateway origin the
 operator is actually using: `/plugin?plugin=olympus&id=dashboard`. Copy the working page's URL; do
 not assume port 18789, reuse the agent host's localhost origin for a remote
 operator, or link only to the OpenClaw chat homepage. Verify that the page loads
