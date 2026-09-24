@@ -1015,6 +1015,10 @@ describe('publisher-mode card', () => {
 describe('native OpenClaw page offers the same publisher one-click connect', () => {
   const PUBLISHER_SHEETS = ['connect-gmail-email', 'connect-google_drive-docs', 'connect-dropbox-files'] as const;
   const LOOPBACK_BROWSER_ORIGIN = 'http://localhost:19989';
+  // What OpenClaw records at the operator's WebSocket handshake for a browser
+  // behind an SSH port forward: its Origin, the Host it arrived with, and a
+  // direct local transport (sshd connects from loopback).
+  const LOCAL_BROWSER = { origin: LOOPBACK_BROWSER_ORIGIN, requestHost: 'localhost:19989', isLocalClient: true };
   const FRESH_GATEWAY = { gateway: { bind: 'loopback', port: 19989 } };
 
   function nativeWorkerConfig() {
@@ -1028,7 +1032,7 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
     return async (url: RequestInfo | URL, init?: RequestInit) => instance.fetch(new Request(url, init));
   }
 
-  async function nativeSetupBody(instance: Fixture, browserOrigin?: string): Promise<string> {
+  async function nativeSetupBody(instance: Fixture, browserOrigin?: Record<string, unknown>): Promise<string> {
     const result = await requestDashboardRead({
       params: { view: 'setup' },
       canWrite: true,
@@ -1076,15 +1080,16 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
   async function startThroughGateway(
     registered: ReturnType<typeof gateway>,
     openClawConfig: unknown,
-  ): Promise<{ status: number; body: { authorization_url: string } }> {
+    browserOrigin: Record<string, unknown> = LOCAL_BROWSER,
+  ): Promise<{ status: number; body: Record<string, any> }> {
     const calls: unknown[][] = [];
     await registered.methods.get(OLYMPUS_DASHBOARD_CONTROL_METHOD)!({
       params: { action: 'start_oauth', source: 'dropbox' },
-      client: { connect: { scopes: ['operator.write'] }, browserOrigin: { origin: LOOPBACK_BROWSER_ORIGIN } },
+      client: { connect: { scopes: ['operator.write'] }, browserOrigin },
       context: { getRuntimeConfig: () => openClawConfig },
       respond: (...args: unknown[]) => calls.push(args),
     });
-    return calls[0]?.[1] as { status: number; body: { authorization_url: string } };
+    return calls[0]?.[1] as { status: number; body: Record<string, any> };
   }
 
   async function callbackThroughGateway(
@@ -1118,7 +1123,7 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
   });
 
   test('a loopback Gateway with no publicOrigin renders the same publisher cards, enabled', async () => {
-    const body = await nativeSetupBody(fixture(), LOOPBACK_BROWSER_ORIGIN);
+    const body = await nativeSetupBody(fixture(), LOCAL_BROWSER);
     for (const id of PUBLISHER_SHEETS) expectPublisherSheet(sheet(body, id));
     expect(body).not.toContain('id="setup-dropbox-files"');
     expect(body).not.toContain('data-native-oauth-unavailable');
@@ -1132,9 +1137,24 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
   });
 
   test('a remote browser origin is not a substitute for gateway.publicOrigin', async () => {
-    const body = await nativeSetupBody(fixture(), 'https://gateway.tailnet.example');
+    const body = await nativeSetupBody(fixture(), {
+      origin: 'https://gateway.tailnet.example', requestHost: 'gateway.tailnet.example', isLocalClient: false,
+    });
     expect(body).toContain('data-native-oauth-unavailable');
     expect(body).not.toContain('https://gateway.tailnet.example/oauth/callback/');
+  });
+
+  test('a loopback-shaped origin is refused from a non-local client or a different Host', async () => {
+    for (const browserOrigin of [
+      { ...LOCAL_BROWSER, isLocalClient: false },
+      { ...LOCAL_BROWSER, requestHost: 'localhost:28000' },
+    ]) {
+      expect(await nativeSetupBody(fixture(), browserOrigin)).toContain('data-native-oauth-unavailable');
+      const instance = fixture();
+      const started = await startThroughGateway(gateway(instance, FRESH_GATEWAY), FRESH_GATEWAY, browserOrigin);
+      expect(started.status).toBe(409);
+      expect(started.body.error.code).toBe('gateway_public_origin_required');
+    }
   });
 
   test('one-click connect completes through the Gateway on the loopback origin OpenClaw attested', async () => {
@@ -1146,6 +1166,9 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
     expect(authorization.searchParams.get('client_id')).toBe(PUBLISHER_APP_KEY);
     expect(authorization.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
     const state = authorization.searchParams.get('state')!;
+    // The origin crossed workers/http.ts's internal-header gate: the worker
+    // only honours the Gateway's origin header beside a valid worker bearer,
+    // so a signed state naming it proves the gate restored it.
     expect(statePayload(state).origin).toBe(LOOPBACK_BROWSER_ORIGIN);
 
     // The relay bounces the browser to <origin>/oauth/callback/dropbox, which

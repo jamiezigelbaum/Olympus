@@ -214,6 +214,30 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
     })).toThrow('unknown field');
   });
 
+  test('the OAuth callback reads OpenClaw\'s live config, like start, not the registration-time copy', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const routes = new Map<string, (request: IncomingMessage, response: ServerResponse) => Promise<boolean | void> | boolean | void>();
+    registerOlympusDashboardGateway({
+      // Registration-time copy: no publicOrigin yet.
+      config: { gateway: {} },
+      runtime: { config: { current: () => ({ gateway: { publicOrigin: 'https://gateway.example' } }) } },
+      registerGatewayMethod() {},
+      registerHttpRoute(route) {
+        routes.set(route.path, route.handler);
+      },
+    }, configuredWorker(), {
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), ...(init ? { init } : {}) });
+        return new Response(null, { status: 303, headers: { Location: '/oauth/callback/dropbox/done' } });
+      },
+    });
+    const response = mockResponse();
+    await routes.get('/oauth/callback/dropbox')!(callbackRequest('203.0.113.10', '203.0.113.10'), response.value);
+    expect(response.statusCode()).toBe(303);
+    expect(new Headers(requests[0]?.init?.headers).get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER))
+      .toBe('https://gateway.example');
+  });
+
   test('OAuth start fails actionably when Gateway public origin is absent', async () => {
     let fetched = false;
     const registrations = gatewayRegistrations(async () => {
@@ -236,17 +260,36 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
 
   test('without publicOrigin, only an attested loopback browser origin and a loopback callback stand in', async () => {
     const fresh = { gateway: { bind: 'loopback', port: 19989 } };
-    expect(resolveNativeOAuthOrigin(fresh, 'http://localhost:19989')).toBe('http://localhost:19989');
-    expect(resolveNativeOAuthOrigin(fresh, 'http://127.0.0.1:19989/')).toBe('http://127.0.0.1:19989');
-    expect(resolveNativeOAuthOrigin(fresh, 'http://[::1]:19989')).toBe('http://[::1]:19989');
-    expect(resolveNativeOAuthOrigin(fresh, 'https://gateway.tailnet.example')).toBeUndefined();
-    expect(resolveNativeOAuthOrigin(fresh, 'http://192.168.1.20:19989')).toBeUndefined();
-    expect(resolveNativeOAuthOrigin(fresh, 'http://localhost:19989/path')).toBeUndefined();
-    expect(resolveNativeOAuthOrigin(fresh, 'http://user@localhost:19989')).toBeUndefined();
+    // The handshake facts OpenClaw records for a local browser: Origin, the
+    // Host it arrived with, and a direct local transport. An SSH port forward
+    // looks exactly like this too — sshd connects from loopback.
+    const local = (origin: string, requestHost: string, isLocalClient: unknown = true) => ({
+      origin, requestHost, isLocalClient,
+    });
+    expect(resolveNativeOAuthOrigin(fresh, local('http://localhost:19989', 'localhost:19989'))).toBe('http://localhost:19989');
+    expect(resolveNativeOAuthOrigin(fresh, local('http://127.0.0.1:19989/', '127.0.0.1:19989'))).toBe('http://127.0.0.1:19989');
+    expect(resolveNativeOAuthOrigin(fresh, local('http://[::1]:19989', '[::1]:19989'))).toBe('http://[::1]:19989');
+    expect(resolveNativeOAuthOrigin(fresh, local('http://LOCALHOST:19989', 'LocalHost:19989'))).toBe('http://localhost:19989');
+    // Refused: a non-local client presenting a loopback-shaped origin.
+    expect(resolveNativeOAuthOrigin(fresh, local('http://localhost:19989', 'localhost:19989', false))).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, local('http://localhost:19989', 'localhost:19989', 'true'))).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, { origin: 'http://localhost:19989', requestHost: 'localhost:19989' })).toBeUndefined();
+    // Refused: an origin whose host is not the Host the connection arrived on.
+    expect(resolveNativeOAuthOrigin(fresh, local('http://localhost:19989', 'localhost:28000'))).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, local('http://localhost:19989', '127.0.0.1:19989'))).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, { origin: 'http://localhost:19989', isLocalClient: true })).toBeUndefined();
+    // Refused: anything that is not bare loopback http.
+    expect(resolveNativeOAuthOrigin(fresh, local('https://gateway.tailnet.example', 'gateway.tailnet.example'))).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, local('http://192.168.1.20:19989', '192.168.1.20:19989'))).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, local('http://localhost:19989/path', 'localhost:19989'))).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, local('http://user@localhost:19989', 'localhost:19989'))).toBeUndefined();
+    expect(resolveNativeOAuthOrigin(fresh, 'http://localhost:19989')).toBeUndefined();
     expect(resolveNativeOAuthOrigin(fresh, undefined)).toBeUndefined();
     // A configured publicOrigin always wins over the browser.
-    expect(resolveNativeOAuthOrigin({ gateway: { publicOrigin: 'https://gateway.example' } }, 'http://localhost:19989'))
-      .toBe('https://gateway.example');
+    expect(resolveNativeOAuthOrigin(
+      { gateway: { publicOrigin: 'https://gateway.example' } },
+      local('http://localhost:19989', 'localhost:19989'),
+    )).toBe('https://gateway.example');
 
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const registrations = gatewayRegistrations(async (url, init) => {

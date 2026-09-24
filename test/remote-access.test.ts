@@ -152,7 +152,11 @@ describe('relay header trust', () => {
     expect(loadOrCreateRelayAuthSecret(remoteAccessDir(dataEnv))).toBe(secret);
     // A direct loopback caller forging the headers.
     expect(verify(request({ 'x-olympus-relay': '1', 'x-forwarded-for': '203.0.113.9' }))).toBe(false);
-    expect(verify(request({ 'x-olympus-relay': '1', [RELAY_AUTH_HEADER]: `${secret.slice(0, -1)}A` }))).toBe(false);
+    // Flip the last character to one guaranteed to differ: a fixed 'A' left the
+    // secret unchanged whenever it already ended in 'A' (1 run in 64).
+    const forged = `${secret.slice(0, -1)}${secret.at(-1) === 'A' ? 'B' : 'A'}`;
+    expect(forged).not.toBe(secret);
+    expect(verify(request({ 'x-olympus-relay': '1', [RELAY_AUTH_HEADER]: forged }))).toBe(false);
     expect(verify(request({ 'x-olympus-relay': '1', [RELAY_AUTH_HEADER]: 'short' }))).toBe(false);
     expect(verify(request({ [RELAY_AUTH_HEADER]: secret }))).toBe(false);
     // The relay's local endpoint.

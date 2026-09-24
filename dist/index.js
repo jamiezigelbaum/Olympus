@@ -16274,8 +16274,8 @@ function registerOlympusDashboardGateway(api, config, options = {}) {
         params: parseDashboardReadParams(params),
         canWrite: gatewayClientHasScope(client, "operator.write"),
         config,
-        openClawConfig: context?.getRuntimeConfig?.() ?? api.config,
-        browserOrigin: client?.browserOrigin?.origin,
+        openClawConfig: currentOpenClawConfig(api, context),
+        browserOrigin: client?.browserOrigin,
         fetchImpl,
         ...signal ? { signal } : {}
       });
@@ -16291,8 +16291,8 @@ function registerOlympusDashboardGateway(api, config, options = {}) {
     }
     try {
       const parsed = parseDashboardControlParams(params);
-      const openClawConfig = context?.getRuntimeConfig?.() ?? api.config;
-      const gatewayPublicOrigin = resolveNativeOAuthOrigin(openClawConfig, client?.browserOrigin?.origin);
+      const openClawConfig = currentOpenClawConfig(api, context);
+      const gatewayPublicOrigin = resolveNativeOAuthOrigin(openClawConfig, client?.browserOrigin);
       if (parsed.action === "start_oauth" && !gatewayPublicOrigin) {
         respond(true, gatewayPublicOriginRequiredResult());
         return;
@@ -16615,8 +16615,20 @@ function resolveGatewayPublicOrigin(value) {
     return;
   }
 }
+function currentOpenClawConfig(api, context) {
+  return context?.getRuntimeConfig?.() ?? api.runtime?.config?.current?.() ?? api.config;
+}
 function resolveNativeOAuthOrigin(openClawConfig, browserOrigin) {
-  return resolveGatewayPublicOrigin(openClawConfig) ?? loopbackHttpOrigin(browserOrigin);
+  return resolveGatewayPublicOrigin(openClawConfig) ?? localLoopbackBrowserOrigin(browserOrigin);
+}
+function localLoopbackBrowserOrigin(value) {
+  if (!isRecord2(value) || value.isLocalClient !== true)
+    return;
+  const origin = loopbackHttpOrigin(value.origin);
+  if (!origin || typeof value.requestHost !== "string")
+    return;
+  const requestHost = value.requestHost.trim().toLowerCase();
+  return requestHost && new URL(origin).host === requestHost ? origin : undefined;
 }
 function loopbackHttpOrigin(value) {
   if (typeof value !== "string")
@@ -16669,7 +16681,7 @@ function registerOAuthCallbackRoutes(api, config, fetchImpl) {
           writeCallbackPage(response, false, 410);
           return true;
         }
-        await handleOAuthCallback({ request, response, source, config, openClawConfig: api.config, fetchImpl });
+        await handleOAuthCallback({ request, response, source, config, openClawConfig: currentOpenClawConfig(api), fetchImpl });
         return true;
       }
     });

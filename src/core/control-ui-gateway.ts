@@ -34,10 +34,11 @@ interface GatewayClientLike {
   invalidated?: boolean;
   connect?: { scopes?: unknown };
   /**
-   * OpenClaw's server-attested browser origin for this WebSocket client,
-   * captured at the handshake after its own origin policy admitted it.
+   * The browser-origin facts OpenClaw captured for this WebSocket client at
+   * the handshake: the Origin header, the Host header it arrived with, and
+   * whether the transport was a direct local connection.
    */
-  browserOrigin?: { origin?: unknown };
+  browserOrigin?: { origin?: unknown; requestHost?: unknown; isLocalClient?: unknown };
 }
 
 interface GatewayRequestHandlerInput {
@@ -52,6 +53,8 @@ type GatewayRequestHandler = (input: GatewayRequestHandlerInput) => Promise<void
 
 export interface OlympusDashboardGatewayApi {
   config?: unknown;
+  /** OpenClaw's live config snapshot; `config` is only the registration-time copy. */
+  runtime?: { config?: { current?: () => unknown } };
   registerGatewayMethod?(method: string, handler: GatewayRequestHandler, options?: {
     scope?: 'operator.read' | 'operator.write';
     profileAccess?: 'independent' | 'required';
@@ -109,8 +112,8 @@ export function registerOlympusDashboardGateway(
           params: parseDashboardReadParams(params),
           canWrite: gatewayClientHasScope(client, 'operator.write'),
           config,
-          openClawConfig: context?.getRuntimeConfig?.() ?? api.config,
-          browserOrigin: client?.browserOrigin?.origin,
+          openClawConfig: currentOpenClawConfig(api, context),
+          browserOrigin: client?.browserOrigin,
           fetchImpl,
           ...(signal ? { signal } : {}),
         });
@@ -131,8 +134,8 @@ export function registerOlympusDashboardGateway(
       }
       try {
         const parsed = parseDashboardControlParams(params);
-        const openClawConfig = context?.getRuntimeConfig?.() ?? api.config;
-        const gatewayPublicOrigin = resolveNativeOAuthOrigin(openClawConfig, client?.browserOrigin?.origin);
+        const openClawConfig = currentOpenClawConfig(api, context);
+        const gatewayPublicOrigin = resolveNativeOAuthOrigin(openClawConfig, client?.browserOrigin);
         if (parsed.action === 'start_oauth' && !gatewayPublicOrigin) {
           respond(true, gatewayPublicOriginRequiredResult());
           return;
@@ -160,7 +163,7 @@ export async function requestDashboardRead(input: {
   canWrite: boolean;
   config: OlympusConfig;
   openClawConfig?: unknown;
-  /** The reading client's server-attested browser origin, when OpenClaw supplies one. */
+  /** The reading client's handshake browser-origin facts, when OpenClaw supplies them. */
   browserOrigin?: unknown;
   fetchImpl?: DashboardFetch;
   signal?: AbortSignal;
@@ -481,21 +484,47 @@ export function resolveGatewayPublicOrigin(value: unknown): string | undefined {
 }
 
 /**
+ * One config source for every Gateway path: the call's own runtime config,
+ * then OpenClaw's live snapshot, then the registration-time copy. The OAuth
+ * start and its callback must agree on `gateway.publicOrigin`, and only the
+ * live snapshot follows a config change without a plugin reload.
+ */
+function currentOpenClawConfig(
+  api: OlympusDashboardGatewayApi,
+  context?: { getRuntimeConfig?: () => unknown },
+): unknown {
+  return context?.getRuntimeConfig?.() ?? api.runtime?.config?.current?.() ?? api.config;
+}
+
+/**
  * The origin a native OAuth flow returns to.
  *
  * `gateway.publicOrigin` wins whenever it is configured. Without it, a fresh
- * install's loopback Gateway still has one origin it can prove: the loopback
- * browser origin OpenClaw itself attested and admitted at the operator's
- * WebSocket handshake. Requiring `gateway.publicOrigin` for that case left every
- * fresh install on the bring-your-own walkthrough with a disabled button
- * (beta.5 fresh install on a clean Linux user, 2026-09-24). Only loopback http
- * is accepted here: a provider code then reaches software on the operator's own
- * machine, and the callback route can re-derive the identical origin from the
- * loopback request it arrives on. A remote https origin still needs
- * `gateway.publicOrigin`, because nothing on the callback can attest it.
+ * loopback install falls back to the operator's own browser origin, but only
+ * when all of these hold for the facts OpenClaw captured at the WebSocket
+ * handshake: the transport was a direct local connection (`isLocalClient`),
+ * the Origin is plain http on localhost, 127.0.0.1 or [::1] with no path, and
+ * the Origin's host equals the Host header the connection arrived with — the
+ * same host comparison as OpenClaw's own `isGatewayHostBrowserOrigin`. A
+ * browser on the Gateway host or behind the operator's SSH port forward
+ * passes; a remote client or an Origin naming some other address does not.
+ * Requiring `gateway.publicOrigin` for this case left every fresh install on
+ * the bring-your-own walkthrough with a disabled button (beta.5 fresh install
+ * on a clean Linux user, 2026-09-24). A provider code then reaches software on
+ * the operator's own machine, and the callback route re-derives the same origin
+ * from the loopback request it arrives on. Any https or remote origin still
+ * needs `gateway.publicOrigin`.
  */
 export function resolveNativeOAuthOrigin(openClawConfig: unknown, browserOrigin: unknown): string | undefined {
-  return resolveGatewayPublicOrigin(openClawConfig) ?? loopbackHttpOrigin(browserOrigin);
+  return resolveGatewayPublicOrigin(openClawConfig) ?? localLoopbackBrowserOrigin(browserOrigin);
+}
+
+function localLoopbackBrowserOrigin(value: unknown): string | undefined {
+  if (!isRecord(value) || value.isLocalClient !== true) return undefined;
+  const origin = loopbackHttpOrigin(value.origin);
+  if (!origin || typeof value.requestHost !== 'string') return undefined;
+  const requestHost = value.requestHost.trim().toLowerCase();
+  return requestHost && new URL(origin).host === requestHost ? origin : undefined;
 }
 
 function loopbackHttpOrigin(value: unknown): string | undefined {
@@ -559,7 +588,7 @@ function registerOAuthCallbackRoutes(
           writeCallbackPage(response, false, 410);
           return true;
         }
-        await handleOAuthCallback({ request, response, source, config, openClawConfig: api.config, fetchImpl });
+        await handleOAuthCallback({ request, response, source, config, openClawConfig: currentOpenClawConfig(api), fetchImpl });
         return true;
       },
     });
