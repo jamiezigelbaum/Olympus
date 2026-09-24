@@ -56,6 +56,8 @@ export interface RelayClientOptions {
   /** Loopback Olympus worker; defaults to `http://127.0.0.1:28090`. */
   readonly target?: string;
   readonly allowedPaths?: readonly string[];
+  /** Per-install secret the local endpoint forwards as `x-olympus-relay-auth`. */
+  readonly relayAuth?: string;
   /** Extra trust anchors for the relay control plane (tests and private relays). */
   readonly ca?: string | Buffer;
   readonly onStatus?: (status: RelayClientStatus) => void;
@@ -116,6 +118,7 @@ export class RelayClient implements AcmeDnsPublisher {
       cert: material.cert,
       target: this.options.target ?? 'http://127.0.0.1:28090',
       ...(this.options.allowedPaths ? { allowedPaths: this.options.allowedPaths } : {}),
+      ...(this.options.relayAuth ? { relayAuth: this.options.relayAuth } : {}),
       peerAddress: (port) => (port === undefined ? undefined : this.peers.get(port)),
       onRequest: (port) => {
         const state = port === undefined ? undefined : this.connectionTimers.get(port);

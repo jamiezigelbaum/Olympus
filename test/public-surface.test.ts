@@ -91,7 +91,7 @@ describe('v0.4 positive public surface', () => {
     expect(plugin.contracts.tools).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
     expect(plugin.skills).toEqual([...V0_4_PUBLIC_SKILL_DIRS]);
     expect(Object.keys(plugin.configSchema.properties)).toEqual([...V0_4_PUBLIC_PLUGIN_CONFIG_KEYS]);
-    expect(Object.keys(plugin.uiHints)).toEqual(['argus', 'sovereignty', 'email', 'sourceIndex', 'worker.authToken']);
+    expect(Object.keys(plugin.uiHints)).toEqual(['argus', 'sovereignty', 'email', 'sourceIndex', 'worker.authToken', 'remote']);
     // A bearer token must never render in the clear in Control UI or a config read.
     expect(plugin.uiHints['worker.authToken']).toMatchObject({ sensitive: true });
     expect(sourceCorpus.properties.sourceId?.enum).toEqual([...V0_4_PUBLIC_SOURCE_IDS]);

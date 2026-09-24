@@ -2330,6 +2330,15 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   const argus = asRecord4(root?.argus);
   const email = asRecord4(root?.email);
   const sourceIndex = asRecord4(root?.sourceIndex);
+  const remote = asRecord4(root?.remote);
+  if (remote) {
+    config.remote = { enabled: remote.enabled === true };
+    for (const key of ["relayHost", "publicBaseUrl"]) {
+      const value = remote[key];
+      if (typeof value === "string" && value.trim())
+        config.remote[key] = value.trim();
+    }
+  }
   if (sovereignty) {
     config.sovereignty = {};
     if (typeof sovereignty.configPath === "string" && sovereignty.configPath.trim()) {
@@ -9989,6 +9998,7 @@ function createNativeProcessService(options) {
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
   const restartOnCleanExit = options.restartOnCleanExit ?? true;
+  const stableUptimeMs = options.stableUptimeMs ?? 0;
   const spawnChild = options.spawn ?? spawnProcess;
   let generation = 0;
   let current;
@@ -10071,6 +10081,10 @@ function createNativeProcessService(options) {
       if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
         return;
       lifetime.childReady = false;
+      if (lifetime.stableTimer) {
+        clearTimeout(lifetime.stableTimer);
+        lifetime.stableTimer = undefined;
+      }
       if (!restartOnCleanExit && code === 0 && signal === null) {
         completeCleanExit(lifetime, child).catch(() => {
           reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
@@ -10107,7 +10121,18 @@ function createNativeProcessService(options) {
     if (spawnFailed || childExited(child))
       throw new Error(`Olympus ${options.label} exited during startup.`);
     lifetime.childReady = true;
-    lifetime.restartAttempt = 0;
+    if (stableUptimeMs > 0) {
+      if (lifetime.stableTimer)
+        clearTimeout(lifetime.stableTimer);
+      lifetime.stableTimer = setTimeout(() => {
+        lifetime.stableTimer = undefined;
+        if (isCurrent(lifetime) && lifetime.child === child && lifetime.childReady)
+          lifetime.restartAttempt = 0;
+      }, stableUptimeMs);
+      lifetime.stableTimer.unref?.();
+    } else {
+      lifetime.restartAttempt = 0;
+    }
     clearFailure(lifetime);
     lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
   };
@@ -10127,6 +10152,7 @@ function createNativeProcessService(options) {
         stopping: false,
         restartAttempt: 0,
         restartTimer: undefined,
+        stableTimer: undefined,
         cleanupPromise: undefined
       };
       current = lifetime;
@@ -10160,6 +10186,10 @@ function createNativeProcessService(options) {
     if (lifetime.restartTimer) {
       clearTimeout(lifetime.restartTimer);
       lifetime.restartTimer = undefined;
+    }
+    if (lifetime.stableTimer) {
+      clearTimeout(lifetime.stableTimer);
+      lifetime.stableTimer = undefined;
     }
     const cleanup = terminateChild(lifetime, stopGraceMs).then(() => {
       if (retiring === lifetime)
@@ -13256,6 +13286,383 @@ async function embeddingDrainReadinessProbe(readinessPath, instanceId, child) {
   }
 }
 function asRecord11(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+// src/core/native-relay-service.ts
+init_config();
+import { randomUUID as relayRandomUUID } from "node:crypto";
+import { statSync as relayStatSync } from "node:fs";
+import { isAbsolute as relayIsAbsolute } from "node:path";
+import { fileURLToPath as relayFileURLToPath } from "node:url";
+
+// src/core/remote-access.ts
+import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
+import {
+  chmodSync as raChmodSync,
+  lstatSync as raLstatSync,
+  mkdirSync as raMkdirSync,
+  readFileSync as raReadFileSync,
+  renameSync as raRenameSync,
+  statSync as raStatSync,
+  writeFileSync as raWriteFileSync
+} from "node:fs";
+import { homedir as raHomedir } from "node:os";
+import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
+
+// src/core/remote-public-url.ts
+var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL";
+var REMOTE_MCP_RESOURCE_PATH = "/mcp";
+var LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+function parseRemotePublicBaseUrl(value) {
+  const raw = value?.trim();
+  if (!raw)
+    return { enabled: false, reason: "not_configured" };
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} is not a URL.` };
+  }
+  if (url.username || url.password) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not carry credentials.` };
+  }
+  if (url.search || url.hash || raw.includes("?") || raw.includes("#")) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not have a query or fragment.` };
+  }
+  if (url.pathname !== "/" && url.pathname !== "") {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must be an origin such as https://example.com, with no path.` };
+  }
+  const secure = url.protocol === "https:";
+  if (!secure && !(url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname))) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must use https (plain http is allowed only on a loopback host).` };
+  }
+  const origin = url.origin;
+  return {
+    enabled: true,
+    urls: {
+      origin,
+      host: url.host.toLowerCase(),
+      issuer: origin,
+      resource: `${origin}${REMOTE_MCP_RESOURCE_PATH}`,
+      protectedResourceMetadataUrl: `${origin}/.well-known/oauth-protected-resource${REMOTE_MCP_RESOURCE_PATH}`,
+      secure
+    }
+  };
+}
+
+// src/core/remote-access.ts
+var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v1";
+var REMOTE_ACCESS_DIR_NAME = "connect-relay";
+var STATUS_FILE = "status.json";
+var DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+var LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
+function resolveRemoteAccessMode(remote) {
+  if (!remote?.enabled)
+    return { mode: "off" };
+  const { relayHost, publicBaseUrl } = remote;
+  if (relayHost && publicBaseUrl) {
+    return {
+      mode: "error",
+      error: "remote.relayHost and remote.publicBaseUrl are mutually exclusive: the relay sets the public address itself. " + "Unset one of them (openclaw config unset plugins.entries.olympus.config.remote.publicBaseUrl, or .relayHost)."
+    };
+  }
+  if (publicBaseUrl) {
+    const parsed = parseRemotePublicBaseUrl(publicBaseUrl);
+    if (!parsed.enabled) {
+      return { mode: "error", error: `remote.publicBaseUrl is invalid: ${(parsed.detail ?? "not a URL").replace(REMOTE_PUBLIC_BASE_URL_ENV, "it")}` };
+    }
+    return { mode: "manual", publicBaseUrl: parsed.urls.origin };
+  }
+  if (relayHost) {
+    const host = relayHost.toLowerCase();
+    if (!DNS_NAME.test(host)) {
+      return { mode: "error", error: "remote.relayHost must be a DNS name such as connect.olympusplugin.ai, with no scheme, port or path." };
+    }
+    return { mode: "relay", relayHost: host };
+  }
+  return {
+    mode: "error",
+    error: "remote.enabled is on, but neither remote.relayHost (the Olympus relay) nor remote.publicBaseUrl (your own tunnel) is set."
+  };
+}
+function olympusDataDir(env = process.env) {
+  const configured = env.XDG_DATA_HOME?.trim();
+  const dataRoot = configured || raJoin(env.HOME?.trim() || raHomedir(), ".local", "share");
+  if (!raIsAbsolute(dataRoot))
+    throw new TypeError("XDG_DATA_HOME must be an absolute private data root.");
+  return raJoin(dataRoot, "openclaw", "olympus");
+}
+function remoteAccessDir(env = process.env) {
+  return raJoin(olympusDataDir(env), REMOTE_ACCESS_DIR_NAME);
+}
+function ensureRemoteAccessDir(dir) {
+  raMkdirSync(dir, { recursive: true, mode: 448 });
+  const stat2 = raLstatSync(dir);
+  if (!stat2.isDirectory() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid()) {
+    throw new Error("the remote access state directory must be a directory owned by this user");
+  }
+  raChmodSync(dir, 448);
+  return dir;
+}
+function writePrivateText(path, text) {
+  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(8).toString("hex")}`;
+  raWriteFileSync(temporary, text, { mode: 384, flag: "wx" });
+  raChmodSync(temporary, 384);
+  raRenameSync(temporary, path);
+}
+function writePrivateJson(path, value) {
+  writePrivateText(path, `${JSON.stringify(value, null, 2)}
+`);
+}
+function readPrivateFile(path) {
+  try {
+    const stat2 = raLstatSync(path);
+    if (!stat2.isFile() || typeof process.getuid === "function" && stat2.uid !== process.getuid())
+      return;
+    return raReadFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+}
+function emptyRemoteAccessStatus(mode, now = new Date) {
+  return {
+    schema: REMOTE_ACCESS_STATUS_SCHEMA,
+    updated_at: now.toISOString(),
+    mode,
+    error: null,
+    relay_host: null,
+    local_url: null,
+    public_base_url: null,
+    instance_id: null,
+    pid: null,
+    install_id: null,
+    hostname: null,
+    relay: null,
+    certificate: null,
+    terms_url: null
+  };
+}
+function writeRemoteAccessStatus(dir, status) {
+  ensureRemoteAccessDir(dir);
+  writePrivateJson(raJoin(dir, STATUS_FILE), status);
+}
+function parseStatus(text) {
+  try {
+    const value = JSON.parse(text);
+    return value && value.schema === REMOTE_ACCESS_STATUS_SCHEMA ? value : undefined;
+  } catch {
+    return;
+  }
+}
+function readRemoteAccessStatus(dir) {
+  const text = readPrivateFile(raJoin(dir, STATUS_FILE));
+  return text === undefined ? undefined : parseStatus(text);
+}
+function originOf(value) {
+  if (!value?.trim())
+    return;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
+  } catch {
+    return;
+  }
+}
+function loopbackWorkerOrigin(value) {
+  const origin = originOf(value);
+  if (!origin)
+    return;
+  const url = new URL(origin);
+  return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname) ? origin : undefined;
+}
+
+// src/core/native-relay-service.ts
+var SERVICE_ID7 = "olympus-remote-relay";
+var SERVICE_LABEL5 = "remote relay";
+var DEFAULT_STARTUP_TIMEOUT_MS4 = 15000;
+var DEFAULT_STABLE_UPTIME_MS = 60000;
+var CHILD_ENV_PASSTHROUGH = ["HOME", "XDG_DATA_HOME", "PATH", "TMPDIR", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"];
+function createNativeRelayService(options) {
+  let lastStatusDir;
+  let lastInstanceId;
+  const service = createNativeProcessService({
+    id: SERVICE_ID7,
+    label: SERVICE_LABEL5,
+    reload: {
+      configPrefixes: [
+        "plugins.entries.olympus.config.remote",
+        "plugins.entries.olympus.config.email.baseUrl",
+        "plugins.entries.olympus.config.worker.service"
+      ]
+    },
+    initialConfig: options.initialPluginConfig,
+    ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
+    ...options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {},
+    ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
+    ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
+    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4,
+    stableUptimeMs: options.stableUptimeMs ?? DEFAULT_STABLE_UPTIME_MS,
+    prepareStart: async (input) => {
+      const settings = prepareRelayStart(relayFreshConfig(input.context.config, input.initialConfig), options);
+      lastStatusDir = settings.statusDir;
+      lastInstanceId = settings.launch?.instanceId;
+      return settings.launch;
+    }
+  });
+  return {
+    ...service,
+    async stop() {
+      await service.stop();
+      clearStalePublicUrl(lastStatusDir, lastInstanceId);
+    }
+  };
+}
+function prepareRelayStart(config, options) {
+  const env = { ...process.env };
+  applyWorkerSetupEnv({ env, ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {} });
+  const statusDir = remoteAccessDir(env);
+  const mode = resolveRemoteAccessMode(config.remote);
+  const localUrl = workerOrigin(config, env);
+  const status = (next) => ({
+    ...emptyRemoteAccessStatus(next.mode),
+    local_url: localUrl ?? null,
+    ...next
+  });
+  const fail = (error, statusMode2) => {
+    writeRemoteAccessStatus(statusDir, status({ mode: statusMode2, error }));
+    throw new NativeProcessConfigurationError(`Olympus remote access is off: ${error}`);
+  };
+  if (mode.mode === "off") {
+    if (readRemoteAccessStatus(statusDir))
+      writeRemoteAccessStatus(statusDir, status({ mode: "off" }));
+    return { statusDir, launch: undefined };
+  }
+  if (mode.mode === "error")
+    return fail(mode.error, "off");
+  const statusMode = mode.mode;
+  if (env[REMOTE_PUBLIC_BASE_URL_ENV]?.trim()) {
+    return fail(`${REMOTE_PUBLIC_BASE_URL_ENV} in worker.env already sets the public address, which conflicts with plugin config remote.*. Remove it from worker.env, or turn remote.enabled off.`, statusMode);
+  }
+  if (mode.mode === "manual") {
+    writeRemoteAccessStatus(statusDir, status({ mode: "manual", public_base_url: mode.publicBaseUrl }));
+    return { statusDir, launch: undefined };
+  }
+  if (!localUrl) {
+    return fail("the relay forwards only to a loopback http worker; email.baseUrl is not one.", "relay");
+  }
+  const instanceId = relayRandomUUID();
+  const childEnv = {};
+  for (const name of CHILD_ENV_PASSTHROUGH)
+    if (env[name])
+      childEnv[name] = env[name];
+  Object.assign(childEnv, options.childEnv ?? {}, {
+    OLYMPUS_RELAY_HOST: mode.relayHost,
+    OLYMPUS_RELAY_TARGET: localUrl,
+    OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: instanceId
+  });
+  let command;
+  let executablePath;
+  try {
+    command = resolveBunRuntimePath(config.worker.service.runtimePath, env);
+    executablePath = resolveExecutablePath(options.executablePath ?? relayFileURLToPath(new URL("./cli.js", options.moduleUrl)));
+  } catch {
+    return fail("the Bun runtime or the packaged Olympus CLI could not be found.", "relay");
+  }
+  writeRemoteAccessStatus(statusDir, status({
+    mode: "relay",
+    relay_host: mode.relayHost,
+    instance_id: instanceId,
+    relay: { state: "starting", reason: null, retry_in_ms: null }
+  }));
+  return {
+    statusDir,
+    launch: {
+      command,
+      args: ["--no-env-file", executablePath, "__relay-service-run", instanceId],
+      env: childEnv,
+      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4,
+      endpointOccupied: false,
+      statusDir,
+      instanceId,
+      readinessProbe: async (child) => {
+        watchExit(child, statusDir, instanceId);
+        const reported = readRemoteAccessStatus(statusDir);
+        return reported?.instance_id === instanceId && reported.pid === child.pid;
+      }
+    }
+  };
+}
+function workerOrigin(config, env) {
+  if (!config.worker.service.enabled) {
+    const port = env.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
+    if (port && /^\d{1,5}$/.test(port)) {
+      const host = env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
+      return loopbackWorkerOrigin(`http://${host === "::1" ? "[::1]" : host}:${port}`);
+    }
+  }
+  return loopbackWorkerOrigin(config.email.baseUrl);
+}
+var watchedChildren = new WeakSet;
+function watchExit(child, statusDir, instanceId) {
+  if (watchedChildren.has(child))
+    return;
+  watchedChildren.add(child);
+  child.once("exit", () => {
+    try {
+      const status = readRemoteAccessStatus(statusDir);
+      if (!status || status.instance_id !== instanceId || status.relay?.state === "stopped")
+        return;
+      writeRemoteAccessStatus(statusDir, {
+        ...status,
+        updated_at: new Date().toISOString(),
+        public_base_url: null,
+        relay: { state: "offline", reason: "the relay process exited; Olympus restarts it", retry_in_ms: null }
+      });
+    } catch {}
+  });
+}
+function clearStalePublicUrl(statusDir, instanceId) {
+  if (!statusDir || !instanceId)
+    return;
+  try {
+    const status = readRemoteAccessStatus(statusDir);
+    if (!status || status.instance_id !== instanceId)
+      return;
+    if (status.public_base_url === null && status.relay?.state === "stopped")
+      return;
+    writeRemoteAccessStatus(statusDir, {
+      ...status,
+      updated_at: new Date().toISOString(),
+      public_base_url: null,
+      relay: { state: "stopped", reason: null, retry_in_ms: null }
+    });
+  } catch {}
+}
+function resolveExecutablePath(path) {
+  if (!relayIsAbsolute(path) || !relayStatSync(path).isFile())
+    throw new Error("Olympus CLI is unavailable.");
+  return path;
+}
+function relayFreshConfig(contextConfig, initialPluginConfig) {
+  const root = relayConfigRecord(contextConfig);
+  const entries = relayConfigRecord(relayConfigRecord(root?.plugins)?.entries);
+  const olympus = relayConfigRecord(entries?.olympus);
+  let pluginConfig;
+  if (entries) {
+    pluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
+  } else if (root && ["remote", "worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key))) {
+    pluginConfig = root;
+  } else {
+    pluginConfig = initialPluginConfig;
+  }
+  try {
+    return configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
+  } catch {
+    throw new NativeProcessConfigurationError("Olympus remote access could not read the plugin configuration.");
+  }
+}
+function relayConfigRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
@@ -16862,6 +17269,7 @@ var plugin = {
       moduleUrl: import.meta.url
     });
     const transcriptionCleanupService = createNativeTranscriptionCleanupService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url });
+    const relayService = createNativeRelayService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url });
     if (api.registerService) {
       api.registerService(backgroundNativeProcessService(workerRegistration));
       api.registerService(backgroundNativeProcessService(telegramService));
@@ -16869,7 +17277,8 @@ var plugin = {
       api.registerService(backgroundNativeProcessService(whatsappService));
       api.registerService(backgroundNativeProcessService(embeddingDrainService));
       api.registerService(transcriptionCleanupService);
-    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled || config.worker.creditMonitor.enabled || config.worker.whatsappCapture.enabled || config.worker.embeddingDrain.enabled || config.worker.transcriptionCleanup.enabled) {
+      api.registerService(backgroundNativeProcessService(relayService));
+    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled || config.worker.creditMonitor.enabled || config.worker.whatsappCapture.enabled || config.worker.embeddingDrain.enabled || config.worker.transcriptionCleanup.enabled || config.remote?.enabled) {
       throw new Error("This OpenClaw host does not support native Olympus services.");
     }
     const ctx = {

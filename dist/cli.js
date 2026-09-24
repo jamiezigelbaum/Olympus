@@ -7364,6 +7364,8 @@ var init_public_surface = __esm(() => {
     "connections pair",
     "connections list",
     "connections revoke",
+    "connections status",
+    "connections terms",
     "dashboard",
     "source answer",
     "source index status",
@@ -7391,7 +7393,8 @@ var init_public_surface = __esm(() => {
   ];
   V0_4_PACKAGE_INTERNAL_CLI_HELPERS = [
     "__oauth-detached-child",
-    "__worker-service-run"
+    "__worker-service-run",
+    "__relay-service-run"
   ];
   V0_4_PUBLIC_DASHBOARD_ROUTES = [
     { method: "GET", path: "/dashboard" },
@@ -53629,9 +53632,13 @@ __export(exports_remote_public_url, {
   resolveRemotePublicUrls: () => resolveRemotePublicUrls,
   parseRemotePublicBaseUrl: () => parseRemotePublicBaseUrl,
   isConfiguredResource: () => isConfiguredResource,
+  currentRemotePublicUrls: () => currentRemotePublicUrls,
   REMOTE_PUBLIC_BASE_URL_ENV: () => REMOTE_PUBLIC_BASE_URL_ENV,
   REMOTE_MCP_RESOURCE_PATH: () => REMOTE_MCP_RESOURCE_PATH
 });
+function currentRemotePublicUrls(source) {
+  return typeof source === "function" ? source() : source;
+}
 function parseRemotePublicBaseUrl(value) {
   const raw = value?.trim();
   if (!raw)
@@ -53686,6 +53693,390 @@ function isConfiguredResource(value, urls) {
 var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL", REMOTE_MCP_RESOURCE_PATH = "/mcp", LOOPBACK_HOSTNAMES;
 var init_remote_public_url = __esm(() => {
   LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
+// src/core/remote-access.ts
+var exports_remote_access = {};
+__export(exports_remote_access, {
+  writeRemoteAccessStatus: () => writeRemoteAccessStatus,
+  termsAccepted: () => termsAccepted,
+  resolveRemoteAccessUrls: () => resolveRemoteAccessUrls,
+  resolveRemoteAccessMode: () => resolveRemoteAccessMode,
+  remoteAccessStatusView: () => remoteAccessStatusView,
+  remoteAccessDirForCli: () => remoteAccessDirForCli,
+  remoteAccessDir: () => remoteAccessDir,
+  relayProcessRunning: () => relayProcessRunning,
+  recordTermsAcceptance: () => recordTermsAcceptance,
+  readTermsAcceptance: () => readTermsAcceptance,
+  readRemoteAccessStatus: () => readRemoteAccessStatus,
+  olympusDataDir: () => olympusDataDir,
+  loopbackWorkerOrigin: () => loopbackWorkerOrigin,
+  loadOrCreateRelayAuthSecret: () => loadOrCreateRelayAuthSecret,
+  ensureRemoteAccessDir: () => ensureRemoteAccessDir,
+  emptyRemoteAccessStatus: () => emptyRemoteAccessStatus,
+  createRemotePublicUrlSource: () => createRemotePublicUrlSource,
+  createRelayRequestVerifier: () => createRelayRequestVerifier,
+  REMOTE_ACCESS_STATUS_SCHEMA: () => REMOTE_ACCESS_STATUS_SCHEMA,
+  REMOTE_ACCESS_DIR_NAME: () => REMOTE_ACCESS_DIR_NAME,
+  RELAY_AUTH_HEADER: () => RELAY_AUTH_HEADER
+});
+import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
+import {
+  chmodSync as raChmodSync,
+  lstatSync as raLstatSync,
+  mkdirSync as raMkdirSync,
+  readFileSync as raReadFileSync,
+  renameSync as raRenameSync,
+  statSync as raStatSync,
+  writeFileSync as raWriteFileSync
+} from "node:fs";
+import { homedir as raHomedir } from "node:os";
+import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
+function resolveRemoteAccessMode(remote) {
+  if (!remote?.enabled)
+    return { mode: "off" };
+  const { relayHost, publicBaseUrl } = remote;
+  if (relayHost && publicBaseUrl) {
+    return {
+      mode: "error",
+      error: "remote.relayHost and remote.publicBaseUrl are mutually exclusive: the relay sets the public address itself. " + "Unset one of them (openclaw config unset plugins.entries.olympus.config.remote.publicBaseUrl, or .relayHost)."
+    };
+  }
+  if (publicBaseUrl) {
+    const parsed = parseRemotePublicBaseUrl(publicBaseUrl);
+    if (!parsed.enabled) {
+      return { mode: "error", error: `remote.publicBaseUrl is invalid: ${(parsed.detail ?? "not a URL").replace(REMOTE_PUBLIC_BASE_URL_ENV, "it")}` };
+    }
+    return { mode: "manual", publicBaseUrl: parsed.urls.origin };
+  }
+  if (relayHost) {
+    const host = relayHost.toLowerCase();
+    if (!DNS_NAME.test(host)) {
+      return { mode: "error", error: "remote.relayHost must be a DNS name such as connect.olympusplugin.ai, with no scheme, port or path." };
+    }
+    return { mode: "relay", relayHost: host };
+  }
+  return {
+    mode: "error",
+    error: "remote.enabled is on, but neither remote.relayHost (the Olympus relay) nor remote.publicBaseUrl (your own tunnel) is set."
+  };
+}
+function olympusDataDir(env = process.env) {
+  const configured = env.XDG_DATA_HOME?.trim();
+  const dataRoot = configured || raJoin(env.HOME?.trim() || raHomedir(), ".local", "share");
+  if (!raIsAbsolute(dataRoot))
+    throw new TypeError("XDG_DATA_HOME must be an absolute private data root.");
+  return raJoin(dataRoot, "openclaw", "olympus");
+}
+function remoteAccessDir(env = process.env) {
+  return raJoin(olympusDataDir(env), REMOTE_ACCESS_DIR_NAME);
+}
+function remoteAccessDirForCli(env = process.env) {
+  const workerEnv = env.HOME?.trim() ? readWorkerSetupEnv({ env }) : undefined;
+  const xdg = env.XDG_DATA_HOME?.trim() || workerEnv?.XDG_DATA_HOME;
+  return remoteAccessDir({ ...env.HOME !== undefined ? { HOME: env.HOME } : {}, ...xdg ? { XDG_DATA_HOME: xdg } : {} });
+}
+function ensureRemoteAccessDir(dir) {
+  raMkdirSync(dir, { recursive: true, mode: 448 });
+  const stat3 = raLstatSync(dir);
+  if (!stat3.isDirectory() || stat3.isSymbolicLink() || typeof process.getuid === "function" && stat3.uid !== process.getuid()) {
+    throw new Error("the remote access state directory must be a directory owned by this user");
+  }
+  raChmodSync(dir, 448);
+  return dir;
+}
+function writePrivateText(path, text) {
+  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(8).toString("hex")}`;
+  raWriteFileSync(temporary, text, { mode: 384, flag: "wx" });
+  raChmodSync(temporary, 384);
+  raRenameSync(temporary, path);
+}
+function writePrivateJson2(path, value) {
+  writePrivateText(path, `${JSON.stringify(value, null, 2)}
+`);
+}
+function readPrivateFile(path) {
+  try {
+    const stat3 = raLstatSync(path);
+    if (!stat3.isFile() || typeof process.getuid === "function" && stat3.uid !== process.getuid())
+      return;
+    return raReadFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+}
+function cachedFileReader(path, parse, minIntervalMs, now) {
+  let checkedAt = -Infinity;
+  let key;
+  let value;
+  return () => {
+    const at = now();
+    if (at - checkedAt < minIntervalMs)
+      return value;
+    checkedAt = at;
+    let file;
+    try {
+      file = path();
+      const stat3 = raStatSync(file, { bigint: true });
+      const next = `${stat3.dev}:${stat3.ino}:${stat3.size}:${stat3.mtimeNs}:${stat3.ctimeNs}`;
+      if (next === key)
+        return value;
+      key = next;
+    } catch {
+      key = undefined;
+      value = undefined;
+      return;
+    }
+    const text = readPrivateFile(file);
+    value = text === undefined ? undefined : parse(text);
+    return value;
+  };
+}
+function emptyRemoteAccessStatus(mode, now = new Date) {
+  return {
+    schema: REMOTE_ACCESS_STATUS_SCHEMA,
+    updated_at: now.toISOString(),
+    mode,
+    error: null,
+    relay_host: null,
+    local_url: null,
+    public_base_url: null,
+    instance_id: null,
+    pid: null,
+    install_id: null,
+    hostname: null,
+    relay: null,
+    certificate: null,
+    terms_url: null
+  };
+}
+function writeRemoteAccessStatus(dir, status) {
+  ensureRemoteAccessDir(dir);
+  writePrivateJson2(raJoin(dir, STATUS_FILE), status);
+}
+function parseStatus(text) {
+  try {
+    const value = JSON.parse(text);
+    return value && value.schema === REMOTE_ACCESS_STATUS_SCHEMA ? value : undefined;
+  } catch {
+    return;
+  }
+}
+function readRemoteAccessStatus(dir) {
+  const text = readPrivateFile(raJoin(dir, STATUS_FILE));
+  return text === undefined ? undefined : parseStatus(text);
+}
+function createRemotePublicUrlSource(env = process.env, options = {}) {
+  if (env[REMOTE_PUBLIC_BASE_URL_ENV]?.trim()) {
+    const parsed = parseRemotePublicBaseUrl(env[REMOTE_PUBLIC_BASE_URL_ENV]);
+    const urls = parsed.enabled ? parsed.urls : undefined;
+    return { origin: "env", current: () => urls };
+  }
+  const dir = remoteAccessDir(env);
+  const read = cachedFileReader(() => raJoin(dir, STATUS_FILE), (text) => {
+    const status = parseStatus(text);
+    if (!status || status.error || status.mode === "off" || !status.public_base_url)
+      return;
+    const parsed = parseRemotePublicBaseUrl(status.public_base_url);
+    return parsed.enabled ? parsed.urls : undefined;
+  }, options.minIntervalMs ?? 1000, options.now ?? Date.now);
+  return { origin: "status", current: read };
+}
+function loadOrCreateRelayAuthSecret(dir) {
+  ensureRemoteAccessDir(dir);
+  const path = raJoin(dir, RELAY_AUTH_FILE);
+  const existing = readPrivateFile(path)?.trim();
+  if (existing && /^[A-Za-z0-9_-]{43}$/.test(existing))
+    return existing;
+  const secret = raRandomBytes(32).toString("base64url");
+  writePrivateText(path, `${secret}
+`);
+  return secret;
+}
+function createRelayRequestVerifier(env = process.env, options = {}) {
+  const dir = remoteAccessDir(env);
+  const secret = cachedFileReader(() => raJoin(dir, RELAY_AUTH_FILE), (text) => {
+    const value = text.trim();
+    return /^[A-Za-z0-9_-]{43}$/.test(value) ? Buffer.from(value) : undefined;
+  }, options.minIntervalMs ?? 1000, options.now ?? Date.now);
+  return (request) => {
+    if (request.headers.get("x-olympus-relay") !== "1")
+      return false;
+    const presented = request.headers.get(RELAY_AUTH_HEADER);
+    const expected = secret();
+    if (!presented || !expected)
+      return false;
+    const actual = Buffer.from(presented);
+    return actual.length === expected.length && raTimingSafeEqual(actual, expected);
+  };
+}
+function readTermsAcceptance(dir) {
+  const text = readPrivateFile(raJoin(dir, TERMS_FILE));
+  if (text === undefined)
+    return;
+  try {
+    const value = JSON.parse(text);
+    return typeof value?.accepted_at === "string" ? value : undefined;
+  } catch {
+    return;
+  }
+}
+function recordTermsAcceptance(dir, termsUrl, now = new Date) {
+  ensureRemoteAccessDir(dir);
+  const acceptance = { terms_url: termsUrl ?? null, accepted_at: now.toISOString() };
+  writePrivateJson2(raJoin(dir, TERMS_FILE), acceptance);
+  return acceptance;
+}
+function termsAccepted(dir, currentTermsUrl) {
+  const acceptance = readTermsAcceptance(dir);
+  if (!acceptance)
+    return false;
+  return currentTermsUrl === undefined || acceptance.terms_url === currentTermsUrl;
+}
+function resolveRemoteAccessUrls(input) {
+  const local = localWorkerOrigin(input);
+  let publicBase = null;
+  let source = null;
+  const manual = parseRemotePublicBaseUrl(input.layeredEnv[REMOTE_PUBLIC_BASE_URL_ENV]);
+  if (manual.enabled) {
+    publicBase = manual.urls.origin;
+    source = "worker_env";
+  } else if (input.status && !input.status.error && input.status.mode !== "off" && input.status.public_base_url) {
+    const reported = parseRemotePublicBaseUrl(input.status.public_base_url);
+    if (reported.enabled) {
+      publicBase = reported.urls.origin;
+      source = input.status.mode === "relay" ? "relay" : "config";
+    }
+  }
+  const origin = publicBase ?? local;
+  return {
+    public_base_url: publicBase,
+    public_base_url_source: source,
+    mcp_url: `${origin}/mcp`,
+    openapi_url: `${origin}/openapi.json`,
+    oauth_issuer: publicBase,
+    local_url: local
+  };
+}
+function localWorkerOrigin(input) {
+  const explicit = originOf(input.env.OLYMPUS_EMAIL_BASE_URL);
+  if (explicit)
+    return explicit;
+  const reported = originOf(input.status?.local_url ?? undefined);
+  if (reported)
+    return reported;
+  const port = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
+  if (port && /^\d{1,5}$/.test(port)) {
+    const host = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
+    const origin = originOf(`http://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${port}`);
+    if (origin)
+      return origin;
+  }
+  return originOf(input.configuredWorkerBaseUrl) ?? "http://127.0.0.1:8010";
+}
+function originOf(value) {
+  if (!value?.trim())
+    return;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
+  } catch {
+    return;
+  }
+}
+function loopbackWorkerOrigin(value) {
+  const origin = originOf(value);
+  if (!origin)
+    return;
+  const url = new URL(origin);
+  return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname) ? origin : undefined;
+}
+function remoteAccessStatusView(input) {
+  const { status, urls } = input;
+  const isAlive = input.isAlive ?? processIsAlive;
+  const acceptance = readTermsAcceptance(input.dir);
+  const mode = status ? status.mode : "off";
+  let relayState = status?.relay?.state ?? null;
+  if (status?.mode === "relay" && status.pid !== null && relayState !== "stopped" && !isAlive(status.pid)) {
+    relayState = "not_running";
+  }
+  const termsUrl = status?.terms_url ?? null;
+  const accepted = acceptance !== undefined && (termsUrl === null || acceptance.terms_url === termsUrl);
+  const view = {
+    kind: "remote_access_status",
+    schema: REMOTE_ACCESS_STATUS_SCHEMA,
+    remote_enabled: urls.public_base_url_source === "worker_env" || status !== undefined && status.mode !== "off" && !status.error,
+    mode,
+    error: status?.error ?? null,
+    public_base_url: urls.public_base_url,
+    public_base_url_source: urls.public_base_url_source,
+    urls: { mcp: urls.mcp_url, openapi: urls.openapi_url, oauth_issuer: urls.oauth_issuer },
+    local_url: urls.local_url,
+    relay: {
+      host: status?.relay_host ?? null,
+      state: relayState,
+      connected: relayState === "online",
+      reason: status?.relay?.reason ?? null,
+      retry_in_ms: status?.relay?.retry_in_ms ?? null,
+      install_id: status?.install_id ?? null,
+      hostname: status?.hostname ?? null
+    },
+    certificate: {
+      state: status?.certificate?.state ?? null,
+      not_after: status?.certificate?.not_after ?? null,
+      reason: status?.certificate?.reason ?? null
+    },
+    terms: {
+      url: termsUrl,
+      accepted,
+      accepted_at: acceptance?.accepted_at ?? null,
+      accepted_url: acceptance?.terms_url ?? null
+    },
+    updated_at: status?.updated_at ?? null,
+    next_step: null
+  };
+  view.next_step = nextStep(view);
+  return view;
+}
+function nextStep(view) {
+  if (view.error)
+    return view.error;
+  if (view.mode === "off" && !view.public_base_url) {
+    return "Remote access is off, so hosted agents cannot reach this Olympus (local agents are unaffected). " + "To turn it on: openclaw config set plugins.entries.olympus.config.remote.enabled true, plus remote.relayHost (the Olympus relay) or remote.publicBaseUrl (your own tunnel).";
+  }
+  if (view.mode !== "relay")
+    return null;
+  if (view.certificate.state === "awaiting_terms") {
+    return "Read the Let's Encrypt subscriber agreement (terms.url), then accept it with olympus connections terms --accept.";
+  }
+  if (view.relay.state === "not_running")
+    return "The relay process is not running; check openclaw gateway status.";
+  if (view.relay.state !== "online")
+    return "Olympus is connecting to the relay.";
+  if (view.certificate.state === "failed")
+    return "The certificate could not be obtained yet; Olympus retries automatically.";
+  if (view.certificate.state !== "serving")
+    return "Olympus is obtaining its certificate.";
+  return null;
+}
+function relayProcessRunning(dir, isAlive = processIsAlive) {
+  const status = readRemoteAccessStatus(dir);
+  return status?.mode === "relay" && status.pid !== null && status.relay?.state !== "stopped" && isAlive(status.pid);
+}
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v1", REMOTE_ACCESS_DIR_NAME = "connect-relay", RELAY_AUTH_HEADER = "x-olympus-relay-auth", STATUS_FILE = "status.json", RELAY_AUTH_FILE = "relay-auth", TERMS_FILE = "acme-terms.json", DNS_NAME, LOOPBACK_HOSTNAMES2;
+var init_remote_access = __esm(() => {
+  init_remote_public_url();
+  init_worker_auth();
+  DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+  LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 
 // node_modules/zod/v4/core/core.js
@@ -68086,6 +68477,1049 @@ var init_server3 = __esm(() => {
   init_tools();
 });
 
+// connect-relay/shared/protocol.ts
+import { createHash as createHash40, createPublicKey, randomBytes as randomBytes8, sign, verify } from "node:crypto";
+function base64url2(data) {
+  return Buffer.from(data).toString("base64url");
+}
+function base32(data) {
+  let bits = 0;
+  let value = 0;
+  let out = "";
+  for (const byte of data) {
+    value = value << 8 | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += BASE32[value >>> bits - 5 & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0)
+    out += BASE32[value << 5 - bits & 31];
+  return out;
+}
+function installIdForPublicKey(spkiDer) {
+  return base32(createHash40("sha256").update(spkiDer).digest().subarray(0, 20));
+}
+function spkiOf(key) {
+  return key.export({ format: "der", type: "spki" });
+}
+function signedPayload(kind, nonce, installId, extra = "") {
+  return Buffer.from([SIGNATURE_DOMAIN, kind, nonce, installId, extra].join(`
+`), "utf8");
+}
+function signInstallMessage(privateKey, kind, nonce, installId, extra = "") {
+  return base64url2(sign(null, signedPayload(kind, nonce, installId, extra), privateKey));
+}
+function encodeLine(message) {
+  return `${JSON.stringify(message)}
+`;
+}
+function readLines(stream, onLine, onError, onRest) {
+  let buffered = Buffer.alloc(0);
+  const onData = (chunk) => {
+    buffered = Buffer.concat([buffered, typeof chunk === "string" ? Buffer.from(chunk) : chunk]);
+    for (;; ) {
+      const newline = buffered.indexOf(10);
+      if (newline === -1) {
+        if (buffered.length > MAX_CONTROL_LINE_BYTES) {
+          stream.removeListener("data", onData);
+          onError("control line too long");
+        }
+        return;
+      }
+      const line = buffered.subarray(0, newline).toString("utf8");
+      buffered = buffered.subarray(newline + 1);
+      if (newline > MAX_CONTROL_LINE_BYTES) {
+        stream.removeListener("data", onData);
+        onError("control line too long");
+        return;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        stream.removeListener("data", onData);
+        onError("control line is not JSON");
+        return;
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        stream.removeListener("data", onData);
+        onError("control line is not an object");
+        return;
+      }
+      if (onLine(parsed) === "stop") {
+        stream.removeListener("data", onData);
+        onRest?.(buffered);
+        return;
+      }
+    }
+  };
+  stream.on("data", onData);
+}
+var PROTOCOL_VERSION = 1, MAX_CONTROL_LINE_BYTES = 4096, SIGNATURE_DOMAIN = "olympus-connect-relay/v1", BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
+var init_protocol2 = () => {};
+
+// connect-relay/client/csr.ts
+import { createPublicKey as createPublicKey2, sign as sign2 } from "node:crypto";
+function length(n) {
+  if (n < 128)
+    return Buffer.from([n]);
+  const bytes = [];
+  for (let v = n;v > 0; v >>= 8)
+    bytes.unshift(v & 255);
+  return Buffer.from([128 | bytes.length, ...bytes]);
+}
+function tlv(tag, ...content) {
+  const body = Buffer.concat(content);
+  return Buffer.concat([Buffer.from([tag]), length(body.length), body]);
+}
+function oid(dotted) {
+  const parts = dotted.split(".").map(Number);
+  const bytes = [40 * parts[0] + parts[1]];
+  for (const part of parts.slice(2)) {
+    const chunk = [part & 127];
+    for (let v = part >>> 7;v > 0; v >>>= 7)
+      chunk.unshift(128 | v & 127);
+    bytes.push(...chunk);
+  }
+  return tlv(6, Buffer.from(bytes));
+}
+function createCsr(hostname, privateKey) {
+  if (!/^[a-z0-9.-]{1,253}$/.test(hostname))
+    throw new Error("CSR hostname must be a lowercase DNS name");
+  if (privateKey.asymmetricKeyType !== "ec")
+    throw new Error("CSR key must be an EC P-256 key");
+  const spki = createPublicKey2(privateKey).export({ format: "der", type: "spki" });
+  const subject = sequence(set2(sequence(oid(OID_COMMON_NAME), tlv(12, Buffer.from(hostname, "utf8")))));
+  const subjectAltName = sequence(tlv(130, Buffer.from(hostname, "ascii")));
+  const extensions = sequence(sequence(oid(OID_SUBJECT_ALT_NAME), tlv(4, subjectAltName)));
+  const attributes = tlv(160, sequence(oid(OID_EXTENSION_REQUEST), set2(extensions)));
+  const info = sequence(tlv(2, Buffer.from([0])), subject, spki, attributes);
+  const signature = sign2("sha256", info, privateKey);
+  return sequence(info, sequence(oid(OID_ECDSA_WITH_SHA256)), tlv(3, Buffer.from([0]), signature));
+}
+var sequence = (...content) => tlv(48, ...content), set2 = (...content) => tlv(49, ...content), OID_COMMON_NAME = "2.5.4.3", OID_EXTENSION_REQUEST = "1.2.840.113549.1.9.14", OID_SUBJECT_ALT_NAME = "2.5.29.17", OID_ECDSA_WITH_SHA256 = "1.2.840.10045.4.3.2";
+var init_csr = () => {};
+
+// connect-relay/client/acme.ts
+var exports_acme = {};
+__export(exports_acme, {
+  obtainCertificate: () => obtainCertificate,
+  jwkThumbprint: () => jwkThumbprint,
+  fetchTermsOfService: () => fetchTermsOfService,
+  dns01Value: () => dns01Value,
+  AcmeError: () => AcmeError
+});
+import { createHash as createHash41, createPublicKey as createPublicKey3, sign as sign3 } from "node:crypto";
+function jwkThumbprint(jwk) {
+  const canonical2 = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y });
+  return base64url2(createHash41("sha256").update(canonical2).digest());
+}
+function dns01Value(token, thumbprint) {
+  return base64url2(createHash41("sha256").update(`${token}.${thumbprint}`).digest());
+}
+async function fetchTermsOfService(directoryUrl, fetchImpl = fetch) {
+  const response = await fetchImpl(directoryUrl);
+  if (!response.ok)
+    throw new AcmeError(`ACME directory answered HTTP ${response.status}`);
+  const directory = await response.json();
+  const terms = directory.meta?.termsOfService;
+  return typeof terms === "string" && /^https?:\/\//.test(terms) ? terms : undefined;
+}
+async function obtainCertificate(options) {
+  if (!options.termsOfServiceAgreed)
+    throw new AcmeError("the CA subscriber agreement has not been accepted");
+  const fetchImpl = options.fetch ?? fetch;
+  const pollIntervalMs = options.pollIntervalMs ?? 2000;
+  const deadline = Date.now() + (options.timeoutMs ?? 180000);
+  const jwk = createPublicKey3(options.accountKey).export({ format: "jwk" });
+  const thumbprint = jwkThumbprint(jwk);
+  const directory = await (await fetchImpl(options.directoryUrl)).json();
+  let nonce;
+  let kid;
+  const freshNonce = async () => {
+    const response = await fetchImpl(directory.newNonce, { method: "HEAD" });
+    const value = response.headers.get("replay-nonce");
+    if (!value)
+      throw new AcmeError("ACME server returned no nonce");
+    return value;
+  };
+  const post = async (url, payload, accept, retried = false) => {
+    nonce ??= await freshNonce();
+    const header = { alg: "ES256", nonce, url, ...kid ? { kid } : { jwk } };
+    const protectedHeader = base64url2(Buffer.from(JSON.stringify(header)));
+    const encodedPayload = payload === undefined ? "" : base64url2(Buffer.from(JSON.stringify(payload)));
+    const signature = sign3("sha256", Buffer.from(`${protectedHeader}.${encodedPayload}`), {
+      key: options.accountKey,
+      dsaEncoding: "ieee-p1363"
+    });
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers: { "content-type": "application/jose+json", ...accept ? { accept } : {} },
+      body: JSON.stringify({ protected: protectedHeader, payload: encodedPayload, signature: base64url2(signature) })
+    });
+    nonce = response.headers.get("replay-nonce") ?? undefined;
+    const text = await response.text();
+    let body = {};
+    if ((response.headers.get("content-type") ?? "").includes("json") && text)
+      body = JSON.parse(text);
+    if (response.status >= 400) {
+      if (!retried && body.type === "urn:ietf:params:acme:error:badNonce") {
+        nonce = undefined;
+        return post(url, payload, accept, true);
+      }
+      throw new AcmeError(`ACME request failed with HTTP ${response.status}: ${String(body.detail ?? "")}`, body);
+    }
+    return { status: response.status, headers: response.headers, body, text };
+  };
+  const pollUntil = async (url, done) => {
+    for (;; ) {
+      const { body } = await post(url, undefined);
+      const status = String(body.status);
+      if (done(status))
+        return body;
+      if (status === "invalid")
+        throw new AcmeError(`ACME object ${url} became invalid`, body);
+      if (Date.now() > deadline)
+        throw new AcmeError(`timed out waiting for ${url}`);
+      await sleep3(pollIntervalMs);
+    }
+  };
+  const account = await post(directory.newAccount, { termsOfServiceAgreed: true });
+  kid = account.headers.get("location") ?? undefined;
+  if (!kid)
+    throw new AcmeError("ACME account has no URL");
+  const order = await post(directory.newOrder, { identifiers: [{ type: "dns", value: options.hostname }] });
+  const orderUrl = order.headers.get("location");
+  if (!orderUrl)
+    throw new AcmeError("ACME order has no URL");
+  const authorizations = order.body.authorizations;
+  const published = [];
+  try {
+    for (const authorizationUrl of authorizations) {
+      const { body: authorization } = await post(authorizationUrl, undefined);
+      if (authorization.status === "valid")
+        continue;
+      const challenge = authorization.challenges.find((candidate) => candidate.type === "dns-01");
+      if (!challenge)
+        throw new AcmeError("ACME authorization offers no dns-01 challenge");
+      const value = dns01Value(challenge.token, thumbprint);
+      await options.dns.publish(value);
+      published.push(value);
+      if (options.propagationDelayMs)
+        await sleep3(options.propagationDelayMs);
+      await post(challenge.url, {});
+      await pollUntil(authorizationUrl, (status) => status === "valid");
+    }
+    const csr = createCsr(options.hostname, options.certificateKey);
+    await post(order.body.finalize, { csr: base64url2(csr) });
+    const finished = await pollUntil(orderUrl, (status) => status === "valid");
+    const certificate = await post(finished.certificate, undefined, "application/pem-certificate-chain");
+    if (!certificate.text.includes("BEGIN CERTIFICATE"))
+      throw new AcmeError("ACME server returned no certificate");
+    return certificate.text;
+  } finally {
+    for (const value of published)
+      await options.dns.clear(value).catch(() => {});
+  }
+}
+var AcmeError, sleep3 = (ms) => new Promise((resolve8) => setTimeout(resolve8, ms));
+var init_acme = __esm(() => {
+  init_protocol2();
+  init_csr();
+  AcmeError = class AcmeError extends Error {
+    problem;
+    constructor(message, problem) {
+      super(message);
+      this.problem = problem;
+    }
+  };
+});
+
+// connect-relay/client/identity.ts
+import { createPrivateKey, createPublicKey as createPublicKey4, generateKeyPairSync } from "node:crypto";
+import { chmodSync as chmodSync19, existsSync as existsSync38, lstatSync as lstatSync17, mkdirSync as mkdirSync29, readFileSync as readFileSync31, renameSync as renameSync9, writeFileSync as writeFileSync10 } from "node:fs";
+import { join as join50 } from "node:path";
+function ensureStateDir(stateDir) {
+  mkdirSync29(stateDir, { recursive: true, mode: 448 });
+  const dir = join50(stateDir, "connect-relay");
+  mkdirSync29(dir, { recursive: true, mode: 448 });
+  const stat3 = lstatSync17(dir);
+  if (!stat3.isDirectory() || stat3.isSymbolicLink() || typeof process.getuid === "function" && stat3.uid !== process.getuid()) {
+    throw new Error("the connect-relay state directory must be a directory owned by this user");
+  }
+  chmodSync19(dir, 448);
+  return dir;
+}
+function writePrivateFile(path, contents) {
+  const temporary = `${path}.tmp.${process.pid}`;
+  writeFileSync10(temporary, contents, { mode: 384 });
+  chmodSync19(temporary, 384);
+  renameSync9(temporary, path);
+}
+function loadOrCreateKey(path, create) {
+  if (existsSync38(path))
+    return createPrivateKey(readFileSync31(path));
+  const key = create();
+  writePrivateFile(path, key.export({ format: "pem", type: "pkcs8" }));
+  return key;
+}
+function loadOrCreateIdentity(stateDir) {
+  const dir = ensureStateDir(stateDir);
+  const privateKey = loadOrCreateKey(join50(dir, "install-key.pem"), () => generateKeyPairSync("ed25519").privateKey);
+  if (privateKey.asymmetricKeyType !== "ed25519")
+    throw new Error("install-key.pem is not an Ed25519 key");
+  const publicKey = createPublicKey4(privateKey);
+  const spki = spkiOf(publicKey);
+  return { installId: installIdForPublicKey(spki), privateKey, publicKey, publicKeySpki: base64url2(spki) };
+}
+function loadOrCreateAcmeAccountKey(stateDir) {
+  return loadOrCreateKey(join50(ensureStateDir(stateDir), "acme-account-key.pem"), p256);
+}
+function loadOrCreateTlsKey(stateDir) {
+  return loadOrCreateKey(join50(ensureStateDir(stateDir), "tls-key.pem"), p256);
+}
+var p256 = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey;
+var init_identity = __esm(() => {
+  init_protocol2();
+});
+
+// connect-relay/shared/bridge.ts
+function propagateClose(a, b) {
+  const destroyBoth = () => {
+    a.destroy();
+    b.destroy();
+  };
+  a.on("error", destroyBoth);
+  b.on("error", destroyBoth);
+  const onClose = (other) => () => {
+    if (other.destroyed)
+      return;
+    other.end();
+    setTimeout(() => other.destroy(), DRAIN_GRACE_MS).unref();
+  };
+  a.once("close", onClose(b));
+  b.once("close", onClose(a));
+}
+var DRAIN_GRACE_MS = 30000;
+
+// connect-relay/client/local-endpoint.ts
+import http from "node:http";
+import https from "node:https";
+function allowedForwardPath(rawUrl, allowed) {
+  if (!rawUrl || !rawUrl.startsWith("/") || rawUrl.startsWith("//"))
+    return;
+  const rawPath = rawUrl.split("?", 1)[0];
+  if (/%2e|%2f|%5c|\\/i.test(rawPath) || rawPath.split("/").some((segment) => segment === "." || segment === ".."))
+    return;
+  let url;
+  try {
+    url = new URL(rawUrl, "http://relay.invalid");
+  } catch {
+    return;
+  }
+  if (url.pathname !== rawPath)
+    return;
+  if (!allowed.some((prefix) => url.pathname === prefix || url.pathname.startsWith(`${prefix}/`)))
+    return;
+  return `${url.pathname}${url.search}`;
+}
+function forwardedHeaders(incoming, peer, relayAuth) {
+  const headers = {};
+  const connectionTokens = new Set(String(incoming.connection ?? "").split(",").map((token) => token.trim().toLowerCase()).filter(Boolean));
+  for (const [name, value] of Object.entries(incoming)) {
+    const lower = name.toLowerCase();
+    if (value === undefined || HOP_BY_HOP.has(lower) || connectionTokens.has(lower) || UNTRUSTED_FORWARDING.test(lower))
+      continue;
+    headers[lower] = value;
+  }
+  headers["x-olympus-relay"] = "1";
+  if (relayAuth)
+    headers[RELAY_AUTH_HEADER2] = relayAuth;
+  headers["x-forwarded-proto"] = "https";
+  if (typeof incoming.host === "string")
+    headers["x-forwarded-host"] = incoming.host;
+  if (peer)
+    headers["x-forwarded-for"] = peer;
+  return headers;
+}
+async function startLocalEndpoint(options) {
+  const allowed = options.allowedPaths ?? DEFAULT_ALLOWED_PATHS;
+  const target = new URL(options.target);
+  if (target.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(target.hostname)) {
+    throw new Error("the relay client only forwards to a loopback http:// worker");
+  }
+  const server = https.createServer({ key: options.key, cert: options.cert, minVersion: "TLSv1.2", handshakeTimeout: options.handshakeTimeoutMs ?? 1e4 }, (req, res) => {
+    const sourcePort = req.socket.remotePort;
+    options.onRequest?.(sourcePort);
+    res.once("close", () => options.onResponseDone?.(sourcePort));
+    const path = allowedForwardPath(req.url, allowed);
+    if (!path) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not_found", message: "This Olympus address only serves its remote agent endpoints." }));
+      return;
+    }
+    const peer = options.peerAddress?.(req.socket.remotePort);
+    const upstream = http.request({
+      protocol: "http:",
+      hostname: target.hostname.replace(/^\[|\]$/g, ""),
+      port: target.port || 80,
+      method: req.method,
+      path,
+      headers: forwardedHeaders(req.headers, peer, options.relayAuth)
+    }, (upstreamRes) => {
+      const headers = {};
+      for (const [name, value] of Object.entries(upstreamRes.headers)) {
+        if (value !== undefined && !HOP_BY_HOP.has(name.toLowerCase()))
+          headers[name] = value;
+      }
+      res.writeHead(upstreamRes.statusCode ?? 502, headers);
+      upstreamRes.pipe(res);
+    });
+    upstream.on("error", () => {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      res.writeHead(502, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "worker_unavailable", message: "Olympus is running but its local worker did not answer." }));
+    });
+    res.on("close", () => upstream.destroy());
+    req.pipe(upstream);
+  });
+  server.on("upgrade", (_req, socket) => socket.destroy());
+  server.headersTimeout = 15000;
+  server.requestTimeout = 60000;
+  server.on("tlsClientError", () => {});
+  await new Promise((resolve8) => server.listen(0, "127.0.0.1", resolve8));
+  return {
+    port: server.address().port,
+    close: () => new Promise((resolve8) => {
+      server.close(() => resolve8());
+      server.closeAllConnections?.();
+    })
+  };
+}
+var DEFAULT_ALLOWED_PATHS, RELAY_AUTH_HEADER2 = "x-olympus-relay-auth", HOP_BY_HOP, UNTRUSTED_FORWARDING;
+var init_local_endpoint = __esm(() => {
+  DEFAULT_ALLOWED_PATHS = [
+    "/mcp",
+    "/openapi.json",
+    "/api/v1/tools",
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-authorization-server",
+    "/connect/authorize",
+    "/connect/token",
+    "/connect/register",
+    "/connect/revoke"
+  ];
+  HOP_BY_HOP = new Set([
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade"
+  ]);
+  UNTRUSTED_FORWARDING = /^(forwarded|x-forwarded-.*|x-real-ip|x-olympus-relay.*)$/;
+});
+
+// connect-relay/client/relay-client.ts
+import net from "node:net";
+import tls from "node:tls";
+
+class RelayClient {
+  options;
+  session;
+  endpoint;
+  stopped = true;
+  register = false;
+  failures = 0;
+  heartbeat;
+  reconnectTimer;
+  dnsWaiters = new Map;
+  peers = new Map;
+  connectionTimers = new Map;
+  dataSockets = new Set;
+  sequence = 0;
+  dataConnections = 0;
+  hostnameValue;
+  readyWaiters = [];
+  constructor(options) {
+    this.options = options;
+  }
+  get installId() {
+    return this.options.identity.installId;
+  }
+  get activeDataConnections() {
+    return this.dataConnections;
+  }
+  get hostname() {
+    return this.hostnameValue;
+  }
+  start() {
+    if (!this.stopped)
+      return;
+    this.stopped = false;
+    this.connect();
+  }
+  ready() {
+    if (this.hostnameValue && this.session && !this.session.destroyed)
+      return Promise.resolve(this.hostnameValue);
+    return new Promise((resolve8) => this.readyWaiters.push(resolve8));
+  }
+  async setCertificate(material) {
+    const next = await startLocalEndpoint({
+      key: material.key,
+      cert: material.cert,
+      target: this.options.target ?? "http://127.0.0.1:28090",
+      ...this.options.allowedPaths ? { allowedPaths: this.options.allowedPaths } : {},
+      ...this.options.relayAuth ? { relayAuth: this.options.relayAuth } : {},
+      peerAddress: (port) => port === undefined ? undefined : this.peers.get(port),
+      onRequest: (port) => {
+        const state = port === undefined ? undefined : this.connectionTimers.get(port);
+        if (!state)
+          return;
+        state.inFlight += 1;
+        if (state.timer)
+          clearTimeout(state.timer);
+        delete state.timer;
+      },
+      onResponseDone: (port) => {
+        const state = port === undefined ? undefined : this.connectionTimers.get(port);
+        if (!state)
+          return;
+        state.inFlight = Math.max(0, state.inFlight - 1);
+        if (state.inFlight === 0)
+          state.timer = setTimeout(state.expire, this.options.idleTimeoutMs ?? 30000);
+      },
+      handshakeTimeoutMs: this.options.firstRequestTimeoutMs ?? 1e4
+    });
+    const previous = this.endpoint;
+    this.endpoint = next;
+    await previous?.close();
+  }
+  async stop() {
+    this.stopped = true;
+    if (this.reconnectTimer)
+      clearTimeout(this.reconnectTimer);
+    if (this.heartbeat)
+      clearInterval(this.heartbeat);
+    this.session?.destroy();
+    for (const socket of this.dataSockets)
+      socket.destroy();
+    for (const waiter of this.dnsWaiters.values())
+      waiter.reject(new Error("relay client stopped"));
+    this.dnsWaiters.clear();
+    await this.endpoint?.close();
+    this.endpoint = undefined;
+    this.options.onStatus?.({ state: "stopped" });
+  }
+  publish(value) {
+    return this.dnsRequest("acme-dns-set", value);
+  }
+  clear(value) {
+    return this.dnsRequest("acme-dns-clear", value);
+  }
+  dnsRequest(type, value) {
+    const session = this.session;
+    if (!session || session.destroyed || !this.hostnameValue)
+      return Promise.reject(new Error("relay session is not online"));
+    const id = `dns-${++this.sequence}`;
+    return new Promise((resolve8, reject) => {
+      const timer = setTimeout(() => {
+        this.dnsWaiters.delete(id);
+        reject(new Error("relay did not answer the DNS request"));
+      }, 30000);
+      this.dnsWaiters.set(id, {
+        resolve: () => {
+          clearTimeout(timer);
+          resolve8();
+        },
+        reject: (error2) => {
+          clearTimeout(timer);
+          reject(error2);
+        }
+      });
+      this.send(session, { type, id, value });
+    });
+  }
+  send(socket, message) {
+    socket.write(encodeLine(message));
+  }
+  dial(servername) {
+    return tls.connect({
+      host: this.options.relayHost,
+      port: this.options.relayPort ?? 443,
+      servername,
+      minVersion: "TLSv1.2",
+      ...this.options.ca ? { ca: this.options.ca } : {}
+    });
+  }
+  connect() {
+    if (this.stopped)
+      return;
+    this.options.onStatus?.({ state: "connecting" });
+    const socket = this.dial(this.options.controlServerName);
+    this.session = socket;
+    let reason = "connection closed";
+    let replaced = false;
+    const { identity } = this.options;
+    readLines(socket, (message) => {
+      switch (message.type) {
+        case "challenge": {
+          const nonce = String(message.nonce);
+          const kind = this.register ? "register" : "hello";
+          const sig = signInstallMessage(identity.privateKey, kind, nonce, identity.installId);
+          socket.write(encodeLine(kind === "register" ? { type: "register", v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig } : { type: "hello", v: PROTOCOL_VERSION, installId: identity.installId, sig }));
+          return "continue";
+        }
+        case "ready": {
+          const expected = `${identity.installId}.${this.options.zone.toLowerCase()}`;
+          if (message.hostname !== expected || message.installId !== identity.installId) {
+            reason = "relay announced an unexpected hostname";
+            socket.destroy();
+            return "stop";
+          }
+          this.failures = 0;
+          this.register = false;
+          this.hostnameValue = expected;
+          this.options.onStatus?.({ state: "online", hostname: this.hostnameValue });
+          if (this.heartbeat)
+            clearInterval(this.heartbeat);
+          this.heartbeat = setInterval(() => this.send(socket, { type: "ping" }), this.options.heartbeatMs ?? 30000);
+          for (const waiter of this.readyWaiters.splice(0))
+            waiter(this.hostnameValue);
+          return "continue";
+        }
+        case "open":
+          this.attach(String(message.connId), typeof message.remoteAddress === "string" ? message.remoteAddress : undefined);
+          return "continue";
+        case "acme-dns-result": {
+          const waiter = this.dnsWaiters.get(String(message.id));
+          this.dnsWaiters.delete(String(message.id));
+          if (message.ok === true)
+            waiter?.resolve();
+          else
+            waiter?.reject(new Error(`relay refused the DNS request: ${String(message.error ?? "unknown")}`));
+          return "continue";
+        }
+        case "pong":
+          return "continue";
+        case "error":
+          reason = String(message.message ?? message.code);
+          if (message.code === "unregistered")
+            this.register = true;
+          if (message.code === "replaced")
+            replaced = true;
+          return "stop";
+        default:
+          return "continue";
+      }
+    }, (why) => {
+      reason = why;
+      socket.destroy();
+    });
+    socket.on("error", (error2) => {
+      reason = error2.message;
+    });
+    socket.on("close", () => {
+      if (this.session === socket)
+        this.session = undefined;
+      if (this.heartbeat)
+        clearInterval(this.heartbeat);
+      for (const waiter of this.dnsWaiters.values())
+        waiter.reject(new Error("relay session closed"));
+      this.dnsWaiters.clear();
+      if (this.stopped)
+        return;
+      if (replaced) {
+        this.options.onStatus?.({ state: "replaced" });
+        this.schedule(this.options.replacedBackoffMs ?? 5 * 60000);
+        return;
+      }
+      if (this.register && this.failures === 0) {
+        this.failures = 1;
+        this.schedule(0);
+        return;
+      }
+      this.failures += 1;
+      const { minMs, maxMs } = this.options.backoff ?? { minMs: 1000, maxMs: 60000 };
+      const delay = Math.min(maxMs, minMs * 2 ** Math.min(this.failures - 1, 16));
+      const jittered = Math.round(delay / 2 + Math.random() * (delay / 2));
+      this.options.onStatus?.({ state: "offline", reason, retryInMs: jittered });
+      this.schedule(jittered);
+    });
+  }
+  schedule(delayMs) {
+    if (this.reconnectTimer)
+      clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => this.connect(), delayMs);
+  }
+  attach(connId, remoteAddress) {
+    const endpoint = this.endpoint;
+    if (!endpoint || this.dataConnections >= (this.options.maxDataConnections ?? 64))
+      return;
+    const { identity } = this.options;
+    const data = this.dial(this.options.dataServerName ?? `data.${this.options.controlServerName}`);
+    this.dataConnections += 1;
+    this.dataSockets.add(data);
+    data.on("close", () => {
+      this.dataConnections -= 1;
+      this.dataSockets.delete(data);
+    });
+    data.on("error", () => data.destroy());
+    let sentAttach = false;
+    readLines(data, (message) => {
+      if (message.type !== "challenge") {
+        data.destroy();
+        return "stop";
+      }
+      sentAttach = true;
+      const sig = signInstallMessage(identity.privateKey, "attach", String(message.nonce), identity.installId, connId);
+      data.write(encodeLine({ type: "attach", v: PROTOCOL_VERSION, installId: identity.installId, connId, sig }));
+      return "stop";
+    }, () => data.destroy(), (rest) => {
+      if (!sentAttach)
+        return;
+      data.pause();
+      const local = net.connect(endpoint.port, "127.0.0.1");
+      this.dataSockets.add(local);
+      local.on("close", () => this.dataSockets.delete(local));
+      const destroyBoth = () => {
+        data.destroy();
+        local.destroy();
+      };
+      propagateClose(data, local);
+      local.once("connect", () => {
+        const port = local.localPort;
+        if (port !== undefined) {
+          if (remoteAddress)
+            this.peers.set(port, remoteAddress);
+          this.connectionTimers.set(port, {
+            inFlight: 0,
+            timer: setTimeout(destroyBoth, this.options.firstRequestTimeoutMs ?? 1e4),
+            expire: destroyBoth
+          });
+          local.once("close", () => {
+            this.peers.delete(port);
+            const state = this.connectionTimers.get(port);
+            if (state?.timer)
+              clearTimeout(state.timer);
+            this.connectionTimers.delete(port);
+          });
+        }
+        const first = (chunk) => {
+          if (chunk[0] === 123) {
+            destroyBoth();
+            return;
+          }
+          local.write(chunk);
+          data.pipe(local);
+        };
+        if (rest.length > 0)
+          first(rest);
+        else
+          data.once("data", first);
+        local.pipe(data);
+        data.resume();
+      });
+    });
+  }
+}
+var init_relay_client = __esm(() => {
+  init_protocol2();
+  init_local_endpoint();
+});
+
+// connect-relay/client/connect.ts
+var exports_connect = {};
+__export(exports_connect, {
+  startConnect: () => startConnect,
+  certificateIsFresh: () => certificateIsFresh,
+  LETS_ENCRYPT_DIRECTORY: () => LETS_ENCRYPT_DIRECTORY
+});
+import { X509Certificate } from "node:crypto";
+import { existsSync as existsSync39, readFileSync as readFileSync32 } from "node:fs";
+import { join as join51 } from "node:path";
+function certificateIsFresh(pem, hostname, now = Date.now()) {
+  if (!pem)
+    return false;
+  try {
+    const certificate = new X509Certificate(pem);
+    if (!certificate.checkHost(hostname))
+      return false;
+    const notBefore = Date.parse(certificate.validFrom);
+    const notAfter = Date.parse(certificate.validTo);
+    return notAfter - now > (notAfter - notBefore) / 3;
+  } catch {
+    return false;
+  }
+}
+function certificateIsValid(pem, hostname, now = Date.now()) {
+  if (!pem)
+    return false;
+  try {
+    const certificate = new X509Certificate(pem);
+    return Boolean(certificate.checkHost(hostname)) && Date.parse(certificate.validTo) > now;
+  } catch {
+    return false;
+  }
+}
+function certificateNotAfter(pem) {
+  return new Date(Date.parse(new X509Certificate(pem).validTo)).toISOString();
+}
+async function startConnect(options) {
+  const identity = loadOrCreateIdentity(options.stateDir);
+  const client = new RelayClient({ ...options, identity });
+  const certPath = join51(ensureStateDir(options.stateDir), "tls-cert.pem");
+  const tlsKey = loadOrCreateTlsKey(options.stateDir);
+  const tlsKeyPem = tlsKey.export({ format: "pem", type: "pkcs8" });
+  const directoryUrl = options.acme.directoryUrl ?? LETS_ENCRYPT_DIRECTORY;
+  const awaitFirst = options.awaitFirstCertificate !== false;
+  const renewCheckMs = options.renewCheckMs ?? 12 * 60 * 60 * 1000;
+  const backoff = options.retryBackoff ?? { minMs: 60000, maxMs: 60 * 60 * 1000 };
+  let renewing;
+  let served;
+  let stopped = false;
+  let failures = 0;
+  let retryTimer;
+  let status = { state: "none" };
+  const report = (next) => {
+    status = next;
+    options.onCertificate?.(next);
+  };
+  const serve2 = async (pem, hostname) => {
+    if (pem !== served) {
+      await client.setCertificate({ key: tlsKeyPem, cert: pem });
+      served = pem;
+    }
+    return { hostname, notAfter: certificateNotAfter(pem) };
+  };
+  const agreed = async () => {
+    const decision = options.acme.termsOfServiceAgreed;
+    if (typeof decision === "boolean")
+      return { ok: decision, termsUrl: undefined };
+    const termsUrl = await fetchTermsOfService(directoryUrl, options.acme.fetch ?? fetch);
+    return { ok: await decision(termsUrl), termsUrl };
+  };
+  const ensureCertificate = async () => {
+    const hostname = await client.ready();
+    let pem = existsSync39(certPath) ? readFileSync32(certPath, "utf8") : undefined;
+    if (!certificateIsFresh(pem, hostname)) {
+      const terms = await agreed();
+      if (!terms.ok) {
+        const serving = pem && certificateIsValid(pem, hostname) ? await serve2(pem, hostname) : undefined;
+        report({ state: "awaiting_terms", termsUrl: terms.termsUrl, ...serving ? { serving } : {} });
+        return;
+      }
+      report({ state: "issuing" });
+      pem = await obtainCertificate({
+        directoryUrl,
+        accountKey: loadOrCreateAcmeAccountKey(options.stateDir),
+        certificateKey: tlsKey,
+        hostname,
+        dns: client,
+        termsOfServiceAgreed: true,
+        ...options.acme.fetch ? { fetch: options.acme.fetch } : {},
+        propagationDelayMs: options.acme.propagationDelayMs ?? 1e4,
+        ...options.acme.pollIntervalMs ? { pollIntervalMs: options.acme.pollIntervalMs } : {}
+      });
+      writePrivateFile(certPath, pem);
+    }
+    failures = 0;
+    report({ state: "serving", ...await serve2(pem, hostname) });
+  };
+  const check = () => {
+    if (retryTimer)
+      clearTimeout(retryTimer);
+    retryTimer = undefined;
+    renewing ??= ensureCertificate().catch((error2) => {
+      if (stopped)
+        throw error2;
+      failures += 1;
+      const delay = Math.min(backoff.maxMs, backoff.minMs * 2 ** Math.min(failures - 1, 16));
+      report({ state: "failed", reason: error2 instanceof Error ? error2.message : String(error2), retryInMs: delay });
+      if (!awaitFirst) {
+        retryTimer = setTimeout(() => void check().catch(() => {}), delay);
+        retryTimer.unref?.();
+      }
+      throw error2;
+    }).finally(() => {
+      renewing = undefined;
+    });
+    return renewing;
+  };
+  client.start();
+  if (awaitFirst) {
+    try {
+      await check();
+    } catch (error2) {
+      await client.stop();
+      throw error2;
+    }
+  } else {
+    check().catch(() => {});
+  }
+  const timer = setInterval(() => void check().catch(() => {}), renewCheckMs);
+  timer.unref?.();
+  return {
+    client,
+    url: async () => `https://${await client.ready()}/mcp`,
+    certificate: () => status,
+    checkCertificate: () => check().catch(() => {}),
+    stop: async () => {
+      stopped = true;
+      clearInterval(timer);
+      if (retryTimer)
+        clearTimeout(retryTimer);
+      await client.stop();
+    }
+  };
+}
+var LETS_ENCRYPT_DIRECTORY = "https://acme-v02.api.letsencrypt.org/directory";
+var init_connect2 = __esm(() => {
+  init_acme();
+  init_identity();
+  init_relay_client();
+});
+
+// src/core/remote-relay-runtime.ts
+var exports_remote_relay_runtime = {};
+__export(exports_remote_relay_runtime, {
+  startRelayRuntime: () => startRelayRuntime,
+  runRelayRuntimeProcess: () => runRelayRuntimeProcess,
+  RELAY_TARGET_ENV: () => RELAY_TARGET_ENV,
+  RELAY_HOST_ENV: () => RELAY_HOST_ENV
+});
+async function startRelayRuntime(options) {
+  const zone = options.env[RELAY_HOST_ENV]?.trim().toLowerCase();
+  if (!zone)
+    throw new Error(`${RELAY_HOST_ENV} is required.`);
+  const target = loopbackWorkerOrigin(options.env[RELAY_TARGET_ENV]);
+  if (!target)
+    throw new Error(`${RELAY_TARGET_ENV} must be the loopback http origin of the Olympus worker.`);
+  const dataDir = olympusDataDir(options.env);
+  const dir = remoteAccessDir(options.env);
+  const relayAuth = loadOrCreateRelayAuthSecret(dir);
+  const controlHost = `relay.${zone}`;
+  const status = {
+    ...emptyRemoteAccessStatus("relay"),
+    relay_host: zone,
+    local_url: target,
+    instance_id: options.instanceId,
+    pid: process.pid,
+    relay: { state: "connecting", reason: null, retry_in_ms: null },
+    certificate: { state: "none", not_after: null, reason: null, retry_in_ms: null }
+  };
+  let stopped = false;
+  let servedHostname;
+  const write = () => {
+    status.updated_at = new Date().toISOString();
+    status.public_base_url = !stopped && servedHostname ? `https://${servedHostname}` : null;
+    writeRemoteAccessStatus(dir, status);
+  };
+  write();
+  const onStatus = (next) => {
+    if (stopped && next.state !== "stopped")
+      return;
+    status.relay = {
+      state: next.state,
+      reason: next.state === "offline" ? next.reason : null,
+      retry_in_ms: next.state === "offline" ? next.retryInMs : null
+    };
+    if (next.state === "online")
+      status.hostname = next.hostname;
+    write();
+  };
+  const onCertificate = (next) => {
+    if (stopped)
+      return;
+    const serving = next.state === "serving" ? next : next.state === "awaiting_terms" ? next.serving : undefined;
+    if (serving) {
+      servedHostname = serving.hostname;
+      status.hostname = serving.hostname;
+    }
+    status.certificate = {
+      state: next.state,
+      not_after: serving?.notAfter ?? status.certificate?.not_after ?? null,
+      reason: next.state === "failed" ? next.reason : null,
+      retry_in_ms: next.state === "failed" ? next.retryInMs : null
+    };
+    if (next.state === "awaiting_terms")
+      status.terms_url = next.termsUrl ?? null;
+    write();
+  };
+  const handle = await startConnect({
+    stateDir: dataDir,
+    relayHost: options.relayAddress?.host ?? controlHost,
+    ...options.relayAddress ? { relayPort: options.relayAddress.port } : {},
+    controlServerName: controlHost,
+    zone,
+    target,
+    relayAuth,
+    ...options.ca ? { ca: options.ca } : {},
+    ...options.heartbeatMs ? { heartbeatMs: options.heartbeatMs } : {},
+    ...options.backoff ? { backoff: options.backoff } : {},
+    ...options.retryBackoff ? { retryBackoff: options.retryBackoff } : {},
+    onStatus,
+    onCertificate,
+    awaitFirstCertificate: false,
+    acme: {
+      directoryUrl: options.acmeDirectoryUrl ?? LETS_ENCRYPT_DIRECTORY,
+      termsOfServiceAgreed: (termsUrl) => {
+        if (status.terms_url !== (termsUrl ?? null)) {
+          status.terms_url = termsUrl ?? null;
+          write();
+        }
+        return termsAccepted(dir, termsUrl);
+      },
+      ...options.acmePropagationDelayMs !== undefined ? { propagationDelayMs: options.acmePropagationDelayMs } : {},
+      ...options.acmePollIntervalMs !== undefined ? { pollIntervalMs: options.acmePollIntervalMs } : {}
+    }
+  });
+  status.install_id = handle.client.installId;
+  write();
+  const termsTimer = setInterval(() => {
+    if (status.certificate?.state !== "awaiting_terms")
+      return;
+    if (termsAccepted(dir, status.terms_url ?? undefined))
+      handle.checkCertificate();
+  }, options.termsPollMs ?? 5000);
+  termsTimer.unref?.();
+  return {
+    handle,
+    async stop() {
+      if (stopped)
+        return;
+      stopped = true;
+      clearInterval(termsTimer);
+      await handle.stop();
+      status.relay = { state: "stopped", reason: null, retry_in_ms: null };
+      write();
+    }
+  };
+}
+async function runRelayRuntimeProcess(instanceId, overrides = {}) {
+  const runtime = await startRelayRuntime({ ...overrides, env: process.env, instanceId });
+  await new Promise((resolve8) => {
+    const shutdown = () => {
+      runtime.stop().finally(resolve8);
+    };
+    process.once("SIGTERM", shutdown);
+    process.once("SIGINT", shutdown);
+  });
+}
+var RELAY_HOST_ENV = "OLYMPUS_RELAY_HOST", RELAY_TARGET_ENV = "OLYMPUS_RELAY_TARGET";
+var init_remote_relay_runtime = __esm(() => {
+  init_connect2();
+  init_remote_access();
+});
+
 // src/core/native-process-service.ts
 var init_native_process_service = () => {};
 
@@ -68927,17 +70361,17 @@ var init_drive_extraction_source = __esm(() => {
 });
 
 // src/workers/file-extraction/job-store.ts
-import { chmodSync as chmodSync19, mkdirSync as mkdirSync29 } from "node:fs";
-import { createHash as createHash40, randomUUID as randomUUID16 } from "node:crypto";
+import { chmodSync as chmodSync20, mkdirSync as mkdirSync30 } from "node:fs";
+import { createHash as createHash42, randomUUID as randomUUID16 } from "node:crypto";
 import { homedir as homedir41 } from "node:os";
-import { dirname as dirname39, join as join50 } from "node:path";
+import { dirname as dirname39, join as join52 } from "node:path";
 import { Database as Database15 } from "bun:sqlite";
 function defaultFileExtractionJobsDbPath(env = process.env) {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override)
     return override;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join50(homedir41(), ".local", "share");
-  return join50(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join52(homedir41(), ".local", "share");
+  return join52(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
 }
 
 class LocalFileExtractionJobStore {
@@ -68950,11 +70384,11 @@ class LocalFileExtractionJobStore {
     this.readonly = options.readonly === true;
     const inMemory = dbPath === ":memory:";
     if (!inMemory && !this.readonly) {
-      mkdirSync29(dirname39(dbPath), { recursive: true, mode: 448 });
+      mkdirSync30(dirname39(dbPath), { recursive: true, mode: 448 });
     }
     this.db = this.readonly ? new Database15(dbPath, { readonly: true }) : new Database15(dbPath, { create: true });
     if (!inMemory && !this.readonly)
-      chmodSync19(dbPath, 384);
+      chmodSync20(dbPath, 384);
     const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
     if (this.readonly) {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
@@ -69988,7 +71422,7 @@ function makeJobId() {
   return `fx_${randomUUID16()}`;
 }
 function hashString5(value) {
-  return createHash40("sha256").update(value).digest("hex");
+  return createHash42("sha256").update(value).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -70650,7 +72084,7 @@ var init_document_formats = __esm(() => {
 // src/workers/file-extraction/extractors/text.ts
 import { mkdtemp as mkdtemp2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir as tmpdir4 } from "node:os";
-import { join as join51 } from "node:path";
+import { join as join53 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version2 = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -70889,9 +72323,9 @@ async function extractPdfText(input) {
   });
 }
 async function extractPdfTextWithCommand(input) {
-  const tempDir = await mkdtemp2(join51(tmpdir4(), TEMP_DIR_PREFIX2));
+  const tempDir = await mkdtemp2(join53(tmpdir4(), TEMP_DIR_PREFIX2));
   try {
-    const inputPath = join51(tempDir, "input.pdf");
+    const inputPath = join53(tempDir, "input.pdf");
     await writeFile2(inputPath, input.context.bytes);
     const result = await input.commandRunner({
       command: input.command,
@@ -71126,7 +72560,7 @@ var init_text = __esm(() => {
 // src/workers/file-extraction/extractors/ocr.ts
 import { mkdtemp as mkdtemp3, readFile as readFile8, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
-import { join as join52 } from "node:path";
+import { join as join54 } from "node:path";
 function createOcrExtractor(options = {}) {
   const kind = options.kind ?? OCR_EXTRACTOR_KIND;
   const version2 = options.version ?? OCR_EXTRACTOR_VERSION;
@@ -71190,11 +72624,11 @@ async function runOcrLane(run) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp3(join52(tmpdir5(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join54(tmpdir5(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join52(tempDir, "input.pdf");
-    const outputPath = join52(tempDir, "output.pdf");
-    const sidecarPath = join52(tempDir, "sidecar.txt");
+    const inputPath = join54(tempDir, "input.pdf");
+    const outputPath = join54(tempDir, "output.pdf");
+    const sidecarPath = join54(tempDir, "sidecar.txt");
     await writeFile3(inputPath, input.bytes);
     try {
       await input.commandRunner({
@@ -71251,9 +72685,9 @@ async function extractPdfOcr(input) {
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp3(join52(tmpdir5(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join54(tmpdir5(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join52(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+    const inputPath = join54(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
     await writeFile3(inputPath, input.bytes);
     const result = await input.commandRunner({
       command: OCR_IMAGE_COMMAND,
@@ -71531,7 +72965,7 @@ var init_remote_vlm = __esm(() => {
 // src/workers/file-extraction/extractors/transcription.ts
 import { mkdtemp as mkdtemp4, readFile as readFile9, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir6 } from "node:os";
-import { extname, join as join53 } from "node:path";
+import { extname, join as join55 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
   const argv = command.trim().split(/\s+/).filter(Boolean);
   if (argv.length === 0) {
@@ -71607,8 +73041,8 @@ function createTranscriptionExtractor(options = {}) {
       try {
         let inputPath = input.localPath;
         if (!inputPath) {
-          tempDir = await mkdtemp4(join53(tmpdir6(), tempDirPrefix));
-          inputPath = join53(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
+          tempDir = await mkdtemp4(join55(tmpdir6(), tempDirPrefix));
+          inputPath = join55(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile4(inputPath, bytes);
         }
         const transcribed = await transcriber.transcribe({
@@ -71748,9 +73182,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer5 } from "node:buffer";
-import { createHash as createHash41 } from "node:crypto";
+import { createHash as createHash43 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash41("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash43("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -72376,7 +73810,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash42 } from "node:crypto";
+import { createHash as createHash44 } from "node:crypto";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
     return { allowed: true };
@@ -72855,7 +74289,7 @@ function retryable(errorKind, error2) {
 }
 function hashError(error2) {
   const detail = error2 instanceof Error ? `${error2.name}:${error2.message}` : String(error2);
-  return createHash42("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash44("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error2) {
   const message = error2 instanceof Error ? error2.message : "";
@@ -72970,7 +74404,7 @@ function summarizeEgressDestinations(values) {
   return { egressDestination: "venice_mixed_approved" };
 }
 function hashToken(value) {
-  return createHash42("sha256").update(value).digest("hex");
+  return createHash44("sha256").update(value).digest("hex");
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS;
 var init_runner = __esm(() => {
@@ -72993,12 +74427,12 @@ var init_runner = __esm(() => {
 
 // src/workers/file-extraction/tiered-store-sink.ts
 function createTieredStoreExtractionSink(options) {
-  const set2 = options.set;
-  const classificationNow = () => options.tierClassification ?? set2.classification();
+  const set3 = options.set;
+  const classificationNow = () => options.tierClassification ?? set3.classification();
   const sinkFor = (store, recordContentTier, tierClassification) => createConnectorStoreExtractionSink({
     store,
     classify: (item) => buildSourceSensitivity({
-      trustTier: store.activeLocalItemRow(item.identity.localItemId)?.trustTier ?? set2.restingTierFor(store.trustDomain),
+      trustTier: store.activeLocalItemRow(item.identity.localItemId)?.trustTier ?? set3.restingTierFor(store.trustDomain),
       trustDomain: store.trustDomain
     }),
     syncConnectorId: options.syncConnectorId,
@@ -73011,11 +74445,11 @@ function createTieredStoreExtractionSink(options) {
   return {
     async accept(request) {
       const ref = request.ref;
-      const stored = TIER_DOMAIN_ORDER.map((domain) => set2.store(domain)?.activeLocalItemRow(ref.localItemId)?.identity).find((candidate) => candidate !== undefined && candidate.provider === ref.provider && candidate.accountScope === ref.accountScope && candidate.providerItemId === ref.providerItemId);
+      const stored = TIER_DOMAIN_ORDER.map((domain) => set3.store(domain)?.activeLocalItemRow(ref.localItemId)?.identity).find((candidate) => candidate !== undefined && candidate.provider === ref.provider && candidate.accountScope === ref.accountScope && candidate.providerItemId === ref.providerItemId);
       const identity = stored ?? { provider: ref.provider, accountScope: ref.accountScope, providerItemId: ref.providerItemId };
-      const ledger = set2.ledger;
+      const ledger = set3.ledger;
       if (!ledger.isRouted(identity)) {
-        const legacy = legacyStoreFor(set2, ref.localItemId);
+        const legacy = legacyStoreFor(set3, ref.localItemId);
         if (!legacy)
           return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
         return sinkFor(legacy, true, classificationNow()).accept(request);
@@ -73025,8 +74459,8 @@ function createTieredStoreExtractionSink(options) {
         return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
       const current = ledger.copies(identity).filter((copy) => copy.state === "current");
       const anchor = current.find((copy) => copy.layers !== "content");
-      const anchorDomain = anchor ? set2.domainForCorpus(anchor.corpusId) : undefined;
-      const anchorStore = anchorDomain ? set2.store(anchorDomain) : undefined;
+      const anchorDomain = anchor ? set3.domainForCorpus(anchor.corpusId) : undefined;
+      const anchorStore = anchorDomain ? set3.store(anchorDomain) : undefined;
       if (!anchor || !anchorStore)
         return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
       const plan = planExtractionSinkWrite(anchorStore, request);
@@ -73071,7 +74505,7 @@ function createTieredStoreExtractionSink(options) {
         snifferId: content.snifferId
       };
       if (decision.contentTier === "secrets") {
-        recordSecret(set2, plan.item, request.text, {
+        recordSecret(set3, plan.item, request.text, {
           namesReleasable: record3.metadataTier === "public" || record3.metadataTier === "private",
           sourceScope: anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope
         });
@@ -73081,16 +74515,16 @@ function createTieredStoreExtractionSink(options) {
           identity: plan.item.identity,
           copies: recorded.previousCopies,
           storeFor: (corpusId) => {
-            const domain = set2.domainForCorpus(corpusId);
-            return domain ? set2.store(domain) : undefined;
+            const domain = set3.domainForCorpus(corpusId);
+            return domain ? set3.store(domain) : undefined;
           },
           connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID
         });
         return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
       }
-      const placement = set2.placementFor(decision);
+      const placement = set3.placementFor(decision);
       const contentCopy = placement.copies.find((copy) => copy.layers !== "metadata");
-      const contentStore = contentCopy ? set2.store(contentCopy.trustDomain, { create: true }) : undefined;
+      const contentStore = contentCopy ? set3.store(contentCopy.trustDomain, { create: true }) : undefined;
       if (!contentCopy || !contentStore)
         return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
       if (record3.contentRead) {
@@ -73125,7 +74559,7 @@ function createTieredStoreExtractionSink(options) {
               kind: "store",
               layer: "content",
               sensitivity: buildSourceSensitivity({
-                trustTier: set2.restingTierFor(contentCopy.trustDomain),
+                trustTier: set3.restingTierFor(contentCopy.trustDomain),
                 trustDomain: contentCopy.trustDomain
               })
             })
@@ -73143,9 +74577,9 @@ function createTieredStoreExtractionSink(options) {
 function skipped(skippedReason) {
   return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason };
 }
-function legacyStoreFor(set2, localItemId) {
-  const legacy = TIER_DOMAIN_ORDER.filter((domain) => set2.legSpec(domain)?.legacy === true).flatMap((domain) => {
-    const store = set2.store(domain);
+function legacyStoreFor(set3, localItemId) {
+  const legacy = TIER_DOMAIN_ORDER.filter((domain) => set3.legSpec(domain)?.legacy === true).flatMap((domain) => {
+    const store = set3.store(domain);
     return store ? [store] : [];
   });
   return legacy.find((store) => store.activeLocalItemRow(localItemId) !== undefined) ?? legacy[0];
@@ -73155,8 +74589,8 @@ function samePlacement2(current, placement) {
     return false;
   return placement.copies.every((planned) => current.some((copy) => copy.corpusId === planned.corpusId && copy.layers === planned.layers));
 }
-function recordSecret(set2, item, text, options) {
-  const index = set2.secrets();
+function recordSecret(set3, item, text, options) {
+  const index = set3.secrets();
   if (!index)
     return;
   const title = stringMetadata2(item, ["title", "name", "subject"]);
@@ -73208,22 +74642,22 @@ var init_tiered_store_sink = __esm(() => {
 });
 
 // src/workers/connector-store/tiered-extraction.ts
-function tieredExtractionView(set2) {
-  const legacyDomains = () => TIER_DOMAIN_ORDER.filter((domain) => set2.legSpec(domain)?.legacy === true);
-  const routedDomains = () => TIER_DOMAIN_ORDER.filter((domain) => set2.legSpec(domain) !== undefined && set2.legSpec(domain)?.legacy !== true);
+function tieredExtractionView(set3) {
+  const legacyDomains = () => TIER_DOMAIN_ORDER.filter((domain) => set3.legSpec(domain)?.legacy === true);
+  const routedDomains = () => TIER_DOMAIN_ORDER.filter((domain) => set3.legSpec(domain) !== undefined && set3.legSpec(domain)?.legacy !== true);
   const order = () => [...legacyDomains(), ...routedDomains()];
   const storesHoldingRow = (localItemId) => order().flatMap((domain) => {
-    const store = set2.store(domain);
+    const store = set3.store(domain);
     return store && store.activeLocalItemRow(localItemId) ? [store] : [];
   });
   const keep = (domain, store, candidates) => {
-    const copies = set2.ledger.copiesForMany(candidates.map((candidate) => candidate.identity));
-    const legacyLeg = set2.legSpec(domain)?.legacy === true;
+    const copies = set3.ledger.copiesForMany(candidates.map((candidate) => candidate.identity));
+    const legacyLeg = set3.legSpec(domain)?.legacy === true;
     return candidates.filter((candidate) => {
       const itemCopies = copies.get(tierLedgerIdentityKey(candidate.identity)) ?? [];
       if (itemCopies.length === 0)
-        return legacyLeg && !set2.ledger.isRouted(candidate.identity);
-      return routedCandidate(store.corpusId, itemCopies) && set2.ledger.getCurrent(candidate.identity)?.state !== "moving";
+        return legacyLeg && !set3.ledger.isRouted(candidate.identity);
+      return routedCandidate(store.corpusId, itemCopies) && set3.ledger.getCurrent(candidate.identity)?.state !== "moving";
     });
   };
   return {
@@ -73240,12 +74674,12 @@ function tieredExtractionView(set2) {
           throw new Error("Extraction candidate cursor names a store this set does not have.");
         index = position;
         cursor = separator < 0 ? undefined : rest.slice(separator + 1) || undefined;
-      } else if (cursor !== undefined && set2.legSpec(domains[0])?.legacy !== true) {
+      } else if (cursor !== undefined && set3.legSpec(domains[0])?.legacy !== true) {
         throw new Error("Extraction candidate cursor has no legacy store to resume.");
       }
       for (;index < domains.length; index += 1) {
         const domain = domains[index];
-        const store = set2.store(domain);
+        const store = set3.store(domain);
         if (!store) {
           cursor = undefined;
           continue;
@@ -73258,16 +74692,16 @@ function tieredExtractionView(set2) {
           return {
             candidates,
             done: false,
-            nextCursor: encodeCursor2(set2, domains, index, page.nextCursor),
+            nextCursor: encodeCursor2(set3, domains, index, page.nextCursor),
             ...page.skippedByDisposition ? { skippedByDisposition: page.skippedByDisposition } : {}
           };
         }
         if (last || candidates.length > 0) {
-          const next = nextOpenIndex(set2, domains, index + 1);
+          const next = nextOpenIndex(set3, domains, index + 1);
           return {
             candidates,
             done: next === undefined,
-            ...next !== undefined ? { nextCursor: encodeCursor2(set2, domains, next, undefined) } : {},
+            ...next !== undefined ? { nextCursor: encodeCursor2(set3, domains, next, undefined) } : {},
             ...page.skippedByDisposition ? { skippedByDisposition: page.skippedByDisposition } : {}
           };
         }
@@ -73296,7 +74730,7 @@ function tieredExtractionView(set2) {
         const located = store.activeLocalItemRow(localItemId);
         if (!located)
           continue;
-        if (set2.ledger.isRouted(located.identity))
+        if (set3.ledger.isRouted(located.identity))
           routed = true;
         if (tier === undefined || TRUST_TIER_RANK[located.trustTier] > TRUST_TIER_RANK[tier])
           tier = located.trustTier;
@@ -73314,15 +74748,15 @@ function routedCandidate(corpusId, copies) {
     return false;
   return !current.some((copy) => copy.corpusId !== corpusId && copy.layers === "content");
 }
-function encodeCursor2(set2, domains, index, storeCursor) {
+function encodeCursor2(set3, domains, index, storeCursor) {
   const domain = domains[index];
-  if (index === 0 && set2.legSpec(domain)?.legacy === true && storeCursor !== undefined)
+  if (index === 0 && set3.legSpec(domain)?.legacy === true && storeCursor !== undefined)
     return storeCursor;
   return `${TIER_CURSOR_PREFIX}${domain}:${storeCursor ?? ""}`;
 }
-function nextOpenIndex(set2, domains, from) {
+function nextOpenIndex(set3, domains, from) {
   for (let index = from;index < domains.length; index += 1) {
-    if (set2.store(domains[index]))
+    if (set3.store(domains[index]))
       return index;
   }
   return;
@@ -73848,20 +75282,20 @@ var init_analyst_openai = __esm(() => {
 
 // src/core/venice-model-catalog.ts
 import {
-  existsSync as existsSync38,
-  mkdirSync as mkdirSync30,
-  readFileSync as readFileSync31,
-  renameSync as renameSync9,
+  existsSync as existsSync40,
+  mkdirSync as mkdirSync31,
+  readFileSync as readFileSync33,
+  renameSync as renameSync10,
   rmSync as rmSync9,
-  writeFileSync as writeFileSync10
+  writeFileSync as writeFileSync11
 } from "node:fs";
 import { randomUUID as randomUUID17 } from "node:crypto";
 import { homedir as homedir42 } from "node:os";
-import { dirname as dirname40, isAbsolute as isAbsolute8, join as join54 } from "node:path";
+import { dirname as dirname40, isAbsolute as isAbsolute8, join as join56 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir42(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute8(configuredRoot) ? configuredRoot : join54(homeDir, ".cache");
-  return join54(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute8(configuredRoot) ? configuredRoot : join56(homeDir, ".cache");
+  return join56(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -74031,11 +75465,11 @@ function parseCatalogModels(payload) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync38(path))
+  if (!existsSync40(path))
     return;
   let payload;
   try {
-    payload = JSON.parse(readFileSync31(path, "utf8"));
+    payload = JSON.parse(readFileSync33(path, "utf8"));
   } catch {
     return;
   }
@@ -74067,16 +75501,16 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID17()}.tmp`;
   try {
-    mkdirSync30(dirname40(path), { recursive: true, mode: 448 });
+    mkdirSync31(dirname40(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
-    writeFileSync10(tempPath, `${JSON.stringify({
+    writeFileSync11(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
       catalog_type: catalog.type,
       fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
       models
     }, null, 2)}
 `, { mode: 384 });
-    renameSync9(tempPath, path);
+    renameSync10(tempPath, path);
   } catch {} finally {
     rmSync9(tempPath, { force: true });
   }
@@ -74572,7 +76006,7 @@ import {
   unlink as unlink2
 } from "node:fs/promises";
 import { homedir as homedir43 } from "node:os";
-import { dirname as dirname41, join as join55 } from "node:path";
+import { dirname as dirname41, join as join57 } from "node:path";
 function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
   const audit = result.audit;
   const skipped2 = audit.skipped_corpora.map((skip) => ({
@@ -74739,8 +76173,8 @@ function resolveSourceAnswerLatencyLogPath(env = process.env) {
     }
     return raw;
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join55(homedir43(), ".local", "share");
-  return join55(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join57(homedir43(), ".local", "share");
+  return join57(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
 }
 async function makeExistingLedgerPrivate(path) {
   try {
@@ -74842,8 +76276,8 @@ var init_answer_latency_log = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash43 } from "node:crypto";
-import { readFileSync as readFileSync32 } from "node:fs";
+import { createHash as createHash45 } from "node:crypto";
+import { readFileSync as readFileSync34 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir44 } from "node:os";
 import { resolve as resolvePath } from "node:path";
@@ -75010,7 +76444,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync32(trustPath, "utf8");
+        this.caPem = readFileSync34(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -75226,15 +76660,15 @@ async function runSourceWatchEvaluationPass(input) {
 function resolveSourceWatchGatewayConnection(config2, options = {}) {
   const env = options.env ?? process.env;
   const gateway = asRecord11(asRecord11(config2)?.gateway);
-  const tls = asRecord11(gateway?.tls);
-  if (tls?.enabled !== undefined && typeof tls.enabled !== "boolean") {
+  const tls2 = asRecord11(gateway?.tls);
+  if (tls2?.enabled !== undefined && typeof tls2.enabled !== "boolean") {
     throw new TypeError("OpenClaw gateway.tls.enabled must be a boolean.");
   }
-  const tlsEnabled = tls?.enabled === true;
+  const tlsEnabled = tls2?.enabled === true;
   const port = resolveGatewayPortValue(options.gatewayPort ?? gateway?.port, env);
   let certificatePath;
   if (tlsEnabled) {
-    certificatePath = resolvePublicCertificatePath(tls?.certPath, env, "gateway.tls.certPath");
+    certificatePath = resolvePublicCertificatePath(tls2?.certPath, env, "gateway.tls.certPath");
     if (!certificatePath) {
       throw new TypeError("OpenClaw HTTPS gateway requires gateway.tls.certPath.");
     }
@@ -75281,14 +76715,14 @@ async function loadOpenClawGatewayConfig(env = process.env) {
     if (!record3 || record3.ok === false) {
       throw new Error("OpenClaw gateway configuration was refused.");
     }
-    const tls = asRecord11(record3.tls);
+    const tls2 = asRecord11(record3.tls);
     return {
       gateway: {
         ...record3.port !== undefined ? { port: record3.port } : {},
-        ...tls ? {
+        ...tls2 ? {
           tls: {
-            ...tls.enabled !== undefined ? { enabled: tls.enabled } : {},
-            ...tls.certPath !== undefined ? { certPath: tls.certPath } : {}
+            ...tls2.enabled !== undefined ? { enabled: tls2.enabled } : {},
+            ...tls2.certPath !== undefined ? { certPath: tls2.certPath } : {}
           }
         } : {}
       }
@@ -75316,7 +76750,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2565(value) {
-  return createHash43("sha256").update(value, "utf8").digest("hex");
+  return createHash45("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -77981,7 +79415,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash44 } from "node:crypto";
+import { createHash as createHash46 } from "node:crypto";
 function escapeHtml(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -78041,14 +79475,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash44("sha256").update(normalised).digest("hex");
+  return createHash46("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml(input.title) : `<a class="lead" href="${escapeHtml(leadHref)}">${escapeHtml(input.title)}</a> <span class="crumb">/</span> ${escapeHtml(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash44("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash46("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -81435,7 +82869,7 @@ var init_control_ui_contract = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac3, randomBytes as randomBytes8, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes9, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -81787,7 +83221,7 @@ function dashboardControlExpiresAtMs(parts) {
 function mintDashboardControlSession(authToken, origin, nowMs) {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes8(24).toString("base64url"),
+    nonce: randomBytes9(24).toString("base64url"),
     issuedSeconds: nowSeconds,
     originTag: dashboardControlOriginTag(authToken, origin)
   };
@@ -82230,35 +83664,35 @@ var init_embedding_ledger2 = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync31, readFileSync as readFileSync33, rmSync as rmSync10, writeFileSync as writeFileSync11 } from "node:fs";
-import { dirname as dirname42, join as join56 } from "node:path";
+import { mkdirSync as mkdirSync32, readFileSync as readFileSync35, rmSync as rmSync10, writeFileSync as writeFileSync12 } from "node:fs";
+import { dirname as dirname42, join as join58 } from "node:path";
 import { homedir as homedir45 } from "node:os";
 function guardStateDir(env) {
   const configured = env[GUARD_STATE_DIR_ENV]?.trim();
   if (configured)
     return configured;
-  return join56(env.HOME?.trim() || homedir45(), ...GUARD_STATE_DIR_SEGMENTS);
+  return join58(env.HOME?.trim() || homedir45(), ...GUARD_STATE_DIR_SEGMENTS);
 }
 function resolveEmbeddingOverridePath(env = process.env) {
   const explicit = env[GUARD_OVERRIDE_PATH_ENV]?.trim();
   if (explicit)
     return explicit;
-  return join56(guardStateDir(env), "operator-override");
+  return join58(guardStateDir(env), "operator-override");
 }
 function resolveGuardReportPath(env = process.env) {
-  return join56(guardStateDir(env), "latest.json");
+  return join58(guardStateDir(env), "latest.json");
 }
 function resolveEmbeddingDrainReportPath(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_PATH_ENV]?.trim();
   if (explicit)
     return explicit;
   const dir = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim() || EMBEDDING_DRAIN_REPORT_DIR_DEFAULT;
-  return join56(dir, "source-embedding-drain-current.json");
+  return join58(dir, "source-embedding-drain-current.json");
 }
 function readEmbeddingOperatorOverride(path) {
   let raw;
   try {
-    raw = readFileSync33(path, "utf8");
+    raw = readFileSync35(path, "utf8");
   } catch (error2) {
     if (error2?.code === "ENOENT")
       return "none";
@@ -82278,8 +83712,8 @@ function writeEmbeddingOperatorOverride(path, on) {
     rmSync10(path, { force: true });
     return;
   }
-  mkdirSync31(dirname42(path), { recursive: true });
-  writeFileSync11(path, `${EMBEDDING_PRIORITY_TOKEN}
+  mkdirSync32(dirname42(path), { recursive: true });
+  writeFileSync12(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
 function asRecord12(value) {
@@ -82297,7 +83731,7 @@ function fresh(at, now, maxAgeMs) {
 }
 function readJsonFile(path) {
   try {
-    return asRecord12(JSON.parse(readFileSync33(path, "utf8")));
+    return asRecord12(JSON.parse(readFileSync35(path, "utf8")));
   } catch {
     return;
   }
@@ -82485,8 +83919,8 @@ var init_embedding_runtime = __esm(() => {
 });
 
 // src/workers/dashboard/background-runtime.ts
-import { readFileSync as readFileSync34 } from "node:fs";
-import { join as join57 } from "node:path";
+import { readFileSync as readFileSync36 } from "node:fs";
+import { join as join59 } from "node:path";
 function resolveLaneReportDir(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim();
   if (explicit)
@@ -82504,7 +83938,7 @@ function asRecord13(value) {
 }
 function readJsonFile2(path) {
   try {
-    return asRecord13(JSON.parse(readFileSync34(path, "utf8")));
+    return asRecord13(JSON.parse(readFileSync36(path, "utf8")));
   } catch {
     return;
   }
@@ -82598,7 +84032,7 @@ function readBackgroundRuntime(options = {}) {
   const guard = readGuardArbitration(resolveGuardReportPath(env));
   const lanes = [];
   for (const spec of LANE_REPORTS) {
-    const record3 = readJsonFile2(join57(dir, spec.file));
+    const record3 = readJsonFile2(join59(dir, spec.file));
     if (record3 === undefined)
       continue;
     const updatedAt = readStamp(record3.updated_at) ?? readStamp(record3.generated_at);
@@ -83282,7 +84716,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync20, copyFileSync, existsSync as existsSync39, lstatSync as lstatSync17, mkdirSync as mkdirSync32, readFileSync as readFileSync35 } from "node:fs";
+import { chmodSync as chmodSync21, copyFileSync, existsSync as existsSync41, lstatSync as lstatSync18, mkdirSync as mkdirSync33, readFileSync as readFileSync37 } from "node:fs";
 import { dirname as dirname43 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
@@ -83340,7 +84774,7 @@ function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync39(path)) {
+  if (!existsSync41(path)) {
     return {
       path,
       present: false,
@@ -83348,7 +84782,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text = readFileSync35(path, "utf8");
+  const text = readFileSync37(path, "utf8");
   const raw = JSON.parse(text);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -83389,16 +84823,16 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync39(path)) {
-    const stat5 = lstatSync17(path);
+  if (existsSync41(path)) {
+    const stat5 = lstatSync18(path);
     if (stat5.isSymbolicLink() || !stat5.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
     }
     backupPath = `${path}.${stamp}.bak`;
     copyFileSync(path, backupPath);
-    chmodSync20(backupPath, 384);
+    chmodSync21(backupPath, 384);
   } else {
-    mkdirSync32(dirname43(path), { recursive: true });
+    mkdirSync33(dirname43(path), { recursive: true });
   }
   writePrivateFileAtomicSync(path, text);
   return {
@@ -83863,7 +85297,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash45 } from "node:crypto";
+import { createHash as createHash47 } from "node:crypto";
 function parseStructuredChatScope(value) {
   const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -83891,7 +85325,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash45("sha256").update(value).digest("hex");
+  return createHash47("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -84096,10 +85530,10 @@ function safeDetail(value) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash46, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
-import { readFileSync as readFileSync36, statSync as statSync11 } from "node:fs";
+import { createHash as createHash48, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
+import { readFileSync as readFileSync38, statSync as statSync11 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
-import { join as join58, resolve as resolve9 } from "node:path";
+import { join as join60, resolve as resolve9 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -85868,7 +87302,7 @@ async function retrySqliteBusy(operation) {
         throw new EmailSourceWorkerError(503, "source_index_busy", "The source index is busy; retry the source request shortly.");
       }
       recordSourceAnswerSqliteRetry(retryDelays[attempt]);
-      await sleep3(retryDelays[attempt]);
+      await sleep4(retryDelays[attempt]);
     }
   }
   throw lastError;
@@ -85893,7 +87327,7 @@ function isSqliteBusyError(error2) {
   const candidate = error2;
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
-function sleep3(ms) {
+function sleep4(ms) {
   return new Promise((resolve10) => setTimeout(resolve10, ms));
 }
 async function parseSourceIndexAnswerRequest(request) {
@@ -87140,7 +88574,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual5(createHash46("sha256").update(expected).digest(), createHash46("sha256").update(state).digest());
+  return timingSafeEqual5(createHash48("sha256").update(expected).digest(), createHash48("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -87244,7 +88678,7 @@ function readDashboardRegistryOutcome(registryPath) {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync36(join58(homedir46(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync38(join60(homedir46(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -88067,7 +89501,7 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash47 } from "node:crypto";
+import { createHash as createHash49 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -88754,7 +90188,7 @@ function createCanonicalDropboxSchedulerSource(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash47("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash49("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -89314,7 +90748,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash47("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash49("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -89773,12 +91207,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname44, join as join59 } from "node:path";
+import { dirname as dirname44, join as join61 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join59(dirname44(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join61(dirname44(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -90161,7 +91595,7 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync33, readFileSync as readFileSync37 } from "node:fs";
+import { mkdirSync as mkdirSync34, readFileSync as readFileSync39 } from "node:fs";
 import { dirname as dirname45 } from "node:path";
 function defaultSnifferMaxCallsPerPass(kind) {
   return kind === "venice" ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
@@ -90179,7 +91613,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync37(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync39(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -90199,7 +91633,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync33(dirname45(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync34(dirname45(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -90441,7 +91875,7 @@ var init_sniffer_resolver = __esm(() => {
 });
 
 // src/workers/classification/sniffer-service.ts
-import { existsSync as existsSync40 } from "node:fs";
+import { existsSync as existsSync42 } from "node:fs";
 
 class TierSnifferService {
   options;
@@ -90485,7 +91919,7 @@ class TierSnifferService {
     let remainingQuestions = 0;
     for (const ledgerPath of this.ledgerPaths()) {
       const path = tierSnifferPathForLedger(ledgerPath);
-      if (path === ":memory:" || !existsSync40(path))
+      if (path === ":memory:" || !existsSync42(path))
         continue;
       let store;
       try {
@@ -90539,11 +91973,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync40(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync42(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own = tierLedgerPathForStore(store.dbPath);
-      if (existsSync40(own))
+      if (existsSync42(own))
         paths.add(own);
     }
     return [...paths];
@@ -91171,8 +92605,8 @@ var init_webStandardStreamableHttp = __esm(() => {
 async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BODY_BYTES, options = {}) {
   const declared = request.headers.get("Content-Length");
   if (declared !== null) {
-    const length = Number(declared);
-    if (Number.isFinite(length) && length > maxBytes)
+    const length2 = Number(declared);
+    if (Number.isFinite(length2) && length2 > maxBytes)
       return { ok: false, reason: "too_large" };
   }
   if (!request.body)
@@ -91250,7 +92684,7 @@ __export(exports_remote_mcp, {
   authenticateRemoteRequest: () => authenticateRemoteRequest,
   REMOTE_MCP_PATH: () => REMOTE_MCP_PATH
 });
-import { existsSync as existsSync41 } from "node:fs";
+import { existsSync as existsSync43 } from "node:fs";
 function isRemoteMcpRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_MCP_PATH;
@@ -91292,7 +92726,7 @@ function createRemoteMcpHandler(options) {
   };
 }
 function authenticateRemoteRequest(request, options) {
-  const urls = options.publicUrls;
+  const urls = currentRemotePublicUrls(options.publicUrls);
   const refuse2 = (error2) => ({ ok: false, response: unauthorized(error2, urls) });
   const token = bearerToken(request.headers.get("Authorization"));
   if (token === undefined)
@@ -91321,7 +92755,7 @@ function lazyRemoteConnectionStore(resolvePath2, open6) {
     if (store)
       return store;
     const dbPath = resolvePath2();
-    if (!options.create && !existsSync41(dbPath))
+    if (!options.create && !existsSync43(dbPath))
       return;
     store = open6(dbPath);
     return store;
@@ -91381,6 +92815,7 @@ var init_remote_mcp = __esm(() => {
   init_operation_caller();
   init_remote_connections();
   init_remote_oauth_store();
+  init_remote_public_url();
   init_server3();
   init_remote_request_body();
 });
@@ -91401,12 +92836,12 @@ function isAcceptableRedirectUri(value) {
     return false;
   if (url.protocol === "https:")
     return url.hostname.length > 0;
-  return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname);
+  return url.protocol === "http:" && LOOPBACK_HOSTNAMES3.has(url.hostname);
 }
 function isLoopbackRedirectUri(value) {
   try {
     const url = new URL(value);
-    return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname);
+    return url.protocol === "http:" && LOOPBACK_HOSTNAMES3.has(url.hostname);
   } catch {
     return false;
   }
@@ -91433,9 +92868,9 @@ function redirectHost(value) {
     return value;
   }
 }
-var LOOPBACK_HOSTNAMES2, MAX_REDIRECT_URI_LENGTH = 2048;
+var LOOPBACK_HOSTNAMES3, MAX_REDIRECT_URI_LENGTH = 2048;
 var init_redirect_uris = __esm(() => {
-  LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "[::1]", "localhost"]);
+  LOOPBACK_HOSTNAMES3 = new Set(["127.0.0.1", "[::1]", "localhost"]);
 });
 
 // src/workers/remote-oauth/cimd.ts
@@ -91662,11 +93097,11 @@ function parseHttpResponse(raw) {
   if ((headers.get("transfer-encoding") ?? "").toLowerCase().includes("chunked")) {
     body = decodeChunked(rest);
   } else if (headers.has("content-length")) {
-    const length = Number(headers.get("content-length"));
-    if (!Number.isInteger(length) || length < 0 || length > rest.length) {
+    const length2 = Number(headers.get("content-length"));
+    if (!Number.isInteger(length2) || length2 < 0 || length2 > rest.length) {
       throw new ClientMetadataError("Client metadata response was truncated.");
     }
-    body = rest.subarray(0, length);
+    body = rest.subarray(0, length2);
   } else {
     body = rest;
   }
@@ -91808,7 +93243,7 @@ var init_cimd = __esm(() => {
 });
 
 // src/workers/remote-oauth/consent-page.ts
-import { randomBytes as randomBytes9 } from "node:crypto";
+import { randomBytes as randomBytes10 } from "node:crypto";
 function hostnameOf(host) {
   try {
     return new URL(`https://${host}`).hostname;
@@ -91838,7 +93273,7 @@ function consentSecurityHeaders(nonce, redirectOrigin) {
   };
 }
 function renderConsentPage(input) {
-  const nonce = randomBytes9(16).toString("base64");
+  const nonce = randomBytes10(16).toString("base64");
   const name = escapeHtml4(input.clientName);
   const provenance = input.verifiedHost ? `<div class="host">${escapeHtml4(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
   const redirectHostname = hostnameOf(input.redirectHost);
@@ -91883,7 +93318,7 @@ ${error2}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderConsentErrorPage(message) {
-  const nonce = randomBytes9(16).toString("base64");
+  const nonce = randomBytes10(16).toString("base64");
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -91945,7 +93380,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash48, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHash as createHash50, randomBytes as randomBytes11, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -91978,8 +93413,9 @@ function authorizationServerMetadata(urls) {
   };
 }
 function createRemoteOAuthHandler(options) {
-  const urls = options.publicUrls;
   const now = options.now ?? Date.now;
+  const trustRelayHeaders = options.trustRelayHeaders ?? (() => false);
+  const callerKey = (request) => callerKeyFor(request, trustRelayHeaders);
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3600000, now);
   const metadataFetches = tokenBucket(30, 60000, now);
   const resolveClientMetadata = options.resolveClientMetadata ?? createClientMetadataResolver({ allowFetch: () => metadataFetches.take() });
@@ -92060,8 +93496,8 @@ function createRemoteOAuthHandler(options) {
     if (callerPending >= MAX_PENDING_CONSENTS_PER_CALLER || pending.size >= MAX_PENDING_CONSENTS) {
       return errorPage(429, "Too many approvals are waiting. Finish or close one, or try again in a few minutes.");
     }
-    const requestId = randomBytes10(16).toString("hex");
-    const csrf = randomBytes10(32).toString("base64url");
+    const requestId = randomBytes11(16).toString("hex");
+    const csrf = randomBytes11(32).toString("base64url");
     const entry = {
       caller,
       client,
@@ -92139,7 +93575,7 @@ function createRemoteOAuthHandler(options) {
     }
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
-    const code = randomBytes10(32).toString("base64url");
+    const code = randomBytes11(32).toString("base64url");
     codes.set(sha2566(code), {
       clientId: entry.client.clientId,
       displayName: entry.client.clientName,
@@ -92187,7 +93623,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash48("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash50("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -92259,6 +93695,7 @@ function createRemoteOAuthHandler(options) {
     return new Response(null, { status: 200, headers: { "Cache-Control": "no-store" } });
   };
   return async (request) => {
+    const urls = currentRemotePublicUrls(options.publicUrls);
     if (!urls)
       return jsonResponse2(404, { error: "not_found" });
     if (!hostAllowed(request, urls))
@@ -92306,13 +93743,13 @@ function createRemoteOAuthHandler(options) {
     }
   };
 }
-function callerKey(request) {
-  if (request.headers.get("x-olympus-relay") !== "1")
+function callerKeyFor(request, trusted) {
+  if (request.headers.get("x-olympus-relay") !== "1" || !trusted(request))
     return "direct";
   const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
   return forwarded ? `relay:${forwarded.slice(0, 64)}` : "direct";
 }
-function pairingPacer(now, sleep4) {
+function pairingPacer(now, sleep5) {
   const callers = new Map;
   let global = [];
   const prune = (at) => {
@@ -92333,7 +93770,7 @@ function pairingPacer(now, sleep4) {
     },
     async hold(ms) {
       if (ms > 0)
-        await sleep4(ms);
+        await sleep5(ms);
     },
     recordFailure(caller) {
       const at = now();
@@ -92366,7 +93803,7 @@ function hostAllowed(request, urls) {
   } catch {
     return false;
   }
-  return LOOPBACK_HOSTNAMES3.has(hostname);
+  return LOOPBACK_HOSTNAMES4.has(hostname);
 }
 function sameOriginFormPost(request) {
   const site = request.headers.get("sec-fetch-site");
@@ -92439,7 +93876,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual6(a, b);
 }
 function sha2566(value) {
-  return createHash48("sha256").update(value).digest("hex");
+  return createHash50("sha256").update(value).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -92496,7 +93933,7 @@ function jsonResponse2(status, body, headers = {}) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }
   });
 }
-var REMOTE_OAUTH_PATHS, ROUTED_PATHS, AUTHORIZATION_CODE_TTL_MS = 60000, CONSENT_REQUEST_TTL_MS, CONSENT_MAX_ATTEMPTS = 5, MAX_PENDING_CONSENTS = 256, MAX_PENDING_CONSENTS_PER_CALLER = 8, PAIRING_FAILURE_WINDOW_MS, PAIRING_PER_CALLER_MAX_DELAY_MS = 60000, PAIRING_GLOBAL_FAILURES_BEFORE_DELAY = 20, PAIRING_GLOBAL_DELAY_MS = 2000, PAIRING_MAX_HELD_MS = 1e4, PAIRING_MAX_TRACKED_CALLERS = 1024, MAX_LIVE_CODES = 256, MAX_FORM_BYTES, MAX_REGISTRATION_BYTES, CONNECT_BODY_DEADLINE_MS = 1e4, PKCE_VERIFIER_PATTERN, PKCE_CHALLENGE_PATTERN, LOOPBACK_HOSTNAMES3;
+var REMOTE_OAUTH_PATHS, ROUTED_PATHS, AUTHORIZATION_CODE_TTL_MS = 60000, CONSENT_REQUEST_TTL_MS, CONSENT_MAX_ATTEMPTS = 5, MAX_PENDING_CONSENTS = 256, MAX_PENDING_CONSENTS_PER_CALLER = 8, PAIRING_FAILURE_WINDOW_MS, PAIRING_PER_CALLER_MAX_DELAY_MS = 60000, PAIRING_GLOBAL_FAILURES_BEFORE_DELAY = 20, PAIRING_GLOBAL_DELAY_MS = 2000, PAIRING_MAX_HELD_MS = 1e4, PAIRING_MAX_TRACKED_CALLERS = 1024, MAX_LIVE_CODES = 256, MAX_FORM_BYTES, MAX_REGISTRATION_BYTES, CONNECT_BODY_DEADLINE_MS = 1e4, PKCE_VERIFIER_PATTERN, PKCE_CHALLENGE_PATTERN, LOOPBACK_HOSTNAMES4;
 var init_handler = __esm(() => {
   init_operation_caller();
   init_remote_public_url();
@@ -92520,7 +93957,7 @@ var init_handler = __esm(() => {
   MAX_REGISTRATION_BYTES = 16 * 1024;
   PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/;
   PKCE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-  LOOPBACK_HOSTNAMES3 = new Set(["127.0.0.1", "localhost", "[::1]"]);
+  LOOPBACK_HOSTNAMES4 = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 
 // src/workers/remote-openapi.ts
@@ -92535,7 +93972,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash49 } from "node:crypto";
+import { createHash as createHash51 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -92544,14 +93981,24 @@ function withRemoteOpenApiRoutes(openApi, rest) {
   return (request) => isRemoteOpenApiRequest(request) ? openApi(request) : rest(request);
 }
 function createRemoteOpenApiHandler(options) {
-  const serverUrl = publicServerUrl(options.publicBaseUrl);
-  const specText = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-  const specEtag = `"${createHash49("sha256").update(specText).digest("base64url").slice(0, 27)}"`;
+  const configured = options.publicBaseUrl;
+  if (typeof configured !== "function")
+    publicServerUrl(configured);
+  let spec;
+  const currentSpec = () => {
+    const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
+    if (spec?.serverUrl !== serverUrl) {
+      const text = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
+      spec = { serverUrl, text, etag: `"${createHash51("sha256").update(text).digest("base64url").slice(0, 27)}"` };
+    }
+    return spec;
+  };
   return async (request) => {
     const { pathname } = new URL(request.url);
     let response;
     if (pathname === REMOTE_OPENAPI_SPEC_PATH) {
-      response = serveSpec(request, specText, specEtag);
+      const { text, etag } = currentSpec();
+      response = serveSpec(request, text, etag);
     } else {
       const name = TOOL_PATH_PATTERN.exec(pathname)?.[1];
       response = name === undefined ? jsonResponse(404, { error: "not_found" }) : await callTool(request, name, options);
@@ -92645,6 +94092,13 @@ function operationErrorResponse(error2) {
     });
   }
   return jsonResponse(500, { error: "internal_error", message: "Olympus could not complete this request." });
+}
+function livePublicServerUrl(publicBaseUrl) {
+  try {
+    return publicServerUrl(publicBaseUrl);
+  } catch {
+    return "/";
+  }
 }
 function publicServerUrl(publicBaseUrl) {
   if (publicBaseUrl === undefined)
@@ -92808,8 +94262,8 @@ __export(exports_server2, {
   activeCredentialHandle: () => activeCredentialHandle,
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle
 });
-import { existsSync as existsSync42 } from "node:fs";
-import { dirname as dirname46, isAbsolute as isAbsolute9, join as join60 } from "node:path";
+import { existsSync as existsSync44 } from "node:fs";
+import { dirname as dirname46, isAbsolute as isAbsolute9, join as join62 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -93131,7 +94585,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync42(store.dbPath))
+        if (!existsSync44(store.dbPath))
           continue;
         const handle = new LocalConnectorStore({
           dbPath: store.dbPath,
@@ -95130,12 +96584,15 @@ async function main() {
   } = await Promise.resolve().then(() => (init_remote_mcp(), exports_remote_mcp));
   const { resolveRemoteConnectionsDbPath: resolveRemoteConnectionsDbPath2, openRemoteConnectionStore: openRemoteConnectionStore2 } = await Promise.resolve().then(() => (init_remote_connections(), exports_remote_connections));
   const { resolveRemotePublicUrls: resolveRemotePublicUrls2 } = await Promise.resolve().then(() => (init_remote_public_url(), exports_remote_public_url));
+  const { createRelayRequestVerifier: createRelayRequestVerifier2, createRemotePublicUrlSource: createRemotePublicUrlSource2 } = await Promise.resolve().then(() => (init_remote_access(), exports_remote_access));
   const { createRemoteOAuthHandler: createRemoteOAuthHandler2, withRemoteOAuthRoutes: withRemoteOAuthRoutes2 } = await Promise.resolve().then(() => (init_handler(), exports_handler));
   const remotePublic = resolveRemotePublicUrls2(process.env);
   if (!remotePublic.enabled && remotePublic.reason === "invalid") {
     console.warn(`[olympus] remote agent OAuth is off: ${remotePublic.detail ?? "invalid public base URL"}`);
   }
-  const remotePublicUrls = remotePublic.enabled ? remotePublic.urls : undefined;
+  const remotePublicSource = createRemotePublicUrlSource2(process.env);
+  const remotePublicUrls = () => remotePublicSource.current();
+  const trustRelayHeaders = createRelayRequestVerifier2(process.env);
   const remoteConnections = lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2);
   dashboardAgentStore = remoteConnections;
   const remoteAgentOptions = {
@@ -95152,7 +96609,7 @@ async function main() {
   const { createRemoteOpenApiHandler: createRemoteOpenApiHandler2, withRemoteOpenApiRoutes: withRemoteOpenApiRoutes2 } = await Promise.resolve().then(() => (init_remote_openapi(), exports_remote_openapi));
   const remoteOpenApi = createRemoteOpenApiHandler2({
     ...remoteAgentOptions,
-    ...remotePublicUrls ? { publicBaseUrl: remotePublicUrls.origin } : {}
+    publicBaseUrl: () => remotePublicUrls()?.origin
   });
   const server = Bun.serve({
     hostname,
@@ -95160,6 +96617,7 @@ async function main() {
     idleTimeout: 0,
     fetch: withRemoteOAuthRoutes2(createRemoteOAuthHandler2({
       publicUrls: remotePublicUrls,
+      trustRelayHeaders,
       connections: () => remoteConnections({ create: true })
     }), withRemoteOpenApiRoutes2(remoteOpenApi, withRemoteMcpRoute2(createRemoteMcpHandler2(remoteAgentOptions), withWorkerBearerAuth(worker.fetch, { authToken }))))
   });
@@ -95177,7 +96635,7 @@ async function main() {
     model: snifferModel,
     stores: () => connectorStores,
     classificationLedgerPath: resolveClassificationLedgerPath(process.env),
-    budgetStatePath: join60(dirname46(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join62(dirname46(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -96123,8 +97581,8 @@ init_messaging_pairing();
 init_messaging_capture();
 init_config();
 init_dashboard_launch();
-import { randomBytes as randomBytes11 } from "node:crypto";
-import { readFileSync as readFileSync38, openSync as openSync11, closeSync as closeSync11, writeSync as writeSync2 } from "node:fs";
+import { randomBytes as randomBytes12 } from "node:crypto";
+import { readFileSync as readFileSync40, openSync as openSync11, closeSync as closeSync11, writeSync as writeSync2 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve10 } from "node:path";
@@ -96441,7 +97899,7 @@ function deleteOlympusData(options) {
 function deleteOlympusDataWithCustody(options) {
   const custody = dataDeleteCustody(options);
   if (options.dryRun !== true && !custody.ready) {
-    throw new OperationError("invalid_params", custody.requirement === "source_disconnected" ? `Disconnect ${options.sourceId} before deleting its local data.` : "Stop or uninstall the Olympus worker before deleting local data.", custody.next_action);
+    throw new OperationError("invalid_params", custody.requirement === "source_disconnected" ? `Disconnect ${options.sourceId} before deleting its local data.` : custody.observed === "relay_running" ? "Turn remote access off before deleting local data: the relay process is still running." : "Stop or uninstall the Olympus worker before deleting local data.", custody.next_action);
   }
   return {
     ...deleteOlympusData(options),
@@ -96480,6 +97938,14 @@ function dataDeleteCustody(options) {
   }
   const workerState = options.workerState;
   const ready = workerState === "inactive" || workerState === "missing";
+  if (ready && options.all === true && options.relayRunning === true) {
+    return {
+      requirement: "worker_inactive",
+      ready: false,
+      observed: "relay_running",
+      next_action: "Run openclaw config set plugins.entries.olympus.config.remote.enabled false (or stop the OpenClaw Gateway), check olympus connections status, then retry."
+    };
+  }
   return {
     requirement: "worker_inactive",
     ready,
@@ -98885,6 +100351,7 @@ init_drive();
 init_public_surface();
 init_remote_connections();
 init_remote_public_url();
+init_remote_access();
 var PUBLIC_CLI_COMMAND_NAMES = new Set(V0_4_PUBLIC_CLI_COMMANDS);
 var PUBLIC_CLI_HELP_GROUPS = new Set([
   "argus",
@@ -98990,6 +100457,14 @@ async function main2() {
     await runWorkerForeground(args[1] ? { managedInstanceId: args[1] } : {});
     return;
   }
+  if (args[0] === "__relay-service-run") {
+    if (args.length !== 2 || !args[1]) {
+      throw new OperationError("invalid_params", "Native relay service invocation needs exactly one instance id.");
+    }
+    const { runRelayRuntimeProcess: runRelayRuntimeProcess2 } = await Promise.resolve().then(() => (init_remote_relay_runtime(), exports_remote_relay_runtime));
+    await runRelayRuntimeProcess2(args[1]);
+    process.exit(0);
+  }
   if (args[0] === "__oauth-detached-child") {
     const requestPath = args[1];
     if (!requestPath)
@@ -99014,7 +100489,8 @@ async function main2() {
   }
   if (args[0] === "connections") {
     try {
-      console.log(JSON.stringify(runConnectionsCommand(args.slice(1)), null, 2));
+      const result = args[1] === "terms" ? await runConnectionsTermsCommand(args.slice(2)) : runConnectionsCommand(args.slice(1));
+      console.log(JSON.stringify(result, null, 2));
     } catch (error2) {
       if (error2 instanceof OperationError) {
         console.error(`Error [${error2.code}]: ${error2.message}`);
@@ -99316,7 +100792,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync38("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync40("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -99332,11 +100808,11 @@ function parseCliBoolean(value, key) {
 }
 var MAX_CLI_NAME_WORDS = Math.max(...operations.map((operation) => operation.cliHints.name.split(" ").length));
 function resolveCliOperation(args) {
-  for (let length = Math.min(MAX_CLI_NAME_WORDS, args.length);length > 0; length -= 1) {
-    const cliName = args.slice(0, length).join(" ");
+  for (let length2 = Math.min(MAX_CLI_NAME_WORDS, args.length);length2 > 0; length2 -= 1) {
+    const cliName = args.slice(0, length2).join(" ");
     const operation = findOperationByCliName(cliName);
     if (operation)
-      return { operation, rest: args.slice(length) };
+      return { operation, rest: args.slice(length2) };
   }
   return { rest: args };
 }
@@ -99659,7 +101135,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync38(resolve10(input2), "utf8");
+    raw = readFileSync40(resolve10(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -99730,6 +101206,8 @@ function printHelp() {
   console.log("  olympus connections pair");
   console.log("  olympus connections list");
   console.log("  olympus connections revoke <id>");
+  console.log("  olympus connections status");
+  console.log("  olympus connections terms [--accept]");
   console.log("  olympus data export --output <dir> [--source <id>]");
   console.log("  olympus data verify --input <dir>");
   console.log("  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]");
@@ -99765,6 +101243,8 @@ var PUBLIC_LEAF_USAGE = {
   "connections pair": "olympus connections pair",
   "connections list": "olympus connections list",
   "connections revoke": "olympus connections revoke <id>",
+  "connections status": "olympus connections status",
+  "connections terms": "olympus connections terms [--accept]",
   dashboard: "olympus dashboard [--read-only] [--no-open]",
   "data export": "olympus data export --output <dir> [--source <id>]",
   "data verify": "olympus data verify --input <dir>",
@@ -99839,7 +101319,9 @@ var COMMAND_GROUP_HELP = {
     "  olympus connections add <name>      Approve a remote agent; prints its URL and token once",
     "  olympus connections pair            Print a one-time code to approve Claude, ChatGPT or Grok",
     "  olympus connections list",
-    "  olympus connections revoke <id>"
+    "  olympus connections revoke <id>",
+    "  olympus connections status          Remote access: relay, public URLs, certificate expiry",
+    "  olympus connections terms [--accept]  Show (or accept) the Let's Encrypt subscriber agreement"
   ],
   data: [
     "Usage: olympus data <command>",
@@ -100277,7 +101759,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes11(32).toString("base64url");
+  return randomBytes12(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};
@@ -100785,7 +102267,8 @@ async function runDataCommand(args) {
     return deleteOlympusDataWithCustody({
       all: options.all,
       dryRun: options.dryRun,
-      workerState
+      workerState,
+      relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env))
     });
   }
   if (command === "--help" || command === "-h") {
@@ -100876,6 +102359,11 @@ function resolveWorkerAuthToken(env = process.env, config2 = loadConfig(env)) {
 }
 function runConnectionsCommand(args, env = process.env) {
   const [command, ...rest] = args;
+  if (command === "status") {
+    if (rest.length !== 0)
+      throw new OperationError("invalid_params", "Usage: olympus connections status");
+    return runConnectionsStatus(env);
+  }
   const store = openRemoteConnectionStore(resolveRemoteConnectionsDbPathForCli(env));
   try {
     if (command === "add") {
@@ -100883,11 +102371,11 @@ function runConnectionsCommand(args, env = process.env) {
         throw new OperationError("invalid_params", "Usage: olympus connections add <name>");
       }
       const created = store.create(rest[0]);
+      const urls = remoteAccessUrlsForCli(env);
       return {
         kind: "remote_connection_created",
         connection: remoteConnectionView(created.connection),
-        url: remoteConnectionUrl(loadConfig(env)),
-        openapi_url: remoteConnectionUrl(loadConfig(env), "/openapi.json"),
+        ...remoteUrlFields(urls),
         db_path: store.dbPath,
         token: created.token,
         notice: "The token is shown once and is not stored. Paste it into the agent now; revoke with olympus connections revoke <id>."
@@ -100896,16 +102384,19 @@ function runConnectionsCommand(args, env = process.env) {
     if (command === "pair") {
       if (rest.length !== 0)
         throw new OperationError("invalid_params", "Usage: olympus connections pair");
-      const publicUrls = resolveRemotePublicUrls(environmentWithWorkerSetupEnv({ env }));
+      const urls = remoteAccessUrlsForCli(env);
       const minted = store.oauth.mintPairingCode();
+      const oauthEnabled = urls.public_base_url !== null;
       return {
         kind: "remote_pairing_code",
         code: minted.code,
         expires_at: minted.expiresAt,
-        oauth_enabled: publicUrls.enabled,
-        url: publicUrls.enabled ? publicUrls.urls.resource : null,
+        oauth_enabled: oauthEnabled,
+        url: oauthEnabled ? urls.mcp_url : null,
+        openapi_url: oauthEnabled ? urls.openapi_url : null,
+        oauth_issuer: urls.oauth_issuer,
         db_path: store.dbPath,
-        notice: publicUrls.enabled ? "Type this code on the Olympus approval page that opens when you add the URL as a connector. It works once and expires in 10 minutes." : `OAuth approval is off until ${REMOTE_PUBLIC_BASE_URL_ENV} gives this install a public https address. Bearer connections (olympus connections add) still work.`
+        notice: oauthEnabled ? "Type this code on the Olympus approval page that opens when you add the URL as a connector. It works once and expires in 10 minutes." : `OAuth approval is off until this install has a public https address: turn on remote access (plugin config remote.*), or set ${REMOTE_PUBLIC_BASE_URL_ENV}. Bearer connections (olympus connections add) still work.`
       };
     }
     if (command === "list") {
@@ -100913,8 +102404,7 @@ function runConnectionsCommand(args, env = process.env) {
         throw new OperationError("invalid_params", "Usage: olympus connections list");
       return {
         kind: "remote_connections",
-        url: remoteConnectionUrl(loadConfig(env)),
-        openapi_url: remoteConnectionUrl(loadConfig(env), "/openapi.json"),
+        ...remoteUrlFields(remoteAccessUrlsForCli(env)),
         db_path: store.dbPath,
         connections: store.list().map(remoteConnectionView)
       };
@@ -100929,6 +102419,77 @@ function runConnectionsCommand(args, env = process.env) {
     store.close();
   }
 }
+function remoteAccessUrlsForCli(env) {
+  const layeredEnv = environmentWithWorkerSetupEnv({ env });
+  return resolveRemoteAccessUrls({
+    layeredEnv,
+    env,
+    status: readRemoteAccessStatus(remoteAccessDirForCli(env)),
+    configuredWorkerBaseUrl: loadConfig(layeredEnv).email.baseUrl
+  });
+}
+function remoteUrlFields(urls) {
+  return {
+    url: urls.mcp_url,
+    openapi_url: urls.openapi_url,
+    oauth_issuer: urls.oauth_issuer,
+    public_base_url: urls.public_base_url
+  };
+}
+function runConnectionsStatus(env) {
+  const dir = remoteAccessDirForCli(env);
+  const status = readRemoteAccessStatus(dir);
+  const layeredEnv = environmentWithWorkerSetupEnv({ env });
+  const urls = resolveRemoteAccessUrls({
+    layeredEnv,
+    env,
+    status,
+    configuredWorkerBaseUrl: loadConfig(layeredEnv).email.baseUrl
+  });
+  return { ...remoteAccessStatusView({ dir, urls, status }) };
+}
+async function runConnectionsTermsCommand(args, env = process.env, dependencies = {}) {
+  const accept = args.length === 1 && args[0] === "--accept";
+  if (args.length > 1 || args.length === 1 && !accept) {
+    throw new OperationError("invalid_params", "Usage: olympus connections terms [--accept]");
+  }
+  const dir = remoteAccessDirForCli(env);
+  const status = readRemoteAccessStatus(dir);
+  let termsUrl = status?.terms_url ?? undefined;
+  const caNamesNone = !termsUrl && status?.certificate?.state === "awaiting_terms";
+  if (!termsUrl && !caNamesNone) {
+    const fetchTerms = dependencies.fetchTerms ?? (async () => {
+      const { fetchTermsOfService: fetchTermsOfService2 } = await Promise.resolve().then(() => (init_acme(), exports_acme));
+      const { LETS_ENCRYPT_DIRECTORY: LETS_ENCRYPT_DIRECTORY2 } = await Promise.resolve().then(() => (init_connect2(), exports_connect));
+      const bounded = (input2, init) => fetch(input2, { ...init, signal: AbortSignal.timeout(1e4) });
+      return fetchTermsOfService2(LETS_ENCRYPT_DIRECTORY2, bounded);
+    });
+    try {
+      termsUrl = await fetchTerms();
+    } catch {
+      throw new OperationError("config_error", "Could not read the Let's Encrypt subscriber agreement URL from its directory.", "Check the network and retry; the agreement is published at https://letsencrypt.org/repository/.");
+    }
+  }
+  const acceptance = readTermsAcceptance(dir);
+  if (accept) {
+    const recorded = recordTermsAcceptance(dir, termsUrl, dependencies.now?.() ?? new Date);
+    return {
+      kind: "remote_access_terms",
+      url: termsUrl ?? null,
+      accepted: true,
+      accepted_at: recorded.accepted_at,
+      notice: termsUrl ? "Accepted. Olympus will now request this install's certificate through the relay." : "Accepted. The certificate authority publishes no agreement URL, so this records consent to its terms as it states them; if it later publishes an agreement, you will be asked again."
+    };
+  }
+  const accepted = acceptance !== undefined && (termsUrl === undefined || acceptance.terms_url === termsUrl);
+  return {
+    kind: "remote_access_terms",
+    url: termsUrl ?? null,
+    accepted,
+    accepted_at: accepted ? acceptance.accepted_at : null,
+    notice: accepted ? "Already accepted." : termsUrl ? "Remote access needs a certificate for this install's own hostname, which means agreeing to the certificate authority's Subscriber Agreement. Read it at the url above; to accept, run olympus connections terms --accept." : "Remote access needs a certificate for this install's own hostname. The certificate authority publishes no agreement URL; to consent to its terms and continue, run olympus connections terms --accept."
+  };
+}
 function remoteConnectionView(connection) {
   return {
     id: connection.id,
@@ -100940,9 +102501,6 @@ function remoteConnectionView(connection) {
     revoked_at: connection.revokedAt,
     status: connection.revokedAt ? "revoked" : "active"
   };
-}
-function remoteConnectionUrl(config2, path = "/mcp") {
-  return new URL(path, config2.email.baseUrl).toString();
 }
 function runDashboardTokenCommand(env = process.env) {
   const token = resolveWorkerAuthToken(env);
@@ -101078,6 +102636,7 @@ export {
   runGoogleRequestBudgetFutureRecovery,
   runDashboardTokenCommand,
   runDashboardCommand,
+  runConnectionsTermsCommand,
   runConnectionsCommand,
   resolveCliOperation,
   parseXReconcileRecoveryArgs,

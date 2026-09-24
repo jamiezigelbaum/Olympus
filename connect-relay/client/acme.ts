@@ -57,6 +57,21 @@ export function dns01Value(token: string, thumbprint: string): string {
   return base64url(createHash('sha256').update(`${token}.${thumbprint}`).digest());
 }
 
+/**
+ * The CA's current subscriber agreement URL (RFC 8555 section 7.1.1
+ * `meta.termsOfService`), or undefined when the CA publishes none. This is
+ * what the user must be shown before the first order, and what a recorded
+ * acceptance is compared against: a CA that publishes a new agreement needs a
+ * new acceptance.
+ */
+export async function fetchTermsOfService(directoryUrl: string, fetchImpl: typeof fetch = fetch): Promise<string | undefined> {
+  const response = await fetchImpl(directoryUrl);
+  if (!response.ok) throw new AcmeError(`ACME directory answered HTTP ${response.status}`);
+  const directory = (await response.json()) as { meta?: { termsOfService?: unknown } };
+  const terms = directory.meta?.termsOfService;
+  return typeof terms === 'string' && /^https?:\/\//.test(terms) ? terms : undefined;
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function obtainCertificate(options: ObtainCertificateOptions): Promise<string> {

@@ -27,7 +27,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { sanitizeCallerDisplayName } from '../../core/operation-caller.ts';
 import type { RemoteConnectionStore } from '../../core/remote-connections.ts';
-import { isConfiguredResource, type RemotePublicUrls } from '../../core/remote-public-url.ts';
+import { currentRemotePublicUrls, isConfiguredResource, type RemotePublicUrls, type RemotePublicUrlsSource } from '../../core/remote-public-url.ts';
 import {
   ClientMetadataError,
   createClientMetadataResolver,
@@ -72,8 +72,15 @@ const PKCE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
 export interface RemoteOAuthHandlerOptions {
-  /** The configured public URLs, or undefined when OAuth is off. */
-  publicUrls: RemotePublicUrls | undefined;
+  /** The configured public URLs (or a live source); undefined when OAuth is off. */
+  publicUrls: RemotePublicUrlsSource;
+  /**
+   * Whether a request really came through the relay's local endpoint, so its
+   * `x-olympus-relay`/`x-forwarded-for` headers may name the caller. Without
+   * it every caller is `direct`: loopback is shared by every local process,
+   * so those headers alone are forgeable.
+   */
+  trustRelayHeaders?: (request: Request) => boolean;
   /** The connection store; OAuth may create the database (registration precedes pairing). */
   connections: () => RemoteConnectionStore;
   resolveClientMetadata?: (clientId: string) => Promise<ClientMetadata>;
@@ -153,8 +160,9 @@ export function authorizationServerMetadata(urls: RemotePublicUrls): Record<stri
 }
 
 export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (request: Request) => Promise<Response> {
-  const urls = options.publicUrls;
   const now = options.now ?? Date.now;
+  const trustRelayHeaders = options.trustRelayHeaders ?? (() => false);
+  const callerKey = (request: Request): string => callerKeyFor(request, trustRelayHeaders);
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3_600_000, now);
   // Only a cache miss costs a fetch, so only a miss spends from this bucket.
   const metadataFetches = tokenBucket(30, 60_000, now);
@@ -439,6 +447,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
   };
 
   return async (request: Request): Promise<Response> => {
+    const urls = currentRemotePublicUrls(options.publicUrls);
     if (!urls) return jsonResponse(404, { error: 'not_found' });
     if (!hostAllowed(request, urls)) return jsonResponse(421, { error: 'misdirected_request' });
     const { pathname } = new URL(request.url);
@@ -480,11 +489,12 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
  * Who is asking, for pacing and slot limits: the agent address the relay
  * reports, else one shared key for everything arriving directly (loopback, or
  * a tunnel that does not set the relay's header). The relay's local endpoint
- * drops any inbound copy of these headers before setting its own, so behind
- * the relay they cannot be forged; direct callers share one bucket.
+ * drops any inbound copy of these headers before setting its own and proves
+ * itself with the per-install relay secret (`trusted`); a loopback caller
+ * that forges the headers without it is `direct`, sharing one bucket.
  */
-function callerKey(request: Request): string {
-  if (request.headers.get('x-olympus-relay') !== '1') return 'direct';
+function callerKeyFor(request: Request, trusted: (request: Request) => boolean): string {
+  if (request.headers.get('x-olympus-relay') !== '1' || !trusted(request)) return 'direct';
   const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
   return forwarded ? `relay:${forwarded.slice(0, 64)}` : 'direct';
 }

@@ -153,11 +153,13 @@ and the relay client forwards to it.
 
 ### OAuth as built (slice 4)
 
-- **Switch:** OAuth is on only when `OLYMPUS_PUBLIC_BASE_URL` (an https origin)
-  is set in the worker's environment. The issuer (`<origin>`), the resource
-  (`<origin>/mcp`) and every metadata URL come from it, never from `Host` or
-  forwarding headers. Unset, the routes answer 404 and bearer connections work
-  as before.
+- **Switch:** OAuth is on only when the worker has a public base URL (an
+  https origin): `OLYMPUS_PUBLIC_BASE_URL` in its environment, or, since the
+  relay wiring, the address the remote-access service reports (plugin config
+  `remote.*`; see [relay.md](relay.md#plugin-wiring)), followed without a
+  restart. The issuer (`<origin>`), the resource (`<origin>/mcp`) and every
+  metadata URL come from it, never from `Host` or forwarding headers. Unset,
+  the routes answer 404 and bearer connections work as before.
 - **Routes:** `/.well-known/oauth-protected-resource[/mcp]`,
   `/.well-known/oauth-authorization-server`, and `/connect/authorize`,
   `/connect/token`, `/connect/register`, `/connect/revoke`. The relay's local

@@ -269,7 +269,7 @@ function applyNativeWorkerConfigEnv(config: OlympusConfig, env: NodeJS.ProcessEn
   env[NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp] = String(config.worker.whatsappCapture.enabled);
 }
 
-function resolveBunRuntimePath(configured: string | undefined, env: NodeJS.ProcessEnv): string {
+export function resolveBunRuntimePath(configured: string | undefined, env: NodeJS.ProcessEnv): string {
   if (configured) return assertExecutableFile(configured, 'Bun runtime');
   const candidates = [
     process.execPath,

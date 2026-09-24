@@ -23,6 +23,17 @@ export interface RemotePublicUrls {
   secure: boolean;
 }
 
+/**
+ * The public URLs as a value fixed at start, or a function asked per request
+ * (the worker's live source, which follows the relay; see
+ * core/remote-access.ts). Either way they never come from the request.
+ */
+export type RemotePublicUrlsSource = RemotePublicUrls | undefined | (() => RemotePublicUrls | undefined);
+
+export function currentRemotePublicUrls(source: RemotePublicUrlsSource): RemotePublicUrls | undefined {
+  return typeof source === 'function' ? source() : source;
+}
+
 export type RemotePublicUrlResolution =
   | { enabled: true; urls: RemotePublicUrls }
   | { enabled: false; reason: 'not_configured' | 'invalid'; detail?: string };
