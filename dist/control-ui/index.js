@@ -25,6 +25,16 @@ function mountDashboardController(options) {
   function queryAll(selector) {
     return Array.from(root.querySelectorAll(selector));
   }
+  function setSheetOpen(sheet, open) {
+    sheet.classList.toggle("on", open);
+    sheet.setAttribute("aria-hidden", open ? "false" : "true");
+    if (!sheet.id)
+      return;
+    queryAll("[data-sheet-toggle]").forEach((toggle) => {
+      if (toggle.dataset.sheetToggle === `#${sheet.id}`)
+        toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+  }
   function say(form, message) {
     const slot = form.querySelector("[data-action-message]");
     if (slot)
@@ -654,9 +664,20 @@ function mountDashboardController(options) {
       const sheet = selector ? query(selector) : null;
       if (!sheet)
         return;
-      const open = sheet.classList.toggle("on");
-      sheet.setAttribute("aria-hidden", open ? "false" : "true");
+      const open = !sheet.classList.contains("on");
+      if (open) {
+        queryAll(".sheet.on").forEach((other) => {
+          if (other !== sheet && !other.contains(toggle))
+            setSheetOpen(other, false);
+        });
+      }
+      setSheetOpen(sheet, open);
       toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) {
+        if (!sheet.hasAttribute("tabindex"))
+          sheet.setAttribute("tabindex", "-1");
+        sheet.focus();
+      }
       const form = sheet.querySelector('form[data-connect-kind="oauth"][data-oauth-autostart]');
       if (open && form && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
         startedFromSheet.add(form);

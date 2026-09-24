@@ -1665,8 +1665,10 @@ is never handed to the operator as a caveat in the final reply. Use that Gateway
 permissions and keeps the worker bearer on the server; it needs no worker-token
 paste. See the [upstream contract](https://docs.openclaw.ai/plugins/feature-plugins).
 
-For native OAuth, verify that `gateway.publicOrigin` names that Gateway's
-HTTPS or literal localhost/loopback HTTP origin. Use the applicable live-change
+For native OAuth, a browser that reaches the Gateway on a loopback HTTP origin
+(on the Gateway host or through the operator's own port forward) needs no
+configuration. Any other access, such as an HTTPS proxy or tailnet name, needs
+`gateway.publicOrigin` to name that Gateway's HTTPS origin. Use the applicable live-change
 procedure for an authorized change; never edit runtime configuration directly
 or send a remote browser to the worker's loopback callback. If native support is absent, or the operator explicitly chooses direct access,
 explain that boundary and use the supported standalone dashboard. If a declared

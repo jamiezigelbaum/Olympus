@@ -1277,9 +1277,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // offer one Connect button instead of a walkthrough for an app the
             // owner does not have to register. Names sources only — no client
             // id, no relay URL, no state: this rides on the read-only surface.
-            publisherOAuthSources: nativeDashboardOAuthOrigin
-              ? dashboardPublisherOAuthSources(nativeDashboardOAuthOrigin, dashboardClientIdSets.own)
-              : [],
+            // Which card a source gets depends on the publisher app, never on
+            // whether this native render has an OAuth origin: gating it there
+            // handed every fresh native install the bring-your-own walkthrough
+            // (beta.5, 2026-09-24). A native page without an origin keeps the
+            // one-click card and marks its button unavailable instead.
+            publisherOAuthSources: dashboardPublisherOAuthSources(dashboardClientIdSets.own),
             apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
             pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
             contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -1557,7 +1560,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             ? undefined
             : dashboardPublisherOAuthFlow(
               source,
-              dashboardOrigin,
               dashboardOAuthClientIdForSource(source, clientIdSets.own),
             );
           const clientId = submittedClientId
@@ -5802,7 +5804,6 @@ interface DashboardPublisherOAuthFlow {
 
 function dashboardPublisherOAuthFlow(
   source: DashboardOAuthSource,
-  dashboardOrigin: string,
   ownClientId: string | undefined,
 ): DashboardPublisherOAuthFlow | undefined {
   if (source === 'x') return undefined;
@@ -5817,13 +5818,11 @@ function dashboardPublisherOAuthFlow(
 
 /** The sources whose card offers one-click Connect through a publisher app. */
 function dashboardPublisherOAuthSources(
-  dashboardOrigin: string,
   ownClientIds: Partial<Record<DashboardOAuthSource | 'google', string>>,
 ): DashboardOAuthSource[] {
   const sources: DashboardOAuthSource[] = ['gmail', 'google-drive', 'dropbox', 'x'];
   return sources.filter((source) => dashboardPublisherOAuthFlow(
     source,
-    dashboardOrigin,
     dashboardOAuthClientIdForSource(source, ownClientIds),
   ) !== undefined);
 }

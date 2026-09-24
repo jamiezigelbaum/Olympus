@@ -77338,6 +77338,16 @@ function mountDashboardController(options) {
   function queryAll(selector) {
     return Array.from(root.querySelectorAll(selector));
   }
+  function setSheetOpen(sheet, open6) {
+    sheet.classList.toggle("on", open6);
+    sheet.setAttribute("aria-hidden", open6 ? "false" : "true");
+    if (!sheet.id)
+      return;
+    queryAll("[data-sheet-toggle]").forEach((toggle) => {
+      if (toggle.dataset.sheetToggle === `#${sheet.id}`)
+        toggle.setAttribute("aria-expanded", open6 ? "true" : "false");
+    });
+  }
   function say(form, message) {
     const slot = form.querySelector("[data-action-message]");
     if (slot)
@@ -77967,9 +77977,20 @@ function mountDashboardController(options) {
       const sheet = selector ? query(selector) : null;
       if (!sheet)
         return;
-      const open6 = sheet.classList.toggle("on");
-      sheet.setAttribute("aria-hidden", open6 ? "false" : "true");
+      const open6 = !sheet.classList.contains("on");
+      if (open6) {
+        queryAll(".sheet.on").forEach((other) => {
+          if (other !== sheet && !other.contains(toggle))
+            setSheetOpen(other, false);
+        });
+      }
+      setSheetOpen(sheet, open6);
       toggle.setAttribute("aria-expanded", open6 ? "true" : "false");
+      if (open6) {
+        if (!sheet.hasAttribute("tabindex"))
+          sheet.setAttribute("tabindex", "-1");
+        sheet.focus();
+      }
       const form = sheet.querySelector('form[data-connect-kind="oauth"][data-oauth-autostart]');
       if (open6 && form && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
         startedFromSheet.add(form);
@@ -85971,7 +85992,7 @@ function createEmailSourceWorker(options = {}) {
             ...googleCloudProjectId ? { googleCloudProjectId } : {},
             googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
             ...nativeDashboardOAuthOrigin ? { oauthRedirectBaseUrl: nativeDashboardOAuthOrigin } : {},
-            publisherOAuthSources: nativeDashboardOAuthOrigin ? dashboardPublisherOAuthSources(nativeDashboardOAuthOrigin, dashboardClientIdSets.own) : [],
+            publisherOAuthSources: dashboardPublisherOAuthSources(dashboardClientIdSets.own),
             apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
             pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
             contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -86118,7 +86139,7 @@ function createEmailSourceWorker(options = {}) {
             const clientIdSets = await dashboardOAuthClientIdSets(registry2, secretStore);
             const submittedClientId = asOptionalString(record3.client_id);
             const dashboardOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
-            const publisher = submittedClientId ? undefined : dashboardPublisherOAuthFlow(source, dashboardOrigin, dashboardOAuthClientIdForSource(source, clientIdSets.own));
+            const publisher = submittedClientId ? undefined : dashboardPublisherOAuthFlow(source, dashboardOAuthClientIdForSource(source, clientIdSets.own));
             const clientId = submittedClientId ?? publisher?.clientId ?? dashboardOAuthClientIdForSource(source, clientIdSets.all);
             if (!clientId) {
               throw new EmailSourceWorkerError(409, "oauth_client_id_missing", `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
@@ -88755,7 +88776,7 @@ function dashboardCurrentPublisherClientIds(source) {
 function dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey) {
   return clientIdKey.replace(/\.oauth\.client_id$/, ".oauth.client_id_source");
 }
-function dashboardPublisherOAuthFlow(source, dashboardOrigin, ownClientId) {
+function dashboardPublisherOAuthFlow(source, ownClientId) {
   if (source === "x")
     return;
   if (ownClientId)
@@ -88767,9 +88788,9 @@ function dashboardPublisherOAuthFlow(source, dashboardOrigin, ownClientId) {
   const appKey = dropboxPublisherAppKey();
   return appKey ? { clientId: appKey, redirectUri: oauthRelayUrl(), relay: true } : undefined;
 }
-function dashboardPublisherOAuthSources(dashboardOrigin, ownClientIds) {
+function dashboardPublisherOAuthSources(ownClientIds) {
   const sources = ["gmail", "google-drive", "dropbox", "x"];
-  return sources.filter((source) => dashboardPublisherOAuthFlow(source, dashboardOrigin, dashboardOAuthClientIdForSource(source, ownClientIds)) !== undefined);
+  return sources.filter((source) => dashboardPublisherOAuthFlow(source, dashboardOAuthClientIdForSource(source, ownClientIds)) !== undefined);
 }
 async function dashboardOAuthClientSecretAvailability(secretStore) {
   const output = {};

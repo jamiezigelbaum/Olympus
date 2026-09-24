@@ -444,8 +444,10 @@ This candidate artifact includes native Control UI support. On OpenClaw
 UI** and the Gateway activation completed in Step 4, followed by a browser
 reload. The native page uses your signed-in permissions and
 keeps the worker bearer on the server, so no worker-token paste is needed.
-Native OAuth also needs `gateway.publicOrigin` to name the Gateway's HTTPS or
-localhost/loopback origin; follow the managed change procedure to configure it.
+Native OAuth works without configuration when your browser reaches the Gateway
+on a localhost/loopback address. Reaching it any other way, such as through an
+HTTPS proxy, needs `gateway.publicOrigin` to name that HTTPS origin; follow the
+managed change procedure to configure it.
 See the [agent guide](../INSTALL_FOR_AGENTS.md#step-6--finish-installation-dashboard-handoff).
 
 If the artifact lacks that integration, or you choose direct access, use the
