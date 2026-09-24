@@ -371,4 +371,6 @@ export const AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 
 .agentsecret { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
 .agentsecret[hidden] { display: none; }
 .agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
-.agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }`;
+.agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
+#agents { margin-top: 26px; }
+.promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`;

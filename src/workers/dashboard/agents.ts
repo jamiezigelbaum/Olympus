@@ -231,7 +231,7 @@ function remoteUnavailable(access: DashboardRemoteAccess): string {
 function instructionsStep(agent: AgentChoice, inStep: boolean): string {
   const lead = inStep
     ? `Tell it when to ask Olympus. ${agent.instructionsWhere}`
-    : `To have it ask Olympus on its own: ${agent.instructionsWhere}`;
+    : `To have it ask Olympus on its own, ${agent.instructionsWhere.charAt(0).toLowerCase()}${agent.instructionsWhere.slice(1)}`;
   const body = `${escapeHtml(lead)}${copyBox(`agent-${agent.id}-instructions`, AGENT_INSTRUCTION_TEXT, 'Copy instructions', true)}`;
   const skill = agent.id === 'claude' || agent.id === 'local'
     ? `<span class="hint">The Olympus skill is the folder ${escapeHtml(AGENT_SKILL_PATH.replace(/\/SKILL\.md$/, ''))} inside the plugin folder.</span>`
@@ -240,7 +240,9 @@ function instructionsStep(agent: AgentChoice, inStep: boolean): string {
 }
 
 function copyBox(id: string, text: string, label: string, primary = false): string {
-  return `<div class="promptbox" id="${id}">${escapeHtml(text)}</div>`
+  // Sentences wrap between words; addresses and snippets may break anywhere.
+  const prose = text.includes(' ') && !text.startsWith('http') ? ' prose' : '';
+  return `<div class="promptbox${prose}" id="${id}">${escapeHtml(text)}</div>`
     + `<button class="btn${primary ? ' primary' : ''}" type="button" data-copy-target="#${id}">${escapeHtml(label)}</button>`
     + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
 }

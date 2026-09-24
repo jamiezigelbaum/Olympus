@@ -2082,3 +2082,22 @@ the step is DONE, not broken.
     The signature of this failure is a state-changing action whose
     named gate was not cleared immediately before it — and interleaved
     unrelated questions do not count as clearing it.
+
+## Optional — Connect other agents (after Step 7)
+
+Only when the operator asks for it. Do not offer it as part of installation.
+
+- Send the operator to the dashboard's Setup page, **Connect an agent**. The
+  panel carries each agent's exact steps; do not paraphrase them into chat.
+- Pairing codes and connection keys are minted by the operator in that panel
+  (or `olympus connections pair` / `olympus connections add <name>`, run by
+  its resolved plugin path). Never ask the operator to paste a key or code back
+  to you, and never print one into chat or a log.
+- Agents in a vendor's cloud need remote access. If the panel says remote
+  access is off, say so plainly; do not set up a tunnel or edit worker.env
+  without the operator's explicit consent for that specific change.
+- For Claude Code or Codex on the same machine, the local command is
+  `<rootDir>/bin/olympus serve` (rootDir from
+  `openclaw plugins inspect olympus --json`). Adding it to another agent's MCP
+  configuration is its own consent (Rule one).
+- Revoke with the panel's **Revoke** or `olympus connections revoke <id>`.

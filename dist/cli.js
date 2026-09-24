@@ -7413,7 +7413,10 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/sync-now" },
     { method: "POST", path: "/dashboard/embedding-priority" },
     { method: "POST", path: "/dashboard/disconnect" },
-    { method: "POST", path: "/dashboard/unpair" }
+    { method: "POST", path: "/dashboard/unpair" },
+    { method: "POST", path: "/dashboard/agents/pairing-code" },
+    { method: "POST", path: "/dashboard/agents/keys" },
+    { method: "POST", path: "/dashboard/agents/revoke" }
   ];
   PUBLIC_OPERATION_NAMES = {
     native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
@@ -75846,7 +75849,26 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
         .finder-inspector { grid-column: 1 / -1; grid-row: 2; border-top: 1px solid var(--line2); }
         .finder-footer { grid-row: 3; }
       }
-`;
+`, AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 4px 0 0; }
+.agentchoice { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.agentchoice > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 8px; align-items: baseline; font-size: 13px; color: var(--t2); }
+.agentchoice > summary::-webkit-details-marker { display: none; }
+.agentchoice > summary::after { content: '\\25B8'; margin-left: auto; color: var(--t4); transition: transform .12s ease; }
+.agentchoice[open] > summary::after { transform: rotate(90deg); }
+.agentchoice > summary:hover .name, .agentchoice > summary:focus-visible .name { color: var(--link); }
+.agentchoice > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; border-radius: 8px; }
+.agentchoice > summary .name { font-weight: 600; }
+.agentchoice .agentbody { padding: 2px 14px 14px; }
+.agentchoice .agentbody > p { margin: 0 0 10px; }
+.agentchoice .steps li { margin-bottom: 14px; }
+.agentchoice .steps .rowform { margin-top: 8px; }
+.agentchoice .steps .hint { display: block; margin: 6px 0 0; }
+.agentsecret { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.agentsecret[hidden] { display: none; }
+.agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
+.agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
+#agents { margin-top: 26px; }
+.promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`;
 
 // src/control-ui/browser-controller.ts
 function mountDashboardController(options) {
@@ -75886,7 +75908,7 @@ function mountDashboardController(options) {
     return "Request failed.";
   }
   function applyWriteCapability() {
-    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind]," + "form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check]").forEach((form) => {
+    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind]," + "form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind]").forEach((form) => {
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
       form.querySelectorAll('button,input:not([type="hidden"])').forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
@@ -76241,6 +76263,91 @@ function mountDashboardController(options) {
     say(form, typeof statusMessage === "string" ? statusMessage : released ? successMessage(params.action) : unreleasedMessage(params.action));
     await refreshNow(false, released);
   }
+  function agentParams(form) {
+    const kind = form.dataset.agentKind;
+    if (kind === "pair")
+      return { action: "mint_agent_pairing_code" };
+    if (kind === "key")
+      return { action: "create_agent_key", name: formRecord(form).name || "" };
+    if (kind === "revoke")
+      return { action: "revoke_agent_connection", connection_id: formRecord(form).connection_id || "" };
+    return;
+  }
+  function showAgentSecret(form, value, note) {
+    const holder = form.closest("[data-agent-step]") || form.parentElement || form;
+    const slot = holder.querySelector("[data-agent-secret-slot]");
+    const field = slot?.querySelector("[data-agent-secret]");
+    if (!slot || !field)
+      return;
+    field.value = value;
+    const noteSlot = slot.querySelector("[data-agent-secret-note]");
+    if (noteSlot)
+      noteSlot.textContent = note;
+    slot.hidden = false;
+    field.focus();
+    field.select();
+  }
+  function clearAgentSecret(slot) {
+    slot.querySelectorAll("[data-agent-secret]").forEach((field) => {
+      field.value = "";
+    });
+    const noteSlot = slot.querySelector("[data-agent-secret-note]");
+    if (noteSlot)
+      noteSlot.textContent = "";
+    slot.hidden = true;
+  }
+  async function submitAgentControl(form) {
+    if (!canWrite && !csrfToken) {
+      say(form, options.authority === "worker-session" ? "Unlock dashboard controls above first." : "Your OpenClaw connection has read-only access.");
+      return;
+    }
+    const params = agentParams(form);
+    if (!params || pendingForms.has(form))
+      return;
+    if (params.action === "revoke_agent_connection" && !window.confirm(form.dataset.confirmation || "Revoke this connection?"))
+      return;
+    setFormPending(form, true, params.action === "revoke_agent_connection" ? "Revoking…" : "Working…");
+    let result;
+    try {
+      result = await options.transport.control(params);
+    } catch {
+      say(form, "Could not reach Olympus.");
+      return;
+    } finally {
+      setFormPending(form, false);
+    }
+    if (result.status === 401 || result.status === 403) {
+      if (options.authority === "worker-session") {
+        csrfToken = "";
+        say(form, "The control session expired — unlock controls in Setup, then try again.");
+      } else {
+        canWrite = false;
+        applyWriteCapability();
+        say(form, "Your write access expired. Reconnect with operator.write access, then try again.");
+      }
+      return;
+    }
+    if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+      say(form, errorMessage3(result));
+      return;
+    }
+    if (params.action === "mint_agent_pairing_code" && typeof result.body.code === "string") {
+      say(form, "");
+      showAgentSecret(form, result.body.code, "Type this code on the Olympus approval page. It works once and expires in 10 minutes.");
+      return;
+    }
+    if (params.action === "create_agent_key" && typeof result.body.token === "string") {
+      say(form, "");
+      showAgentSecret(form, result.body.token, "Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again.");
+      return;
+    }
+    const statusMessage = result.body.status_message;
+    say(form, typeof statusMessage === "string" ? statusMessage : "Revoked.");
+    form.querySelectorAll("button").forEach((button) => {
+      button.disabled = true;
+    });
+    await refreshNow(false, true);
+  }
   function copyText(node) {
     if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)
       return node.value;
@@ -76371,6 +76478,11 @@ function mountDashboardController(options) {
         unlock(form);
       return;
     }
+    if (form.hasAttribute("data-agent-kind")) {
+      event.preventDefault();
+      submitAgentControl(form);
+      return;
+    }
     if (!form.matches("[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind],[data-model-check]"))
       return;
     event.preventDefault();
@@ -76397,6 +76509,14 @@ function mountDashboardController(options) {
         startedFromSheet.add(form);
         form.requestSubmit();
       }
+      return;
+    }
+    const done = target.closest("[data-agent-secret-done]");
+    if (done) {
+      const slot = done.closest("[data-agent-secret-slot]");
+      if (slot)
+        clearAgentSecret(slot);
+      refreshNow(false, true);
       return;
     }
     const copy = target.closest("[data-copy-target]");
@@ -78221,6 +78341,9 @@ function standaloneDashboardControllerScript(input) {
         if (action === 'set_embedding_priority') return ['/dashboard/embedding-priority', withoutAction(params)];
         if (action === 'disconnect') return ['/dashboard/disconnect', withoutAction(params)];
         if (action === 'unpair') return ['/dashboard/unpair', withoutAction(params)];
+        if (action === 'mint_agent_pairing_code') return ['/dashboard/agents/pairing-code', {}];
+        if (action === 'create_agent_key') return ['/dashboard/agents/keys', withoutAction(params)];
+        if (action === 'revoke_agent_connection') return ['/dashboard/agents/revoke', withoutAction(params)];
         return null;
       }
       function withoutAction(params) {
@@ -80518,6 +80641,221 @@ var init_model_setup2 = __esm(() => {
   init_components();
 });
 
+// src/core/agent-instructions.ts
+var AGENT_SKILL_PATH = "integrations/agent-skills/ask-olympus/SKILL.md", AGENT_SKILL_DESCRIPTION, AGENT_INSTRUCTION_TEXT;
+var init_agent_instructions = __esm(() => {
+  AGENT_SKILL_DESCRIPTION = "Ask Olympus, the owner's private search over their own email, files, " + "messages, notes and saved reading, whenever a question may be answered from their own records.";
+  AGENT_INSTRUCTION_TEXT = [
+    "Olympus is my private search over my own email, files, messages, notes, bookmarks and saved reading. " + "You can ask it through its source_answer tool.",
+    "",
+    "Ask Olympus whenever my question might be answered from my own records: what someone told me, " + "what a document or contract says, or when something happened. " + "If you are not sure, ask it anyway. You do not need me to mention Olympus.",
+    "",
+    "Ask one question at a time, in plain words, and wait for each answer before asking the next. " + "Answers can take a minute.",
+    "",
+    "Pass on what Olympus answers with its citations, and say plainly what it could not find. " + "Do not guess past it or fill gaps from memory.",
+    "",
+    "Use source_index_status only to check which of my sources are ready."
+  ].join(`
+`);
+});
+
+// src/workers/dashboard/agents.ts
+function renderDashboardAgentsSection(input) {
+  const { view } = input;
+  return [
+    '<div class="sect" id="agents">Agents</div>',
+    remoteAccessRow(view.remoteAccess),
+    setupRow({
+      label: "Connect an agent",
+      blurb: "Let Claude, ChatGPT, Grok, Muse or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.",
+      action: { label: "Connect an agent", kind: "none", sheet: AGENT_CONNECT_SHEET_ID, primary: true }
+    }),
+    connectSheet(view.remoteAccess),
+    connectionList(view, input.now)
+  ].join(`
+`);
+}
+function remoteAccessRow(access) {
+  const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf(access.mcpUrl)}.` : access.state === "off" ? "Off. Only agents on this computer can ask Olympus." : access.state === "not_connected" ? "Not connected right now. Agents in the cloud cannot reach Olympus until it reconnects." : `Not set up correctly. ${access.detail}`;
+  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span></div>` + `</div>`;
+}
+function connectSheet(access) {
+  const choices = AGENTS.map((agent) => agentChoice(agent, access)).join("");
+  return `<div class="sheet" id="${AGENT_CONNECT_SHEET_ID}" aria-hidden="true">` + `<h4>Connect an agent</h4>` + `<p>Pick the agent you use. It can ask Olympus questions, and it never sees Private source text or Secrets.</p>` + `<div class="agentpick">${choices}</div>` + `</div>`;
+}
+function agentChoice(agent, access) {
+  const detail = agent.detail ? ` <span class="hint">${escapeHtml(agent.detail)}</span>` : "";
+  return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">` + `<summary><span class="name">${escapeHtml(agent.label)}</span>${detail}</summary>` + `<div class="agentbody">${agentBody(agent, access)}</div>` + `</details>`;
+}
+function agentBody(agent, access) {
+  if (agent.method === "local")
+    return localBody(agent);
+  if (access.state !== "on")
+    return remoteUnavailable(access) + instructionsStep(agent, false);
+  if (agent.method === "oauth") {
+    return `<ol class="steps">` + `<li>${escapeHtml(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${escapeHtml(agent.approve ?? "")}</li>` + `<li data-agent-step>On that page, type a pairing code from here.${pairForm(agent.id)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+  }
+  if (agent.method === "key") {
+    const url = agent.address === "openapi" ? access.openapiUrl : access.mcpUrl;
+    return `<ol class="steps">` + `<li>${escapeHtml(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, url, "Copy address")}</li>` + `<li data-agent-step>Create a key for it. ${escapeHtml(agent.keyUse ?? "")}${keyForm(agent.id, agent.keyName ?? agent.label)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+  }
+  return `<p>If the agent can add a connector that signs in, use the connector address and a pairing code. If it takes an address and a key, create a key.</p>` + `<ol class="steps">` + `<li>Connector (MCP) address:${copyBox("agent-other-url", access.mcpUrl, "Copy address")}` + `OpenAPI address, for agents that read an API description:${copyBox("agent-other-openapi", access.openapiUrl, "Copy address")}</li>` + `<li data-agent-step>Approve a connector with a pairing code.${pairForm(agent.id)}</li>` + `<li data-agent-step>Or create a key and give it to the agent as a bearer token.${keyForm(agent.id, "Agent")}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+}
+function localBody(agent) {
+  return `<p>These run on this computer, so they work without remote access. Paste this into Claude Code or Codex and it adds Olympus for you:</p>` + copyBox("agent-local-prompt", LOCAL_AGENT_PROMPT, "Copy prompt", true) + `<details class="agentprompt" data-poll-key="agent-local-manual"><summary>Add it yourself instead</summary>` + `<p>The plugin folder is the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>` + copyBox("agent-local-claude", CLAUDE_CODE_SNIPPET, "Copy command") + `<p>For Codex, add this to ~/.codex/config.toml:</p>` + copyBox("agent-local-codex", CODEX_SNIPPET, "Copy snippet") + `</details>` + instructionsStep(agent, false);
+}
+function remoteUnavailable(access) {
+  const text = access.state === "not_connected" ? "Remote access is not connected right now, so this agent cannot reach Olympus. Check that this computer is online and Olympus is running, then open this page again." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Claude Code and Codex on this computer work now.";
+  return `<p class="why" data-remote-unavailable>${escapeHtml(text)}</p>`;
+}
+function instructionsStep(agent, inStep) {
+  const lead = inStep ? `Tell it when to ask Olympus. ${agent.instructionsWhere}` : `To have it ask Olympus on its own, ${agent.instructionsWhere.charAt(0).toLowerCase()}${agent.instructionsWhere.slice(1)}`;
+  const body = `${escapeHtml(lead)}${copyBox(`agent-${agent.id}-instructions`, AGENT_INSTRUCTION_TEXT, "Copy instructions", true)}`;
+  const skill = agent.id === "claude" || agent.id === "local" ? `<span class="hint">The Olympus skill is the folder ${escapeHtml(AGENT_SKILL_PATH.replace(/\/SKILL\.md$/, ""))} inside the plugin folder.</span>` : "";
+  return inStep ? `${body}${skill}` : `<p>${body}</p>${skill}`;
+}
+function copyBox(id, text, label, primary = false) {
+  const prose = text.includes(" ") && !text.startsWith("http") ? " prose" : "";
+  return `<div class="promptbox${prose}" id="${id}">${escapeHtml(text)}</div>` + `<button class="btn${primary ? " primary" : ""}" type="button" data-copy-target="#${id}">${escapeHtml(label)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
+}
+function pairForm(agentId) {
+  return `<form class="rowform" data-agent-kind="pair">` + `<button class="btn primary" type="submit">Get pairing code</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-code`, "Pairing code");
+}
+function keyForm(agentId, name) {
+  return `<form class="rowform" data-agent-kind="key">` + `<input class="keyfield" type="text" name="name" value="${escapeHtml(name)}" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-key`, "Key");
+}
+function secretSlot(id, label) {
+  return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn quiet" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
+}
+function connectionList(view, now) {
+  if (view.unavailable) {
+    return `<div class="foot" data-agent-connections="unavailable">Olympus could not read its list of connected agents. Reload this page to try again.</div>`;
+  }
+  if (view.connections.length === 0) {
+    return `<div class="foot" data-agent-connections="none">No agents are connected yet.</div>`;
+  }
+  const rows = view.connections.map((connection) => connectionRow(connection, now)).join(`
+`);
+  return `<div class="sect">Connected agents — ${view.connections.length}</div>
+${rows}`;
+}
+function connectionRow(connection, now) {
+  const used = connection.lastUsedAt ? `last used ${relativeDay(connection.lastUsedAt, now)}` : "not used yet";
+  const why = `added ${calendarDate(connection.createdAt)} · ${used}`;
+  const confirmation = `Revoke ${connection.name}? It will no longer be able to ask Olympus. You can connect it again later.`;
+  return `<div class="attncard plain" data-agent-connection="${escapeHtml(connection.id)}">` + `<div class="grow"><span class="name">${escapeHtml(connection.name)}</span><span class="why"> — ${escapeHtml(why)}</span></div>` + `<form class="rowform" data-agent-kind="revoke" data-confirmation="${escapeHtml(confirmation)}">` + `<input type="hidden" name="connection_id" value="${escapeHtml(connection.id)}">` + `<button class="btn quiet" type="submit">Revoke</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
+}
+function calendarDate(iso) {
+  const date4 = new Date(iso);
+  if (Number.isNaN(date4.getTime()))
+    return "on an unknown date";
+  return `${MONTHS[date4.getUTCMonth()]} ${date4.getUTCDate()}, ${date4.getUTCFullYear()}`;
+}
+function relativeDay(iso, now) {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime()))
+    return "at an unknown time";
+  const minutes = Math.floor((now.getTime() - at.getTime()) / 60000);
+  if (minutes < 60)
+    return "within the hour";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24)
+    return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30)
+    return `${days} day${days === 1 ? "" : "s"} ago`;
+  return `on ${calendarDate(iso)}`;
+}
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <plugin folder>/bin/olympus serve", CODEX_SNIPPET, MONTHS;
+var init_agents = __esm(() => {
+  init_agent_instructions();
+  init_components();
+  AGENTS = [
+    {
+      id: "claude",
+      label: "Claude",
+      detail: "web, desktop and phone",
+      method: "oauth",
+      add: "In Claude, open Settings, then Connectors, and choose Add custom connector. Name it Olympus and paste this address as the URL:",
+      approve: "Choose Add, then Connect. An Olympus approval page opens, on your phone too.",
+      instructionsWhere: "Paste this into a Claude project's instructions, or add the Olympus skill under Settings, then Capabilities."
+    },
+    {
+      id: "chatgpt",
+      label: "ChatGPT",
+      method: "oauth",
+      add: "In ChatGPT, open Settings, then Apps & Connectors, and create a connector (turn on Developer mode under Advanced if ChatGPT asks). Name it Olympus, choose OAuth, and paste this address as the URL:",
+      approve: "Choose Create. An Olympus approval page opens.",
+      instructionsWhere: "Paste this into a ChatGPT project's instructions, or into your custom instructions."
+    },
+    {
+      id: "grok",
+      label: "Grok or Grok Bot",
+      method: "oauth",
+      add: "In Grok, open Settings, then Connectors, and add a custom connector. On a team, an admin adds it once and every Grok Bot can use it. Paste this address as the URL:",
+      approve: "Save the connector and connect it. An Olympus approval page opens.",
+      instructionsWhere: "Paste this into your Grok Bot's skills or into Grok's custom instructions."
+    },
+    {
+      id: "muse",
+      label: "Muse",
+      method: "key",
+      keyName: "Muse",
+      address: "openapi",
+      add: "In Muse, add a custom connector from an OpenAPI address, and paste this address:",
+      keyUse: "When Muse asks how to sign in, choose a bearer token and paste the key.",
+      instructionsWhere: "Paste this into Muse's instructions for the Olympus connector."
+    },
+    {
+      id: "grok-api",
+      label: "Grok API",
+      detail: "xAI API and scripts",
+      method: "key",
+      keyName: "Grok API",
+      address: "mcp",
+      add: "Add Olympus as a remote MCP server with this address:",
+      keyUse: "Send the key as a bearer token: the header Authorization: Bearer followed by the key.",
+      instructionsWhere: "Put this in the system prompt of the requests that use Olympus."
+    },
+    {
+      id: "local",
+      label: "Claude Code or Codex",
+      detail: "on this computer",
+      method: "local",
+      instructionsWhere: "Paste this into your CLAUDE.md or AGENTS.md, or copy the Olympus skill folder into ~/.claude/skills/ or ~/.codex/skills/."
+    },
+    {
+      id: "other",
+      label: "Other",
+      method: "other",
+      instructionsWhere: "Paste this wherever the agent keeps its instructions."
+    }
+  ];
+  LOCAL_AGENT_PROMPT = [
+    "Add Olympus to this coding agent as a local MCP server.",
+    "Find the installed plugin with `openclaw plugins inspect olympus --json` and take `plugin.rootDir`.",
+    "Then run the one command for this tool:",
+    "- Claude Code: `claude mcp add olympus -- <rootDir>/bin/olympus serve`",
+    "- Codex: `codex mcp add olympus -- <rootDir>/bin/olympus serve`",
+    "Do not change any other configuration. Afterwards, list the Olympus tools to confirm source_answer is there."
+  ].join(`
+`);
+  CODEX_SNIPPET = [
+    "[mcp_servers.olympus]",
+    'command = "<plugin folder>/bin/olympus"',
+    'args = ["serve"]'
+  ].join(`
+`);
+  MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+});
+
 // src/workers/dashboard/pages/setup.ts
 function renderDashboardSetupPage(view, options) {
   const degraded = options?.degradedCredentials ?? view.degraded_credentials;
@@ -80542,7 +80880,8 @@ function renderDashboardSetupPage(view, options) {
       intro: CONNECTOR_SHEET_INTRO,
       promptText: CONNECTOR_PROMPT,
       copyButtonLabel: CONNECTOR_SHEET_COPY_LABEL
-    })
+    }),
+    ...options?.agents ? [renderDashboardAgentsSection({ view: options.agents, now: new Date(view.generated_at) })] : []
   ].join(`
 `);
   return pageShell({
@@ -80556,7 +80895,7 @@ function renderDashboardSetupPage(view, options) {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }
     },
-    styles: [DASHBOARD_NAV_CSS, SETUP_JOURNEY_CSS, MODEL_SETUP_CSS],
+    styles: [DASHBOARD_NAV_CSS, SETUP_JOURNEY_CSS, MODEL_SETUP_CSS, AGENT_CONNECT_CSS],
     ...options?.format === undefined ? {} : { format: options.format }
   });
 }
@@ -80842,6 +81181,7 @@ function formatDuration(minutes) {
 var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_SHEET_COPY_LABEL = "Copy prompt", CONNECTOR_ROW_LABEL = "Something else", CONNECTOR_ROW_BLURB = "Anything with an API or an export — build the connector with your agent", CONNECTOR_ROW_BUTTON_LABEL = "Build a connector", CONNECTOR_PROMPT, SETUP_GROUPS;
 var init_setup = __esm(() => {
   init_model_setup2();
+  init_agents();
   init_source_dashboard();
   init_vocabulary();
   init_components();
@@ -81344,7 +81684,10 @@ function isDashboardControlRoute(request) {
     "/dashboard/sync-now",
     "/dashboard/embedding-priority",
     "/dashboard/disconnect",
-    "/dashboard/unpair"
+    "/dashboard/unpair",
+    "/dashboard/agents/pairing-code",
+    "/dashboard/agents/keys",
+    "/dashboard/agents/revoke"
   ]).has(new URL(request.url).pathname);
 }
 function hmacTag(authToken, context, ...parts) {
@@ -81779,7 +82122,7 @@ function whenText(recordedAt, now) {
 }
 function utcStamp(at) {
   const day = at.getUTCDate();
-  const month = MONTHS[at.getUTCMonth()] ?? "";
+  const month = MONTHS2[at.getUTCMonth()] ?? "";
   const hours = String(at.getUTCHours()).padStart(2, "0");
   const minutes = String(at.getUTCMinutes()).padStart(2, "0");
   return `${day} ${month} ${at.getUTCFullYear()}, ${hours}:${minutes} UTC`;
@@ -81787,7 +82130,7 @@ function utcStamp(at) {
 function plural3(count, one, many) {
   return count === 1 ? one : many;
 }
-var DEFAULT_BASE_PATH5 = "/dashboard", BACKGROUND_QUERY_PARAM3 = "background", MONTHS, EMBEDDING_LEDGER_CSS = `.ledgerback { margin-bottom: 10px; font-size: 12px; }
+var DEFAULT_BASE_PATH5 = "/dashboard", BACKGROUND_QUERY_PARAM3 = "background", MONTHS2, EMBEDDING_LEDGER_CSS = `.ledgerback { margin-bottom: 10px; font-size: 12px; }
 .ledgerback a { color: var(--t3); text-decoration: none; }
 .ledgerback a:hover { color: var(--t1); }
 .ledgerwarn { background: var(--panel); border: 1px solid var(--warn); border-radius: 9px; padding: 10px 14px; margin-bottom: 10px; color: var(--warn); font-size: 12px; line-height: 1.5; }
@@ -81809,7 +82152,7 @@ var init_embedding_ledger2 = __esm(() => {
   init_nav();
   init_components();
   init_vocabulary();
-  MONTHS = [
+  MONTHS2 = [
     "Jan",
     "Feb",
     "Mar",
@@ -82243,6 +82586,165 @@ var init_background_runtime = __esm(() => {
   ];
   backgroundLaneSampleStore = new LaneSampleStore;
   PARK_LINE = /^paused\s+([^\s:]+):\s*(.+)$/;
+});
+
+// src/workers/agent-connections.ts
+function remoteAccessFromEnv(env) {
+  const resolved = resolveRemotePublicUrls(env);
+  if (resolved.enabled) {
+    return {
+      state: "on",
+      mcpUrl: resolved.urls.resource,
+      openapiUrl: `${resolved.urls.origin}/openapi.json`
+    };
+  }
+  if (resolved.reason === "invalid") {
+    return { state: "invalid", detail: resolved.detail ?? "The public address is not valid." };
+  }
+  return { state: "off" };
+}
+function dashboardAgentsView(backend) {
+  const remoteAccess = backend.remoteAccess();
+  let records;
+  try {
+    records = backend.store()?.list() ?? [];
+  } catch {
+    return { remoteAccess, connections: [], unavailable: true };
+  }
+  return {
+    remoteAccess,
+    connections: records.filter((record3) => record3.revokedAt === null).map((record3) => ({
+      id: record3.id,
+      name: record3.displayName,
+      kind: record3.kind,
+      createdAt: record3.createdAt,
+      lastUsedAt: record3.lastUsedAt
+    }))
+  };
+}
+async function handleDashboardAgentRequest(request, pathname, backend) {
+  if (request.method !== "POST" || !DASHBOARD_AGENT_CONTROL_PATHS.includes(pathname)) {
+    return;
+  }
+  if (!backend) {
+    return refusal(501, "agent_connections_not_supported", "This worker does not manage agent connections.");
+  }
+  const body = await objectBody(request);
+  if (!body)
+    return refusal(400, "invalid_request", "Request body must be a JSON object.");
+  if (pathname === DASHBOARD_AGENT_PAIRING_CODE_PATH) {
+    if (Object.keys(body).length !== 0)
+      return refusal(400, "invalid_request", "A pairing code takes no fields.");
+    const remoteAccess = backend.remoteAccess();
+    if (remoteAccess.state !== "on") {
+      return refusal(409, "remote_access_off", remoteAccessRefusal(remoteAccess));
+    }
+    const store2 = openStore(backend);
+    if (!store2)
+      return storeUnavailable();
+    const minted = store2.oauth.mintPairingCode();
+    return secretResponse({
+      ok: true,
+      code: minted.code,
+      expires_at: minted.expiresAt,
+      url: remoteAccess.mcpUrl
+    });
+  }
+  if (pathname === DASHBOARD_AGENT_KEYS_PATH) {
+    const unknown4 = Object.keys(body).filter((key) => key !== "name");
+    if (unknown4.length > 0)
+      return refusal(400, "invalid_request", "A key takes only a name.");
+    const name = sanitizeCallerDisplayName(body.name);
+    if (!name)
+      return refusal(400, "invalid_request", "Give the connection a name, for example Muse.");
+    const store2 = openStore(backend);
+    if (!store2)
+      return storeUnavailable();
+    const created = store2.create(name);
+    const remoteAccess = backend.remoteAccess();
+    return secretResponse({
+      ok: true,
+      token: created.token,
+      connection: connectionView(created.connection),
+      ...remoteAccess.state === "on" ? { mcp_url: remoteAccess.mcpUrl, openapi_url: remoteAccess.openapiUrl } : {}
+    });
+  }
+  const unknown3 = Object.keys(body).filter((key) => key !== "connection_id");
+  if (unknown3.length > 0)
+    return refusal(400, "invalid_request", "Revoke takes only a connection_id.");
+  const id = typeof body.connection_id === "string" ? body.connection_id : "";
+  if (!/^[a-f0-9]{18}$/.test(id))
+    return refusal(400, "invalid_request", "That is not a connection id.");
+  const store = openStore(backend, false);
+  const existing = store?.list().find((record3) => record3.id === id);
+  if (!store || !existing)
+    return refusal(404, "connection_not_found", "No connection has that id.");
+  const revoked = store.revoke(id);
+  return secretResponse({
+    ok: true,
+    connection: connectionView(revoked),
+    status_message: `${revoked.displayName} can no longer ask Olympus.`
+  });
+}
+function remoteAccessRefusal(access) {
+  if (access.state === "invalid")
+    return `Remote access is not set up correctly: ${access.detail}`;
+  if (access.state === "not_connected")
+    return "Remote access is not connected right now, so no agent could use a pairing code. Try again once it reconnects.";
+  return "Remote access is off, so agents in the cloud cannot reach Olympus yet. Pairing codes work once it is on.";
+}
+function openStore(backend, create = true) {
+  try {
+    return backend.store({ create });
+  } catch {
+    return;
+  }
+}
+function storeUnavailable() {
+  return refusal(503, "agent_connections_unavailable", "Olympus could not open its connection list. Try again, or run olympus doctor.");
+}
+function connectionView(record3) {
+  return {
+    id: record3.id,
+    name: record3.displayName,
+    kind: record3.kind,
+    created_at: record3.createdAt,
+    last_used_at: record3.lastUsedAt,
+    revoked_at: record3.revokedAt
+  };
+}
+async function objectBody(request) {
+  let value;
+  try {
+    const text = await request.text();
+    value = text.trim() === "" ? {} : JSON.parse(text);
+  } catch {
+    return;
+  }
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+function secretResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer"
+    }
+  });
+}
+function refusal(status, code, message) {
+  return secretResponse({ ok: false, error: { code, message } }, status);
+}
+var DASHBOARD_AGENT_PAIRING_CODE_PATH = "/dashboard/agents/pairing-code", DASHBOARD_AGENT_KEYS_PATH = "/dashboard/agents/keys", DASHBOARD_AGENT_REVOKE_PATH = "/dashboard/agents/revoke", DASHBOARD_AGENT_CONTROL_PATHS;
+var init_agent_connections = __esm(() => {
+  init_remote_public_url();
+  init_operation_caller();
+  DASHBOARD_AGENT_CONTROL_PATHS = [
+    DASHBOARD_AGENT_PAIRING_CODE_PATH,
+    DASHBOARD_AGENT_KEYS_PATH,
+    DASHBOARD_AGENT_REVOKE_PATH
+  ];
 });
 
 // src/core/source-disposition-tree.ts
@@ -83559,6 +84061,7 @@ function dashboardConnectSourceLabel(source) {
 }
 function createEmailSourceWorker(options = {}) {
   const connector = options.connector ?? new GogcliEmailConnectorStub;
+  const agentConnections = options.agentConnections;
   const sourceAnswer = options.sourceAnswer;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
@@ -83791,6 +84294,9 @@ function createEmailSourceWorker(options = {}) {
             policy: SOURCE_WATCH_POLICY
           });
         }
+        const agentResponse = await handleDashboardAgentRequest(request, url.pathname, agentConnections);
+        if (agentResponse)
+          return agentResponse;
         if (request.method === "GET" && url.pathname === "/dashboard/auth-check") {
           return json({ ok: true });
         }
@@ -83993,7 +84499,8 @@ function createEmailSourceWorker(options = {}) {
             embeddingRuntime,
             backgroundRuntime,
             ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
-            ...dashboardUi ? { nativeOAuthAvailable: dashboardUi.nativeOAuthAvailable } : {}
+            ...dashboardUi ? { nativeOAuthAvailable: dashboardUi.nativeOAuthAvailable } : {},
+            ...agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}
           };
           if (dashboardUi) {
             return json(renderDashboardControlUi({
@@ -86320,17 +86827,17 @@ function samePathList(left, right) {
   const b = normalize(right);
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
-function dashboardUnpairPathError(refusal) {
-  if (refusal.reason === "outside_root") {
+function dashboardUnpairPathError(refusal2) {
+  if (refusal2.reason === "outside_root") {
     return new EmailSourceWorkerError(409, "unpair_session_path_external", "The configured pairing-session directory is outside every Olympus-owned root, so Unpair will not delete it. Check OLYMPUS_TELEGRAM_SESSION_PATH or OLYMPUS_WHATSAPP_STATE_DIR, then remove the session by hand.");
   }
-  if (refusal.reason === "symlink_component") {
-    return new EmailSourceWorkerError(409, "unpair_session_path_external", `The pairing-session path reaches outside Olympus through a symbolic link at ${refusal.component}, so Unpair will not delete it. Remove the session by hand.`);
+  if (refusal2.reason === "symlink_component") {
+    return new EmailSourceWorkerError(409, "unpair_session_path_external", `The pairing-session path reaches outside Olympus through a symbolic link at ${refusal2.component}, so Unpair will not delete it. Remove the session by hand.`);
   }
-  if (refusal.reason === "inspection_failed") {
-    return new EmailSourceWorkerError(409, "unpair_session_path_unreadable", `Unpair could not inspect ${refusal.component}, so it cannot say what is there. Check the permissions on the pairing-session directory, then retry.`);
+  if (refusal2.reason === "inspection_failed") {
+    return new EmailSourceWorkerError(409, "unpair_session_path_unreadable", `Unpair could not inspect ${refusal2.component}, so it cannot say what is there. Check the permissions on the pairing-session directory, then retry.`);
   }
-  return new EmailSourceWorkerError(409, "unpair_session_path_not_a_file", `Refusing to delete a pairing artifact that is not a regular file: ${refusal.component}`);
+  return new EmailSourceWorkerError(409, "unpair_session_path_not_a_file", `Refusing to delete a pairing artifact that is not a regular file: ${refusal2.component}`);
 }
 function dashboardUnpairedSourceStates(unpaired, registryPath) {
   const read = readReconciledUnpairedSources(registryPath);
@@ -87208,6 +87715,7 @@ var init_email_source = __esm(() => {
   init_embedding_ledger();
   init_embedding_runtime();
   init_background_runtime();
+  init_agent_connections();
   init_source_dashboard();
   init_credential_health();
   init_source_dispositions();
@@ -94475,7 +94983,12 @@ async function main() {
       };
     }
   } : undefined;
+  let dashboardAgentStore;
   const worker = createEmailSourceWorker({
+    agentConnections: {
+      store: (options) => dashboardAgentStore?.(options),
+      remoteAccess: () => remoteAccessFromEnv(process.env)
+    },
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
     ...sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {},
@@ -94563,6 +95076,7 @@ async function main() {
   }
   const remotePublicUrls = remotePublic.enabled ? remotePublic.urls : undefined;
   const remoteConnections = lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2);
+  dashboardAgentStore = remoteConnections;
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -95205,6 +95719,7 @@ var init_server4 = __esm(async () => {
   init_classification_ledger();
   init_tier_migration();
   init_embedding_ledger();
+  init_agent_connections();
   INGESTION_DISPOSITION_SOURCES = [
     {
       sourceId: DROPBOX_INGESTION_EXCLUSION_SOURCE,

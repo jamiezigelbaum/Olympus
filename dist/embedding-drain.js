@@ -19195,6 +19195,12 @@ var init_source_dashboard = __esm(() => {
   };
 });
 
+// src/core/remote-public-url.ts
+var LOOPBACK_HOSTNAMES;
+var init_remote_public_url = __esm(() => {
+  LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
 // src/workers/google-connectors/gmail-live-control.ts
 var GMAIL_STORE_PULL_INTERVAL_MS, GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS, GMAIL_STORE_RECONCILE_INTERVAL_MS, GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, GMAIL_DAILY_REQUEST_GUARD_REASON = "gmail_daily_api_request_guard";
 var init_gmail_live_control = __esm(() => {
@@ -20712,6 +20718,38 @@ init_phases();
 init_scheduler_markers();
 init_vocabulary();
 
+// src/core/agent-instructions.ts
+var AGENT_SKILL_DESCRIPTION = "Ask Olympus, the owner's private search over their own email, files, " + "messages, notes and saved reading, whenever a question may be answered from their own records.";
+var AGENT_INSTRUCTION_TEXT = [
+  "Olympus is my private search over my own email, files, messages, notes, bookmarks and saved reading. " + "You can ask it through its source_answer tool.",
+  "",
+  "Ask Olympus whenever my question might be answered from my own records: what someone told me, " + "what a document or contract says, or when something happened. " + "If you are not sure, ask it anyway. You do not need me to mention Olympus.",
+  "",
+  "Ask one question at a time, in plain words, and wait for each answer before asking the next. " + "Answers can take a minute.",
+  "",
+  "Pass on what Olympus answers with its citations, and say plainly what it could not find. " + "Do not guess past it or fill gaps from memory.",
+  "",
+  "Use source_index_status only to check which of my sources are ready."
+].join(`
+`);
+
+// src/workers/dashboard/agents.ts
+var LOCAL_AGENT_PROMPT = [
+  "Add Olympus to this coding agent as a local MCP server.",
+  "Find the installed plugin with `openclaw plugins inspect olympus --json` and take `plugin.rootDir`.",
+  "Then run the one command for this tool:",
+  "- Claude Code: `claude mcp add olympus -- <rootDir>/bin/olympus serve`",
+  "- Codex: `codex mcp add olympus -- <rootDir>/bin/olympus serve`",
+  "Do not change any other configuration. Afterwards, list the Olympus tools to confirm source_answer is there."
+].join(`
+`);
+var CODEX_SNIPPET = [
+  "[mcp_servers.olympus]",
+  'command = "<plugin folder>/bin/olympus"',
+  'args = ["serve"]'
+].join(`
+`);
+
 // src/workers/dashboard/pages/setup.ts
 init_source_dashboard();
 init_vocabulary();
@@ -21126,6 +21164,10 @@ class LaneSampleStore {
   }
 }
 var backgroundLaneSampleStore = new LaneSampleStore;
+
+// src/workers/agent-connections.ts
+init_remote_public_url();
+init_operation_caller();
 
 // src/workers/email-source/index.ts
 init_source_dashboard();

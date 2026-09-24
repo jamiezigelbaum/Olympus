@@ -38,6 +38,7 @@ import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
 import { buildSourceDispositionsView, renderSourceDispositionsHtml } from '../src/workers/source-dispositions.ts';
 import { estimateMailScope, mailScopeDraftView } from '../src/core/mail-source-scope.ts';
 import type { OlympusMailScopeDraft } from '../src/control-ui-contract.ts';
+import type { DashboardAgentsView } from '../src/workers/agent-connections.ts';
 
 export const DASHBOARD_PREVIEW_NOW = new Date('2026-07-07T21:00:00.000Z');
 const NOW = DASHBOARD_PREVIEW_NOW;
@@ -667,6 +668,26 @@ function dropboxPreview(mode: 'initial' | 'update') {
   return result;
 }
 
+/**
+ * Setup's Agents section: ?agents=off (remote access off, nothing connected),
+ * ?agents=not-connected, or the default: remote access on with two agents.
+ */
+export function previewAgentsView(mode: string | null): DashboardAgentsView {
+  if (mode === 'off') return { remoteAccess: { state: 'off' }, connections: [] };
+  if (mode === 'not-connected') return { remoteAccess: { state: 'not_connected' }, connections: [] };
+  return {
+    remoteAccess: {
+      state: 'on',
+      mcpUrl: 'https://k7q2m9x4.connect.olympusplugin.ai/mcp',
+      openapiUrl: 'https://k7q2m9x4.connect.olympusplugin.ai/openapi.json',
+    },
+    connections: [
+      { id: '0a1b2c3d4e5f60718a', name: 'Claude', kind: 'oauth', createdAt: '2026-07-01T16:20:00.000Z', lastUsedAt: '2026-07-07T18:05:00.000Z' },
+      { id: '9f8e7d6c5b4a392817', name: 'Muse', kind: 'bearer', createdAt: '2026-07-06T09:00:00.000Z', lastUsedAt: null },
+    ],
+  };
+}
+
 if (import.meta.main) {
   const port = Number(process.env.DASHBOARD_PREVIEW_PORT ?? 8930);
   Bun.serve({
@@ -694,6 +715,17 @@ if (import.meta.main) {
       if (body.action === 'browse_mail_scope') {
         return Response.json(mailPickerBrowseFixture(body.draft as OlympusMailScopeDraft));
       }
+    }
+    // The Agents section's controls answer with obviously fake values, so the
+    // show-once field can be walked in a browser. Nothing is minted.
+    if (request.method === 'POST' && url.pathname === '/dashboard/agents/pairing-code') {
+      return Response.json({ ok: true, code: 'PREV-IEW2-CODE', expires_at: new Date(Date.now() + 600_000).toISOString() });
+    }
+    if (request.method === 'POST' && url.pathname === '/dashboard/agents/keys') {
+      return Response.json({ ok: true, token: 'olympus_conn_000000000000000000_preview-key-not-real' });
+    }
+    if (request.method === 'POST' && url.pathname === '/dashboard/agents/revoke') {
+      return Response.json({ ok: true, status_message: 'Preview only: nothing was revoked.' });
     }
     // Every other control POST (connect, sync now, disconnect, embedding
     // priority) needs a worker. Say so in the words the page prints, instead
@@ -761,6 +793,7 @@ if (import.meta.main) {
           overridePath: '/preview/operator-override',
         },
         ...(previewUnlocked ? { controlSessionCsrfToken: 'preview-csrf-token' } : {}),
+        agents: previewAgentsView(url.searchParams.get('agents')),
       },
     });
     return new Response(page.html, { status: page.status, headers: { 'content-type': 'text/html; charset=utf-8' } });
@@ -771,4 +804,5 @@ if (import.meta.main) {
   console.log('  mail scope picker: /mail-picker (add ?approved for a saved scope)');
   console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');
   console.log('  publisher-app one-click cards (add ?setup): /connect-dropbox-publisher /connect-google-publisher');
+  console.log('  agents (add ?setup): remote access on by default; &agents=off or &agents=not-connected');
 }

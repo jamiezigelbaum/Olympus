@@ -605,8 +605,9 @@ then `olympus worker install`). A worker that simply is not running says so
 instead: `Email worker is not reachable at http://127.0.0.1:8010/v1:`
 followed by the underlying connection error.
 
-Non-OpenClaw agents (Claude, etc.) can get the same tools over MCP:
-`olympus serve` — see the README's MCP section.
+To let other agents ask Olympus (Claude, ChatGPT, Grok, Muse, or Claude Code
+and Codex on this computer), open the dashboard's Setup page and press
+**Connect an agent** — see the README's "Connect other agents" section.
 
 ## Anytime
 
