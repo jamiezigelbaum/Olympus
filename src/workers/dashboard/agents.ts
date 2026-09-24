@@ -166,7 +166,7 @@ function connectSheet(access: DashboardRemoteAccess): string {
   const choices = AGENTS.map((agent) => agentChoice(agent, access)).join('');
   return `<div class="sheet" id="${AGENT_CONNECT_SHEET_ID}" aria-hidden="true">`
     + `<h4>Connect an agent</h4>`
-    + `<p>Pick the agent you use. It never sees Private source text or Secrets. For Private items it receives only answers that Venice or a local model reasoned out, with their titles.</p>`
+    + `<p>Pick the agent you use. It never sees Private source text or Secrets. For Private items it receives only answers that Venice or a local model reasoned out, with each item's title, path, source and author.</p>`
     + `<div class="agentpick">${choices}</div>`
     + `</div>`;
 }

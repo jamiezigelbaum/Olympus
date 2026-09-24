@@ -330,7 +330,7 @@ Agents in the cloud reach Olympus only when remote access is on; the Agents
 section says whether it is. Every connected agent gets the same privacy rules
 as your OpenClaw agent. It never sees Private source text or Secrets. For
 Private items it receives only answers that Venice or a local model reasoned
-out, with their titles. The same
+out, with each item's title, path, source and author. The same
 section lists connected agents with when each was added and last used, and
 **Revoke** removes one. `olympus connections list|revoke|pair|add` does the
 same from a terminal.
