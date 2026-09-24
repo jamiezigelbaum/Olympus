@@ -229,7 +229,8 @@ olympus tier classifier approve --why "<your reason>"
 ```
 
 Without approval those items stay Private and are found only by keyword
-search meanwhile. `no-sensitive` has no classifier lane and nothing to
+search meanwhile. To record a no, run `olympus tier classifier decline`;
+`status` then reports `decision: "declined"` rather than `"not_asked"`. `no-sensitive` has no classifier lane and nothing to
 approve; if `status` reports any other refusal, the policy names a model the
 classifier may not use, and it stays off.
 
@@ -456,7 +457,7 @@ Olympus runs on another machine, your agent runs `olympus dashboard --no-open`
 and gives you the returned opening link for the browser connection you configured. You do not need the plugin's
 installation directory or its worker token.
 
-The link expires after two minutes and works once. Open it promptly; if it has
+The link expires after fifteen minutes and works once. Open it promptly; if it has
 expired or was already used, ask your agent to run `olympus dashboard` again.
 The browser clears the link's ticket and keeps an HttpOnly control session;
 the durable worker token never enters the URL or browser storage. Treat an

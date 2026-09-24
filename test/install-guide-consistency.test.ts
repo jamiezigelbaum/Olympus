@@ -86,6 +86,20 @@ describe('pilot installation entry points', () => {
     expect(section).toContain('Skipped');
     expect(section).toContain('key being present');
     expect(section).toContain('keep source Connect unopened');
+    // 2026-09-24 beta.4 test: a literal agent skipped the classifier gate and
+    // its summary never mentioned it, so the decision is a receipt line.
+    expect(section).toContain('**Privacy classifier decision.**');
+    expect(section).toContain('olympus tier classifier status');
+    for (const outcome of ['**approved**', '**declined**', '**refused**', '**not applicable**']) {
+      expect(section).toContain(outcome);
+    }
+    expect(section.replace(/\s+/g, ' ')).toContain('Do not send the dashboard handoff until this line reads one of');
+    expect(section.replace(/\n>\s*/g, ' ')).toContain('Privacy classifier: `<approved, declined, refused (reason), or not applicable (no-sensitive)>`');
+    const handoffRules = document.slice(handoff - 3000, handoff).replace(/\s+/g, ' ');
+    expect(handoffRules).toContain('Deliver this required user-facing handoff **verbatim**');
+    expect(handoffRules).toContain('`/plugin?plugin=olympus&id=dashboard` on the Gateway origin');
+    expect(handoffRules).toContain('It needs no ticket and does not expire.');
+    expect(handoffRules).toContain('`http://127.0.0.1:8010/…`');
     expect(document).toContain('Sources are the point of');
     expect(document).toContain('dashboard\nhandoff that lets them choose is required');
     expect(document).toContain('/plugin?plugin=olympus&id=dashboard');
@@ -135,8 +149,68 @@ describe('pilot installation entry points', () => {
     expect(gate.replace(/>\s*/g, '').replace(/\s+/g, ' ')).toContain('labels and sender');
     expect(gate).toContain('olympus tier classifier approve --why');
     expect(gate).toContain('never an ordinary cloud model');
-    expect(gate).toContain('A no is a complete answer; record nothing.');
+    expect(gate).toContain('olympus tier classifier decline');
+    expect(gate).not.toContain('record nothing');
+    expect(gate).toContain('Privacy\nclassifier: not applicable (no-sensitive)');
     expect(document).toContain('- **Privacy classifier approval** (end of Step 3)');
+    // The receipt reads the recorded `decision` field, and its outcomes are
+    // exactly the ones Step 3 can leave behind.
+    const receipt = document.slice(
+      document.indexOf('- **Privacy classifier decision.**'),
+      document.indexOf('A provider key being present'),
+    );
+    for (const decision of ['`approved`', '`declined`', '`refused`', '`not_applicable`', '`not_asked`']) {
+      expect(receipt).toContain(decision);
+      expect(gate).toContain(decision === '`refused`' ? '`refused` reason' : decision);
+    }
+  });
+
+  test('Step 5 asks the Custom plugin UI opt-in before the restart, with a standalone fallback', () => {
+    const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const step5 = document.slice(
+      document.indexOf('## Step 5 — Validate, then restart the gateway'),
+      document.indexOf('## Step 6 — Finish installation'),
+    );
+    const optIn = step5.indexOf('**Custom plugin UI opt-in (its own Rule one gate, before the restart).**');
+    expect(optIn).toBeGreaterThan(0);
+    expect(optIn).toBeLessThan(step5.indexOf('openclaw gateway restart\n```'));
+    const text = step5.slice(optIn).replace(/>\s*/g, '').replace(/\s+/g, ' ');
+    expect(text).toContain('Settings → Labs → Custom plugin UI');
+    expect(text).toContain('gateway.controlUi.experimental.customPlugins');
+    expect(text).toContain('every plugin you have installed, not only Olympus');
+    expect(text).toContain('On a no, record nothing, leave it off, and use the standalone opening link in Step 6');
+    expect(document).toContain('- **Custom plugin UI opt-in** (Step 5, before the restart)');
+  });
+
+  test('the posture is never a pick-list before the explanation and sensitivity conversation', () => {
+    const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const rule = document.indexOf('**No pick-list before the explanation — question tools included.**');
+    const explanation = document.indexOf('**Required user-facing four-tier explanation.**');
+    expect(rule).toBeGreaterThan(0);
+    expect(rule).toBeLessThan(explanation);
+    const text = document.slice(rule, explanation).replace(/\s+/g, ' ');
+    expect(text).toContain('question tool');
+    expect(text).toContain('never a bare preset id');
+    expect(text).toContain('sensitivity conversation');
+  });
+
+  test('Step 0 installs Bun without unzip or sudo when those are missing', () => {
+    const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const step0 = document.slice(document.indexOf('## Step 0 — Preflight'), document.indexOf('## Step 1 — Install the plugin'));
+    expect(step0).toContain('command -v unzip');
+    expect(step0).toContain('npm install -g --prefix "$HOME/.local" bun');
+    expect(step0).toContain('bun.exe');
+    expect(step0).toContain('npm install -g --prefix "$HOME/.local" --ignore-scripts=false bun');
+    expect(step0).toContain('no unzip or sudo: see "Installing Bun" below');
+    expect(step0).toContain('Never ask the operator to run a `sudo` command you can avoid.');
+  });
+
+  test('the standalone opening link lifetime matches the ticket TTL everywhere', () => {
+    for (const path of ['INSTALL_FOR_AGENTS.md', 'docs/QUICKSTART.md', 'src/workers/dashboard/components.ts']) {
+      const document = readFileSync(join(ROOT, path), 'utf8').replace(/\s+/g, ' ');
+      expect(document).toContain('expires after fifteen minutes');
+      expect(document).not.toContain('expires after two minutes');
+    }
   });
 
   test('entry points state the OpenClaw Node range, not a stale one', () => {

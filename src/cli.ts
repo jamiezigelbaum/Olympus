@@ -2524,7 +2524,7 @@ const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
  * their problem is now this function's: it resolves the worker token the way
  * `olympus dashboard token` already does (worker.env outranks a stale config),
  * asks THIS install's OWN configured worker — never a host from a response,
- * never a redirect — for a 120-second single-use ticket bound to that origin,
+ * never a redirect — for a 15-minute single-use ticket bound to that origin,
  * and returns a link whose fragment carries only that ticket. The page at
  * `/dashboard/launch` clears the fragment and redeems it, and the worker
  * answers with the same origin-bound HttpOnly control cookie a manual unlock
@@ -2557,8 +2557,8 @@ export async function runDashboardCommand(
     url: openUrl,
     opened,
     hint: dependencies.noOpen
-      ? 'This fresh single-use 120-second link was not opened locally and is ready to hand to the intended browser.'
-      : 'This link carries a single-use 120-second ticket, not the worker token;'
+      ? 'This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser.'
+      : 'This link carries a single-use 15-minute ticket, not the worker token;'
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
         + ` For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`,
   };

@@ -331,6 +331,35 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     await expect(runTierCommand(['classifier', 'approve'], { env: withPolicy })).rejects.toThrow('--why');
     const approved = await runTierCommand(['classifier', 'approve', '--why', 'Owner chose the local model for the sniffer.'], { env: withPolicy });
     expect(approved).toMatchObject({ recorded: { approved_by: 'owner', status: 'complete', kind: 'classifier_model_decision' } });
-    expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ approved: true });
+    expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ approved: true, decision: 'approved' });
+  });
+
+  test('tier classifier decline is recorded, so status tells declined from never asked', async () => {
+    const { dir, env } = setup();
+    const sovereigntyPath = join(dir, 'sovereignty.json');
+    const { loadSovereigntyPreset } = await import('../src/core/sovereignty.ts');
+    writeFileSync(sovereigntyPath, JSON.stringify(loadSovereigntyPreset('local-first')));
+    const withPolicy = { ...env, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: sovereigntyPath };
+    let clock = Date.parse('2026-09-24T10:00:00.000Z');
+    const now = () => new Date(clock += 1000);
+    expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ approved: false, decision: 'not_asked' });
+    const declined = await runTierCommand(['classifier', 'decline'], { env: withPolicy, now });
+    expect(declined).toMatchObject({ recorded: { approved_by: 'owner', status: 'complete', kind: 'classifier_model_revoked' } });
+    expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ approved: false, decision: 'declined' });
+    // A later yes supersedes the no; a later no supersedes the yes.
+    await runTierCommand(['classifier', 'approve', '--why', 'Changed my mind.'], { env: withPolicy, now });
+    expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ approved: true, decision: 'approved' });
+    await runTierCommand(['classifier', 'decline', '--why', 'Keep names on this machine.'], { env: withPolicy, now });
+    expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ approved: false, decision: 'declined' });
+  });
+
+  test('tier classifier status reports not applicable on no-sensitive and nothing to decline', async () => {
+    const { dir, env } = setup();
+    const sovereigntyPath = join(dir, 'sovereignty.json');
+    const { loadSovereigntyPreset } = await import('../src/core/sovereignty.ts');
+    writeFileSync(sovereigntyPath, JSON.stringify(loadSovereigntyPreset('no-sensitive')));
+    const withPolicy = { ...env, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: sovereigntyPath };
+    expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ lane: null, refused: 'no_private_lane', approved: false, decision: 'not_applicable' });
+    await expect(runTierCommand(['classifier', 'decline'], { env: withPolicy })).rejects.toThrow('nothing to decline');
   });
 });

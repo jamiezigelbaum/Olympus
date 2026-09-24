@@ -14,7 +14,7 @@
  *   nothing about the worker token or about any other ticket.
  * - It is never persisted. One process, one `Map`, in memory; a restart simply
  *   invalidates outstanding tickets, and the reader runs the CLI again.
- * - It is single-use and short-lived (120s) and bound to the origin that minted
+ * - It is single-use and short-lived (15 minutes) and bound to the origin that minted
  *   it, so a copied ticket grants at most one redemption at the intended origin
  *   before it expires. Anyone holding an unused ticket can use it there.
  *
@@ -32,10 +32,12 @@ export const DASHBOARD_LAUNCH_REDEEM_PATH = '/dashboard/control/launch/redeem';
 /** The URL fragment key the opening page reads and clears. */
 export const DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = 'olympus_launch_ticket';
 /**
- * Long enough for a browser to navigate and one fetch, short enough that a
- * copied ticket has limited exposure: one redemption before expiry.
+ * Long enough for an operator to receive the link in chat and open it (owner
+ * decision, 2026-09-24: two minutes routinely expired before the click), short
+ * enough that a copied ticket has limited exposure: one redemption before
+ * expiry.
  */
-export const DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 120;
+export const DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900;
 /**
  * A bound on the in-memory store. The CLI mints one ticket per invocation and
  * the browser consumes it; anything approaching this cap is a caller that is
