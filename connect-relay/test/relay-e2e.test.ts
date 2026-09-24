@@ -3,7 +3,7 @@
  * A hosted agent opens TLS with SNI `<install-id>.<zone>` to the relay and
  * reaches the fake worker; the relay only ever forwards ciphertext.
  */
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import tls from 'node:tls';
@@ -30,6 +30,9 @@ import { startRelay, type RelayHandle } from '../server/relay.ts';
 import { startMockAcme, type MockAcme } from './helpers/mock-acme.ts';
 import { agentRequest, captureClientHello, holdOpen, openControl, rawExchange, syntheticClientHello, trickle } from './helpers/net.ts';
 import { createTestCa, type TestCa } from './helpers/pki.ts';
+
+// Several tests issue a certificate through the mock CA (openssl) before exercising timeouts.
+setDefaultTimeout(20_000);
 
 const ZONE = 'connect.olympus.test';
 const CONTROL_HOST = `relay.${ZONE}`;
@@ -78,7 +81,11 @@ async function makeRelay(
   return { relay, registry };
 }
 
-async function connectInstall(relay: RelayHandle, stateDir = newStateDir(), extra: { maxDataConnections?: number } = {}) {
+async function connectInstall(
+  relay: RelayHandle,
+  stateDir = newStateDir(),
+  extra: { maxDataConnections?: number; firstRequestTimeoutMs?: number } = {},
+) {
   const handle = await startConnect({
     ...extra,
     stateDir,
@@ -386,6 +393,12 @@ async function registerRaw(relay: RelayHandle) {
 
 class CountingDns extends MemoryDnsProvider {
   calls = 0;
+  failRemovals = false;
+  override async removeAddress(hostname: string) {
+    this.calls += 1;
+    if (this.failRemovals) throw new Error('provider unavailable');
+    return super.removeAddress(hostname);
+  }
   override async ensureAddress(hostname: string) {
     this.calls += 1;
     return super.ensureAddress(hostname);
@@ -462,7 +475,7 @@ describe('abuse resistance', () => {
     first.control.destroy();
   });
 
-  test('registrations that never start issuance, or go quiet, expire with their address record', async () => {
+  test('never-issued registrations expire only once offline; quiet ones expire and their address record is removed within budget, with retry', async () => {
     const counting = new CountingDns();
     const { relay, registry } = await makeRelay({}, undefined, { dns: counting });
     const idle = await registerRaw(relay);
@@ -471,16 +484,43 @@ describe('abuse resistance', () => {
     expect(await active.control.next()).toMatchObject({ ok: true });
     const hostname = `${active.identity.installId}.${ZONE}`;
     expect(counting.addresses.has(hostname)).toBe(true);
+    expect(registry.addressRecordCount()).toBe(1);
 
     const day = 24 * 60 * 60_000;
+    // Still connected: a live session is never expired as unactivated.
+    expect(await relay.sweep(Date.now() + day + 60_000)).toEqual([]);
+    expect(registry.get(idle.identity.installId)).toBeDefined();
+    idle.control.destroy();
+    await until(() => !relay.onlineInstalls().includes(idle.identity.installId));
     expect(await relay.sweep(Date.now() + day + 60_000)).toEqual([idle.identity.installId]);
     expect(registry.get(idle.identity.installId)).toBeUndefined();
-    expect(await idle.control.next()).toMatchObject({ type: 'error', code: 'unregistered' });
-    expect(registry.get(active.identity.installId)).toBeDefined();
 
-    expect(await relay.sweep(Date.now() + 91 * day)).toEqual([active.identity.installId]);
-    expect(counting.addresses.has(hostname)).toBe(false);
+    // Quiet for 90 days: expired, but the address record stays counted until DNS removal succeeds.
     active.control.destroy();
+    await until(() => relay.onlineInstalls().length === 0);
+    counting.failRemovals = true;
+    expect(await relay.sweep(Date.now() + 91 * day)).toEqual([active.identity.installId]);
+    expect(counting.addresses.has(hostname)).toBe(true);
+    expect(registry.addressRecordCount()).toBe(1);
+    expect(registry.pendingAddressRemovals()).toEqual([active.identity.installId]);
+    counting.failRemovals = false;
+    expect(await relay.sweep(Date.now() + 91 * day)).toEqual([]);
+    expect(counting.addresses.has(hostname)).toBe(false);
+    expect(registry.addressRecordCount()).toBe(0);
+    expect(registry.pendingAddressRemovals()).toEqual([]);
+  });
+
+  test('address-record removal waits for DNS budget', async () => {
+    const counting = new CountingDns();
+    const { relay, registry } = await makeRelay({ dnsCallsGlobal: { capacity: 2, refillPerSecond: 0 } }, undefined, { dns: counting });
+    const active = await registerRaw(relay);
+    active.control.send({ type: 'acme-dns-set', id: 'a', value: 'H'.repeat(43) });
+    expect(await active.control.next()).toMatchObject({ ok: true }); // spends the whole budget
+    active.control.destroy();
+    await until(() => relay.onlineInstalls().length === 0);
+    expect(await relay.sweep(Date.now() + 91 * 24 * 60 * 60_000)).toEqual([active.identity.installId]);
+    expect(registry.pendingAddressRemovals()).toEqual([active.identity.installId]);
+    expect(counting.addresses.size).toBe(1);
   });
 
   test('the file registry is append-only, survives a torn line, and replays expiry state', async () => {
@@ -619,5 +659,23 @@ describe('flow control and client limits', () => {
     expect(statuses).not.toContain('online');
     expect(statuses).toContain('offline:relay announced an unexpected hostname');
     expect(client.hostname).toBeUndefined();
+  });
+
+  test('one address cannot hold all of an install\'s slots, and stalled handshakes are closed', async () => {
+    const { relay } = await makeRelay({ maxConcurrentPerInstallPerAddress: 3, newConnectionsPerInstall: { capacity: 100, refillPerSecond: 100 } });
+    const { handle, hostname } = await connectInstall(relay, newStateDir(), { firstRequestTimeoutMs: 400 });
+    const hello = await captureClientHello(hostname);
+    // Three stalled ClientHellos from one address fill that address's share...
+    const stalled = [holdOpen(relay.port, hello), holdOpen(relay.port, hello), holdOpen(relay.port, hello)];
+    await until(() => handle.client.activeDataConnections === 3);
+    // ...the fourth is refused at once...
+    expect(await rawExchange(relay.port, hello)).toEqual(tlsAlertRecord(TLS_ALERT.internalError));
+    // ...and the stalled ones are closed by the install's first-request deadline, freeing the slots.
+    for (const result of await Promise.all(stalled.map((entry) => entry.closed))) {
+      expect(result.afterMs).toBeLessThan(3_000);
+    }
+    await until(() => handle.client.activeDataConnections === 0);
+    const response = await agentRequest({ port: relay.port, servername: hostname, ca: ca.cert, path: '/mcp' });
+    expect(response.status).toBe(200);
   });
 });

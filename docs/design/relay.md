@@ -70,6 +70,11 @@ install ──TLS(SNI=relay.zone)─┘  control session: hello/register, open, 
   - Before the ClientHello, the relay caps connections per address and
     overall, and parses only once a whole TLS record has arrived, so a
     byte-by-byte trickle costs one parse per record.
+  - One address can hold at most 6 of an install's 32 slots, and the install
+    closes any connection that has not finished TLS and sent a request within
+    10 seconds, so stalled handshakes cannot exhaust an install.
+  - When one side of a spliced connection closes, the other is ended, not
+    destroyed, so bytes still queued for a slow reader are delivered.
   - Per-address limits key IPv6 by /64. When an AAAA record is published the
     relay listens dual-stack on `::`, and refuses to start IPv4-only.
 - **Identity.**
@@ -83,8 +88,10 @@ install ──TLS(SNI=relay.zone)─┘  control session: hello/register, open, 
   - The registry stores only the id, the public key, and registration,
     last-seen, and activation times. It stores no IP address and no account.
   - Registrations are rate-limited per address and relay-wide. A registration
-    that never starts certificate issuance expires after 24 hours; one with no
-    session for 90 days expires with its address record. The store is an
+    that never starts certificate issuance expires after 24 hours once it is
+    offline; one with no session for 90 days expires. Its address record stays
+    counted until the DNS removal (within the DNS budget) succeeds, and failed
+    removals are retried on the next sweep. The store is an
     append-only JSON-lines log, compacted on start, so no request rewrites the
     whole file.
 - **Local TLS endpoint.** It forwards only the remote agent surface: `/mcp`,
@@ -195,16 +202,17 @@ cannot name another record.
 |---|---|
 | ClientHello deadline / size | 5 s / 16 KiB + record headers |
 | Attach deadline after `open` | 10 s |
-| Concurrent public connections per install | 32 |
+| Concurrent public connections per install / per install from one address (IPv6 /64) | 32 / 6 |
+| Install side: TLS handshake and first request deadline per connection | 10 s |
 | New public connections per install | burst 30, 5/s |
 | Control-host connections (session setup) per address | burst 30, 1 per 2 s |
-| Data-host connections per address (concurrent) | 512 |
+| Data-host connections per address (concurrent) / handshakes per address | 512 / burst 200, 50/s |
 | Pre-ClientHello connections per address / listener total | 32 / 50,000 |
 | Registrations per address / relay-wide | 5, then 5/hour / 200, then 200/hour |
 | ACME TXT publishes and clears per install | 10, then 10/hour; 4 outstanding |
 | DNS provider calls, relay-wide | burst 120, 2/s |
 | Explicit address records | 50,000 |
-| Registration expiry: no issuance / no session | 24 hours / 90 days |
+| Registration expiry: no issuance (and offline) / no session | 24 hours / 90 days |
 | Client data connections | 64 |
 | Session idle (install pings every 30 s) | 90 s |
 | Spliced connection idle | 15 min |

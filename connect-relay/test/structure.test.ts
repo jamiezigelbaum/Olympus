@@ -15,7 +15,7 @@ const imports = (source: string) => [...source.matchAll(/from\s+['"]([^'"]+)['"]
 
 describe('relay plaintext boundary', () => {
   test('the public data path and SNI parser never import TLS or HTTP', () => {
-    for (const file of ['server/public-path.ts', 'shared/sni.ts', 'shared/rate-limit.ts']) {
+    for (const file of ['server/public-path.ts', 'shared/sni.ts', 'shared/rate-limit.ts', 'shared/bridge.ts']) {
       for (const specifier of imports(read(file))) {
         expect(specifier, `${file} imports ${specifier}`).not.toMatch(/^(node:)?(tls|https?|http2)$/);
       }
