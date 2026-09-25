@@ -842,6 +842,33 @@ describe('pairing codes', () => {
     expect((await submitConsent(chatgpt, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code })).status).toBe(303);
   });
 
+  test('IPv6 callers are grouped by /64, so one host cannot mint callers', async () => {
+    const owner = await openFrom(relayed('198.51.100.20'));
+    const first = await openFrom(relayed('2001:db8:1:2::1'));
+    // 300 more requests from 300 addresses inside one /64: all one caller.
+    for (let i = 2; i < 302; i += 1) expect((await openFrom(relayed(`2001:db8:1:2::${i.toString(16)}`))).response.status).toBe(200);
+    const code = () => ({ action: 'approve', pairing_code: store.oauth.mintPairingCode().code });
+    expect((await submitConsent(first, code(), { Origin: base, ...relayed('2001:db8:1:2::1') })).status).toBe(400);
+    expect((await submitConsent(owner, code(), { Origin: base, ...relayed('198.51.100.20') })).status).toBe(303);
+  });
+
+  test('a page the owner is typing a code into is pinned against eviction', async () => {
+    const ownerHeaders = relayed('198.51.100.20');
+    const owner = await openFrom(ownerHeaders);
+    // A typo pins nothing; a well-formed (wrong) code does.
+    expect((await submitConsent(owner, { action: 'approve', pairing_code: 'ABC' }, { Origin: base, ...ownerHeaders })).status).toBe(400);
+    expect((await submitConsent(owner, { action: 'approve', pairing_code: 'AAAA-AAAA-AAAA' }, { Origin: base, ...ownerHeaders })).status).toBe(400);
+    // 200 distinct /64s, one request each, all naming the owner's app: past
+    // the 128-per-client cap, every eviction in that scope picks an unpinned page.
+    for (let i = 0; i < 200; i += 1) {
+      expect((await openFrom(relayed(`2001:db8:${(i + 16).toString(16)}::1`))).response.status).toBe(200);
+    }
+    sleeps = [];
+    const approved = await submitConsent(owner, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code }, { Origin: base, ...ownerHeaders });
+    expect(approved.status).toBe(303);
+    expect(new URL(approved.headers.get('location')!).searchParams.get('code')).toBeTruthy();
+  });
+
   test('olympus connections pair mints a code and says whether OAuth is on', () => {
     const env = {
       HOME: join(dir, 'home'),

@@ -25,8 +25,10 @@
  * servers with no Origin or their own.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { addressKey } from '../../../connect-relay/shared/rate-limit.ts';
 import { sanitizeCallerDisplayName } from '../../core/operation-caller.ts';
 import type { RemoteConnectionStore } from '../../core/remote-connections.ts';
+import { normalizePairingCode } from '../../core/remote-oauth-store.ts';
 import { currentRemotePublicUrls, isConfiguredResource, type RemotePublicUrls, type RemotePublicUrlsSource } from '../../core/remote-public-url.ts';
 import {
   ClientMetadataError,
@@ -120,6 +122,13 @@ interface PendingConsent {
   csrf: string;
   attempts: number;
   expiresAt: number;
+  /**
+   * Someone holding this page's cookie and CSRF token has typed a well-formed
+   * pairing code into it: likely the owner mid-approval. Evicted only when a
+   * scope has nothing unpinned left. Pinning is not free: it costs a paced
+   * pairing check, and five wrong codes end the page.
+   */
+  pinned: boolean;
 }
 
 interface IssuedCode {
@@ -198,10 +207,14 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
    *   caller holding the most slots in that scope (fair share).
    * An attacker spread over many addresses therefore evicts itself first. The
    * owner, holding one request, is evicted only when every holder is down to
-   * one, which takes more distinct addresses than the table has slots.
+   * one, which takes more distinct addresses (IPv6 /64s) than the scope has
+   * slots. A page someone is typing a pairing code into is pinned: it goes
+   * only when its scope holds nothing unpinned.
    */
   const admitPending = (caller: string, clientId: string): void => {
-    const evictFairShare = (scope: Array<[string, PendingConsent]>): void => {
+    const evictFairShare = (all: Array<[string, PendingConsent]>): void => {
+      const unpinned = all.filter(([, entry]) => !entry.pinned);
+      const scope = unpinned.length > 0 ? unpinned : all;
       const held = new Map<string, number>();
       for (const [, entry] of scope) held.set(entry.caller, (held.get(entry.caller) ?? 0) + 1);
       const heaviest = Math.max(0, ...held.values());
@@ -210,7 +223,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       if (victim) pending.delete(victim[0]);
     };
     const own = [...pending].filter(([, entry]) => entry.caller === caller);
-    if (own.length >= MAX_PENDING_CONSENTS_PER_CALLER) pending.delete(own[0]![0]);
+    if (own.length >= MAX_PENDING_CONSENTS_PER_CALLER) {
+      pending.delete((own.find(([, entry]) => !entry.pinned) ?? own[0]!)[0]);
+    }
     const sameClient = [...pending].filter(([, entry]) => entry.client.clientId === clientId);
     if (sameClient.length >= MAX_PENDING_CONSENTS_PER_CLIENT) evictFairShare(sameClient);
     if (pending.size >= MAX_PENDING_CONSENTS) evictFairShare([...pending]);
@@ -287,6 +302,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       csrf,
       attempts: 0,
       expiresAt: now() + CONSENT_REQUEST_TTL_MS,
+      pinned: false,
     };
     pending.set(requestId, entry);
     return consentPage(requestId, entry, u);
@@ -337,6 +353,8 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     const action = form.get('action');
     if (action === 'deny') return finish({ error: 'access_denied', error_description: 'The owner denied the request.' });
     if (action !== 'approve') return errorPage(400, 'The approval form was malformed.');
+    // A typo pins nothing (it costs nothing either); a real attempt does.
+    if (normalizePairingCode(form.get('pairing_code') ?? '') !== undefined) entry.pinned = true;
     const caller = callerKey(request);
     const wait = pacer.delayFor(caller);
     if (wait > PAIRING_MAX_HELD_MS) {
@@ -521,7 +539,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
 
 /**
  * Who is asking, for pacing and slot limits: the agent address the relay
- * reports, else one shared key for everything arriving directly (loopback, or
+ * reports (IPv6 grouped by /64), else one shared key for everything arriving directly (loopback, or
  * a tunnel that does not set the relay's header). The relay's local endpoint
  * drops any inbound copy of these headers before setting its own and proves
  * itself with the per-install relay secret (`trusted`); a loopback caller
@@ -530,7 +548,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
 function callerKeyFor(request: Request, trusted: (request: Request) => boolean): string {
   if (request.headers.get('x-olympus-relay') !== '1' || !trusted(request)) return 'direct';
   const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  return forwarded ? `relay:${forwarded.slice(0, 64)}` : 'direct';
+  // IPv6 by /64, like the relay's own limits: one host commonly holds a whole
+  // /64, so per-address keys would hand it unlimited callers.
+  return forwarded ? `relay:${addressKey(forwarded.slice(0, 64))}` : 'direct';
 }
 
 /**
