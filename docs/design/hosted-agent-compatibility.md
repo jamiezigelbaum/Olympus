@@ -207,14 +207,19 @@ and the relay client forwards to it.
   (up to a minute), and past 20 wrong codes in 15 minutes every check waits
   two seconds.
 - **Waiting approvals** are bounded (256 in all, 128 per client id, 8 per
-  caller, where a caller is the address the relay reports), but a new request
+  caller, where a caller is the address the relay reports, IPv6 grouped by
+  /64 as the relay's own limits are), but a new request
   is never refused. It evicts an older one instead: a caller at its cap loses
   its own oldest; a client id at its cap, or a full table, loses the oldest
   request of whichever caller holds the most slots in that scope. A flood from
   many addresses therefore evicts itself, and the owner, holding one request,
   is evicted only once every holder is down to one. That takes more distinct
   addresses than the scope has slots (128 when the flood names the owner's own
-  app, whose client id is public). The evicted page says it was replaced.
+  app, whose client id is public). A page into which a well-formed pairing
+  code has been typed (with its cookie and CSRF token) is pinned: it is
+  evicted only when its scope holds nothing unpinned. Pinning costs a paced
+  pairing check, and five wrong codes end the page, so it cannot be used to
+  hold slots cheaply. The evicted page says it was replaced.
   Before this, 32 addresses holding 8 each filled the table and every other
   caller got a 429 for ten minutes.
   Callers that arrive without the relay's secret (a tunnel, or loopback) share

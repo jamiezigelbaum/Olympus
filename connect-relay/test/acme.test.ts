@@ -5,7 +5,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AcmeError, obtainCertificate, type AcmeDnsPublisher } from '../client/acme.ts';
 import { ariCertId, fetchRenewalInfo, selectRenewalTime } from '../client/ari.ts';
-import { certificateIsFresh } from '../client/connect.ts';
+import { ariRenewalDue, certificateIsFresh, latestRenewalMoment } from '../client/connect.ts';
 import { createCsr } from '../client/csr.ts';
 import { MemoryDnsProvider } from '../server/dns.ts';
 import { startMockAcme, type MockAcme } from './helpers/mock-acme.ts';
@@ -158,6 +158,23 @@ describe('ACME Renewal Information (RFC 9773)', () => {
     } finally {
       acme.setRenewalWindow(undefined);
     }
+  });
+
+  test('a CA window past expiry cannot let the certificate lapse', () => {
+    const { cert } = ca.issue(HOST);
+    const x509 = new X509Certificate(cert);
+    const notBefore = Date.parse(x509.validFrom);
+    const notAfter = Date.parse(x509.validTo);
+    const latest = latestRenewalMoment(cert);
+    expect(latest).toBe(notAfter - (notAfter - notBefore) / 6);
+    // A window 200 days out, beyond this 90-day certificate's expiry.
+    const farRenewAt = selectRenewalTime({ start: notAfter + 110 * 86_400_000, end: notAfter + 111 * 86_400_000 });
+    expect(ariRenewalDue(cert, farRenewAt, notBefore + 86_400_000)).toBe(false);
+    expect(ariRenewalDue(cert, farRenewAt, latest - 1)).toBe(false);
+    expect(ariRenewalDue(cert, farRenewAt, latest)).toBe(true);
+    expect(ariRenewalDue(cert, farRenewAt, notAfter - 86_400_000)).toBe(true);
+    // An earlier CA moment still wins.
+    expect(ariRenewalDue(cert, notBefore + 2 * 86_400_000, notBefore + 3 * 86_400_000)).toBe(true);
   });
 
   test('a renewal order names the certificate it replaces; a refused replaces falls back to a plain order', async () => {

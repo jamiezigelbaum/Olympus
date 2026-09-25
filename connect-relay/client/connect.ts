@@ -103,6 +103,23 @@ export function certificateIsFresh(pem: string | undefined, hostname: string, no
   }
 }
 
+/**
+ * The latest moment an ARI-chosen renewal may wait for: a sixth of the
+ * lifetime before expiry. A CA window past that (or past expiry itself) is
+ * clamped, so a far-future window can never let the certificate lapse.
+ */
+export function latestRenewalMoment(pem: string): number {
+  const certificate = new X509Certificate(pem);
+  const notBefore = Date.parse(certificate.validFrom);
+  const notAfter = Date.parse(certificate.validTo);
+  return notAfter - (notAfter - notBefore) / 6;
+}
+
+/** Whether a certificate with an ARI plan is due: the plan says so, or it is inside its last sixth. */
+export function ariRenewalDue(pem: string, renewAt: number, now = Date.now()): boolean {
+  return Math.min(renewAt, latestRenewalMoment(pem)) <= now;
+}
+
 /** Still inside its validity window for `hostname` (usable while a renewal waits). */
 function certificateIsValid(pem: string | undefined, hostname: string, now = Date.now()): boolean {
   if (!pem) return false;
@@ -183,7 +200,7 @@ export async function startConnect(options: ConnectOptions): Promise<ConnectHand
     ari = {
       certId: info.certId,
       window: info.window,
-      renewAt: same ? ari!.renewAt : selectRenewalTime(info.window),
+      renewAt: Math.min(same ? ari!.renewAt : selectRenewalTime(info.window), latestRenewalMoment(pem)),
       freshUntil: now + info.retryAfterMs,
     };
     return ari;
@@ -203,7 +220,7 @@ export async function startConnect(options: ConnectOptions): Promise<ConnectHand
     const hostname = await client.ready();
     let pem = existsSync(certPath) ? readFileSync(certPath, 'utf8') : undefined;
     const plan = pem && certificateIsValid(pem, hostname) ? await renewalPlan(pem) : undefined;
-    const due = plan ? plan.renewAt <= Date.now() : !certificateIsFresh(pem, hostname);
+    const due = plan ? ariRenewalDue(pem!, plan.renewAt) : !certificateIsFresh(pem, hostname);
     if (due) {
       const terms = await agreed();
       if (!terms.ok) {

@@ -4,14 +4,14 @@
  * reaches the fake worker; the relay only ever forwards ciphertext.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
-import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
+import { X509Certificate, createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import tls from 'node:tls';
 import http, { type IncomingHttpHeaders } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startConnect, type ConnectHandle } from '../client/connect.ts';
+import { latestRenewalMoment, startConnect, type ConnectHandle } from '../client/connect.ts';
 import { ariCertId } from '../client/ari.ts';
 import { loadOrCreateIdentity } from '../client/identity.ts';
 import { RelayClient } from '../client/relay-client.ts';
@@ -263,6 +263,21 @@ describe('connect relay end to end', () => {
       expect(acme.issued.length).toBe(issuedBefore + 1);
       const response = await agentRequest({ port: relay.port, servername: second.hostname, ca: ca.cert, path: '/mcp' });
       expect(response.status).toBe(200);
+    } finally {
+      acme.setRenewalWindow(undefined);
+    }
+  });
+
+  test('a renewal window the CA sets past expiry is clamped to the last sixth of the lifetime', async () => {
+    const { relay } = await makeRelay();
+    const day = 24 * 60 * 60 * 1000;
+    try {
+      acme.setRenewalWindow({ start: Date.now() + 200 * day, end: Date.now() + 201 * day });
+      const { handle, stateDir } = await connectInstall(relay);
+      const pem = readFileSync(join(stateDir, 'connect-relay', 'tls-cert.pem'), 'utf8');
+      const renewAt = Date.parse((handle.certificate() as { renewAt?: string }).renewAt ?? '');
+      expect(renewAt).toBe(latestRenewalMoment(pem));
+      expect(renewAt).toBeLessThan(Date.parse(new X509Certificate(pem).validTo));
     } finally {
       acme.setRenewalWindow(undefined);
     }
@@ -701,6 +716,36 @@ describe('operator commands (server/admin.ts)', () => {
     expect(reopened.pendingAddressRemovals()).toEqual([identity.installId]);
     expect(readRegistrySnapshot(registryPath).counts().revoked).toBe(1);
     expect((await runAdmin(['restore', identity.installId], env)).code).toBe(1);
+  });
+
+  test('offline revoke writes the log only as its owner, and a starting relay is never mistaken for a stopped one', async () => {
+    const dir = newStateDir();
+    const registryPath = join(dir, 'registry.jsonl');
+    const env = { RELAY_REGISTRY_PATH: registryPath, RELAY_ADMIN_SOCKET: join(dir, 'admin.sock') };
+    const identity = loadOrCreateIdentity(newStateDir());
+    const registry = new FileInstallRegistry(registryPath);
+    registry.register(identity.installId, identity.publicKeySpki);
+    await registry.flush();
+    const before = readFileSync(registryPath, 'utf8');
+    const ownUid = process.getuid!();
+    // Another user (root, say) is refused rather than creating or extending a log it would own.
+    const other = await runAdmin(['revoke', identity.installId], env, ownUid + 1);
+    expect(other.code).toBe(1);
+    expect(other.out).toContain('service user');
+    expect(readFileSync(registryPath, 'utf8')).toBe(before);
+    // A relay that holds its socket but is still starting answers "starting"; nothing is appended.
+    const admin = await startAdminSocket(env.RELAY_ADMIN_SOCKET, () => undefined);
+    try {
+      const starting = await runAdmin(['revoke', identity.installId], env, ownUid);
+      expect(starting.code).toBe(1);
+      expect(starting.out).toContain('starting');
+      expect(readFileSync(registryPath, 'utf8')).toBe(before);
+    } finally {
+      await admin.close();
+    }
+    // Missing state directory: nothing is created.
+    const missing = await runAdmin(['revoke', identity.installId], { RELAY_REGISTRY_PATH: join(dir, 'absent', 'registry.jsonl'), RELAY_ADMIN_SOCKET: join(dir, 'none.sock') }, ownUid);
+    expect(missing.code).toBe(1);
   });
 
   test('the command refuses malformed input', async () => {

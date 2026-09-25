@@ -265,6 +265,9 @@ cannot name another record.
     the 12-hourly check does not poll harder than the CA asks; the moment
     picked inside a window is kept while the window is unchanged.
   - A moment before the next periodic check gets its own timer.
+  - The CA's moment is clamped to a sixth of the lifetime before expiry, and
+    a certificate inside its last sixth is due whatever the window says, so
+    a far-future (or past-expiry) window cannot let the certificate lapse.
   - If the CA refuses `replaces` (already replaced, or not this account's),
     the order is placed again without it; a rate-limit or server error is not
     retried that way.
@@ -496,7 +499,11 @@ Nothing below has been executed. It is what deployment needs from Jamie.
     re-register by itself, which made the old hand-appended `remove` line
     ineffective against a running install. The install's client backs off
     six hours on `revoked`. With the relay stopped, `revoke` appends the
-    revocation to the registry log, and the relay applies it on start.
+    revocation to the registry log, and the relay applies it on start. That
+    fallback runs only as the owner of the state directory (the service
+    user), so root cannot create a log the relay cannot rewrite, and only
+    when nothing holds the socket: the relay opens its socket before it reads
+    the registry and answers "starting" until it is up.
   - `restore` lifts a revocation; the install registers again on its next
     attempt.
 - **Human-readable status is an operator command, not a public endpoint.**

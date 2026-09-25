@@ -21,7 +21,7 @@
  * Paths: RELAY_ADMIN_SOCKET (default `<registry dir>/admin.sock`) and
  * RELAY_REGISTRY_PATH (default `/var/lib/olympus-connect-relay/registry.jsonl`).
  */
-import { chmodSync, existsSync, lstatSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, statSync, unlinkSync } from 'node:fs';
 import net from 'node:net';
 import { dirname, join } from 'node:path';
 import { INSTALL_ID_PATTERN, readLines, encodeLine } from '../shared/protocol.ts';
@@ -45,8 +45,18 @@ export function adminSocketPath(env: NodeJS.ProcessEnv = process.env): string {
   return env.RELAY_ADMIN_SOCKET ?? join(dirname(env.RELAY_REGISTRY_PATH ?? DEFAULT_REGISTRY_PATH), 'admin.sock');
 }
 
-/** Serves operator requests for `relay` on a Unix socket at `path` (mode 0600). */
-export async function startAdminSocket(path: string, relay: Pick<RelayHandle, 'status' | 'revoke' | 'restore'>): Promise<{ close(): Promise<void> }> {
+type AdminTarget = Pick<RelayHandle, 'status' | 'revoke' | 'restore'>;
+
+/**
+ * Serves operator requests on a Unix socket at `path` (mode 0600). `relay` may
+ * be a getter answering undefined while the relay starts: main.ts opens the
+ * socket before it touches the registry, so the admin command's offline
+ * fallback (which appends to the registry log) can never run beside a relay
+ * that is starting up and compacting that log.
+ */
+export async function startAdminSocket(path: string, relay: AdminTarget | (() => AdminTarget | undefined)): Promise<{ close(): Promise<void> }> {
+  const target = typeof relay === 'function' ? relay : () => relay;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   // A socket left by a crashed relay would make listen fail; never remove anything else.
   if (existsSync(path)) {
     if (!lstatSync(path).isSocket()) throw new Error(`${path} exists and is not a socket`);
@@ -68,6 +78,8 @@ export async function startAdminSocket(path: string, relay: Pick<RelayHandle, 's
     );
   });
   const handle = async (message: Record<string, unknown>): Promise<AdminResponse> => {
+    const relay = target();
+    if (!relay) return { ok: false, error: 'the relay is starting; try again in a few seconds' };
     try {
       if (message.op === 'status') return { ok: true, op: 'status', status: relay.status() };
       const installId = typeof message.installId === 'string' ? message.installId : '';
@@ -157,7 +169,12 @@ export function formatRevoke(result: RevokeResult): string {
 
 const USAGE = 'Usage: bun server/admin.ts status | revoke <install-id> | restore <install-id>\n';
 
-export async function runAdmin(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Promise<{ code: number; out: string }> {
+export async function runAdmin(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+  /** The caller's uid (tests); defaults to this process's. */
+  uid: number | undefined = process.getuid?.(),
+): Promise<{ code: number; out: string }> {
   const [op, installId, ...extra] = argv;
   if (extra.length > 0 || !(op === 'status' ? installId === undefined : (op === 'revoke' || op === 'restore') && installId !== undefined)) {
     return { code: 2, out: USAGE };
@@ -182,6 +199,18 @@ export async function runAdmin(argv: readonly string[], env: NodeJS.ProcessEnv =
       return { code: 0, out: formatStatus({ ...counts, online: 0, publicConnections: 0, pendingPublicConnections: 0, startedAt: '' }, false) };
     }
     if (request.op === 'revoke') {
+      // Only the service user writes the log: an append by root (or anyone
+      // else) could create a registry the relay then cannot open or rewrite.
+      const owner = existsSync(dirname(registryPath)) ? statSync(dirname(registryPath)).uid : undefined;
+      if (owner === undefined || (uid !== undefined && uid !== owner)) {
+        return {
+          code: 1,
+          out: owner === undefined
+            ? `The relay is not running and ${dirname(registryPath)} does not exist; nothing was recorded.\n`
+            : `The relay is not running. Recording a revocation writes ${registryPath}; run this as the relay's service user `
+              + `(uid ${owner}, for example sudo -u olympus-relay), not uid ${uid}. Nothing was recorded.\n`,
+        };
+      }
       if (readRegistrySnapshot(registryPath).isRevoked(request.installId)) return { code: 0, out: `${request.installId} was already revoked.\n` };
       appendOfflineRevocation(registryPath, request.installId);
       return {

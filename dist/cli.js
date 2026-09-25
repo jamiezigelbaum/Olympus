@@ -9975,7 +9975,7 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
           connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
           tokens
         };
-      })();
+      }).immediate();
     },
     revokeToken(token) {
       if (isWellFormedOAuthRefreshToken(token)) {
@@ -69709,7 +69709,9 @@ var init_relay_client = __esm(() => {
 var exports_connect = {};
 __export(exports_connect, {
   startConnect: () => startConnect,
+  latestRenewalMoment: () => latestRenewalMoment,
   certificateIsFresh: () => certificateIsFresh,
+  ariRenewalDue: () => ariRenewalDue,
   LETS_ENCRYPT_DIRECTORY: () => LETS_ENCRYPT_DIRECTORY
 });
 import { X509Certificate as X509Certificate2 } from "node:crypto";
@@ -69728,6 +69730,15 @@ function certificateIsFresh(pem, hostname, now = Date.now()) {
   } catch {
     return false;
   }
+}
+function latestRenewalMoment(pem) {
+  const certificate = new X509Certificate2(pem);
+  const notBefore = Date.parse(certificate.validFrom);
+  const notAfter = Date.parse(certificate.validTo);
+  return notAfter - (notAfter - notBefore) / 6;
+}
+function ariRenewalDue(pem, renewAt, now = Date.now()) {
+  return Math.min(renewAt, latestRenewalMoment(pem)) <= now;
 }
 function certificateIsValid(pem, hostname, now = Date.now()) {
   if (!pem)
@@ -69796,7 +69807,7 @@ async function startConnect(options) {
     ari = {
       certId: info.certId,
       window: info.window,
-      renewAt: same ? ari.renewAt : selectRenewalTime(info.window),
+      renewAt: Math.min(same ? ari.renewAt : selectRenewalTime(info.window), latestRenewalMoment(pem)),
       freshUntil: now + info.retryAfterMs
     };
     return ari;
@@ -69815,7 +69826,7 @@ async function startConnect(options) {
     const hostname = await client.ready();
     let pem = existsSync39(certPath) ? readFileSync32(certPath, "utf8") : undefined;
     const plan = pem && certificateIsValid(pem, hostname) ? await renewalPlan(pem) : undefined;
-    const due = plan ? plan.renewAt <= Date.now() : !certificateIsFresh(pem, hostname);
+    const due = plan ? ariRenewalDue(pem, plan.renewAt) : !certificateIsFresh(pem, hostname);
     if (due) {
       const terms = await agreed();
       if (!terms.ok) {
@@ -93493,6 +93504,77 @@ var init_remote_mcp = __esm(() => {
   init_remote_request_body();
 });
 
+// connect-relay/shared/rate-limit.ts
+class KeyedTokenBuckets {
+  spec;
+  now;
+  buckets = new Map;
+  constructor(spec, now = Date.now) {
+    this.spec = spec;
+    this.now = now;
+  }
+  take(key) {
+    const now = this.now();
+    const bucket = this.buckets.get(key) ?? { tokens: this.spec.capacity, at: now };
+    bucket.tokens = Math.min(this.spec.capacity, bucket.tokens + (now - bucket.at) / 1000 * this.spec.refillPerSecond);
+    bucket.at = now;
+    if (bucket.tokens < 1) {
+      this.buckets.set(key, bucket);
+      return false;
+    }
+    bucket.tokens -= 1;
+    this.buckets.set(key, bucket);
+    if (this.buckets.size > 1e4)
+      this.sweep(now);
+    return true;
+  }
+  sweep(now) {
+    for (const [key, bucket] of this.buckets) {
+      const tokens = bucket.tokens + (now - bucket.at) / 1000 * this.spec.refillPerSecond;
+      if (tokens >= this.spec.capacity)
+        this.buckets.delete(key);
+    }
+  }
+}
+
+class KeyedCounter {
+  counts = new Map;
+  tryAcquire(key, max) {
+    const current = this.counts.get(key) ?? 0;
+    if (current >= max)
+      return;
+    this.counts.set(key, current + 1);
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      const remaining = (this.counts.get(key) ?? 1) - 1;
+      if (remaining > 0)
+        this.counts.set(key, remaining);
+      else
+        this.counts.delete(key);
+    };
+  }
+  get(key) {
+    return this.counts.get(key) ?? 0;
+  }
+}
+function addressKey(address) {
+  if (!address)
+    return "unknown";
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+  if (mapped)
+    return mapped[1];
+  if (!address.includes(":"))
+    return address;
+  const [head = "", tail = ""] = address.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = address.includes("::") ? [...left, ...Array(8 - left.length - right.length).fill("0"), ...right] : left;
+  return `${groups.slice(0, 4).map((group) => (group || "0").toLowerCase().replace(/^0+(?=.)/, "")).join(":")}::/64`;
+}
+
 // src/workers/remote-oauth/redirect-uris.ts
 function isAcceptableRedirectUri(value) {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_REDIRECT_URI_LENGTH)
@@ -94105,7 +94187,9 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
   };
   const admitPending = (caller, clientId) => {
-    const evictFairShare = (scope) => {
+    const evictFairShare = (all) => {
+      const unpinned = all.filter(([, entry]) => !entry.pinned);
+      const scope = unpinned.length > 0 ? unpinned : all;
       const held = new Map;
       for (const [, entry] of scope)
         held.set(entry.caller, (held.get(entry.caller) ?? 0) + 1);
@@ -94115,8 +94199,9 @@ function createRemoteOAuthHandler(options) {
         pending.delete(victim[0]);
     };
     const own = [...pending].filter(([, entry]) => entry.caller === caller);
-    if (own.length >= MAX_PENDING_CONSENTS_PER_CALLER)
-      pending.delete(own[0][0]);
+    if (own.length >= MAX_PENDING_CONSENTS_PER_CALLER) {
+      pending.delete((own.find(([, entry]) => !entry.pinned) ?? own[0])[0]);
+    }
     const sameClient = [...pending].filter(([, entry]) => entry.client.clientId === clientId);
     if (sameClient.length >= MAX_PENDING_CONSENTS_PER_CLIENT)
       evictFairShare(sameClient);
@@ -94193,7 +94278,8 @@ function createRemoteOAuthHandler(options) {
       state,
       csrf,
       attempts: 0,
-      expiresAt: now() + CONSENT_REQUEST_TTL_MS
+      expiresAt: now() + CONSENT_REQUEST_TTL_MS,
+      pinned: false
     };
     pending.set(requestId, entry);
     return consentPage(requestId, entry, u);
@@ -94241,6 +94327,8 @@ function createRemoteOAuthHandler(options) {
       return finish2({ error: "access_denied", error_description: "The owner denied the request." });
     if (action !== "approve")
       return errorPage(400, "The approval form was malformed.");
+    if (normalizePairingCode(form.get("pairing_code") ?? "") !== undefined)
+      entry.pinned = true;
     const caller = callerKey(request);
     const wait = pacer.delayFor(caller);
     if (wait > PAIRING_MAX_HELD_MS) {
@@ -94433,7 +94521,7 @@ function callerKeyFor(request, trusted) {
   if (request.headers.get("x-olympus-relay") !== "1" || !trusted(request))
     return "direct";
   const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded ? `relay:${forwarded.slice(0, 64)}` : "direct";
+  return forwarded ? `relay:${addressKey(forwarded.slice(0, 64))}` : "direct";
 }
 function pairingPacer(now, sleep5) {
   const callers = new Map;
@@ -94622,6 +94710,7 @@ function jsonResponse2(status, body, headers = {}) {
 var REMOTE_OAUTH_PATHS, ROUTED_PATHS, AUTHORIZATION_CODE_TTL_MS = 60000, CONSENT_REQUEST_TTL_MS, CONSENT_MAX_ATTEMPTS = 5, MAX_PENDING_CONSENTS = 256, MAX_PENDING_CONSENTS_PER_CALLER = 8, MAX_PENDING_CONSENTS_PER_CLIENT = 128, PAIRING_FAILURE_WINDOW_MS, PAIRING_PER_CALLER_MAX_DELAY_MS = 60000, PAIRING_GLOBAL_FAILURES_BEFORE_DELAY = 20, PAIRING_GLOBAL_DELAY_MS = 2000, PAIRING_MAX_HELD_MS = 1e4, PAIRING_MAX_TRACKED_CALLERS = 1024, MAX_LIVE_CODES = 256, MAX_FORM_BYTES, MAX_REGISTRATION_BYTES, CONNECT_BODY_DEADLINE_MS = 1e4, PKCE_VERIFIER_PATTERN, PKCE_CHALLENGE_PATTERN, LOOPBACK_HOSTNAMES4;
 var init_handler = __esm(() => {
   init_operation_caller();
+  init_remote_oauth_store();
   init_remote_public_url();
   init_cimd();
   init_remote_request_body();
