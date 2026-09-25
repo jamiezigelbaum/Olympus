@@ -234,6 +234,78 @@ and the relay client forwards to it.
   cookie. `/mcp` keeps no Origin rule, because it is bearer-only, sends no CORS
   headers, and hosted agents call it from their servers.
 
+### MCP 2026-07-28 (assessed 2026-09-25)
+
+**Verdict: no SDK migration for v0.5.** Olympus's `/mcp` serves protocol
+2025-11-25 through `@modelcontextprotocol/sdk` 1.29.0, and that is what the
+target clients speak or fall back to today. Moving to 2026-07-28 is its own
+slice (below), not a v0.5 blocker.
+
+What 2026-07-28 changed for a Streamable HTTP server:
+- **Stateless core.** No `initialize` handshake and no `Mcp-Session-Id`;
+  every request carries its protocol version, client info and capabilities
+  in `_meta`, and servers must implement `server/discover`. Server-to-client
+  requests move into results (multi round-trip requests), and the GET stream
+  is gone.
+- **Mirrored headers.** Every POST carries `MCP-Protocol-Version`,
+  `Mcp-Method`, and for `tools/call` `Mcp-Name`. A modern server must reject
+  a missing or mismatched header with 400 and `HeaderMismatch` (-32020), and
+  an unsupported version with 400 and `UnsupportedProtocolVersionError`
+  (-32022).
+- **Authorization.** The RFC 9207 `iss` is required (Olympus already sends
+  it), credentials are bound to their issuer, and Dynamic Client
+  Registration is deprecated in favor of CIMD but still works. Olympus serves
+  both, CIMD first.
+
+**Eras and fallback.** The spec calls 2025-11-25 and earlier *legacy*.
+A *dual-era* client tries a modern request first, and on a 400 whose body is
+not a recognized modern error it falls back to `initialize`. The spec's
+matrix: dual-era client with a legacy server works; a modern-only client
+with a legacy server fails. The TypeScript, Python, Go and C# SDK 2.x lines
+are dual-era.
+
+**What Olympus answers today.** Olympus is stateless already (one server
+and transport per request, no session, GET and DELETE answer 405), so it is
+compatible in shape. The installed SDK 1.29.0 supports 2025-11-25 down to
+2024-10-07 (1.30.1, the newest 1.x, is the same). A modern request gets
+400 with `-32000 Bad Request: Unsupported protocol version`, which is not a
+modern error code, so a dual-era client falls back and `initialize`
+negotiates 2025-11-25. `test/remote-mcp.test.ts` pins that answer, because
+a 1.x upgrade that started answering -32022 would make dual-era clients
+retry modern forever instead of falling back.
+
+**The clients.**
+- **Claude** (web, desktop, mobile): its connector documentation lists auth
+  specs 2025-03-26 through 2025-11-25 and Streamable HTTP; Anthropic has
+  announced 2026-07-28 support is coming, with no date. A third-party issue
+  tracker reported in August 2026 that Claude Desktop and Claude Code still
+  sent the legacy handshake. Works with a 2025-11-25 server today.
+- **ChatGPT** (developer mode connectors): documents Streamable HTTP and
+  SSE, no protocol version. Its CIMD document is served and tested. No
+  evidence that it is modern-only; treat it as legacy or dual-era.
+- **Grok** (custom connectors, xAI remote MCP tools): documents Streamable
+  HTTP, no version; xAI's own MCP server runs in stateless mode. Same
+  treatment.
+- **Codex** reportedly moved to 2026-07-28 (same third-party report). If its
+  client is dual-era, as the SDK 2.x clients are, it falls back; that is
+  unverified.
+- Unverified until the end-to-end proof (build step 7), which should record
+  the protocol version each client negotiates.
+
+**Timeouts, noticed on the way.** Claude.ai and Desktop cut a tool call at
+240 seconds. `source_answer` can run about that long at the end of its
+timeout chain, so the async submit/poll pair noted for Muse may be needed
+for Claude too.
+
+**Follow-up slice: dual-era server.** Move `/mcp` and `olympus serve` to the
+split SDK 2.x packages (`@modelcontextprotocol/server` 2.1.0, which needs
+zod 4 as a new dependency), serving modern requests statelessly with
+`server/discover` and header validation, and `initialize` for legacy
+clients. It touches `src/mcp/server.ts` (stdio), `src/workers/remote-mcp.ts`,
+the MCP tests that use the 1.x client, and the committed `dist/` bundle, so
+it is a slice of its own. It becomes a v0.5 requirement only if a target
+client ships modern-only.
+
 ## Build sequence
 
 Each slice is its own pull request. Security, auth and install surfaces are
@@ -303,6 +375,16 @@ critical-class and need an independent review receipt.
   (Free plan: one custom connector; works on mobile)
 - [Codex MCP](https://developers.openai.com/codex/mcp)
 - [MCP 2026-07-28 release](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
+- MCP 2026-07-28 [versioning and backward compatibility](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
+  and [Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+  (checked 2026-09-25)
+- [Building Claude custom connectors](https://claude.com/docs/connectors/building),
+  [Bringing MCP 2026-07-28 to Claude](https://claude.com/blog/bringing-mcp-2026-07-28-to-claude)
+  (checked 2026-09-25)
+- [ChatGPT developer mode](https://developers.openai.com/api/docs/guides/developer-mode)
+  (checked 2026-09-25)
+- [plaud-tools issue #220](https://github.com/massive-value/plaud-tools/issues/220)
+  (third-party report of which clients sent which handshake, August 2026)
 - [OpenClaw `mcp serve`](https://docs.openclaw.ai/cli/mcp) exposes
   conversations only, not plugin tools, which is why Olympus hosts its own
   endpoint.
