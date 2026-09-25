@@ -25,7 +25,7 @@ a per-platform binary in the npm package.
 | [sish](https://docs.ssi.sh/cli) | Yes (`--sni-proxy`). The client is plain `ssh -R`. | SSH public keys via `--authentication-key-request-url`. That is close, but there is [no per-key binding restriction](https://docs.ssi.sh/cli), so any key holder can squat another install's name, which is a denial of service. | Would need an SSH client in Node (`ssh2`), a new dependency. | Closest. Needs a fork for per-key name binding and custom DNS-01 publishing. |
 | **Purpose-built TS** | Yes. The ClientHello parser is about 100 lines. | Ed25519 install key. The install id is derived from the key. | Yes. It uses only `node:` built-ins and works on Node and Bun. | **Chosen.** |
 
-The relay and shared protocol are about 1,150 lines of commented TypeScript. The install client adds about 850 more, and tests come on top. Every option
+The relay, its operator command and the shared protocol are about 2,000 lines of commented TypeScript. The install client adds about 1,300 more, and tests come on top. Every option
 above would still have needed the two pieces that carry the real design
 weight: key-bound registration, and relay-published DNS-01 TXT records
 constrained to the install's own name. The WhatsApp bridge shows the existing
@@ -145,8 +145,63 @@ intercept traffic. Pass-through TLS protects against:
 
 It does not protect against the DNS owner itself. Such an issuance would be
 publicly visible in Certificate Transparency logs. Watching CT for the
-install's own hostname is a listed follow-up. CAA `accounturi` pinning does not
+install's own hostname is designed below ([Certificate Transparency
+watch](#certificate-transparency-watch)). CAA `accounturi` pinning does not
 help, because the same operator controls the CAA record.
+
+### Certificate Transparency watch
+
+Status: design; not built in v0.5 (see the reasoning at the end).
+
+**What it catches.** A certificate for `<install-id>.<zone>` that the install
+did not request: an active relay operator (or anyone controlling the zone's
+DNS) obtaining one to intercept agents' traffic. Every publicly trusted
+certificate must be logged in CT to be accepted by browsers and most TLS
+stacks, so issuance is visible even when the relay hides everything else.
+
+**Detection rule.** The install knows its own certificate key. Any logged
+certificate (or precertificate) whose names include its hostname and whose
+public key is *not* the install's own TLS key is foreign. No list of serials
+to maintain, no false positive from the install's own renewals (they reuse
+the key), and a key rotation on the install would only need the previous
+public key kept for one lifetime.
+
+**Where to look, in order of preference.**
+1. **A CT search service** such as crt.sh
+   (`https://crt.sh/?q=<hostname>&output=json`) or a commercial CT API
+   (Cert Spotter's `issuances` API supports `after=<id>` cursors, which makes
+   polling cheap). One HTTPS request per install per poll, from the install
+   itself, so the relay cannot filter it. crt.sh is free but frequently slow
+   or down, so timeouts are expected and never treated as "all clear".
+2. **The logs directly** (RFC 6962 `get-entries`), which needs no third
+   party but means following every log in the browser log lists, which is
+   too heavy for an install.
+
+**Cadence and privacy.** Every 6–12 hours with jitter, plus once after each
+issuance. The query reveals the install's hostname to the CT service, which
+is already public in CT, so nothing new leaks. The watch must go directly,
+not through the relay.
+
+**Alerting the owner.**
+- The relay child writes a `ct_alert` (issuer, serial, notBefore, a crt.sh
+  link) into `status.json`. `olympus connections status` and the dashboard's
+  Agents section show it prominently, and the worker could refuse to publish
+  the public URL until the owner acknowledges it.
+- The owner's OpenClaw agent gets the same alert through the existing
+  status path, so it can message the owner.
+- Acknowledging records the certificate as known (for example a certificate
+  issued during a support session) so it does not alert again.
+- The recommended response: revoke every connection (`olympus connections
+  revoke`), stop remote access, and move to a self-run tunnel
+  (`remote.publicBaseUrl`) until the relay is explained.
+
+**Why not in v0.5.** The detection is small, but a watch is only worth
+having if its alert reaches the owner. That path runs through the relay
+child's status, `olympus connections status` and the dashboard's Agents
+section, which a parallel change is reworking now. A half-wired watch that
+logs to a file nobody reads would be a false assurance, and crt.sh's
+reliability needs a stale-watch signal ("CT not checked for 3 days") as
+well. Follow-up 3 below.
 
 ### Offline and over-limit behavior
 
@@ -198,9 +253,32 @@ cannot name another record.
   non-terminal, and RFC 4592 wildcard synthesis stops applying to it. A
   wildcard-only zone would therefore break the install's own address during
   every issuance and renewal.
-- **Renewal:** the install renews when less than a third of the certificate's
-  lifetime remains. The window is proportional, so it survives Let's Encrypt
-  moving to shorter lifetimes.
+- **Renewal (ARI, RFC 9773):** when the CA publishes ACME Renewal
+  Information (Let's Encrypt does), the install asks it for a renewal window
+  for the served certificate (`client/ari.ts`), picks a random moment inside
+  it, and renews then, naming the old certificate in the order (`replaces`).
+  Let's Encrypt exempts such renewals from every rate limit, which keeps
+  renewals from competing with first issuances for the roughly 50 new
+  certificates a week the whole domain gets. It also lets the CA pull a
+  renewal forward (before a mass revocation, for example). Details:
+  - The answer is reused until its `Retry-After` (bounded to 1–24 hours), so
+    the 12-hourly check does not poll harder than the CA asks; the moment
+    picked inside a window is kept while the window is unchanged.
+  - A moment before the next periodic check gets its own timer.
+  - The CA's moment is clamped to a sixth of the lifetime before expiry, and
+    a certificate inside its last sixth is due whatever the window says, so
+    a far-future (or past-expiry) window cannot let the certificate lapse.
+  - If the CA refuses `replaces` (already replaced, or not this account's),
+    the order is placed again without it; a rate-limit or server error is not
+    retried that way.
+  - A window that is already over for a certificate issued a moment ago does
+    not start a renewal loop; the periodic check handles it.
+  - The client's certificate status carries the planned moment (`renewAt`);
+    `olympus connections status` does not show it yet.
+- **Renewal fallback:** with no ARI (the CA offers none, the certificate has
+  no Authority Key Identifier, or the CA does not know it), the install renews
+  when less than a third of the certificate's lifetime remains. The window is
+  proportional, so it survives Let's Encrypt moving to shorter lifetimes.
 - **Subscriber agreement:** creating the ACME account accepts the CA's
   subscriber agreement, so no order is placed until the owner has accepted
   the CA's *current* agreement (the directory's `meta.termsOfService`) with
@@ -395,9 +473,44 @@ Nothing below has been executed. It is what deployment needs from Jamie.
 - **State.** The registry is `/var/lib/olympus-connect-relay/registry.jsonl`.
   Back it up. Losing it forces installs to re-register, which they do
   automatically on the `unregistered` error.
-- **Removing an install.** Append
-  `{"op":"remove","installId":"<id>","at":<ms>}` to the registry, delete its
-  DNS records, then restart. An admin revoke command is a follow-up.
+- **Operator commands** (`server/admin.ts`), run on the relay host as the
+  service user:
+
+  ```sh
+  cd /opt/olympus-connect-relay/connect-relay
+  sudo -u olympus-relay /usr/local/bin/bun server/admin.ts status
+  sudo -u olympus-relay /usr/local/bin/bun server/admin.ts revoke <install-id>
+  sudo -u olympus-relay /usr/local/bin/bun server/admin.ts restore <install-id>
+  ```
+
+  They talk to the running relay over a Unix socket,
+  `/var/lib/olympus-connect-relay/admin.sock` (0600, in the 0700 state
+  directory; `RELAY_ADMIN_SOCKET` overrides it, and the unit allows
+  `AF_UNIX` for it). Nothing new listens on the network.
+  - `status` prints counts only: registered and activated installs, online
+    sessions, open and waiting public connections, address records (and how
+    many are queued for removal), and revoked installs. It never prints an
+    install id. With the relay stopped it reads the registry log instead.
+  - `revoke` needs no restart. It removes the registration, ends the live
+    session (which also clears its ACME TXT values and answers waiting agents
+    with the offline alert), and removes the address record at once if the
+    relay-wide DNS budget allows, otherwise the hourly sweep retries it. The
+    id is refused from then on (`revoked` error): an install would otherwise
+    re-register by itself, which made the old hand-appended `remove` line
+    ineffective against a running install. The install's client backs off
+    six hours on `revoked`. With the relay stopped, `revoke` appends the
+    revocation to the registry log, and the relay applies it on start. That
+    fallback runs only as the owner of the state directory (the service
+    user), so root cannot create a log the relay cannot rewrite, and only
+    when nothing holds the socket: the relay opens its socket before it reads
+    the registry and answers "starting" until it is up.
+  - `restore` lifts a revocation; the install registers again on its next
+    attempt.
+- **Human-readable status is an operator command, not a public endpoint.**
+  The relay's public listener deliberately has no HTTP surface
+  (`test/structure.test.ts` holds that), so a public status page would add
+  one. Uptime monitoring checks the TLS behavior instead (the Verify
+  commands above).
 - **Incidents.** A spike in `public_rejected_limit` means an abusive agent or
   a misbehaving install. Adjust the limits in `server/public-path.ts` and
   record a disposition.
@@ -413,10 +526,12 @@ Nothing below has been executed. It is what deployment needs from Jamie.
    because the local endpoint strips any inbound copy, and only while the
    worker stays bound to loopback. OAuth metadata should build URLs from
    `x-forwarded-host`.
-3. **Certificate Transparency watch** for the install's hostname: an alert on
-   any certificate the install did not request.
-4. **ACME Renewal Information (ARI, RFC 9773).** It makes renewals exempt from
-   every Let's Encrypt limit.
-5. A human-readable relay status endpoint, and an admin revoke command.
+3. **Certificate Transparency watch** for the install's hostname: designed in
+   [Certificate Transparency watch](#certificate-transparency-watch); build it
+   together with its alert path once the dashboard Agents rework lands.
+4. **ACME Renewal Information (ARI, RFC 9773): done** (see
+   [Certificates](#certificates-acme-dns-01)).
+5. **Operator status and revoke: done** (`server/admin.ts`, see
+   [Operate](#operate)).
 6. A pre-opened data-connection pool, if first-byte latency matters.
 7. Multi-node relay: a shared registry, plus session routing by install id.

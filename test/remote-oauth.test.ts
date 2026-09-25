@@ -669,10 +669,10 @@ describe('pairing codes', () => {
     expect(store.oauth.checkPairingCode(live.code)).toEqual({ ok: true });
   });
 
-  const authorizeUrlFor = () => {
+  const authorizeUrlFor = (client: { client_id: string; redirect_uris: string[] } = CLAUDE_CIMD) => {
     const url = new URL(`${base}/connect/authorize`);
     url.search = new URLSearchParams({
-      response_type: 'code', client_id: CLAUDE_CIMD_URL, redirect_uri: CLAUDE_CIMD.redirect_uris[0]!,
+      response_type: 'code', client_id: client.client_id, redirect_uri: client.redirect_uris[0]!,
       code_challenge: 'x'.repeat(43), code_challenge_method: 'S256', state: 's',
     }).toString();
     return url;
@@ -683,8 +683,8 @@ describe('pairing codes', () => {
     'x-forwarded-for': address,
     ...(auth === undefined ? {} : { [RELAY_AUTH_HEADER]: auth }),
   });
-  const openFrom = async (headers: Record<string, string>) => {
-    const response = await fetch(authorizeUrlFor(), { redirect: 'manual', headers });
+  const openFrom = async (headers: Record<string, string>, url: URL = authorizeUrlFor()) => {
+    const response = await fetch(url, { redirect: 'manual', headers });
     const html = await response.text();
     return {
       response,
@@ -749,10 +749,20 @@ describe('pairing codes', () => {
     // Without the relay's secret (or with a wrong one), rotating the forged
     // agent address does not buy fresh per-caller slots or a fresh pacing
     // budget: every such request is the shared `direct` caller.
-    for (let i = 0; i < 8; i += 1) expect((await openFrom(forged(`203.0.113.${i + 1}`))).response.status).toBe(200);
-    expect((await openFrom(forged('203.0.113.99'))).response.status).toBe(429);
-    expect((await openFrom(forged('203.0.113.98', 'A'.repeat(43)))).response.status).toBe(429);
-    expect((await openFrom({})).response.status).toBe(429);
+    const pages: Awaited<ReturnType<typeof openFrom>>[] = [];
+    for (let i = 0; i < 8; i += 1) pages.push(await openFrom(forged(`203.0.113.${i + 1}`)));
+    // Three more "addresses" are the same direct caller: each evicts that
+    // caller's own oldest waiting approval instead of getting fresh slots.
+    for (const headers of [forged('203.0.113.99'), forged('203.0.113.98', 'A'.repeat(43)), {}]) {
+      expect((await openFrom(headers)).response.status).toBe(200);
+    }
+    const code = () => ({ action: 'approve', pairing_code: store.oauth.mintPairingCode().code });
+    for (const evicted of pages.slice(0, 3)) {
+      const gone = await submitConsent(evicted, code());
+      expect(gone.status).toBe(400);
+      expect(await gone.text()).toContain('replaced by a newer one');
+    }
+    expect((await submitConsent(pages[3]!, code())).status).toBe(303);
     // The real relay (with the secret) still gets per-address slots.
     expect((await openFrom(relayed('198.51.100.20'))).response.status).toBe(200);
   });
@@ -767,12 +777,148 @@ describe('pairing codes', () => {
     expect(sleeps).toEqual([1000, 2000, 4000]);
   });
 
-  test('one caller can hold at most eight waiting approvals', async () => {
+  test('one caller holds at most eight waiting approvals; a ninth replaces its own oldest', async () => {
     const flooder = relayed('203.0.113.50');
+    const owner = await openFrom(relayed('198.51.100.20'));
+    const first = await openFrom(flooder);
     for (let i = 0; i < 8; i += 1) expect((await openFrom(flooder)).response.status).toBe(200);
-    expect((await openFrom(flooder)).response.status).toBe(429);
-    expect((await openFrom(relayed('198.51.100.20'))).response.status).toBe(200);
+    const code = () => ({ action: 'approve', pairing_code: store.oauth.mintPairingCode().code });
+    expect((await submitConsent(first, code(), { Origin: base, ...flooder })).status).toBe(400);
+    // Nobody else's approval moved.
+    expect((await submitConsent(owner, code())).status).toBe(303);
     expect((await openFrom({})).response.status).toBe(200);
+  });
+
+  test('a full table evicts the heaviest holder, so a distributed flood never locks the owner out', async () => {
+    // The review finding: 32 relay addresses x 8 used to fill all 256 slots
+    // and answer everyone else 429 for ten minutes.
+    // Half the flood names Claude, half ChatGPT, so neither app's cap binds first.
+    const floodClient = (a: number) => authorizeUrlFor(a < 16 ? CLAUDE_CIMD : CHATGPT_CIMD);
+    const floods = new Map<string, Awaited<ReturnType<typeof openFrom>>[]>();
+    for (let a = 0; a < 32; a += 1) {
+      const headers = relayed(`203.0.113.${a + 1}`);
+      const pages: Awaited<ReturnType<typeof openFrom>>[] = [];
+      for (let i = 0; i < 8; i += 1) {
+        const page = await openFrom(headers, floodClient(a));
+        expect(page.response.status).toBe(200);
+        pages.push(page);
+      }
+      floods.set(`203.0.113.${a + 1}`, pages);
+    }
+    // The table is full. The owner still gets a page, from a fresh address,
+    // and can finish it while the flood keeps coming.
+    const ownerHeaders = relayed('198.51.100.20');
+    const owner = await openFrom(ownerHeaders);
+    expect(owner.response.status).toBe(200);
+    for (let a = 0; a < 32; a += 1) expect((await openFrom(relayed(`203.0.113.${a + 1}`), floodClient(a))).response.status).toBe(200);
+    for (let i = 0; i < 40; i += 1) expect((await openFrom(relayed(`192.0.2.${i + 1}`))).response.status).toBe(200);
+    const approved = await submitConsent(owner, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code },
+      { Origin: base, ...ownerHeaders });
+    expect(approved.status).toBe(303);
+    expect(new URL(approved.headers.get('location')!).searchParams.get('code')).toBeTruthy();
+    // What made room was the flood's own oldest requests.
+    const firstFlood = floods.get('203.0.113.1')![0]!;
+    expect((await submitConsent(firstFlood, { action: 'deny' }, { Origin: base, ...relayed('203.0.113.1') })).status).toBe(400);
+  });
+
+  test('one client id cannot take every slot', async () => {
+    // Anyone can start a request naming Claude's client id; past half the
+    // table those requests evict each other instead of crowding out other apps.
+    const chatgpt = await openConsent(authorizeUrlFor(CHATGPT_CIMD));
+    const firsts: Awaited<ReturnType<typeof openFrom>>[] = [];
+    for (let a = 0; a < 16; a += 1) {
+      for (let i = 0; i < 8; i += 1) {
+        const page = await openFrom(relayed(`203.0.113.${a + 1}`));
+        if (i === 0) firsts.push(page);
+      }
+    }
+    const deny = (page: typeof firsts[number], address: string) =>
+      submitConsent(page, { action: 'deny' }, { Origin: base, ...relayed(address) });
+    // 128 Claude requests wait. The next, from a new address, evicts the
+    // oldest of them (every holder has eight), though the table is not full.
+    expect((await openFrom(relayed('192.0.2.1'))).response.status).toBe(200);
+    expect((await deny(firsts[0]!, '203.0.113.1')).status).toBe(400);
+    expect((await deny(firsts[1]!, '203.0.113.2')).status).toBe(303);
+    expect((await submitConsent(chatgpt, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code })).status).toBe(303);
+  });
+
+  test('IPv6 callers are grouped by /64, so one host cannot mint callers', async () => {
+    const owner = await openFrom(relayed('198.51.100.20'));
+    const first = await openFrom(relayed('2001:db8:1:2::1'));
+    // 300 more requests from 300 addresses inside one /64: all one caller.
+    for (let i = 2; i < 302; i += 1) expect((await openFrom(relayed(`2001:db8:1:2::${i.toString(16)}`))).response.status).toBe(200);
+    const code = () => ({ action: 'approve', pairing_code: store.oauth.mintPairingCode().code });
+    expect((await submitConsent(first, code(), { Origin: base, ...relayed('2001:db8:1:2::1') })).status).toBe(400);
+    expect((await submitConsent(owner, code(), { Origin: base, ...relayed('198.51.100.20') })).status).toBe(303);
+  });
+
+  test('a page the owner is typing a code into is pinned against eviction', async () => {
+    const ownerHeaders = relayed('198.51.100.20');
+    const owner = await openFrom(ownerHeaders);
+    // A typo pins nothing; a well-formed (wrong) code does.
+    expect((await submitConsent(owner, { action: 'approve', pairing_code: 'ABC' }, { Origin: base, ...ownerHeaders })).status).toBe(400);
+    expect((await submitConsent(owner, { action: 'approve', pairing_code: 'AAAA-AAAA-AAAA' }, { Origin: base, ...ownerHeaders })).status).toBe(400);
+    // 200 distinct /64s, one request each, all naming the owner's app: past
+    // the 128-per-client cap, every eviction in that scope picks an unpinned page.
+    for (let i = 0; i < 200; i += 1) {
+      expect((await openFrom(relayed(`2001:db8:${(i + 16).toString(16)}::1`))).response.status).toBe(200);
+    }
+    sleeps = [];
+    const approved = await submitConsent(owner, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code }, { Origin: base, ...ownerHeaders });
+    expect(approved.status).toBe(303);
+    expect(new URL(approved.headers.get('location')!).searchParams.get('code')).toBeTruthy();
+  });
+
+  test("pinned attacker pages across 17+ /64s cannot evict the owner's single page", async () => {
+    // The re-review's attack: fill Claude's 128-slot client cap with pinned
+    // entries from 16 /64s (8 each), leave the owner's page the only unpinned
+    // one, then keep opening pages from further /64s. Fair share runs over the
+    // whole scope, so the victims are always the attackers holding the most.
+    const attackers = Array.from({ length: 20 }, (_, i) => relayed(`2001:db8:${(i + 0x100).toString(16)}::1`));
+    const refusedPins: number[] = [];
+    for (const headers of attackers.slice(0, 16)) {
+      for (let i = 0; i < 8; i += 1) {
+        const page = await openFrom(headers);
+        expect(page.response.status).toBe(200);
+        // Try to pin it with a well-formed wrong code. The pacer admits a few
+        // per caller; a refused check ("Wait N seconds") pins nothing.
+        const tried = await submitConsent(page, { action: 'approve', pairing_code: 'AAAA-AAAA-AAAA' }, { Origin: base, ...headers });
+        if ((await tried.text()).includes('Wait')) refusedPins.push(i);
+      }
+    }
+    expect(refusedPins.length).toBeGreaterThan(0);
+    const ownerHeaders = relayed('198.51.100.20');
+    const owner = await openFrom(ownerHeaders);
+    for (const headers of attackers.slice(16)) {
+      for (let i = 0; i < 8; i += 1) expect((await openFrom(headers)).response.status).toBe(200);
+    }
+    for (let i = 0; i < 20; i += 1) expect((await openFrom(relayed(`2001:db8:${(i + 0x200).toString(16)}::1`))).response.status).toBe(200);
+    sleeps = [];
+    const approved = await submitConsent(owner, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code }, { Origin: base, ...ownerHeaders });
+    expect(approved.status).toBe(303);
+    expect(new URL(approved.headers.get('location')!).searchParams.get('code')).toBeTruthy();
+  });
+
+  test('even when every attacker entry is pinned, fair share evicts the heaviest attacker, not the owner', async () => {
+    // Five paced checks per /64 fit inside the hold limit, so 26 /64s can pin
+    // 130 pages and fill Claude's 128-slot cap with pinned entries alone. The
+    // owner's page is then the only unpinned entry in that scope.
+    let pinned = 0;
+    for (let a = 0; a < 26; a += 1) {
+      const headers = relayed(`2001:db8:${(a + 0x300).toString(16)}::1`);
+      for (let i = 0; i < 5; i += 1) {
+        const page = await openFrom(headers);
+        const tried = await submitConsent(page, { action: 'approve', pairing_code: 'AAAA-AAAA-AAAA' }, { Origin: base, ...headers });
+        if (!(await tried.text()).includes('Wait')) pinned += 1;
+      }
+    }
+    expect(pinned).toBeGreaterThanOrEqual(128);
+    const ownerHeaders = relayed('198.51.100.20');
+    const owner = await openFrom(ownerHeaders);
+    for (let i = 0; i < 40; i += 1) expect((await openFrom(relayed(`2001:db8:${(i + 0x400).toString(16)}::1`))).response.status).toBe(200);
+    sleeps = [];
+    const approved = await submitConsent(owner, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code }, { Origin: base, ...ownerHeaders });
+    expect(approved.status).toBe(303);
   });
 
   test('olympus connections pair mints a code and says whether OAuth is on', () => {
@@ -839,6 +985,63 @@ describe('tokens', () => {
     expect(next.status).toBe(200);
     expect((await refresh()).status).toBe(400);
     expect(store.list()[0]!.revokedAt).not.toBeNull();
+  });
+
+  describe('revoking a grant inside the refresh grace window kills everything', () => {
+    // The grace window hands the successor pair to whoever presents the old
+    // refresh token with the (public) client id. Revocation must end that at
+    // once: the old token, the successor pair, and the grace entry itself.
+    const rotateThenRevoke = async (revoke: (ctx: { connectionId: string; successorRefresh: string }) => Promise<void> | void) => {
+      const first = await claudeGrant();
+      const refresh = (token: string) => tokenRequest({
+        grant_type: 'refresh_token', refresh_token: token, client_id: CLAUDE_CIMD_URL, resource: urls.resource,
+      });
+      const rotated = await refresh(first.refresh_token);
+      expect(rotated.status).toBe(200);
+      const successor = await rotated.json() as { access_token: string; refresh_token: string };
+      // Inside the grace window the old token still answers with the successor pair.
+      clock += 10_000;
+      expect((await refresh(first.refresh_token)).status).toBe(200);
+      await revoke({ connectionId: store.list()[0]!.id, successorRefresh: successor.refresh_token });
+      clock += 1_000;
+      expect(clock - Date.parse('2026-09-24T12:00:00.000Z')).toBeLessThan(REMOTE_OAUTH_REFRESH_GRACE_MS);
+      const replay = await refresh(first.refresh_token);
+      expect(replay.status).toBe(400);
+      expect(await replay.json()).toMatchObject({ error: 'invalid_grant' });
+      expect((await refresh(successor.refresh_token)).status).toBe(400);
+      expect((await mcpInitialize(`Bearer ${successor.access_token}`)).status).toBe(401);
+      expect((await mcpInitialize(`Bearer ${first.access_token}`)).status).toBe(401);
+      expect(store.list()[0]!.revokedAt).not.toBeNull();
+      // Nothing under the grant survives on disk either.
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        expect(db.query('SELECT COUNT(*) AS n FROM remote_oauth_tokens').get()).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
+    };
+
+    test('by the worker process (dashboard or in-process revoke)', async () => {
+      await rotateThenRevoke(({ connectionId }) => { store.revoke(connectionId); });
+    });
+
+    test('by olympus connections revoke, from another process', async () => {
+      await rotateThenRevoke(({ connectionId }) => {
+        const env = { HOME: join(dir, 'home'), OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: dbPath, OLYMPUS_CONFIG: join(dir, 'missing.json') };
+        runConnectionsCommand(['revoke', connectionId], env);
+      });
+    });
+
+    test('by the client revoking its successor refresh token (RFC 7009)', async () => {
+      await rotateThenRevoke(async ({ successorRefresh }) => {
+        const response = await fetch(`${base}/connect/revoke`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ token: successorRefresh }).toString(),
+        });
+        expect(response.status).toBe(200);
+      });
+    });
   });
 
   test('the grace window answers only the same client', async () => {

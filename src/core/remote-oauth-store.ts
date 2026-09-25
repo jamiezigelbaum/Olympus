@@ -328,6 +328,8 @@ export function createRemoteOAuthStore(
     refresh(input): OAuthRefreshResult {
       if (!isWellFormedOAuthRefreshToken(input.refreshToken)) return { ok: false, reason: 'unknown' };
       const at = now();
+      // IMMEDIATE: take the write lock before reading, so two processes
+      // refreshing the same token cannot both see it unused and both rotate.
       return db.transaction((): OAuthRefreshResult => {
         const row = readToken(input.refreshToken, 'refresh');
         if (!row) return { ok: false, reason: 'unknown' };
@@ -374,7 +376,7 @@ export function createRemoteOAuthStore(
           connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
           tokens,
         };
-      })();
+      }).immediate();
     },
 
     revokeToken(token: string): void {

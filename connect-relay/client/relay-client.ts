@@ -65,6 +65,8 @@ export interface RelayClientOptions {
   readonly backoff?: { readonly minMs: number; readonly maxMs: number };
   /** After another process takes over this install's session. */
   readonly replacedBackoffMs?: number;
+  /** After the relay operator revoked this install (default 6 hours; the operator may restore it). */
+  readonly revokedBackoffMs?: number;
 }
 
 export class RelayClient implements AcmeDnsPublisher {
@@ -205,6 +207,7 @@ export class RelayClient implements AcmeDnsPublisher {
     this.session = socket;
     let reason = 'connection closed';
     let replaced = false;
+    let revoked = false;
     const { identity } = this.options;
     readLines(
       socket,
@@ -257,6 +260,7 @@ export class RelayClient implements AcmeDnsPublisher {
             reason = String(message.message ?? message.code);
             if (message.code === 'unregistered') this.register = true;
             if (message.code === 'replaced') replaced = true;
+            if (message.code === 'revoked') revoked = true;
             return 'stop';
           default:
             return 'continue';
@@ -279,6 +283,13 @@ export class RelayClient implements AcmeDnsPublisher {
       if (replaced) {
         this.options.onStatus?.({ state: 'replaced' });
         this.schedule(this.options.replacedBackoffMs ?? 5 * 60_000);
+        return;
+      }
+      if (revoked) {
+        // Retrying sooner cannot help; ask again rarely in case it was restored.
+        const retryInMs = this.options.revokedBackoffMs ?? 6 * 60 * 60_000;
+        this.options.onStatus?.({ state: 'offline', reason, retryInMs });
+        this.schedule(retryInMs);
         return;
       }
       if (this.register && this.failures === 0) {

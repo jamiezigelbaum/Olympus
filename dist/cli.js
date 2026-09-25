@@ -9975,7 +9975,7 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
           connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
           tokens
         };
-      })();
+      }).immediate();
     },
     revokeToken(token) {
       if (isWellFormedOAuthRefreshToken(token)) {
@@ -10145,15 +10145,16 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
     } catch {}
   };
   const readRow = (id) => db.query("SELECT * FROM remote_connections WHERE id = ?").get(id);
+  const oauth = createRemoteOAuthStore(db, now, (id, at) => {
+    const row = readRow(id);
+    const lastUsedMs = row?.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
+    if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
+      recordLastUse(id, at.toISOString());
+    }
+  });
   return {
     dbPath,
-    oauth: createRemoteOAuthStore(db, now, (id, at) => {
-      const row = readRow(id);
-      const lastUsedMs = row?.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
-      if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
-        recordLastUse(id, at.toISOString());
-      }
-    }),
+    oauth,
     create(displayName) {
       const name = requireDisplayName(displayName);
       const id = randomBytes6(CONNECTION_ID_BYTES).toString("hex");
@@ -10184,6 +10185,8 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
       if (!row) {
         throw new OperationError("invalid_params", `No remote connection has id ${id}.`, "Run olympus connections list.");
       }
+      if (row.kind === "oauth")
+        oauth.revokeGrant(id);
       return toRecord(row);
     },
     verifyToken(token) {
@@ -69013,7 +69016,16 @@ async function obtainCertificate(options) {
   kid = account.headers.get("location") ?? undefined;
   if (!kid)
     throw new AcmeError("ACME account has no URL");
-  const order = await post(directory.newOrder, { identifiers: [{ type: "dns", value: options.hostname }] });
+  const identifiers = [{ type: "dns", value: options.hostname }];
+  let order;
+  try {
+    order = await post(directory.newOrder, { identifiers, ...options.replaces ? { replaces: options.replaces } : {} });
+  } catch (error2) {
+    const type = error2 instanceof AcmeError ? error2.problem?.type : undefined;
+    if (!options.replaces || typeof type !== "string" || NOT_A_REPLACES_REFUSAL.has(type))
+      throw error2;
+    order = await post(directory.newOrder, { identifiers });
+  }
   const orderUrl = order.headers.get("location");
   if (!orderUrl)
     throw new AcmeError("ACME order has no URL");
@@ -69047,7 +69059,7 @@ async function obtainCertificate(options) {
       await options.dns.clear(value).catch(() => {});
   }
 }
-var AcmeError, sleep3 = (ms) => new Promise((resolve8) => setTimeout(resolve8, ms));
+var AcmeError, NOT_A_REPLACES_REFUSAL, sleep3 = (ms) => new Promise((resolve8) => setTimeout(resolve8, ms));
 var init_acme = __esm(() => {
   init_protocol2();
   init_csr();
@@ -69058,6 +69070,131 @@ var init_acme = __esm(() => {
       this.problem = problem;
     }
   };
+  NOT_A_REPLACES_REFUSAL = new Set([
+    "urn:ietf:params:acme:error:rateLimited",
+    "urn:ietf:params:acme:error:serverInternal",
+    "urn:ietf:params:acme:error:badNonce",
+    "urn:ietf:params:acme:error:userActionRequired"
+  ]);
+});
+
+// connect-relay/client/ari.ts
+import { X509Certificate } from "node:crypto";
+function readTlv(der, offset) {
+  const tag = der[offset];
+  let length2 = der[offset + 1];
+  if (tag === undefined || length2 === undefined)
+    throw new Error("truncated DER");
+  let start = offset + 2;
+  if (length2 & 128) {
+    const count = length2 & 127;
+    if (count === 0 || count > 4)
+      throw new Error("unsupported DER length");
+    length2 = 0;
+    for (let i = 0;i < count; i += 1)
+      length2 = length2 * 256 + der[start + i];
+    start += count;
+  }
+  const end = start + length2;
+  if (end > der.length)
+    throw new Error("truncated DER");
+  return { tag, start, end };
+}
+function children(der, parent) {
+  const out = [];
+  for (let offset = parent.start;offset < parent.end; ) {
+    const child = readTlv(der, offset);
+    out.push(child);
+    offset = child.end;
+  }
+  return out;
+}
+function ariCertId(pem) {
+  try {
+    const der = new X509Certificate(pem).raw;
+    const certificate = readTlv(der, 0);
+    const tbs = children(der, certificate)[0];
+    if (!tbs)
+      return;
+    const fields = children(der, tbs);
+    const serial = fields[fields[0]?.tag === 160 ? 1 : 0];
+    if (serial?.tag !== 2)
+      return;
+    const extensions = fields.find((field) => field.tag === 163);
+    if (!extensions)
+      return;
+    const list = children(der, extensions)[0];
+    if (!list)
+      return;
+    for (const extension of children(der, list)) {
+      const [oid2, ...rest] = children(der, extension);
+      if (!oid2 || oid2.tag !== 6 || !der.subarray(oid2.start, oid2.end).equals(OID_AUTHORITY_KEY_IDENTIFIER))
+        continue;
+      const value = rest.find((part) => part.tag === 4);
+      if (!value)
+        return;
+      const aki = readTlv(der, value.start);
+      const keyIdentifier = children(der, aki).find((part) => part.tag === 128);
+      if (!keyIdentifier || keyIdentifier.end === keyIdentifier.start)
+        return;
+      return `${base64url2(der.subarray(keyIdentifier.start, keyIdentifier.end))}.${base64url2(der.subarray(serial.start, serial.end))}`;
+    }
+    return;
+  } catch {
+    return;
+  }
+}
+async function fetchRenewalInfoUrl(directoryUrl, fetchImpl = fetch) {
+  const response = await fetchImpl(directoryUrl);
+  if (!response.ok)
+    return;
+  const directory = await response.json();
+  return typeof directory.renewalInfo === "string" && /^https?:\/\//.test(directory.renewalInfo) ? directory.renewalInfo : undefined;
+}
+async function fetchRenewalInfo(directoryUrl, pem, fetchImpl = fetch) {
+  const certId = ariCertId(pem);
+  if (!certId)
+    return;
+  const base = await fetchRenewalInfoUrl(directoryUrl, fetchImpl);
+  if (!base)
+    return;
+  const response = await fetchImpl(`${base.replace(/\/+$/, "")}/${certId}`);
+  if (!response.ok) {
+    if (response.status === 404)
+      return;
+    throw new Error(`ARI answered HTTP ${response.status}`);
+  }
+  const body = await response.json();
+  const start = Date.parse(String(body.suggestedWindow?.start));
+  const end = Date.parse(String(body.suggestedWindow?.end));
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start)
+    return;
+  return {
+    certId,
+    window: { start, end },
+    retryAfterMs: retryAfterMs2(response.headers.get("retry-after")),
+    ...typeof body.explanationURL === "string" ? { explanationUrl: body.explanationURL } : {}
+  };
+}
+function retryAfterMs2(header, now = Date.now()) {
+  if (!header)
+    return DEFAULT_RETRY_AFTER_MS;
+  const seconds = Number(header);
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - now;
+  if (!Number.isFinite(ms))
+    return DEFAULT_RETRY_AFTER_MS;
+  return Math.min(MAX_RETRY_AFTER_MS, Math.max(MIN_RETRY_AFTER_MS, ms));
+}
+function selectRenewalTime(window2, random = Math.random) {
+  return window2.start + Math.floor(random() * Math.max(0, window2.end - window2.start));
+}
+var DEFAULT_RETRY_AFTER_MS, MIN_RETRY_AFTER_MS, MAX_RETRY_AFTER_MS, OID_AUTHORITY_KEY_IDENTIFIER;
+var init_ari = __esm(() => {
+  init_protocol2();
+  DEFAULT_RETRY_AFTER_MS = 6 * 60 * 60 * 1000;
+  MIN_RETRY_AFTER_MS = 60 * 60 * 1000;
+  MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
+  OID_AUTHORITY_KEY_IDENTIFIER = Buffer.from([85, 29, 35]);
 });
 
 // connect-relay/client/identity.ts
@@ -69391,6 +69528,7 @@ class RelayClient {
     this.session = socket;
     let reason = "connection closed";
     let replaced = false;
+    let revoked = false;
     const { identity } = this.options;
     readLines(socket, (message) => {
       switch (message.type) {
@@ -69439,6 +69577,8 @@ class RelayClient {
             this.register = true;
           if (message.code === "replaced")
             replaced = true;
+          if (message.code === "revoked")
+            revoked = true;
           return "stop";
         default:
           return "continue";
@@ -69463,6 +69603,12 @@ class RelayClient {
       if (replaced) {
         this.options.onStatus?.({ state: "replaced" });
         this.schedule(this.options.replacedBackoffMs ?? 5 * 60000);
+        return;
+      }
+      if (revoked) {
+        const retryInMs = this.options.revokedBackoffMs ?? 6 * 60 * 60000;
+        this.options.onStatus?.({ state: "offline", reason, retryInMs });
+        this.schedule(retryInMs);
         return;
       }
       if (this.register && this.failures === 0) {
@@ -69563,17 +69709,19 @@ var init_relay_client = __esm(() => {
 var exports_connect = {};
 __export(exports_connect, {
   startConnect: () => startConnect,
+  latestRenewalMoment: () => latestRenewalMoment,
   certificateIsFresh: () => certificateIsFresh,
+  ariRenewalDue: () => ariRenewalDue,
   LETS_ENCRYPT_DIRECTORY: () => LETS_ENCRYPT_DIRECTORY
 });
-import { X509Certificate } from "node:crypto";
+import { X509Certificate as X509Certificate2 } from "node:crypto";
 import { existsSync as existsSync39, readFileSync as readFileSync32 } from "node:fs";
 import { join as join51 } from "node:path";
 function certificateIsFresh(pem, hostname, now = Date.now()) {
   if (!pem)
     return false;
   try {
-    const certificate = new X509Certificate(pem);
+    const certificate = new X509Certificate2(pem);
     if (!certificate.checkHost(hostname))
       return false;
     const notBefore = Date.parse(certificate.validFrom);
@@ -69583,18 +69731,27 @@ function certificateIsFresh(pem, hostname, now = Date.now()) {
     return false;
   }
 }
+function latestRenewalMoment(pem) {
+  const certificate = new X509Certificate2(pem);
+  const notBefore = Date.parse(certificate.validFrom);
+  const notAfter = Date.parse(certificate.validTo);
+  return notAfter - (notAfter - notBefore) / 6;
+}
+function ariRenewalDue(pem, renewAt, now = Date.now()) {
+  return Math.min(renewAt, latestRenewalMoment(pem)) <= now;
+}
 function certificateIsValid(pem, hostname, now = Date.now()) {
   if (!pem)
     return false;
   try {
-    const certificate = new X509Certificate(pem);
+    const certificate = new X509Certificate2(pem);
     return Boolean(certificate.checkHost(hostname)) && Date.parse(certificate.validTo) > now;
   } catch {
     return false;
   }
 }
 function certificateNotAfter(pem) {
-  return new Date(Date.parse(new X509Certificate(pem).validTo)).toISOString();
+  return new Date(Date.parse(new X509Certificate2(pem).validTo)).toISOString();
 }
 async function startConnect(options) {
   const identity = loadOrCreateIdentity(options.stateDir);
@@ -69612,6 +69769,8 @@ async function startConnect(options) {
   let failures = 0;
   let retryTimer;
   let status = { state: "none" };
+  let ari;
+  let ariTimer;
   const report = (next) => {
     status = next;
     options.onCertificate?.(next);
@@ -69630,14 +69789,49 @@ async function startConnect(options) {
     const termsUrl = await fetchTermsOfService(directoryUrl, options.acme.fetch ?? fetch);
     return { ok: await decision(termsUrl), termsUrl };
   };
+  const renewalPlan = async (pem) => {
+    const now = Date.now();
+    if (ari && ari.freshUntil > now && pem === served)
+      return ari;
+    let info;
+    try {
+      info = await fetchRenewalInfo(directoryUrl, pem, options.acme.fetch ?? fetch);
+    } catch {
+      return ari && pem === served ? ari : undefined;
+    }
+    if (!info) {
+      ari = undefined;
+      return;
+    }
+    const same = ari?.certId === info.certId && ari.window.start === info.window.start && ari.window.end === info.window.end;
+    ari = {
+      certId: info.certId,
+      window: info.window,
+      renewAt: Math.min(same ? ari.renewAt : selectRenewalTime(info.window), latestRenewalMoment(pem)),
+      freshUntil: now + info.retryAfterMs
+    };
+    return ari;
+  };
+  const scheduleRenewal = (renewAt) => {
+    if (ariTimer)
+      clearTimeout(ariTimer);
+    ariTimer = undefined;
+    const delay = renewAt - Date.now();
+    if (stopped || delay >= renewCheckMs)
+      return;
+    ariTimer = setTimeout(() => void check().catch(() => {}), Math.max(0, delay));
+    ariTimer.unref?.();
+  };
   const ensureCertificate = async () => {
     const hostname = await client.ready();
     let pem = existsSync39(certPath) ? readFileSync32(certPath, "utf8") : undefined;
-    if (!certificateIsFresh(pem, hostname)) {
+    const plan = pem && certificateIsValid(pem, hostname) ? await renewalPlan(pem) : undefined;
+    const due = plan ? ariRenewalDue(pem, plan.renewAt) : !certificateIsFresh(pem, hostname);
+    if (due) {
       const terms = await agreed();
       if (!terms.ok) {
-        const serving = pem && certificateIsValid(pem, hostname) ? await serve2(pem, hostname) : undefined;
-        report({ state: "awaiting_terms", termsUrl: terms.termsUrl, ...serving ? { serving } : {} });
+        const serving2 = pem && certificateIsValid(pem, hostname) ? await serve2(pem, hostname) : undefined;
+        report({ state: "awaiting_terms", termsUrl: terms.termsUrl, ...serving2 ? { serving: serving2 } : {} });
         return;
       }
       report({ state: "issuing" });
@@ -69648,14 +69842,20 @@ async function startConnect(options) {
         hostname,
         dns: client,
         termsOfServiceAgreed: true,
+        ...plan ? { replaces: plan.certId } : {},
         ...options.acme.fetch ? { fetch: options.acme.fetch } : {},
         propagationDelayMs: options.acme.propagationDelayMs ?? 1e4,
         ...options.acme.pollIntervalMs ? { pollIntervalMs: options.acme.pollIntervalMs } : {}
       });
       writePrivateFile(certPath, pem);
+      ari = undefined;
     }
     failures = 0;
-    report({ state: "serving", ...await serve2(pem, hostname) });
+    const serving = await serve2(pem, hostname);
+    const next = due ? await renewalPlan(pem) : plan;
+    if (next && !(due && next.renewAt <= Date.now()))
+      scheduleRenewal(next.renewAt);
+    report({ state: "serving", ...serving, ...next ? { renewAt: new Date(next.renewAt).toISOString() } : {} });
   };
   const check = () => {
     if (retryTimer)
@@ -69700,6 +69900,8 @@ async function startConnect(options) {
       clearInterval(timer);
       if (retryTimer)
         clearTimeout(retryTimer);
+      if (ariTimer)
+        clearTimeout(ariTimer);
       await client.stop();
     }
   };
@@ -69707,6 +69909,7 @@ async function startConnect(options) {
 var LETS_ENCRYPT_DIRECTORY = "https://acme-v02.api.letsencrypt.org/directory";
 var init_connect2 = __esm(() => {
   init_acme();
+  init_ari();
   init_identity();
   init_relay_client();
 });
@@ -78626,19 +78829,19 @@ function mountDispositionsController(options) {
         row.append(disclosure, icon, select, status);
         wrapper.appendChild(row);
         if (draft.expanded.has(node.key)) {
-          const children = root.ownerDocument.createElement("div");
-          children.className = "children";
-          children.setAttribute("role", "group");
-          children.setAttribute("aria-label", node.name);
-          appendNodes(children, draft.branches.get(node.key) || [], new Set([...seen, node.key]));
+          const children2 = root.ownerDocument.createElement("div");
+          children2.className = "children";
+          children2.setAttribute("role", "group");
+          children2.setAttribute("aria-label", node.name);
+          appendNodes(children2, draft.branches.get(node.key) || [], new Set([...seen, node.key]));
           if (draft.branchCursors.has(node.key)) {
             const more2 = root.ownerDocument.createElement("button");
             more2.type = "button";
             more2.dataset.scopeMore = node.key;
             more2.textContent = (draft.branches.get(node.key)?.length || 0) >= 20 ? "Show more folders" : "Continue loading folders";
-            children.appendChild(more2);
+            children2.appendChild(more2);
           }
-          wrapper.appendChild(children);
+          wrapper.appendChild(children2);
         }
         host.appendChild(wrapper);
       }
@@ -85617,7 +85820,7 @@ function renderDispositionNode(node, ancestorState, editable) {
   const locked = selectable.length > 0 || !editable ? "" : lockedReason(node, ancestorState);
   const countLine = `${node.counts.items} ${node.counts.items === 1 ? "item" : "items"}` + (node.counts.excluded_items > 0 ? ` · ${node.counts.excluded_items} no ingestion` : "") + (node.counts.metadata_only_items > 0 ? ` · ${node.counts.metadata_only_items} metadata only` : "");
   const control = `<div class="stored-controls" aria-hidden="true">${STATE_ORDER.map((state) => renderStateRadio(node, state, selectable.includes(state))).join("")}</div>`;
-  const children = node.children.length > 0 ? `<div class="children">${node.children.map((child) => renderDispositionNode(child, node.state, editable)).join("")}</div>` : "";
+  const children2 = node.children.length > 0 ? `<div class="children">${node.children.map((child) => renderDispositionNode(child, node.state, editable)).join("")}</div>` : "";
   const status = node.mixed_below ? "Mixed" : PICKER_STATE_LABELS[node.state];
   const row = `<span class="folder-icon" aria-hidden="true">▰</span><span class="node-name">${escapeHtml2(node.name)}</span>` + `<span class="node-counts">${escapeHtml2(`${node.counts.items}`)}</span>` + `<span class="node-state" data-folder-status>${escapeHtml2(status)}</span>`;
   const data = `data-path="${escapeHtml2(node.path)}" data-name="${escapeHtml2(node.name)}"` + ` data-counts="${escapeHtml2(countLine)}" data-search="${escapeHtml2(`${node.display_path} ${node.name}`.toLowerCase())}"` + ` data-state="${node.state}" data-origin="${node.origin}" data-selectable="${escapeHtml2(selectable.join(","))}"` + (locked === "" ? "" : ` data-locked="${escapeHtml2(locked)}"`);
@@ -85632,7 +85835,7 @@ function renderDispositionNode(node, ancestorState, editable) {
           <details class="node"${node.depth === 1 ? " open" : ""}>
             <summary class="folder-row" ${data}>${row}</summary>
             ${control}
-            ${children}
+            ${children2}
           </details>`;
 }
 function renderStateRadio(node, state, enabled) {
@@ -87399,13 +87602,13 @@ function createEmailSourceWorker(options = {}) {
           }, 503);
         }
         if (isCredentialRefreshBusyError(error2)) {
-          const retryAfterMs2 = error2.retryAfterMs ?? CREDENTIAL_REFRESH_BUSY_RETRY_MS;
+          const retryAfterMs3 = error2.retryAfterMs ?? CREDENTIAL_REFRESH_BUSY_RETRY_MS;
           return json({
             error: {
               code: "credential_refresh_busy",
               message: "The credential is being refreshed by another process; retry shortly.",
               retryable: true,
-              retry_at: new Date(Date.now() + retryAfterMs2).toISOString()
+              retry_at: new Date(Date.now() + retryAfterMs3).toISOString()
             },
             policy: { raw_email_exposed: false }
           }, 503);
@@ -93301,6 +93504,77 @@ var init_remote_mcp = __esm(() => {
   init_remote_request_body();
 });
 
+// connect-relay/shared/rate-limit.ts
+class KeyedTokenBuckets {
+  spec;
+  now;
+  buckets = new Map;
+  constructor(spec, now = Date.now) {
+    this.spec = spec;
+    this.now = now;
+  }
+  take(key) {
+    const now = this.now();
+    const bucket = this.buckets.get(key) ?? { tokens: this.spec.capacity, at: now };
+    bucket.tokens = Math.min(this.spec.capacity, bucket.tokens + (now - bucket.at) / 1000 * this.spec.refillPerSecond);
+    bucket.at = now;
+    if (bucket.tokens < 1) {
+      this.buckets.set(key, bucket);
+      return false;
+    }
+    bucket.tokens -= 1;
+    this.buckets.set(key, bucket);
+    if (this.buckets.size > 1e4)
+      this.sweep(now);
+    return true;
+  }
+  sweep(now) {
+    for (const [key, bucket] of this.buckets) {
+      const tokens = bucket.tokens + (now - bucket.at) / 1000 * this.spec.refillPerSecond;
+      if (tokens >= this.spec.capacity)
+        this.buckets.delete(key);
+    }
+  }
+}
+
+class KeyedCounter {
+  counts = new Map;
+  tryAcquire(key, max) {
+    const current = this.counts.get(key) ?? 0;
+    if (current >= max)
+      return;
+    this.counts.set(key, current + 1);
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      const remaining = (this.counts.get(key) ?? 1) - 1;
+      if (remaining > 0)
+        this.counts.set(key, remaining);
+      else
+        this.counts.delete(key);
+    };
+  }
+  get(key) {
+    return this.counts.get(key) ?? 0;
+  }
+}
+function addressKey(address) {
+  if (!address)
+    return "unknown";
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+  if (mapped)
+    return mapped[1];
+  if (!address.includes(":"))
+    return address;
+  const [head = "", tail = ""] = address.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = address.includes("::") ? [...left, ...Array(8 - left.length - right.length).fill("0"), ...right] : left;
+  return `${groups.slice(0, 4).map((group) => (group || "0").toLowerCase().replace(/^0+(?=.)/, "")).join(":")}::/64`;
+}
+
 // src/workers/remote-oauth/redirect-uris.ts
 function isAcceptableRedirectUri(value) {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_REDIRECT_URI_LENGTH)
@@ -93912,6 +94186,27 @@ function createRemoteOAuthHandler(options) {
       if (entry.expiresAt <= at)
         codes.delete(hash2);
   };
+  const admitPending = (caller, clientId) => {
+    const evictFairShare = (scope) => {
+      const held = new Map;
+      for (const [, entry] of scope)
+        held.set(entry.caller, (held.get(entry.caller) ?? 0) + 1);
+      const heaviest = Math.max(0, ...held.values());
+      const candidates = scope.filter(([, entry]) => held.get(entry.caller) === heaviest);
+      const victim = candidates.find(([, entry]) => !entry.pinned) ?? candidates[0];
+      if (victim)
+        pending.delete(victim[0]);
+    };
+    const own = [...pending].filter(([, entry]) => entry.caller === caller);
+    if (own.length >= MAX_PENDING_CONSENTS_PER_CALLER) {
+      pending.delete((own.find(([, entry]) => !entry.pinned) ?? own[0])[0]);
+    }
+    const sameClient = [...pending].filter(([, entry]) => entry.client.clientId === clientId);
+    if (sameClient.length >= MAX_PENDING_CONSENTS_PER_CLIENT)
+      evictFairShare(sameClient);
+    if (pending.size >= MAX_PENDING_CONSENTS)
+      evictFairShare([...pending]);
+  };
   const resolveClient = async (clientId) => {
     if (isClientIdMetadataUrl(clientId)) {
       try {
@@ -93970,13 +94265,7 @@ function createRemoteOAuthHandler(options) {
     }
     sweep();
     const caller = callerKey(request);
-    let callerPending = 0;
-    for (const entry2 of pending.values())
-      if (entry2.caller === caller)
-        callerPending += 1;
-    if (callerPending >= MAX_PENDING_CONSENTS_PER_CALLER || pending.size >= MAX_PENDING_CONSENTS) {
-      return errorPage(429, "Too many approvals are waiting. Finish or close one, or try again in a few minutes.");
-    }
+    admitPending(caller, client.clientId);
     const requestId = randomBytes11(16).toString("hex");
     const csrf = randomBytes11(32).toString("base64url");
     const entry = {
@@ -93988,7 +94277,8 @@ function createRemoteOAuthHandler(options) {
       state,
       csrf,
       attempts: 0,
-      expiresAt: now() + CONSENT_REQUEST_TTL_MS
+      expiresAt: now() + CONSENT_REQUEST_TTL_MS,
+      pinned: false
     };
     pending.set(requestId, entry);
     return consentPage(requestId, entry, u);
@@ -94019,7 +94309,7 @@ function createRemoteOAuthHandler(options) {
     sweep();
     const entry = /^[a-f0-9]{32}$/.test(requestId) ? pending.get(requestId) : undefined;
     if (!entry)
-      return errorPage(400, "This approval has expired. Start again from the app.");
+      return errorPage(400, "This approval has expired or was replaced by a newer one. Start again from the app.");
     const csrf = form.get("csrf") ?? "";
     const cookie = readCookie(request, consentCookieName(requestId)) ?? "";
     if (!constantTimeEqual(csrf, entry.csrf) || !constantTimeEqual(cookie, entry.csrf)) {
@@ -94042,6 +94332,8 @@ function createRemoteOAuthHandler(options) {
       return consentPage(requestId, entry, u, `Too many wrong codes were tried from here. Wait ${Math.ceil(wait / 1000)} seconds, then try again.`, false);
     }
     await pacer.hold(wait);
+    if (normalizePairingCode(form.get("pairing_code") ?? "") !== undefined)
+      entry.pinned = true;
     const check = options.connections().oauth.checkPairingCode(form.get("pairing_code") ?? "");
     if (!check.ok) {
       if (check.reason === "malformed") {
@@ -94228,7 +94520,7 @@ function callerKeyFor(request, trusted) {
   if (request.headers.get("x-olympus-relay") !== "1" || !trusted(request))
     return "direct";
   const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded ? `relay:${forwarded.slice(0, 64)}` : "direct";
+  return forwarded ? `relay:${addressKey(forwarded.slice(0, 64))}` : "direct";
 }
 function pairingPacer(now, sleep5) {
   const callers = new Map;
@@ -94414,9 +94706,10 @@ function jsonResponse2(status, body, headers = {}) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }
   });
 }
-var REMOTE_OAUTH_PATHS, ROUTED_PATHS, AUTHORIZATION_CODE_TTL_MS = 60000, CONSENT_REQUEST_TTL_MS, CONSENT_MAX_ATTEMPTS = 5, MAX_PENDING_CONSENTS = 256, MAX_PENDING_CONSENTS_PER_CALLER = 8, PAIRING_FAILURE_WINDOW_MS, PAIRING_PER_CALLER_MAX_DELAY_MS = 60000, PAIRING_GLOBAL_FAILURES_BEFORE_DELAY = 20, PAIRING_GLOBAL_DELAY_MS = 2000, PAIRING_MAX_HELD_MS = 1e4, PAIRING_MAX_TRACKED_CALLERS = 1024, MAX_LIVE_CODES = 256, MAX_FORM_BYTES, MAX_REGISTRATION_BYTES, CONNECT_BODY_DEADLINE_MS = 1e4, PKCE_VERIFIER_PATTERN, PKCE_CHALLENGE_PATTERN, LOOPBACK_HOSTNAMES4;
+var REMOTE_OAUTH_PATHS, ROUTED_PATHS, AUTHORIZATION_CODE_TTL_MS = 60000, CONSENT_REQUEST_TTL_MS, CONSENT_MAX_ATTEMPTS = 5, MAX_PENDING_CONSENTS = 256, MAX_PENDING_CONSENTS_PER_CALLER = 8, MAX_PENDING_CONSENTS_PER_CLIENT = 128, PAIRING_FAILURE_WINDOW_MS, PAIRING_PER_CALLER_MAX_DELAY_MS = 60000, PAIRING_GLOBAL_FAILURES_BEFORE_DELAY = 20, PAIRING_GLOBAL_DELAY_MS = 2000, PAIRING_MAX_HELD_MS = 1e4, PAIRING_MAX_TRACKED_CALLERS = 1024, MAX_LIVE_CODES = 256, MAX_FORM_BYTES, MAX_REGISTRATION_BYTES, CONNECT_BODY_DEADLINE_MS = 1e4, PKCE_VERIFIER_PATTERN, PKCE_CHALLENGE_PATTERN, LOOPBACK_HOSTNAMES4;
 var init_handler = __esm(() => {
   init_operation_caller();
+  init_remote_oauth_store();
   init_remote_public_url();
   init_cimd();
   init_remote_request_body();
