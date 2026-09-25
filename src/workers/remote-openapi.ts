@@ -200,6 +200,8 @@ const CALLER_FACING_ERRORS: Partial<Record<OperationErrorCode, number>> = {
   source_index_not_enabled: 503,
   source_answer_busy: 429,
   source_answer_job_not_found: 404,
+  source_answer_deadline: 504,
+  source_answer_too_large: 502,
 };
 
 const INTERNAL_ERROR_MESSAGES: Partial<Record<OperationErrorCode, string>> = {
@@ -324,6 +326,7 @@ function openApiOperation(operation: Operation, config: OlympusConfig): Record<s
       404: errorRef,
       413: errorRef,
       429: errorRef,
+      504: errorRef,
       500: errorRef,
       502: errorRef,
       503: errorRef,

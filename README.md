@@ -358,7 +358,16 @@ seconds for local `olympus serve` (`OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS`,
 under Codex's 60-second default tool timeout); both are capped at 230000.
 `source_answer_result` with that `job_id` returns the answer, the same error
 the call would have raised, or `working` again after waiting up to a minute
-(never longer than the threshold). A job id is readable
+(never longer than the threshold). A job that runs past 20 minutes is stopped
+with `source_answer_deadline`, and revoking a connection drops its jobs.
+
+Remote answers share the analyst with your own assistant's answers; there is
+no priority lane. So the worker runs at most two remote answers at once (the
+analyst's lane count; `OLYMPUS_SOURCE_ANSWER_MAX_RUNNING` raises it for a
+multi-lane analyst) and refuses more with `source_answer_busy`, which bounds
+how much remote work can ever queue ahead of your own question. A caller that
+disconnects, or a job that reaches its deadline, stops the analyst call
+itself and frees the lane. A job id is readable
 only by the connection (or `olympus serve` process) that asked, lives in
 memory, and expires 15 minutes after its answer is ready.
 

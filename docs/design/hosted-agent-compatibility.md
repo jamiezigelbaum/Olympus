@@ -354,10 +354,16 @@ critical-class and need an independent review receipt.
      `{"status": "working", "job_id"}` and keeps running;
      `source_answer_result(job_id)` returns the stored, already-released
      answer, its error, or `working` after waiting up to 60 s. Jobs are bound
-     to the connection, 256-bit ids, capped per connection and globally, held
-     in worker memory (a restart kills the analyst work too), and expire 15
-     minutes after finishing. A disconnect before hand-off still aborts; after
-     it, the job's own deadline governs. See `src/core/source-answer-jobs.ts`.
+     to the connection, 256-bit ids, held in worker memory (a restart kills
+     the analyst work too), dropped when the connection is revoked, and
+     expire 15 minutes after finishing. At most two answers run at once (the
+     analyst's lane count, `OLYMPUS_SOURCE_ANSWER_MAX_RUNNING`), because
+     remote answers share the analyst with the owner's native answers and
+     there is no priority lane. A disconnect before hand-off, or the job's
+     20-minute deadline after it, reaches the analyst as a caller
+     cancellation and frees the lane; the deadline also frees the job's slot
+     itself even if the work never settles. See
+     `src/core/source-answer-jobs.ts`.
 4. **OAuth 2.1 authorization server** with the pairing code approval page.
 5. **Relay client** in the plugin, plus **relay service** code and deployment
    config.

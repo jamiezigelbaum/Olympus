@@ -28225,6 +28225,12 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
   let settled = false;
   const cancellationSettleMs = timeoutMs >= 2 ? Math.min(10, Math.max(1, Math.floor(timeoutMs / 10))) : 0;
   const executionTimeoutMs = Math.max(1, timeoutMs - cancellationSettleMs);
+  const callerSignal = currentAnalystAbortSignal();
+  const followCaller = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted)
+    followCaller();
+  else
+    callerSignal?.addEventListener("abort", followCaller, { once: true });
   const analysis = runWithAnalystAbortSignal(controller.signal, () => analyst.analyze(pack, options)).finally(() => {
     settled = true;
   });
@@ -28269,6 +28275,7 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
   } finally {
     if (timeout)
       clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", followCaller);
   }
 }
 async function analyzeWithOptionalTimeout(analyst, pack, options, timeoutMs) {
@@ -68761,24 +68768,27 @@ __export(exports_source_answer_jobs, {
   SOURCE_ANSWER_RESULT_WAIT_MAX_MS: () => SOURCE_ANSWER_RESULT_WAIT_MAX_MS,
   SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS: () => SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
   SOURCE_ANSWER_MAX_RUNNING_PER_OWNER: () => SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
+  SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING: () => SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING,
   SOURCE_ANSWER_MAX_RUNNING_GLOBAL: () => SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
   SOURCE_ANSWER_MAX_RETAINED_PER_OWNER: () => SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
+  SOURCE_ANSWER_MAX_RESULT_BYTES: () => SOURCE_ANSWER_MAX_RESULT_BYTES,
   SOURCE_ANSWER_JOB_TTL_MS: () => SOURCE_ANSWER_JOB_TTL_MS,
   SOURCE_ANSWER_JOB_DEADLINE_MS: () => SOURCE_ANSWER_JOB_DEADLINE_MS,
   SOURCE_ANSWER_HANDOFF_MIN_MS: () => SOURCE_ANSWER_HANDOFF_MIN_MS,
   SOURCE_ANSWER_HANDOFF_MAX_MS: () => SOURCE_ANSWER_HANDOFF_MAX_MS,
   SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS
 });
-import { randomBytes as randomBytes8 } from "node:crypto";
+import { createHash as createHash40, randomBytes as randomBytes8, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 
 class SourceAnswerJobRegistry {
   limits;
   now;
+  isOwnerRevoked;
   jobs = new Map;
   running = new Map;
   runningTotal = 0;
   constructor(options = {}) {
-    this.limits = {
+    const limits = {
       handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
       resultWaitMs: SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
       ttlMs: SOURCE_ANSWER_JOB_TTL_MS,
@@ -68786,29 +68796,20 @@ class SourceAnswerJobRegistry {
       maxRunningPerOwner: SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
       maxRunningGlobal: SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
       maxRetainedPerOwner: SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
+      maxResultBytes: SOURCE_ANSWER_MAX_RESULT_BYTES,
       ...options.limits
     };
+    limits.maxRunningPerOwner = Math.min(limits.maxRunningPerOwner, limits.maxRunningGlobal);
+    this.limits = limits;
     this.now = options.now ?? Date.now;
+    this.isOwnerRevoked = options.isOwnerRevoked;
   }
   async run(scope, work) {
     this.sweep();
     this.admit(scope.owner);
     const startedAt = this.now();
     const controller = new AbortController;
-    this.running.set(scope.owner, (this.running.get(scope.owner) ?? 0) + 1);
-    this.runningTotal += 1;
-    let released = false;
-    const release = () => {
-      if (released)
-        return;
-      released = true;
-      const count = (this.running.get(scope.owner) ?? 1) - 1;
-      if (count <= 0)
-        this.running.delete(scope.owner);
-      else
-        this.running.set(scope.owner, count);
-      this.runningTotal -= 1;
-    };
+    const release = this.occupy(scope.owner);
     let pending;
     try {
       pending = work(controller.signal);
@@ -68830,22 +68831,31 @@ class SourceAnswerJobRegistry {
       throw first.error;
     }
     scope.detachFromClient?.();
+    let wake;
     const job = {
       id: newJobId(),
       owner: scope.owner,
       startedAt,
-      settled: Promise.resolve()
+      done: new Promise((resolve8) => {
+        wake = resolve8;
+      }),
+      finish: (result) => {
+        if (job.outcome)
+          return;
+        clearTimeout(job.deadline);
+        job.outcome = this.bounded(result);
+        job.finishedAt = this.now();
+        release();
+        wake();
+      },
+      abort: (reason) => controller.abort(reason)
     };
     job.deadline = setTimeout(() => {
-      controller.abort(new Error("source_answer job deadline reached"));
+      job.abort(callerAbortError("source_answer job deadline reached"));
+      job.finish({ ok: false, error: sourceAnswerDeadline(this.limits.deadlineMs) });
     }, Math.max(0, this.limits.deadlineMs - (this.now() - startedAt)));
     job.deadline.unref?.();
-    job.settled = outcome.then((result) => {
-      clearTimeout(job.deadline);
-      job.outcome = result;
-      job.finishedAt = this.now();
-      release();
-    });
+    outcome.then((result) => job.finish(result));
     this.jobs.set(job.id, job);
     this.evictRetained(scope.owner);
     return pendingResult(job.id, this.now() - startedAt, this.limits.resultWaitMs);
@@ -68853,7 +68863,7 @@ class SourceAnswerJobRegistry {
   async result(owner, jobId, signal) {
     this.sweep();
     const job = typeof jobId === "string" && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
-    if (!job || job.owner !== owner)
+    if (!job || !sameOwner(job.owner, owner))
       throw sourceAnswerJobNotFound();
     if (!job.outcome && this.limits.resultWaitMs > 0) {
       let timer;
@@ -68868,32 +68878,91 @@ class SourceAnswerJobRegistry {
             signal.addEventListener("abort", onAbort, { once: true });
         }
       });
-      await Promise.race([job.settled, stop]);
+      await Promise.race([job.done, stop]);
       clearTimeout(timer);
       if (signal && onAbort)
         signal.removeEventListener("abort", onAbort);
     }
+    if (!this.jobs.has(job.id))
+      throw sourceAnswerJobNotFound();
     if (!job.outcome)
       return pendingResult(job.id, this.now() - job.startedAt, this.limits.resultWaitMs);
     if (job.outcome.ok)
       return job.outcome.value;
     throw job.outcome.error;
   }
-  stats() {
-    this.sweep();
-    return { running: this.runningTotal, jobs: this.jobs.size };
-  }
-  admit(owner) {
-    if ((this.running.get(owner) ?? 0) >= this.limits.maxRunningPerOwner || this.runningTotal >= this.limits.maxRunningGlobal) {
-      throw new OperationError("source_answer_busy", "Too many Olympus answers are already in progress for this connection.", "Wait for the answers in progress (call source_answer_result with their job ids) before asking another question.");
+  dropOwner(owner) {
+    for (const [id, job] of this.jobs) {
+      if (!sameOwner(job.owner, owner))
+        continue;
+      this.jobs.delete(id);
+      job.abort(callerAbortError("source_answer connection revoked"));
+      job.finish({ ok: false, error: sourceAnswerJobNotFound() });
     }
   }
   sweep() {
     const now = this.now();
+    const owners = new Map;
     for (const [id, job] of this.jobs) {
-      if (job.finishedAt !== undefined && now - job.finishedAt >= this.limits.ttlMs)
+      if (job.finishedAt !== undefined && now - job.finishedAt >= this.limits.ttlMs) {
         this.jobs.delete(id);
+        continue;
+      }
+      if (this.isOwnerRevoked) {
+        let revoked = owners.get(job.owner);
+        if (revoked === undefined) {
+          try {
+            revoked = this.isOwnerRevoked(job.owner);
+          } catch {
+            revoked = false;
+          }
+          owners.set(job.owner, revoked);
+        }
+        if (revoked)
+          this.dropOwner(job.owner);
+      }
     }
+  }
+  stats() {
+    this.sweep();
+    return { running: this.runningTotal, jobs: this.jobs.size };
+  }
+  occupy(owner) {
+    this.running.set(owner, (this.running.get(owner) ?? 0) + 1);
+    this.runningTotal += 1;
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      const count = (this.running.get(owner) ?? 1) - 1;
+      if (count <= 0)
+        this.running.delete(owner);
+      else
+        this.running.set(owner, count);
+      this.runningTotal -= 1;
+    };
+  }
+  admit(owner) {
+    if ((this.running.get(owner) ?? 0) >= this.limits.maxRunningPerOwner || this.runningTotal >= this.limits.maxRunningGlobal) {
+      throw new OperationError("source_answer_busy", "Olympus is already answering as many questions as its analyst can take at once.", "Wait for the answers in progress (call source_answer_result with their job ids) before asking another question.");
+    }
+  }
+  bounded(result) {
+    if (!result.ok)
+      return result;
+    let bytes;
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(result.value) ?? "", "utf8");
+    } catch {
+      bytes = Number.POSITIVE_INFINITY;
+    }
+    if (bytes <= this.limits.maxResultBytes)
+      return result;
+    return {
+      ok: false,
+      error: new OperationError("source_answer_too_large", "The finished answer was too large for Olympus to hold for collection.", "Ask a narrower question with source_answer.")
+    };
   }
   evictRetained(owner) {
     const finished = [...this.jobs.values()].filter((job) => job.owner === owner && job.finishedAt !== undefined).sort((a, b) => a.finishedAt - b.finishedAt);
@@ -68906,6 +68975,19 @@ class SourceAnswerJobRegistry {
       excess -= 1;
     }
   }
+}
+function sameOwner(a, b) {
+  const left = createHash40("sha256").update(a).digest();
+  const right = createHash40("sha256").update(b).digest();
+  return timingSafeEqual4(left, right);
+}
+function callerAbortError(message) {
+  const error2 = new Error(message);
+  error2.name = "AbortError";
+  return error2;
+}
+function sourceAnswerDeadline(deadlineMs) {
+  return new OperationError("source_answer_deadline", `The answer did not finish within Olympus's ${Math.round(deadlineMs / 60000)}-minute limit and was stopped.`, "Ask a narrower question, or try again later.");
 }
 function sourceAnswerJobOwner(caller) {
   if (!caller)
@@ -68920,7 +69002,8 @@ function sourceAnswerJobLimitsFromEnv(env, surface) {
   const configured = surface === "stdio" ? env.OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS : env.OLYMPUS_SOURCE_ANSWER_HANDOFF_MS;
   const handoffMs = clampedInteger(configured, SOURCE_ANSWER_HANDOFF_MIN_MS, SOURCE_ANSWER_HANDOFF_MAX_MS) ?? (surface === "stdio" ? SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS : SOURCE_ANSWER_HANDOFF_DEFAULT_MS);
   const resultWaitMs = Math.min(clampedInteger(env.OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS, 0, SOURCE_ANSWER_RESULT_WAIT_MAX_MS) ?? SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS, handoffMs);
-  return { handoffMs, resultWaitMs };
+  const maxRunningGlobal = clampedInteger(env.OLYMPUS_SOURCE_ANSWER_MAX_RUNNING, 1, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING);
+  return { handoffMs, resultWaitMs, ...maxRunningGlobal !== undefined ? { maxRunningGlobal } : {} };
 }
 function isSourceAnswerPending(value) {
   return typeof value === "object" && value !== null && value.status === "working" && typeof value.job_id === "string";
@@ -68946,11 +69029,12 @@ function clampedInteger(value, min, max) {
     return;
   return Math.min(max, Math.max(min, Math.round(parsed)));
 }
-var SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200000, SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS = 45000, SOURCE_ANSWER_HANDOFF_MAX_MS = 230000, SOURCE_ANSWER_HANDOFF_MIN_MS = 1000, SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60000, SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120000, SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_DEADLINE_MS, SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 3, SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 12, SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16, JOB_ID_PREFIX = "saj_", JOB_ID_PATTERN;
+var SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200000, SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS = 45000, SOURCE_ANSWER_HANDOFF_MAX_MS = 230000, SOURCE_ANSWER_HANDOFF_MIN_MS = 1000, SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60000, SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120000, SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_DEADLINE_MS, SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 2, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING = 16, SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 2, SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16, SOURCE_ANSWER_MAX_RESULT_BYTES, JOB_ID_PREFIX = "saj_", JOB_ID_PATTERN;
 var init_source_answer_jobs = __esm(() => {
   init_operation_error();
   SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
   SOURCE_ANSWER_JOB_DEADLINE_MS = 20 * 60000;
+  SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
   JOB_ID_PATTERN = /^saj_[A-Za-z0-9_-]{43}$/;
 });
 
@@ -69054,7 +69138,7 @@ var init_server3 = __esm(() => {
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash40, createPublicKey, randomBytes as randomBytes9, sign, verify } from "node:crypto";
+import { createHash as createHash41, createPublicKey, randomBytes as randomBytes9, sign, verify } from "node:crypto";
 function base64url2(data) {
   return Buffer.from(data).toString("base64url");
 }
@@ -69075,7 +69159,7 @@ function base32(data) {
   return out;
 }
 function installIdForPublicKey(spkiDer) {
-  return base32(createHash40("sha256").update(spkiDer).digest().subarray(0, 20));
+  return base32(createHash41("sha256").update(spkiDer).digest().subarray(0, 20));
 }
 function spkiOf(key) {
   return key.export({ format: "der", type: "spki" });
@@ -69187,13 +69271,13 @@ __export(exports_acme, {
   dns01Value: () => dns01Value,
   AcmeError: () => AcmeError
 });
-import { createHash as createHash41, createPublicKey as createPublicKey3, sign as sign3 } from "node:crypto";
+import { createHash as createHash42, createPublicKey as createPublicKey3, sign as sign3 } from "node:crypto";
 function jwkThumbprint(jwk) {
   const canonical2 = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y });
-  return base64url2(createHash41("sha256").update(canonical2).digest());
+  return base64url2(createHash42("sha256").update(canonical2).digest());
 }
 function dns01Value(token, thumbprint) {
-  return base64url2(createHash41("sha256").update(`${token}.${thumbprint}`).digest());
+  return base64url2(createHash42("sha256").update(`${token}.${thumbprint}`).digest());
 }
 async function fetchTermsOfService(directoryUrl, fetchImpl = fetch) {
   const response = await fetchImpl(directoryUrl);
@@ -71138,7 +71222,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync20, mkdirSync as mkdirSync30 } from "node:fs";
-import { createHash as createHash42, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash43, randomUUID as randomUUID16 } from "node:crypto";
 import { homedir as homedir41 } from "node:os";
 import { dirname as dirname39, join as join52 } from "node:path";
 import { Database as Database15 } from "bun:sqlite";
@@ -72198,7 +72282,7 @@ function makeJobId() {
   return `fx_${randomUUID16()}`;
 }
 function hashString5(value) {
-  return createHash42("sha256").update(value).digest("hex");
+  return createHash43("sha256").update(value).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -73958,9 +74042,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer5 } from "node:buffer";
-import { createHash as createHash43 } from "node:crypto";
+import { createHash as createHash44 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash43("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash44("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -74586,7 +74670,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash44 } from "node:crypto";
+import { createHash as createHash45 } from "node:crypto";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
     return { allowed: true };
@@ -75065,7 +75149,7 @@ function retryable(errorKind, error2) {
 }
 function hashError(error2) {
   const detail = error2 instanceof Error ? `${error2.name}:${error2.message}` : String(error2);
-  return createHash44("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash45("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error2) {
   const message = error2 instanceof Error ? error2.message : "";
@@ -75180,7 +75264,7 @@ function summarizeEgressDestinations(values) {
   return { egressDestination: "venice_mixed_approved" };
 }
 function hashToken(value) {
-  return createHash44("sha256").update(value).digest("hex");
+  return createHash45("sha256").update(value).digest("hex");
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS;
 var init_runner = __esm(() => {
@@ -75993,7 +76077,7 @@ function createOpenAICompatibleAnalystModel(options) {
           });
         } catch (error2) {
           if (request.signal?.aborted)
-            throw callerAbortError(request.signal.reason);
+            throw callerAbortError2(request.signal.reason);
           throw new OperationError("source_index_error", `${providerLabel3} (${model}) was unreachable at ${url}.`, error2 instanceof Error ? error2.message : `Check the ${providerLabel3} endpoint and network.`);
         }
         if (!response.ok) {
@@ -76005,7 +76089,7 @@ function createOpenAICompatibleAnalystModel(options) {
           data = await response.json();
         } catch (error2) {
           if (request.signal?.aborted)
-            throw callerAbortError(request.signal.reason);
+            throw callerAbortError2(request.signal.reason);
           if (timedOut) {
             throw new OperationError("source_index_error", `${providerLabel3} (${model}) did not complete within ${timeoutMs}ms.`, "The endpoint returned response headers but stalled the body; falling back to local.");
           }
@@ -76029,7 +76113,7 @@ function createOpenAICompatibleAnalystModel(options) {
     }
   };
 }
-function callerAbortError(reason) {
+function callerAbortError2(reason) {
   if (reason instanceof Error && reason.name === "AbortError")
     return reason;
   const error2 = new Error("Analyst request was cancelled.");
@@ -77052,7 +77136,7 @@ var init_answer_latency_log = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash45 } from "node:crypto";
+import { createHash as createHash46 } from "node:crypto";
 import { readFileSync as readFileSync34 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir44 } from "node:os";
@@ -77526,7 +77610,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2565(value) {
-  return createHash45("sha256").update(value, "utf8").digest("hex");
+  return createHash46("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -80223,7 +80307,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash46 } from "node:crypto";
+import { createHash as createHash47 } from "node:crypto";
 function escapeHtml(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -80283,14 +80367,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash46("sha256").update(normalised).digest("hex");
+  return createHash47("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml(input.title) : `<a class="lead" href="${escapeHtml(leadHref)}">${escapeHtml(input.title)}</a> <span class="crumb">/</span> ${escapeHtml(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash46("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash47("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -83717,7 +83801,7 @@ var init_control_ui_contract = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac3, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -84192,7 +84276,7 @@ function verifyGatewayCallbackPeerHeader(value, authToken) {
   const expected = createHmac3("sha256", authToken).update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${peer}`).digest("base64url");
   const presentedBytes = Buffer.from(presented, "ascii");
   const expectedBytes = Buffer.from(expected, "ascii");
-  if (presentedBytes.length !== expectedBytes.length || !timingSafeEqual4(presentedBytes, expectedBytes))
+  if (presentedBytes.length !== expectedBytes.length || !timingSafeEqual5(presentedBytes, expectedBytes))
     return;
   return peer;
 }
@@ -84303,7 +84387,7 @@ function constantTimeStringEqual(actual, expected) {
   const expectedPadded = new Uint8Array(maxLength);
   actualPadded.set(actualBytes.slice(0, maxLength));
   expectedPadded.set(expectedBytes.slice(0, maxLength));
-  return timingSafeEqual4(actualPadded, expectedPadded) && actualBytes.byteLength === expectedBytes.byteLength;
+  return timingSafeEqual5(actualPadded, expectedPadded) && actualBytes.byteLength === expectedBytes.byteLength;
 }
 function workerAuthRequiredResponse() {
   return new Response(JSON.stringify({
@@ -86143,7 +86227,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash47 } from "node:crypto";
+import { createHash as createHash48 } from "node:crypto";
 function parseStructuredChatScope(value) {
   const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -86171,7 +86255,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash47("sha256").update(value).digest("hex");
+  return createHash48("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -86376,7 +86460,7 @@ function safeDetail(value) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash48, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
+import { createHash as createHash49, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 import { readFileSync as readFileSync38, statSync as statSync11 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
 import { join as join60, resolve as resolve9 } from "node:path";
@@ -86531,7 +86615,7 @@ function createEmailSourceWorker(options = {}) {
               const sourceAnswerRequest = await parseSourceIndexAnswerRequest(request);
               requestParsed = true;
               caller = sourceAnswerRequest.caller;
-              const result = await retrySqliteBusy(() => sourceAnswer.answer(sourceAnswerRequest));
+              const result = await runWithAnalystAbortSignal(callerCancellationSignal(request.signal), () => retrySqliteBusy(() => sourceAnswer.answer(sourceAnswerRequest)));
               assertNoRawEmailFields(result);
               const response = json(result);
               await emitSourceAnswerLatencyRecords({
@@ -88056,6 +88140,24 @@ function requireCurrentFileEmbeddingScope(store, resolver) {
     signature: JSON.stringify({ accountScope, filters })
   };
 }
+function callerCancellationSignal(signal) {
+  const controller = new AbortController;
+  const abort = () => {
+    const reason = signal.reason;
+    if (reason instanceof Error && reason.name === "AbortError") {
+      controller.abort(reason);
+      return;
+    }
+    const error2 = new Error("The caller cancelled this answer.");
+    error2.name = "AbortError";
+    controller.abort(error2);
+  };
+  if (signal.aborted)
+    abort();
+  else
+    signal.addEventListener("abort", abort, { once: true });
+  return controller.signal;
+}
 function scrubSourceWorkerLogMessage(message) {
   return String(message).slice(0, 200).replace(/[A-Za-z0-9._~+/=-]{24,}/g, "<redacted>");
 }
@@ -89428,7 +89530,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual5(createHash48("sha256").update(expected).digest(), createHash48("sha256").update(state).digest());
+  return timingSafeEqual6(createHash49("sha256").update(expected).digest(), createHash49("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -90030,6 +90132,7 @@ function mostPrivateTrustDomain(domains) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger";
 var init_email_source = __esm(() => {
+  init_analyst();
   init_file_lease();
   init_email_policy();
   init_publisher_oauth_client();
@@ -90356,7 +90459,7 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash49 } from "node:crypto";
+import { createHash as createHash50 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -91046,7 +91149,7 @@ function createCanonicalDropboxSchedulerSource(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash49("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash50("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -91670,7 +91773,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash49("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash50("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -94412,7 +94515,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash50, randomBytes as randomBytes12, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHash as createHash51, randomBytes as randomBytes12, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -94673,7 +94776,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash50("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash51("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -94923,10 +95026,10 @@ function consentCookie(requestId, value, secure, maxAgeSeconds) {
 function constantTimeEqual(left, right) {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
-  return a.length === b.length && a.length > 0 && timingSafeEqual6(a, b);
+  return a.length === b.length && a.length > 0 && timingSafeEqual7(a, b);
 }
 function sha2566(value) {
-  return createHash50("sha256").update(value).digest("hex");
+  return createHash51("sha256").update(value).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -95023,7 +95126,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash51 } from "node:crypto";
+import { createHash as createHash52 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -95040,7 +95143,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text, etag: `"${createHash51("sha256").update(text).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text, etag: `"${createHash52("sha256").update(text).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -95235,6 +95338,7 @@ function openApiOperation(operation, config2) {
       404: errorRef,
       413: errorRef,
       429: errorRef,
+      504: errorRef,
       500: errorRef,
       502: errorRef,
       503: errorRef
@@ -95267,7 +95371,9 @@ var init_remote_openapi = __esm(() => {
     source_index_policy_violation: 403,
     source_index_not_enabled: 503,
     source_answer_busy: 429,
-    source_answer_job_not_found: 404
+    source_answer_job_not_found: 404,
+    source_answer_deadline: 504,
+    source_answer_too_large: 502
   };
   INTERNAL_ERROR_MESSAGES = {
     email_unreachable: "Olympus could not reach its source worker in time. Retry later.",
@@ -97685,7 +97791,18 @@ async function main() {
     return remoteAccessFromStatus({ live: remotePublicUrls(), status });
   };
   const { SourceAnswerJobRegistry: SourceAnswerJobRegistry2, sourceAnswerJobLimitsFromEnv: sourceAnswerJobLimitsFromEnv2 } = await Promise.resolve().then(() => (init_source_answer_jobs(), exports_source_answer_jobs));
-  const sourceAnswerJobs = new SourceAnswerJobRegistry2({ limits: sourceAnswerJobLimitsFromEnv2(process.env, "remote") });
+  const sourceAnswerJobs = new SourceAnswerJobRegistry2({
+    limits: sourceAnswerJobLimitsFromEnv2(process.env, "remote"),
+    isOwnerRevoked: (owner) => {
+      if (!owner.startsWith("remote:"))
+        return false;
+      const id = owner.slice("remote:".length);
+      const record3 = remoteConnections()?.list().find((connection) => connection.id === id);
+      return record3 === undefined || record3.revokedAt !== null;
+    }
+  });
+  const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30000);
+  sourceAnswerJobSweep.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,

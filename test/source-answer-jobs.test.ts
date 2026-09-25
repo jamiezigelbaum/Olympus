@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { currentAnalystAbortSignal } from '../src/core/analyst.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { OperationError } from '../src/core/operation-error.ts';
 import { findOperationByName, type OperationContext } from '../src/core/operations.ts';
@@ -74,11 +75,18 @@ function answerFixture(text = 'released answer'): SourceIndexAnswerResult {
   } as unknown as SourceIndexAnswerResult;
 }
 
-/** A fake analyst: fast by default; `hold()` makes the next answers wait for `release()`. */
+/**
+ * A fake analyst: fast by default; `hold()` makes the next answers wait for
+ * `release()`. It records the caller-cancellation signal the worker gives it,
+ * and `honorAbort` decides whether it stops on that signal (a real model call
+ * does) or never finishes at all (a stuck one).
+ */
 function fakeAnalyst() {
   let gate: { promise: Promise<void>; resolve: () => void } | undefined;
   const analyst = {
     calls: 0,
+    honorAbort: true,
+    signals: [] as AbortSignal[],
     hold() {
       let resolve!: () => void;
       const promise = new Promise<void>((r) => { resolve = r; });
@@ -90,8 +98,16 @@ function fakeAnalyst() {
     },
     async answer() {
       analyst.calls += 1;
+      const signal = currentAnalystAbortSignal();
+      if (signal) analyst.signals.push(signal);
       const waiting = gate?.promise;
-      if (waiting) await waiting;
+      if (waiting) {
+        const aborted = new Promise<never>((_resolve, reject) => {
+          if (!analyst.honorAbort || !signal) return;
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+        await Promise.race([waiting, aborted]);
+      }
       return answerFixture();
     },
   };
@@ -106,7 +122,14 @@ let analyst: ReturnType<typeof fakeAnalyst>;
 let jobs: SourceAnswerJobRegistry;
 
 function startServer(limits: Partial<SourceAnswerJobLimits> = FAST): void {
-  jobs = new SourceAnswerJobRegistry({ limits });
+  // Wired as the worker wires it (email-source/server.ts).
+  jobs = new SourceAnswerJobRegistry({
+    limits,
+    isOwnerRevoked: (owner) => {
+      const record = store.list().find((connection) => `remote:${connection.id}` === owner);
+      return record === undefined || record.revokedAt !== null;
+    },
+  });
   const worker = createEmailSourceWorker({
     sourceAnswer: { answer: () => analyst.answer() },
     sourceAnswerLatencyLog: { record() {} },
@@ -304,6 +327,91 @@ describe('source_answer hand-off over OpenAPI', () => {
   });
 });
 
+describe('against the real worker route', () => {
+  function realWorkerContext(signal: AbortSignal, registry: SourceAnswerJobRegistry, connectionId = 'conn-real'): OperationContext {
+    const worker = createEmailSourceWorker({
+      sourceAnswer: { answer: () => analyst.answer() },
+      sourceAnswerLatencyLog: { record() {} },
+    });
+    return createInProcessOperationContext({
+      config: defaultConfig(),
+      sourceIndexReadEnabled: true,
+      caller: { surface: 'remote', connectionId, displayName: 'Claude' },
+      signal,
+      sourceAnswerJobs: registry,
+      workerFetch: worker.fetch,
+    });
+  }
+  const sourceAnswer = () => findOperationByName('source_answer')!;
+  const sourceAnswerResult = () => findOperationByName('source_answer_result')!;
+
+  test('a stuck analyst cannot hold a slot past the job deadline', async () => {
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 20, resultWaitMs: 0, deadlineMs: 120, maxRunningGlobal: 1 } });
+    analyst.honorAbort = false;
+    analyst.hold();
+    const ctx = realWorkerContext(new AbortController().signal, registry);
+    const pending = await sourceAnswer().handler(ctx, { question: 'q' }) as SourceAnswerPending;
+    expect(pending.status).toBe('working');
+    expect(registry.stats().running).toBe(1);
+    await expect(sourceAnswer().handler(ctx, { question: 'q2' })).rejects.toMatchObject({ code: 'source_answer_busy' });
+
+    await Bun.sleep(160);
+    // The analyst never settles, yet the slot is free and the job has its answer.
+    expect(registry.stats().running).toBe(0);
+    await expect(sourceAnswerResult().handler(ctx, { job_id: pending.job_id }))
+      .rejects.toMatchObject({ code: 'source_answer_deadline' });
+    // The deadline also reached the analyst as a caller cancellation.
+    expect(analyst.signals[0]!.aborted).toBe(true);
+    expect((analyst.signals[0]!.reason as Error).name).toBe('AbortError');
+  });
+
+  test('a disconnect before the threshold stops the analyst itself, not only the request', async () => {
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 5_000 } });
+    analyst.hold();
+    const client = new AbortController();
+    const pending = sourceAnswer().handler(realWorkerContext(client.signal, registry), { question: 'q' });
+    await Bun.sleep(20);
+    expect(analyst.signals).toHaveLength(1);
+    expect(analyst.signals[0]!.aborted).toBe(false);
+    client.abort();
+    await expect(pending).rejects.toBeInstanceOf(OperationError);
+    expect(analyst.signals[0]!.aborted).toBe(true);
+    expect(registry.stats()).toEqual({ running: 0, jobs: 0 });
+  });
+
+  test('after hand-off a disconnect leaves the analyst running; the deadline stops it', async () => {
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 20, resultWaitMs: 0, deadlineMs: 150 } });
+    analyst.hold();
+    const client = new AbortController();
+    const pending = await sourceAnswer().handler(realWorkerContext(client.signal, registry), { question: 'q' }) as SourceAnswerPending;
+    expect(pending.status).toBe('working');
+    client.abort();
+    await Bun.sleep(30);
+    expect(analyst.signals[0]!.aborted).toBe(false);
+    await Bun.sleep(150);
+    expect(analyst.signals[0]!.aborted).toBe(true);
+    expect(registry.stats().running).toBe(0);
+  });
+});
+
+describe('revocation', () => {
+  test('revoking a connection aborts and drops its jobs and frees its slots', async () => {
+    const { connection, token } = store.create('Claude');
+    analyst.hold();
+    const first = await restCall(token, 'source_answer', { question: 'q' });
+    expect(first.body.status).toBe('working');
+    expect(jobs.stats()).toEqual({ running: 1, jobs: 1 });
+
+    store.revoke(connection.id);
+    jobs.sweep();
+    expect(jobs.stats()).toEqual({ running: 0, jobs: 0 });
+    expect(analyst.signals[0]!.aborted).toBe(true);
+    // And the revoked credential reaches nothing.
+    const after = await restCall(token, 'source_answer_result', { job_id: first.body.job_id as string });
+    expect(after.status).toBe(401);
+  });
+});
+
 describe('client aborts and job deadlines', () => {
   function inProcess(options: {
     registry: SourceAnswerJobRegistry;
@@ -360,7 +468,7 @@ describe('client aborts and job deadlines', () => {
     const error = await sourceAnswerResult.handler(later, { job_id: first.job_id }).catch((e: unknown) => e);
     // The same error the call itself would have raised on a lane timeout.
     expect(error).toBeInstanceOf(OperationError);
-    expect((error as OperationError).code).toBe('email_unreachable');
+    expect((error as OperationError).code).toBe('source_answer_deadline');
   });
 
   test('a job that fails rethrows the error the direct call raises (the release refusal included)', async () => {
@@ -429,6 +537,25 @@ describe('SourceAnswerJobRegistry', () => {
     await expect(registry.result('remote:a', ids[0])).rejects.toMatchObject({ code: 'source_answer_job_not_found' });
     expect(await registry.result('remote:a', ids[1])).toBe('a1');
     expect(await registry.result('remote:a', ids[2])).toBe('a2');
+  });
+
+  test('a stored answer over the size cap becomes an error, never a truncated answer', async () => {
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 5, resultWaitMs: 200, maxResultBytes: 64 } });
+    const big = await registry.run(scope(registry), () => Bun.sleep(20).then(() => ({ answer: 'x'.repeat(100) }))) as SourceAnswerPending;
+    await expect(registry.result('remote:a', big.job_id)).rejects.toMatchObject({ code: 'source_answer_too_large' });
+    const small = await registry.run(scope(registry), () => Bun.sleep(20).then(() => ({ answer: 'ok' }))) as SourceAnswerPending;
+    expect(await registry.result('remote:a', small.job_id)).toEqual({ answer: 'ok' });
+  });
+
+  test('the running cap is the analyst lane count: two by default, set by env, never below one connection\'s share', () => {
+    const registry = new SourceAnswerJobRegistry();
+    expect(registry.limits.maxRunningGlobal).toBe(2);
+    expect(registry.limits.maxRunningPerOwner).toBeLessThanOrEqual(registry.limits.maxRunningGlobal);
+    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_MAX_RUNNING: '1' }, 'remote').maxRunningGlobal).toBe(1);
+    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_MAX_RUNNING: '99' }, 'remote').maxRunningGlobal).toBe(16);
+    expect(sourceAnswerJobLimitsFromEnv({}, 'remote').maxRunningGlobal).toBeUndefined();
+    const single = new SourceAnswerJobRegistry({ limits: { maxRunningGlobal: 1 } });
+    expect(single.limits.maxRunningPerOwner).toBe(1);
   });
 
   test('job ids are 256-bit and unique', async () => {

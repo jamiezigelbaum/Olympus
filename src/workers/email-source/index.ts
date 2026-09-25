@@ -1,4 +1,5 @@
 import type { ModelSetupView } from '../../core/model-setup.ts';
+import { runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import type { SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { SecretLocationNote } from '../../core/evidence-pack.ts';
@@ -882,7 +883,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               const sourceAnswerRequest = await parseSourceIndexAnswerRequest(request);
               requestParsed = true;
               caller = sourceAnswerRequest.caller;
-              const result = await retrySqliteBusy(() => sourceAnswer.answer(sourceAnswerRequest));
+              // The caller's cancellation reaches the analyst: a client that
+              // disconnects (or a hand-off job's deadline, for remote agents)
+              // stops the model call and frees the analyst lane.
+              const result = await runWithAnalystAbortSignal(
+                callerCancellationSignal(request.signal),
+                () => retrySqliteBusy(() => sourceAnswer.answer(sourceAnswerRequest)),
+              );
               assertNoRawEmailFields(result);
               const response = json(result);
               await emitSourceAnswerLatencyRecords({
@@ -3224,6 +3231,28 @@ function requireCurrentFileEmbeddingScope(
     filters,
     signature: JSON.stringify({ accountScope, filters }),
   };
+}
+
+/**
+ * Follows the request's signal with an AbortError reason, which the analyst
+ * route reads as the caller's cancellation (it ends the route without
+ * counting against a lane), whatever reason the runtime aborted with.
+ */
+function callerCancellationSignal(signal: AbortSignal): AbortSignal {
+  const controller = new AbortController();
+  const abort = () => {
+    const reason = signal.reason;
+    if (reason instanceof Error && reason.name === 'AbortError') {
+      controller.abort(reason);
+      return;
+    }
+    const error = new Error('The caller cancelled this answer.');
+    error.name = 'AbortError';
+    controller.abort(error);
+  };
+  if (signal.aborted) abort();
+  else signal.addEventListener('abort', abort, { once: true });
+  return controller.signal;
 }
 
 function scrubSourceWorkerLogMessage(message: unknown): string {

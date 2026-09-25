@@ -3976,7 +3976,19 @@ export async function main(): Promise<void> {
   // Slow source_answer calls from remote agents hand off to in-memory jobs
   // bound to the connection; see core/source-answer-jobs.ts.
   const { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv } = await import('../../core/source-answer-jobs.ts');
-  const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env, 'remote') });
+  const sourceAnswerJobs = new SourceAnswerJobRegistry({
+    limits: sourceAnswerJobLimitsFromEnv(process.env, 'remote'),
+    // A revoked connection's jobs are aborted and dropped. Revocation can come
+    // from the CLI (another process), so the store is the authority.
+    isOwnerRevoked: (owner) => {
+      if (!owner.startsWith('remote:')) return false;
+      const id = owner.slice('remote:'.length);
+      const record = remoteConnections()?.list().find((connection) => connection.id === id);
+      return record === undefined || record.revokedAt !== null;
+    },
+  });
+  const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30_000);
+  sourceAnswerJobSweep.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,

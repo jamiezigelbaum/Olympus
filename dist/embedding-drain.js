@@ -20518,6 +20518,7 @@ init_venice_models();
 init_sovereignty();
 
 // src/workers/email-source/index.ts
+init_analyst();
 init_file_lease();
 init_email_policy();
 init_publisher_oauth_client();

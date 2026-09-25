@@ -13,7 +13,9 @@ export type OperationErrorCode =
   | 'source_index_policy_violation'
   | 'source_index_error'
   | 'source_answer_busy'
-  | 'source_answer_job_not_found';
+  | 'source_answer_job_not_found'
+  | 'source_answer_deadline'
+  | 'source_answer_too_large';
 
 export class OperationError extends Error {
   code: OperationErrorCode;

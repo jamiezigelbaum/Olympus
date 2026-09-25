@@ -23,7 +23,7 @@
  * would then have to cover. After a restart a job id is simply unknown, and
  * the caller asks again.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
 import type { OperationCaller } from './operation-caller.ts';
 
@@ -41,9 +41,19 @@ export const SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120_000;
 export const SOURCE_ANSWER_JOB_TTL_MS = 15 * 60_000;
 /** Backstop on a handed-off job; the answer's own timeout chain normally ends it first. */
 export const SOURCE_ANSWER_JOB_DEADLINE_MS = 20 * 60_000;
-export const SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 3;
-export const SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 12;
+/**
+ * Sized to the analyst, not to the HTTP server: the local analyst is a
+ * single-lane model, and remote answers share that lane with the owner's own
+ * native answers (there is no priority lane). Two running remote answers is
+ * the most that can ever queue ahead of an owner's question.
+ * `OLYMPUS_SOURCE_ANSWER_MAX_RUNNING` raises it for a multi-lane analyst.
+ */
+export const SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 2;
+export const SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING = 16;
+export const SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 2;
 export const SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16;
+/** A stored answer's serialized size cap. */
+export const SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
 
 const JOB_ID_PREFIX = 'saj_';
 /** 32 random bytes: 256 bits, base64url. */
@@ -57,6 +67,7 @@ export interface SourceAnswerJobLimits {
   maxRunningPerOwner: number;
   maxRunningGlobal: number;
   maxRetainedPerOwner: number;
+  maxResultBytes: number;
 }
 
 export interface SourceAnswerPending {
@@ -90,24 +101,34 @@ interface JobRecord {
   startedAt: number;
   finishedAt?: number;
   outcome?: { ok: true; value: unknown } | { ok: false; error: unknown };
-  settled: Promise<void>;
+  /** Resolves when the job finishes: its work settles, its deadline passes, or it is dropped. */
+  done: Promise<void>;
+  /** Records the outcome once, frees the running slot, and wakes result waiters. */
+  finish(outcome: { ok: true; value: unknown } | { ok: false; error: unknown }): void;
+  abort(reason: Error): void;
   deadline?: ReturnType<typeof setTimeout>;
 }
 
 export interface SourceAnswerJobRegistryOptions {
   limits?: Partial<SourceAnswerJobLimits>;
   now?: () => number;
+  /**
+   * Whether an owner's approval has been withdrawn (a revoked connection).
+   * Checked on every sweep; a revoked owner's jobs are aborted and dropped.
+   */
+  isOwnerRevoked?: (owner: string) => boolean;
 }
 
 export class SourceAnswerJobRegistry {
   readonly limits: SourceAnswerJobLimits;
   private readonly now: () => number;
+  private readonly isOwnerRevoked: ((owner: string) => boolean) | undefined;
   private readonly jobs = new Map<string, JobRecord>();
   private readonly running = new Map<string, number>();
   private runningTotal = 0;
 
   constructor(options: SourceAnswerJobRegistryOptions = {}) {
-    this.limits = {
+    const limits = {
       handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
       resultWaitMs: SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
       ttlMs: SOURCE_ANSWER_JOB_TTL_MS,
@@ -115,9 +136,14 @@ export class SourceAnswerJobRegistry {
       maxRunningPerOwner: SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
       maxRunningGlobal: SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
       maxRetainedPerOwner: SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
+      maxResultBytes: SOURCE_ANSWER_MAX_RESULT_BYTES,
       ...options.limits,
     };
+    // One connection can never hold more than the whole allowance.
+    limits.maxRunningPerOwner = Math.min(limits.maxRunningPerOwner, limits.maxRunningGlobal);
+    this.limits = limits;
     this.now = options.now ?? Date.now;
+    this.isOwnerRevoked = options.isOwnerRevoked;
   }
 
   /**
@@ -133,17 +159,7 @@ export class SourceAnswerJobRegistry {
     this.admit(scope.owner);
     const startedAt = this.now();
     const controller = new AbortController();
-    this.running.set(scope.owner, (this.running.get(scope.owner) ?? 0) + 1);
-    this.runningTotal += 1;
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      const count = (this.running.get(scope.owner) ?? 1) - 1;
-      if (count <= 0) this.running.delete(scope.owner);
-      else this.running.set(scope.owner, count);
-      this.runningTotal -= 1;
-    };
+    const release = this.occupy(scope.owner);
 
     let pending: Promise<T>;
     try {
@@ -172,22 +188,31 @@ export class SourceAnswerJobRegistry {
     // Hand-off. The client may now go away without cancelling the work; the
     // job's own deadline is what ends it from here.
     scope.detachFromClient?.();
+    let wake!: () => void;
     const job: JobRecord = {
       id: newJobId(),
       owner: scope.owner,
       startedAt,
-      settled: Promise.resolve(),
+      done: new Promise<void>((resolve) => { wake = resolve; }),
+      finish: (result) => {
+        if (job.outcome) return;
+        clearTimeout(job.deadline);
+        job.outcome = this.bounded(result);
+        job.finishedAt = this.now();
+        release();
+        wake();
+      },
+      abort: (reason) => controller.abort(reason),
     };
+    // The deadline frees the slot and records its own error at once; it does
+    // not wait for the work to notice the abort, so work that never settles
+    // cannot hold a slot past it.
     job.deadline = setTimeout(() => {
-      controller.abort(new Error('source_answer job deadline reached'));
+      job.abort(callerAbortError('source_answer job deadline reached'));
+      job.finish({ ok: false, error: sourceAnswerDeadline(this.limits.deadlineMs) });
     }, Math.max(0, this.limits.deadlineMs - (this.now() - startedAt)));
     job.deadline.unref?.();
-    job.settled = outcome.then((result) => {
-      clearTimeout(job.deadline);
-      job.outcome = result;
-      job.finishedAt = this.now();
-      release();
-    });
+    void outcome.then((result) => job.finish(result));
     this.jobs.set(job.id, job);
     this.evictRetained(scope.owner);
     return pendingResult(job.id, this.now() - startedAt, this.limits.resultWaitMs);
@@ -201,7 +226,7 @@ export class SourceAnswerJobRegistry {
   async result(owner: string, jobId: unknown, signal?: AbortSignal): Promise<unknown> {
     this.sweep();
     const job = typeof jobId === 'string' && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
-    if (!job || job.owner !== owner) throw sourceAnswerJobNotFound();
+    if (!job || !sameOwner(job.owner, owner)) throw sourceAnswerJobNotFound();
     if (!job.outcome && this.limits.resultWaitMs > 0) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       let onAbort: (() => void) | undefined;
@@ -213,13 +238,52 @@ export class SourceAnswerJobRegistry {
           else signal.addEventListener('abort', onAbort, { once: true });
         }
       });
-      await Promise.race([job.settled, stop]);
+      await Promise.race([job.done, stop]);
       clearTimeout(timer);
       if (signal && onAbort) signal.removeEventListener('abort', onAbort);
     }
+    // Dropped while waiting (its connection was revoked).
+    if (!this.jobs.has(job.id)) throw sourceAnswerJobNotFound();
     if (!job.outcome) return pendingResult(job.id, this.now() - job.startedAt, this.limits.resultWaitMs);
     if (job.outcome.ok) return job.outcome.value;
     throw job.outcome.error;
+  }
+
+  /**
+   * Aborts and forgets every job an owner holds (a revoked connection). Its
+   * running slots are freed at once.
+   */
+  dropOwner(owner: string): void {
+    for (const [id, job] of this.jobs) {
+      if (!sameOwner(job.owner, owner)) continue;
+      this.jobs.delete(id);
+      job.abort(callerAbortError('source_answer connection revoked'));
+      job.finish({ ok: false, error: sourceAnswerJobNotFound() });
+    }
+  }
+
+  /** Expires finished jobs and drops revoked owners' jobs; also run on a timer by the worker. */
+  sweep(): void {
+    const now = this.now();
+    const owners = new Map<string, boolean>();
+    for (const [id, job] of this.jobs) {
+      if (job.finishedAt !== undefined && now - job.finishedAt >= this.limits.ttlMs) {
+        this.jobs.delete(id);
+        continue;
+      }
+      if (this.isOwnerRevoked) {
+        let revoked = owners.get(job.owner);
+        if (revoked === undefined) {
+          try {
+            revoked = this.isOwnerRevoked(job.owner);
+          } catch {
+            revoked = false;
+          }
+          owners.set(job.owner, revoked);
+        }
+        if (revoked) this.dropOwner(job.owner);
+      }
+    }
   }
 
   /** Running calls (before and after hand-off) and retained jobs, for tests and status. */
@@ -228,22 +292,49 @@ export class SourceAnswerJobRegistry {
     return { running: this.runningTotal, jobs: this.jobs.size };
   }
 
+  private occupy(owner: string): () => void {
+    this.running.set(owner, (this.running.get(owner) ?? 0) + 1);
+    this.runningTotal += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const count = (this.running.get(owner) ?? 1) - 1;
+      if (count <= 0) this.running.delete(owner);
+      else this.running.set(owner, count);
+      this.runningTotal -= 1;
+    };
+  }
+
   private admit(owner: string): void {
     if ((this.running.get(owner) ?? 0) >= this.limits.maxRunningPerOwner
       || this.runningTotal >= this.limits.maxRunningGlobal) {
       throw new OperationError(
         'source_answer_busy',
-        'Too many Olympus answers are already in progress for this connection.',
+        'Olympus is already answering as many questions as its analyst can take at once.',
         'Wait for the answers in progress (call source_answer_result with their job ids) before asking another question.',
       );
     }
   }
 
-  private sweep(): void {
-    const now = this.now();
-    for (const [id, job] of this.jobs) {
-      if (job.finishedAt !== undefined && now - job.finishedAt >= this.limits.ttlMs) this.jobs.delete(id);
+  /** A stored answer larger than the cap is replaced by an error, never truncated. */
+  private bounded(result: { ok: true; value: unknown } | { ok: false; error: unknown }) {
+    if (!result.ok) return result;
+    let bytes: number;
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(result.value) ?? '', 'utf8');
+    } catch {
+      bytes = Number.POSITIVE_INFINITY;
     }
+    if (bytes <= this.limits.maxResultBytes) return result;
+    return {
+      ok: false as const,
+      error: new OperationError(
+        'source_answer_too_large',
+        'The finished answer was too large for Olympus to hold for collection.',
+        'Ask a narrower question with source_answer.',
+      ),
+    };
   }
 
   /** Oldest finished jobs go first; running jobs are bounded by admission instead. */
@@ -259,6 +350,32 @@ export class SourceAnswerJobRegistry {
       excess -= 1;
     }
   }
+}
+
+/** Constant-time owner comparison, so a lookup cannot time out another key. */
+function sameOwner(a: string, b: string): boolean {
+  const left = createHash('sha256').update(a).digest();
+  const right = createHash('sha256').update(b).digest();
+  return timingSafeEqual(left, right);
+}
+
+/**
+ * The abort reason the answer pipeline treats as the caller's cancellation
+ * (an AbortError that is not a lane timeout): it ends the analyst route
+ * without counting against the lane.
+ */
+function callerAbortError(message: string): Error {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
+function sourceAnswerDeadline(deadlineMs: number): OperationError {
+  return new OperationError(
+    'source_answer_deadline',
+    `The answer did not finish within Olympus's ${Math.round(deadlineMs / 60_000)}-minute limit and was stopped.`,
+    'Ask a narrower question, or try again later.',
+  );
 }
 
 /**
@@ -284,6 +401,8 @@ export type SourceAnswerJobSurface = 'remote' | 'stdio';
  * 45 s, below Codex's 60 s). Both clamp to 1 s–230 s.
  * `OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS` sets how long one result call waits
  * (0–120 s, default 60 s, and never past the surface's threshold).
+ * `OLYMPUS_SOURCE_ANSWER_MAX_RUNNING` sets how many answers may run at once
+ * (1–16, default 2: the analyst's lane count, not the server's).
  */
 export function sourceAnswerJobLimitsFromEnv(
   env: NodeJS.ProcessEnv,
@@ -296,7 +415,8 @@ export function sourceAnswerJobLimitsFromEnv(
     clampedInteger(env.OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS, 0, SOURCE_ANSWER_RESULT_WAIT_MAX_MS) ?? SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
     handoffMs,
   );
-  return { handoffMs, resultWaitMs };
+  const maxRunningGlobal = clampedInteger(env.OLYMPUS_SOURCE_ANSWER_MAX_RUNNING, 1, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING);
+  return { handoffMs, resultWaitMs, ...(maxRunningGlobal !== undefined ? { maxRunningGlobal } : {}) };
 }
 
 export function isSourceAnswerPending(value: unknown): value is SourceAnswerPending {
