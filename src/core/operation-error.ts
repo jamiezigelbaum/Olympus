@@ -11,7 +11,11 @@ export type OperationErrorCode =
   | 'email_policy_violation'
   | 'source_index_not_enabled'
   | 'source_index_policy_violation'
-  | 'source_index_error';
+  | 'source_index_error'
+  | 'source_answer_busy'
+  | 'source_answer_job_not_found'
+  | 'source_answer_deadline'
+  | 'source_answer_too_large';
 
 export class OperationError extends Error {
   code: OperationErrorCode;
@@ -35,4 +39,16 @@ export class OperationError extends Error {
       ...(this.suggestion ? { suggestion: this.suggestion } : {}),
     };
   }
+}
+
+/**
+ * An unknown, expired, or another caller's source-answer job: one refusal, so
+ * a caller cannot tell a job it may not read from one that does not exist.
+ */
+export function sourceAnswerJobNotFound(): OperationError {
+  return new OperationError(
+    'source_answer_job_not_found',
+    'No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted.',
+    'Ask the question again with source_answer.',
+  );
 }

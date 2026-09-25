@@ -988,13 +988,23 @@ var init_public_surface = __esm(() => {
     "argus_list_models",
     "argus_complete",
     "source_answer",
+    "source_answer_result",
     "source_index_status",
     "source_index_search",
     "olympus_doctor"
   ];
-  V0_4_PUBLIC_CLI_OPERATIONS = V0_4_PUBLIC_MCP_TOOLS;
+  V0_4_PUBLIC_CLI_OPERATIONS = [
+    "argus_ping",
+    "argus_list_models",
+    "argus_complete",
+    "source_answer",
+    "source_index_status",
+    "source_index_search",
+    "olympus_doctor"
+  ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
+    "source_answer_result",
     "source_index_status"
   ];
   V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
@@ -20508,6 +20518,7 @@ init_venice_models();
 init_sovereignty();
 
 // src/workers/email-source/index.ts
+init_analyst();
 init_file_lease();
 init_email_policy();
 init_publisher_oauth_client();

@@ -1471,10 +1471,10 @@ not guess OpenClaw's managed storage path and do not assume a global `olympus`
 command exists.
 
 Configure the `olympus` server with
-`tools: { include: [source_answer, source_index_status] }` (the packaged
+`tools: { include: [source_answer, source_answer_result, source_index_status] }` (the packaged
 `config/hermes/olympus.mcp.yaml` shows the complete YAML), reload MCP, and
-verify the only discovered names are `mcp_olympus_source_answer` and
-`mcp_olympus_source_index_status`. In Step 7, after the chosen source is ready,
+verify the only discovered names are `mcp_olympus_source_answer`,
+`mcp_olympus_source_answer_result` and `mcp_olympus_source_index_status`. In Step 7, after the chosen source is ready,
 exercise a cited answer through the discovered `mcp_olympus_source_answer`. Do not enable
 `source_index_search`, `source_watch_*`, prompts, or resources for v0.4 Hermes.
 

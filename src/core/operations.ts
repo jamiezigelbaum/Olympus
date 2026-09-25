@@ -3,7 +3,7 @@ import { runDoctor } from './doctor.ts';
 import { EmailClient, type SourceAnswerSelectedItemOption } from './email.ts';
 import { defaultConfig, type OlympusConfig } from './config.ts';
 import { resolveLane, resolveModelProfile } from './config.ts';
-import { OperationError } from './operation-error.ts';
+import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
 import { selectedItemContentFieldPath } from './source-index/selected-item-safety.ts';
 import {
   createPublicSourceCorpusRegistry,
@@ -14,6 +14,7 @@ import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import { V0_4_PUBLIC_NATIVE_TOOLS } from './public-surface.ts';
 import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-watch.ts';
 import type { OperationCaller } from './operation-caller.ts';
+import type { SourceAnswerJobScope } from './source-answer-jobs.ts';
 
 type SourceIndexAnswerCorpusId = string;
 type SourceIndexStatusCorpusId = string;
@@ -40,6 +41,12 @@ export interface OperationContext {
    * it does not change release policy.
    */
   caller?: OperationCaller;
+  /**
+   * Set only by surfaces whose clients cut tool calls short and that can bind
+   * a job to its caller (remote, stdio MCP). With it, a slow source_answer
+   * hands off to a background job; without it, it waits as it always has.
+   */
+  sourceAnswerJobs?: SourceAnswerJobScope;
 }
 
 export interface Operation {
@@ -137,6 +144,10 @@ const SOURCE_ANSWER_PARAMS = {
   timeoutMs: { type: 'number', description: 'OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora. It also raises the private-lane request budget to match, up to a 600000 ms ceiling, so a slow local analyst finishes instead of timing out.' },
 } satisfies Record<string, ParamDef>;
 
+const SOURCE_ANSWER_RESULT_PARAMS = {
+  job_id: { type: 'string', required: true, description: 'The job_id a source_answer call returned with status "working".' },
+} satisfies Record<string, ParamDef>;
+
 export const operations: Operation[] = [
   {
     name: 'argus_ping',
@@ -222,6 +233,7 @@ export const operations: Operation[] = [
       'For Dropbox documents with incomplete local extraction, audit.self_heal reports whether Olympus forced a local re-ingest inline or left one queued for retry.',
       'The returned answer field is already the calling-assistant-safe answer; when it answers the user, pass it through with citations/coverage notes instead of re-reasoning over the audit.',
       'Call it one at a time: the local analyst is a single-lane model, so concurrent source_answer calls queue behind each other and the later ones time out. Slow is fine; wait for each answer before issuing the next, and pass timeoutMs 600000.',
+      'If the result is {"status": "working", "job_id": ...} instead of an answer, the answer is still being prepared and keeps running: call source_answer_result with that job_id (again while it says working) rather than asking again.',
     ].join(' '),
     params: SOURCE_ANSWER_PARAMS,
     mutating: false,
@@ -252,7 +264,7 @@ export const operations: Operation[] = [
       const includeInternalContent = optionalBoolean(params.include_internal_content, 'include_internal_content');
       const internalContentMaxBytes = optionalNumber(params.internal_content_max_bytes, 'internal_content_max_bytes');
       const timeoutMs = optionalNumber(params.timeoutMs, 'timeoutMs');
-      return ctx.email.sourceAnswer({
+      const answer = (signal?: AbortSignal) => ctx.email.sourceAnswer({
         question,
         ...(query !== undefined ? { query } : {}),
         ...(account !== undefined ? { account } : {}),
@@ -277,7 +289,29 @@ export const operations: Operation[] = [
         ...(internalContentMaxBytes !== undefined ? { internalContentMaxBytes } : {}),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
         ...(ctx.caller ? { caller: ctx.caller } : {}),
+        ...(signal ? { signal } : {}),
       });
+      const jobs = ctx.sourceAnswerJobs;
+      return jobs ? jobs.registry.run(jobs, answer) : answer();
+    },
+  },
+  {
+    name: 'source_answer_result',
+    description: [
+      'Get the answer to a source_answer call that returned {"status": "working", "job_id": ...}.',
+      'Returns the finished answer exactly as source_answer would have (same release rules, citations and coverage), the same error it would have raised, or {"status": "working"} again after waiting up to about a minute; then call it again.',
+      'A job_id works only for the connection that asked, and expires about 15 minutes after the answer is ready.',
+    ].join(' '),
+    params: SOURCE_ANSWER_RESULT_PARAMS,
+    mutating: false,
+    nativeExposure: 'sourceIndexEnabledOnly',
+    cliHints: { name: 'source answer result', positional: ['job_id'] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(SOURCE_ANSWER_RESULT_PARAMS, params, 'Source answer result');
+      const jobId = asString(params.job_id, 'job_id');
+      const jobs = ctx.sourceAnswerJobs;
+      if (!jobs) throw sourceAnswerJobNotFound();
+      return jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
     },
   },
   {

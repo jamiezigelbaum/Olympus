@@ -13,10 +13,8 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import {
-  V0_4_PUBLIC_MCP_TOOLS,
-  V0_4_PUBLIC_NATIVE_TOOLS,
-} from '../src/core/public-surface.ts';
+import { operations } from '../src/core/operations.ts';
+import { V0_4_PUBLIC_NATIVE_TOOLS } from '../src/core/public-surface.ts';
 
 interface InspectResult {
   plugin?: {
@@ -111,7 +109,13 @@ try {
     throw new Error('Managed OpenClaw inspection did not preserve npm-pack tarball provenance.');
   }
   expectExact(plugin.contracts?.tools, V0_4_PUBLIC_NATIVE_TOOLS, 'native public tool contract');
-  expectExact(plugin.toolNames, V0_4_PUBLIC_MCP_TOOLS, 'runtime materialized public tools');
+  // Session-route tools (source watches) register as per-session factories, so
+  // the runtime materializes the rest of the native list.
+  expectExact(
+    plugin.toolNames,
+    V0_4_PUBLIC_NATIVE_TOOLS.filter((name) => operations.find((operation) => operation.name === name)?.requiresOpenClawSessionRoute !== true),
+    'runtime materialized public tools',
+  );
 
   installedRoot = requiredContainedPath(plugin.rootDir, stateDir, 'installed plugin root');
   const inspectedInstallPath = requiredContainedPath(inspect.install.installPath, stateDir, 'managed install path');

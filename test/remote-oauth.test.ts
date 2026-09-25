@@ -371,7 +371,7 @@ describe('end to end with the MCP SDK OAuth client', () => {
       expect(callback.searchParams.get('iss')).toBe(base);
       expect(callback.searchParams.get('state')).toBe('state-123');
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['source_answer', 'source_index_status']);
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['source_answer', 'source_answer_result', 'source_index_status']);
       await client.callTool({ name: 'source_answer', arguments: { question: 'what changed?' } });
     } finally {
       await client.close();

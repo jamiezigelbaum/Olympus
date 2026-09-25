@@ -1,6 +1,9 @@
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 
 // src/core/operation-error.ts
+function sourceAnswerJobNotFound() {
+  return new OperationError("source_answer_job_not_found", "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted.", "Ask the question again with source_answer.");
+}
 var OperationError;
 var init_operation_error = __esm(() => {
   OperationError = class OperationError extends Error {
@@ -253,13 +256,23 @@ var init_public_surface = __esm(() => {
     "argus_list_models",
     "argus_complete",
     "source_answer",
+    "source_answer_result",
     "source_index_status",
     "source_index_search",
     "olympus_doctor"
   ];
-  V0_4_PUBLIC_CLI_OPERATIONS = V0_4_PUBLIC_MCP_TOOLS;
+  V0_4_PUBLIC_CLI_OPERATIONS = [
+    "argus_ping",
+    "argus_list_models",
+    "argus_complete",
+    "source_answer",
+    "source_index_status",
+    "source_index_search",
+    "olympus_doctor"
+  ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
+    "source_answer_result",
     "source_index_status"
   ];
   V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
@@ -11215,6 +11228,12 @@ function redactedSecretRefLabel(secretRef) {
     return `store:${trimmed.slice("store:".length).trim()}`;
   return "configured secretRef";
 }
+function callerCancellation(signal) {
+  if (!signal?.aborted)
+    return;
+  const reason = signal.reason;
+  return reason instanceof Error && reason.name === "AbortError" ? reason : undefined;
+}
 function createDelphiTransport(config) {
   return new DirectHttpDelphiTransport(fetch, config.argus.requestTimeoutSeconds * 1000);
 }
@@ -11232,12 +11251,18 @@ class DirectHttpDelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      const cancelled = callerCancellation(init.signal);
+      if (cancelled)
+        throw cancelled;
       if (isAbortError(firstError)) {
         throw argusTimeoutError(lane, url, timeoutMs);
       }
       try {
         response = await this.fetchWithTimeout(url, init, timeoutMs);
       } catch (secondError) {
+        const cancelledAgain = callerCancellation(init.signal);
+        if (cancelledAgain)
+          throw cancelledAgain;
         if (isAbortError(secondError)) {
           throw argusTimeoutError(lane, url, timeoutMs);
         }
@@ -11553,6 +11578,7 @@ class EmailClient {
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      ...options.signal ? { signal: options.signal } : {},
       body: JSON.stringify({
         question: options.question,
         ...options.query ? { query: options.query } : {},
@@ -15600,6 +15626,9 @@ var SOURCE_ANSWER_PARAMS = {
   internal_content_max_bytes: { type: "number", description: "Max internal context bytes; worker-capped." },
   timeoutMs: { type: "number", description: "OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora. It also raises the private-lane request budget to match, up to a 600000 ms ceiling, so a slow local analyst finishes instead of timing out." }
 };
+var SOURCE_ANSWER_RESULT_PARAMS = {
+  job_id: { type: "string", required: true, description: 'The job_id a source_answer call returned with status "working".' }
+};
 var operations = [
   {
     name: "argus_ping",
@@ -15682,7 +15711,8 @@ var operations = [
       "It never returns source packets, vectors, OAuth material, or raw secure-local file content; secure-local answers release only as OPSEC-scanned bounded derivatives.",
       "For Dropbox documents with incomplete local extraction, audit.self_heal reports whether Olympus forced a local re-ingest inline or left one queued for retry.",
       "The returned answer field is already the calling-assistant-safe answer; when it answers the user, pass it through with citations/coverage notes instead of re-reasoning over the audit.",
-      "Call it one at a time: the local analyst is a single-lane model, so concurrent source_answer calls queue behind each other and the later ones time out. Slow is fine; wait for each answer before issuing the next, and pass timeoutMs 600000."
+      "Call it one at a time: the local analyst is a single-lane model, so concurrent source_answer calls queue behind each other and the later ones time out. Slow is fine; wait for each answer before issuing the next, and pass timeoutMs 600000.",
+      'If the result is {"status": "working", "job_id": ...} instead of an answer, the answer is still being prepared and keeps running: call source_answer_result with that job_id (again while it says working) rather than asking again.'
     ].join(" "),
     params: SOURCE_ANSWER_PARAMS,
     mutating: false,
@@ -15713,7 +15743,7 @@ var operations = [
       const includeInternalContent = optionalBoolean(params.include_internal_content, "include_internal_content");
       const internalContentMaxBytes = optionalNumber2(params.internal_content_max_bytes, "internal_content_max_bytes");
       const timeoutMs = optionalNumber2(params.timeoutMs, "timeoutMs");
-      return ctx.email.sourceAnswer({
+      const answer = (signal) => ctx.email.sourceAnswer({
         question,
         ...query !== undefined ? { query } : {},
         ...account !== undefined ? { account } : {},
@@ -15737,8 +15767,31 @@ var operations = [
         ...includeInternalContent !== undefined ? { includeInternalContent } : {},
         ...internalContentMaxBytes !== undefined ? { internalContentMaxBytes } : {},
         ...timeoutMs !== undefined ? { timeoutMs } : {},
-        ...ctx.caller ? { caller: ctx.caller } : {}
+        ...ctx.caller ? { caller: ctx.caller } : {},
+        ...signal ? { signal } : {}
       });
+      const jobs = ctx.sourceAnswerJobs;
+      return jobs ? jobs.registry.run(jobs, answer) : answer();
+    }
+  },
+  {
+    name: "source_answer_result",
+    description: [
+      'Get the answer to a source_answer call that returned {"status": "working", "job_id": ...}.',
+      'Returns the finished answer exactly as source_answer would have (same release rules, citations and coverage), the same error it would have raised, or {"status": "working"} again after waiting up to about a minute; then call it again.',
+      "A job_id works only for the connection that asked, and expires about 15 minutes after the answer is ready."
+    ].join(" "),
+    params: SOURCE_ANSWER_RESULT_PARAMS,
+    mutating: false,
+    nativeExposure: "sourceIndexEnabledOnly",
+    cliHints: { name: "source answer result", positional: ["job_id"] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(SOURCE_ANSWER_RESULT_PARAMS, params, "Source answer result");
+      const jobId = asString(params.job_id, "job_id");
+      const jobs = ctx.sourceAnswerJobs;
+      if (!jobs)
+        throw sourceAnswerJobNotFound();
+      return jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
     }
   },
   {

@@ -20,7 +20,28 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
   'olympus_doctor',
 ] as const;
 
+// `source_answer_result` collects a slow source_answer that handed off to a
+// background job (core/source-answer-jobs.ts). It is on the surfaces whose
+// clients cut tool calls short and that can bind a job to its caller: stdio
+// MCP (one client per `olympus serve` process; Codex, Claude Code and Hermes
+// all cap tool calls) and remote (per connection). Native OpenClaw sets its
+// own tool budget (timeoutMs up to 600000) and never hands off; a one-shot CLI
+// process could not keep a job alive between two commands.
 export const V0_4_PUBLIC_MCP_TOOLS = [
+  'argus_ping',
+  'argus_list_models',
+  'argus_complete',
+  'source_answer',
+  'source_answer_result',
+  'source_index_status',
+  'source_index_search',
+  'olympus_doctor',
+] as const;
+
+// Operation names, not typed command lines. `olympus_doctor` is exposed to the
+// CLI as the command `olympus doctor` through its cliHints; see
+// V0_4_PUBLIC_CLI_COMMANDS for the user-facing command roster.
+export const V0_4_PUBLIC_CLI_OPERATIONS = [
   'argus_ping',
   'argus_list_models',
   'argus_complete',
@@ -30,13 +51,9 @@ export const V0_4_PUBLIC_MCP_TOOLS = [
   'olympus_doctor',
 ] as const;
 
-// Operation names, not typed command lines. `olympus_doctor` is exposed to the
-// CLI as the command `olympus doctor` through its cliHints; see
-// V0_4_PUBLIC_CLI_COMMANDS for the user-facing command roster.
-export const V0_4_PUBLIC_CLI_OPERATIONS = V0_4_PUBLIC_MCP_TOOLS;
-
 export const V0_4_HERMES_MCP_TOOLS = [
   'source_answer',
+  'source_answer_result',
   'source_index_status',
 ] as const;
 

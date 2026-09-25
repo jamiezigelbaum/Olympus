@@ -10,6 +10,7 @@ import { createEmailTransport, EmailClient } from '../core/email.ts';
 import { sanitizeCallerDisplayName, type OperationCaller } from '../core/operation-caller.ts';
 import { shouldExposeOperation, type OperationSurface } from '../core/operation-exposure.ts';
 import { findOperationByName, operations, OperationError } from '../core/operations.ts';
+import { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv, sourceAnswerJobOwner } from '../core/source-answer-jobs.ts';
 import type { OperationContext } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
 import { listMcpTools } from './tools.ts';
@@ -91,10 +92,14 @@ export async function serve(): Promise<void> {
     };
   });
 
+  // One stdio server serves one client, so this process-local registry is
+  // already per client: a slow source_answer hands off to it rather than
+  // outliving the client's tool-call limit.
+  const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env, 'stdio') });
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // The stdio client names itself during initialize (e.g. "claude-code").
     // Self-reported, so it is an audit label only, never an authorization.
-    return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name));
+    return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name, sourceAnswerJobs));
   });
 
   await server.connect(new StdioServerTransport());
@@ -106,12 +111,15 @@ export function mcpOperationCaller(clientName?: string): OperationCaller {
   return { surface: 'mcp', ...(displayName ? { displayName } : {}) };
 }
 
-function makeContext(clientName?: string): OperationContext {
+function makeContext(clientName?: string, sourceAnswerJobs?: SourceAnswerJobRegistry): OperationContext {
   const config = loadConfig();
+  const caller = mcpOperationCaller(clientName);
+  const owner = sourceAnswerJobOwner(caller);
   return {
     config,
     delphi: new DelphiClient(config, createDelphiTransport(config)),
     email: new EmailClient(config, createEmailTransport(config)),
-    caller: mcpOperationCaller(clientName),
+    caller,
+    ...(sourceAnswerJobs && owner ? { sourceAnswerJobs: { registry: sourceAnswerJobs, owner } } : {}),
   };
 }
