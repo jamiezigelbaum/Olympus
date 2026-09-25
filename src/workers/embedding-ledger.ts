@@ -538,4 +538,28 @@ export const EMBEDDING_LEDGER_BACKFILL: readonly EmbeddingLedgerEntry[] = PUBLIC
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: 'complete',
   },
+  {
+    entry_id: 'decision-2026-09-25-chat-lane-catch-up',
+    recorded_at: '2026-09-25T09:00:00.000Z',
+    kind: 'model_decision',
+    what: 'Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every '
+      + 'hybrid-served chunk still missing a vector, not only chunks a sync queued, so items whose '
+      + 'embedding was deferred or lost across a restart catch up.',
+    scope: {
+      corpora: [
+        'internal.x.bookmarks',
+        'secure_local.x.bookmarks',
+        'internal.whatsapp.messages',
+        'secure_local.whatsapp.messages',
+        'internal.telegram.messages',
+        'secure_local.telegram.protected.messages',
+      ],
+    },
+    why: 'Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only '
+      + 're-list an item when it changes). No model, endpoint or epoch changes and no existing vector '
+      + 'is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded '
+      + 'per pass, with the backlog and estimated cost shown on the source page and in doctor.',
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+    status: 'complete',
+  },
 ];

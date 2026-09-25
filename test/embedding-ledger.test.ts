@@ -233,24 +233,26 @@ describe('backfill', () => {
     expect(reEmbed?.status).toBe('in_progress');
   });
 
-  test('only owner decisions are approved, and the newest is the 2026-09-24 Readwise hybrid decision', async () => {
+  test('only owner decisions are approved, and the newest is the 2026-09-25 chat-lane catch-up decision', async () => {
     const ledger = await readEmbeddingLedger(tempLedgerPath());
     const approved = ledger.entries.filter((found) => found.approved_by === 'jamie');
 
-    expect(ledger.entries[0]?.entry_id).toBe('decision-2026-09-24-readwise-hybrid');
+    expect(ledger.entries[0]?.entry_id).toBe('decision-2026-09-25-chat-lane-catch-up');
     expect(ledger.entries[0]?.approved_by).toBe('jamie');
-    // The owner decisions, newest first: Readwise answers hybrid on its
-    // existing vectors (2026-09-24); then 2026-08-24's keep-the-model and the
+    // The owner decisions, newest first: chat lanes catch up on chunks still
+    // missing a vector (2026-09-25); Readwise answers hybrid on its existing
+    // vectors (2026-09-24); then 2026-08-24's keep-the-model and the
     // three lanes that run on it. Nothing else claims approval, which is the
     // rule the ledger exists to keep — an approval is never inferred from a
     // machine having done something.
     expect(approved.map((found) => found.entry_id)).toEqual([
+      'decision-2026-09-25-chat-lane-catch-up',
       'decision-2026-09-24-readwise-hybrid',
       'backfill-2026-08-24-drain-lane-enablement',
       'backfill-2026-08-24-model-decision',
     ]);
-    expect(approved[2]?.kind).toBe('model_decision');
-    expect(approved[2]?.model_id).toBe(QWEN3);
+    expect(approved[3]?.kind).toBe('model_decision');
+    expect(approved[3]?.model_id).toBe(QWEN3);
   });
 
   test('the Readwise hybrid decision quotes the owner and invalidates nothing', async () => {

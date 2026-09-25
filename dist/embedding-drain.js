@@ -21243,6 +21243,25 @@ var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
     why: "The Readwise stores were declared keyword-only while the sync embedded every chunk inline, so " + "the vectors were paid for and never used, and a Venice embedding timeout failed the whole sync " + "(live, 2026-09-24). No model, endpoint or epoch changes, no existing vector is invalidated or " + "re-embedded; only chunks with no vector yet are embedded, by the embedding task, with backoff " + "when the provider does not answer.",
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: "complete"
+  },
+  {
+    entry_id: "decision-2026-09-25-chat-lane-catch-up",
+    recorded_at: "2026-09-25T09:00:00.000Z",
+    kind: "model_decision",
+    what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "hybrid-served chunk still missing a vector, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
+    scope: {
+      corpora: [
+        "internal.x.bookmarks",
+        "secure_local.x.bookmarks",
+        "internal.whatsapp.messages",
+        "secure_local.whatsapp.messages",
+        "internal.telegram.messages",
+        "secure_local.telegram.protected.messages"
+      ]
+    },
+    why: "Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only " + "re-list an item when it changes). No model, endpoint or epoch changes and no existing vector " + "is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded " + "per pass, with the backlog and estimated cost shown on the source page and in doctor.",
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+    status: "complete"
   }
 ];
 
@@ -22075,7 +22094,7 @@ ${request.taskId}`);
 }
 var EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60000;
 var EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-var CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = false;
+var CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true;
 var WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE = {
   [SCHEDULER_SOURCE_IDS.readwise]: true,
   [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,

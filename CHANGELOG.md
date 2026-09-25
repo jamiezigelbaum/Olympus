@@ -30,7 +30,10 @@ hybrid search, and the hosted-agent connection slices.
   sweep, and the delay shows as `embedding_provider_unavailable` on the
   Background page, the source page and in `olympus doctor`. Readwise also
   sweeps any chunk still missing a vector, 32 items per store per pass, so
-  earlier failed syncs catch up. Gmail and Drive embed only within their
+  earlier failed syncs catch up; X, WhatsApp and Telegram do the same (owner
+  decision `decision-2026-09-25-chat-lane-catch-up`), so a chat store with an
+  old unembedded backlog embeds it once on its approved model, with the
+  backlog and estimated cost shown first. Gmail and Drive embed only within their
   current approved scope. Each hybrid store shows its embedding backlog and an
   estimated cost. One embedding runs per store at a time across the sync, the
   sweep and the external drain, so nothing is paid for twice.
