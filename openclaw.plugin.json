@@ -2503,20 +2503,20 @@
       "remote": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Remote access for hosted agents (Claude, ChatGPT, Grok, Muse). Off by default. Choose one address: the Olympus connect relay (relayHost) or your own tunnel (publicBaseUrl), never both.",
+        "description": "Remote access for hosted agents (Claude, ChatGPT, Grok, Muse). Off by default; turn it on from the Agents section of the Olympus dashboard. Uses the Olympus connect relay unless publicBaseUrl names your own tunnel; never set both.",
         "properties": {
           "enabled": {
             "type": "boolean",
             "default": false,
-            "description": "Turn on remote access. Olympus then keeps the relay session open (or uses publicBaseUrl) and prints the public URLs from olympus connections."
+            "description": "Turn on remote access (the dashboard's Turn on remote access sets this). Olympus then keeps the relay session open (or uses publicBaseUrl) and prints the public URLs from olympus connections."
           },
           "relayHost": {
             "type": "string",
-            "description": "The connect relay zone, for example connect.olympusplugin.ai. No default until the Olympus relay is public. Leave unset when publicBaseUrl is set."
+            "description": "The connect relay zone. Unset means the Olympus relay, connect.olympusplugin.ai. Leave unset when publicBaseUrl is set."
           },
           "publicBaseUrl": {
             "type": "string",
-            "description": "Manual https origin for a tunnel you run yourself (for example a Cloudflare quick tunnel), with no path. Leave unset when relayHost is set."
+            "description": "Advanced: manual https origin for a tunnel you run yourself (for example a Cloudflare quick tunnel), with no path, instead of the Olympus relay. Leave relayHost unset."
           }
         }
       }
@@ -2572,7 +2572,7 @@
     },
     "remote": {
       "label": "Remote access",
-      "help": "Lets hosted agents reach this Olympus. Before the first certificate, accept the Let's Encrypt subscriber agreement with olympus connections terms."
+      "help": "Lets hosted agents reach this Olympus. Turn it on from the Agents section of the Olympus dashboard, which shows the Let's Encrypt subscriber agreement to accept first (or: olympus connections terms --accept)."
     }
   },
   "activation": {

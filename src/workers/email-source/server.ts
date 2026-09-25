@@ -3827,10 +3827,12 @@ export async function main(): Promise<void> {
   // page's agent panel reads the very store handle `/mcp` and OAuth use.
   let dashboardAgentStore: DashboardAgentConnectionsBackend['store'] | undefined;
   let dashboardRemoteAccess: DashboardAgentConnectionsBackend['remoteAccess'] = () => ({ state: 'off' });
+  let dashboardRemoteAccessControl: DashboardAgentConnectionsBackend['remoteAccessControl'];
   const worker = createEmailSourceWorker({
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
       remoteAccess: () => dashboardRemoteAccess(),
+      get remoteAccessControl() { return dashboardRemoteAccessControl; },
     },
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
@@ -3973,6 +3975,17 @@ export async function main(): Promise<void> {
     }
     return remoteAccessFromStatus({ live: remotePublicUrls(), status });
   };
+  // Turn on / Turn off remote access: the agreement as the CLI records it,
+  // and the config change through the Gateway's own config write.
+  if (authToken) {
+    const { fetchLetsEncryptTermsUrl } = await import('../../core/remote-access-terms.ts');
+    const { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter } = await import('../remote-access-control.ts');
+    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
+      dir: () => remoteAccessDir(process.env),
+      fetchTerms: fetchLetsEncryptTermsUrl,
+      setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
+    });
+  }
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
