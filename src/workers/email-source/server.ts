@@ -3973,6 +3973,10 @@ export async function main(): Promise<void> {
     }
     return remoteAccessFromStatus({ live: remotePublicUrls(), status });
   };
+  // Slow source_answer calls from remote agents hand off to in-memory jobs
+  // bound to the connection; see core/source-answer-jobs.ts.
+  const { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv } = await import('../../core/source-answer-jobs.ts');
+  const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env) });
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -3982,6 +3986,7 @@ export async function main(): Promise<void> {
       workerFetch: worker.fetch,
       caller,
       signal,
+      sourceAnswerJobs,
     }),
   };
   // `/openapi.json` and `/api/v1/tools/<name>`: the same remote surface as

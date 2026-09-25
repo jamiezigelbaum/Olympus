@@ -343,10 +343,21 @@ instructions, or load the packaged Agent Skills folder
 ### Using Olympus from other agents (MCP)
 
 `olympus serve` exposes the same sanitized read operations — `source_answer`,
-`source_index_status`, and capability-gated `source_index_search` — to any
-MCP-capable agent. The supported v0.4 Hermes configuration narrows that server
-to exactly `source_answer` and `source_index_status` through its per-server
-tool allowlist.
+`source_answer_result`, `source_index_status`, and capability-gated
+`source_index_search` — to any MCP-capable agent. The supported Hermes
+configuration narrows that server to exactly `source_answer`,
+`source_answer_result` and `source_index_status` through its per-server tool
+allowlist.
+
+MCP clients cap how long one tool call may run, and an answer can take several
+minutes. So over MCP (local `olympus serve` and remote `/mcp` alike) and the
+OpenAPI tool paths, a `source_answer` that is not done after about 200 seconds
+(`OLYMPUS_SOURCE_ANSWER_HANDOFF_MS`, at most 230000) returns
+`{"status": "working", "job_id": …}` and keeps running; `source_answer_result`
+with that `job_id` returns the answer, the same error the call would have
+raised, or `working` again after waiting up to a minute. A job id is readable
+only by the connection (or `olympus serve` process) that asked, lives in
+memory, and expires 15 minutes after its answer is ready.
 
 For Hermes Agent, resolve the installed plugin first:
 
@@ -371,21 +382,21 @@ mcp_servers:
     command: <absolute-managed-plugin-root>/bin/olympus
     args: [serve]
     tools:
-      include: [source_answer, source_index_status]
+      include: [source_answer, source_answer_result, source_index_status]
       prompts: false
       resources: false
 ```
 
 Restart Hermes or run `/reload-mcp`, then verify that the discovered registered
-names are exactly `mcp_olympus_source_answer` and
-`mcp_olympus_source_index_status`. Invoke the discovered names rather than
+names are exactly `mcp_olympus_source_answer`,
+`mcp_olympus_source_answer_result` and `mcp_olympus_source_index_status`. Invoke the discovered names rather than
 hard-coding them. A cited-answer round trip uses the discovered
 `mcp_olympus_source_answer`; `source_watch_*` remains OpenClaw-only.
 
 The optional packaged Hermes skill is
 [`integrations/hermes/ask-sources/SKILL.md`](integrations/hermes/ask-sources/SKILL.md).
 Copy its directory to `~/.hermes/skills/ask-sources/` or expose the parent with
-`skills.external_dirs`; it declares the same two tools and no fallback access.
+`skills.external_dirs`; it declares the same three tools and no fallback access.
 
 No `hermes://mcp/install` link is published: current Hermes upstream documents
 custom MCP installation through `hermes mcp add` but does not document that URI
@@ -394,9 +405,9 @@ separately reviewed external action.
 
 There are no operator agent tools. Index maintenance — sync, extraction,
 embedding, retries — is the worker's own scheduler, and what a person drives by
-hand goes through the `olympus` CLI. The whole agent tool surface is ten tools —
+hand goes through the `olympus` CLI. The whole agent tool surface is eleven tools —
 `argus_ping`, `argus_list_models`, `argus_complete`, `source_answer`,
-`source_index_status`, `source_index_search`, `source_watch_create`,
+`source_answer_result` (MCP and remote only), `source_index_status`, `source_index_search`, `source_watch_create`,
 `source_watches`, `source_watch_cancel`, `olympus_doctor` — declared in
 [`src/core/public-surface.ts`](src/core/public-surface.ts); Hermes over MCP sees
 the subset above, and worker bearer auth is enforced throughout.

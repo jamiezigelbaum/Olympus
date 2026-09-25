@@ -15,7 +15,7 @@
  *   accepts only the worker bearer, so a connection token reaches nothing else.
  *
  * The tool list is the `remote` operation surface (the Hermes list:
- * source_answer and source_index_status). Each request is served statelessly:
+ * source_answer, source_answer_result and source_index_status). Each request is served statelessly:
  * one MCP server and transport per HTTP request, JSON responses, no session.
  * The connection's identity is set as the caller by the worker, never taken
  * from the client, and lands on the answer's audit ledger entry.
@@ -34,6 +34,7 @@ import {
 } from '../core/remote-connections.ts';
 import { isWellFormedOAuthAccessToken } from '../core/remote-oauth-store.ts';
 import { currentRemotePublicUrls, type RemotePublicUrls, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
+import { sourceAnswerJobOwner, type SourceAnswerJobRegistry } from '../core/source-answer-jobs.ts';
 import { createOlympusMcpServer } from '../mcp/server.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
 
@@ -182,18 +183,23 @@ export function createInProcessOperationContext(input: {
   /**
    * The remote client's request signal. It is joined to each in-process
    * request, so a client that disconnects aborts its worker request the same
-   * way a disconnecting HTTP caller aborts one.
+   * way a disconnecting HTTP caller aborts one — until a slow source_answer
+   * hands off to a background job, which detaches it (see
+   * core/source-answer-jobs.ts).
    */
   signal?: AbortSignal;
+  /** The worker's hand-off registry; without it source_answer never hands off. */
+  sourceAnswerJobs?: SourceAnswerJobRegistry;
 }): OperationContext {
   const config: OlympusConfig = {
     ...input.config,
     email: { ...input.config.email, enabled: true, baseUrl: IN_PROCESS_WORKER_BASE_URL },
     sourceIndex: { ...input.config.sourceIndex, enabled: input.sourceIndexReadEnabled },
   };
+  const client = detachableSignal(input.signal);
   const transport = new DirectHttpEmailTransport(
     (url, init) => {
-      const signals = [init.signal, input.signal].filter((signal): signal is AbortSignal => signal != null);
+      const signals = [init.signal, client.signal].filter((signal): signal is AbortSignal => signal != null);
       const request = new Request(url, {
         ...init,
         ...(signals.length > 0 ? { signal: signals.length === 1 ? signals[0]! : AbortSignal.any(signals) } : {}),
@@ -205,12 +211,39 @@ export function createInProcessOperationContext(input: {
     undefined,
     config.email.requestTimeoutSeconds * 1000,
   );
+  const owner = sourceAnswerJobOwner(input.caller);
   return {
     config,
     delphi: new DelphiClient(config, createDelphiTransport(config)),
     email: new EmailClient(config, transport),
     caller: input.caller,
+    ...(input.sourceAnswerJobs && owner
+      ? {
+          sourceAnswerJobs: {
+            registry: input.sourceAnswerJobs,
+            owner,
+            ...(input.signal ? { clientSignal: input.signal } : {}),
+            detachFromClient: client.detach,
+          },
+        }
+      : {}),
   };
+}
+
+/**
+ * Follows `upstream` until detached. Before detaching, an upstream abort
+ * aborts this signal; afterwards it no longer can.
+ */
+function detachableSignal(upstream: AbortSignal | undefined): { signal: AbortSignal | undefined; detach: () => void } {
+  if (!upstream) return { signal: undefined, detach: () => undefined };
+  const controller = new AbortController();
+  if (upstream.aborted) {
+    controller.abort(upstream.reason);
+    return { signal: controller.signal, detach: () => undefined };
+  }
+  const follow = () => controller.abort(upstream.reason);
+  upstream.addEventListener('abort', follow, { once: true });
+  return { signal: controller.signal, detach: () => upstream.removeEventListener('abort', follow) };
 }
 
 export function bearerToken(header: string | null): string | undefined {

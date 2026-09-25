@@ -164,12 +164,12 @@ describe('remote operation surface', () => {
 });
 
 describe('remote MCP over loopback with a connection token', () => {
-  test('an MCP SDK client lists exactly two tools, reads status, and answers attributed to the connection', async () => {
+  test('an MCP SDK client lists exactly the remote tools, reads status, and answers attributed to the connection', async () => {
     const { connection, token } = store.create('Muse');
     const client = await connectClient(token);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['source_answer', 'source_index_status']);
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['source_answer', 'source_answer_result', 'source_index_status']);
 
       const status = await client.callTool({ name: 'source_index_status', arguments: {} });
       const statusText = (status.content as Array<{ type: string; text: string }>)[0]!.text;

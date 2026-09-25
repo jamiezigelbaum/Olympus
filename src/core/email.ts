@@ -65,6 +65,8 @@ export interface SourceIndexAnswerOptions {
   timeoutMs?: number;
   /** The calling agent, for the answer's audit entry. Attribution only. */
   caller?: OperationCaller;
+  /** Ends the worker request early (a hand-off job's deadline). Never sent. */
+  signal?: AbortSignal;
 }
 
 export interface SourceAnswerSelectedItemOption {
@@ -392,6 +394,7 @@ export class EmailClient {
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      ...(options.signal ? { signal: options.signal } : {}),
       body: JSON.stringify({
         question: options.question,
         ...(options.query ? { query: options.query } : {}),

@@ -11,7 +11,9 @@ export type OperationErrorCode =
   | 'email_policy_violation'
   | 'source_index_not_enabled'
   | 'source_index_policy_violation'
-  | 'source_index_error';
+  | 'source_index_error'
+  | 'source_answer_busy'
+  | 'source_answer_job_not_found';
 
 export class OperationError extends Error {
   code: OperationErrorCode;

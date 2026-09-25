@@ -77,7 +77,8 @@ entry ("Grok asked…"), so the owner can see what each connection asked.
 | Grok and Grok Bot | Remote MCP. It is a custom connector (Business/Enterprise), or through the xAI API, which uses header auth. | Paste the URL and approve, or paste the URL and a token. |
 | Muse | OpenAPI plus a static bearer token (Muse has no OAuth or native MCP yet). | Paste the URL and token from `olympus connections add muse`. |
 
-Remote tool list: `source_answer` and `source_index_status`, the same narrowed
+Remote tool list: `source_answer`, `source_answer_result` and
+`source_index_status`, the same narrowed
 list Hermes gets (`V0_4_HERMES_MCP_TOOLS`). Source watches remain native-only
 because their delivery depends on OpenClaw's session routing.
 
@@ -231,10 +232,17 @@ critical-class and need an independent review receipt.
      CORS is intentionally absent: Muse fetches from its VM, server-side, and
      no browser page needs to read either path. Both remote endpoints read
      request bodies through a bounded stream reader (256 KiB).
-   - Open: Muse's HTTP timeout is unpublished. `source_answer` can take
-     minutes, so an async submit/poll pair (`POST` returns a job id, `GET`
-     polls it) is the follow-up if end-to-end proof shows synchronous calls
-     cut off.
+   - Slow answers (v0.5): Claude cuts a tool call at about 240 s and
+     Muse's HTTP timeout is unpublished, while `source_answer` can take
+     minutes. A call still running at the hand-off threshold (200 s default,
+     `OLYMPUS_SOURCE_ANSWER_HANDOFF_MS`, at most 230 s) returns
+     `{"status": "working", "job_id"}` and keeps running;
+     `source_answer_result(job_id)` returns the stored, already-released
+     answer, its error, or `working` after waiting up to 60 s. Jobs are bound
+     to the connection, 256-bit ids, capped per connection and globally, held
+     in worker memory (a restart kills the analyst work too), and expire 15
+     minutes after finishing. A disconnect before hand-off still aborts; after
+     it, the job's own deadline governs. See `src/core/source-answer-jobs.ts`.
 4. **OAuth 2.1 authorization server** with the pairing code approval page.
 5. **Relay client** in the plugin, plus **relay service** code and deployment
    config.
