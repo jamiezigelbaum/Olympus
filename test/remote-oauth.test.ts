@@ -908,6 +908,63 @@ describe('tokens', () => {
     expect(store.list()[0]!.revokedAt).not.toBeNull();
   });
 
+  describe('revoking a grant inside the refresh grace window kills everything', () => {
+    // The grace window hands the successor pair to whoever presents the old
+    // refresh token with the (public) client id. Revocation must end that at
+    // once: the old token, the successor pair, and the grace entry itself.
+    const rotateThenRevoke = async (revoke: (ctx: { connectionId: string; successorRefresh: string }) => Promise<void> | void) => {
+      const first = await claudeGrant();
+      const refresh = (token: string) => tokenRequest({
+        grant_type: 'refresh_token', refresh_token: token, client_id: CLAUDE_CIMD_URL, resource: urls.resource,
+      });
+      const rotated = await refresh(first.refresh_token);
+      expect(rotated.status).toBe(200);
+      const successor = await rotated.json() as { access_token: string; refresh_token: string };
+      // Inside the grace window the old token still answers with the successor pair.
+      clock += 10_000;
+      expect((await refresh(first.refresh_token)).status).toBe(200);
+      await revoke({ connectionId: store.list()[0]!.id, successorRefresh: successor.refresh_token });
+      clock += 1_000;
+      expect(clock - Date.parse('2026-09-24T12:00:00.000Z')).toBeLessThan(REMOTE_OAUTH_REFRESH_GRACE_MS);
+      const replay = await refresh(first.refresh_token);
+      expect(replay.status).toBe(400);
+      expect(await replay.json()).toMatchObject({ error: 'invalid_grant' });
+      expect((await refresh(successor.refresh_token)).status).toBe(400);
+      expect((await mcpInitialize(`Bearer ${successor.access_token}`)).status).toBe(401);
+      expect((await mcpInitialize(`Bearer ${first.access_token}`)).status).toBe(401);
+      expect(store.list()[0]!.revokedAt).not.toBeNull();
+      // Nothing under the grant survives on disk either.
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        expect(db.query('SELECT COUNT(*) AS n FROM remote_oauth_tokens').get()).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
+    };
+
+    test('by the worker process (dashboard or in-process revoke)', async () => {
+      await rotateThenRevoke(({ connectionId }) => { store.revoke(connectionId); });
+    });
+
+    test('by olympus connections revoke, from another process', async () => {
+      await rotateThenRevoke(({ connectionId }) => {
+        const env = { HOME: join(dir, 'home'), OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: dbPath, OLYMPUS_CONFIG: join(dir, 'missing.json') };
+        runConnectionsCommand(['revoke', connectionId], env);
+      });
+    });
+
+    test('by the client revoking its successor refresh token (RFC 7009)', async () => {
+      await rotateThenRevoke(async ({ successorRefresh }) => {
+        const response = await fetch(`${base}/connect/revoke`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ token: successorRefresh }).toString(),
+        });
+        expect(response.status).toBe(200);
+      });
+    });
+  });
+
   test('the grace window answers only the same client', async () => {
     const first = await claudeGrant();
     const refresh = (clientId: string) => tokenRequest({

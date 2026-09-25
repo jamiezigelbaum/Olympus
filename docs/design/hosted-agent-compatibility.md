@@ -176,14 +176,49 @@ and the relay client forwards to it.
   for 45 seconds a just-used one returns the same successor pair (concurrent
   refreshes, a lost response), and after that, or once the successor has
   rotated, replaying it revokes the grant. Only digests are stored.
+- **Refresh grace exposure (accepted).** Inside those 45 seconds, anyone who
+  holds the old refresh token and the client id gets the successor pair. The
+  client id is not a secret: every client is public, and Claude's and
+  ChatGPT's are published URLs. So a stolen refresh token that is replayed
+  within 45 seconds of the real client's refresh is *not* detected as reuse:
+  thief and client share one live pair, and reuse detection fires only on a
+  replay after the window or after the successor has itself rotated. (If the
+  thief rotates the successor first, the real client's next refresh inside
+  the thief's window gets the thief's pair too; outside it, the grant is
+  revoked.) The window exists because hosted clients do refresh concurrently
+  and do lose responses, and the alternative, revoking on any reuse, would
+  disconnect them. The exposure is bounded: it needs the refresh token itself
+  (stored only by the client, sent only to the token endpoint over TLS),
+  it lasts 45 seconds per rotation, and the grace state lives in the worker's
+  memory only. Revocation ends it at once: revoking the grant (dashboard,
+  `olympus connections revoke` from another process, or the client revoking
+  its successor refresh token at `/connect/revoke`) deletes every token row,
+  so the old token, the successor pair and the grace entry all stop working
+  inside the window (`test/remote-oauth.test.ts`, "revoking a grant inside
+  the refresh grace window kills everything"). Sender-constrained tokens
+  (DPoP, RFC 9449) would close it, but only once the hosted clients send
+  them; none of the connector documentation checked for this slice mentions
+  DPoP.
 - **Pairing:** `olympus connections pair` prints `SSSS-XXXX-XXXX`: a public
   selector naming the code plus a secret (about 39 bits), no ambiguous
   characters, valid 10 minutes, single use. Five wrong secrets for one selector
   kill that code only; unknown selectors and malformed input burn nothing.
   Guessing is paced, never locked: each caller's wrong codes double its wait
   (up to a minute), and past 20 wrong codes in 15 minutes every check waits
-  two seconds. A caller (the address the relay reports) holds at most eight
-  waiting approvals.
+  two seconds.
+- **Waiting approvals** are bounded (256 in all, 128 per client id, 8 per
+  caller, where a caller is the address the relay reports), but a new request
+  is never refused. It evicts an older one instead: a caller at its cap loses
+  its own oldest; a client id at its cap, or a full table, loses the oldest
+  request of whichever caller holds the most slots in that scope. A flood from
+  many addresses therefore evicts itself, and the owner, holding one request,
+  is evicted only once every holder is down to one. That takes more distinct
+  addresses than the scope has slots (128 when the flood names the owner's own
+  app, whose client id is public). The evicted page says it was replaced.
+  Before this, 32 addresses holding 8 each filled the table and every other
+  caller got a 429 for ten minutes.
+  Callers that arrive without the relay's secret (a tunnel, or loopback) share
+  one `direct` caller, so they compete for its eight slots.
 - **Schema v2 and rollback:** opening the connection database with this build
   first copies a v1 database to `remote-connections.sqlite.pre-v2.bak`, then
   migrates. An older build refuses v2, so a downgrade restores that copy with
