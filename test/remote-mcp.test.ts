@@ -231,6 +231,50 @@ describe('remote MCP over loopback with a connection token', () => {
     expect((await answer(`Bearer ${WORKER_TOKEN}`)).status).toBe(200);
   });
 
+  test('a 2026-07-28 (modern) request gets the answer that makes a dual-era client fall back', async () => {
+    // Olympus serves MCP 2025-11-25 (SDK 1.x). A modern client first sends a
+    // stateless request carrying `_meta` and the Mcp-Method/Mcp-Name headers.
+    // The spec's fallback rule: a 400 whose body is NOT a recognized modern
+    // error (-32022 UnsupportedProtocolVersion, -32020 HeaderMismatch) means
+    // "legacy server", and the client falls back to initialize. A modern
+    // error code here would instead make it retry modern and never connect.
+    // See docs/design/hosted-agent-compatibility.md, "MCP 2026-07-28".
+    const { token } = store.create('Codex');
+    const meta = {
+      'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+      'io.modelcontextprotocol/clientInfo': { name: 'modern-client', version: '1.0.0' },
+      'io.modelcontextprotocol/clientCapabilities': {},
+    };
+    const modern = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: `Bearer ${token}`,
+        'MCP-Protocol-Version': '2026-07-28',
+        'Mcp-Method': 'tools/call',
+        'Mcp-Name': 'source_index_status',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'source_index_status', arguments: {}, _meta: meta } }),
+    });
+    expect(modern.status).toBe(400);
+    const body = await modern.json() as { error?: { code?: number } };
+    expect(body.error?.code).toBeDefined();
+    expect([-32020, -32022]).not.toContain(body.error!.code!);
+    // The fallback itself: initialize negotiates the newest legacy revision.
+    const legacy = await mcpInitialize(`Bearer ${token}`);
+    expect(legacy.status).toBe(200);
+    const initialized = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 2, method: 'initialize',
+        params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'dual-era', version: '1' } },
+      }),
+    });
+    expect((await initialized.json() as { result: { protocolVersion: string } }).result.protocolVersion).toBe('2025-11-25');
+  });
+
   test('a stateless endpoint answers GET with 405 after authenticating', async () => {
     const { token } = store.create('Scripted');
     expect((await fetch(`${base}/mcp`)).status).toBe(401);

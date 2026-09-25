@@ -177,14 +177,56 @@ and the relay client forwards to it.
   for 45 seconds a just-used one returns the same successor pair (concurrent
   refreshes, a lost response), and after that, or once the successor has
   rotated, replaying it revokes the grant. Only digests are stored.
+- **Refresh grace exposure (accepted).** Inside those 45 seconds, anyone who
+  holds the old refresh token and the client id gets the successor pair. The
+  client id is not a secret: every client is public, and Claude's and
+  ChatGPT's are published URLs. So a stolen refresh token that is replayed
+  within 45 seconds of the real client's refresh is *not* detected as reuse:
+  thief and client share one live pair, and reuse detection fires only on a
+  replay after the window or after the successor has itself rotated. (If the
+  thief rotates the successor first, the real client's next refresh inside
+  the thief's window gets the thief's pair too; outside it, the grant is
+  revoked.) The window exists because hosted clients do refresh concurrently
+  and do lose responses, and the alternative, revoking on any reuse, would
+  disconnect them. The exposure is bounded: it needs the refresh token itself
+  (stored only by the client, sent only to the token endpoint over TLS),
+  it lasts 45 seconds per rotation, and the grace state lives in the worker's
+  memory only. Revocation ends it at once: revoking the grant (dashboard,
+  `olympus connections revoke` from another process, or the client revoking
+  its successor refresh token at `/connect/revoke`) deletes every token row,
+  so the old token, the successor pair and the grace entry all stop working
+  inside the window (`test/remote-oauth.test.ts`, "revoking a grant inside
+  the refresh grace window kills everything"). Sender-constrained tokens
+  (DPoP, RFC 9449) would close it, but only once the hosted clients send
+  them; none of the connector documentation checked for this slice mentions
+  DPoP.
 - **Pairing:** `olympus connections pair` prints `SSSS-XXXX-XXXX`: a public
   selector naming the code plus a secret (about 39 bits), no ambiguous
   characters, valid 10 minutes, single use. Five wrong secrets for one selector
   kill that code only; unknown selectors and malformed input burn nothing.
   Guessing is paced, never locked: each caller's wrong codes double its wait
   (up to a minute), and past 20 wrong codes in 15 minutes every check waits
-  two seconds. A caller (the address the relay reports) holds at most eight
-  waiting approvals.
+  two seconds.
+- **Waiting approvals** are bounded (256 in all, 128 per client id, 8 per
+  caller, where a caller is the address the relay reports, IPv6 grouped by
+  /64 as the relay's own limits are), but a new request
+  is never refused. It evicts an older one instead: a caller at its cap loses
+  its own oldest; a client id at its cap, or a full table, loses the oldest
+  request of whichever caller holds the most slots in that scope. A flood from
+  many addresses therefore evicts itself, and the owner, holding one request,
+  is evicted only once every holder is down to one. That takes more distinct
+  addresses than the scope has slots (128 when the flood names the owner's own
+  app, whose client id is public). A page whose pairing check the pacer has
+  admitted (a well-formed code, with the page's cookie and CSRF token) is
+  pinned, but pinning only decides *which* of the heaviest callers' entries
+  goes: fair share always runs over the whole scope, so pinned entries can
+  never move an eviction onto a caller holding fewer, such as the owner. Each
+  pin costs a paced check (about five per caller fit inside the hold limit)
+  and five wrong codes end the page. The evicted page says it was replaced.
+  Before this, 32 addresses holding 8 each filled the table and every other
+  caller got a 429 for ten minutes.
+  Callers that arrive without the relay's secret (a tunnel, or loopback) share
+  one `direct` caller, so they compete for its eight slots.
 - **Schema v2 and rollback:** opening the connection database with this build
   first copies a v1 database to `remote-connections.sqlite.pre-v2.bak`, then
   migrates. An older build refuses v2, so a downgrade restores that copy with
@@ -199,6 +241,78 @@ and the relay client forwards to it.
   needs a same-origin browser, a CSRF token and a matching SameSite=Strict
   cookie. `/mcp` keeps no Origin rule, because it is bearer-only, sends no CORS
   headers, and hosted agents call it from their servers.
+
+### MCP 2026-07-28 (assessed 2026-09-25)
+
+**Verdict: no SDK migration for v0.5.** Olympus's `/mcp` serves protocol
+2025-11-25 through `@modelcontextprotocol/sdk` 1.29.0, and that is what the
+target clients speak or fall back to today. Moving to 2026-07-28 is its own
+slice (below), not a v0.5 blocker.
+
+What 2026-07-28 changed for a Streamable HTTP server:
+- **Stateless core.** No `initialize` handshake and no `Mcp-Session-Id`;
+  every request carries its protocol version, client info and capabilities
+  in `_meta`, and servers must implement `server/discover`. Server-to-client
+  requests move into results (multi round-trip requests), and the GET stream
+  is gone.
+- **Mirrored headers.** Every POST carries `MCP-Protocol-Version`,
+  `Mcp-Method`, and for `tools/call` `Mcp-Name`. A modern server must reject
+  a missing or mismatched header with 400 and `HeaderMismatch` (-32020), and
+  an unsupported version with 400 and `UnsupportedProtocolVersionError`
+  (-32022).
+- **Authorization.** The RFC 9207 `iss` is required (Olympus already sends
+  it), credentials are bound to their issuer, and Dynamic Client
+  Registration is deprecated in favor of CIMD but still works. Olympus serves
+  both, CIMD first.
+
+**Eras and fallback.** The spec calls 2025-11-25 and earlier *legacy*.
+A *dual-era* client tries a modern request first, and on a 400 whose body is
+not a recognized modern error it falls back to `initialize`. The spec's
+matrix: dual-era client with a legacy server works; a modern-only client
+with a legacy server fails. The TypeScript, Python, Go and C# SDK 2.x lines
+are dual-era.
+
+**What Olympus answers today.** Olympus is stateless already (one server
+and transport per request, no session, GET and DELETE answer 405), so it is
+compatible in shape. The installed SDK 1.29.0 supports 2025-11-25 down to
+2024-10-07 (1.30.1, the newest 1.x, is the same). A modern request gets
+400 with `-32000 Bad Request: Unsupported protocol version`, which is not a
+modern error code, so a dual-era client falls back and `initialize`
+negotiates 2025-11-25. `test/remote-mcp.test.ts` pins that answer, because
+a 1.x upgrade that started answering -32022 would make dual-era clients
+retry modern forever instead of falling back.
+
+**The clients.**
+- **Claude** (web, desktop, mobile): its connector documentation lists auth
+  specs 2025-03-26 through 2025-11-25 and Streamable HTTP; Anthropic has
+  announced 2026-07-28 support is coming, with no date. A third-party issue
+  tracker reported in August 2026 that Claude Desktop and Claude Code still
+  sent the legacy handshake. Works with a 2025-11-25 server today.
+- **ChatGPT** (developer mode connectors): documents Streamable HTTP and
+  SSE, no protocol version. Its CIMD document is served and tested. No
+  evidence that it is modern-only; treat it as legacy or dual-era.
+- **Grok** (custom connectors, xAI remote MCP tools): documents Streamable
+  HTTP, no version; xAI's own MCP server runs in stateless mode. Same
+  treatment.
+- **Codex** reportedly moved to 2026-07-28 (same third-party report). If its
+  client is dual-era, as the SDK 2.x clients are, it falls back; that is
+  unverified.
+- Unverified until the end-to-end proof (build step 7), which should record
+  the protocol version each client negotiates.
+
+**Timeouts, noticed on the way.** Claude.ai and Desktop cut a tool call at
+240 seconds. `source_answer` can run about that long at the end of its
+timeout chain, so the async submit/poll pair noted for Muse may be needed
+for Claude too.
+
+**Follow-up slice: dual-era server.** Move `/mcp` and `olympus serve` to the
+split SDK 2.x packages (`@modelcontextprotocol/server` 2.1.0, which needs
+zod 4 as a new dependency), serving modern requests statelessly with
+`server/discover` and header validation, and `initialize` for legacy
+clients. It touches `src/mcp/server.ts` (stdio), `src/workers/remote-mcp.ts`,
+the MCP tests that use the 1.x client, and the committed `dist/` bundle, so
+it is a slice of its own. It becomes a v0.5 requirement only if a target
+client ships modern-only.
 
 ## Build sequence
 
@@ -277,6 +391,16 @@ critical-class and need an independent review receipt.
   (Free plan: one custom connector; works on mobile)
 - [Codex MCP](https://developers.openai.com/codex/mcp)
 - [MCP 2026-07-28 release](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
+- MCP 2026-07-28 [versioning and backward compatibility](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
+  and [Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+  (checked 2026-09-25)
+- [Building Claude custom connectors](https://claude.com/docs/connectors/building),
+  [Bringing MCP 2026-07-28 to Claude](https://claude.com/blog/bringing-mcp-2026-07-28-to-claude)
+  (checked 2026-09-25)
+- [ChatGPT developer mode](https://developers.openai.com/api/docs/guides/developer-mode)
+  (checked 2026-09-25)
+- [plaud-tools issue #220](https://github.com/massive-value/plaud-tools/issues/220)
+  (third-party report of which clients sent which handshake, August 2026)
 - [OpenClaw `mcp serve`](https://docs.openclaw.ai/cli/mcp) exposes
   conversations only, not plugin tools, which is why Olympus hosts its own
   endpoint.

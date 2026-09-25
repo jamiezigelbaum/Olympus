@@ -174,7 +174,10 @@ describe('agent control routes carry dashboard custody', () => {
     const html = await page.text();
     expect(html).toContain(`data-agent-connection="${body.connection.id}"`);
     expect(html).not.toContain(body.token);
-    expect(html).not.toContain(body.token.split('_').at(-1)!);
+    // The secret is everything after `olympus_conn_<18-hex id>_`; it may itself
+    // contain `_` (base64url), so splitting on `_` could test a 1-2 character
+    // fragment that CSS happens to contain.
+    expect(html).not.toContain(body.token.slice('olympus_conn_'.length + 18 + 1));
     // Nor does the JSON view model.
     const json = await (await guarded(new Request(`${ORIGIN}/dashboard.json`, { headers: { Authorization: 'Bearer worker-secret' } }))).text();
     expect(json).not.toContain(body.token);

@@ -3,6 +3,7 @@
  * docs/design/relay.md ("Runbook") and deploy/olympus-connect-relay.service.
  */
 import { readFileSync } from 'node:fs';
+import { adminSocketPath, startAdminSocket } from './admin.ts';
 import { CloudflareDnsProvider } from './dns.ts';
 import { FileInstallRegistry } from './registry.ts';
 import { startRelay } from './relay.ts';
@@ -26,7 +27,14 @@ if (process.env.RELAY_PUBLIC_IPV6 && !listenHost.includes(':')) {
   throw new Error('RELAY_PUBLIC_IPV6 is set but RELAY_LISTEN_HOST is IPv4-only; use :: or unset RELAY_LISTEN_HOST');
 }
 
-const relay = await startRelay({
+// Operator commands (status, revoke, restore): a 0600 Unix socket in the state
+// directory, opened BEFORE the registry is read and compacted, so the admin
+// command never mistakes a starting relay for a stopped one and appends to the
+// log underneath it. See admin.ts.
+let relay: Awaited<ReturnType<typeof startRelay>> | undefined;
+const admin = await startAdminSocket(adminSocketPath(), () => relay);
+
+relay = await startRelay({
   zone: required('RELAY_ZONE'),
   controlHost: required('RELAY_CONTROL_HOST'),
   ...(process.env.RELAY_DATA_HOST ? { dataHost: process.env.RELAY_DATA_HOST } : {}),
@@ -47,6 +55,6 @@ const relay = await startRelay({
 });
 
 console.log(JSON.stringify({ at: new Date().toISOString(), event: 'relay_listening', port: relay.port }));
-const shutdown = () => void relay.close().then(() => process.exit(0));
+const shutdown = () => void admin.close().then(() => relay?.close()).then(() => process.exit(0));
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);

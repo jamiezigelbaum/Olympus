@@ -127,7 +127,9 @@ export type RelayEvent =
   | 'register_rejected'
   | 'auth_rejected'
   | 'attach_rejected'
-  | 'acme_dns';
+  | 'acme_dns'
+  | 'install_revoked'
+  | 'install_restored';
 
 export interface PublicPathDeps {
   readonly zone: string;
