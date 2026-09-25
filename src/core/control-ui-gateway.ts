@@ -475,6 +475,18 @@ export function parseDashboardControlParams(value: unknown): OlympusDashboardCon
     if (!/^[a-f0-9]{18}$/.test(connectionId)) throw new DashboardGatewayInvalidRequestError('connection_id is not a connection id.');
     return { action, connection_id: connectionId };
   }
+  if (action === 'set_remote_access') {
+    const record = exactRecord(outer, ['action', 'enabled', 'accept_terms']);
+    if (typeof record.enabled !== 'boolean') throw new DashboardGatewayInvalidRequestError('enabled must be true or false.');
+    if (record.accept_terms === undefined) return { action, enabled: record.enabled };
+    if (!record.enabled) throw new DashboardGatewayInvalidRequestError('Only turning remote access on accepts an agreement.');
+    const accept = exactRecord(record.accept_terms, ['url']);
+    if (!('url' in accept)) throw new DashboardGatewayInvalidRequestError('accept_terms.url is required.');
+    if (accept.url === null) return { action, enabled: true, accept_terms: { url: null } };
+    const url = boundedString(accept.url, 2048, 'accept_terms.url', false);
+    if (!url.startsWith('https://')) throw new DashboardGatewayInvalidRequestError('accept_terms.url must be an https URL.');
+    return { action, enabled: true, accept_terms: { url } };
+  }
   throw new DashboardGatewayInvalidRequestError('Unknown Olympus dashboard control action.');
 }
 
@@ -835,6 +847,11 @@ function dashboardControlWorkerRequest(params: OlympusDashboardControlParams): {
       return { path: '/dashboard/agents/keys', body: { name: params.name } };
     case 'revoke_agent_connection':
       return { path: '/dashboard/agents/revoke', body: { connection_id: params.connection_id } };
+    case 'set_remote_access':
+      return {
+        path: '/dashboard/agents/remote-access',
+        body: { enabled: params.enabled, ...(params.accept_terms ? { accept_terms: { url: params.accept_terms.url } } : {}) },
+      };
   }
 }
 

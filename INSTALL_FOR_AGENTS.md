@@ -2109,10 +2109,19 @@ Only when the operator asks for it. Do not offer it as part of installation.
   its resolved plugin path). Never ask the operator to paste a key or code back
   to you, and never print one into chat or a log.
 - Agents in a vendor's cloud need remote access. If the panel says remote
-  access is off, say so plainly. Turning it on (`remote.enabled` plus
-  `remote.relayHost`) is a configuration change with its own consent, made
-  through `openclaw config set` and the validate-then-restart order in Step 5.
-  `olympus connections status` says what a relay that is on is waiting for.
+  access is off, say so plainly and send the operator to **Turn on remote
+  access** in the same Agents section. That button is the normal path: it
+  shows Let's Encrypt's subscriber agreement, records the operator's own
+  acceptance, and changes `remote.enabled` through OpenClaw's config write, so
+  the operator needs no terminal. Never accept the agreement for them (do not
+  run `olympus connections terms --accept` on their behalf), and do not turn
+  remote access on yourself without its own consent (Rule one). The relay
+  (`connect.olympusplugin.ai`) is the default; `remote.publicBaseUrl` is only
+  for an operator who runs their own tunnel, set with `openclaw config set`
+  and the validate-then-restart order in Step 5.
+  `olympus connections status` says what remote access that is on is waiting
+  for, including "Olympus relay unavailable" while the relay cannot be
+  reached.
 - For Claude Code or Codex on the same machine, the local command is
   `<rootDir>/bin/olympus serve` (rootDir from
   `openclaw plugins inspect olympus --json`). Adding it to another agent's MCP

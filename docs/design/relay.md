@@ -212,16 +212,31 @@ cannot name another record.
 
 ## Plugin wiring
 
-Remote access is opt-in plugin config, off by default:
+Remote access is opt-in plugin config, off by default. The normal path is the
+dashboard: **Turn on remote access** in Setup's Agents section (below). The
+equivalent commands:
 
 ```sh
 openclaw config set plugins.entries.olympus.config.remote.enabled true
-openclaw config set plugins.entries.olympus.config.remote.relayHost connect.olympusplugin.ai
-# or, for a tunnel you run yourself, instead of relayHost:
+# relayHost defaults to connect.olympusplugin.ai; set it only for another relay.
+# Advanced, for a tunnel you run yourself instead of the relay:
 openclaw config set plugins.entries.olympus.config.remote.publicBaseUrl https://<your-tunnel>
 ```
 
-`relayHost` has no default until the relay is deployed. `relayHost` and
+`relayHost` defaults to `connect.olympusplugin.ai` (in
+`resolveRemoteAccessMode`, not as a manifest schema default, so a
+`publicBaseUrl` owner never has a relay host materialized beside it). Before
+the relay is deployed, turning remote access on is safe: the relay child stays
+up, reconnects with its own backoff (1 s doubling to 60 s, jittered), and
+status reads `relay.state: offline` with the reason; `olympus connections
+status` and the dashboard say "Olympus relay unavailable". **Upgrade note:** a
+config with `remote.enabled: true` and no address used to be a named error
+that kept remote access off; it now starts the relay service. Nothing public
+happens before the owner accepts the CA's agreement: the install registers its
+key with the relay, but no DNS record is published, no ACME account is
+created and no certificate is ordered, so no Certificate Transparency entry
+names the install (held by `test/native-relay-service.test.ts`). The
+CHANGELOG carries the same note. `relayHost` and
 `publicBaseUrl` are mutually exclusive, and so is either with an
 `OLYMPUS_PUBLIC_BASE_URL` in worker.env; a conflict turns remote access off
 (named in Gateway service health and in `olympus connections status`), never
@@ -246,6 +261,31 @@ the rest of the plugin.
   at most once a second), so issuer, resource and OpenAPI `servers` follow the
   relay without a worker restart; a restart would cut in-flight answers and
   drop pending OAuth approvals. They still never come from `Host`.
+- **Dashboard toggle.** Setup's Agents section offers **Turn on remote
+  access** and **Turn off remote access** (`POST /dashboard/agents/remote-access`,
+  with the control cookie, CSRF and same-origin checks every dashboard control
+  has, plus its own rate limit of 6 per 10 minutes). Turning on first needs the
+  owner's acceptance of the CA's current agreement: the route answers 409
+  `terms_required` with the agreement URL, the page shows it with a plain
+  summary, and the owner's explicit acceptance comes back naming that URL. It
+  is recorded exactly as `olympus connections terms --accept` records it
+  (`resolveCurrentTermsUrl`, `recordTermsAcceptance`); a URL that changed
+  meanwhile is refused as `terms_changed`. The config change never touches
+  openclaw.json directly: the worker asks the Gateway over the plugin route
+  `/plugins/olympus/remote-access` (worker bearer, body exactly
+  `{"enabled": boolean}`), and the Gateway applies it with the plugin runtime's
+  `api.runtime.config.mutateConfigFile` and `afterWrite: { mode: 'auto' }`, the
+  same locked, validated, backed-up write `config.patch` and `openclaw config
+  set` commit through. An OpenClaw without that runtime API gets a plain 501
+  naming the `openclaw config set` equivalent. A public address set by
+  `OLYMPUS_PUBLIC_BASE_URL` in worker.env is outside plugin config, so the
+  panel shows where it comes from and how to remove it instead of Turn off,
+  and the route refuses to toggle it (`set_by_worker_env`); a Turn off that
+  wrote nothing never reports "off" while an address is still up.
+- **Outage.** A relay session that goes offline keeps its public address in
+  status.json (the certificate still names it), but the dashboard reads "not
+  connected" with the reason and mints no pairing codes until the session is
+  back.
 - **Forwarding trust.** The local endpoint adds `x-olympus-relay-auth`, a
   per-install secret from `relay-auth`, and strips any inbound copy. The
   worker believes `x-olympus-relay`/`x-forwarded-for` only alongside that

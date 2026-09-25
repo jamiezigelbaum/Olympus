@@ -116,6 +116,7 @@ import {
   readRemoteAccessStatus,
   readTermsAcceptance,
   recordTermsAcceptance,
+  resolveCurrentTermsUrl,
   relayProcessRunning,
   remoteAccessDirForCli,
   remoteAccessStatusView,
@@ -2594,28 +2595,19 @@ export async function runConnectionsTermsCommand(
   }
   const dir = remoteAccessDirForCli(env);
   const status = readRemoteAccessStatus(dir);
-  let termsUrl = status?.terms_url ?? undefined;
-  // The relay child asked its CA and found no agreement URL: there is nothing
-  // to show, but consent is still recorded (against no URL) so issuance can
-  // proceed instead of waiting forever.
-  const caNamesNone = !termsUrl && status?.certificate?.state === 'awaiting_terms';
-  if (!termsUrl && !caNamesNone) {
-    const fetchTerms = dependencies.fetchTerms ?? (async () => {
-      const { fetchTermsOfService } = await import('../connect-relay/client/acme.ts');
-      const { LETS_ENCRYPT_DIRECTORY } = await import('../connect-relay/client/connect.ts');
-      const bounded = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
-        fetch(input, { ...init, signal: AbortSignal.timeout(10_000) })) as typeof fetch;
-      return fetchTermsOfService(LETS_ENCRYPT_DIRECTORY, bounded);
-    });
-    try {
-      termsUrl = await fetchTerms();
-    } catch {
-      throw new OperationError(
-        'config_error',
-        'Could not read the Let\'s Encrypt subscriber agreement URL from its directory.',
-        'Check the network and retry; the agreement is published at https://letsencrypt.org/repository/.',
-      );
-    }
+  const fetchTerms = dependencies.fetchTerms
+    ?? (async () => (await import('./core/remote-access-terms.ts')).fetchLetsEncryptTermsUrl());
+  let termsUrl: string | undefined;
+  try {
+    // The relay's reported agreement, or none when the CA named none, else
+    // the CA directory now: the one resolution the dashboard shares.
+    termsUrl = await resolveCurrentTermsUrl(status, fetchTerms);
+  } catch {
+    throw new OperationError(
+      'config_error',
+      'Could not read the Let\'s Encrypt subscriber agreement URL from its directory.',
+      'Check the network and retry; the agreement is published at https://letsencrypt.org/repository/.',
+    );
   }
   const acceptance = readTermsAcceptance(dir);
   if (accept) {

@@ -81,6 +81,10 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
 
   const onStatus = (next: RelayClientStatus) => {
     if (stopped && next.state !== 'stopped') return;
+    // A reconnect attempt after a failure stays "offline" with its reason
+    // until it succeeds or fails again, so an unreachable relay (not deployed
+    // yet, or down) reads as one steady "relay unavailable", not a flicker.
+    if (next.state === 'connecting' && status.relay?.state === 'offline') return;
     status.relay = {
       state: next.state,
       reason: next.state === 'offline' ? next.reason : null,

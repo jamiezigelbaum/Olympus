@@ -515,7 +515,55 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (kind === 'pair') return { action: 'mint_agent_pairing_code' };
     if (kind === 'key') return { action: 'create_agent_key', name: formRecord(form).name || '' };
     if (kind === 'revoke') return { action: 'revoke_agent_connection', connection_id: formRecord(form).connection_id || '' };
+    if (kind === 'remote-on') return { action: 'set_remote_access', enabled: true };
+    if (kind === 'remote-off') return { action: 'set_remote_access', enabled: false };
+    if (kind === 'remote-accept') {
+      // The agreement this panel showed, as the route named it: the owner's
+      // acceptance is bound to that exact version.
+      if (form.dataset.termsShown !== 'true') return undefined;
+      return { action: 'set_remote_access', enabled: true, accept_terms: { url: form.dataset.termsUrl || null } };
+    }
     return undefined;
+  }
+
+  /**
+   * Remote access asked for Let's Encrypt's agreement: open the panel under
+   * the row with the link pointed at the agreement the route named, and bind
+   * the accept button to that same version.
+   */
+  function showRemoteTerms(from: HTMLFormElement, body: Record<string, unknown>, message: string): void {
+    const panel = query<HTMLElement>('[data-remote-terms]');
+    const accept = panel?.querySelector<HTMLFormElement>('form[data-agent-kind="remote-accept"]');
+    const terms = body.terms && typeof body.terms === 'object' && !Array.isArray(body.terms)
+      ? body.terms as Record<string, unknown>
+      : undefined;
+    if (!panel || !accept || !terms) {
+      say(from, message);
+      return;
+    }
+    const url = typeof terms.url === 'string' && /^https:\/\//.test(terms.url) ? terms.url : '';
+    const readUrl = typeof terms.read_url === 'string' && /^https:\/\//.test(terms.read_url) ? terms.read_url : url;
+    const link = panel.querySelector<HTMLAnchorElement>('[data-remote-terms-link]');
+    if (link && readUrl) link.href = readUrl;
+    accept.dataset.termsUrl = url;
+    accept.dataset.termsShown = 'true';
+    say(from, '');
+    say(accept, from === accept ? message : '');
+    panel.hidden = false;
+    if (!panel.hasAttribute('tabindex')) panel.setAttribute('tabindex', '-1');
+    panel.focus();
+  }
+
+  function hideRemoteTerms(): void {
+    const panel = query<HTMLElement>('[data-remote-terms]');
+    if (!panel) return;
+    panel.hidden = true;
+    const accept = panel.querySelector<HTMLFormElement>('form[data-agent-kind="remote-accept"]');
+    if (accept) {
+      delete accept.dataset.termsShown;
+      delete accept.dataset.termsUrl;
+      say(accept, '');
+    }
   }
 
   function showAgentSecret(form: HTMLFormElement, value: string, note: string): void {
@@ -573,7 +621,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (!params || pendingForms.has(form)) return;
     if (params.action === 'revoke_agent_connection'
       && !window.confirm(form.dataset.confirmation || 'Revoke this connection?')) return;
-    setFormPending(form, true, params.action === 'revoke_agent_connection' ? 'Revoking…' : 'Working…');
+    if (params.action === 'set_remote_access' && !params.enabled
+      && !window.confirm(form.dataset.confirmation || 'Turn off remote access?')) return;
+    setFormPending(form, true, params.action === 'revoke_agent_connection'
+      ? 'Revoking…'
+      : params.action === 'set_remote_access'
+        ? (params.enabled ? 'Turning on…' : 'Turning off…')
+        : 'Working…');
     let result: OlympusDashboardControlResult;
     try {
       result = await options.transport.control(params);
@@ -594,8 +648,23 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }
       return;
     }
+    if (params.action === 'set_remote_access' && result.status === 409) {
+      const code = (result.body.error as Record<string, unknown> | undefined)?.code;
+      if (code === 'terms_required' || code === 'terms_changed') {
+        showRemoteTerms(form, result.body, errorMessage(result));
+        return;
+      }
+    }
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
       say(form, errorMessage(result));
+      return;
+    }
+    if (params.action === 'set_remote_access') {
+      hideRemoteTerms();
+      const statusMessage = result.body.status_message;
+      const row = form.closest('[data-remote-access]');
+      say(row && row.contains(form) ? form : query('[data-remote-access] form') || form,
+        typeof statusMessage === 'string' ? statusMessage : 'Saved.');
       return;
     }
     if (params.action === 'mint_agent_pairing_code' && typeof result.body.code === 'string') {
@@ -704,6 +773,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === 'hidden') return;
     if (!force && query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')) return;
+    // The owner is reading the agreement: a poll must not close it under them.
+    if (!force && query('[data-remote-terms]:not([hidden])')) return;
     // A typed secret or folder query is the only copy of the user's work and
     // is never replaced by polling, however old the tab is.
     if (!force && hasDirtyInput()) return;
@@ -795,6 +866,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         startedFromSheet.add(form);
         form.requestSubmit();
       }
+      return;
+    }
+    if (target.closest('[data-remote-terms-cancel]')) {
+      hideRemoteTerms();
       return;
     }
     const done = target.closest<HTMLElement>('[data-agent-secret-done]');

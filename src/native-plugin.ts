@@ -33,6 +33,11 @@ import {
   type OperationContext,
 } from './core/operations.ts';
 import { registerOlympusDashboardGateway } from './core/control-ui-gateway.ts';
+import {
+  handleRemoteAccessConfigRequest,
+  REMOTE_ACCESS_CONFIG_ROUTE,
+  type OpenClawRuntimeConfigWriter,
+} from './core/remote-access-config.ts';
 
 /**
  * Nothing in this module's graph may introduce a top-level `await`.
@@ -46,6 +51,8 @@ import { registerOlympusDashboardGateway } from './core/control-ui-gateway.ts';
 interface OpenClawPluginApi {
   pluginConfig?: unknown;
   config?: unknown;
+  /** OpenClaw's plugin runtime; `config.mutateConfigFile` is its blessed config write. */
+  runtime?: { config?: OpenClawRuntimeConfigWriter };
   registerTool(tool: NativeTool): void;
   registerService?(service: NativeWorkerServiceDefinition): void;
   registerGatewayMethod?(method: string, handler: (input: {
@@ -285,6 +292,7 @@ const plugin = {
     };
 
     registerSourceWatchDeliveryRoute(api, config);
+    registerRemoteAccessConfigRoute(api, config);
     registerOlympusDashboardGateway(api, config);
 
     for (const operation of operations) {
@@ -438,6 +446,44 @@ function registerSourceWatchDeliveryRoute(api: OpenClawPluginApi, config: Operat
       });
       response.statusCode = result.status;
       response.setHeader('Content-Type', 'application/json');
+      response.end(JSON.stringify(result.body));
+    },
+  });
+}
+
+/**
+ * The dashboard's Turn on / Turn off remote access, applied through OpenClaw's
+ * own config write (`api.runtime.config.mutateConfigFile`). The worker calls
+ * this with its bearer; see core/remote-access-config.ts.
+ */
+function registerRemoteAccessConfigRoute(api: OpenClawPluginApi, config: OperationContext['config']): void {
+  if (!api.registerHttpRoute) return;
+  const currentAuthToken = workerAuthTokenProvider(config);
+  api.registerHttpRoute({
+    path: REMOTE_ACCESS_CONFIG_ROUTE,
+    auth: 'plugin',
+    match: 'exact',
+    handler: async (request, response) => {
+      let body: string;
+      try {
+        body = await readBoundedBody(request, 1024);
+      } catch (error) {
+        response.statusCode = error instanceof RequestBodyTooLargeError ? 413 : 400;
+        response.setHeader('Content-Type', 'application/json');
+        response.end(JSON.stringify({ status: 'failed', error_kind: 'invalid_request_body' }));
+        return;
+      }
+      const authToken = currentAuthToken();
+      const result = await handleRemoteAccessConfigRequest({
+        method: request.method ?? '',
+        authorization: typeof request.headers.authorization === 'string' ? request.headers.authorization : null,
+        body,
+        ...(authToken ? { authToken } : {}),
+        runtimeConfig: api.runtime?.config,
+      });
+      response.statusCode = result.status;
+      response.setHeader('Content-Type', 'application/json');
+      response.setHeader('Cache-Control', 'no-store');
       response.end(JSON.stringify(result.body));
     },
   });

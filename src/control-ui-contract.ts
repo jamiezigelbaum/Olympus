@@ -208,6 +208,17 @@ export type OlympusDashboardControlParams =
   | {
       action: 'revoke_agent_connection';
       connection_id: string;
+    }
+  | {
+      /**
+       * Turn remote access on or off. Turning it on the first time answers
+       * 409 `terms_required` with the CA's agreement; the owner's explicit
+       * acceptance is sent back naming that agreement's URL (null when the CA
+       * names none).
+       */
+      action: 'set_remote_access';
+      enabled: boolean;
+      accept_terms?: { url: string | null };
     };
 
 export interface OlympusDashboardControlResult {
