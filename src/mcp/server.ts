@@ -95,7 +95,7 @@ export async function serve(): Promise<void> {
   // One stdio server serves one client, so this process-local registry is
   // already per client: a slow source_answer hands off to it rather than
   // outliving the client's tool-call limit.
-  const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env) });
+  const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env, 'stdio') });
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // The stdio client names itself during initialize (e.g. "claude-code").
     // Self-reported, so it is an audit label only, never an authorization.

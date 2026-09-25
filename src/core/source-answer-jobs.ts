@@ -3,7 +3,8 @@
  * calls short (hosted agents: Claude documents about 240 s per tool call).
  *
  * The common case stays one call: `source_answer` waits for the answer up to a
- * hand-off threshold (default 200 s) and returns it exactly as before. Past
+ * per-surface hand-off threshold (200 s remote, 45 s local stdio MCP) and
+ * returns it exactly as before. Past
  * the threshold it returns a "still working" result carrying a job id, and the
  * answer keeps running in the background; `source_answer_result(job_id)`
  * returns it once it is done.
@@ -27,6 +28,11 @@ import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
 import type { OperationCaller } from './operation-caller.ts';
 
 export const SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200_000;
+/**
+ * The local stdio MCP default (`olympus serve`, used by Codex and Claude
+ * Code): under Codex's 60 s default MCP tool timeout.
+ */
+export const SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS = 45_000;
 /** Kept below Claude's documented ~240 s per-tool-call limit. */
 export const SOURCE_ANSWER_HANDOFF_MAX_MS = 230_000;
 export const SOURCE_ANSWER_HANDOFF_MIN_MS = 1_000;
@@ -268,15 +274,24 @@ export function sourceAnswerJobOwner(caller: OperationCaller | undefined): strin
   return undefined;
 }
 
+export type SourceAnswerJobSurface = 'remote' | 'stdio';
+
 /**
- * Reads the two operator knobs. `OLYMPUS_SOURCE_ANSWER_HANDOFF_MS` sets the
- * threshold (clamped to 1 s–230 s, below Claude's per-call limit);
- * `OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS` how long one result call waits
- * (0–120 s, and never past the threshold).
+ * Reads the operator knobs for one surface. The threshold is per surface,
+ * because the clients differ: remote agents (worker `/mcp` and OpenAPI) read
+ * `OLYMPUS_SOURCE_ANSWER_HANDOFF_MS` (default 200 s, below Claude's ~240 s);
+ * local stdio MCP reads `OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS` (default
+ * 45 s, below Codex's 60 s). Both clamp to 1 s–230 s.
+ * `OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS` sets how long one result call waits
+ * (0–120 s, default 60 s, and never past the surface's threshold).
  */
-export function sourceAnswerJobLimitsFromEnv(env: NodeJS.ProcessEnv): Partial<SourceAnswerJobLimits> {
-  const handoffMs = clampedInteger(env.OLYMPUS_SOURCE_ANSWER_HANDOFF_MS, SOURCE_ANSWER_HANDOFF_MIN_MS, SOURCE_ANSWER_HANDOFF_MAX_MS)
-    ?? SOURCE_ANSWER_HANDOFF_DEFAULT_MS;
+export function sourceAnswerJobLimitsFromEnv(
+  env: NodeJS.ProcessEnv,
+  surface: SourceAnswerJobSurface,
+): Partial<SourceAnswerJobLimits> {
+  const configured = surface === 'stdio' ? env.OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS : env.OLYMPUS_SOURCE_ANSWER_HANDOFF_MS;
+  const handoffMs = clampedInteger(configured, SOURCE_ANSWER_HANDOFF_MIN_MS, SOURCE_ANSWER_HANDOFF_MAX_MS)
+    ?? (surface === 'stdio' ? SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS : SOURCE_ANSWER_HANDOFF_DEFAULT_MS);
   const resultWaitMs = Math.min(
     clampedInteger(env.OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS, 0, SOURCE_ANSWER_RESULT_WAIT_MAX_MS) ?? SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
     handoffMs,

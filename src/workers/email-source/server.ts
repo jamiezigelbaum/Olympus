@@ -3976,7 +3976,7 @@ export async function main(): Promise<void> {
   // Slow source_answer calls from remote agents hand off to in-memory jobs
   // bound to the connection; see core/source-answer-jobs.ts.
   const { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv } = await import('../../core/source-answer-jobs.ts');
-  const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env) });
+  const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env, 'remote') });
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,

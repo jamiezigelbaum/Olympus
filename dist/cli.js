@@ -68754,6 +68754,7 @@ __export(exports_source_answer_jobs, {
   sourceAnswerJobLimitsFromEnv: () => sourceAnswerJobLimitsFromEnv,
   isSourceAnswerPending: () => isSourceAnswerPending,
   SourceAnswerJobRegistry: () => SourceAnswerJobRegistry,
+  SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS,
   SOURCE_ANSWER_RESULT_WAIT_MAX_MS: () => SOURCE_ANSWER_RESULT_WAIT_MAX_MS,
   SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS: () => SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
   SOURCE_ANSWER_MAX_RUNNING_PER_OWNER: () => SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
@@ -68912,8 +68913,9 @@ function sourceAnswerJobOwner(caller) {
     return "mcp:stdio";
   return;
 }
-function sourceAnswerJobLimitsFromEnv(env) {
-  const handoffMs = clampedInteger(env.OLYMPUS_SOURCE_ANSWER_HANDOFF_MS, SOURCE_ANSWER_HANDOFF_MIN_MS, SOURCE_ANSWER_HANDOFF_MAX_MS) ?? SOURCE_ANSWER_HANDOFF_DEFAULT_MS;
+function sourceAnswerJobLimitsFromEnv(env, surface) {
+  const configured = surface === "stdio" ? env.OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS : env.OLYMPUS_SOURCE_ANSWER_HANDOFF_MS;
+  const handoffMs = clampedInteger(configured, SOURCE_ANSWER_HANDOFF_MIN_MS, SOURCE_ANSWER_HANDOFF_MAX_MS) ?? (surface === "stdio" ? SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS : SOURCE_ANSWER_HANDOFF_DEFAULT_MS);
   const resultWaitMs = Math.min(clampedInteger(env.OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS, 0, SOURCE_ANSWER_RESULT_WAIT_MAX_MS) ?? SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS, handoffMs);
   return { handoffMs, resultWaitMs };
 }
@@ -68941,7 +68943,7 @@ function clampedInteger(value, min, max) {
     return;
   return Math.min(max, Math.max(min, Math.round(parsed)));
 }
-var SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200000, SOURCE_ANSWER_HANDOFF_MAX_MS = 230000, SOURCE_ANSWER_HANDOFF_MIN_MS = 1000, SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60000, SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120000, SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_DEADLINE_MS, SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 3, SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 12, SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16, JOB_ID_PREFIX = "saj_", JOB_ID_PATTERN;
+var SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200000, SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS = 45000, SOURCE_ANSWER_HANDOFF_MAX_MS = 230000, SOURCE_ANSWER_HANDOFF_MIN_MS = 1000, SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60000, SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120000, SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_DEADLINE_MS, SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 3, SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 12, SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16, JOB_ID_PREFIX = "saj_", JOB_ID_PATTERN;
 var init_source_answer_jobs = __esm(() => {
   init_operation_error();
   SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
@@ -69011,7 +69013,7 @@ async function serve() {
       tools: listMcpTools(loadConfig())
     };
   });
-  const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env) });
+  const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env, "stdio") });
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name, sourceAnswerJobs));
   });
@@ -97390,7 +97392,7 @@ async function main() {
     return remoteAccessFromStatus({ live: remotePublicUrls(), status });
   };
   const { SourceAnswerJobRegistry: SourceAnswerJobRegistry2, sourceAnswerJobLimitsFromEnv: sourceAnswerJobLimitsFromEnv2 } = await Promise.resolve().then(() => (init_source_answer_jobs(), exports_source_answer_jobs));
-  const sourceAnswerJobs = new SourceAnswerJobRegistry2({ limits: sourceAnswerJobLimitsFromEnv2(process.env) });
+  const sourceAnswerJobs = new SourceAnswerJobRegistry2({ limits: sourceAnswerJobLimitsFromEnv2(process.env, "remote") });
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,

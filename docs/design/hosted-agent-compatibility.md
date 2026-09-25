@@ -234,8 +234,9 @@ critical-class and need an independent review receipt.
      request bodies through a bounded stream reader (256 KiB).
    - Slow answers (v0.5): Claude cuts a tool call at about 240 s and
      Muse's HTTP timeout is unpublished, while `source_answer` can take
-     minutes. A call still running at the hand-off threshold (200 s default,
-     `OLYMPUS_SOURCE_ANSWER_HANDOFF_MS`, at most 230 s) returns
+     minutes. A call still running at the hand-off threshold (200 s default
+     for remote, `OLYMPUS_SOURCE_ANSWER_HANDOFF_MS`; 45 s for local stdio MCP,
+     `OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS`; at most 230 s) returns
      `{"status": "working", "job_id"}` and keeps running;
      `source_answer_result(job_id)` returns the stored, already-released
      answer, its error, or `working` after waiting up to 60 s. Jobs are bound

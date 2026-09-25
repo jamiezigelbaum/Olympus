@@ -20,6 +20,7 @@ import {
   isSourceAnswerPending,
   SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
   SOURCE_ANSWER_HANDOFF_MAX_MS,
+  SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS,
   SourceAnswerJobRegistry,
   sourceAnswerJobLimitsFromEnv,
   sourceAnswerJobOwner,
@@ -448,13 +449,30 @@ describe('SourceAnswerJobRegistry', () => {
     expect(sourceAnswerJobOwner(undefined)).toBeUndefined();
   });
 
-  test('the threshold is configurable and stays below the 240 s hosted limit', () => {
-    expect(sourceAnswerJobLimitsFromEnv({})).toEqual({ handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS, resultWaitMs: 60_000 });
-    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_HANDOFF_MS: '120000' }).handoffMs).toBe(120_000);
-    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_HANDOFF_MS: '999999' }).handoffMs).toBe(SOURCE_ANSWER_HANDOFF_MAX_MS);
+  test('the remote threshold is configurable and stays below the 240 s hosted limit', () => {
+    expect(sourceAnswerJobLimitsFromEnv({}, 'remote')).toEqual({ handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS, resultWaitMs: 60_000 });
+    expect(SOURCE_ANSWER_HANDOFF_DEFAULT_MS).toBe(200_000);
+    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_HANDOFF_MS: '120000' }, 'remote').handoffMs).toBe(120_000);
+    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_HANDOFF_MS: '999999' }, 'remote').handoffMs).toBe(SOURCE_ANSWER_HANDOFF_MAX_MS);
     expect(SOURCE_ANSWER_HANDOFF_MAX_MS).toBeLessThan(240_000);
-    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_HANDOFF_MS: '5000' }).resultWaitMs).toBe(5_000);
-    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_HANDOFF_MS: 'nope' }).handoffMs).toBe(SOURCE_ANSWER_HANDOFF_DEFAULT_MS);
+    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_HANDOFF_MS: '5000' }, 'remote').resultWaitMs).toBe(5_000);
+    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_HANDOFF_MS: 'nope' }, 'remote').handoffMs).toBe(SOURCE_ANSWER_HANDOFF_DEFAULT_MS);
+    // The stdio knob does not move the remote threshold.
+    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS: '10000' }, 'remote').handoffMs).toBe(SOURCE_ANSWER_HANDOFF_DEFAULT_MS);
+  });
+
+  test('local stdio MCP defaults under Codex\'s 60 s tool timeout and has its own knob', () => {
+    const stdio = sourceAnswerJobLimitsFromEnv({}, 'stdio');
+    expect(stdio).toEqual({ handoffMs: SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS, resultWaitMs: SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS });
+    expect(SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS).toBe(45_000);
+    // Both a source_answer call and a result call finish inside 60 s.
+    expect(stdio.handoffMs!).toBeLessThan(60_000);
+    expect(stdio.resultWaitMs!).toBeLessThan(60_000);
+    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS: '120000' }, 'stdio'))
+      .toEqual({ handoffMs: 120_000, resultWaitMs: 60_000 });
+    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS: '999999' }, 'stdio').handoffMs).toBe(SOURCE_ANSWER_HANDOFF_MAX_MS);
+    // The remote knob does not move the stdio threshold.
+    expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_HANDOFF_MS: '200000' }, 'stdio').handoffMs).toBe(SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS);
   });
 });
 
