@@ -3,6 +3,7 @@
  * docs/design/relay.md ("Runbook") and deploy/olympus-connect-relay.service.
  */
 import { readFileSync } from 'node:fs';
+import { adminSocketPath, startAdminSocket } from './admin.ts';
 import { CloudflareDnsProvider } from './dns.ts';
 import { FileInstallRegistry } from './registry.ts';
 import { startRelay } from './relay.ts';
@@ -46,7 +47,10 @@ const relay = await startRelay({
   log: (event, fields) => console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields })),
 });
 
+// Operator commands (status, revoke, restore): a 0600 Unix socket in the state directory. See admin.ts.
+const admin = await startAdminSocket(adminSocketPath(), relay);
+
 console.log(JSON.stringify({ at: new Date().toISOString(), event: 'relay_listening', port: relay.port }));
-const shutdown = () => void relay.close().then(() => process.exit(0));
+const shutdown = () => void admin.close().then(() => relay.close()).then(() => process.exit(0));
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);

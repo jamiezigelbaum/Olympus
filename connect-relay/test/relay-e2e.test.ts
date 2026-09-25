@@ -28,6 +28,8 @@ import { MemoryDnsProvider, type DnsProvider } from '../server/dns.ts';
 import type { RelayLimits } from '../server/public-path.ts';
 import { FileInstallRegistry, MemoryInstallRegistry, type InstallRegistry } from '../server/registry.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
+import { runAdmin, startAdminSocket } from '../server/admin.ts';
+import { readRegistrySnapshot } from '../server/registry.ts';
 import { startMockAcme, type MockAcme } from './helpers/mock-acme.ts';
 import { agentRequest, captureClientHello, holdOpen, openControl, rawExchange, syntheticClientHello, trickle } from './helpers/net.ts';
 import { createTestCa, type TestCa } from './helpers/pki.ts';
@@ -601,6 +603,111 @@ describe('abuse resistance', () => {
     expect(reopened.get(identity.installId)?.activatedAt).toBeNumber();
     expect(reopened.addressRecordCount()).toBe(1);
     expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe('operator commands (server/admin.ts)', () => {
+  test('revoke ends the install everywhere without a restart, goes through the DNS budget, and sticks', async () => {
+    const dir = newStateDir();
+    const registryPath = join(dir, 'registry.jsonl');
+    const env = { RELAY_REGISTRY_PATH: registryPath, RELAY_ADMIN_SOCKET: join(dir, 'admin.sock') };
+    const { relay, registry } = await makeRelay({}, undefined, { registry: new FileInstallRegistry(registryPath) });
+    const admin = await startAdminSocket(env.RELAY_ADMIN_SOCKET, relay);
+    try {
+      const { hostname } = await connectInstall(relay);
+      const installId = hostname.split('.')[0]!;
+      expect(dns.addresses.has(hostname)).toBe(true);
+      expect(statSync(env.RELAY_ADMIN_SOCKET).mode & 0o777).toBe(0o600);
+
+      // Status: counts only, never an install id.
+      const before = await runAdmin(['status'], env);
+      expect(before.code).toBe(0);
+      expect(before.out).toContain('Registered installs:        1 (1 have requested a certificate)');
+      expect(before.out).toContain('Online now:                 1');
+      expect(before.out).not.toContain(installId);
+
+      const revoked = await runAdmin(['revoke', installId], env);
+      expect(revoked).toEqual({
+        code: 0,
+        out: `Revoked ${installId}. Its registration was removed. Its session was ended. Its DNS address record was removed.\n`,
+      });
+      expect(dns.addresses.has(hostname)).toBe(false);
+      await until(() => relay.onlineInstalls().length === 0);
+      // The install does not simply re-register, though its reconnect backoff here is 50 ms.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(registry.get(installId)).toBeUndefined();
+      expect(registry.isRevoked(installId)).toBe(true);
+      expect(await rawExchange(relay.port, await captureClientHello(hostname))).toEqual(tlsAlertRecord(TLS_ALERT.unrecognizedName));
+      const after = await runAdmin(['status'], env);
+      expect(after.out).toContain('Registered installs:        0');
+      expect(after.out).toContain('Revoked installs:           1');
+      expect((await runAdmin(['revoke', installId], env)).out).toBe(`${installId} was already revoked.\n`);
+
+      // It survives a relay restart (the registry log carries it), and restore lifts it.
+      await registry.flush();
+      expect(new FileInstallRegistry(registryPath).isRevoked(installId)).toBe(true);
+      expect((await runAdmin(['restore', installId], env)).out).toBe(`Restored ${installId}; it may register again.\n`);
+      expect(registry.isRevoked(installId)).toBe(false);
+    } finally {
+      await admin.close();
+    }
+  });
+
+  test('a revoked install is refused at registration, and a revoke without DNS budget queues the record', async () => {
+    const counting = new CountingDns();
+    const { relay, registry } = await makeRelay({ dnsCallsGlobal: { capacity: 2, refillPerSecond: 0 } }, undefined, { dns: counting });
+    const first = await registerRaw(relay);
+    first.control.send({ type: 'acme-dns-set', id: 'a', value: 'H'.repeat(43) });
+    expect(await first.control.next()).toMatchObject({ ok: true }); // spends the whole DNS budget
+    const result = await relay.revoke(first.identity.installId);
+    expect(result).toEqual({ installId: first.identity.installId, revoked: true, wasRegistered: true, wasOnline: true, addressRecord: 'pending' });
+    expect(await first.control.next()).toMatchObject({ type: 'error', code: 'revoked' });
+    expect(registry.pendingAddressRemovals()).toEqual([first.identity.installId]);
+    expect(counting.addresses.size).toBe(1);
+    // Registering again with the same key is refused.
+    const control = openControl(relay.port, CONTROL_HOST, ca.cert);
+    const challenge = await control.next();
+    control.send({
+      type: 'register',
+      v: PROTOCOL_VERSION,
+      installId: first.identity.installId,
+      publicKey: first.identity.publicKeySpki,
+      sig: signInstallMessage(first.identity.privateKey, 'register', String(challenge.nonce), first.identity.installId),
+    });
+    expect(await control.next()).toMatchObject({ type: 'error', code: 'revoked' });
+    expect(registry.get(first.identity.installId)).toBeUndefined();
+  });
+
+  test('with the relay stopped, revoke is recorded in the log and status reads it', async () => {
+    const dir = newStateDir();
+    const registryPath = join(dir, 'registry.jsonl');
+    const env = { RELAY_REGISTRY_PATH: registryPath, RELAY_ADMIN_SOCKET: join(dir, 'admin.sock') };
+    const identity = loadOrCreateIdentity(newStateDir());
+    const registry = new FileInstallRegistry(registryPath);
+    registry.register(identity.installId, identity.publicKeySpki);
+    registry.markAddressRecord(identity.installId);
+    await registry.flush();
+    appendFileSync(registryPath, '{"op":"seen","installId":"trunc'); // a torn final line
+    const out = await runAdmin(['revoke', identity.installId], env);
+    expect(out.code).toBe(0);
+    expect(out.out).toContain('The relay is not running');
+    const status = await runAdmin(['status'], env);
+    expect(status.out).toContain('Relay not running');
+    expect(status.out).toContain('Registered installs:        0');
+    expect(status.out).toContain('Revoked installs:           1');
+    expect(status.out).toContain('(1 queued for removal)');
+    const reopened = new FileInstallRegistry(registryPath);
+    expect(reopened.isRevoked(identity.installId)).toBe(true);
+    expect(reopened.pendingAddressRemovals()).toEqual([identity.installId]);
+    expect(readRegistrySnapshot(registryPath).counts().revoked).toBe(1);
+    expect((await runAdmin(['restore', identity.installId], env)).code).toBe(1);
+  });
+
+  test('the command refuses malformed input', async () => {
+    expect((await runAdmin([], {})).code).toBe(2);
+    expect((await runAdmin(['revoke'], {})).code).toBe(2);
+    expect((await runAdmin(['status', 'x'], {})).code).toBe(2);
+    expect((await runAdmin(['revoke', 'NOT-AN-ID'], {})).code).toBe(2);
   });
 });
 
