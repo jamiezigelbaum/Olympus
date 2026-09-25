@@ -749,7 +749,7 @@ describe('pairing codes', () => {
     // Without the relay's secret (or with a wrong one), rotating the forged
     // agent address does not buy fresh per-caller slots or a fresh pacing
     // budget: every such request is the shared `direct` caller.
-    const pages = [];
+    const pages: Awaited<ReturnType<typeof openFrom>>[] = [];
     for (let i = 0; i < 8; i += 1) pages.push(await openFrom(forged(`203.0.113.${i + 1}`)));
     // Three more "addresses" are the same direct caller: each evicts that
     // caller's own oldest waiting approval instead of getting fresh slots.
@@ -797,7 +797,7 @@ describe('pairing codes', () => {
     const floods = new Map<string, Awaited<ReturnType<typeof openFrom>>[]>();
     for (let a = 0; a < 32; a += 1) {
       const headers = relayed(`203.0.113.${a + 1}`);
-      const pages = [];
+      const pages: Awaited<ReturnType<typeof openFrom>>[] = [];
       for (let i = 0; i < 8; i += 1) {
         const page = await openFrom(headers, floodClient(a));
         expect(page.response.status).toBe(200);
@@ -825,7 +825,7 @@ describe('pairing codes', () => {
     // Anyone can start a request naming Claude's client id; past half the
     // table those requests evict each other instead of crowding out other apps.
     const chatgpt = await openConsent(authorizeUrlFor(CHATGPT_CIMD));
-    const firsts = [];
+    const firsts: Awaited<ReturnType<typeof openFrom>>[] = [];
     for (let a = 0; a < 16; a += 1) {
       for (let i = 0; i < 8; i += 1) {
         const page = await openFrom(relayed(`203.0.113.${a + 1}`));
