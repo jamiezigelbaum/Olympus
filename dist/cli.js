@@ -1362,6 +1362,9 @@ function isExecutableFile(path) {
 var init_openclaw_executable = () => {};
 
 // src/core/operation-error.ts
+function sourceAnswerJobNotFound() {
+  return new OperationError("source_answer_job_not_found", "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted.", "Ask the question again with source_answer.");
+}
 var OperationError;
 var init_operation_error = __esm(() => {
   OperationError = class OperationError extends Error {
@@ -7307,13 +7310,23 @@ var init_public_surface = __esm(() => {
     "argus_list_models",
     "argus_complete",
     "source_answer",
+    "source_answer_result",
     "source_index_status",
     "source_index_search",
     "olympus_doctor"
   ];
-  V0_4_PUBLIC_CLI_OPERATIONS = V0_4_PUBLIC_MCP_TOOLS;
+  V0_4_PUBLIC_CLI_OPERATIONS = [
+    "argus_ping",
+    "argus_list_models",
+    "argus_complete",
+    "source_answer",
+    "source_index_status",
+    "source_index_search",
+    "olympus_doctor"
+  ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
+    "source_answer_result",
     "source_index_status"
   ];
   V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
@@ -42290,6 +42303,7 @@ class EmailClient {
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      ...options.signal ? { signal: options.signal } : {},
       body: JSON.stringify({
         question: options.question,
         ...options.query ? { query: options.query } : {},
@@ -49700,7 +49714,7 @@ function optionalAttachmentType(value) {
     return value;
   throw new OperationError("invalid_params", "attachment_type must be image, video, audio, file, link, or other.");
 }
-var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, operations;
+var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, SOURCE_ANSWER_RESULT_PARAMS, operations;
 var init_operations = __esm(() => {
   init_doctor();
   init_config();
@@ -49768,6 +49782,9 @@ var init_operations = __esm(() => {
     include_internal_content: { type: "boolean", description: "Whether internal corpora may return context passages for {{assistantName}} summarization. Defaults true." },
     internal_content_max_bytes: { type: "number", description: "Max internal context bytes; worker-capped." },
     timeoutMs: { type: "number", description: "OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora. It also raises the private-lane request budget to match, up to a 600000 ms ceiling, so a slow local analyst finishes instead of timing out." }
+  };
+  SOURCE_ANSWER_RESULT_PARAMS = {
+    job_id: { type: "string", required: true, description: 'The job_id a source_answer call returned with status "working".' }
   };
   operations = [
     {
@@ -49851,7 +49868,8 @@ var init_operations = __esm(() => {
         "It never returns source packets, vectors, OAuth material, or raw secure-local file content; secure-local answers release only as OPSEC-scanned bounded derivatives.",
         "For Dropbox documents with incomplete local extraction, audit.self_heal reports whether Olympus forced a local re-ingest inline or left one queued for retry.",
         "The returned answer field is already the calling-assistant-safe answer; when it answers the user, pass it through with citations/coverage notes instead of re-reasoning over the audit.",
-        "Call it one at a time: the local analyst is a single-lane model, so concurrent source_answer calls queue behind each other and the later ones time out. Slow is fine; wait for each answer before issuing the next, and pass timeoutMs 600000."
+        "Call it one at a time: the local analyst is a single-lane model, so concurrent source_answer calls queue behind each other and the later ones time out. Slow is fine; wait for each answer before issuing the next, and pass timeoutMs 600000.",
+        'If the result is {"status": "working", "job_id": ...} instead of an answer, the answer is still being prepared and keeps running: call source_answer_result with that job_id (again while it says working) rather than asking again.'
       ].join(" "),
       params: SOURCE_ANSWER_PARAMS,
       mutating: false,
@@ -49882,7 +49900,7 @@ var init_operations = __esm(() => {
         const includeInternalContent = optionalBoolean2(params.include_internal_content, "include_internal_content");
         const internalContentMaxBytes = optionalNumber4(params.internal_content_max_bytes, "internal_content_max_bytes");
         const timeoutMs = optionalNumber4(params.timeoutMs, "timeoutMs");
-        return ctx.email.sourceAnswer({
+        const answer = (signal) => ctx.email.sourceAnswer({
           question,
           ...query !== undefined ? { query } : {},
           ...account !== undefined ? { account } : {},
@@ -49906,8 +49924,31 @@ var init_operations = __esm(() => {
           ...includeInternalContent !== undefined ? { includeInternalContent } : {},
           ...internalContentMaxBytes !== undefined ? { internalContentMaxBytes } : {},
           ...timeoutMs !== undefined ? { timeoutMs } : {},
-          ...ctx.caller ? { caller: ctx.caller } : {}
+          ...ctx.caller ? { caller: ctx.caller } : {},
+          ...signal ? { signal } : {}
         });
+        const jobs = ctx.sourceAnswerJobs;
+        return jobs ? jobs.registry.run(jobs, answer) : answer();
+      }
+    },
+    {
+      name: "source_answer_result",
+      description: [
+        'Get the answer to a source_answer call that returned {"status": "working", "job_id": ...}.',
+        'Returns the finished answer exactly as source_answer would have (same release rules, citations and coverage), the same error it would have raised, or {"status": "working"} again after waiting up to about a minute; then call it again.',
+        "A job_id works only for the connection that asked, and expires about 15 minutes after the answer is ready."
+      ].join(" "),
+      params: SOURCE_ANSWER_RESULT_PARAMS,
+      mutating: false,
+      nativeExposure: "sourceIndexEnabledOnly",
+      cliHints: { name: "source answer result", positional: ["job_id"] },
+      handler: async (ctx, params) => {
+        assertNoUndeclaredParams(SOURCE_ANSWER_RESULT_PARAMS, params, "Source answer result");
+        const jobId = asString(params.job_id, "job_id");
+        const jobs = ctx.sourceAnswerJobs;
+        if (!jobs)
+          throw sourceAnswerJobNotFound();
+        return jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
       }
     },
     {
@@ -68706,6 +68747,208 @@ var init_stdio2 = __esm(() => {
   init_stdio();
 });
 
+// src/core/source-answer-jobs.ts
+var exports_source_answer_jobs = {};
+__export(exports_source_answer_jobs, {
+  sourceAnswerJobOwner: () => sourceAnswerJobOwner,
+  sourceAnswerJobLimitsFromEnv: () => sourceAnswerJobLimitsFromEnv,
+  isSourceAnswerPending: () => isSourceAnswerPending,
+  SourceAnswerJobRegistry: () => SourceAnswerJobRegistry,
+  SOURCE_ANSWER_RESULT_WAIT_MAX_MS: () => SOURCE_ANSWER_RESULT_WAIT_MAX_MS,
+  SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS: () => SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
+  SOURCE_ANSWER_MAX_RUNNING_PER_OWNER: () => SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
+  SOURCE_ANSWER_MAX_RUNNING_GLOBAL: () => SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
+  SOURCE_ANSWER_MAX_RETAINED_PER_OWNER: () => SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
+  SOURCE_ANSWER_JOB_TTL_MS: () => SOURCE_ANSWER_JOB_TTL_MS,
+  SOURCE_ANSWER_JOB_DEADLINE_MS: () => SOURCE_ANSWER_JOB_DEADLINE_MS,
+  SOURCE_ANSWER_HANDOFF_MIN_MS: () => SOURCE_ANSWER_HANDOFF_MIN_MS,
+  SOURCE_ANSWER_HANDOFF_MAX_MS: () => SOURCE_ANSWER_HANDOFF_MAX_MS,
+  SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS
+});
+import { randomBytes as randomBytes8 } from "node:crypto";
+
+class SourceAnswerJobRegistry {
+  limits;
+  now;
+  jobs = new Map;
+  running = new Map;
+  runningTotal = 0;
+  constructor(options = {}) {
+    this.limits = {
+      handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
+      resultWaitMs: SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
+      ttlMs: SOURCE_ANSWER_JOB_TTL_MS,
+      deadlineMs: SOURCE_ANSWER_JOB_DEADLINE_MS,
+      maxRunningPerOwner: SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
+      maxRunningGlobal: SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
+      maxRetainedPerOwner: SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
+      ...options.limits
+    };
+    this.now = options.now ?? Date.now;
+  }
+  async run(scope, work) {
+    this.sweep();
+    this.admit(scope.owner);
+    const startedAt = this.now();
+    const controller = new AbortController;
+    this.running.set(scope.owner, (this.running.get(scope.owner) ?? 0) + 1);
+    this.runningTotal += 1;
+    let released = false;
+    const release = () => {
+      if (released)
+        return;
+      released = true;
+      const count = (this.running.get(scope.owner) ?? 1) - 1;
+      if (count <= 0)
+        this.running.delete(scope.owner);
+      else
+        this.running.set(scope.owner, count);
+      this.runningTotal -= 1;
+    };
+    let pending;
+    try {
+      pending = work(controller.signal);
+    } catch (error2) {
+      release();
+      throw error2;
+    }
+    const outcome = pending.then((value) => ({ ok: true, value }), (error2) => ({ ok: false, error: error2 }));
+    let timer;
+    const handoff = new Promise((resolve8) => {
+      timer = setTimeout(() => resolve8("handoff"), this.limits.handoffMs);
+    });
+    const first = await Promise.race([outcome, handoff]);
+    clearTimeout(timer);
+    if (first !== "handoff") {
+      release();
+      if (first.ok)
+        return first.value;
+      throw first.error;
+    }
+    scope.detachFromClient?.();
+    const job = {
+      id: newJobId(),
+      owner: scope.owner,
+      startedAt,
+      settled: Promise.resolve()
+    };
+    job.deadline = setTimeout(() => {
+      controller.abort(new Error("source_answer job deadline reached"));
+    }, Math.max(0, this.limits.deadlineMs - (this.now() - startedAt)));
+    job.deadline.unref?.();
+    job.settled = outcome.then((result) => {
+      clearTimeout(job.deadline);
+      job.outcome = result;
+      job.finishedAt = this.now();
+      release();
+    });
+    this.jobs.set(job.id, job);
+    this.evictRetained(scope.owner);
+    return pendingResult(job.id, this.now() - startedAt, this.limits.resultWaitMs);
+  }
+  async result(owner, jobId, signal) {
+    this.sweep();
+    const job = typeof jobId === "string" && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
+    if (!job || job.owner !== owner)
+      throw sourceAnswerJobNotFound();
+    if (!job.outcome && this.limits.resultWaitMs > 0) {
+      let timer;
+      let onAbort;
+      const stop = new Promise((resolve8) => {
+        timer = setTimeout(resolve8, this.limits.resultWaitMs);
+        if (signal) {
+          onAbort = () => resolve8();
+          if (signal.aborted)
+            resolve8();
+          else
+            signal.addEventListener("abort", onAbort, { once: true });
+        }
+      });
+      await Promise.race([job.settled, stop]);
+      clearTimeout(timer);
+      if (signal && onAbort)
+        signal.removeEventListener("abort", onAbort);
+    }
+    if (!job.outcome)
+      return pendingResult(job.id, this.now() - job.startedAt, this.limits.resultWaitMs);
+    if (job.outcome.ok)
+      return job.outcome.value;
+    throw job.outcome.error;
+  }
+  stats() {
+    this.sweep();
+    return { running: this.runningTotal, jobs: this.jobs.size };
+  }
+  admit(owner) {
+    if ((this.running.get(owner) ?? 0) >= this.limits.maxRunningPerOwner || this.runningTotal >= this.limits.maxRunningGlobal) {
+      throw new OperationError("source_answer_busy", "Too many Olympus answers are already in progress for this connection.", "Wait for the answers in progress (call source_answer_result with their job ids) before asking another question.");
+    }
+  }
+  sweep() {
+    const now = this.now();
+    for (const [id, job] of this.jobs) {
+      if (job.finishedAt !== undefined && now - job.finishedAt >= this.limits.ttlMs)
+        this.jobs.delete(id);
+    }
+  }
+  evictRetained(owner) {
+    const finished = [...this.jobs.values()].filter((job) => job.owner === owner && job.finishedAt !== undefined).sort((a, b) => a.finishedAt - b.finishedAt);
+    const owned = [...this.jobs.values()].filter((job) => job.owner === owner).length;
+    let excess = owned - this.limits.maxRetainedPerOwner;
+    for (const job of finished) {
+      if (excess <= 0)
+        break;
+      this.jobs.delete(job.id);
+      excess -= 1;
+    }
+  }
+}
+function sourceAnswerJobOwner(caller) {
+  if (!caller)
+    return;
+  if (caller.surface === "remote")
+    return caller.connectionId ? `remote:${caller.connectionId}` : undefined;
+  if (caller.surface === "mcp")
+    return "mcp:stdio";
+  return;
+}
+function sourceAnswerJobLimitsFromEnv(env) {
+  const handoffMs = clampedInteger(env.OLYMPUS_SOURCE_ANSWER_HANDOFF_MS, SOURCE_ANSWER_HANDOFF_MIN_MS, SOURCE_ANSWER_HANDOFF_MAX_MS) ?? SOURCE_ANSWER_HANDOFF_DEFAULT_MS;
+  const resultWaitMs = Math.min(clampedInteger(env.OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS, 0, SOURCE_ANSWER_RESULT_WAIT_MAX_MS) ?? SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS, handoffMs);
+  return { handoffMs, resultWaitMs };
+}
+function isSourceAnswerPending(value) {
+  return typeof value === "object" && value !== null && value.status === "working" && typeof value.job_id === "string";
+}
+function pendingResult(jobId, elapsedMs, resultWaitMs) {
+  const wait = Math.round(resultWaitMs / 1000);
+  return {
+    status: "working",
+    job_id: jobId,
+    elapsed_ms: elapsedMs,
+    next_tool: "source_answer_result",
+    message: "Olympus is still preparing this answer and it keeps running. " + `Call source_answer_result with this job_id to get it${wait > 0 ? ` (each call waits up to ${wait} s)` : ""}; ` + "repeat while it says working. Do not ask the question again."
+  };
+}
+function newJobId() {
+  return `${JOB_ID_PREFIX}${randomBytes8(32).toString("base64url")}`;
+}
+function clampedInteger(value, min, max) {
+  if (value === undefined || value.trim() === "")
+    return;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed))
+    return;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+var SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200000, SOURCE_ANSWER_HANDOFF_MAX_MS = 230000, SOURCE_ANSWER_HANDOFF_MIN_MS = 1000, SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60000, SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120000, SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_DEADLINE_MS, SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 3, SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 12, SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16, JOB_ID_PREFIX = "saj_", JOB_ID_PATTERN;
+var init_source_answer_jobs = __esm(() => {
+  init_operation_error();
+  SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+  SOURCE_ANSWER_JOB_DEADLINE_MS = 20 * 60000;
+  JOB_ID_PATTERN = /^saj_[A-Za-z0-9_-]{43}$/;
+});
+
 // src/mcp/tools.ts
 function listMcpTools(config2, surface = "mcp") {
   return exposedOperations(operations, { config: config2, surface }).map((operation) => ({
@@ -68768,8 +69011,9 @@ async function serve() {
       tools: listMcpTools(loadConfig())
     };
   });
+  const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env) });
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name));
+    return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name, sourceAnswerJobs));
   });
   await server.connect(new StdioServerTransport);
 }
@@ -68777,13 +69021,16 @@ function mcpOperationCaller(clientName) {
   const displayName = sanitizeCallerDisplayName(clientName);
   return { surface: "mcp", ...displayName ? { displayName } : {} };
 }
-function makeContext(clientName) {
+function makeContext(clientName, sourceAnswerJobs) {
   const config2 = loadConfig();
+  const caller = mcpOperationCaller(clientName);
+  const owner = sourceAnswerJobOwner(caller);
   return {
     config: config2,
     delphi: new DelphiClient(config2, createDelphiTransport(config2)),
     email: new EmailClient(config2, createEmailTransport(config2)),
-    caller: mcpOperationCaller(clientName)
+    caller,
+    ...sourceAnswerJobs && owner ? { sourceAnswerJobs: { registry: sourceAnswerJobs, owner } } : {}
   };
 }
 var init_server3 = __esm(() => {
@@ -68796,12 +69043,13 @@ var init_server3 = __esm(() => {
   init_operation_caller();
   init_operation_exposure();
   init_operations();
+  init_source_answer_jobs();
   init_version();
   init_tools();
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash40, createPublicKey, randomBytes as randomBytes8, sign, verify } from "node:crypto";
+import { createHash as createHash40, createPublicKey, randomBytes as randomBytes9, sign, verify } from "node:crypto";
 function base64url2(data) {
   return Buffer.from(data).toString("base64url");
 }
@@ -83264,7 +83512,7 @@ var init_control_ui_contract = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac3, randomBytes as randomBytes9, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -83616,7 +83864,7 @@ function dashboardControlExpiresAtMs(parts) {
 function mintDashboardControlSession(authToken, origin, nowMs) {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes9(24).toString("base64url"),
+    nonce: randomBytes10(24).toString("base64url"),
     issuedSeconds: nowSeconds,
     originTag: dashboardControlOriginTag(authToken, origin)
   };
@@ -93251,20 +93499,46 @@ function createInProcessOperationContext(input) {
     email: { ...input.config.email, enabled: true, baseUrl: IN_PROCESS_WORKER_BASE_URL },
     sourceIndex: { ...input.config.sourceIndex, enabled: input.sourceIndexReadEnabled }
   };
+  const client = detachableSignal(input.signal);
   const transport = new DirectHttpEmailTransport((url, init) => {
-    const signals = [init.signal, input.signal].filter((signal) => signal != null);
+    const signals = [init.signal, client.signal].filter((signal) => signal != null);
     const request = new Request(url, {
       ...init,
       ...signals.length > 0 ? { signal: signals.length === 1 ? signals[0] : AbortSignal.any(signals) } : {}
     });
     return input.workerFetch(markInProcessRemoteRequest(request));
   }, undefined, config2.email.requestTimeoutSeconds * 1000);
+  const owner = sourceAnswerJobOwner(input.caller);
   return {
     config: config2,
     delphi: new DelphiClient(config2, createDelphiTransport(config2)),
     email: new EmailClient(config2, transport),
-    caller: input.caller
+    caller: input.caller,
+    ...input.sourceAnswerJobs && owner ? {
+      sourceAnswerJobs: {
+        registry: input.sourceAnswerJobs,
+        owner,
+        ...input.signal ? { clientSignal: input.signal } : {},
+        detachFromClient: client.detach
+      }
+    } : {}
   };
+}
+function detachableSignal(upstream) {
+  if (!upstream)
+    return { signal: undefined, detach: () => {
+      return;
+    } };
+  const controller = new AbortController;
+  if (upstream.aborted) {
+    controller.abort(upstream.reason);
+    return { signal: controller.signal, detach: () => {
+      return;
+    } };
+  }
+  const follow = () => controller.abort(upstream.reason);
+  upstream.addEventListener("abort", follow, { once: true });
+  return { signal: controller.signal, detach: () => upstream.removeEventListener("abort", follow) };
 }
 function bearerToken(header) {
   if (!header)
@@ -93297,6 +93571,7 @@ var init_remote_mcp = __esm(() => {
   init_remote_connections();
   init_remote_oauth_store();
   init_remote_public_url();
+  init_source_answer_jobs();
   init_server3();
   init_remote_request_body();
 });
@@ -93724,7 +93999,7 @@ var init_cimd = __esm(() => {
 });
 
 // src/workers/remote-oauth/consent-page.ts
-import { randomBytes as randomBytes10 } from "node:crypto";
+import { randomBytes as randomBytes11 } from "node:crypto";
 function hostnameOf(host) {
   try {
     return new URL(`https://${host}`).hostname;
@@ -93754,7 +94029,7 @@ function consentSecurityHeaders(nonce, redirectOrigin) {
   };
 }
 function renderConsentPage(input) {
-  const nonce = randomBytes10(16).toString("base64");
+  const nonce = randomBytes11(16).toString("base64");
   const name = escapeHtml4(input.clientName);
   const provenance = input.verifiedHost ? `<div class="host">${escapeHtml4(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
   const redirectHostname = hostnameOf(input.redirectHost);
@@ -93799,7 +94074,7 @@ ${error2}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderConsentErrorPage(message) {
-  const nonce = randomBytes10(16).toString("base64");
+  const nonce = randomBytes11(16).toString("base64");
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -93861,7 +94136,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash50, randomBytes as randomBytes11, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHash as createHash50, randomBytes as randomBytes12, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -93977,8 +94252,8 @@ function createRemoteOAuthHandler(options) {
     if (callerPending >= MAX_PENDING_CONSENTS_PER_CALLER || pending.size >= MAX_PENDING_CONSENTS) {
       return errorPage(429, "Too many approvals are waiting. Finish or close one, or try again in a few minutes.");
     }
-    const requestId = randomBytes11(16).toString("hex");
-    const csrf = randomBytes11(32).toString("base64url");
+    const requestId = randomBytes12(16).toString("hex");
+    const csrf = randomBytes12(32).toString("base64url");
     const entry = {
       caller,
       client,
@@ -94056,7 +94331,7 @@ function createRemoteOAuthHandler(options) {
     }
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
-    const code = randomBytes11(32).toString("base64url");
+    const code = randomBytes12(32).toString("base64url");
     codes.set(sha2566(code), {
       clientId: entry.client.clientId,
       displayName: entry.client.clientName,
@@ -94605,7 +94880,9 @@ function buildRemoteOpenApiSpec(options = {}) {
       description: [
         "Ask the owner's Olympus source index questions, under the same privacy rules as their own assistant.",
         "Authenticate every call with the connection token from `olympus connections add <name>` as a bearer token.",
-        "Call source_answer one at a time; an answer can take several minutes."
+        "Call source_answer one at a time; an answer can take several minutes.",
+        'When one takes longer than about 200 seconds, source_answer returns {"status": "working", "job_id": ...} instead and keeps working:',
+        "call source_answer_result with that job_id, again while it says working, to get the answer."
       ].join(" ")
     },
     servers: [{ url: options.serverUrl ?? "/" }],
@@ -94662,6 +94939,7 @@ function openApiOperation(operation, config2) {
       403: errorRef,
       404: errorRef,
       413: errorRef,
+      429: errorRef,
       500: errorRef,
       502: errorRef,
       503: errorRef
@@ -94676,7 +94954,7 @@ function firstSentence(text) {
   const match = /^(.+?[.!?])(\s|$)/.exec(text);
   return (match?.[1] ?? text).slice(0, 120);
 }
-var REMOTE_OPENAPI_SPEC_PATH = "/openapi.json", REMOTE_OPENAPI_TOOLS_PREFIX = "/api/v1/tools/", REMOTE_OPENAPI_MAX_BODY_BYTES, REMOTE_OPENAPI_API_VERSION = "1.0.0", TOOL_PATH_PATTERN, CALLER_FACING_ERRORS, INTERNAL_ERROR_MESSAGES;
+var REMOTE_OPENAPI_SPEC_PATH = "/openapi.json", REMOTE_OPENAPI_TOOLS_PREFIX = "/api/v1/tools/", REMOTE_OPENAPI_MAX_BODY_BYTES, REMOTE_OPENAPI_API_VERSION = "1.1.0", TOOL_PATH_PATTERN, CALLER_FACING_ERRORS, INTERNAL_ERROR_MESSAGES;
 var init_remote_openapi = __esm(() => {
   init_config();
   init_operation_error();
@@ -94692,7 +94970,9 @@ var init_remote_openapi = __esm(() => {
     unsupported_filter: 400,
     email_policy_violation: 403,
     source_index_policy_violation: 403,
-    source_index_not_enabled: 503
+    source_index_not_enabled: 503,
+    source_answer_busy: 429,
+    source_answer_job_not_found: 404
   };
   INTERNAL_ERROR_MESSAGES = {
     email_unreachable: "Olympus could not reach its source worker in time. Retry later.",
@@ -97109,6 +97389,8 @@ async function main() {
     }
     return remoteAccessFromStatus({ live: remotePublicUrls(), status });
   };
+  const { SourceAnswerJobRegistry: SourceAnswerJobRegistry2, sourceAnswerJobLimitsFromEnv: sourceAnswerJobLimitsFromEnv2 } = await Promise.resolve().then(() => (init_source_answer_jobs(), exports_source_answer_jobs));
+  const sourceAnswerJobs = new SourceAnswerJobRegistry2({ limits: sourceAnswerJobLimitsFromEnv2(process.env) });
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -97117,7 +97399,8 @@ async function main() {
       sourceIndexReadEnabled,
       workerFetch: worker.fetch,
       caller,
-      signal
+      signal,
+      sourceAnswerJobs
     })
   };
   const { createRemoteOpenApiHandler: createRemoteOpenApiHandler2, withRemoteOpenApiRoutes: withRemoteOpenApiRoutes2 } = await Promise.resolve().then(() => (init_remote_openapi(), exports_remote_openapi));
@@ -98095,7 +98378,7 @@ init_messaging_pairing();
 init_messaging_capture();
 init_config();
 init_dashboard_launch();
-import { randomBytes as randomBytes12 } from "node:crypto";
+import { randomBytes as randomBytes13 } from "node:crypto";
 import { readFileSync as readFileSync40, openSync as openSync11, closeSync as closeSync11, writeSync as writeSync2 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -102273,7 +102556,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes12(32).toString("base64url");
+  return randomBytes13(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};

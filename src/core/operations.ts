@@ -3,7 +3,7 @@ import { runDoctor } from './doctor.ts';
 import { EmailClient, type SourceAnswerSelectedItemOption } from './email.ts';
 import { defaultConfig, type OlympusConfig } from './config.ts';
 import { resolveLane, resolveModelProfile } from './config.ts';
-import { OperationError } from './operation-error.ts';
+import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
 import { selectedItemContentFieldPath } from './source-index/selected-item-safety.ts';
 import {
   createPublicSourceCorpusRegistry,
@@ -14,7 +14,7 @@ import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import { V0_4_PUBLIC_NATIVE_TOOLS } from './public-surface.ts';
 import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-watch.ts';
 import type { OperationCaller } from './operation-caller.ts';
-import { sourceAnswerJobNotFound, type SourceAnswerJobScope } from './source-answer-jobs.ts';
+import type { SourceAnswerJobScope } from './source-answer-jobs.ts';
 
 type SourceIndexAnswerCorpusId = string;
 type SourceIndexStatusCorpusId = string;

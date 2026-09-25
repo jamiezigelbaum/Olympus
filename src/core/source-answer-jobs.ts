@@ -23,7 +23,7 @@
  * the caller asks again.
  */
 import { randomBytes } from 'node:crypto';
-import { OperationError } from './operation-error.ts';
+import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
 import type { OperationCaller } from './operation-caller.ts';
 
 export const SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200_000;
@@ -300,14 +300,6 @@ function pendingResult(jobId: string, elapsedMs: number, resultWaitMs: number): 
       + `Call source_answer_result with this job_id to get it${wait > 0 ? ` (each call waits up to ${wait} s)` : ''}; `
       + 'repeat while it says working. Do not ask the question again.',
   };
-}
-
-export function sourceAnswerJobNotFound(): OperationError {
-  return new OperationError(
-    'source_answer_job_not_found',
-    'No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted.',
-    'Ask the question again with source_answer.',
-  );
 }
 
 function newJobId(): string {
