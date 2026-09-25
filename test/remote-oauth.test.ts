@@ -669,10 +669,10 @@ describe('pairing codes', () => {
     expect(store.oauth.checkPairingCode(live.code)).toEqual({ ok: true });
   });
 
-  const authorizeUrlFor = () => {
+  const authorizeUrlFor = (client: { client_id: string; redirect_uris: string[] } = CLAUDE_CIMD) => {
     const url = new URL(`${base}/connect/authorize`);
     url.search = new URLSearchParams({
-      response_type: 'code', client_id: CLAUDE_CIMD_URL, redirect_uri: CLAUDE_CIMD.redirect_uris[0]!,
+      response_type: 'code', client_id: client.client_id, redirect_uri: client.redirect_uris[0]!,
       code_challenge: 'x'.repeat(43), code_challenge_method: 'S256', state: 's',
     }).toString();
     return url;
@@ -683,8 +683,8 @@ describe('pairing codes', () => {
     'x-forwarded-for': address,
     ...(auth === undefined ? {} : { [RELAY_AUTH_HEADER]: auth }),
   });
-  const openFrom = async (headers: Record<string, string>) => {
-    const response = await fetch(authorizeUrlFor(), { redirect: 'manual', headers });
+  const openFrom = async (headers: Record<string, string>, url: URL = authorizeUrlFor()) => {
+    const response = await fetch(url, { redirect: 'manual', headers });
     const html = await response.text();
     return {
       response,
@@ -749,10 +749,20 @@ describe('pairing codes', () => {
     // Without the relay's secret (or with a wrong one), rotating the forged
     // agent address does not buy fresh per-caller slots or a fresh pacing
     // budget: every such request is the shared `direct` caller.
-    for (let i = 0; i < 8; i += 1) expect((await openFrom(forged(`203.0.113.${i + 1}`))).response.status).toBe(200);
-    expect((await openFrom(forged('203.0.113.99'))).response.status).toBe(429);
-    expect((await openFrom(forged('203.0.113.98', 'A'.repeat(43)))).response.status).toBe(429);
-    expect((await openFrom({})).response.status).toBe(429);
+    const pages = [];
+    for (let i = 0; i < 8; i += 1) pages.push(await openFrom(forged(`203.0.113.${i + 1}`)));
+    // Three more "addresses" are the same direct caller: each evicts that
+    // caller's own oldest waiting approval instead of getting fresh slots.
+    for (const headers of [forged('203.0.113.99'), forged('203.0.113.98', 'A'.repeat(43)), {}]) {
+      expect((await openFrom(headers)).response.status).toBe(200);
+    }
+    const code = () => ({ action: 'approve', pairing_code: store.oauth.mintPairingCode().code });
+    for (const evicted of pages.slice(0, 3)) {
+      const gone = await submitConsent(evicted, code());
+      expect(gone.status).toBe(400);
+      expect(await gone.text()).toContain('replaced by a newer one');
+    }
+    expect((await submitConsent(pages[3]!, code())).status).toBe(303);
     // The real relay (with the secret) still gets per-address slots.
     expect((await openFrom(relayed('198.51.100.20'))).response.status).toBe(200);
   });
@@ -767,12 +777,69 @@ describe('pairing codes', () => {
     expect(sleeps).toEqual([1000, 2000, 4000]);
   });
 
-  test('one caller can hold at most eight waiting approvals', async () => {
+  test('one caller holds at most eight waiting approvals; a ninth replaces its own oldest', async () => {
     const flooder = relayed('203.0.113.50');
+    const owner = await openFrom(relayed('198.51.100.20'));
+    const first = await openFrom(flooder);
     for (let i = 0; i < 8; i += 1) expect((await openFrom(flooder)).response.status).toBe(200);
-    expect((await openFrom(flooder)).response.status).toBe(429);
-    expect((await openFrom(relayed('198.51.100.20'))).response.status).toBe(200);
+    const code = () => ({ action: 'approve', pairing_code: store.oauth.mintPairingCode().code });
+    expect((await submitConsent(first, code(), { Origin: base, ...flooder })).status).toBe(400);
+    // Nobody else's approval moved.
+    expect((await submitConsent(owner, code())).status).toBe(303);
     expect((await openFrom({})).response.status).toBe(200);
+  });
+
+  test('a full table evicts the heaviest holder, so a distributed flood never locks the owner out', async () => {
+    // The review finding: 32 relay addresses x 8 used to fill all 256 slots
+    // and answer everyone else 429 for ten minutes.
+    // Half the flood names Claude, half ChatGPT, so neither app's cap binds first.
+    const floodClient = (a: number) => authorizeUrlFor(a < 16 ? CLAUDE_CIMD : CHATGPT_CIMD);
+    const floods = new Map<string, Awaited<ReturnType<typeof openFrom>>[]>();
+    for (let a = 0; a < 32; a += 1) {
+      const headers = relayed(`203.0.113.${a + 1}`);
+      const pages = [];
+      for (let i = 0; i < 8; i += 1) {
+        const page = await openFrom(headers, floodClient(a));
+        expect(page.response.status).toBe(200);
+        pages.push(page);
+      }
+      floods.set(`203.0.113.${a + 1}`, pages);
+    }
+    // The table is full. The owner still gets a page, from a fresh address,
+    // and can finish it while the flood keeps coming.
+    const ownerHeaders = relayed('198.51.100.20');
+    const owner = await openFrom(ownerHeaders);
+    expect(owner.response.status).toBe(200);
+    for (let a = 0; a < 32; a += 1) expect((await openFrom(relayed(`203.0.113.${a + 1}`), floodClient(a))).response.status).toBe(200);
+    for (let i = 0; i < 40; i += 1) expect((await openFrom(relayed(`192.0.2.${i + 1}`))).response.status).toBe(200);
+    const approved = await submitConsent(owner, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code },
+      { Origin: base, ...ownerHeaders });
+    expect(approved.status).toBe(303);
+    expect(new URL(approved.headers.get('location')!).searchParams.get('code')).toBeTruthy();
+    // What made room was the flood's own oldest requests.
+    const firstFlood = floods.get('203.0.113.1')![0]!;
+    expect((await submitConsent(firstFlood, { action: 'deny' }, { Origin: base, ...relayed('203.0.113.1') })).status).toBe(400);
+  });
+
+  test('one client id cannot take every slot', async () => {
+    // Anyone can start a request naming Claude's client id; past half the
+    // table those requests evict each other instead of crowding out other apps.
+    const chatgpt = await openConsent(authorizeUrlFor(CHATGPT_CIMD));
+    const firsts = [];
+    for (let a = 0; a < 16; a += 1) {
+      for (let i = 0; i < 8; i += 1) {
+        const page = await openFrom(relayed(`203.0.113.${a + 1}`));
+        if (i === 0) firsts.push(page);
+      }
+    }
+    const deny = (page: typeof firsts[number], address: string) =>
+      submitConsent(page, { action: 'deny' }, { Origin: base, ...relayed(address) });
+    // 128 Claude requests wait. The next, from a new address, evicts the
+    // oldest of them (every holder has eight), though the table is not full.
+    expect((await openFrom(relayed('192.0.2.1'))).response.status).toBe(200);
+    expect((await deny(firsts[0]!, '203.0.113.1')).status).toBe(400);
+    expect((await deny(firsts[1]!, '203.0.113.2')).status).toBe(303);
+    expect((await submitConsent(chatgpt, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code })).status).toBe(303);
   });
 
   test('olympus connections pair mints a code and says whether OAuth is on', () => {

@@ -52,9 +52,21 @@ const ROUTED_PATHS = new Set<string>(Object.values(REMOTE_OAUTH_PATHS));
 const AUTHORIZATION_CODE_TTL_MS = 60_000;
 const CONSENT_REQUEST_TTL_MS = 10 * 60_000;
 const CONSENT_MAX_ATTEMPTS = 5;
+/**
+ * Waiting approvals are bounded, but a full table never refuses a new one: a
+ * new request evicts an older one instead (see admitPending), so a flood can
+ * cost the owner an approval page, never ten minutes of being locked out.
+ */
 const MAX_PENDING_CONSENTS = 256;
-/** Waiting approvals one caller (relay-reported address) may hold. */
+/** Waiting approvals one caller (relay-reported address) may hold; its own oldest makes room. */
 const MAX_PENDING_CONSENTS_PER_CALLER = 8;
+/**
+ * Waiting approvals one client id may hold, so no single app takes the whole
+ * table. Half, not less: anyone can name the owner's own app (Claude's client
+ * id is public), and inside that scope the owner is protected only by fair
+ * share, so a smaller cap would let fewer addresses evict the owner.
+ */
+const MAX_PENDING_CONSENTS_PER_CLIENT = 128;
 /** Pacing for pairing-code checks: see pairingPacer. */
 const PAIRING_FAILURE_WINDOW_MS = 15 * 60_000;
 const PAIRING_PER_CALLER_MAX_DELAY_MS = 60_000;
@@ -178,6 +190,32 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     for (const [hash, entry] of codes) if (entry.expiresAt <= at) codes.delete(hash);
   };
 
+  /**
+   * Makes room for one more waiting approval from `caller` for `clientId`.
+   * Nothing is refused; the table only ever evicts:
+   * - a caller at its cap loses its own oldest request;
+   * - a client id at its cap, or a full table, loses the oldest request of the
+   *   caller holding the most slots in that scope (fair share).
+   * An attacker spread over many addresses therefore evicts itself first. The
+   * owner, holding one request, is evicted only when every holder is down to
+   * one, which takes more distinct addresses than the table has slots.
+   */
+  const admitPending = (caller: string, clientId: string): void => {
+    const evictFairShare = (scope: Array<[string, PendingConsent]>): void => {
+      const held = new Map<string, number>();
+      for (const [, entry] of scope) held.set(entry.caller, (held.get(entry.caller) ?? 0) + 1);
+      const heaviest = Math.max(0, ...held.values());
+      // Map order is insertion order, so the first match is that caller's oldest.
+      const victim = scope.find(([, entry]) => held.get(entry.caller) === heaviest);
+      if (victim) pending.delete(victim[0]);
+    };
+    const own = [...pending].filter(([, entry]) => entry.caller === caller);
+    if (own.length >= MAX_PENDING_CONSENTS_PER_CALLER) pending.delete(own[0]![0]);
+    const sameClient = [...pending].filter(([, entry]) => entry.client.clientId === clientId);
+    if (sameClient.length >= MAX_PENDING_CONSENTS_PER_CLIENT) evictFairShare(sameClient);
+    if (pending.size >= MAX_PENDING_CONSENTS) evictFairShare([...pending]);
+  };
+
   const resolveClient = async (clientId: string): Promise<ResolvedClient | string> => {
     if (isClientIdMetadataUrl(clientId)) {
       try {
@@ -236,11 +274,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     }
     sweep();
     const caller = callerKey(request);
-    let callerPending = 0;
-    for (const entry of pending.values()) if (entry.caller === caller) callerPending += 1;
-    if (callerPending >= MAX_PENDING_CONSENTS_PER_CALLER || pending.size >= MAX_PENDING_CONSENTS) {
-      return errorPage(429, 'Too many approvals are waiting. Finish or close one, or try again in a few minutes.');
-    }
+    admitPending(caller, client.clientId);
     const requestId = randomBytes(16).toString('hex');
     const csrf = randomBytes(32).toString('base64url');
     const entry: PendingConsent = {
@@ -288,7 +322,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     const requestId = form.get('request_id') ?? '';
     sweep();
     const entry = /^[a-f0-9]{32}$/.test(requestId) ? pending.get(requestId) : undefined;
-    if (!entry) return errorPage(400, 'This approval has expired. Start again from the app.');
+    if (!entry) return errorPage(400, 'This approval has expired or was replaced by a newer one. Start again from the app.');
     const csrf = form.get('csrf') ?? '';
     const cookie = readCookie(request, consentCookieName(requestId)) ?? '';
     if (!constantTimeEqual(csrf, entry.csrf) || !constantTimeEqual(cookie, entry.csrf)) {
