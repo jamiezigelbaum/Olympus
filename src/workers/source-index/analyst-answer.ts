@@ -1362,6 +1362,9 @@ async function routeAnalysis(input: RouteAnalysisInput): Promise<RoutedAnalysis>
       return { result: attempt.result, backend: 'venice' };
     } catch (error) {
       if (isAnalystPolicyRefusal(error)) throw error;
+      // The caller went away: nobody is left to answer, and it is not
+      // Venice's failure, so no fallback leg and no fallback trace.
+      if (isCallerCancellation(error)) throw error;
       // Explicit Venice failed; fall back to local so the request still has a
       // privacy-preserving answer path, and report the actual backend used.
       const fallback = await observeImplicitAnalystLeg('local', localAnalystTimeoutMs, () =>
@@ -1403,6 +1406,7 @@ async function routeAnalysis(input: RouteAnalysisInput): Promise<RoutedAnalysis>
         analyzeWithOptionalTimeout(cloud, pack, { localOnly }, cloudAnalystTimeoutMs));
       return { result, backend: 'cloud' };
     } catch (error) {
+      if (isCallerCancellation(error)) throw error;
       const fallback = await observeImplicitAnalystLeg('local', localAnalystTimeoutMs, () =>
         analyzeWithOptionalTimeout(local, pack, { localOnly }, localAnalystTimeoutMs));
       return {

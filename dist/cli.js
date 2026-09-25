@@ -28016,6 +28016,8 @@ async function routeAnalysis(input) {
     } catch (error) {
       if (isAnalystPolicyRefusal(error))
         throw error;
+      if (isCallerCancellation(error))
+        throw error;
       const fallback = await observeImplicitAnalystLeg("local", localAnalystTimeoutMs, () => analyzeWithOptionalTimeout(local, pack, { localOnly }, localAnalystTimeoutMs));
       return {
         result: fallback,
@@ -28051,6 +28053,8 @@ async function routeAnalysis(input) {
       const result2 = await observeImplicitAnalystLeg("cloud", cloudAnalystTimeoutMs, () => analyzeWithOptionalTimeout(cloud, pack, { localOnly }, cloudAnalystTimeoutMs));
       return { result: result2, backend: "cloud" };
     } catch (error) {
+      if (isCallerCancellation(error))
+        throw error;
       const fallback = await observeImplicitAnalystLeg("local", localAnalystTimeoutMs, () => analyzeWithOptionalTimeout(local, pack, { localOnly }, localAnalystTimeoutMs));
       return {
         result: fallback,
@@ -40945,6 +40949,12 @@ function redactedSecretRefLabel(secretRef) {
     return `store:${trimmed2.slice("store:".length).trim()}`;
   return "configured secretRef";
 }
+function callerCancellation(signal) {
+  if (!signal?.aborted)
+    return;
+  const reason = signal.reason;
+  return reason instanceof Error && reason.name === "AbortError" ? reason : undefined;
+}
 function createDelphiTransport(config) {
   return new DirectHttpDelphiTransport(fetch, config.argus.requestTimeoutSeconds * 1000);
 }
@@ -40962,12 +40972,18 @@ class DirectHttpDelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      const cancelled = callerCancellation(init.signal);
+      if (cancelled)
+        throw cancelled;
       if (isAbortError2(firstError)) {
         throw argusTimeoutError(lane, url, timeoutMs);
       }
       try {
         response = await this.fetchWithTimeout(url, init, timeoutMs);
       } catch (secondError) {
+        const cancelledAgain = callerCancellation(init.signal);
+        if (cancelledAgain)
+          throw cancelledAgain;
         if (isAbortError2(secondError)) {
           throw argusTimeoutError(lane, url, timeoutMs);
         }

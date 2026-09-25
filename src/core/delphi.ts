@@ -236,6 +236,18 @@ function redactedSecretRefLabel(secretRef: string): string {
   return 'configured secretRef';
 }
 
+/**
+ * The caller's cancellation, when the request's signal was aborted with an
+ * AbortError reason (a disconnect, a hand-off job's deadline, an answer leg's
+ * budget). Any other abort reason (a TimeoutError, say) keeps the lane-timeout
+ * mapping it always had.
+ */
+function callerCancellation(signal: AbortSignal | null | undefined): Error | undefined {
+  if (!signal?.aborted) return undefined;
+  const reason: unknown = signal.reason;
+  return reason instanceof Error && reason.name === 'AbortError' ? reason : undefined;
+}
+
 export function createDelphiTransport(config: OlympusConfig): DelphiTransport {
   return new DirectHttpDelphiTransport(fetch, config.argus.requestTimeoutSeconds * 1000);
 }
@@ -260,6 +272,12 @@ export class DirectHttpDelphiTransport implements DelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      // The caller's own cancellation (a disconnect, a hand-off job's
+      // deadline, a leg budget) is not this lane timing out: it surfaces as
+      // the caller's abort reason, which the answer route reads as a
+      // cancellation instead of a lane failure.
+      const cancelled = callerCancellation(init.signal);
+      if (cancelled) throw cancelled;
       if (isAbortError(firstError)) {
         throw argusTimeoutError(lane, url, timeoutMs);
       }
@@ -270,6 +288,8 @@ export class DirectHttpDelphiTransport implements DelphiTransport {
       try {
         response = await this.fetchWithTimeout(url, init, timeoutMs);
       } catch (secondError) {
+        const cancelledAgain = callerCancellation(init.signal);
+        if (cancelledAgain) throw cancelledAgain;
         if (isAbortError(secondError)) {
           throw argusTimeoutError(lane, url, timeoutMs);
         }

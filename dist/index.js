@@ -11228,6 +11228,12 @@ function redactedSecretRefLabel(secretRef) {
     return `store:${trimmed.slice("store:".length).trim()}`;
   return "configured secretRef";
 }
+function callerCancellation(signal) {
+  if (!signal?.aborted)
+    return;
+  const reason = signal.reason;
+  return reason instanceof Error && reason.name === "AbortError" ? reason : undefined;
+}
 function createDelphiTransport(config) {
   return new DirectHttpDelphiTransport(fetch, config.argus.requestTimeoutSeconds * 1000);
 }
@@ -11245,12 +11251,18 @@ class DirectHttpDelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      const cancelled = callerCancellation(init.signal);
+      if (cancelled)
+        throw cancelled;
       if (isAbortError(firstError)) {
         throw argusTimeoutError(lane, url, timeoutMs);
       }
       try {
         response = await this.fetchWithTimeout(url, init, timeoutMs);
       } catch (secondError) {
+        const cancelledAgain = callerCancellation(init.signal);
+        if (cancelledAgain)
+          throw cancelledAgain;
         if (isAbortError(secondError)) {
           throw argusTimeoutError(lane, url, timeoutMs);
         }
