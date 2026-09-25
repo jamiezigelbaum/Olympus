@@ -94187,14 +94187,13 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
   };
   const admitPending = (caller, clientId) => {
-    const evictFairShare = (all) => {
-      const unpinned = all.filter(([, entry]) => !entry.pinned);
-      const scope = unpinned.length > 0 ? unpinned : all;
+    const evictFairShare = (scope) => {
       const held = new Map;
       for (const [, entry] of scope)
         held.set(entry.caller, (held.get(entry.caller) ?? 0) + 1);
       const heaviest = Math.max(0, ...held.values());
-      const victim = scope.find(([, entry]) => held.get(entry.caller) === heaviest);
+      const candidates = scope.filter(([, entry]) => held.get(entry.caller) === heaviest);
+      const victim = candidates.find(([, entry]) => !entry.pinned) ?? candidates[0];
       if (victim)
         pending.delete(victim[0]);
     };
@@ -94327,14 +94326,14 @@ function createRemoteOAuthHandler(options) {
       return finish2({ error: "access_denied", error_description: "The owner denied the request." });
     if (action !== "approve")
       return errorPage(400, "The approval form was malformed.");
-    if (normalizePairingCode(form.get("pairing_code") ?? "") !== undefined)
-      entry.pinned = true;
     const caller = callerKey(request);
     const wait = pacer.delayFor(caller);
     if (wait > PAIRING_MAX_HELD_MS) {
       return consentPage(requestId, entry, u, `Too many wrong codes were tried from here. Wait ${Math.ceil(wait / 1000)} seconds, then try again.`, false);
     }
     await pacer.hold(wait);
+    if (normalizePairingCode(form.get("pairing_code") ?? "") !== undefined)
+      entry.pinned = true;
     const check = options.connections().oauth.checkPairingCode(form.get("pairing_code") ?? "");
     if (!check.ok) {
       if (check.reason === "malformed") {

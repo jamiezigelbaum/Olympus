@@ -215,11 +215,13 @@ and the relay client forwards to it.
   many addresses therefore evicts itself, and the owner, holding one request,
   is evicted only once every holder is down to one. That takes more distinct
   addresses than the scope has slots (128 when the flood names the owner's own
-  app, whose client id is public). A page into which a well-formed pairing
-  code has been typed (with its cookie and CSRF token) is pinned: it is
-  evicted only when its scope holds nothing unpinned. Pinning costs a paced
-  pairing check, and five wrong codes end the page, so it cannot be used to
-  hold slots cheaply. The evicted page says it was replaced.
+  app, whose client id is public). A page whose pairing check the pacer has
+  admitted (a well-formed code, with the page's cookie and CSRF token) is
+  pinned, but pinning only decides *which* of the heaviest callers' entries
+  goes: fair share always runs over the whole scope, so pinned entries can
+  never move an eviction onto a caller holding fewer, such as the owner. Each
+  pin costs a paced check (about five per caller fit inside the hold limit)
+  and five wrong codes end the page. The evicted page says it was replaced.
   Before this, 32 addresses holding 8 each filled the table and every other
   caller got a 429 for ten minutes.
   Callers that arrive without the relay's secret (a tunnel, or loopback) share

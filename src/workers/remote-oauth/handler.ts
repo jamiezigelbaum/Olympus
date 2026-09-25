@@ -202,24 +202,27 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
   /**
    * Makes room for one more waiting approval from `caller` for `clientId`.
    * Nothing is refused; the table only ever evicts:
-   * - a caller at its cap loses its own oldest request;
-   * - a client id at its cap, or a full table, loses the oldest request of the
-   *   caller holding the most slots in that scope (fair share).
+   * - a caller at its cap loses its own oldest unpinned request;
+   * - a client id at its cap, or a full table, loses a request of the caller
+   *   holding the most slots in that scope (fair share).
    * An attacker spread over many addresses therefore evicts itself first. The
    * owner, holding one request, is evicted only when every holder is down to
    * one, which takes more distinct addresses (IPv6 /64s) than the scope has
-   * slots. A page someone is typing a pairing code into is pinned: it goes
-   * only when its scope holds nothing unpinned.
+   * slots. A page whose pairing check the pacer admitted is pinned: among the
+   * heaviest callers' entries, unpinned ones go first. Pinning never moves an
+   * eviction onto a caller holding fewer entries.
    */
   const admitPending = (caller: string, clientId: string): void => {
-    const evictFairShare = (all: Array<[string, PendingConsent]>): void => {
-      const unpinned = all.filter(([, entry]) => !entry.pinned);
-      const scope = unpinned.length > 0 ? unpinned : all;
+    const evictFairShare = (scope: Array<[string, PendingConsent]>): void => {
+      // Fair share over the whole scope, pinned or not: the caller holding the
+      // most entries loses one. Pinning never shifts eviction onto a lighter
+      // caller; it only chooses among the heaviest callers' entries.
       const held = new Map<string, number>();
       for (const [, entry] of scope) held.set(entry.caller, (held.get(entry.caller) ?? 0) + 1);
       const heaviest = Math.max(0, ...held.values());
-      // Map order is insertion order, so the first match is that caller's oldest.
-      const victim = scope.find(([, entry]) => held.get(entry.caller) === heaviest);
+      const candidates = scope.filter(([, entry]) => held.get(entry.caller) === heaviest);
+      // Map order is insertion order, so the first match is the oldest.
+      const victim = candidates.find(([, entry]) => !entry.pinned) ?? candidates[0];
       if (victim) pending.delete(victim[0]);
     };
     const own = [...pending].filter(([, entry]) => entry.caller === caller);
@@ -353,8 +356,6 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     const action = form.get('action');
     if (action === 'deny') return finish({ error: 'access_denied', error_description: 'The owner denied the request.' });
     if (action !== 'approve') return errorPage(400, 'The approval form was malformed.');
-    // A typo pins nothing (it costs nothing either); a real attempt does.
-    if (normalizePairingCode(form.get('pairing_code') ?? '') !== undefined) entry.pinned = true;
     const caller = callerKey(request);
     const wait = pacer.delayFor(caller);
     if (wait > PAIRING_MAX_HELD_MS) {
@@ -362,6 +363,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
         `Too many wrong codes were tried from here. Wait ${Math.ceil(wait / 1000)} seconds, then try again.`, false);
     }
     await pacer.hold(wait);
+    // Pinned only once the pacer has admitted this check: a real, paced
+    // attempt. A typo pins nothing (it costs nothing either).
+    if (normalizePairingCode(form.get('pairing_code') ?? '') !== undefined) entry.pinned = true;
     const check = options.connections().oauth.checkPairingCode(form.get('pairing_code') ?? '');
     if (!check.ok) {
       if (check.reason === 'malformed') {

@@ -869,6 +869,58 @@ describe('pairing codes', () => {
     expect(new URL(approved.headers.get('location')!).searchParams.get('code')).toBeTruthy();
   });
 
+  test("pinned attacker pages across 17+ /64s cannot evict the owner's single page", async () => {
+    // The re-review's attack: fill Claude's 128-slot client cap with pinned
+    // entries from 16 /64s (8 each), leave the owner's page the only unpinned
+    // one, then keep opening pages from further /64s. Fair share runs over the
+    // whole scope, so the victims are always the attackers holding the most.
+    const attackers = Array.from({ length: 20 }, (_, i) => relayed(`2001:db8:${(i + 0x100).toString(16)}::1`));
+    const refusedPins: number[] = [];
+    for (const headers of attackers.slice(0, 16)) {
+      for (let i = 0; i < 8; i += 1) {
+        const page = await openFrom(headers);
+        expect(page.response.status).toBe(200);
+        // Try to pin it with a well-formed wrong code. The pacer admits a few
+        // per caller; a refused check ("Wait N seconds") pins nothing.
+        const tried = await submitConsent(page, { action: 'approve', pairing_code: 'AAAA-AAAA-AAAA' }, { Origin: base, ...headers });
+        if ((await tried.text()).includes('Wait')) refusedPins.push(i);
+      }
+    }
+    expect(refusedPins.length).toBeGreaterThan(0);
+    const ownerHeaders = relayed('198.51.100.20');
+    const owner = await openFrom(ownerHeaders);
+    for (const headers of attackers.slice(16)) {
+      for (let i = 0; i < 8; i += 1) expect((await openFrom(headers)).response.status).toBe(200);
+    }
+    for (let i = 0; i < 20; i += 1) expect((await openFrom(relayed(`2001:db8:${(i + 0x200).toString(16)}::1`))).response.status).toBe(200);
+    sleeps = [];
+    const approved = await submitConsent(owner, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code }, { Origin: base, ...ownerHeaders });
+    expect(approved.status).toBe(303);
+    expect(new URL(approved.headers.get('location')!).searchParams.get('code')).toBeTruthy();
+  });
+
+  test('even when every attacker entry is pinned, fair share evicts the heaviest attacker, not the owner', async () => {
+    // Five paced checks per /64 fit inside the hold limit, so 26 /64s can pin
+    // 130 pages and fill Claude's 128-slot cap with pinned entries alone. The
+    // owner's page is then the only unpinned entry in that scope.
+    let pinned = 0;
+    for (let a = 0; a < 26; a += 1) {
+      const headers = relayed(`2001:db8:${(a + 0x300).toString(16)}::1`);
+      for (let i = 0; i < 5; i += 1) {
+        const page = await openFrom(headers);
+        const tried = await submitConsent(page, { action: 'approve', pairing_code: 'AAAA-AAAA-AAAA' }, { Origin: base, ...headers });
+        if (!(await tried.text()).includes('Wait')) pinned += 1;
+      }
+    }
+    expect(pinned).toBeGreaterThanOrEqual(128);
+    const ownerHeaders = relayed('198.51.100.20');
+    const owner = await openFrom(ownerHeaders);
+    for (let i = 0; i < 40; i += 1) expect((await openFrom(relayed(`2001:db8:${(i + 0x400).toString(16)}::1`))).response.status).toBe(200);
+    sleeps = [];
+    const approved = await submitConsent(owner, { action: 'approve', pairing_code: store.oauth.mintPairingCode().code }, { Origin: base, ...ownerHeaders });
+    expect(approved.status).toBe(303);
+  });
+
   test('olympus connections pair mints a code and says whether OAuth is on', () => {
     const env = {
       HOME: join(dir, 'home'),
