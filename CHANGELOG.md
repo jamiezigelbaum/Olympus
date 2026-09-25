@@ -24,19 +24,20 @@ hybrid search, and the hosted-agent connection slices.
 - **Readwise (#100, #101).** Readwise answers with hybrid search in its
   Personal and Private tiers, using the embeddings it already has (owner
   decision `decision-2026-09-24-readwise-hybrid` in the embedding ledger);
-  Private chunks embed and query only through the private lane. Embedding now
-  runs outside the sync for every source: a provider timeout after items are
-  saved no longer fails the sync, the items are queued for a background
-  sweep, and the delay shows as `embedding_provider_unavailable` on the
+  Private chunks embed and query only through the private lane. Readwise now
+  embeds only outside the sync, and for every source a provider timeout after
+  items are saved no longer fails the sync: the items are queued for a
+  background sweep, and the delay shows as `embedding_provider_unavailable` on the
   Background page, the source page and in `olympus doctor`. Readwise also
   sweeps any chunk still missing a vector, 32 items per store per pass, so
   earlier failed syncs catch up; X, WhatsApp and Telegram do the same (owner
   decision `decision-2026-09-25-chat-lane-catch-up`), so a chat store with an
   old unembedded backlog embeds it once on its approved model, with the
-  backlog and estimated cost shown first. Gmail and Drive embed only within their
-  current approved scope. Each hybrid store shows its embedding backlog and an
+  backlog and estimated cost shown first. The sweep embeds Gmail and Drive items only
+  within their current approved scope. Each hybrid store shows its embedding backlog and an
   estimated cost. One embedding runs per store at a time across the sync, the
-  sweep and the external drain, so nothing is paid for twice.
+  sweep and the external drain, so two embedders never work on the same chunks
+  at once.
 - **Needs you (#100).** A sync task shows **Needs you** after three failures in
   a row (a missing or refused credential after one), the same on Home, the
   page header, the source page and the Background page; below that it reads
@@ -46,7 +47,8 @@ hybrid search, and the hosted-agent connection slices.
   answer questions from agents beyond OpenClaw, under the same privacy rules.
   Cloud agents see up to Personal. Private items are read only by Venice or a
   local model, and the agent receives only their derived answers, with each
-  item's title, path, source and author. Secrets never leave. Claude Code and
+  item's title, path, source and author. Secret values never leave; only where
+  a secret is gets reported. Claude Code and
   Codex on the same computer can connect today through the local MCP server;
   the Setup page's new **Agents** section walks through it and lists and
   revokes connections. For cloud agents (Claude on the web and phone, ChatGPT,
