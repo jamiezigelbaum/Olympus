@@ -32,8 +32,8 @@ hybrid search, and the hosted-agent connection slices.
   sweeps any chunk still missing a vector, 32 items per store per pass, so
   earlier failed syncs catch up; X, WhatsApp and Telegram do the same (owner
   decision `decision-2026-09-25-chat-lane-catch-up`), so a chat store with an
-  old unembedded backlog embeds it once on its approved model, with the
-  backlog and estimated cost shown first. The sweep embeds Gmail and Drive items only
+  old unembedded backlog embeds it once on its approved model, and the source
+  page shows the backlog and estimated cost. The sweep embeds Gmail and Drive items only
   within their current approved scope. Each hybrid store shows its embedding backlog and an
   estimated cost. One embedding runs per store at a time across the sync, the
   sweep and the external drain, so two embedders never work on the same chunks

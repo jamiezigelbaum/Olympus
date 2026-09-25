@@ -21246,9 +21246,9 @@ var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
   },
   {
     entry_id: "decision-2026-09-25-chat-lane-catch-up",
-    recorded_at: "2026-09-25T09:00:00.000Z",
+    recorded_at: "2026-09-25T07:00:00.000Z",
     kind: "model_decision",
-    what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "hybrid-served chunk still missing a vector, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
+    what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "chunk still missing a vector in a hybrid or shadow corpus, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
     scope: {
       corpora: [
         "internal.x.bookmarks",
