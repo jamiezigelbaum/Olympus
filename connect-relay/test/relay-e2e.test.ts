@@ -12,6 +12,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startConnect, type ConnectHandle } from '../client/connect.ts';
+import { ariCertId } from '../client/ari.ts';
 import { loadOrCreateIdentity } from '../client/identity.ts';
 import { RelayClient } from '../client/relay-client.ts';
 import {
@@ -226,6 +227,43 @@ describe('connect relay end to end', () => {
     expect(acme.issued.length).toBe(issuedBefore);
     const response = await agentRequest({ port: relay.port, servername: second.hostname, ca: ca.cert, path: '/mcp' });
     expect(response.status).toBe(200);
+  });
+
+  test('renewal follows the CA renewal window (ARI) and names the certificate it replaces', async () => {
+    const { relay } = await makeRelay();
+    const hour = 60 * 60 * 1000;
+    try {
+      // A window a month out: the install reports when it will renew, and does not renew now.
+      acme.setRenewalWindow({ start: Date.now() + 30 * 24 * hour, end: Date.now() + 31 * 24 * hour });
+      const first = await connectInstall(relay);
+      const status = first.handle.certificate();
+      expect(status.state).toBe('serving');
+      const renewAt = Date.parse((status as { renewAt?: string }).renewAt ?? '');
+      expect(renewAt).toBeGreaterThanOrEqual(Date.now() + 30 * 24 * hour - 60_000);
+      expect(renewAt).toBeLessThanOrEqual(Date.now() + 31 * 24 * hour);
+      const oldPem = readFileSync(join(first.stateDir, 'connect-relay', 'tls-cert.pem'), 'utf8');
+      const oldId = ariCertId(oldPem)!;
+      expect(acme.renewalInfoRequests).toContain(oldId);
+      await first.handle.stop();
+
+      // The CA pulls the window into the past (as before a mass revocation).
+      // The certificate is 90 days fresh by the proportional rule, yet the
+      // restarted install renews at once, with `replaces` naming the old one.
+      acme.setRenewalWindow({ start: Date.now() - 2 * hour, end: Date.now() - hour });
+      const issuedBefore = acme.issued.length;
+      const second = await connectInstall(relay, first.stateDir);
+      expect(acme.issued.length).toBe(issuedBefore + 1);
+      expect(acme.replacements.at(-1)).toBe(oldId);
+      const newPem = readFileSync(join(first.stateDir, 'connect-relay', 'tls-cert.pem'), 'utf8');
+      expect(ariCertId(newPem)).not.toBe(oldId);
+      // A CA still answering "overdue" for the brand-new certificate does not start a renewal loop.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(acme.issued.length).toBe(issuedBefore + 1);
+      const response = await agentRequest({ port: relay.port, servername: second.hostname, ca: ca.cert, path: '/mcp' });
+      expect(response.status).toBe(200);
+    } finally {
+      acme.setRenewalWindow(undefined);
+    }
   });
 
   test('an unknown install name gets a fatal unrecognized_name alert', async () => {

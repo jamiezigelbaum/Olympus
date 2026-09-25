@@ -9,6 +9,7 @@ import { X509Certificate } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fetchTermsOfService, obtainCertificate } from './acme.ts';
+import { fetchRenewalInfo, selectRenewalTime, type RenewalWindow } from './ari.ts';
 import {
   ensureStateDir,
   loadOrCreateAcmeAccountKey,
@@ -34,7 +35,13 @@ export type CertificateStatus =
       serving?: { hostname: string; notAfter: string };
     }
   | { state: 'issuing' }
-  | { state: 'serving'; hostname: string; notAfter: string }
+  | {
+      state: 'serving';
+      hostname: string;
+      notAfter: string;
+      /** When the CA's renewal window (ARI) says this install will renew, if it offers one. */
+      renewAt?: string;
+    }
   | { state: 'failed'; reason: string; retryInMs: number };
 
 export interface ConnectOptions extends Omit<RelayClientOptions, 'identity'> {
@@ -79,7 +86,9 @@ export interface ConnectHandle {
 /**
  * True when `pem` exists, names `hostname`, and has more than a third of its
  * lifetime left. Proportional, so it keeps working as CA lifetimes shrink
- * (Let's Encrypt is moving from 90-day toward 45-day certificates).
+ * (Let's Encrypt is moving from 90-day toward 45-day certificates). This is
+ * the fallback: when the CA offers ACME Renewal Information (RFC 9773), its
+ * suggested window decides instead (see `startConnect`).
  */
 export function certificateIsFresh(pem: string | undefined, hostname: string, now = Date.now()): boolean {
   if (!pem) return false;
@@ -125,6 +134,11 @@ export async function startConnect(options: ConnectOptions): Promise<ConnectHand
   let failures = 0;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let status: CertificateStatus = { state: 'none' };
+  // The CA's latest renewal window for the served certificate, and the moment
+  // picked inside it. The pick is kept while the window stays the same, so
+  // repeated checks do not re-roll it.
+  let ari: { certId: string; window: RenewalWindow; renewAt: number; freshUntil: number } | undefined;
+  let ariTimer: ReturnType<typeof setTimeout> | undefined;
 
   const report = (next: CertificateStatus) => {
     status = next;
@@ -146,10 +160,51 @@ export async function startConnect(options: ConnectOptions): Promise<ConnectHand
     return { ok: await decision(termsUrl), termsUrl };
   };
 
+  /**
+   * ARI (RFC 9773): when the CA suggests a renewal window for `pem`, renew at
+   * a random moment inside it and name the old certificate in the order
+   * (`replaces`), which exempts the renewal from Let's Encrypt's rate limits.
+   * Undefined when the CA offers none; a failed lookup keeps the last answer.
+   */
+  const renewalPlan = async (pem: string): Promise<{ certId: string; renewAt: number } | undefined> => {
+    const now = Date.now();
+    if (ari && ari.freshUntil > now && pem === served) return ari;
+    let info;
+    try {
+      info = await fetchRenewalInfo(directoryUrl, pem, options.acme.fetch ?? fetch);
+    } catch {
+      return ari && pem === served ? ari : undefined;
+    }
+    if (!info) {
+      ari = undefined;
+      return undefined;
+    }
+    const same = ari?.certId === info.certId && ari.window.start === info.window.start && ari.window.end === info.window.end;
+    ari = {
+      certId: info.certId,
+      window: info.window,
+      renewAt: same ? ari!.renewAt : selectRenewalTime(info.window),
+      freshUntil: now + info.retryAfterMs,
+    };
+    return ari;
+  };
+
+  /** A renewal moment before the next periodic check gets its own timer. */
+  const scheduleRenewal = (renewAt: number) => {
+    if (ariTimer) clearTimeout(ariTimer);
+    ariTimer = undefined;
+    const delay = renewAt - Date.now();
+    if (stopped || delay >= renewCheckMs) return;
+    ariTimer = setTimeout(() => void check().catch(() => {}), Math.max(0, delay));
+    ariTimer.unref?.();
+  };
+
   const ensureCertificate = async () => {
     const hostname = await client.ready();
     let pem = existsSync(certPath) ? readFileSync(certPath, 'utf8') : undefined;
-    if (!certificateIsFresh(pem, hostname)) {
+    const plan = pem && certificateIsValid(pem, hostname) ? await renewalPlan(pem) : undefined;
+    const due = plan ? plan.renewAt <= Date.now() : !certificateIsFresh(pem, hostname);
+    if (due) {
       const terms = await agreed();
       if (!terms.ok) {
         // Never order without consent. A still-valid certificate keeps serving
@@ -166,14 +221,23 @@ export async function startConnect(options: ConnectOptions): Promise<ConnectHand
         hostname,
         dns: client,
         termsOfServiceAgreed: true,
+        ...(plan ? { replaces: plan.certId } : {}),
         ...(options.acme.fetch ? { fetch: options.acme.fetch } : {}),
         propagationDelayMs: options.acme.propagationDelayMs ?? 10_000,
         ...(options.acme.pollIntervalMs ? { pollIntervalMs: options.acme.pollIntervalMs } : {}),
       });
       writePrivateFile(certPath, pem);
+      ari = undefined;
     }
     failures = 0;
-    report({ state: 'serving', ...(await serve(pem!, hostname)) });
+    const serving = await serve(pem!, hostname);
+    // Ask about the certificate now served, so its window is known (and a
+    // renewal inside the next check interval is scheduled) right away.
+    const next = due ? await renewalPlan(pem!) : plan;
+    // A window already due for a certificate issued a moment ago would loop;
+    // leave that to the periodic check instead.
+    if (next && !(due && next.renewAt <= Date.now())) scheduleRenewal(next.renewAt);
+    report({ state: 'serving', ...serving, ...(next ? { renewAt: new Date(next.renewAt).toISOString() } : {}) });
   };
 
   const check = (): Promise<void> => {
@@ -219,6 +283,7 @@ export async function startConnect(options: ConnectOptions): Promise<ConnectHand
       stopped = true;
       clearInterval(timer);
       if (retryTimer) clearTimeout(retryTimer);
+      if (ariTimer) clearTimeout(ariTimer);
       await client.stop();
     },
   };
