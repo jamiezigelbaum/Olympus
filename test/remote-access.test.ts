@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RELAY_AUTH_HEADER as CLIENT_RELAY_AUTH_HEADER } from '../connect-relay/client/local-endpoint.ts';
@@ -8,6 +8,7 @@ import { configFromPluginConfig } from '../src/core/config.ts';
 import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
 import {
   createRelayRequestVerifier,
+  DEFAULT_RELAY_HOST,
   createRemotePublicUrlSource,
   emptyRemoteAccessStatus,
   loadOrCreateRelayAuthSecret,
@@ -64,12 +65,25 @@ function relayStatus(overrides: Partial<RemoteAccessStatusFile> = {}): RemoteAcc
 describe('remote access mode', () => {
   const mode = (remote: unknown) => resolveRemoteAccessMode(configFromPluginConfig({ remote }).remote);
 
-  test('is off unless enabled, and needs exactly one public address', () => {
+  test('is off unless enabled, and uses exactly one public address', () => {
     expect(mode(undefined)).toEqual({ mode: 'off' });
     expect(mode({ relayHost: 'connect.olympusplugin.ai' })).toEqual({ mode: 'off' });
     expect(mode({ enabled: true, relayHost: 'Connect.OlympusPlugin.ai' })).toEqual({ mode: 'relay', relayHost: 'connect.olympusplugin.ai' });
     expect(mode({ enabled: true, publicBaseUrl: 'https://tunnel.trycloudflare.com/' })).toEqual({ mode: 'manual', publicBaseUrl: 'https://tunnel.trycloudflare.com' });
-    expect(mode({ enabled: true })).toMatchObject({ mode: 'error', error: expect.stringContaining('neither remote.relayHost') });
+  });
+
+  test('the relay host defaults to the Olympus relay, and never beside a tunnel of your own', () => {
+    expect(DEFAULT_RELAY_HOST).toBe('connect.olympusplugin.ai');
+    // What the dashboard's Turn on remote access writes: only remote.enabled.
+    expect(mode({ enabled: true })).toEqual({ mode: 'relay', relayHost: 'connect.olympusplugin.ai' });
+    // The default is not materialized as config, so a publicBaseUrl owner is not in conflict.
+    expect(mode({ enabled: true, publicBaseUrl: 'https://tunnel.example' })).toEqual({ mode: 'manual', publicBaseUrl: 'https://tunnel.example' });
+    expect(configFromPluginConfig({ remote: { enabled: true } }).remote).toEqual({ enabled: true });
+    const manifest = JSON.parse(readFileSync(join(import.meta.dir, '..', 'openclaw.plugin.json'), 'utf8')) as {
+      configSchema: { properties: { remote: { properties: { relayHost: Record<string, unknown> } } } };
+    };
+    expect(manifest.configSchema.properties.remote.properties.relayHost.default).toBeUndefined();
+    expect(manifest.configSchema.properties.remote.properties.relayHost.description).toContain('connect.olympusplugin.ai');
   });
 
   test('refuses the relay and a manual public URL together, with a clear error', () => {
@@ -246,7 +260,7 @@ describe('olympus connections status', () => {
       remote_enabled: false,
       public_base_url: null,
       relay: { connected: false, state: null },
-      next_step: expect.stringContaining('remote.enabled true'),
+      next_step: expect.stringContaining('Turn on remote access in the Agents section'),
     });
     writeRemoteAccessStatus(dir, relayStatus({
       public_base_url: null,
@@ -256,6 +270,17 @@ describe('olympus connections status', () => {
       public_base_url: null,
       certificate: { state: 'awaiting_terms' },
       next_step: expect.stringContaining('olympus connections terms --accept'),
+    });
+    // The relay is unreachable (not deployed yet, or down): a steady, named status.
+    writeRemoteAccessStatus(dir, relayStatus({
+      public_base_url: null,
+      relay: { state: 'offline', reason: 'getaddrinfo ENOTFOUND relay.connect.olympusplugin.ai', retry_in_ms: 8_000 },
+      certificate: { state: 'none', not_after: null, reason: null, retry_in_ms: null },
+    }));
+    expect(runConnectionsCommand(['status'], env)).toMatchObject({
+      remote_enabled: true,
+      relay: { state: 'offline', connected: false, retry_in_ms: 8_000 },
+      next_step: expect.stringContaining('Olympus relay unavailable (getaddrinfo ENOTFOUND relay.connect.olympusplugin.ai)'),
     });
     writeRemoteAccessStatus(dir, relayStatus({ pid: 2 ** 22 + 12345 }));
     expect(runConnectionsCommand(['status'], env)).toMatchObject({ relay: { state: 'not_running', connected: false } });

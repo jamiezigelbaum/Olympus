@@ -19,8 +19,11 @@ import {
   readRemoteAccessStatus,
   recordTermsAcceptance,
   remoteAccessDir,
+  remoteAccessStatusView,
+  resolveRemoteAccessUrls,
   type RemoteAccessStatusFile,
 } from '../src/core/remote-access.ts';
+import { remoteAccessFromStatus } from '../src/workers/agent-connections.ts';
 import { MemoryDnsProvider } from '../connect-relay/server/dns.ts';
 import { MemoryInstallRegistry } from '../connect-relay/server/registry.ts';
 import { startRelay, type RelayHandle } from '../connect-relay/server/relay.ts';
@@ -329,6 +332,54 @@ describe('native relay service', () => {
     const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE });
     await expect(service.start({ serviceHealth: healthRecorder(events) })).rejects.toThrow('worker.env');
     expect(readRemoteAccessStatus(dir)?.error).toContain('OLYMPUS_PUBLIC_BASE_URL in worker.env');
+  });
+
+  test('turned on before the Olympus relay is live: a steady "relay unavailable", retried with backoff, never a crash loop', async () => {
+    const { dir, workerEnvPath } = fixtureRoot();
+    // Nothing listens here: the relay host resolves, but no relay answers.
+    const closed = http.createServer();
+    await new Promise<void>((resolve) => closed.listen(0, '127.0.0.1', resolve));
+    const port = (closed.address() as AddressInfo).port;
+    await new Promise<void>((resolve) => closed.close(() => resolve()));
+    const events: string[] = [];
+    // Only remote.enabled, as the dashboard's Turn on remote access writes it.
+    const service = relayService(workerEnvPath, { enabled: true }, { childEnv: { TEST_RELAY_PORT: String(port) } });
+    await service.start({ serviceHealth: healthRecorder(events) });
+    const first = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'offline');
+    expect(first.relay_host).toBe('connect.olympusplugin.ai');
+    expect(first.relay?.reason).toContain('ECONNREFUSED');
+    expect(first.relay?.retry_in_ms).toBeGreaterThan(0);
+    expect(first.public_base_url).toBeNull();
+
+    // Across many reconnect attempts (50–200 ms backoff in the fixture) the
+    // same child keeps running and the status stays "offline" with its reason.
+    const seen = new Set<string>();
+    const delays: number[] = [];
+    for (let sample = 0; sample < 30; sample++) {
+      await Bun.sleep(50);
+      const status = readRemoteAccessStatus(dir)!;
+      seen.add(status.relay!.state);
+      if (status.relay?.retry_in_ms) delays.push(status.relay.retry_in_ms);
+      expect(status.pid).toBe(first.pid);
+      expect(status.instance_id).toBe(first.instance_id);
+    }
+    expect([...seen]).toEqual(['offline']);
+    expect(Math.max(...delays)).toBeLessThanOrEqual(200);
+    // Health: the start was reported once and cleared; no crash, no restart.
+    expect(events.at(-1)).toBe('clear');
+    expect(events.filter((event) => event.startsWith('failure') && !event.includes('is starting'))).toEqual([]);
+
+    const view = remoteAccessStatusView({
+      dir,
+      status: readRemoteAccessStatus(dir),
+      urls: resolveRemoteAccessUrls({ layeredEnv: {}, env: {}, status: readRemoteAccessStatus(dir), configuredWorkerBaseUrl: workerBaseUrl }),
+    });
+    expect(view).toMatchObject({ remote_enabled: true, relay: { state: 'offline', connected: false } });
+    expect(view.next_step).toContain('Olympus relay unavailable');
+    expect(remoteAccessFromStatus({ live: undefined, status: view })).toMatchObject({
+      state: 'not_connected',
+      detail: expect.stringContaining('Olympus relay unavailable'),
+    });
   });
 
   test('remote access that was never turned on writes nothing', async () => {

@@ -320,6 +320,7 @@ import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
+import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter } from '../remote-access-control.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
@@ -3979,7 +3980,6 @@ export async function main(): Promise<void> {
   // and the config change through the Gateway's own config write.
   if (authToken) {
     const { fetchLetsEncryptTermsUrl } = await import('../../core/remote-access-terms.ts');
-    const { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter } = await import('../remote-access-control.ts');
     dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
       dir: () => remoteAccessDir(process.env),
       fetchTerms: fetchLetsEncryptTermsUrl,

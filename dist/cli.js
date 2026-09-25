@@ -7419,7 +7419,8 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/unpair" },
     { method: "POST", path: "/dashboard/agents/pairing-code" },
     { method: "POST", path: "/dashboard/agents/keys" },
-    { method: "POST", path: "/dashboard/agents/revoke" }
+    { method: "POST", path: "/dashboard/agents/revoke" },
+    { method: "POST", path: "/dashboard/agents/remote-access" }
   ];
   PUBLIC_OPERATION_NAMES = {
     native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
@@ -54025,6 +54026,7 @@ __export(exports_remote_access, {
   termsAccepted: () => termsAccepted,
   resolveRemoteAccessUrls: () => resolveRemoteAccessUrls,
   resolveRemoteAccessMode: () => resolveRemoteAccessMode,
+  resolveCurrentTermsUrl: () => resolveCurrentTermsUrl,
   remoteAccessStatusView: () => remoteAccessStatusView,
   remoteAccessDirForCli: () => remoteAccessDirForCli,
   remoteAccessDir: () => remoteAccessDir,
@@ -54041,7 +54043,8 @@ __export(exports_remote_access, {
   createRelayRequestVerifier: () => createRelayRequestVerifier,
   REMOTE_ACCESS_STATUS_SCHEMA: () => REMOTE_ACCESS_STATUS_SCHEMA,
   REMOTE_ACCESS_DIR_NAME: () => REMOTE_ACCESS_DIR_NAME,
-  RELAY_AUTH_HEADER: () => RELAY_AUTH_HEADER
+  RELAY_AUTH_HEADER: () => RELAY_AUTH_HEADER,
+  DEFAULT_RELAY_HOST: () => DEFAULT_RELAY_HOST
 });
 import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
 import {
@@ -54072,17 +54075,11 @@ function resolveRemoteAccessMode(remote) {
     }
     return { mode: "manual", publicBaseUrl: parsed.urls.origin };
   }
-  if (relayHost) {
-    const host = relayHost.toLowerCase();
-    if (!DNS_NAME.test(host)) {
-      return { mode: "error", error: "remote.relayHost must be a DNS name such as connect.olympusplugin.ai, with no scheme, port or path." };
-    }
-    return { mode: "relay", relayHost: host };
+  const host = (relayHost ?? DEFAULT_RELAY_HOST).toLowerCase();
+  if (!DNS_NAME.test(host)) {
+    return { mode: "error", error: "remote.relayHost must be a DNS name such as connect.olympusplugin.ai, with no scheme, port or path." };
   }
-  return {
-    mode: "error",
-    error: "remote.enabled is on, but neither remote.relayHost (the Olympus relay) nor remote.publicBaseUrl (your own tunnel) is set."
-  };
+  return { mode: "relay", relayHost: host };
 }
 function olympusDataDir(env = process.env) {
   const configured = env.XDG_DATA_HOME?.trim();
@@ -54250,6 +54247,14 @@ function recordTermsAcceptance(dir, termsUrl, now = new Date) {
   writePrivateJson2(raJoin(dir, TERMS_FILE), acceptance);
   return acceptance;
 }
+async function resolveCurrentTermsUrl(status, fetchTerms) {
+  const reported = status?.terms_url ?? undefined;
+  if (reported)
+    return reported;
+  if (status?.certificate?.state === "awaiting_terms")
+    return;
+  return fetchTerms();
+}
 function termsAccepted(dir, currentTermsUrl) {
   const acceptance = readTermsAcceptance(dir);
   if (!acceptance)
@@ -54365,15 +54370,18 @@ function nextStep(view) {
   if (view.error)
     return view.error;
   if (view.mode === "off" && !view.public_base_url) {
-    return "Remote access is off, so hosted agents cannot reach this Olympus (local agents are unaffected). " + "To turn it on: openclaw config set plugins.entries.olympus.config.remote.enabled true, plus remote.relayHost (the Olympus relay) or remote.publicBaseUrl (your own tunnel).";
+    return "Remote access is off, so hosted agents cannot reach this Olympus (local agents are unaffected). " + "To turn it on, use Turn on remote access in the Agents section of the Olympus dashboard, " + "or run: openclaw config set plugins.entries.olympus.config.remote.enabled true";
   }
   if (view.mode !== "relay")
     return null;
   if (view.certificate.state === "awaiting_terms") {
-    return "Read the Let's Encrypt subscriber agreement (terms.url), then accept it with olympus connections terms --accept.";
+    return "Read the Let's Encrypt subscriber agreement (terms.url), then accept it with Turn on remote access in the dashboard, or with olympus connections terms --accept.";
   }
   if (view.relay.state === "not_running")
     return "The relay process is not running; check openclaw gateway status.";
+  if (view.relay.state === "offline") {
+    return `Olympus relay unavailable${view.relay.reason ? ` (${view.relay.reason})` : ""}. ` + "Olympus keeps retrying on its own; local agents are unaffected.";
+  }
   if (view.relay.state !== "online")
     return "Olympus is connecting to the relay.";
   if (view.certificate.state === "failed")
@@ -54394,7 +54402,7 @@ function processIsAlive(pid) {
     return error.code === "EPERM";
   }
 }
-var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v1", REMOTE_ACCESS_DIR_NAME = "connect-relay", RELAY_AUTH_HEADER = "x-olympus-relay-auth", STATUS_FILE = "status.json", RELAY_AUTH_FILE = "relay-auth", TERMS_FILE = "acme-terms.json", DNS_NAME, LOOPBACK_HOSTNAMES2;
+var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v1", REMOTE_ACCESS_DIR_NAME = "connect-relay", RELAY_AUTH_HEADER = "x-olympus-relay-auth", STATUS_FILE = "status.json", RELAY_AUTH_FILE = "relay-auth", TERMS_FILE = "acme-terms.json", DNS_NAME, LOOPBACK_HOSTNAMES2, DEFAULT_RELAY_HOST = "connect.olympusplugin.ai";
 var init_remote_access = __esm(() => {
   init_remote_public_url();
   init_worker_auth();
@@ -69750,6 +69758,8 @@ async function startRelayRuntime(options) {
   const onStatus = (next) => {
     if (stopped && next.state !== "stopped")
       return;
+    if (next.state === "connecting" && status.relay?.state === "offline")
+      return;
     status.relay = {
       state: next.state,
       reason: next.state === "offline" ? next.reason : null,
@@ -76855,6 +76865,25 @@ function createOpenClawSourceWatchDeliveryTransport(options = {}) {
     }
   };
 }
+async function postOpenClawGatewayPluginRoute(input) {
+  const env = input.env ?? process.env;
+  const gatewayConfig = input.gatewayConfig !== undefined ? input.gatewayConfig : await loadOpenClawGatewayConfig(env).catch(() => {
+    return;
+  });
+  const connection = resolveSourceWatchGatewayConnection(gatewayConfig, { env });
+  const init = withWorkerAuthHeader({
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input.body),
+    redirect: "error"
+  }, input.authToken);
+  const url = `${connection.baseUrl}${input.path}`;
+  const timeoutMs = input.timeoutMs ?? 30000;
+  if (connection.certificatePath) {
+    return requestVerifiedHttps(url, init, timeoutMs, readFileSync34(connection.certificatePath, "utf8"));
+  }
+  return fetchWithTimeout(input.fetchImpl ?? fetch, url, init, timeoutMs);
+}
 function defaultOpenClawGatewayBaseUrl(env = process.env, gatewayConfig) {
   return resolveSourceWatchGatewayConnection(gatewayConfig, { env }).baseUrl;
 }
@@ -77625,6 +77654,11 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 .agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
 .agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
 #agents { margin-top: 26px; }
+[data-remote-access] > .rowform { flex: 0 0 auto; margin-left: 8px; }
+.remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: 13px; color: var(--t2); }
+.remoteterms[hidden] { display: none; }
+.remoteterms p { margin: 0 0 8px; max-width: 72ch; }
+.remoteterms .rowform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`, MODEL_SETUP_CSS = `
 .modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{border:1px solid var(--border,#333);border-radius:12px;padding:16px 18px;min-width:0}
 .modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:12.5px}
@@ -78049,7 +78083,50 @@ function mountDashboardController(options) {
       return { action: "create_agent_key", name: formRecord(form).name || "" };
     if (kind === "revoke")
       return { action: "revoke_agent_connection", connection_id: formRecord(form).connection_id || "" };
+    if (kind === "remote-on")
+      return { action: "set_remote_access", enabled: true };
+    if (kind === "remote-off")
+      return { action: "set_remote_access", enabled: false };
+    if (kind === "remote-accept") {
+      if (form.dataset.termsShown !== "true")
+        return;
+      return { action: "set_remote_access", enabled: true, accept_terms: { url: form.dataset.termsUrl || null } };
+    }
     return;
+  }
+  function showRemoteTerms(from, body, message) {
+    const panel = query("[data-remote-terms]");
+    const accept = panel?.querySelector('form[data-agent-kind="remote-accept"]');
+    const terms = body.terms && typeof body.terms === "object" && !Array.isArray(body.terms) ? body.terms : undefined;
+    if (!panel || !accept || !terms) {
+      say(from, message);
+      return;
+    }
+    const url = typeof terms.url === "string" && /^https:\/\//.test(terms.url) ? terms.url : "";
+    const readUrl = typeof terms.read_url === "string" && /^https:\/\//.test(terms.read_url) ? terms.read_url : url;
+    const link = panel.querySelector("[data-remote-terms-link]");
+    if (link && readUrl)
+      link.href = readUrl;
+    accept.dataset.termsUrl = url;
+    accept.dataset.termsShown = "true";
+    say(from, "");
+    say(accept, from === accept ? message : "");
+    panel.hidden = false;
+    if (!panel.hasAttribute("tabindex"))
+      panel.setAttribute("tabindex", "-1");
+    panel.focus();
+  }
+  function hideRemoteTerms() {
+    const panel = query("[data-remote-terms]");
+    if (!panel)
+      return;
+    panel.hidden = true;
+    const accept = panel.querySelector('form[data-agent-kind="remote-accept"]');
+    if (accept) {
+      delete accept.dataset.termsShown;
+      delete accept.dataset.termsUrl;
+      say(accept, "");
+    }
   }
   function showAgentSecret(form, value, note) {
     const holder = form.closest("[data-agent-step]") || form.parentElement || form;
@@ -78104,7 +78181,9 @@ function mountDashboardController(options) {
       return;
     if (params.action === "revoke_agent_connection" && !window.confirm(form.dataset.confirmation || "Revoke this connection?"))
       return;
-    setFormPending(form, true, params.action === "revoke_agent_connection" ? "Revoking…" : "Working…");
+    if (params.action === "set_remote_access" && !params.enabled && !window.confirm(form.dataset.confirmation || "Turn off remote access?"))
+      return;
+    setFormPending(form, true, params.action === "revoke_agent_connection" ? "Revoking…" : params.action === "set_remote_access" ? params.enabled ? "Turning on…" : "Turning off…" : "Working…");
     let result;
     try {
       result = await options.transport.control(params);
@@ -78125,8 +78204,22 @@ function mountDashboardController(options) {
       }
       return;
     }
+    if (params.action === "set_remote_access" && result.status === 409) {
+      const code = result.body.error?.code;
+      if (code === "terms_required" || code === "terms_changed") {
+        showRemoteTerms(form, result.body, errorMessage3(result));
+        return;
+      }
+    }
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
       say(form, errorMessage3(result));
+      return;
+    }
+    if (params.action === "set_remote_access") {
+      hideRemoteTerms();
+      const statusMessage2 = result.body.status_message;
+      const row = form.closest("[data-remote-access]");
+      say(row && row.contains(form) ? form : query("[data-remote-access] form") || form, typeof statusMessage2 === "string" ? statusMessage2 : "Saved.");
       return;
     }
     if (params.action === "mint_agent_pairing_code" && typeof result.body.code === "string") {
@@ -78235,6 +78328,8 @@ function mountDashboardController(options) {
       return;
     if (!force && query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select'))
       return;
+    if (!force && query("[data-remote-terms]:not([hidden])"))
+      return;
     if (!force && hasDirtyInput())
       return;
     if (!force && hasFocusedControl()) {
@@ -78319,6 +78414,10 @@ function mountDashboardController(options) {
         startedFromSheet.add(form);
         form.requestSubmit();
       }
+      return;
+    }
+    if (target.closest("[data-remote-terms-cancel]")) {
+      hideRemoteTerms();
       return;
     }
     const done = target.closest("[data-agent-secret-done]");
@@ -80154,6 +80253,7 @@ function standaloneDashboardControllerScript(input) {
         if (action === 'mint_agent_pairing_code') return ['/dashboard/agents/pairing-code', {}];
         if (action === 'create_agent_key') return ['/dashboard/agents/keys', withoutAction(params)];
         if (action === 'revoke_agent_connection') return ['/dashboard/agents/revoke', withoutAction(params)];
+        if (action === 'set_remote_access') return ['/dashboard/agents/remote-access', withoutAction(params)];
         return null;
       }
       function withoutAction(params) {
@@ -82490,6 +82590,272 @@ var init_model_setup2 = __esm(() => {
   init_components();
 });
 
+// src/workers/agent-connections.ts
+function remoteAccessFromStatus(input) {
+  const status = input.status;
+  const relayDown = status?.mode === "relay" && status.relay !== undefined && status.relay.state !== "online";
+  if (input.live && !relayDown) {
+    return { state: "on", mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json` };
+  }
+  if (status?.error)
+    return { state: "invalid", detail: status.error };
+  if (status && status.mode !== "off" && status.remote_enabled) {
+    if (status.mode === "relay")
+      return relayNotConnected(status);
+    return status.next_step ? { state: "not_connected", detail: status.next_step } : { state: "not_connected" };
+  }
+  return { state: "off" };
+}
+function relayNotConnected(status) {
+  const relay = status.relay?.state;
+  if (status.certificate?.state === "awaiting_terms") {
+    return {
+      state: "not_connected",
+      needsTerms: true,
+      detail: "Olympus needs you to accept Let's Encrypt's subscriber agreement before it can get its certificate."
+    };
+  }
+  if (relay === "offline" || relay === "replaced") {
+    return {
+      state: "not_connected",
+      detail: "Olympus relay unavailable, so agents in the cloud cannot reach Olympus right now. Olympus keeps trying on its own."
+    };
+  }
+  if (relay === "not_running") {
+    return {
+      state: "not_connected",
+      detail: "The remote access process has stopped. Olympus restarts it on its own; if this stays, restart OpenClaw."
+    };
+  }
+  if (relay === "online" && status.certificate?.state === "failed") {
+    return { state: "not_connected", detail: "Olympus could not get its certificate yet. It tries again on its own." };
+  }
+  if (relay === "online")
+    return { state: "not_connected", detail: "Olympus is getting its certificate." };
+  if (relay === undefined || relay === null) {
+    return status.next_step ? { state: "not_connected", detail: status.next_step } : { state: "not_connected" };
+  }
+  return { state: "not_connected", detail: "Olympus is connecting to its relay." };
+}
+function dashboardAgentsView(backend) {
+  const remoteAccess = backend.remoteAccess();
+  let records;
+  try {
+    records = backend.store()?.list() ?? [];
+  } catch {
+    return { remoteAccess, connections: [], unavailable: true };
+  }
+  return {
+    remoteAccess,
+    connections: records.filter((record3) => record3.revokedAt === null).map((record3) => ({
+      id: record3.id,
+      name: record3.displayName,
+      kind: record3.kind,
+      createdAt: record3.createdAt,
+      lastUsedAt: record3.lastUsedAt
+    }))
+  };
+}
+async function handleDashboardAgentRequest(request, pathname, backend) {
+  if (request.method !== "POST" || !DASHBOARD_AGENT_CONTROL_PATHS.includes(pathname)) {
+    return;
+  }
+  if (!backend) {
+    return refusal(501, "agent_connections_not_supported", "This worker does not manage agent connections.");
+  }
+  const body = await objectBody(request);
+  if (!body)
+    return refusal(400, "invalid_request", "Request body must be a JSON object.");
+  if (pathname === DASHBOARD_AGENT_REMOTE_ACCESS_PATH)
+    return setRemoteAccess(body, backend);
+  if (pathname === DASHBOARD_AGENT_PAIRING_CODE_PATH) {
+    if (Object.keys(body).length !== 0)
+      return refusal(400, "invalid_request", "A pairing code takes no fields.");
+    const remoteAccess = backend.remoteAccess();
+    if (remoteAccess.state !== "on") {
+      return refusal(409, "remote_access_off", remoteAccessRefusal(remoteAccess));
+    }
+    const store2 = openStore(backend);
+    if (!store2)
+      return storeUnavailable();
+    const minted = store2.oauth.mintPairingCode();
+    return secretResponse({
+      ok: true,
+      code: minted.code,
+      expires_at: minted.expiresAt,
+      url: remoteAccess.mcpUrl
+    });
+  }
+  if (pathname === DASHBOARD_AGENT_KEYS_PATH) {
+    const unknown4 = Object.keys(body).filter((key) => key !== "name");
+    if (unknown4.length > 0)
+      return refusal(400, "invalid_request", "A key takes only a name.");
+    const name = sanitizeCallerDisplayName(body.name);
+    if (!name)
+      return refusal(400, "invalid_request", "Give the connection a name, for example Muse.");
+    const store2 = openStore(backend);
+    if (!store2)
+      return storeUnavailable();
+    const created = store2.create(name);
+    const remoteAccess = backend.remoteAccess();
+    return secretResponse({
+      ok: true,
+      token: created.token,
+      connection: connectionView(created.connection),
+      ...remoteAccess.state === "on" ? { mcp_url: remoteAccess.mcpUrl, openapi_url: remoteAccess.openapiUrl } : {}
+    });
+  }
+  const unknown3 = Object.keys(body).filter((key) => key !== "connection_id");
+  if (unknown3.length > 0)
+    return refusal(400, "invalid_request", "Revoke takes only a connection_id.");
+  const id = typeof body.connection_id === "string" ? body.connection_id : "";
+  if (!/^[a-f0-9]{18}$/.test(id))
+    return refusal(400, "invalid_request", "That is not a connection id.");
+  const store = openStore(backend, false);
+  const existing = store?.list().find((record3) => record3.id === id);
+  if (!store || !existing)
+    return refusal(404, "connection_not_found", "No connection has that id.");
+  const revoked = store.revoke(id);
+  return secretResponse({
+    ok: true,
+    connection: connectionView(revoked),
+    status_message: `${revoked.displayName} can no longer ask Olympus.`
+  });
+}
+async function setRemoteAccess(body, backend) {
+  const unknown3 = Object.keys(body).filter((key) => key !== "enabled" && key !== "accept_terms");
+  if (unknown3.length > 0 || typeof body.enabled !== "boolean") {
+    return refusal(400, "invalid_request", "Say whether to turn remote access on or off.");
+  }
+  let acceptedUrl;
+  if (body.accept_terms !== undefined) {
+    const accept = body.accept_terms;
+    const record3 = accept && typeof accept === "object" && !Array.isArray(accept) ? accept : undefined;
+    if (!body.enabled || !record3 || Object.keys(record3).length !== 1 || !("url" in record3) || record3.url !== null && !isHttpsUrl(record3.url)) {
+      return refusal(400, "invalid_request", "An agreement acceptance names the agreement it accepts.");
+    }
+    acceptedUrl = record3.url;
+  }
+  const control = backend.remoteAccessControl;
+  if (!control) {
+    return refusal(501, "remote_access_control_not_supported", "This Olympus cannot turn remote access on or off from the dashboard.");
+  }
+  if (body.enabled) {
+    let current;
+    try {
+      current = await control.currentTermsUrl();
+    } catch {
+      return refusal(502, "terms_unavailable", "Olympus could not read Let's Encrypt's subscriber agreement just now. Check the internet connection, then try again.");
+    }
+    const terms = { url: current ?? null, read_url: current ?? LETS_ENCRYPT_REPOSITORY_URL };
+    if (acceptedUrl !== undefined) {
+      if (acceptedUrl !== (current ?? null)) {
+        return secretResponse({
+          ok: false,
+          error: {
+            code: "terms_changed",
+            message: "Let's Encrypt has published a new subscriber agreement. Read it, then accept it to continue."
+          },
+          terms
+        }, 409);
+      }
+      control.recordTermsAcceptance(current);
+    } else if (!control.termsAccepted(current)) {
+      return secretResponse({
+        ok: false,
+        error: {
+          code: "terms_required",
+          message: "Read Let's Encrypt's subscriber agreement, then accept it to turn on remote access."
+        },
+        terms
+      }, 409);
+    }
+  }
+  const written = await control.setEnabled(body.enabled).catch(() => ({
+    ok: false,
+    status: 502,
+    code: "openclaw_unreachable",
+    message: "Olympus could not reach OpenClaw to change the setting. Check that OpenClaw is running, then try again."
+  }));
+  if (!written.ok)
+    return refusal(written.status, written.code, written.message);
+  return secretResponse({
+    ok: true,
+    enabled: body.enabled,
+    status_message: body.enabled ? "Remote access is turning on. Olympus connects to its relay and gets a certificate, which usually takes a minute." : "Remote access is off. Agents in the cloud can no longer reach Olympus; agents on this computer are unaffected."
+  });
+}
+function isHttpsUrl(value) {
+  if (typeof value !== "string" || value.length > 2048)
+    return false;
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+function remoteAccessRefusal(access) {
+  if (access.state === "invalid")
+    return `Remote access is not set up correctly: ${access.detail}`;
+  if (access.state === "not_connected") {
+    return `Remote access is not connected yet, so no agent could use a pairing code. Try again once it is.${access.detail ? ` ${access.detail}` : ""}`;
+  }
+  return "Remote access is off, so agents in the cloud cannot reach Olympus yet. Pairing codes work once it is on.";
+}
+function openStore(backend, create = true) {
+  try {
+    return backend.store({ create });
+  } catch {
+    return;
+  }
+}
+function storeUnavailable() {
+  return refusal(503, "agent_connections_unavailable", "Olympus could not open its connection list. Try again, or run olympus doctor.");
+}
+function connectionView(record3) {
+  return {
+    id: record3.id,
+    name: record3.displayName,
+    kind: record3.kind,
+    created_at: record3.createdAt,
+    last_used_at: record3.lastUsedAt,
+    revoked_at: record3.revokedAt
+  };
+}
+async function objectBody(request) {
+  let value;
+  try {
+    const text = await request.text();
+    value = text.trim() === "" ? {} : JSON.parse(text);
+  } catch {
+    return;
+  }
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+function secretResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer"
+    }
+  });
+}
+function refusal(status, code, message) {
+  return secretResponse({ ok: false, error: { code, message } }, status);
+}
+var DASHBOARD_AGENT_PAIRING_CODE_PATH = "/dashboard/agents/pairing-code", DASHBOARD_AGENT_KEYS_PATH = "/dashboard/agents/keys", DASHBOARD_AGENT_REVOKE_PATH = "/dashboard/agents/revoke", DASHBOARD_AGENT_REMOTE_ACCESS_PATH = "/dashboard/agents/remote-access", DASHBOARD_AGENT_CONTROL_PATHS, LETS_ENCRYPT_REPOSITORY_URL = "https://letsencrypt.org/repository/";
+var init_agent_connections = __esm(() => {
+  init_operation_caller();
+  DASHBOARD_AGENT_CONTROL_PATHS = [
+    DASHBOARD_AGENT_PAIRING_CODE_PATH,
+    DASHBOARD_AGENT_KEYS_PATH,
+    DASHBOARD_AGENT_REVOKE_PATH,
+    DASHBOARD_AGENT_REMOTE_ACCESS_PATH
+  ];
+});
+
 // src/core/agent-instructions.ts
 var AGENT_SKILL_PATH = "integrations/agent-skills/ask-olympus/SKILL.md", AGENT_SKILL_DESCRIPTION, AGENT_INSTRUCTION_TEXT;
 var init_agent_instructions = __esm(() => {
@@ -82525,9 +82891,21 @@ function renderDashboardAgentsSection(input) {
 `);
 }
 function remoteAccessRow(access) {
-  const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf(access.mcpUrl)}.` : access.state === "off" ? "Off. Only agents on this computer can ask Olympus." : access.state === "not_connected" ? "On, but not connected yet. Agents in the cloud cannot reach Olympus until it is." : `Not set up correctly. ${access.detail}`;
+  const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf(access.mcpUrl)}.` : access.state === "off" ? "Off. Only agents on this computer can ask Olympus." : access.state === "not_connected" ? "On, but not connected. Agents in the cloud cannot reach Olympus until it is." : `Not set up correctly. ${access.detail}`;
   const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml(access.detail)}</span>` : "";
-  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span>${next}</div>` + `</div>`;
+  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span>${next}</div>` + remoteAccessControls(access) + `</div>` + (access.state === "off" || access.state === "not_connected" && access.needsTerms ? termsPanel() : "");
+}
+function remoteAccessControls(access) {
+  const status = `<span class="actmsg" data-action-message role="status"></span>`;
+  if (access.state === "off") {
+    return `<form class="rowform" data-agent-kind="remote-on">` + `<button class="btn primary" type="submit">Turn on remote access</button>${status}` + `</form>`;
+  }
+  const review = access.state === "not_connected" && access.needsTerms ? `<form class="rowform" data-agent-kind="remote-on"><button class="btn primary" type="submit">Review agreement</button>${status}</form>` : "";
+  const confirmation = "Turn off remote access? Agents in the cloud will no longer reach Olympus until you turn it on again. Agents on this computer are unaffected.";
+  return review + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml(confirmation)}">` + `<button class="btn quiet" type="submit">Turn off remote access</button>${status}` + `</form>`;
+}
+function termsPanel() {
+  return `<div class="remoteterms" data-remote-terms hidden>` + `<p><b>Before remote access turns on</b></p>` + `<p>So that agents in the cloud reach this computer over an encrypted connection only this computer can open, Olympus gets a free certificate from Let's Encrypt. Getting one means agreeing to Let's Encrypt's Subscriber Agreement.</p>` + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You create no account and share no email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>` + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>` + `<form class="rowform" data-agent-kind="remote-accept">` + `<button class="btn primary" type="submit">I accept, turn on remote access</button>` + `<button class="btn quiet" type="button" data-remote-terms-cancel>Not now</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
 }
 function connectSheet(access) {
   const choices = AGENTS.map((agent) => agentChoice(agent, access)).join("");
@@ -82555,7 +82933,7 @@ function localBody(agent) {
   return `<p>These run on this computer, so they work without remote access. Paste this into Claude Code or Codex and it adds Olympus for you:</p>` + copyBox("agent-local-prompt", LOCAL_AGENT_PROMPT, "Copy prompt", true) + `<details class="agentprompt" data-poll-key="agent-local-manual"><summary>Add it yourself instead</summary>` + `<p>The plugin folder is the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>` + copyBox("agent-local-claude", CLAUDE_CODE_SNIPPET, "Copy command") + `<p>For Codex, add this to ~/.codex/config.toml:</p>` + copyBox("agent-local-codex", CODEX_SNIPPET, "Copy snippet") + `</details>` + instructionsStep(agent, false);
 }
 function remoteUnavailable(access) {
-  const text = access.state === "not_connected" ? "Remote access is on but not connected yet, so this agent cannot reach Olympus. The Remote access line above says what it is waiting for." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Claude Code and Codex on this computer work now.";
+  const text = access.state === "not_connected" ? "Remote access is on but not connected, so this agent cannot reach Olympus right now. The Remote access line above says why." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Turn on remote access above first. Claude Code and Codex on this computer work now.";
   return `<p class="why" data-remote-unavailable>${escapeHtml(text)}</p>`;
 }
 function instructionsStep(agent, inStep) {
@@ -82625,6 +83003,7 @@ function hostOf(url) {
 }
 var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <plugin folder>/bin/olympus serve", CODEX_SNIPPET, MONTHS;
 var init_agents = __esm(() => {
+  init_agent_connections();
   init_agent_instructions();
   init_components();
   AGENTS = [
@@ -83285,6 +83664,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
   const agentMintAllowed = agentMintLimiter(now);
+  const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
     const presentedAuthorization = request.headers.get("Authorization");
     const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
@@ -83361,6 +83741,8 @@ function withWorkerBearerAuth(fetchHandler, options) {
     if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
       if (isAgentMintRoute(request) && !agentMintAllowed("bearer"))
         return agentMintLimitedResponse();
+      if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed("bearer"))
+        return remoteAccessToggleLimitedResponse();
       return fetchHandler(isGatewayPublicOriginContextRoute(request) ? withGatewayPublicOriginContext(request, presentedGatewayPublicOrigin) : request);
     }
     if (isDashboardControlReadRoute(request)) {
@@ -83388,6 +83770,9 @@ function withWorkerBearerAuth(fetchHandler, options) {
       if (authorization.status === "allowed") {
         if (isAgentMintRoute(request) && !agentMintAllowed(`session:${authorization.sessionId}`)) {
           return agentMintLimitedResponse();
+        }
+        if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed(`session:${authorization.sessionId}`)) {
+          return remoteAccessToggleLimitedResponse();
         }
         return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
       }
@@ -83531,12 +83916,27 @@ function dashboardControlLockedResponse() {
 function isAgentMintRoute(request) {
   return request.method === "POST" && AGENT_MINT_PATHS.has(new URL(request.url).pathname);
 }
-function agentMintLimiter(now) {
+function isRemoteAccessToggleRoute(request) {
+  return request.method === "POST" && new URL(request.url).pathname === REMOTE_ACCESS_TOGGLE_PATH;
+}
+function remoteAccessToggleLimitedResponse() {
+  return new Response(JSON.stringify({
+    ok: false,
+    error: {
+      code: "remote_access_rate_limited",
+      message: "Remote access was turned on or off too many times in the last few minutes. Wait a few minutes, then try again."
+    }
+  }), {
+    status: 429,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "Retry-After": "600" }
+  });
+}
+function agentMintLimiter(now, limit = AGENT_MINT_LIMIT, windowMs = AGENT_MINT_WINDOW_MS) {
   const recent = new Map;
   return (key) => {
     const at = now();
-    const kept = (recent.get(key) ?? []).filter((time3) => at - time3 < AGENT_MINT_WINDOW_MS);
-    if (kept.length >= AGENT_MINT_LIMIT) {
+    const kept = (recent.get(key) ?? []).filter((time3) => at - time3 < windowMs);
+    if (kept.length >= limit) {
       recent.set(key, kept);
       return false;
     }
@@ -83575,7 +83975,8 @@ function isDashboardControlRoute(request) {
     "/dashboard/unpair",
     "/dashboard/agents/pairing-code",
     "/dashboard/agents/keys",
-    "/dashboard/agents/revoke"
+    "/dashboard/agents/revoke",
+    "/dashboard/agents/remote-access"
   ]).has(new URL(request.url).pathname);
 }
 function hmacTag(authToken, context, ...parts) {
@@ -83906,13 +84307,14 @@ function optionalEnv(value) {
   const trimmed2 = value?.trim();
   return trimmed2 ? trimmed2 : undefined;
 }
-var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256;
+var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS;
 var init_http = __esm(() => {
   init_worker_auth();
   init_dashboard_launch();
   DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
   AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
   AGENT_MINT_WINDOW_MS = 10 * 60000;
+  REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
 });
 
 // src/workers/dashboard/pages/embedding-ledger.ts
@@ -84476,163 +84878,6 @@ var init_background_runtime = __esm(() => {
   ];
   backgroundLaneSampleStore = new LaneSampleStore;
   PARK_LINE = /^paused\s+([^\s:]+):\s*(.+)$/;
-});
-
-// src/workers/agent-connections.ts
-function remoteAccessFromStatus(input) {
-  if (input.live) {
-    return { state: "on", mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json` };
-  }
-  const status = input.status;
-  if (status?.error)
-    return { state: "invalid", detail: status.error };
-  if (status && status.mode !== "off" && status.remote_enabled) {
-    return status.next_step ? { state: "not_connected", detail: status.next_step } : { state: "not_connected" };
-  }
-  return { state: "off" };
-}
-function dashboardAgentsView(backend) {
-  const remoteAccess = backend.remoteAccess();
-  let records;
-  try {
-    records = backend.store()?.list() ?? [];
-  } catch {
-    return { remoteAccess, connections: [], unavailable: true };
-  }
-  return {
-    remoteAccess,
-    connections: records.filter((record3) => record3.revokedAt === null).map((record3) => ({
-      id: record3.id,
-      name: record3.displayName,
-      kind: record3.kind,
-      createdAt: record3.createdAt,
-      lastUsedAt: record3.lastUsedAt
-    }))
-  };
-}
-async function handleDashboardAgentRequest(request, pathname, backend) {
-  if (request.method !== "POST" || !DASHBOARD_AGENT_CONTROL_PATHS.includes(pathname)) {
-    return;
-  }
-  if (!backend) {
-    return refusal(501, "agent_connections_not_supported", "This worker does not manage agent connections.");
-  }
-  const body = await objectBody(request);
-  if (!body)
-    return refusal(400, "invalid_request", "Request body must be a JSON object.");
-  if (pathname === DASHBOARD_AGENT_PAIRING_CODE_PATH) {
-    if (Object.keys(body).length !== 0)
-      return refusal(400, "invalid_request", "A pairing code takes no fields.");
-    const remoteAccess = backend.remoteAccess();
-    if (remoteAccess.state !== "on") {
-      return refusal(409, "remote_access_off", remoteAccessRefusal(remoteAccess));
-    }
-    const store2 = openStore(backend);
-    if (!store2)
-      return storeUnavailable();
-    const minted = store2.oauth.mintPairingCode();
-    return secretResponse({
-      ok: true,
-      code: minted.code,
-      expires_at: minted.expiresAt,
-      url: remoteAccess.mcpUrl
-    });
-  }
-  if (pathname === DASHBOARD_AGENT_KEYS_PATH) {
-    const unknown4 = Object.keys(body).filter((key) => key !== "name");
-    if (unknown4.length > 0)
-      return refusal(400, "invalid_request", "A key takes only a name.");
-    const name = sanitizeCallerDisplayName(body.name);
-    if (!name)
-      return refusal(400, "invalid_request", "Give the connection a name, for example Muse.");
-    const store2 = openStore(backend);
-    if (!store2)
-      return storeUnavailable();
-    const created = store2.create(name);
-    const remoteAccess = backend.remoteAccess();
-    return secretResponse({
-      ok: true,
-      token: created.token,
-      connection: connectionView(created.connection),
-      ...remoteAccess.state === "on" ? { mcp_url: remoteAccess.mcpUrl, openapi_url: remoteAccess.openapiUrl } : {}
-    });
-  }
-  const unknown3 = Object.keys(body).filter((key) => key !== "connection_id");
-  if (unknown3.length > 0)
-    return refusal(400, "invalid_request", "Revoke takes only a connection_id.");
-  const id = typeof body.connection_id === "string" ? body.connection_id : "";
-  if (!/^[a-f0-9]{18}$/.test(id))
-    return refusal(400, "invalid_request", "That is not a connection id.");
-  const store = openStore(backend, false);
-  const existing = store?.list().find((record3) => record3.id === id);
-  if (!store || !existing)
-    return refusal(404, "connection_not_found", "No connection has that id.");
-  const revoked = store.revoke(id);
-  return secretResponse({
-    ok: true,
-    connection: connectionView(revoked),
-    status_message: `${revoked.displayName} can no longer ask Olympus.`
-  });
-}
-function remoteAccessRefusal(access) {
-  if (access.state === "invalid")
-    return `Remote access is not set up correctly: ${access.detail}`;
-  if (access.state === "not_connected") {
-    return `Remote access is not connected yet, so no agent could use a pairing code. Try again once it is.${access.detail ? ` ${access.detail}` : ""}`;
-  }
-  return "Remote access is off, so agents in the cloud cannot reach Olympus yet. Pairing codes work once it is on.";
-}
-function openStore(backend, create = true) {
-  try {
-    return backend.store({ create });
-  } catch {
-    return;
-  }
-}
-function storeUnavailable() {
-  return refusal(503, "agent_connections_unavailable", "Olympus could not open its connection list. Try again, or run olympus doctor.");
-}
-function connectionView(record3) {
-  return {
-    id: record3.id,
-    name: record3.displayName,
-    kind: record3.kind,
-    created_at: record3.createdAt,
-    last_used_at: record3.lastUsedAt,
-    revoked_at: record3.revokedAt
-  };
-}
-async function objectBody(request) {
-  let value;
-  try {
-    const text = await request.text();
-    value = text.trim() === "" ? {} : JSON.parse(text);
-  } catch {
-    return;
-  }
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-function secretResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": "no-store",
-      "Referrer-Policy": "no-referrer"
-    }
-  });
-}
-function refusal(status, code, message) {
-  return secretResponse({ ok: false, error: { code, message } }, status);
-}
-var DASHBOARD_AGENT_PAIRING_CODE_PATH = "/dashboard/agents/pairing-code", DASHBOARD_AGENT_KEYS_PATH = "/dashboard/agents/keys", DASHBOARD_AGENT_REVOKE_PATH = "/dashboard/agents/revoke", DASHBOARD_AGENT_CONTROL_PATHS;
-var init_agent_connections = __esm(() => {
-  init_operation_caller();
-  DASHBOARD_AGENT_CONTROL_PATHS = [
-    DASHBOARD_AGENT_PAIRING_CODE_PATH,
-    DASHBOARD_AGENT_KEYS_PATH,
-    DASHBOARD_AGENT_REVOKE_PATH
-  ];
 });
 
 // src/core/source-disposition-tree.ts
@@ -92547,6 +92792,69 @@ var init_sniffer_service = __esm(() => {
   init_tier_ledger();
 });
 
+// src/core/remote-access-config.ts
+var REMOTE_ACCESS_CONFIG_ROUTE = "/plugins/olympus/remote-access";
+var init_remote_access_config = __esm(() => {
+  init_http();
+});
+
+// src/workers/remote-access-control.ts
+function createGatewayRemoteAccessConfigWriter(options) {
+  return async (enabled) => {
+    let response;
+    try {
+      response = await postOpenClawGatewayPluginRoute({
+        path: REMOTE_ACCESS_CONFIG_ROUTE,
+        body: { enabled },
+        authToken: options.authToken,
+        ...options.env ? { env: options.env } : {},
+        ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
+        ...options.gatewayConfig !== undefined ? { gatewayConfig: options.gatewayConfig } : {},
+        timeoutMs: 20000
+      });
+    } catch {
+      return {
+        ok: false,
+        status: 502,
+        code: "openclaw_unreachable",
+        message: "Olympus could not reach OpenClaw to change the setting. Check that OpenClaw is running, then try again."
+      };
+    }
+    const body = await response.json().catch(() => {
+      return;
+    });
+    if (response.ok && (body?.status === "written" || body?.status === "unchanged")) {
+      return body.status === "unchanged" ? { ok: true, unchanged: true } : { ok: true };
+    }
+    if (response.status === 404) {
+      return {
+        ok: false,
+        status: 501,
+        code: "config_write_unsupported",
+        message: "Restart OpenClaw so it loads this version of Olympus, then try again."
+      };
+    }
+    const message = typeof body?.message === "string" && body.message.length <= 400 ? body.message : "OpenClaw did not accept the change. Try again in a moment.";
+    const code = typeof body?.error_kind === "string" && /^[a-z0-9_]{1,64}$/.test(body.error_kind) ? body.error_kind : "config_write_failed";
+    return { ok: false, status: response.status === 501 ? 501 : 502, code, message };
+  };
+}
+function createDashboardRemoteAccessControl(options) {
+  return {
+    currentTermsUrl: () => resolveCurrentTermsUrl(readRemoteAccessStatus(options.dir()), options.fetchTerms),
+    termsAccepted: (url) => termsAccepted(options.dir(), url),
+    recordTermsAcceptance: (url) => {
+      recordTermsAcceptance(options.dir(), url, options.now?.() ?? new Date);
+    },
+    setEnabled: options.setEnabled
+  };
+}
+var init_remote_access_control = __esm(() => {
+  init_remote_access_config();
+  init_remote_access();
+  init_source_watch_runtime();
+});
+
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/webStandardStreamableHttp.js
 class WebStandardStreamableHTTPServerTransport {
   constructor(options = {}) {
@@ -94440,6 +94748,18 @@ var init_handler = __esm(() => {
   PKCE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
   LOOPBACK_HOSTNAMES4 = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
+
+// src/core/remote-access-terms.ts
+var exports_remote_access_terms = {};
+__export(exports_remote_access_terms, {
+  fetchLetsEncryptTermsUrl: () => fetchLetsEncryptTermsUrl
+});
+async function fetchLetsEncryptTermsUrl() {
+  const { fetchTermsOfService: fetchTermsOfService2 } = await Promise.resolve().then(() => (init_acme(), exports_acme));
+  const { LETS_ENCRYPT_DIRECTORY: LETS_ENCRYPT_DIRECTORY2 } = await Promise.resolve().then(() => (init_connect2(), exports_connect));
+  const bounded = (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(1e4) });
+  return fetchTermsOfService2(LETS_ENCRYPT_DIRECTORY2, bounded);
+}
 
 // src/workers/remote-openapi.ts
 var exports_remote_openapi = {};
@@ -96997,10 +97317,14 @@ async function main() {
   } : undefined;
   let dashboardAgentStore;
   let dashboardRemoteAccess = () => ({ state: "off" });
+  let dashboardRemoteAccessControl;
   const worker = createEmailSourceWorker({
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
-      remoteAccess: () => dashboardRemoteAccess()
+      remoteAccess: () => dashboardRemoteAccess(),
+      get remoteAccessControl() {
+        return dashboardRemoteAccessControl;
+      }
     },
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
@@ -97109,6 +97433,14 @@ async function main() {
     }
     return remoteAccessFromStatus({ live: remotePublicUrls(), status });
   };
+  if (authToken) {
+    const { fetchLetsEncryptTermsUrl: fetchLetsEncryptTermsUrl2 } = await Promise.resolve().then(() => exports_remote_access_terms);
+    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
+      dir: () => remoteAccessDir2(process.env),
+      fetchTerms: fetchLetsEncryptTermsUrl2,
+      setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env })
+    });
+  }
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -97753,6 +98085,7 @@ var init_server4 = __esm(async () => {
   init_tier_migration();
   init_embedding_ledger();
   init_agent_connections();
+  init_remote_access_control();
   INGESTION_DISPOSITION_SOURCES = [
     {
       sourceId: DROPBOX_INGESTION_EXCLUSION_SOURCE,
@@ -102969,20 +103302,12 @@ async function runConnectionsTermsCommand(args, env = process.env, dependencies 
   }
   const dir = remoteAccessDirForCli(env);
   const status = readRemoteAccessStatus(dir);
-  let termsUrl = status?.terms_url ?? undefined;
-  const caNamesNone = !termsUrl && status?.certificate?.state === "awaiting_terms";
-  if (!termsUrl && !caNamesNone) {
-    const fetchTerms = dependencies.fetchTerms ?? (async () => {
-      const { fetchTermsOfService: fetchTermsOfService2 } = await Promise.resolve().then(() => (init_acme(), exports_acme));
-      const { LETS_ENCRYPT_DIRECTORY: LETS_ENCRYPT_DIRECTORY2 } = await Promise.resolve().then(() => (init_connect2(), exports_connect));
-      const bounded = (input2, init) => fetch(input2, { ...init, signal: AbortSignal.timeout(1e4) });
-      return fetchTermsOfService2(LETS_ENCRYPT_DIRECTORY2, bounded);
-    });
-    try {
-      termsUrl = await fetchTerms();
-    } catch {
-      throw new OperationError("config_error", "Could not read the Let's Encrypt subscriber agreement URL from its directory.", "Check the network and retry; the agreement is published at https://letsencrypt.org/repository/.");
-    }
+  const fetchTerms = dependencies.fetchTerms ?? (async () => (await Promise.resolve().then(() => exports_remote_access_terms)).fetchLetsEncryptTermsUrl());
+  let termsUrl;
+  try {
+    termsUrl = await resolveCurrentTermsUrl(status, fetchTerms);
+  } catch {
+    throw new OperationError("config_error", "Could not read the Let's Encrypt subscriber agreement URL from its directory.", "Check the network and retry; the agreement is published at https://letsencrypt.org/repository/.");
   }
   const acceptance = readTermsAcceptance(dir);
   if (accept) {

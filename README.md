@@ -327,7 +327,18 @@ button.
   `olympus serve` command) into the agent. This works without remote access.
 
 Agents in the cloud reach Olympus only when remote access is on; the Agents
-section says whether it is. Every connected agent gets the same privacy rules
+section says whether it is. To turn it on, press **Turn on remote access** in
+that section. It first shows Let's Encrypt's subscriber agreement (a link plus
+a short summary), because Olympus gets a free certificate for this computer's
+own address, and turns remote access on only after you accept. Olympus then
+connects through the Olympus relay (`connect.olympusplugin.ai`): you create no
+account and run no tunnel. The relay forwards encrypted traffic and cannot read
+questions or answers. **Turn off remote access** turns it off again. If the
+relay cannot be reached, the section says **Olympus relay unavailable** and
+Olympus keeps retrying on its own; agents on this computer are unaffected.
+Advanced: to use a tunnel you run yourself instead of the relay, set
+`plugins.entries.olympus.config.remote.publicBaseUrl` to its https origin
+(`openclaw config set …`) and turn remote access on. Every connected agent gets the same privacy rules
 as your OpenClaw agent. It never sees Private source text or Secrets. For
 Private items it receives only answers that Venice or a local model reasoned
 out, with each item's title, path, source and author. The same

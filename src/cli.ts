@@ -123,7 +123,6 @@ import {
   resolveRemoteAccessUrls,
   type RemoteAccessUrls,
 } from './core/remote-access.ts';
-import { fetchLetsEncryptTermsUrl } from './core/remote-access-terms.ts';
 
 const PUBLIC_CLI_COMMAND_NAMES = new Set<string>(V0_4_PUBLIC_CLI_COMMANDS);
 const PUBLIC_CLI_HELP_GROUPS = new Set([
@@ -2596,7 +2595,8 @@ export async function runConnectionsTermsCommand(
   }
   const dir = remoteAccessDirForCli(env);
   const status = readRemoteAccessStatus(dir);
-  const fetchTerms = dependencies.fetchTerms ?? fetchLetsEncryptTermsUrl;
+  const fetchTerms = dependencies.fetchTerms
+    ?? (async () => (await import('./core/remote-access-terms.ts')).fetchLetsEncryptTermsUrl());
   let termsUrl: string | undefined;
   try {
     // The relay's reported agreement, or none when the CA named none, else

@@ -13366,6 +13366,7 @@ var REMOTE_ACCESS_DIR_NAME = "connect-relay";
 var STATUS_FILE = "status.json";
 var DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 var LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
+var DEFAULT_RELAY_HOST = "connect.olympusplugin.ai";
 function resolveRemoteAccessMode(remote) {
   if (!remote?.enabled)
     return { mode: "off" };
@@ -13383,17 +13384,11 @@ function resolveRemoteAccessMode(remote) {
     }
     return { mode: "manual", publicBaseUrl: parsed.urls.origin };
   }
-  if (relayHost) {
-    const host = relayHost.toLowerCase();
-    if (!DNS_NAME.test(host)) {
-      return { mode: "error", error: "remote.relayHost must be a DNS name such as connect.olympusplugin.ai, with no scheme, port or path." };
-    }
-    return { mode: "relay", relayHost: host };
+  const host = (relayHost ?? DEFAULT_RELAY_HOST).toLowerCase();
+  if (!DNS_NAME.test(host)) {
+    return { mode: "error", error: "remote.relayHost must be a DNS name such as connect.olympusplugin.ai, with no scheme, port or path." };
   }
-  return {
-    mode: "error",
-    error: "remote.enabled is on, but neither remote.relayHost (the Olympus relay) nor remote.publicBaseUrl (your own tunnel) is set."
-  };
+  return { mode: "relay", relayHost: host };
 }
 function olympusDataDir(env = process.env) {
   const configured = env.XDG_DATA_HOME?.trim();
@@ -13847,6 +13842,7 @@ var DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer";
 var DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1";
 var AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
 var AGENT_MINT_WINDOW_MS = 10 * 60000;
+var REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
 function createGatewayCallbackPeerHeader(peer, authToken) {
   const normalized = normalizeGatewayCallbackPeer(peer);
   const signature = createHmac("sha256", authToken).update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${normalized}`).digest("base64url");
@@ -16628,6 +16624,24 @@ function parseDashboardControlParams(value) {
       throw new DashboardGatewayInvalidRequestError("connection_id is not a connection id.");
     return { action, connection_id: connectionId };
   }
+  if (action === "set_remote_access") {
+    const record = exactRecord(outer, ["action", "enabled", "accept_terms"]);
+    if (typeof record.enabled !== "boolean")
+      throw new DashboardGatewayInvalidRequestError("enabled must be true or false.");
+    if (record.accept_terms === undefined)
+      return { action, enabled: record.enabled };
+    if (!record.enabled)
+      throw new DashboardGatewayInvalidRequestError("Only turning remote access on accepts an agreement.");
+    const accept = exactRecord(record.accept_terms, ["url"]);
+    if (!("url" in accept))
+      throw new DashboardGatewayInvalidRequestError("accept_terms.url is required.");
+    if (accept.url === null)
+      return { action, enabled: true, accept_terms: { url: null } };
+    const url = boundedString(accept.url, 2048, "accept_terms.url", false);
+    if (!url.startsWith("https://"))
+      throw new DashboardGatewayInvalidRequestError("accept_terms.url must be an https URL.");
+    return { action, enabled: true, accept_terms: { url } };
+  }
   throw new DashboardGatewayInvalidRequestError("Unknown Olympus dashboard control action.");
 }
 function resolveGatewayPublicOrigin(value) {
@@ -16919,6 +16933,11 @@ function dashboardControlWorkerRequest(params) {
       return { path: "/dashboard/agents/keys", body: { name: params.name } };
     case "revoke_agent_connection":
       return { path: "/dashboard/agents/revoke", body: { connection_id: params.connection_id } };
+    case "set_remote_access":
+      return {
+        path: "/dashboard/agents/remote-access",
+        body: { enabled: params.enabled, ...params.accept_terms ? { accept_terms: { url: params.accept_terms.url } } : {} }
+      };
   }
 }
 function parseDashboardReadResult(value, expectedCanWrite) {
@@ -17209,6 +17228,84 @@ function enumValue(value, values, label) {
   throw new DashboardGatewayInvalidRequestError(`${label} is invalid.`);
 }
 
+// src/core/remote-access-config.ts
+var REMOTE_ACCESS_CONFIG_ROUTE = "/plugins/olympus/remote-access";
+var REMOTE_ACCESS_ENABLED_CONFIG_PATH = "plugins.entries.olympus.config.remote.enabled";
+async function handleRemoteAccessConfigRequest(input) {
+  if (!input.authToken) {
+    return failed(503, "remote_access_auth_unconfigured", "The Olympus worker token is not configured.");
+  }
+  if (!hasValidWorkerBearerToken(input.authorization, input.authToken)) {
+    return failed(401, "unauthorized", "Unauthorized.");
+  }
+  if (input.method !== "POST")
+    return failed(405, "method_not_allowed", "Use POST.");
+  let enabled;
+  try {
+    const parsed = JSON.parse(input.body);
+    const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+    if (!record || Object.keys(record).length !== 1 || typeof record.enabled !== "boolean")
+      throw new Error("shape");
+    enabled = record.enabled;
+  } catch {
+    return failed(400, "invalid_request", 'The request must be exactly {"enabled": true} or {"enabled": false}.');
+  }
+  const writer = input.runtimeConfig;
+  if (typeof writer?.mutateConfigFile !== "function") {
+    return failed(501, "config_write_unsupported", "This OpenClaw version does not let plugins change their settings. Update OpenClaw, or run: " + `openclaw config set ${REMOTE_ACCESS_ENABLED_CONFIG_PATH} ${enabled}`);
+  }
+  if (currentEnabled(writer) === enabled) {
+    return { status: 200, body: { status: "unchanged", enabled } };
+  }
+  try {
+    const result = await writer.mutateConfigFile({
+      afterWrite: { mode: "auto" },
+      mutate: (draft) => {
+        const remote = objectAt(objectAt(objectAt(objectAt(objectAt(draft, "plugins"), "entries"), "olympus"), "config"), "remote");
+        remote.enabled = enabled;
+      }
+    });
+    const followUp = asRecord16(asRecord16(result)?.followUp);
+    return {
+      status: 200,
+      body: {
+        status: "written",
+        enabled,
+        ...typeof followUp?.mode === "string" ? { follow_up: followUp.mode } : {}
+      }
+    };
+  } catch {
+    return failed(500, "config_write_failed", "OpenClaw did not accept the change. Try again, or run: " + `openclaw config set ${REMOTE_ACCESS_ENABLED_CONFIG_PATH} ${enabled}`);
+  }
+}
+function currentEnabled(writer) {
+  try {
+    const root = asRecord16(writer.current?.());
+    const remote = asRecord16(asRecord16(asRecord16(asRecord16(asRecord16(root?.plugins)?.entries)?.olympus)?.config)?.remote);
+    return typeof remote?.enabled === "boolean" ? remote.enabled : undefined;
+  } catch {
+    return;
+  }
+}
+function objectAt(parent, key) {
+  const existing = parent[key];
+  if (existing === undefined) {
+    const created = {};
+    parent[key] = created;
+    return created;
+  }
+  const record = asRecord16(existing);
+  if (!record)
+    throw new TypeError(`config ${key} is not an object`);
+  return record;
+}
+function asRecord16(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+function failed(status, errorKind, message) {
+  return { status, body: { status: "failed", error_kind: errorKind, message } };
+}
+
 // src/native-plugin.ts
 function operationResult(operation, payload) {
   return {
@@ -17230,13 +17327,13 @@ function contentTextForOperation(operation, payload) {
   return JSON.stringify(payload, null, 2);
 }
 function sourceAnswerContentText(payload) {
-  const result = asRecord16(payload);
+  const result = asRecord17(payload);
   if (!result || typeof result.answer !== "string")
     return;
-  const audit = asRecord16(result.audit);
-  const policy = asRecord16(result.policy);
-  const synthesis = asRecord16(audit?.answer_synthesis);
-  const timings = asRecord16(audit?.phase_timings);
+  const audit = asRecord17(result.audit);
+  const policy = asRecord17(result.policy);
+  const synthesis = asRecord17(audit?.answer_synthesis);
+  const timings = asRecord17(audit?.phase_timings);
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
   const skipped = Array.isArray(audit?.skipped_corpora) ? audit.skipped_corpora : [];
   const lines = [
@@ -17246,7 +17343,7 @@ function sourceAnswerContentText(payload) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record = asRecord16(item);
+    const record = asRecord17(item);
     if (!record)
       return;
     const label = firstString(record.source_label, record.title, record.corpus_id, "source");
@@ -17257,7 +17354,7 @@ function sourceAnswerContentText(payload) {
   });
   if (evidence.length > 8)
     lines.push(`... ${evidence.length - 8} more evidence item(s) kept in tool details.`);
-  const coverageNotes = skipped.map((item) => asRecord16(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
+  const coverageNotes = skipped.map((item) => asRecord17(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
     const corpus = typeof item.corpus_id === "string" ? item.corpus_id : "unknown corpus";
     const reason = typeof item.reason === "string" ? item.reason : "skipped";
     return `${corpus}: ${reason}`;
@@ -17309,7 +17406,7 @@ function labelForOperation(operation) {
 function asParams(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asRecord16(value) {
+function asRecord17(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function firstString(...values) {
@@ -17360,6 +17457,7 @@ var plugin = {
       caller: { surface: "native", displayName: "OpenClaw" }
     };
     registerSourceWatchDeliveryRoute(api, config);
+    registerRemoteAccessConfigRoute(api, config);
     registerOlympusDashboardGateway(api, config);
     for (const operation of operations) {
       if (!shouldExposeOperation(operation, { config, surface: "native" }))
@@ -17478,6 +17576,39 @@ function registerSourceWatchDeliveryRoute(api, config) {
     }
   });
 }
+function registerRemoteAccessConfigRoute(api, config) {
+  if (!api.registerHttpRoute)
+    return;
+  const currentAuthToken = workerAuthTokenProvider(config);
+  api.registerHttpRoute({
+    path: REMOTE_ACCESS_CONFIG_ROUTE,
+    auth: "plugin",
+    match: "exact",
+    handler: async (request, response) => {
+      let body;
+      try {
+        body = await readBoundedBody(request, 1024);
+      } catch (error) {
+        response.statusCode = error instanceof RequestBodyTooLargeError ? 413 : 400;
+        response.setHeader("Content-Type", "application/json");
+        response.end(JSON.stringify({ status: "failed", error_kind: "invalid_request_body" }));
+        return;
+      }
+      const authToken = currentAuthToken();
+      const result = await handleRemoteAccessConfigRequest({
+        method: request.method ?? "",
+        authorization: typeof request.headers.authorization === "string" ? request.headers.authorization : null,
+        body,
+        ...authToken ? { authToken } : {},
+        runtimeConfig: api.runtime?.config
+      });
+      response.statusCode = result.status;
+      response.setHeader("Content-Type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify(result.body));
+    }
+  });
+}
 async function loadOpenClawDurableSend() {
   const moduleName = "openclaw/plugin-sdk/channel-outbound";
   let sdk;
@@ -17560,7 +17691,7 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord2(value, allowed) {
-  const record = asRecord16(value);
+  const record = asRecord17(value);
   if (!record || Object.keys(record).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }

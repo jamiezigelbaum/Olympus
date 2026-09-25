@@ -288,7 +288,7 @@ describe('request validation', () => {
     expect(store.list()).toEqual([]);
   });
 
-  test('the Gateway bridge accepts exactly the three actions and maps them to the routes', async () => {
+  test('the Gateway bridge accepts exactly the agent actions and maps them to the routes', async () => {
     expect(parseDashboardControlParams({ action: 'mint_agent_pairing_code' })).toEqual({ action: 'mint_agent_pairing_code' });
     expect(parseDashboardControlParams({ action: 'create_agent_key', name: ' Muse ' })).toEqual({ action: 'create_agent_key', name: 'Muse' });
     expect(() => parseDashboardControlParams({ action: 'create_agent_key', name: 'Muse', token: 'x' })).toThrow();
@@ -304,10 +304,16 @@ describe('request validation', () => {
       { action: 'mint_agent_pairing_code' },
       { action: 'create_agent_key', name: 'Muse' },
       { action: 'revoke_agent_connection', connection_id: 'c'.repeat(18) },
+      { action: 'set_remote_access', enabled: true, accept_terms: { url: 'https://letsencrypt.org/documents/LE-SA-v1.6.pdf' } },
     ];
     for (const param of params) await requestDashboardControl({ params: param, config, fetchImpl });
     expect(seen.map((entry) => new URL(entry.url).pathname)).toEqual([...DASHBOARD_AGENT_CONTROL_PATHS]);
-    expect(seen.map((entry) => JSON.parse(entry.body))).toEqual([{}, { name: 'Muse' }, { connection_id: 'c'.repeat(18) }]);
+    expect(seen.map((entry) => JSON.parse(entry.body))).toEqual([
+      {},
+      { name: 'Muse' },
+      { connection_id: 'c'.repeat(18) },
+      { enabled: true, accept_terms: { url: 'https://letsencrypt.org/documents/LE-SA-v1.6.pdf' } },
+    ]);
   });
 });
 

@@ -680,11 +680,32 @@ function dropboxPreview(mode: 'initial' | 'update') {
 
 /**
  * Setup's Agents section: ?agents=off (remote access off, nothing connected),
- * ?agents=not-connected, or the default: remote access on with two agents.
+ * ?agents=not-connected, ?agents=relay-unavailable (on, relay down),
+ * ?agents=awaiting-terms (on, agreement to accept), or the default: remote
+ * access on with two agents.
  */
 export function previewAgentsView(mode: string | null): DashboardAgentsView {
   if (mode === 'off') return { remoteAccess: { state: 'off' }, connections: [] };
   if (mode === 'not-connected') return { remoteAccess: { state: 'not_connected' }, connections: [] };
+  if (mode === 'relay-unavailable') {
+    return {
+      remoteAccess: {
+        state: 'not_connected',
+        detail: 'Olympus relay unavailable, so agents in the cloud cannot reach Olympus right now. Olympus keeps trying on its own.',
+      },
+      connections: [],
+    };
+  }
+  if (mode === 'awaiting-terms') {
+    return {
+      remoteAccess: {
+        state: 'not_connected',
+        needsTerms: true,
+        detail: 'Olympus needs you to accept Let\'s Encrypt\'s subscriber agreement before it can get its certificate.',
+      },
+      connections: [],
+    };
+  }
   return {
     remoteAccess: {
       state: 'on',
@@ -736,6 +757,26 @@ if (import.meta.main) {
     }
     if (request.method === 'POST' && url.pathname === '/dashboard/agents/revoke') {
       return Response.json({ ok: true, status_message: 'Preview only: nothing was revoked.' });
+    }
+    // Turn on shows the agreement first, as the worker does before any
+    // acceptance; accepting or turning off changes nothing here.
+    if (request.method === 'POST' && url.pathname === '/dashboard/agents/remote-access') {
+      const body = await request.json().catch(() => ({})) as { enabled?: boolean; accept_terms?: unknown };
+      if (body.enabled === true && body.accept_terms === undefined) {
+        return Response.json({
+          ok: false,
+          error: { code: 'terms_required', message: 'Read Let\'s Encrypt\'s subscriber agreement, then accept it to turn on remote access.' },
+          // Preview only: the worker names the CA directory's current agreement here.
+          terms: { url: 'https://letsencrypt.org/repository/', read_url: 'https://letsencrypt.org/repository/' },
+        }, { status: 409 });
+      }
+      return Response.json({
+        ok: true,
+        enabled: body.enabled === true,
+        status_message: body.enabled === true
+          ? 'Preview only: remote access would now be turning on.'
+          : 'Preview only: remote access would now be off.',
+      });
     }
     // Every other control POST (connect, sync now, disconnect, embedding
     // priority) needs a worker. Say so in the words the page prints, instead
@@ -814,5 +855,5 @@ if (import.meta.main) {
   console.log('  mail scope picker: /mail-picker (add ?approved for a saved scope)');
   console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');
   console.log('  publisher-app one-click cards (add ?setup): /connect-dropbox-publisher /connect-google-publisher');
-  console.log('  agents (add ?setup): remote access on by default; &agents=off or &agents=not-connected');
+  console.log('  agents (add ?setup): remote access on by default; &agents=off, &agents=not-connected, &agents=relay-unavailable or &agents=awaiting-terms');
 }

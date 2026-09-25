@@ -368,12 +368,21 @@ describe('native OpenClaw plugin adapter', () => {
         routes.push(route as unknown as Record<string, unknown>);
       },
     });
-    expect(routes).toEqual([expect.objectContaining({
-      path: '/plugins/olympus/watch-delivery',
-      auth: 'plugin',
-      match: 'exact',
-      handler: expect.any(Function),
-    })]);
+    expect(routes).toEqual([
+      expect.objectContaining({
+        path: '/plugins/olympus/watch-delivery',
+        auth: 'plugin',
+        match: 'exact',
+        handler: expect.any(Function),
+      }),
+      // The dashboard's remote-access toggle, applied with OpenClaw's config write.
+      expect.objectContaining({
+        path: '/plugins/olympus/remote-access',
+        auth: 'plugin',
+        match: 'exact',
+        handler: expect.any(Function),
+      }),
+    ]);
   });
 
   test('tool calls and watch delivery use the worker.env token current at each request', async () => {

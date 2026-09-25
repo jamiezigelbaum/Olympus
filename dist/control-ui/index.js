@@ -413,7 +413,50 @@ function mountDashboardController(options) {
       return { action: "create_agent_key", name: formRecord(form).name || "" };
     if (kind === "revoke")
       return { action: "revoke_agent_connection", connection_id: formRecord(form).connection_id || "" };
+    if (kind === "remote-on")
+      return { action: "set_remote_access", enabled: true };
+    if (kind === "remote-off")
+      return { action: "set_remote_access", enabled: false };
+    if (kind === "remote-accept") {
+      if (form.dataset.termsShown !== "true")
+        return;
+      return { action: "set_remote_access", enabled: true, accept_terms: { url: form.dataset.termsUrl || null } };
+    }
     return;
+  }
+  function showRemoteTerms(from, body, message) {
+    const panel = query("[data-remote-terms]");
+    const accept = panel?.querySelector('form[data-agent-kind="remote-accept"]');
+    const terms = body.terms && typeof body.terms === "object" && !Array.isArray(body.terms) ? body.terms : undefined;
+    if (!panel || !accept || !terms) {
+      say(from, message);
+      return;
+    }
+    const url = typeof terms.url === "string" && /^https:\/\//.test(terms.url) ? terms.url : "";
+    const readUrl = typeof terms.read_url === "string" && /^https:\/\//.test(terms.read_url) ? terms.read_url : url;
+    const link = panel.querySelector("[data-remote-terms-link]");
+    if (link && readUrl)
+      link.href = readUrl;
+    accept.dataset.termsUrl = url;
+    accept.dataset.termsShown = "true";
+    say(from, "");
+    say(accept, from === accept ? message : "");
+    panel.hidden = false;
+    if (!panel.hasAttribute("tabindex"))
+      panel.setAttribute("tabindex", "-1");
+    panel.focus();
+  }
+  function hideRemoteTerms() {
+    const panel = query("[data-remote-terms]");
+    if (!panel)
+      return;
+    panel.hidden = true;
+    const accept = panel.querySelector('form[data-agent-kind="remote-accept"]');
+    if (accept) {
+      delete accept.dataset.termsShown;
+      delete accept.dataset.termsUrl;
+      say(accept, "");
+    }
   }
   function showAgentSecret(form, value, note) {
     const holder = form.closest("[data-agent-step]") || form.parentElement || form;
@@ -468,7 +511,9 @@ function mountDashboardController(options) {
       return;
     if (params.action === "revoke_agent_connection" && !window.confirm(form.dataset.confirmation || "Revoke this connection?"))
       return;
-    setFormPending(form, true, params.action === "revoke_agent_connection" ? "Revoking…" : "Working…");
+    if (params.action === "set_remote_access" && !params.enabled && !window.confirm(form.dataset.confirmation || "Turn off remote access?"))
+      return;
+    setFormPending(form, true, params.action === "revoke_agent_connection" ? "Revoking…" : params.action === "set_remote_access" ? params.enabled ? "Turning on…" : "Turning off…" : "Working…");
     let result;
     try {
       result = await options.transport.control(params);
@@ -489,8 +534,22 @@ function mountDashboardController(options) {
       }
       return;
     }
+    if (params.action === "set_remote_access" && result.status === 409) {
+      const code = result.body.error?.code;
+      if (code === "terms_required" || code === "terms_changed") {
+        showRemoteTerms(form, result.body, errorMessage(result));
+        return;
+      }
+    }
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
       say(form, errorMessage(result));
+      return;
+    }
+    if (params.action === "set_remote_access") {
+      hideRemoteTerms();
+      const statusMessage2 = result.body.status_message;
+      const row = form.closest("[data-remote-access]");
+      say(row && row.contains(form) ? form : query("[data-remote-access] form") || form, typeof statusMessage2 === "string" ? statusMessage2 : "Saved.");
       return;
     }
     if (params.action === "mint_agent_pairing_code" && typeof result.body.code === "string") {
@@ -599,6 +658,8 @@ function mountDashboardController(options) {
       return;
     if (!force && query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select'))
       return;
+    if (!force && query("[data-remote-terms]:not([hidden])"))
+      return;
     if (!force && hasDirtyInput())
       return;
     if (!force && hasFocusedControl()) {
@@ -683,6 +744,10 @@ function mountDashboardController(options) {
         startedFromSheet.add(form);
         form.requestSubmit();
       }
+      return;
+    }
+    if (target.closest("[data-remote-terms-cancel]")) {
+      hideRemoteTerms();
       return;
     }
     const done = target.closest("[data-agent-secret-done]");
@@ -2496,6 +2561,11 @@ var AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 4px 0 0; 
 .agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
 .agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
 #agents { margin-top: 26px; }
+[data-remote-access] > .rowform { flex: 0 0 auto; margin-left: 8px; }
+.remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: 13px; color: var(--t2); }
+.remoteterms[hidden] { display: none; }
+.remoteterms p { margin: 0 0 8px; max-width: 72ch; }
+.remoteterms .rowform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`;
 var MODEL_SETUP_CSS = `
 .modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{border:1px solid var(--border,#333);border-radius:12px;padding:16px 18px;min-width:0}
