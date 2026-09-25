@@ -4,9 +4,10 @@
  * The dashboard's Turn on / Turn off remote access changes exactly one
  * OpenClaw config value, `plugins.entries.olympus.config.remote.enabled`, and
  * only through OpenClaw's own config write path: the plugin runtime's
- * `api.runtime.config.mutateConfigFile`. That is the same locked, validated
- * (`validateConfigObjectWithPlugins`), backed-up write that `config.patch` and
- * `openclaw config set` commit through, and its `afterWrite: { mode: 'auto' }`
+ * `api.runtime.config.mutateConfigFile`. That is the same locked, backed-up
+ * write that `config.patch` and `openclaw config set` commit through
+ * (`replaceConfigFile`, whose `writeConfigFile` validates the authored config
+ * with `validateConfigObjectRawWithPlugins`), and its `afterWrite: { mode: 'auto' }`
  * lets the Gateway's reload planner apply it; the relay service reloads on
  * `plugins.entries.olympus.config.remote`. Olympus never writes openclaw.json.
  *

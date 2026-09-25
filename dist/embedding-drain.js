@@ -20833,6 +20833,7 @@ init_vocabulary();
 
 // src/workers/agent-connections.ts
 init_operation_caller();
+var WORKER_ENV_ADDRESS_MESSAGE = "This address is set by OLYMPUS_PUBLIC_BASE_URL in worker.env, a tunnel you run yourself, " + "so the dashboard cannot turn it off. To turn remote access off, delete that line from ~/.config/olympus/worker.env, " + "then restart OpenClaw (openclaw gateway restart), and stop your tunnel.";
 
 // src/core/agent-instructions.ts
 var AGENT_SKILL_DESCRIPTION = "Ask Olympus, the owner's private search over their own email, files, " + "messages, notes and saved reading, whenever a question may be answered from their own records.";

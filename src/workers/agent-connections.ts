@@ -56,7 +56,17 @@ export const LETS_ENCRYPT_REPOSITORY_URL = 'https://letsencrypt.org/repository/'
  * words.
  */
 export type DashboardRemoteAccess =
-  | { state: 'on'; mcpUrl: string; openapiUrl: string }
+  | {
+      state: 'on';
+      mcpUrl: string;
+      openapiUrl: string;
+      /**
+       * `worker_env`: the address is OLYMPUS_PUBLIC_BASE_URL in worker.env, a
+       * tunnel the owner runs. Plugin config cannot turn that off, so the
+       * panel offers no Turn off and says where the address comes from.
+       */
+      setBy?: 'worker_env';
+    }
   | { state: 'off' }
   | { state: 'not_connected'; detail?: string; needsTerms?: true }
   | { state: 'invalid'; detail: string };
@@ -116,9 +126,15 @@ export interface DashboardRemoteAccessControl {
 export function remoteAccessFromStatus(input: {
   live: RemotePublicUrls | undefined;
   status: (Pick<RemoteAccessStatusView, 'error' | 'mode' | 'remote_enabled' | 'next_step'>
-    & Partial<Pick<RemoteAccessStatusView, 'relay' | 'certificate'>>) | undefined;
+    & Partial<Pick<RemoteAccessStatusView, 'relay' | 'certificate' | 'public_base_url_source'>>) | undefined;
+  /** Where the worker's live address comes from: its environment (worker.env) or the relay status. */
+  liveOrigin?: 'env' | 'status';
 }): DashboardRemoteAccess {
   const status = input.status;
+  if (input.live && (input.liveOrigin === 'env' || status?.public_base_url_source === 'worker_env')) {
+    // A tunnel the owner runs, named in worker.env: up regardless of plugin config.
+    return { state: 'on', mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json`, setBy: 'worker_env' };
+  }
   const relayDown = status?.mode === 'relay' && status.relay !== undefined && status.relay.state !== 'online';
   if (input.live && !relayDown) {
     return { state: 'on', mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json` };
@@ -289,6 +305,12 @@ async function setRemoteAccess(
   if (!control) {
     return refusal(501, 'remote_access_control_not_supported', 'This Olympus cannot turn remote access on or off from the dashboard.');
   }
+  // A tunnel named in worker.env is outside plugin config: writing
+  // remote.enabled would change nothing (off) or conflict with it (on).
+  const before = currentAccess(backend);
+  if (before?.state === 'on' && before.setBy === 'worker_env') {
+    return refusal(409, 'set_by_worker_env', WORKER_ENV_ADDRESS_MESSAGE);
+  }
   if (body.enabled) {
     let current: string | undefined;
     try {
@@ -331,13 +353,48 @@ async function setRemoteAccess(
     message: 'Olympus could not reach OpenClaw to change the setting. Check that OpenClaw is running, then try again.',
   }));
   if (!written.ok) return refusal(written.status, written.code, written.message);
+  if (!body.enabled && written.unchanged) {
+    // Nothing was written. Say "off" only when no address is still up.
+    const after = currentAccess(backend);
+    if (after && after.state === 'on') {
+      return refusal(
+        409,
+        'remote_access_still_reachable',
+        `Remote access is already off in OpenClaw's settings, but agents in the cloud can still reach Olympus at ${hostOfUrl(after.mcpUrl)}. `
+          + 'Restart OpenClaw so the change takes effect, then check this page again.',
+      );
+    }
+  }
   return secretResponse({
     ok: true,
     enabled: body.enabled,
     status_message: body.enabled
       ? 'Remote access is turning on. Olympus connects to its relay and gets a certificate, which usually takes a minute.'
-      : 'Remote access is off. Agents in the cloud can no longer reach Olympus; agents on this computer are unaffected.',
+      : written.unchanged
+        ? 'Remote access is off. Agents in the cloud cannot reach Olympus; agents on this computer are unaffected.'
+        : 'Remote access is turning off. Within a few seconds agents in the cloud can no longer reach Olympus; agents on this computer are unaffected.',
   });
+}
+
+/** Where to remove a worker.env address; shown in place of Turn off. */
+export const WORKER_ENV_ADDRESS_MESSAGE = 'This address is set by OLYMPUS_PUBLIC_BASE_URL in worker.env, a tunnel you run yourself, '
+  + 'so the dashboard cannot turn it off. To turn remote access off, delete that line from ~/.config/olympus/worker.env, '
+  + 'then restart OpenClaw (openclaw gateway restart), and stop your tunnel.';
+
+function currentAccess(backend: DashboardAgentConnectionsBackend): DashboardRemoteAccess | undefined {
+  try {
+    return backend.remoteAccess();
+  } catch {
+    return undefined;
+  }
+}
+
+function hostOfUrl(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 function isHttpsUrl(value: unknown): value is string {

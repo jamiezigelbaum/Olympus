@@ -663,3 +663,77 @@ describe('the controller shows the agreement before turning on', () => {
     expect(form.querySelector('[data-action-message]')!.textContent).toBe('Remote access is off.');
   });
 });
+
+describe('a public address set in worker.env', () => {
+  const live = parseRemotePublicBaseUrl('https://my-tunnel.example');
+  const envAccess = remoteAccessFromStatus({ live: live.enabled ? live.urls : undefined, status: undefined, liveOrigin: 'env' });
+
+  test('is on, set by worker.env, from either the worker origin or the status source', () => {
+    expect(envAccess).toEqual({
+      state: 'on',
+      mcpUrl: 'https://my-tunnel.example/mcp',
+      openapiUrl: 'https://my-tunnel.example/openapi.json',
+      setBy: 'worker_env',
+    });
+    const viaStatus = remoteAccessFromStatus({
+      live: live.enabled ? live.urls : undefined,
+      status: { error: null, mode: 'off', remote_enabled: true, next_step: null, public_base_url_source: 'worker_env' },
+    });
+    expect(viaStatus).toMatchObject({ state: 'on', setBy: 'worker_env' });
+  });
+
+  test('offers no Turn off; says where the address comes from and how to remove it', () => {
+    const doc = new Window().document;
+    doc.body.innerHTML = renderDashboardAgentsSection({ view: { remoteAccess: envAccess, connections: [] }, now: NOW });
+    expect(doc.querySelector('form[data-agent-kind="remote-off"]')).toBeNull();
+    expect(doc.querySelector('form[data-agent-kind="remote-on"]')).toBeNull();
+    const hint = doc.querySelector('[data-remote-set-by="worker_env"]')!.textContent!;
+    expect(hint).toContain('set by OLYMPUS_PUBLIC_BASE_URL in worker.env');
+    expect(hint).toContain('delete that line from ~/.config/olympus/worker.env');
+    expect(hint).toContain('openclaw gateway restart');
+  });
+
+  test('the route refuses to toggle it and writes nothing', async () => {
+    const { dir } = home();
+    writeRemoteAccessStatus(dir, relayStatus());
+    recordTermsAcceptance(dir, TERMS_V1);
+    const { backend, writes } = control(dir);
+    const envBackend = { ...backend, remoteAccess: () => envAccess };
+    for (const body of [{ enabled: false }, { enabled: true }]) {
+      const refused = await call(envBackend, body);
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({ ok: false, error: { code: 'set_by_worker_env', message: expect.stringContaining('OLYMPUS_PUBLIC_BASE_URL') } });
+    }
+    expect(writes).toEqual([]);
+  });
+});
+
+describe('Turn off reports off only when nothing is still reachable', () => {
+  const REMOTE_ON: DashboardRemoteAccess = { state: 'on', mcpUrl: `${PUBLIC}/mcp`, openapiUrl: `${PUBLIC}/openapi.json` };
+
+  test('an unchanged write while an address is still up is not reported as off', async () => {
+    const { dir } = home();
+    const { backend, writes } = control(dir, { write: { ok: true, unchanged: true } });
+    const stillOn = { ...backend, remoteAccess: () => REMOTE_ON };
+    const result = await call(stillOn, { enabled: false });
+    expect(result.status).toBe(409);
+    expect(result.body).toMatchObject({ ok: false, error: { code: 'remote_access_still_reachable', message: expect.stringContaining('abc123.connect.olympusplugin.ai') } });
+    expect(JSON.stringify(result.body)).not.toContain('Remote access is off');
+    expect(writes).toEqual([false]);
+  });
+
+  test('an unchanged write with nothing up says off; a real write says turning off', async () => {
+    const { dir } = home();
+    const unchanged = control(dir, { write: { ok: true, unchanged: true } });
+    expect((await call(unchanged.backend, { enabled: false })).body).toMatchObject({ ok: true, status_message: expect.stringMatching(/^Remote access is off\./) });
+    const written = control(dir);
+    const on = { ...written.backend, remoteAccess: () => REMOTE_ON };
+    expect((await call(on, { enabled: false })).body).toMatchObject({ ok: true, status_message: expect.stringMatching(/^Remote access is turning off\./) });
+  });
+});
+
+test('the agreement summary does not claim there is no account', () => {
+  const html = renderDashboardAgentsSection({ view: { remoteAccess: { state: 'off' }, connections: [] }, now: NOW });
+  expect(html).toContain('You don\'t sign up for anything or share an email address.');
+  expect(html).not.toContain('create no account');
+});

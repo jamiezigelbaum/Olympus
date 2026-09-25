@@ -3974,7 +3974,7 @@ export async function main(): Promise<void> {
     } catch {
       status = undefined;
     }
-    return remoteAccessFromStatus({ live: remotePublicUrls(), status });
+    return remoteAccessFromStatus({ live: remotePublicUrls(), status, liveOrigin: remotePublicSource.origin });
   };
   // Turn on / Turn off remote access: the agreement as the CLI records it,
   // and the config change through the Gateway's own config write.

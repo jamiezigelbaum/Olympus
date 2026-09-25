@@ -229,7 +229,14 @@ openclaw config set plugins.entries.olympus.config.remote.publicBaseUrl https://
 the relay is deployed, turning remote access on is safe: the relay child stays
 up, reconnects with its own backoff (1 s doubling to 60 s, jittered), and
 status reads `relay.state: offline` with the reason; `olympus connections
-status` and the dashboard say "Olympus relay unavailable". `relayHost` and
+status` and the dashboard say "Olympus relay unavailable". **Upgrade note:** a
+config with `remote.enabled: true` and no address used to be a named error
+that kept remote access off; it now starts the relay service. Nothing public
+happens before the owner accepts the CA's agreement: the install registers its
+key with the relay, but no DNS record is published, no ACME account is
+created and no certificate is ordered, so no Certificate Transparency entry
+names the install (held by `test/native-relay-service.test.ts`). The
+CHANGELOG carries the same note. `relayHost` and
 `publicBaseUrl` are mutually exclusive, and so is either with an
 `OLYMPUS_PUBLIC_BASE_URL` in worker.env; a conflict turns remote access off
 (named in Gateway service health and in `olympus connections status`), never
@@ -270,7 +277,11 @@ the rest of the plugin.
   `api.runtime.config.mutateConfigFile` and `afterWrite: { mode: 'auto' }`, the
   same locked, validated, backed-up write `config.patch` and `openclaw config
   set` commit through. An OpenClaw without that runtime API gets a plain 501
-  naming the `openclaw config set` equivalent.
+  naming the `openclaw config set` equivalent. A public address set by
+  `OLYMPUS_PUBLIC_BASE_URL` in worker.env is outside plugin config, so the
+  panel shows where it comes from and how to remove it instead of Turn off,
+  and the route refuses to toggle it (`set_by_worker_env`); a Turn off that
+  wrote nothing never reports "off" while an address is still up.
 - **Outage.** A relay session that goes offline keeps its public address in
   status.json (the certificate still names it), but the dashboard reads "not
   connected" with the reason and mints no pairing codes until the session is

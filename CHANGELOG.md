@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased (v0.5)
+
+- **Remote access from the dashboard.** Setup's Agents section offers **Turn
+  on remote access** (after showing Let's Encrypt's subscriber agreement for
+  explicit acceptance) and **Turn off remote access**. The change goes through
+  OpenClaw's own config write; Olympus never edits openclaw.json. A public
+  address set by `OLYMPUS_PUBLIC_BASE_URL` in worker.env is shown as such, with
+  how to remove it, instead of a Turn off that could not work.
+- **Upgrade note: `remote.relayHost` now defaults to
+  `connect.olympusplugin.ai`.** A config with `remote.enabled: true` and no
+  address used to be an error that kept remote access off; after this upgrade
+  the relay service starts and connects to the Olympus relay instead. Before
+  the owner accepts the CA's subscriber agreement nothing public happens: the
+  install registers its key with the relay (no DNS record, no ACME account, no
+  certificate order, so no Certificate Transparency entry), and status reads
+  "awaiting the agreement". To keep remote access off, set
+  `remote.enabled false` or use **Turn off remote access**. Until the relay is
+  deployed, status reads "Olympus relay unavailable" and Olympus retries with
+  backoff.
+
 ## 0.4.0-beta.6 - 2026-09-25
 
 Fixes from the beta.5 first-time install on OpenClaw 2026.9.6, Readwise on

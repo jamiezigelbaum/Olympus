@@ -19,6 +19,7 @@
  */
 import {
   LETS_ENCRYPT_REPOSITORY_URL,
+  WORKER_ENV_ADDRESS_MESSAGE,
   type DashboardAgentConnection,
   type DashboardAgentsView,
   type DashboardRemoteAccess,
@@ -160,7 +161,9 @@ function remoteAccessRow(access: DashboardRemoteAccess): string {
         : `Not set up correctly. ${access.detail}`;
   const next = access.state === 'not_connected' && access.detail
     ? `<span class="hint" data-remote-next-step> ${escapeHtml(access.detail)}</span>`
-    : '';
+    : access.state === 'on' && access.setBy === 'worker_env'
+      ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml(WORKER_ENV_ADDRESS_MESSAGE)}</span>`
+      : '';
   return `<div class="attncard plain" data-remote-access="${access.state}">`
     + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span>${next}</div>`
     + remoteAccessControls(access)
@@ -175,6 +178,8 @@ function remoteAccessRow(access: DashboardRemoteAccess): string {
  */
 function remoteAccessControls(access: DashboardRemoteAccess): string {
   const status = `<span class="actmsg" data-action-message role="status"></span>`;
+  // Set outside plugin config: a Turn off here would change nothing.
+  if (access.state === 'on' && access.setBy === 'worker_env') return '';
   if (access.state === 'off') {
     return `<form class="rowform" data-agent-kind="remote-on">`
       + `<button class="btn primary" type="submit">Turn on remote access</button>${status}`
@@ -195,7 +200,7 @@ function termsPanel(): string {
   return `<div class="remoteterms" data-remote-terms hidden>`
     + `<p><b>Before remote access turns on</b></p>`
     + `<p>So that agents in the cloud reach this computer over an encrypted connection only this computer can open, Olympus gets a free certificate from Let's Encrypt. Getting one means agreeing to Let's Encrypt's Subscriber Agreement.</p>`
-    + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You create no account and share no email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>`
+    + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You don't sign up for anything or share an email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>`
     + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>`
     + `<form class="rowform" data-agent-kind="remote-accept">`
     + `<button class="btn primary" type="submit">I accept, turn on remote access</button>`

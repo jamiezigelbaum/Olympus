@@ -382,6 +382,26 @@ describe('native relay service', () => {
     });
   });
 
+  test('an upgraded config with remote.enabled and no agreement makes nothing public: no DNS record, ACME account or order', async () => {
+    // Before the default relay host, { enabled: true } alone was an error that
+    // kept remote access off; now it connects. The test relay's zone stands in
+    // for connect.olympusplugin.ai so the session actually comes up.
+    const { dir, workerEnvPath } = fixtureRoot();
+    const accountsBefore = acme.accounts;
+    const issuedBefore = acme.issued.length;
+    const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE });
+    await service.start({});
+    const waiting = await until(() => readRemoteAccessStatus(dir), (s) => s.certificate?.state === 'awaiting_terms' && s.install_id !== null);
+    expect(waiting.relay?.state).toBe('online');
+    await Bun.sleep(300);
+    const hostname = `${waiting.install_id}.${ZONE}`;
+    expect(acme.accounts).toBe(accountsBefore);
+    expect(acme.issued.length).toBe(issuedBefore);
+    expect(dns.addresses.has(hostname)).toBe(false);
+    expect(dns.txt.has(`_acme-challenge.${hostname}`)).toBe(false);
+    expect(readRemoteAccessStatus(dir)?.public_base_url).toBeNull();
+  });
+
   test('remote access that was never turned on writes nothing', async () => {
     const { dir, workerEnvPath } = fixtureRoot();
     const service = relayService(workerEnvPath, { enabled: false });

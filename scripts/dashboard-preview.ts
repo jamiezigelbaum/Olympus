@@ -681,7 +681,8 @@ function dropboxPreview(mode: 'initial' | 'update') {
 /**
  * Setup's Agents section: ?agents=off (remote access off, nothing connected),
  * ?agents=not-connected, ?agents=relay-unavailable (on, relay down),
- * ?agents=awaiting-terms (on, agreement to accept), or the default: remote
+ * ?agents=awaiting-terms (on, agreement to accept), ?agents=worker-env (a
+ * tunnel named in worker.env), or the default: remote
  * access on with two agents.
  */
 export function previewAgentsView(mode: string | null): DashboardAgentsView {
@@ -692,6 +693,17 @@ export function previewAgentsView(mode: string | null): DashboardAgentsView {
       remoteAccess: {
         state: 'not_connected',
         detail: 'Olympus relay unavailable, so agents in the cloud cannot reach Olympus right now. Olympus keeps trying on its own.',
+      },
+      connections: [],
+    };
+  }
+  if (mode === 'worker-env') {
+    return {
+      remoteAccess: {
+        state: 'on',
+        mcpUrl: 'https://quiet-river-1234.trycloudflare.com/mcp',
+        openapiUrl: 'https://quiet-river-1234.trycloudflare.com/openapi.json',
+        setBy: 'worker_env',
       },
       connections: [],
     };
@@ -855,5 +867,5 @@ if (import.meta.main) {
   console.log('  mail scope picker: /mail-picker (add ?approved for a saved scope)');
   console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');
   console.log('  publisher-app one-click cards (add ?setup): /connect-dropbox-publisher /connect-google-publisher');
-  console.log('  agents (add ?setup): remote access on by default; &agents=off, &agents=not-connected, &agents=relay-unavailable or &agents=awaiting-terms');
+  console.log('  agents (add ?setup): remote access on by default; &agents=off, &agents=not-connected, &agents=relay-unavailable, &agents=awaiting-terms or &agents=worker-env');
 }

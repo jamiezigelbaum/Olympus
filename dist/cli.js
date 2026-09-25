@@ -82593,6 +82593,9 @@ var init_model_setup2 = __esm(() => {
 // src/workers/agent-connections.ts
 function remoteAccessFromStatus(input) {
   const status = input.status;
+  if (input.live && (input.liveOrigin === "env" || status?.public_base_url_source === "worker_env")) {
+    return { state: "on", mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json`, setBy: "worker_env" };
+  }
   const relayDown = status?.mode === "relay" && status.relay !== undefined && status.relay.state !== "online";
   if (input.live && !relayDown) {
     return { state: "on", mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json` };
@@ -82740,6 +82743,10 @@ async function setRemoteAccess(body, backend) {
   if (!control) {
     return refusal(501, "remote_access_control_not_supported", "This Olympus cannot turn remote access on or off from the dashboard.");
   }
+  const before = currentAccess(backend);
+  if (before?.state === "on" && before.setBy === "worker_env") {
+    return refusal(409, "set_by_worker_env", WORKER_ENV_ADDRESS_MESSAGE);
+  }
   if (body.enabled) {
     let current;
     try {
@@ -82779,11 +82786,31 @@ async function setRemoteAccess(body, backend) {
   }));
   if (!written.ok)
     return refusal(written.status, written.code, written.message);
+  if (!body.enabled && written.unchanged) {
+    const after = currentAccess(backend);
+    if (after && after.state === "on") {
+      return refusal(409, "remote_access_still_reachable", `Remote access is already off in OpenClaw's settings, but agents in the cloud can still reach Olympus at ${hostOfUrl(after.mcpUrl)}. ` + "Restart OpenClaw so the change takes effect, then check this page again.");
+    }
+  }
   return secretResponse({
     ok: true,
     enabled: body.enabled,
-    status_message: body.enabled ? "Remote access is turning on. Olympus connects to its relay and gets a certificate, which usually takes a minute." : "Remote access is off. Agents in the cloud can no longer reach Olympus; agents on this computer are unaffected."
+    status_message: body.enabled ? "Remote access is turning on. Olympus connects to its relay and gets a certificate, which usually takes a minute." : written.unchanged ? "Remote access is off. Agents in the cloud cannot reach Olympus; agents on this computer are unaffected." : "Remote access is turning off. Within a few seconds agents in the cloud can no longer reach Olympus; agents on this computer are unaffected."
   });
+}
+function currentAccess(backend) {
+  try {
+    return backend.remoteAccess();
+  } catch {
+    return;
+  }
+}
+function hostOfUrl(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 function isHttpsUrl(value) {
   if (typeof value !== "string" || value.length > 2048)
@@ -82845,7 +82872,7 @@ function secretResponse(body, status = 200) {
 function refusal(status, code, message) {
   return secretResponse({ ok: false, error: { code, message } }, status);
 }
-var DASHBOARD_AGENT_PAIRING_CODE_PATH = "/dashboard/agents/pairing-code", DASHBOARD_AGENT_KEYS_PATH = "/dashboard/agents/keys", DASHBOARD_AGENT_REVOKE_PATH = "/dashboard/agents/revoke", DASHBOARD_AGENT_REMOTE_ACCESS_PATH = "/dashboard/agents/remote-access", DASHBOARD_AGENT_CONTROL_PATHS, LETS_ENCRYPT_REPOSITORY_URL = "https://letsencrypt.org/repository/";
+var DASHBOARD_AGENT_PAIRING_CODE_PATH = "/dashboard/agents/pairing-code", DASHBOARD_AGENT_KEYS_PATH = "/dashboard/agents/keys", DASHBOARD_AGENT_REVOKE_PATH = "/dashboard/agents/revoke", DASHBOARD_AGENT_REMOTE_ACCESS_PATH = "/dashboard/agents/remote-access", DASHBOARD_AGENT_CONTROL_PATHS, LETS_ENCRYPT_REPOSITORY_URL = "https://letsencrypt.org/repository/", WORKER_ENV_ADDRESS_MESSAGE;
 var init_agent_connections = __esm(() => {
   init_operation_caller();
   DASHBOARD_AGENT_CONTROL_PATHS = [
@@ -82854,6 +82881,7 @@ var init_agent_connections = __esm(() => {
     DASHBOARD_AGENT_REVOKE_PATH,
     DASHBOARD_AGENT_REMOTE_ACCESS_PATH
   ];
+  WORKER_ENV_ADDRESS_MESSAGE = "This address is set by OLYMPUS_PUBLIC_BASE_URL in worker.env, a tunnel you run yourself, " + "so the dashboard cannot turn it off. To turn remote access off, delete that line from ~/.config/olympus/worker.env, " + "then restart OpenClaw (openclaw gateway restart), and stop your tunnel.";
 });
 
 // src/core/agent-instructions.ts
@@ -82892,11 +82920,13 @@ function renderDashboardAgentsSection(input) {
 }
 function remoteAccessRow(access) {
   const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf(access.mcpUrl)}.` : access.state === "off" ? "Off. Only agents on this computer can ask Olympus." : access.state === "not_connected" ? "On, but not connected. Agents in the cloud cannot reach Olympus until it is." : `Not set up correctly. ${access.detail}`;
-  const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml(access.detail)}</span>` : "";
+  const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml(access.detail)}</span>` : access.state === "on" && access.setBy === "worker_env" ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml(WORKER_ENV_ADDRESS_MESSAGE)}</span>` : "";
   return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span>${next}</div>` + remoteAccessControls(access) + `</div>` + (access.state === "off" || access.state === "not_connected" && access.needsTerms ? termsPanel() : "");
 }
 function remoteAccessControls(access) {
   const status = `<span class="actmsg" data-action-message role="status"></span>`;
+  if (access.state === "on" && access.setBy === "worker_env")
+    return "";
   if (access.state === "off") {
     return `<form class="rowform" data-agent-kind="remote-on">` + `<button class="btn primary" type="submit">Turn on remote access</button>${status}` + `</form>`;
   }
@@ -82905,7 +82935,7 @@ function remoteAccessControls(access) {
   return review + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml(confirmation)}">` + `<button class="btn quiet" type="submit">Turn off remote access</button>${status}` + `</form>`;
 }
 function termsPanel() {
-  return `<div class="remoteterms" data-remote-terms hidden>` + `<p><b>Before remote access turns on</b></p>` + `<p>So that agents in the cloud reach this computer over an encrypted connection only this computer can open, Olympus gets a free certificate from Let's Encrypt. Getting one means agreeing to Let's Encrypt's Subscriber Agreement.</p>` + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You create no account and share no email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>` + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>` + `<form class="rowform" data-agent-kind="remote-accept">` + `<button class="btn primary" type="submit">I accept, turn on remote access</button>` + `<button class="btn quiet" type="button" data-remote-terms-cancel>Not now</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
+  return `<div class="remoteterms" data-remote-terms hidden>` + `<p><b>Before remote access turns on</b></p>` + `<p>So that agents in the cloud reach this computer over an encrypted connection only this computer can open, Olympus gets a free certificate from Let's Encrypt. Getting one means agreeing to Let's Encrypt's Subscriber Agreement.</p>` + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You don't sign up for anything or share an email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>` + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>` + `<form class="rowform" data-agent-kind="remote-accept">` + `<button class="btn primary" type="submit">I accept, turn on remote access</button>` + `<button class="btn quiet" type="button" data-remote-terms-cancel>Not now</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
 }
 function connectSheet(access) {
   const choices = AGENTS.map((agent) => agentChoice(agent, access)).join("");
@@ -97431,7 +97461,7 @@ async function main() {
     } catch {
       status = undefined;
     }
-    return remoteAccessFromStatus({ live: remotePublicUrls(), status });
+    return remoteAccessFromStatus({ live: remotePublicUrls(), status, liveOrigin: remotePublicSource.origin });
   };
   if (authToken) {
     const { fetchLetsEncryptTermsUrl: fetchLetsEncryptTermsUrl2 } = await Promise.resolve().then(() => exports_remote_access_terms);
