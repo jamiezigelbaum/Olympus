@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.4.0-beta.6 - 2026-09-25
+
+Fixes from the beta.5 first-time install on OpenClaw 2026.9.6, Readwise on
+hybrid search, and the hosted-agent connection slices.
+
+- **One-click connect inside OpenClaw (#97).** The native Olympus page now
+  offers the same one-click Gmail, Google Drive and Dropbox connect as the
+  standalone dashboard; bring-your-own apps stay in a disclosure. On a
+  Gateway reached over loopback (on the host or through an SSH port forward)
+  native OAuth needs no `gateway.publicOrigin`: Olympus uses the loopback
+  origin OpenClaw verified for that browser connection, only when OpenClaw
+  reports a local client whose origin matches its Host. HTTPS and remote
+  access still need `gateway.publicOrigin`.
+- **Setup page (#98, #99).** The Models cards use compact rows on both the
+  native and standalone pages (key field, Connect and the key link on one row;
+  the local-model buttons side by side), and only one setup sheet is open at a
+  time.
+- **Install handoff (#96).** An operator chatting in the Control UI is pointed
+  at the **Olympus** sidebar entry instead of being asked for their browser's
+  address; a link is used only from other channels or for the standalone
+  fallback.
+- **Readwise (#100, #101).** Readwise answers with hybrid search in its
+  Personal and Private tiers, using the embeddings it already has (owner
+  decision `decision-2026-09-24-readwise-hybrid` in the embedding ledger);
+  Private chunks embed and query only through the private lane. Readwise now
+  embeds only outside the sync, and for every source a provider timeout after
+  items are saved no longer fails the sync: the items are queued for a
+  background sweep, and the delay shows as `embedding_provider_unavailable` on the
+  Background page, the source page and in `olympus doctor`. Readwise also
+  sweeps any chunk still missing a vector, 32 items per store per pass, so
+  earlier failed syncs catch up; X, WhatsApp and Telegram do the same (owner
+  decision `decision-2026-09-25-chat-lane-catch-up`), so a chat store with an
+  old unembedded backlog embeds it once on its approved model, and the source
+  page shows the backlog and estimated cost. The sweep embeds Gmail and Drive items only
+  within their current approved scope. Each hybrid store shows its embedding backlog and an
+  estimated cost. One embedding runs per store at a time across the sync, the
+  sweep and the external drain, so two embedders never work on the same chunks
+  at once.
+- **Needs you (#100).** A sync task shows **Needs you** after three failures in
+  a row (a missing or refused credential after one), the same on Home, the
+  page header, the source page and the Background page; below that it reads
+  as retrying. Readwise counts its items as items, and `olympus doctor` shows
+  items next to chunks per tier.
+- **Connect other agents, preview (#87, #90, #92, #94, #95).** Olympus can now
+  answer questions from agents beyond OpenClaw, under the same privacy rules.
+  Cloud agents see up to Personal. Private items are read only by Venice or a
+  local model, and the agent receives only their derived answers, with each
+  item's title, path, source and author. Secret values never leave; only where
+  a secret is gets reported. Claude Code and
+  Codex on the same computer can connect today through the local MCP server;
+  the Setup page's new **Agents** section walks through it and lists and
+  revokes connections. For cloud agents (Claude on the web and phone, ChatGPT,
+  Grok and Muse), this beta adds the building blocks: a remote MCP endpoint and
+  an OpenAPI view with revocable connection keys (`olympus connections
+  add|list|revoke`), OAuth 2.1 sign-in approved with a one-time pairing code
+  (`olympus connections pair`), and an opt-in remote-access setting with its
+  own status command (`olympus connections status`). Remote access is off by
+  default. The hosted Olympus connect relay isn't live yet, so cloud agents
+  currently need your own tunnel via `remote.publicBaseUrl` (advanced).
+
 ## 0.4.0-beta.5 - 2026-09-24
 
 Fixes from the beta.4 first-time install on a clean Linux user, plus the first

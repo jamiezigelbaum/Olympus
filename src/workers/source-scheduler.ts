@@ -1271,12 +1271,12 @@ const EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
 
 /**
  * Owner decision for the chat lanes' store-wide sweep (X, WhatsApp, Telegram):
- * whether their sweep also embeds chunks no sync queued, which starts
- * embedding an existing backlog on the lane's approved identity. Pending the
- * owner's answer (asked 2026-09-24), off: those lanes sweep their queue only.
- * Flip this one line to switch every chat lane at once.
+ * their sweep also embeds chunks no sync queued, so a backlog on the lane's
+ * approved identity catches up. On since 2026-09-25 (embedding ledger
+ * decision-2026-09-25-chat-lane-catch-up). Flip this one line to switch every
+ * chat lane at once.
  */
-export const CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = false;
+export const CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true;
 
 /**
  * Per source: may its embedding sweep embed store-wide (every hybrid-served
