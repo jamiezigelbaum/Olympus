@@ -1,6 +1,6 @@
 <div align="center">
 
-![Olympus: a towering mountain crowned by a celestial palace, surrounded by cyborg gods, AI agents, and lobster adventurers](docs/assets/olympus-banner.png)
+![Olympus: a towering mountain crowned by a celestial palace, surrounded by cyborg gods, AI agents, and lobster adventurers](assets/olympus-banner.png)
 
 # ⛰️ Olympus
 
