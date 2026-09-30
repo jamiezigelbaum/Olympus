@@ -5,6 +5,7 @@ import { spawn as spawnChild } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import { connectGuidedSession, type ConnectResult } from './connect.ts';
 import { telegramSessionBasePath, whatsappStateDir } from './pairing-session-paths.ts';
@@ -134,7 +135,7 @@ interface PairingReceipt {
  */
 export async function pairMessagingSource(options: PairMessagingSourceOptions): Promise<MessagingPairingResult> {
   const env = { ...process.env, ...(options.env ?? {}) };
-  const packageRoot = resolve(options.packageRoot ?? join(import.meta.dir, '..', '..'));
+  const packageRoot = resolve(options.packageRoot ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..'));
   const runner = options.runCommand ?? runPairingCommand;
   const secretStore = options.secretStore ?? createDefaultSecretStore();
   const pathContext = {

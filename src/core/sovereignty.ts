@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { OperationError } from './operation-error.ts';
 import { parseOptionalBooleanEnv } from './config.ts';
 import { normalizeSecretRef } from './secret-store.ts';
@@ -511,8 +512,8 @@ export function writeSovereigntyConfigFile(input: {
 }
 
 export function loadSovereigntyPreset(name: SovereigntyPresetName): SovereigntyConfig {
-  const sourceLayoutPath = join(import.meta.dir, '..', '..', 'config', 'sovereignty', 'presets', `${name}.json`);
-  const bundledLayoutPath = join(import.meta.dir, '..', 'config', 'sovereignty', 'presets', `${name}.json`);
+  const sourceLayoutPath = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'sovereignty', 'presets', `${name}.json`);
+  const bundledLayoutPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'config', 'sovereignty', 'presets', `${name}.json`);
   const path = existsSync(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
   return validateSovereigntyConfig(parsed as SovereigntyConfig);
