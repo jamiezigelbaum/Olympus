@@ -6361,9 +6361,10 @@ import { spawn as spawnChild } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 import { homedir as homedir9 } from "node:os";
 import { dirname as dirname10, join as join10, resolve as resolve3 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 async function pairMessagingSource(options) {
   const env = { ...process.env, ...options.env ?? {} };
-  const packageRoot = resolve3(options.packageRoot ?? join10(import.meta.dir, "..", ".."));
+  const packageRoot = resolve3(options.packageRoot ?? join10(dirname10(fileURLToPath2(import.meta.url)), "..", ".."));
   const runner = options.runCommand ?? runPairingCommand;
   const secretStore = options.secretStore ?? createDefaultSecretStore();
   const pathContext = {
@@ -6835,6 +6836,7 @@ var init_messaging_pairing = __esm(() => {
 import { closeSync as closeSync6, constants as constants2, existsSync as existsSync8, fstatSync as fstatSync2, openSync as openSync6, readFileSync as readFileSync10, rmSync as rmSync5 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { dirname as dirname11, join as join11 } from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return join11(dirname11(registryPath), `messaging-capture.${source}.json`);
 }
@@ -6993,7 +6995,7 @@ function resolveCurrentLaunch(options, source) {
     const executable = telegramPythonExecutable({ ...options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {} });
     if (!executable)
       throw new Error("Python 3 is required to start Telegram capture.");
-    const packageRoot = options.packageRoot ?? join11(import.meta.dir, "..", "..");
+    const packageRoot = options.packageRoot ?? join11(dirname11(fileURLToPath3(import.meta.url)), "..", "..");
     return { executable, args: [join11(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
   }
   return {
@@ -26576,6 +26578,7 @@ var init_venice_models = __esm(() => {
 import { chmodSync as chmodSync6, existsSync as existsSync17, mkdirSync as mkdirSync11, readFileSync as readFileSync16, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { dirname as dirname16, join as join20 } from "node:path";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
 function defaultSovereigntyConfigPath() {
   return join20(homedir17(), ".olympus", "sovereignty.json");
 }
@@ -26830,8 +26833,8 @@ function writeSovereigntyConfigFile(input) {
   return path;
 }
 function loadSovereigntyPreset(name) {
-  const sourceLayoutPath = join20(import.meta.dir, "..", "..", "config", "sovereignty", "presets", `${name}.json`);
-  const bundledLayoutPath = join20(import.meta.dir, "..", "config", "sovereignty", "presets", `${name}.json`);
+  const sourceLayoutPath = join20(dirname16(fileURLToPath4(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
+  const bundledLayoutPath = join20(dirname16(fileURLToPath4(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
   const path = existsSync17(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
   const parsed = JSON.parse(readFileSync16(path, "utf8"));
   return validateSovereigntyConfig(parsed);
@@ -50206,10 +50209,10 @@ var init_operations = __esm(() => {
 // src/version.ts
 import { readFileSync as readFileSync26 } from "node:fs";
 import { dirname as dirname31, join as join41 } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { fileURLToPath as fileURLToPath5 } from "node:url";
 var repoRoot, manifest, VERSION;
 var init_version = __esm(() => {
-  repoRoot = dirname31(dirname31(fileURLToPath2(import.meta.url)));
+  repoRoot = dirname31(dirname31(fileURLToPath5(import.meta.url)));
   manifest = JSON.parse(readFileSync26(join41(repoRoot, "openclaw.plugin.json"), "utf8"));
   VERSION = manifest.version;
 });
