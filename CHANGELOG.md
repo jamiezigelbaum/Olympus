@@ -11,20 +11,24 @@ hosted agents, and hardening for the cloud-agent connection preview.
   use Node-standard `import.meta.url`, which also makes those lookups work when
   the CLI runs under Node.
 - **Slow answers for connected agents (#106).** Over the remote MCP and
-  OpenAPI endpoints and the local MCP server, a `source_answer` still running
-  after 200 seconds (below Claude's roughly 240-second tool limit; set with
-  `OLYMPUS_SOURCE_ANSWER_HANDOFF_MS`, 1 to 230 seconds) now returns a
-  `working` status and a job id instead of being cut off. The new
-  `source_answer_result` call returns the same answer or error the direct call
-  would have. Jobs are bound to the connection or local MCP process that
-  started them, kept in memory only, and expire 15 minutes after finishing.
-  Faster answers are unchanged; native OpenClaw and the CLI never hand off.
+  OpenAPI endpoints, a `source_answer` still running after 200 seconds (below
+  Claude's roughly 240-second tool limit; set with
+  `OLYMPUS_SOURCE_ANSWER_HANDOFF_MS`) now returns a `working` status and a job
+  id instead of being cut off; the local MCP server (`olympus serve`) does the
+  same after 45 seconds (below Codex's 60-second default; set with
+  `OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS`). Both are limited to 1 to 230
+  seconds. The new `source_answer_result` call returns the same answer or
+  error the direct call would have, or `working` again while it is still
+  running. Jobs are bound to the connection or local MCP process that started
+  them, kept in memory only, and expire 15 minutes after finishing. Faster
+  answers are unchanged; native OpenClaw and the CLI never hand off.
 - **Connect other agents, preview (#104).** When too many sign-in approvals
   are waiting, a new request now replaces an older one, shared fairly across
-  callers, instead of refusing new requests for 10 minutes. Revoking a
-  connection inside the 45-second refresh-token grace window also ends its
-  successor tokens. The connect relay, still not live, gains certificate
-  renewal timed by the certificate authority (RFC 9773) and local operator
+  callers, instead of refusing new requests for 10 minutes. Tests now prove
+  that revoking a connection inside the 45-second refresh-token grace window
+  ends the old token and its successor pair, and revoking now also clears the
+  cached grace entry. The connect relay, still not live, gains certificate
+  renewal timed by the certificate authority (RFC 9773) and relay operator
   `status`, `revoke` and `restore` commands. Remote access stays off by
   default.
 
