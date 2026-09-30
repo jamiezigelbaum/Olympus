@@ -504,8 +504,9 @@ export class EmailClient {
           ...(options.maxSeconds !== undefined ? { max_seconds: options.maxSeconds } : {}),
         }),
       },
-      // The worker spends up to max_seconds, then answers; allow for the answer.
-      { timeoutMs: ((options.maxSeconds ?? 240) + 120) * 1_000 },
+      // The worker starts no job after max_seconds, and one job (a text pass
+      // plus OCR) can take up to ten minutes to finish.
+      { timeoutMs: ((options.maxSeconds ?? 240) + 600) * 1_000 },
     );
     const data = asRecord(response);
     assertNoRawEmailFields(data);

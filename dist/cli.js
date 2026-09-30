@@ -42450,7 +42450,7 @@ class EmailClient {
         ...options.requeue ? { requeue: true } : {},
         ...options.maxSeconds !== undefined ? { max_seconds: options.maxSeconds } : {}
       })
-    }, { timeoutMs: ((options.maxSeconds ?? 240) + 120) * 1000 });
+    }, { timeoutMs: ((options.maxSeconds ?? 240) + 600) * 1000 });
     const data = asRecord8(response);
     assertNoRawEmailFields(data);
     return data;
@@ -75487,7 +75487,7 @@ async function drainPdfExtraction(input) {
       const run = await input.runner.run({
         ...lane,
         limit: PDF_DRAIN_BATCH,
-        leaseSeconds: 3600,
+        leaseSeconds: 1800,
         extractorKind: input.extractorKind,
         preflightExtractorKinds: [input.extractorKind]
       });
@@ -75507,7 +75507,7 @@ async function drainPdfExtraction(input) {
   }
   return results;
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 10;
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_types();
   init_file_extraction_source();
@@ -91838,7 +91838,7 @@ function createGoogleDriveConnectorStoreSchedulerSource(input) {
           }
         }
       },
-      ...input.fileExtraction ? [GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID].map((corpusId) => fileExtractionSchedulerTask({
+      ...input.fileExtraction ? [GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID].filter((corpusId) => input.fileExtraction.corpusIds().includes(corpusId)).map((corpusId) => fileExtractionSchedulerTask({
         id: `google_drive.docs_extract.${schedulerScopeHash(corpusId)}`,
         runner: input.fileExtraction,
         lane: {

@@ -311,7 +311,8 @@ describe('PDF extraction: Google Drive', () => {
         extractionAccountScope: 'personal',
       })!;
       const task = source.tasks.find((candidate) => candidate.id.startsWith('google_drive.docs_extract.'))!;
-      expect(source.tasks.filter((candidate) => candidate.kind === 'extract')).toHaveLength(2);
+      // Only served Drive corpora get a pass; this runner serves the internal store.
+      expect(source.tasks.filter((candidate) => candidate.kind === 'extract')).toHaveLength(1);
       const outcome = await task.run();
       expect(outcome.counts).toMatchObject({ jobs_queued: 1, jobs_indexed: 1 });
       expect(written[0]?.text).toContain('invoice number 4471');

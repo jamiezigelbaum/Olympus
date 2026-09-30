@@ -1756,7 +1756,9 @@ export function createGoogleDriveConnectorStoreSchedulerSource(input: {
         },
       },
       ...(input.fileExtraction
-        ? [GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID].map((corpusId) =>
+        ? [GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID]
+          .filter((corpusId) => input.fileExtraction!.corpusIds().includes(corpusId))
+          .map((corpusId) =>
           fileExtractionSchedulerTask({
             id: `google_drive.docs_extract.${schedulerScopeHash(corpusId)}`,
             runner: input.fileExtraction!,

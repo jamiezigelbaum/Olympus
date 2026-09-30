@@ -1258,8 +1258,7 @@ export async function drainPdfExtraction(input: {
       const run = await input.runner.run({
         ...lane,
         limit: PDF_DRAIN_BATCH,
-        // A batch of scans can take several OCR timeouts end to end.
-        leaseSeconds: 3_600,
+        leaseSeconds: 1_800,
         extractorKind: input.extractorKind,
         preflightExtractorKinds: [input.extractorKind],
       });
@@ -1283,4 +1282,6 @@ export async function drainPdfExtraction(input: {
 }
 
 const PDF_DRAIN_PLAN_PAGE = 500;
-const PDF_DRAIN_BATCH = 10;
+// One job per lease: a scan can take a text pass plus an OCR pass, so the
+// deadline is checked between single jobs rather than after a long batch.
+const PDF_DRAIN_BATCH = 1;

@@ -11676,7 +11676,7 @@ class EmailClient {
         ...options.requeue ? { requeue: true } : {},
         ...options.maxSeconds !== undefined ? { max_seconds: options.maxSeconds } : {}
       })
-    }, { timeoutMs: ((options.maxSeconds ?? 240) + 120) * 1000 });
+    }, { timeoutMs: ((options.maxSeconds ?? 240) + 600) * 1000 });
     const data = asRecord7(response);
     assertNoRawEmailFields(data);
     return data;
