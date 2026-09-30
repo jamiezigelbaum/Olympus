@@ -19,9 +19,14 @@ hosted agents, and hardening for the cloud-agent connection preview.
   `OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS`). Both are limited to 1 to 230
   seconds. The new `source_answer_result` call returns the same answer or
   error the direct call would have, or `working` again while it is still
-  running. Jobs are bound to the connection or local MCP process that started
-  them, kept in memory only, and expire 15 minutes after finishing. Faster
-  answers are unchanged; native OpenClaw and the CLI never hand off.
+  running; a handed-off answer is stopped after 20 minutes. Jobs are bound to
+  the connection or local MCP process that started them, kept in memory only,
+  and expire 15 minutes after finishing. At most two answers now run at once
+  on each of these surfaces (`OLYMPUS_SOURCE_ANSWER_MAX_RUNNING`, up to 16),
+  and a further `source_answer` is refused with `source_answer_busy` instead
+  of queuing behind the analyst. Answers that finish under the threshold
+  otherwise return as before; native OpenClaw and the CLI never hand off and
+  are not capped.
 - **Connect other agents, preview (#104).** When too many sign-in approvals
   are waiting, a new request now replaces an older one, shared fairly across
   callers, instead of refusing new requests for 10 minutes. Tests now prove
