@@ -2,19 +2,20 @@
 
 ## 0.4.0-beta.9 - 2026-09-30
 
-PDFs from connected file sources are read again, scans included, and the
-owner can see and drain the backlog.
+PDFs from connected file sources are now read, scans included, and you can
+see and drain the backlog.
 
-- **PDF extraction repair (#114).** Every Dropbox file extraction job had been
-  settling as unsupported: a download label the text reader did not recognise
-  replaced the file's catalogued type, so no PDF was read. The catalogued type
-  now wins, and a PDF is also recognised by its first bytes. A PDF with no text
+- **PDF extraction repair (#114).** When a file provider labelled a download
+  with a type the text reader did not recognise, that label replaced the
+  file's catalogued type and the file was skipped as unsupported, so on an
+  affected install no PDF was read. The catalogued type now wins, and a PDF is
+  also recognised by its first bytes. A PDF with no text
   layer is read by the existing `ocrmypdf` command when the host has it; without
   OCR it stays visibly `ocr_required`, and without `pdftotext` the built-in
   decoder reads the text layer. A job whose lease expired on every attempt now
   settles instead of being retried indefinitely.
 - **Google Drive PDFs (#114).** Drive PDFs, previously catalogued by name only,
-  now join the same extraction lane.
+  join the same extraction lane for each Drive store the worker serves.
 - **Backlog report and drain (#114).** `olympus source extract-pdfs` shows each
   file source's PDFs still without text and an estimate of what embedding them
   would cost once read (also in `olympus source index status`). With `--run`
