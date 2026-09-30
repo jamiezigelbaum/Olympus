@@ -30,6 +30,7 @@ import {
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS,
   OCR_EXTRACTOR_KIND,
   createOcrExtractor,
+  createPdfOcr,
 } from './extractors/ocr.ts';
 import {
   REMOTE_VLM_EXTRACTOR_KINDS,
@@ -118,6 +119,14 @@ export function createDefaultExtractorRegistry(
       ...(config.text?.maxBoundedTextChars !== undefined
         ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
         : {}),
+      // A PDF with no text layer is a scan; the text lane reads it by OCR
+      // rather than leaving it for an escalation nothing ever requests.
+      pdfOcr: createPdfOcr({
+        ...(config.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config.ocr.ocrTimeoutMs } : {}),
+        ...(config.text?.maxBoundedTextChars !== undefined
+          ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
+          : {}),
+      }),
     }),
     createOcrExtractor({
       ...(config.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config.ocr.ocrTimeoutMs } : {}),

@@ -35,7 +35,13 @@ import {
   runExtractionCommand,
   type ExtractionCommandRunner,
 } from './command-runner.ts';
-import { createTextExtractor, missingBytesFailure, textLaneAccepts } from './text.ts';
+import {
+  createTextExtractor,
+  isCommandMissing,
+  missingBytesFailure,
+  textLaneAccepts,
+  type PdfOcr,
+} from './text.ts';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -128,6 +134,45 @@ export function createOcrExtractor(options: OcrExtractorOptions = {}): Extractor
 }
 
 /**
+ * OCR for the text lane's PDFs that have no text layer.
+ *
+ * The same command and settlement as this lane's own PDF path. Answers
+ * undefined when the OCR command is not installed, so a host without it keeps
+ * those PDFs visibly `ocr_required` rather than failing them.
+ */
+export function createPdfOcr(options: {
+  maxBoundedTextChars?: number;
+  commandRunner?: ExtractionCommandRunner;
+  ocrTimeoutMs?: number;
+} = {}): PdfOcr {
+  const commandRunner = options.commandRunner ?? runExtractionCommand;
+  return async ({ bytes, mimeType, sizeBytes }) => {
+    try {
+      return await runOcrLane(() => extractPdfOcr({
+        bytes,
+        mimeType,
+        sizeBytes,
+        maxBoundedTextChars: options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS,
+        commandRunner: async (request) => {
+          try {
+            return await commandRunner(request);
+          } catch (error) {
+            if (isCommandMissing(error)) throw new OcrUnavailableError();
+            throw error;
+          }
+        },
+        timeoutMs: options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS,
+      }));
+    } catch (error) {
+      if (error instanceof OcrUnavailableError) return undefined;
+      throw error;
+    }
+  };
+}
+
+class OcrUnavailableError extends Error {}
+
+/**
  * The production lane let a transient command failure propagate out of the
  * extractor and be caught one level up, where it settled as a retryable
  * failure. The landed seam expresses the same disposition in-place, so the
@@ -137,6 +182,7 @@ async function runOcrLane(run: () => Promise<ExtractorOutput>): Promise<Extracto
   try {
     return await run();
   } catch (error) {
+    if (error instanceof OcrUnavailableError) throw error;
     if (error instanceof ExtractionCommandTimeoutError) {
       return { status: 'failed_retryable', errorKind: 'ocr_command_timeout' };
     }

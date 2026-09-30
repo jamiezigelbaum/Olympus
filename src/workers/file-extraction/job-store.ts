@@ -66,6 +66,10 @@ export const MAX_EXTRACTION_LEASE_SECONDS = 3_600;
 export const DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300;
 export const MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3_600;
 export const MAX_EXTRACTION_RETRY_ATTEMPTS = 3;
+/**
+ * Settles a job whose lease expired on every one of its attempts.
+ */
+export const EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = 'extraction_lease_exhausted';
 
 /**
  * The transcription lane keeps its own lease defaults: its units are minutes
@@ -676,6 +680,38 @@ export class LocalFileExtractionJobStore {
     const claimed: Array<{ row: ExtractionJobSqlRow; grant: { authority: string; ordinal: number } }> = [];
 
     this.db.transaction(() => {
+      // A job whose lease keeps expiring never reaches record(): the worker
+      // died or was restarted mid-extraction, every time. Re-leasing it for
+      // ever charged attempts without bound and kept it at the head of the
+      // lane, so once its retry budget is spent it comes to rest instead.
+      this.db.query(`
+        UPDATE extraction_jobs
+        SET status = 'failed_terminal',
+            last_error_kind = ?,
+            leased_by_hash = NULL,
+            leased_until = NULL,
+            lease_token = NULL,
+            lease_grant_ordinal = NULL,
+            next_retry_at = NULL,
+            updated_at = ?
+        WHERE corpus_id = ?
+          AND provider = ?
+          AND account_scope = ?
+          AND approved_scope_key = ?
+          AND status = 'leased'
+          AND leased_until IS NOT NULL
+          AND leased_until < ?
+          AND attempts >= ?
+      `).run(
+        EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND,
+        now,
+        lane.corpusId,
+        lane.provider,
+        lane.accountScope,
+        lane.approvedScopeKey,
+        now,
+        MAX_EXTRACTION_RETRY_ATTEMPTS,
+      );
       for (const row of this.leaseCandidateRows(lane, request, now, limit)) {
         // One grant PER JOB, not per call. The token is per call because it
         // names the call; the grant is what a corpus compares against the last

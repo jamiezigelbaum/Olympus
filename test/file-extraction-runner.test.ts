@@ -401,14 +401,18 @@ describe('extraction runner: settlement comes from the source, never re-derived'
     });
   }
 
-  test('keeps the known item MIME when a download reports a generic octet stream', async () => {
+  test('keeps the catalogued MIME whatever label the download carries; the download only fills a gap', async () => {
     const jobs = jobStore();
+    const { mimeType: _catalogued, ...uncatalogued } = ref(3, { name: 'three' });
     const seen: Array<string | undefined> = [];
     try {
       jobs.enqueue({
         refs: [
           ref(1, { mimeType: 'application/pdf', name: 'one.pdf' }),
+          // The live defect: a provider label the text lane did not know
+          // replaced the catalogued PDF type, and every file was skipped.
           ref(2, { mimeType: 'application/pdf', name: 'two.pdf' }),
+          uncatalogued,
         ],
         extractorKind: FAKE_KIND,
         extractorVersion: FAKE_VERSION,
@@ -429,7 +433,9 @@ describe('extraction runner: settlement comes from the source, never re-derived'
                 bytes: new TextEncoder().encode('bytes'),
                 mimeType: itemRef.providerItemId === 'item-1'
                   ? 'application/octet-stream'
-                  : 'image/png',
+                  : itemRef.providerItemId === 'item-2'
+                    ? 'application/binary'
+                    : 'image/png',
               };
             },
           }),
@@ -438,8 +444,8 @@ describe('extraction runner: settlement comes from the source, never re-derived'
 
       const result = await runner.run({ ...LANE });
 
-      expect(result.counts.indexed).toBe(2);
-      expect(seen.sort()).toEqual(['application/pdf', 'image/png']);
+      expect(result.counts.indexed).toBe(3);
+      expect(seen.sort()).toEqual(['application/pdf', 'application/pdf', 'image/png']);
     } finally {
       jobs.close();
     }

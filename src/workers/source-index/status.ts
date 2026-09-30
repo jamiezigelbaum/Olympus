@@ -167,6 +167,22 @@ export interface SourceIndexCorpusStatusBase {
     };
   };
   content_extraction_throughput?: ContentExtractionThroughputSignal;
+  /**
+   * PDFs catalogued with no extracted text yet, and an ESTIMATE of what
+   * embedding them would cost once extracted: their count times the average
+   * text of this store's already-extracted PDFs (characters / 4 tokens).
+   * `olympus source extract-pdfs --run` extracts them.
+   */
+  pdf_extraction?: {
+    pending_pdfs: number;
+    extracted_pdfs: number;
+    estimate_after_extraction?: {
+      model_id: string;
+      estimated_tokens: number;
+      estimated_cost_usd: number;
+      price_source: 'config' | 'default_unverified';
+    };
+  };
 }
 
 export interface SourceIndexConnectorStoreStatus extends SourceIndexCorpusStatusBase {
@@ -339,9 +355,14 @@ export function createSourceIndexStatusHandler(
           )
           : configuredCorpusStatus(corpus);
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
-        const resolved = store && availability?.modelId
+        const withBacklog = store && availability?.modelId
           ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId)
           : enforced;
+        const resolved = store && corpus.family === 'file'
+          ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true
+            ? availability?.modelId
+            : undefined)
+          : withBacklog;
         if (maxAgeMs > 0) cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
       });
@@ -639,6 +660,42 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
         estimated_cost_usd: estimatedEmbeddingCostUsd(backlog.estimatedTokens, modelId),
         price_source: source,
       },
+    },
+  };
+}
+
+/**
+ * When nothing has been extracted yet there is no observed average; this is
+ * the owner's extracted Dropbox PDFs' average, rounded (about 52k characters).
+ */
+const FALLBACK_PDF_EXTRACTED_CHARS = 50_000;
+
+function withPdfExtractionBacklog<T extends SourceIndexStatusCorpus>(
+  status: T,
+  store: LocalConnectorStore,
+  modelId: string | undefined,
+): T {
+  const backlog = store.pdfExtractionBacklog();
+  if (backlog.pendingPdfs === 0 && backlog.extractedPdfs === 0) return status;
+  const averageChars = backlog.extractedPdfs > 0
+    ? backlog.extractedChars / backlog.extractedPdfs
+    : FALLBACK_PDF_EXTRACTED_CHARS;
+  const estimatedTokens = Math.ceil((backlog.pendingPdfs * averageChars) / 4);
+  return {
+    ...status,
+    pdf_extraction: {
+      pending_pdfs: backlog.pendingPdfs,
+      extracted_pdfs: backlog.extractedPdfs,
+      ...(modelId
+        ? {
+            estimate_after_extraction: {
+              model_id: modelId,
+              estimated_tokens: estimatedTokens,
+              estimated_cost_usd: estimatedEmbeddingCostUsd(estimatedTokens, modelId),
+              price_source: embeddingModelEstimate(modelId).source,
+            },
+          }
+        : {}),
     },
   };
 }

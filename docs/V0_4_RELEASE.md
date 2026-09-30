@@ -21,6 +21,24 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-30 — Repair PDF extraction; attachment metadata only.** Owner
+  authorization: every PDF the connected file sources allow is extracted,
+  with no automatic bulk embedding. Diagnosis: a download label the text lane
+  did not recognise replaced the catalogued type, so every Dropbox
+  `local_text` job settled `skipped_unsupported` and no PDF was ever read;
+  scans dead-ended as `ocr_required` because nothing requested the OCR lane;
+  Drive PDFs had no extraction task. The catalogued type now wins, a scan is
+  read by the existing OCR command when the host has it (otherwise it stays
+  visibly `ocr_required`; installing OCR tools is still not authorized by a
+  connection), Drive PDFs join the shared lane, and the scheduler keeps its
+  modest pace. The owner drains the backlog with `olympus source extract-pdfs
+  --run --requeue` after reading the pending count and embedding estimate in
+  `olympus source extract-pdfs` / `source index status`. Gmail attachment
+  content stays unread: each message records its attachments' name, type,
+  size and MIME part, searchable with the message. This supersedes the PDF
+  half of the deferred coverage audit below for extraction only; the
+  page-level coverage inventory remains deferred.
+
 - **2026-09-24 — Readwise answers hybrid on its existing vectors.** Owner
   decision, recorded in the embedding ledger as
   `decision-2026-09-24-readwise-hybrid` (committed backfill in

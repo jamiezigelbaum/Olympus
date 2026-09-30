@@ -54,6 +54,12 @@ export const GOOGLE_DRIVE_EXTRACTION_MIME_TYPES: readonly string[] = Object.free
 ]);
 
 /**
+ * The extraction lane key for Drive. Drive's scope approval is enforced on
+ * every candidate and fetch by the runtime's scope guard, not by this key.
+ */
+export const GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY = 'google_drive.docs';
+
+/**
  * The one provider call this source makes. Narrow on purpose: this source has
  * no business listing files, and a port that could would invite it to.
  */
