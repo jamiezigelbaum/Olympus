@@ -1,5 +1,7 @@
 <div align="center">
 
+![Olympus: a towering mountain crowned by a celestial palace, surrounded by cyborg gods, AI agents, and lobster adventurers](docs/assets/olympus-banner.png)
+
 # ⛰️ Olympus
 
 **Your whole digital life, searchable by your AI — on your privacy terms.**
