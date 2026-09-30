@@ -562,4 +562,19 @@ export const EMBEDDING_LEDGER_BACKFILL: readonly EmbeddingLedgerEntry[] = PUBLIC
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: 'complete',
   },
+  {
+    entry_id: 'decision-2026-09-30-gmail-catch-up',
+    recorded_at: '2026-09-30T21:05:00.000Z',
+    kind: 'model_decision',
+    what: 'Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks '
+      + 'a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the '
+      + 'store\'s approved identity.',
+    scope: { corpora: ['internal.email'] },
+    why: 'The owner approved the one-time cloud embedding spend for the mail backlog (estimated '
+      + 'US$20-25 at the provider\'s published rate) on 2026-09-30. No model, endpoint or epoch changes '
+      + 'and no existing vector is re-embedded; bounded per pass, with the backlog and estimated cost '
+      + 'shown on the source page and in doctor.',
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+    status: 'complete',
+  },
 ];
