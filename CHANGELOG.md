@@ -42,7 +42,8 @@ hosted agents, and hardening for the cloud-agent connection preview.
   running; a handed-off answer is stopped after 20 minutes. Jobs are bound to
   the connection or local MCP process that started them, kept in memory only,
   and expire 15 minutes after finishing. At most two answers now run at once
-  on each of these surfaces (`OLYMPUS_SOURCE_ANSWER_MAX_RUNNING`, up to 16),
+  across remote connections and two per local MCP server process
+  (`OLYMPUS_SOURCE_ANSWER_MAX_RUNNING`, up to 16),
   and a further `source_answer` is refused with `source_answer_busy` instead
   of queuing behind the analyst. Answers that finish under the threshold
   otherwise return as before; native OpenClaw and the CLI never hand off and
