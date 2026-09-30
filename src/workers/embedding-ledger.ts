@@ -564,7 +564,7 @@ export const EMBEDDING_LEDGER_BACKFILL: readonly EmbeddingLedgerEntry[] = PUBLIC
   },
   {
     entry_id: 'decision-2026-09-30-gmail-catch-up',
-    recorded_at: '2026-09-30T22:30:00.000Z',
+    recorded_at: '2026-09-30T21:05:00.000Z',
     kind: 'model_decision',
     what: 'Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks '
       + 'a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the '
