@@ -2,6 +2,7 @@ import { telegramPythonExecutable } from './messaging-runtime.ts';
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import type { MessagingPairingConnectedResult, MessagingProducerLaunch, MessagingPairingSource } from './messaging-pairing.ts';
@@ -233,7 +234,7 @@ function resolveCurrentLaunch(
   if (source === 'telegram') {
     const executable = telegramPythonExecutable({ ...(options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {}) });
     if (!executable) throw new Error('Python 3 is required to start Telegram capture.');
-    const packageRoot = options.packageRoot ?? join(import.meta.dir, '..', '..');
+    const packageRoot = options.packageRoot ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..');
     return { executable, args: [join(packageRoot, 'scripts', 'telegram-telethon-reader.py'), '--gateway'] };
   }
   return {

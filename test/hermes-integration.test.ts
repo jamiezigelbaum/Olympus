@@ -8,7 +8,7 @@ import { listMcpTools } from '../src/mcp/tools.ts';
 const ROOT = join(import.meta.dir, '..');
 
 describe('Hermes v0.4 integration', () => {
-  test('documents and packages the exact two-tool MCP filter', () => {
+  test('documents and packages the exact Hermes MCP filter', () => {
     const configPath = 'config/hermes/olympus.mcp.yaml';
     const skillPath = 'integrations/hermes/ask-sources/SKILL.md';
     expect(V0_4_PUBLIC_PACKAGE_FILES).toContain(configPath);
@@ -37,7 +37,7 @@ describe('Hermes v0.4 integration', () => {
     expect(docs).toContain('openclaw plugins inspect olympus --json');
     expect(docs).toContain('hermes mcp add olympus --command /absolute/managed/olympus/bin/olympus --args serve');
     expect(docs).toContain('hermes mcp test olympus');
-    expect(docs).toContain('include: [source_answer, source_index_status]');
+    expect(docs).toContain(`include: [${V0_4_HERMES_MCP_TOOLS.join(', ')}]`);
     expect(docs).toContain('mcp_olympus_source_answer');
     expect(docs).not.toContain('mcp__olympus__');
     expect(docs).toContain('No `hermes://mcp/install` link is published');

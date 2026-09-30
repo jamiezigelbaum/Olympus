@@ -9,8 +9,8 @@
  * (`integrations/agent-skills/ask-olympus/SKILL.md`) carries it verbatim for
  * vendors that load skills. A test holds the two equal.
  *
- * It names only the remote tool list (`source_answer`, `source_index_status`)
- * and promises nothing the privacy rules do not already enforce.
+ * It names only the remote tool list (`source_answer`, `source_answer_result`,
+ * `source_index_status`) and promises nothing the privacy rules do not already enforce.
  */
 
 export const AGENT_SKILL_NAME = 'ask-olympus';
@@ -28,7 +28,9 @@ export const AGENT_INSTRUCTION_TEXT = [
     + 'If you are not sure, ask it anyway. You do not need me to mention Olympus.',
   '',
   'Ask one question at a time, in plain words, and wait for each answer before asking the next. '
-    + 'Answers can take a minute.',
+    + 'Answers can take a few minutes. If Olympus says it is still working and gives you a job_id, '
+    + 'call source_answer_result with that job_id, again while it says working, and pass on the answer it returns. '
+    + 'Do not ask the same question again.',
   '',
   'Pass on what Olympus answers with its citations, and say plainly what it could not find. '
     + 'Do not guess past it or fill gaps from memory.',

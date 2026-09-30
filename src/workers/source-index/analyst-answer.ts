@@ -28,7 +28,7 @@
 //   audits — never raw chunks, packets, or pack internals.
 
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
-import { analystPromptBytes, noEvidenceAnalystResult, runWithAnalystAbortSignal } from '../../core/analyst.ts';
+import { analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
@@ -1362,6 +1362,9 @@ async function routeAnalysis(input: RouteAnalysisInput): Promise<RoutedAnalysis>
       return { result: attempt.result, backend: 'venice' };
     } catch (error) {
       if (isAnalystPolicyRefusal(error)) throw error;
+      // The caller went away: nobody is left to answer, and it is not
+      // Venice's failure, so no fallback leg and no fallback trace.
+      if (isCallerCancellation(error)) throw error;
       // Explicit Venice failed; fall back to local so the request still has a
       // privacy-preserving answer path, and report the actual backend used.
       const fallback = await observeImplicitAnalystLeg('local', localAnalystTimeoutMs, () =>
@@ -1403,6 +1406,7 @@ async function routeAnalysis(input: RouteAnalysisInput): Promise<RoutedAnalysis>
         analyzeWithOptionalTimeout(cloud, pack, { localOnly }, cloudAnalystTimeoutMs));
       return { result, backend: 'cloud' };
     } catch (error) {
+      if (isCallerCancellation(error)) throw error;
       const fallback = await observeImplicitAnalystLeg('local', localAnalystTimeoutMs, () =>
         analyzeWithOptionalTimeout(local, pack, { localOnly }, localAnalystTimeoutMs));
       return {
@@ -1706,6 +1710,12 @@ async function analyzeWithTimeout(
     ? Math.min(10, Math.max(1, Math.floor(timeoutMs / 10)))
     : 0;
   const executionTimeoutMs = Math.max(1, timeoutMs - cancellationSettleMs);
+  // The leg's own budget signal also follows the caller's cancellation, so a
+  // caller that goes away stops the model call instead of only the leg timer.
+  const callerSignal = currentAnalystAbortSignal();
+  const followCaller = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) followCaller();
+  else callerSignal?.addEventListener('abort', followCaller, { once: true });
   const analysis = runWithAnalystAbortSignal(
     controller.signal,
     () => analyst.analyze(pack, options),
@@ -1751,6 +1761,7 @@ async function analyzeWithTimeout(
     throw new TrustedAnalystTimeoutError(timeoutMs, Date.now() - startedAt);
   } finally {
     if (timeout) clearTimeout(timeout);
+    callerSignal?.removeEventListener('abort', followCaller);
   }
 }
 

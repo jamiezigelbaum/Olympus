@@ -212,16 +212,18 @@ export function openRemoteConnectionStore(
   const readRow = (id: string): ConnectionRow | null =>
     db.query('SELECT * FROM remote_connections WHERE id = ?').get(id) as ConnectionRow | null;
 
+  const oauth = createRemoteOAuthStore(db, now, (id, at) => {
+    const row = readRow(id);
+    const lastUsedMs = row?.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
+    if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
+      recordLastUse(id, at.toISOString());
+    }
+  });
+
   return {
     dbPath,
 
-    oauth: createRemoteOAuthStore(db, now, (id, at) => {
-      const row = readRow(id);
-      const lastUsedMs = row?.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
-      if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
-        recordLastUse(id, at.toISOString());
-      }
-    }),
+    oauth,
 
     create(displayName: string): CreatedRemoteConnection {
       const name = requireDisplayName(displayName);
@@ -257,6 +259,10 @@ export function openRemoteConnectionStore(
       if (!row) {
         throw new OperationError('invalid_params', `No remote connection has id ${id}.`, 'Run olympus connections list.');
       }
+      // Deleting the token rows is what kills a grant in every process (the
+      // CLI revokes from its own). In this process, also drop any refresh
+      // grace entry, so no successor pair stays cached in memory.
+      if (row.kind === 'oauth') oauth.revokeGrant(id);
       return toRecord(row);
     },
 

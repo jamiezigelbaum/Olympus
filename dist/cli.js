@@ -1362,6 +1362,9 @@ function isExecutableFile(path) {
 var init_openclaw_executable = () => {};
 
 // src/core/operation-error.ts
+function sourceAnswerJobNotFound() {
+  return new OperationError("source_answer_job_not_found", "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted.", "Ask the question again with source_answer.");
+}
 var OperationError;
 var init_operation_error = __esm(() => {
   OperationError = class OperationError extends Error {
@@ -6358,9 +6361,10 @@ import { spawn as spawnChild } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 import { homedir as homedir9 } from "node:os";
 import { dirname as dirname10, join as join10, resolve as resolve3 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 async function pairMessagingSource(options) {
   const env = { ...process.env, ...options.env ?? {} };
-  const packageRoot = resolve3(options.packageRoot ?? join10(import.meta.dir, "..", ".."));
+  const packageRoot = resolve3(options.packageRoot ?? join10(dirname10(fileURLToPath2(import.meta.url)), "..", ".."));
   const runner = options.runCommand ?? runPairingCommand;
   const secretStore = options.secretStore ?? createDefaultSecretStore();
   const pathContext = {
@@ -6832,6 +6836,7 @@ var init_messaging_pairing = __esm(() => {
 import { closeSync as closeSync6, constants as constants2, existsSync as existsSync8, fstatSync as fstatSync2, openSync as openSync6, readFileSync as readFileSync10, rmSync as rmSync5 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { dirname as dirname11, join as join11 } from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return join11(dirname11(registryPath), `messaging-capture.${source}.json`);
 }
@@ -6990,7 +6995,7 @@ function resolveCurrentLaunch(options, source) {
     const executable = telegramPythonExecutable({ ...options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {} });
     if (!executable)
       throw new Error("Python 3 is required to start Telegram capture.");
-    const packageRoot = options.packageRoot ?? join11(import.meta.dir, "..", "..");
+    const packageRoot = options.packageRoot ?? join11(dirname11(fileURLToPath3(import.meta.url)), "..", "..");
     return { executable, args: [join11(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
   }
   return {
@@ -7307,13 +7312,23 @@ var init_public_surface = __esm(() => {
     "argus_list_models",
     "argus_complete",
     "source_answer",
+    "source_answer_result",
     "source_index_status",
     "source_index_search",
     "olympus_doctor"
   ];
-  V0_4_PUBLIC_CLI_OPERATIONS = V0_4_PUBLIC_MCP_TOOLS;
+  V0_4_PUBLIC_CLI_OPERATIONS = [
+    "argus_ping",
+    "argus_list_models",
+    "argus_complete",
+    "source_answer",
+    "source_index_status",
+    "source_index_search",
+    "olympus_doctor"
+  ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
+    "source_answer_result",
     "source_index_status"
   ];
   V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
@@ -9976,7 +9991,7 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
           connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
           tokens
         };
-      })();
+      }).immediate();
     },
     revokeToken(token) {
       if (isWellFormedOAuthRefreshToken(token)) {
@@ -10146,15 +10161,16 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
     } catch {}
   };
   const readRow = (id) => db.query("SELECT * FROM remote_connections WHERE id = ?").get(id);
+  const oauth = createRemoteOAuthStore(db, now, (id, at) => {
+    const row = readRow(id);
+    const lastUsedMs = row?.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
+    if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
+      recordLastUse(id, at.toISOString());
+    }
+  });
   return {
     dbPath,
-    oauth: createRemoteOAuthStore(db, now, (id, at) => {
-      const row = readRow(id);
-      const lastUsedMs = row?.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
-      if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
-        recordLastUse(id, at.toISOString());
-      }
-    }),
+    oauth,
     create(displayName) {
       const name = requireDisplayName(displayName);
       const id = randomBytes6(CONNECTION_ID_BYTES).toString("hex");
@@ -10185,6 +10201,8 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
       if (!row) {
         throw new OperationError("invalid_params", `No remote connection has id ${id}.`, "Run olympus connections list.");
       }
+      if (row.kind === "oauth")
+        oauth.revokeGrant(id);
       return toRecord(row);
     },
     verifyToken(token) {
@@ -26561,6 +26579,7 @@ var init_venice_models = __esm(() => {
 import { chmodSync as chmodSync6, existsSync as existsSync17, mkdirSync as mkdirSync11, readFileSync as readFileSync16, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { dirname as dirname16, join as join20 } from "node:path";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
 function defaultSovereigntyConfigPath() {
   return join20(homedir17(), ".olympus", "sovereignty.json");
 }
@@ -26815,8 +26834,8 @@ function writeSovereigntyConfigFile(input) {
   return path;
 }
 function loadSovereigntyPreset(name) {
-  const sourceLayoutPath = join20(import.meta.dir, "..", "..", "config", "sovereignty", "presets", `${name}.json`);
-  const bundledLayoutPath = join20(import.meta.dir, "..", "config", "sovereignty", "presets", `${name}.json`);
+  const sourceLayoutPath = join20(dirname16(fileURLToPath4(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
+  const bundledLayoutPath = join20(dirname16(fileURLToPath4(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
   const path = existsSync17(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
   const parsed = JSON.parse(readFileSync16(path, "utf8"));
   return validateSovereigntyConfig(parsed);
@@ -28001,6 +28020,8 @@ async function routeAnalysis(input) {
     } catch (error) {
       if (isAnalystPolicyRefusal(error))
         throw error;
+      if (isCallerCancellation(error))
+        throw error;
       const fallback = await observeImplicitAnalystLeg("local", localAnalystTimeoutMs, () => analyzeWithOptionalTimeout(local, pack, { localOnly }, localAnalystTimeoutMs));
       return {
         result: fallback,
@@ -28036,6 +28057,8 @@ async function routeAnalysis(input) {
       const result2 = await observeImplicitAnalystLeg("cloud", cloudAnalystTimeoutMs, () => analyzeWithOptionalTimeout(cloud, pack, { localOnly }, cloudAnalystTimeoutMs));
       return { result: result2, backend: "cloud" };
     } catch (error) {
+      if (isCallerCancellation(error))
+        throw error;
       const fallback = await observeImplicitAnalystLeg("local", localAnalystTimeoutMs, () => analyzeWithOptionalTimeout(local, pack, { localOnly }, localAnalystTimeoutMs));
       return {
         result: fallback,
@@ -28210,6 +28233,12 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
   let settled = false;
   const cancellationSettleMs = timeoutMs >= 2 ? Math.min(10, Math.max(1, Math.floor(timeoutMs / 10))) : 0;
   const executionTimeoutMs = Math.max(1, timeoutMs - cancellationSettleMs);
+  const callerSignal = currentAnalystAbortSignal();
+  const followCaller = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted)
+    followCaller();
+  else
+    callerSignal?.addEventListener("abort", followCaller, { once: true });
   const analysis = runWithAnalystAbortSignal(controller.signal, () => analyst.analyze(pack, options)).finally(() => {
     settled = true;
   });
@@ -28254,6 +28283,7 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
   } finally {
     if (timeout)
       clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", followCaller);
   }
 }
 async function analyzeWithOptionalTimeout(analyst, pack, options, timeoutMs) {
@@ -40923,6 +40953,12 @@ function redactedSecretRefLabel(secretRef) {
     return `store:${trimmed2.slice("store:".length).trim()}`;
   return "configured secretRef";
 }
+function callerCancellation(signal) {
+  if (!signal?.aborted)
+    return;
+  const reason = signal.reason;
+  return reason instanceof Error && reason.name === "AbortError" ? reason : undefined;
+}
 function createDelphiTransport(config) {
   return new DirectHttpDelphiTransport(fetch, config.argus.requestTimeoutSeconds * 1000);
 }
@@ -40940,12 +40976,18 @@ class DirectHttpDelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      const cancelled = callerCancellation(init.signal);
+      if (cancelled)
+        throw cancelled;
       if (isAbortError2(firstError)) {
         throw argusTimeoutError(lane, url, timeoutMs);
       }
       try {
         response = await this.fetchWithTimeout(url, init, timeoutMs);
       } catch (secondError) {
+        const cancelledAgain = callerCancellation(init.signal);
+        if (cancelledAgain)
+          throw cancelledAgain;
         if (isAbortError2(secondError)) {
           throw argusTimeoutError(lane, url, timeoutMs);
         }
@@ -42291,6 +42333,7 @@ class EmailClient {
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      ...options.signal ? { signal: options.signal } : {},
       body: JSON.stringify({
         question: options.question,
         ...options.query ? { query: options.query } : {},
@@ -49701,7 +49744,7 @@ function optionalAttachmentType(value) {
     return value;
   throw new OperationError("invalid_params", "attachment_type must be image, video, audio, file, link, or other.");
 }
-var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, operations;
+var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, SOURCE_ANSWER_RESULT_PARAMS, operations;
 var init_operations = __esm(() => {
   init_doctor();
   init_config();
@@ -49769,6 +49812,9 @@ var init_operations = __esm(() => {
     include_internal_content: { type: "boolean", description: "Whether internal corpora may return context passages for {{assistantName}} summarization. Defaults true." },
     internal_content_max_bytes: { type: "number", description: "Max internal context bytes; worker-capped." },
     timeoutMs: { type: "number", description: "OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora. It also raises the private-lane request budget to match, up to a 600000 ms ceiling, so a slow local analyst finishes instead of timing out." }
+  };
+  SOURCE_ANSWER_RESULT_PARAMS = {
+    job_id: { type: "string", required: true, description: 'The job_id a source_answer call returned with status "working".' }
   };
   operations = [
     {
@@ -49852,7 +49898,8 @@ var init_operations = __esm(() => {
         "It never returns source packets, vectors, OAuth material, or raw secure-local file content; secure-local answers release only as OPSEC-scanned bounded derivatives.",
         "For Dropbox documents with incomplete local extraction, audit.self_heal reports whether Olympus forced a local re-ingest inline or left one queued for retry.",
         "The returned answer field is already the calling-assistant-safe answer; when it answers the user, pass it through with citations/coverage notes instead of re-reasoning over the audit.",
-        "Call it one at a time: the local analyst is a single-lane model, so concurrent source_answer calls queue behind each other and the later ones time out. Slow is fine; wait for each answer before issuing the next, and pass timeoutMs 600000."
+        "Call it one at a time: the local analyst is a single-lane model, so concurrent source_answer calls queue behind each other and the later ones time out. Slow is fine; wait for each answer before issuing the next, and pass timeoutMs 600000.",
+        'If the result is {"status": "working", "job_id": ...} instead of an answer, the answer is still being prepared and keeps running: call source_answer_result with that job_id (again while it says working) rather than asking again.'
       ].join(" "),
       params: SOURCE_ANSWER_PARAMS,
       mutating: false,
@@ -49883,7 +49930,7 @@ var init_operations = __esm(() => {
         const includeInternalContent = optionalBoolean2(params.include_internal_content, "include_internal_content");
         const internalContentMaxBytes = optionalNumber4(params.internal_content_max_bytes, "internal_content_max_bytes");
         const timeoutMs = optionalNumber4(params.timeoutMs, "timeoutMs");
-        return ctx.email.sourceAnswer({
+        const answer = (signal) => ctx.email.sourceAnswer({
           question,
           ...query !== undefined ? { query } : {},
           ...account !== undefined ? { account } : {},
@@ -49907,8 +49954,31 @@ var init_operations = __esm(() => {
           ...includeInternalContent !== undefined ? { includeInternalContent } : {},
           ...internalContentMaxBytes !== undefined ? { internalContentMaxBytes } : {},
           ...timeoutMs !== undefined ? { timeoutMs } : {},
-          ...ctx.caller ? { caller: ctx.caller } : {}
+          ...ctx.caller ? { caller: ctx.caller } : {},
+          ...signal ? { signal } : {}
         });
+        const jobs = ctx.sourceAnswerJobs;
+        return jobs ? jobs.registry.run(jobs, answer) : answer();
+      }
+    },
+    {
+      name: "source_answer_result",
+      description: [
+        'Get the answer to a source_answer call that returned {"status": "working", "job_id": ...}.',
+        'Returns the finished answer exactly as source_answer would have (same release rules, citations and coverage), the same error it would have raised, or {"status": "working"} again after waiting up to about a minute; then call it again.',
+        "A job_id works only for the connection that asked, and expires about 15 minutes after the answer is ready."
+      ].join(" "),
+      params: SOURCE_ANSWER_RESULT_PARAMS,
+      mutating: false,
+      nativeExposure: "sourceIndexEnabledOnly",
+      cliHints: { name: "source answer result", positional: ["job_id"] },
+      handler: async (ctx, params) => {
+        assertNoUndeclaredParams(SOURCE_ANSWER_RESULT_PARAMS, params, "Source answer result");
+        const jobId = asString(params.job_id, "job_id");
+        const jobs = ctx.sourceAnswerJobs;
+        if (!jobs)
+          throw sourceAnswerJobNotFound();
+        return jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
       }
     },
     {
@@ -50140,10 +50210,10 @@ var init_operations = __esm(() => {
 // src/version.ts
 import { readFileSync as readFileSync26 } from "node:fs";
 import { dirname as dirname31, join as join41 } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { fileURLToPath as fileURLToPath5 } from "node:url";
 var repoRoot, manifest, VERSION;
 var init_version = __esm(() => {
-  repoRoot = dirname31(dirname31(fileURLToPath2(import.meta.url)));
+  repoRoot = dirname31(dirname31(fileURLToPath5(import.meta.url)));
   manifest = JSON.parse(readFileSync26(join41(repoRoot, "openclaw.plugin.json"), "utf8"));
   VERSION = manifest.version;
 });
@@ -68714,6 +68784,287 @@ var init_stdio2 = __esm(() => {
   init_stdio();
 });
 
+// src/core/source-answer-jobs.ts
+var exports_source_answer_jobs = {};
+__export(exports_source_answer_jobs, {
+  sourceAnswerJobOwner: () => sourceAnswerJobOwner,
+  sourceAnswerJobLimitsFromEnv: () => sourceAnswerJobLimitsFromEnv,
+  isSourceAnswerPending: () => isSourceAnswerPending,
+  SourceAnswerJobRegistry: () => SourceAnswerJobRegistry,
+  SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS,
+  SOURCE_ANSWER_RESULT_WAIT_MAX_MS: () => SOURCE_ANSWER_RESULT_WAIT_MAX_MS,
+  SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS: () => SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
+  SOURCE_ANSWER_MAX_RUNNING_PER_OWNER: () => SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
+  SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING: () => SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING,
+  SOURCE_ANSWER_MAX_RUNNING_GLOBAL: () => SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
+  SOURCE_ANSWER_MAX_RETAINED_PER_OWNER: () => SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
+  SOURCE_ANSWER_MAX_RESULT_BYTES: () => SOURCE_ANSWER_MAX_RESULT_BYTES,
+  SOURCE_ANSWER_JOB_TTL_MS: () => SOURCE_ANSWER_JOB_TTL_MS,
+  SOURCE_ANSWER_JOB_DEADLINE_MS: () => SOURCE_ANSWER_JOB_DEADLINE_MS,
+  SOURCE_ANSWER_HANDOFF_MIN_MS: () => SOURCE_ANSWER_HANDOFF_MIN_MS,
+  SOURCE_ANSWER_HANDOFF_MAX_MS: () => SOURCE_ANSWER_HANDOFF_MAX_MS,
+  SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS
+});
+import { createHash as createHash40, randomBytes as randomBytes8, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+
+class SourceAnswerJobRegistry {
+  limits;
+  now;
+  isOwnerRevoked;
+  jobs = new Map;
+  running = new Map;
+  runningTotal = 0;
+  constructor(options = {}) {
+    const limits = {
+      handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
+      resultWaitMs: SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
+      ttlMs: SOURCE_ANSWER_JOB_TTL_MS,
+      deadlineMs: SOURCE_ANSWER_JOB_DEADLINE_MS,
+      maxRunningPerOwner: SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
+      maxRunningGlobal: SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
+      maxRetainedPerOwner: SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
+      maxResultBytes: SOURCE_ANSWER_MAX_RESULT_BYTES,
+      ...options.limits
+    };
+    limits.maxRunningPerOwner = Math.min(limits.maxRunningPerOwner, limits.maxRunningGlobal);
+    this.limits = limits;
+    this.now = options.now ?? Date.now;
+    this.isOwnerRevoked = options.isOwnerRevoked;
+  }
+  async run(scope, work) {
+    this.sweep();
+    this.admit(scope.owner);
+    const startedAt = this.now();
+    const controller = new AbortController;
+    const release = this.occupy(scope.owner);
+    let pending;
+    try {
+      pending = work(controller.signal);
+    } catch (error2) {
+      release();
+      throw error2;
+    }
+    const outcome = pending.then((value) => ({ ok: true, value }), (error2) => ({ ok: false, error: error2 }));
+    let timer;
+    const handoff = new Promise((resolve8) => {
+      timer = setTimeout(() => resolve8("handoff"), this.limits.handoffMs);
+    });
+    const first = await Promise.race([outcome, handoff]);
+    clearTimeout(timer);
+    if (first !== "handoff") {
+      release();
+      if (first.ok)
+        return first.value;
+      throw first.error;
+    }
+    scope.detachFromClient?.();
+    let wake;
+    const job = {
+      id: newJobId(),
+      owner: scope.owner,
+      startedAt,
+      done: new Promise((resolve8) => {
+        wake = resolve8;
+      }),
+      finish: (result) => {
+        if (job.outcome)
+          return;
+        clearTimeout(job.deadline);
+        job.outcome = this.bounded(result);
+        job.finishedAt = this.now();
+        release();
+        wake();
+      },
+      abort: (reason) => controller.abort(reason)
+    };
+    job.deadline = setTimeout(() => {
+      job.abort(callerAbortError("source_answer job deadline reached"));
+      job.finish({ ok: false, error: sourceAnswerDeadline(this.limits.deadlineMs) });
+    }, Math.max(0, this.limits.deadlineMs - (this.now() - startedAt)));
+    job.deadline.unref?.();
+    outcome.then((result) => job.finish(result));
+    this.jobs.set(job.id, job);
+    this.evictRetained(scope.owner);
+    return pendingResult(job.id, this.now() - startedAt, this.limits.resultWaitMs);
+  }
+  async result(owner, jobId, signal) {
+    this.sweep();
+    const job = typeof jobId === "string" && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
+    if (!job || !sameOwner(job.owner, owner))
+      throw sourceAnswerJobNotFound();
+    if (!job.outcome && this.limits.resultWaitMs > 0) {
+      let timer;
+      let onAbort;
+      const stop = new Promise((resolve8) => {
+        timer = setTimeout(resolve8, this.limits.resultWaitMs);
+        if (signal) {
+          onAbort = () => resolve8();
+          if (signal.aborted)
+            resolve8();
+          else
+            signal.addEventListener("abort", onAbort, { once: true });
+        }
+      });
+      await Promise.race([job.done, stop]);
+      clearTimeout(timer);
+      if (signal && onAbort)
+        signal.removeEventListener("abort", onAbort);
+    }
+    if (!this.jobs.has(job.id))
+      throw sourceAnswerJobNotFound();
+    if (!job.outcome)
+      return pendingResult(job.id, this.now() - job.startedAt, this.limits.resultWaitMs);
+    if (job.outcome.ok)
+      return job.outcome.value;
+    throw job.outcome.error;
+  }
+  dropOwner(owner) {
+    for (const [id, job] of this.jobs) {
+      if (!sameOwner(job.owner, owner))
+        continue;
+      this.jobs.delete(id);
+      job.abort(callerAbortError("source_answer connection revoked"));
+      job.finish({ ok: false, error: sourceAnswerJobNotFound() });
+    }
+  }
+  sweep() {
+    const now = this.now();
+    const owners = new Map;
+    for (const [id, job] of this.jobs) {
+      if (job.finishedAt !== undefined && now - job.finishedAt >= this.limits.ttlMs) {
+        this.jobs.delete(id);
+        continue;
+      }
+      if (this.isOwnerRevoked) {
+        let revoked = owners.get(job.owner);
+        if (revoked === undefined) {
+          try {
+            revoked = this.isOwnerRevoked(job.owner);
+          } catch {
+            revoked = false;
+          }
+          owners.set(job.owner, revoked);
+        }
+        if (revoked)
+          this.dropOwner(job.owner);
+      }
+    }
+  }
+  stats() {
+    this.sweep();
+    return { running: this.runningTotal, jobs: this.jobs.size };
+  }
+  occupy(owner) {
+    this.running.set(owner, (this.running.get(owner) ?? 0) + 1);
+    this.runningTotal += 1;
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      const count = (this.running.get(owner) ?? 1) - 1;
+      if (count <= 0)
+        this.running.delete(owner);
+      else
+        this.running.set(owner, count);
+      this.runningTotal -= 1;
+    };
+  }
+  admit(owner) {
+    if ((this.running.get(owner) ?? 0) >= this.limits.maxRunningPerOwner || this.runningTotal >= this.limits.maxRunningGlobal) {
+      throw new OperationError("source_answer_busy", "Olympus is already answering as many questions as its analyst can take at once.", "Wait for the answers in progress (call source_answer_result with their job ids) before asking another question.");
+    }
+  }
+  bounded(result) {
+    if (!result.ok)
+      return result;
+    let bytes;
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(result.value) ?? "", "utf8");
+    } catch {
+      bytes = Number.POSITIVE_INFINITY;
+    }
+    if (bytes <= this.limits.maxResultBytes)
+      return result;
+    return {
+      ok: false,
+      error: new OperationError("source_answer_too_large", "The finished answer was too large for Olympus to hold for collection.", "Ask a narrower question with source_answer.")
+    };
+  }
+  evictRetained(owner) {
+    const finished = [...this.jobs.values()].filter((job) => job.owner === owner && job.finishedAt !== undefined).sort((a, b) => a.finishedAt - b.finishedAt);
+    const owned = [...this.jobs.values()].filter((job) => job.owner === owner).length;
+    let excess = owned - this.limits.maxRetainedPerOwner;
+    for (const job of finished) {
+      if (excess <= 0)
+        break;
+      this.jobs.delete(job.id);
+      excess -= 1;
+    }
+  }
+}
+function sameOwner(a, b) {
+  const left = createHash40("sha256").update(a).digest();
+  const right = createHash40("sha256").update(b).digest();
+  return timingSafeEqual4(left, right);
+}
+function callerAbortError(message) {
+  const error2 = new Error(message);
+  error2.name = "AbortError";
+  return error2;
+}
+function sourceAnswerDeadline(deadlineMs) {
+  return new OperationError("source_answer_deadline", `The answer did not finish within Olympus's ${Math.round(deadlineMs / 60000)}-minute limit and was stopped.`, "Ask a narrower question, or try again later.");
+}
+function sourceAnswerJobOwner(caller) {
+  if (!caller)
+    return;
+  if (caller.surface === "remote")
+    return caller.connectionId ? `remote:${caller.connectionId}` : undefined;
+  if (caller.surface === "mcp")
+    return "mcp:stdio";
+  return;
+}
+function sourceAnswerJobLimitsFromEnv(env, surface) {
+  const configured = surface === "stdio" ? env.OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS : env.OLYMPUS_SOURCE_ANSWER_HANDOFF_MS;
+  const handoffMs = clampedInteger(configured, SOURCE_ANSWER_HANDOFF_MIN_MS, SOURCE_ANSWER_HANDOFF_MAX_MS) ?? (surface === "stdio" ? SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS : SOURCE_ANSWER_HANDOFF_DEFAULT_MS);
+  const resultWaitMs = Math.min(clampedInteger(env.OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS, 0, SOURCE_ANSWER_RESULT_WAIT_MAX_MS) ?? SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS, handoffMs);
+  const maxRunningGlobal = clampedInteger(env.OLYMPUS_SOURCE_ANSWER_MAX_RUNNING, 1, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING);
+  return { handoffMs, resultWaitMs, ...maxRunningGlobal !== undefined ? { maxRunningGlobal } : {} };
+}
+function isSourceAnswerPending(value) {
+  return typeof value === "object" && value !== null && value.status === "working" && typeof value.job_id === "string";
+}
+function pendingResult(jobId, elapsedMs, resultWaitMs) {
+  const wait = Math.round(resultWaitMs / 1000);
+  return {
+    status: "working",
+    job_id: jobId,
+    elapsed_ms: elapsedMs,
+    next_tool: "source_answer_result",
+    message: "Olympus is still preparing this answer and it keeps running. " + `Call source_answer_result with this job_id to get it${wait > 0 ? ` (each call waits up to ${wait} s)` : ""}; ` + "repeat while it says working. Do not ask the question again."
+  };
+}
+function newJobId() {
+  return `${JOB_ID_PREFIX}${randomBytes8(32).toString("base64url")}`;
+}
+function clampedInteger(value, min, max) {
+  if (value === undefined || value.trim() === "")
+    return;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed))
+    return;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+var SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200000, SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS = 45000, SOURCE_ANSWER_HANDOFF_MAX_MS = 230000, SOURCE_ANSWER_HANDOFF_MIN_MS = 1000, SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60000, SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120000, SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_DEADLINE_MS, SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 2, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING = 16, SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 2, SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16, SOURCE_ANSWER_MAX_RESULT_BYTES, JOB_ID_PREFIX = "saj_", JOB_ID_PATTERN;
+var init_source_answer_jobs = __esm(() => {
+  init_operation_error();
+  SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+  SOURCE_ANSWER_JOB_DEADLINE_MS = 20 * 60000;
+  SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+  JOB_ID_PATTERN = /^saj_[A-Za-z0-9_-]{43}$/;
+});
+
 // src/mcp/tools.ts
 function listMcpTools(config2, surface = "mcp") {
   return exposedOperations(operations, { config: config2, surface }).map((operation) => ({
@@ -68776,8 +69127,9 @@ async function serve() {
       tools: listMcpTools(loadConfig())
     };
   });
+  const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env, "stdio") });
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name));
+    return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name, sourceAnswerJobs));
   });
   await server.connect(new StdioServerTransport);
 }
@@ -68785,13 +69137,16 @@ function mcpOperationCaller(clientName) {
   const displayName = sanitizeCallerDisplayName(clientName);
   return { surface: "mcp", ...displayName ? { displayName } : {} };
 }
-function makeContext(clientName) {
+function makeContext(clientName, sourceAnswerJobs) {
   const config2 = loadConfig();
+  const caller = mcpOperationCaller(clientName);
+  const owner = sourceAnswerJobOwner(caller);
   return {
     config: config2,
     delphi: new DelphiClient(config2, createDelphiTransport(config2)),
     email: new EmailClient(config2, createEmailTransport(config2)),
-    caller: mcpOperationCaller(clientName)
+    caller,
+    ...sourceAnswerJobs && owner ? { sourceAnswerJobs: { registry: sourceAnswerJobs, owner } } : {}
   };
 }
 var init_server3 = __esm(() => {
@@ -68804,12 +69159,13 @@ var init_server3 = __esm(() => {
   init_operation_caller();
   init_operation_exposure();
   init_operations();
+  init_source_answer_jobs();
   init_version();
   init_tools();
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash40, createPublicKey, randomBytes as randomBytes8, sign, verify } from "node:crypto";
+import { createHash as createHash41, createPublicKey, randomBytes as randomBytes9, sign, verify } from "node:crypto";
 function base64url2(data) {
   return Buffer.from(data).toString("base64url");
 }
@@ -68830,7 +69186,7 @@ function base32(data) {
   return out;
 }
 function installIdForPublicKey(spkiDer) {
-  return base32(createHash40("sha256").update(spkiDer).digest().subarray(0, 20));
+  return base32(createHash41("sha256").update(spkiDer).digest().subarray(0, 20));
 }
 function spkiOf(key) {
   return key.export({ format: "der", type: "spki" });
@@ -68942,13 +69298,13 @@ __export(exports_acme, {
   dns01Value: () => dns01Value,
   AcmeError: () => AcmeError
 });
-import { createHash as createHash41, createPublicKey as createPublicKey3, sign as sign3 } from "node:crypto";
+import { createHash as createHash42, createPublicKey as createPublicKey3, sign as sign3 } from "node:crypto";
 function jwkThumbprint(jwk) {
   const canonical2 = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y });
-  return base64url2(createHash41("sha256").update(canonical2).digest());
+  return base64url2(createHash42("sha256").update(canonical2).digest());
 }
 function dns01Value(token, thumbprint) {
-  return base64url2(createHash41("sha256").update(`${token}.${thumbprint}`).digest());
+  return base64url2(createHash42("sha256").update(`${token}.${thumbprint}`).digest());
 }
 async function fetchTermsOfService(directoryUrl, fetchImpl = fetch) {
   const response = await fetchImpl(directoryUrl);
@@ -69021,7 +69377,16 @@ async function obtainCertificate(options) {
   kid = account.headers.get("location") ?? undefined;
   if (!kid)
     throw new AcmeError("ACME account has no URL");
-  const order = await post(directory.newOrder, { identifiers: [{ type: "dns", value: options.hostname }] });
+  const identifiers = [{ type: "dns", value: options.hostname }];
+  let order;
+  try {
+    order = await post(directory.newOrder, { identifiers, ...options.replaces ? { replaces: options.replaces } : {} });
+  } catch (error2) {
+    const type = error2 instanceof AcmeError ? error2.problem?.type : undefined;
+    if (!options.replaces || typeof type !== "string" || NOT_A_REPLACES_REFUSAL.has(type))
+      throw error2;
+    order = await post(directory.newOrder, { identifiers });
+  }
   const orderUrl = order.headers.get("location");
   if (!orderUrl)
     throw new AcmeError("ACME order has no URL");
@@ -69055,7 +69420,7 @@ async function obtainCertificate(options) {
       await options.dns.clear(value).catch(() => {});
   }
 }
-var AcmeError, sleep3 = (ms) => new Promise((resolve8) => setTimeout(resolve8, ms));
+var AcmeError, NOT_A_REPLACES_REFUSAL, sleep3 = (ms) => new Promise((resolve8) => setTimeout(resolve8, ms));
 var init_acme = __esm(() => {
   init_protocol2();
   init_csr();
@@ -69066,6 +69431,131 @@ var init_acme = __esm(() => {
       this.problem = problem;
     }
   };
+  NOT_A_REPLACES_REFUSAL = new Set([
+    "urn:ietf:params:acme:error:rateLimited",
+    "urn:ietf:params:acme:error:serverInternal",
+    "urn:ietf:params:acme:error:badNonce",
+    "urn:ietf:params:acme:error:userActionRequired"
+  ]);
+});
+
+// connect-relay/client/ari.ts
+import { X509Certificate } from "node:crypto";
+function readTlv(der, offset) {
+  const tag = der[offset];
+  let length2 = der[offset + 1];
+  if (tag === undefined || length2 === undefined)
+    throw new Error("truncated DER");
+  let start = offset + 2;
+  if (length2 & 128) {
+    const count = length2 & 127;
+    if (count === 0 || count > 4)
+      throw new Error("unsupported DER length");
+    length2 = 0;
+    for (let i = 0;i < count; i += 1)
+      length2 = length2 * 256 + der[start + i];
+    start += count;
+  }
+  const end = start + length2;
+  if (end > der.length)
+    throw new Error("truncated DER");
+  return { tag, start, end };
+}
+function children(der, parent) {
+  const out = [];
+  for (let offset = parent.start;offset < parent.end; ) {
+    const child = readTlv(der, offset);
+    out.push(child);
+    offset = child.end;
+  }
+  return out;
+}
+function ariCertId(pem) {
+  try {
+    const der = new X509Certificate(pem).raw;
+    const certificate = readTlv(der, 0);
+    const tbs = children(der, certificate)[0];
+    if (!tbs)
+      return;
+    const fields = children(der, tbs);
+    const serial = fields[fields[0]?.tag === 160 ? 1 : 0];
+    if (serial?.tag !== 2)
+      return;
+    const extensions = fields.find((field) => field.tag === 163);
+    if (!extensions)
+      return;
+    const list = children(der, extensions)[0];
+    if (!list)
+      return;
+    for (const extension of children(der, list)) {
+      const [oid2, ...rest] = children(der, extension);
+      if (!oid2 || oid2.tag !== 6 || !der.subarray(oid2.start, oid2.end).equals(OID_AUTHORITY_KEY_IDENTIFIER))
+        continue;
+      const value = rest.find((part) => part.tag === 4);
+      if (!value)
+        return;
+      const aki = readTlv(der, value.start);
+      const keyIdentifier = children(der, aki).find((part) => part.tag === 128);
+      if (!keyIdentifier || keyIdentifier.end === keyIdentifier.start)
+        return;
+      return `${base64url2(der.subarray(keyIdentifier.start, keyIdentifier.end))}.${base64url2(der.subarray(serial.start, serial.end))}`;
+    }
+    return;
+  } catch {
+    return;
+  }
+}
+async function fetchRenewalInfoUrl(directoryUrl, fetchImpl = fetch) {
+  const response = await fetchImpl(directoryUrl);
+  if (!response.ok)
+    return;
+  const directory = await response.json();
+  return typeof directory.renewalInfo === "string" && /^https?:\/\//.test(directory.renewalInfo) ? directory.renewalInfo : undefined;
+}
+async function fetchRenewalInfo(directoryUrl, pem, fetchImpl = fetch) {
+  const certId = ariCertId(pem);
+  if (!certId)
+    return;
+  const base = await fetchRenewalInfoUrl(directoryUrl, fetchImpl);
+  if (!base)
+    return;
+  const response = await fetchImpl(`${base.replace(/\/+$/, "")}/${certId}`);
+  if (!response.ok) {
+    if (response.status === 404)
+      return;
+    throw new Error(`ARI answered HTTP ${response.status}`);
+  }
+  const body = await response.json();
+  const start = Date.parse(String(body.suggestedWindow?.start));
+  const end = Date.parse(String(body.suggestedWindow?.end));
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start)
+    return;
+  return {
+    certId,
+    window: { start, end },
+    retryAfterMs: retryAfterMs2(response.headers.get("retry-after")),
+    ...typeof body.explanationURL === "string" ? { explanationUrl: body.explanationURL } : {}
+  };
+}
+function retryAfterMs2(header, now = Date.now()) {
+  if (!header)
+    return DEFAULT_RETRY_AFTER_MS;
+  const seconds = Number(header);
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - now;
+  if (!Number.isFinite(ms))
+    return DEFAULT_RETRY_AFTER_MS;
+  return Math.min(MAX_RETRY_AFTER_MS, Math.max(MIN_RETRY_AFTER_MS, ms));
+}
+function selectRenewalTime(window2, random = Math.random) {
+  return window2.start + Math.floor(random() * Math.max(0, window2.end - window2.start));
+}
+var DEFAULT_RETRY_AFTER_MS, MIN_RETRY_AFTER_MS, MAX_RETRY_AFTER_MS, OID_AUTHORITY_KEY_IDENTIFIER;
+var init_ari = __esm(() => {
+  init_protocol2();
+  DEFAULT_RETRY_AFTER_MS = 6 * 60 * 60 * 1000;
+  MIN_RETRY_AFTER_MS = 60 * 60 * 1000;
+  MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
+  OID_AUTHORITY_KEY_IDENTIFIER = Buffer.from([85, 29, 35]);
 });
 
 // connect-relay/client/identity.ts
@@ -69399,6 +69889,7 @@ class RelayClient {
     this.session = socket;
     let reason = "connection closed";
     let replaced = false;
+    let revoked = false;
     const { identity } = this.options;
     readLines(socket, (message) => {
       switch (message.type) {
@@ -69447,6 +69938,8 @@ class RelayClient {
             this.register = true;
           if (message.code === "replaced")
             replaced = true;
+          if (message.code === "revoked")
+            revoked = true;
           return "stop";
         default:
           return "continue";
@@ -69471,6 +69964,12 @@ class RelayClient {
       if (replaced) {
         this.options.onStatus?.({ state: "replaced" });
         this.schedule(this.options.replacedBackoffMs ?? 5 * 60000);
+        return;
+      }
+      if (revoked) {
+        const retryInMs = this.options.revokedBackoffMs ?? 6 * 60 * 60000;
+        this.options.onStatus?.({ state: "offline", reason, retryInMs });
+        this.schedule(retryInMs);
         return;
       }
       if (this.register && this.failures === 0) {
@@ -69571,17 +70070,19 @@ var init_relay_client = __esm(() => {
 var exports_connect = {};
 __export(exports_connect, {
   startConnect: () => startConnect,
+  latestRenewalMoment: () => latestRenewalMoment,
   certificateIsFresh: () => certificateIsFresh,
+  ariRenewalDue: () => ariRenewalDue,
   LETS_ENCRYPT_DIRECTORY: () => LETS_ENCRYPT_DIRECTORY
 });
-import { X509Certificate } from "node:crypto";
+import { X509Certificate as X509Certificate2 } from "node:crypto";
 import { existsSync as existsSync39, readFileSync as readFileSync32 } from "node:fs";
 import { join as join51 } from "node:path";
 function certificateIsFresh(pem, hostname, now = Date.now()) {
   if (!pem)
     return false;
   try {
-    const certificate = new X509Certificate(pem);
+    const certificate = new X509Certificate2(pem);
     if (!certificate.checkHost(hostname))
       return false;
     const notBefore = Date.parse(certificate.validFrom);
@@ -69591,18 +70092,27 @@ function certificateIsFresh(pem, hostname, now = Date.now()) {
     return false;
   }
 }
+function latestRenewalMoment(pem) {
+  const certificate = new X509Certificate2(pem);
+  const notBefore = Date.parse(certificate.validFrom);
+  const notAfter = Date.parse(certificate.validTo);
+  return notAfter - (notAfter - notBefore) / 6;
+}
+function ariRenewalDue(pem, renewAt, now = Date.now()) {
+  return Math.min(renewAt, latestRenewalMoment(pem)) <= now;
+}
 function certificateIsValid(pem, hostname, now = Date.now()) {
   if (!pem)
     return false;
   try {
-    const certificate = new X509Certificate(pem);
+    const certificate = new X509Certificate2(pem);
     return Boolean(certificate.checkHost(hostname)) && Date.parse(certificate.validTo) > now;
   } catch {
     return false;
   }
 }
 function certificateNotAfter(pem) {
-  return new Date(Date.parse(new X509Certificate(pem).validTo)).toISOString();
+  return new Date(Date.parse(new X509Certificate2(pem).validTo)).toISOString();
 }
 async function startConnect(options) {
   const identity = loadOrCreateIdentity(options.stateDir);
@@ -69620,6 +70130,8 @@ async function startConnect(options) {
   let failures = 0;
   let retryTimer;
   let status = { state: "none" };
+  let ari;
+  let ariTimer;
   const report = (next) => {
     status = next;
     options.onCertificate?.(next);
@@ -69638,14 +70150,49 @@ async function startConnect(options) {
     const termsUrl = await fetchTermsOfService(directoryUrl, options.acme.fetch ?? fetch);
     return { ok: await decision(termsUrl), termsUrl };
   };
+  const renewalPlan = async (pem) => {
+    const now = Date.now();
+    if (ari && ari.freshUntil > now && pem === served)
+      return ari;
+    let info;
+    try {
+      info = await fetchRenewalInfo(directoryUrl, pem, options.acme.fetch ?? fetch);
+    } catch {
+      return ari && pem === served ? ari : undefined;
+    }
+    if (!info) {
+      ari = undefined;
+      return;
+    }
+    const same = ari?.certId === info.certId && ari.window.start === info.window.start && ari.window.end === info.window.end;
+    ari = {
+      certId: info.certId,
+      window: info.window,
+      renewAt: Math.min(same ? ari.renewAt : selectRenewalTime(info.window), latestRenewalMoment(pem)),
+      freshUntil: now + info.retryAfterMs
+    };
+    return ari;
+  };
+  const scheduleRenewal = (renewAt) => {
+    if (ariTimer)
+      clearTimeout(ariTimer);
+    ariTimer = undefined;
+    const delay = renewAt - Date.now();
+    if (stopped || delay >= renewCheckMs)
+      return;
+    ariTimer = setTimeout(() => void check().catch(() => {}), Math.max(0, delay));
+    ariTimer.unref?.();
+  };
   const ensureCertificate = async () => {
     const hostname = await client.ready();
     let pem = existsSync39(certPath) ? readFileSync32(certPath, "utf8") : undefined;
-    if (!certificateIsFresh(pem, hostname)) {
+    const plan = pem && certificateIsValid(pem, hostname) ? await renewalPlan(pem) : undefined;
+    const due = plan ? ariRenewalDue(pem, plan.renewAt) : !certificateIsFresh(pem, hostname);
+    if (due) {
       const terms = await agreed();
       if (!terms.ok) {
-        const serving = pem && certificateIsValid(pem, hostname) ? await serve2(pem, hostname) : undefined;
-        report({ state: "awaiting_terms", termsUrl: terms.termsUrl, ...serving ? { serving } : {} });
+        const serving2 = pem && certificateIsValid(pem, hostname) ? await serve2(pem, hostname) : undefined;
+        report({ state: "awaiting_terms", termsUrl: terms.termsUrl, ...serving2 ? { serving: serving2 } : {} });
         return;
       }
       report({ state: "issuing" });
@@ -69656,14 +70203,20 @@ async function startConnect(options) {
         hostname,
         dns: client,
         termsOfServiceAgreed: true,
+        ...plan ? { replaces: plan.certId } : {},
         ...options.acme.fetch ? { fetch: options.acme.fetch } : {},
         propagationDelayMs: options.acme.propagationDelayMs ?? 1e4,
         ...options.acme.pollIntervalMs ? { pollIntervalMs: options.acme.pollIntervalMs } : {}
       });
       writePrivateFile(certPath, pem);
+      ari = undefined;
     }
     failures = 0;
-    report({ state: "serving", ...await serve2(pem, hostname) });
+    const serving = await serve2(pem, hostname);
+    const next = due ? await renewalPlan(pem) : plan;
+    if (next && !(due && next.renewAt <= Date.now()))
+      scheduleRenewal(next.renewAt);
+    report({ state: "serving", ...serving, ...next ? { renewAt: new Date(next.renewAt).toISOString() } : {} });
   };
   const check = () => {
     if (retryTimer)
@@ -69708,6 +70261,8 @@ async function startConnect(options) {
       clearInterval(timer);
       if (retryTimer)
         clearTimeout(retryTimer);
+      if (ariTimer)
+        clearTimeout(ariTimer);
       await client.stop();
     }
   };
@@ -69715,6 +70270,7 @@ async function startConnect(options) {
 var LETS_ENCRYPT_DIRECTORY = "https://acme-v02.api.letsencrypt.org/directory";
 var init_connect2 = __esm(() => {
   init_acme();
+  init_ari();
   init_identity();
   init_relay_client();
 });
@@ -70695,7 +71251,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync20, mkdirSync as mkdirSync30 } from "node:fs";
-import { createHash as createHash42, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash43, randomUUID as randomUUID16 } from "node:crypto";
 import { homedir as homedir41 } from "node:os";
 import { dirname as dirname39, join as join52 } from "node:path";
 import { Database as Database15 } from "bun:sqlite";
@@ -71755,7 +72311,7 @@ function makeJobId() {
   return `fx_${randomUUID16()}`;
 }
 function hashString5(value) {
-  return createHash42("sha256").update(value).digest("hex");
+  return createHash43("sha256").update(value).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -73515,9 +74071,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer5 } from "node:buffer";
-import { createHash as createHash43 } from "node:crypto";
+import { createHash as createHash44 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash43("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash44("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -74143,7 +74699,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash44 } from "node:crypto";
+import { createHash as createHash45 } from "node:crypto";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
     return { allowed: true };
@@ -74622,7 +75178,7 @@ function retryable(errorKind, error2) {
 }
 function hashError(error2) {
   const detail = error2 instanceof Error ? `${error2.name}:${error2.message}` : String(error2);
-  return createHash44("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash45("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error2) {
   const message = error2 instanceof Error ? error2.message : "";
@@ -74737,7 +75293,7 @@ function summarizeEgressDestinations(values) {
   return { egressDestination: "venice_mixed_approved" };
 }
 function hashToken(value) {
-  return createHash44("sha256").update(value).digest("hex");
+  return createHash45("sha256").update(value).digest("hex");
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS;
 var init_runner = __esm(() => {
@@ -75550,7 +76106,7 @@ function createOpenAICompatibleAnalystModel(options) {
           });
         } catch (error2) {
           if (request.signal?.aborted)
-            throw callerAbortError(request.signal.reason);
+            throw callerAbortError2(request.signal.reason);
           throw new OperationError("source_index_error", `${providerLabel3} (${model}) was unreachable at ${url}.`, error2 instanceof Error ? error2.message : `Check the ${providerLabel3} endpoint and network.`);
         }
         if (!response.ok) {
@@ -75562,7 +76118,7 @@ function createOpenAICompatibleAnalystModel(options) {
           data = await response.json();
         } catch (error2) {
           if (request.signal?.aborted)
-            throw callerAbortError(request.signal.reason);
+            throw callerAbortError2(request.signal.reason);
           if (timedOut) {
             throw new OperationError("source_index_error", `${providerLabel3} (${model}) did not complete within ${timeoutMs}ms.`, "The endpoint returned response headers but stalled the body; falling back to local.");
           }
@@ -75586,7 +76142,7 @@ function createOpenAICompatibleAnalystModel(options) {
     }
   };
 }
-function callerAbortError(reason) {
+function callerAbortError2(reason) {
   if (reason instanceof Error && reason.name === "AbortError")
     return reason;
   const error2 = new Error("Analyst request was cancelled.");
@@ -76609,7 +77165,7 @@ var init_answer_latency_log = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash45 } from "node:crypto";
+import { createHash as createHash46 } from "node:crypto";
 import { readFileSync as readFileSync34 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir44 } from "node:os";
@@ -77102,7 +77658,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2565(value) {
-  return createHash45("sha256").update(value, "utf8").digest("hex");
+  return createHash46("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -78725,19 +79281,19 @@ function mountDispositionsController(options) {
         row.append(disclosure, icon, select, status);
         wrapper.appendChild(row);
         if (draft.expanded.has(node.key)) {
-          const children = root.ownerDocument.createElement("div");
-          children.className = "children";
-          children.setAttribute("role", "group");
-          children.setAttribute("aria-label", node.name);
-          appendNodes(children, draft.branches.get(node.key) || [], new Set([...seen, node.key]));
+          const children2 = root.ownerDocument.createElement("div");
+          children2.className = "children";
+          children2.setAttribute("role", "group");
+          children2.setAttribute("aria-label", node.name);
+          appendNodes(children2, draft.branches.get(node.key) || [], new Set([...seen, node.key]));
           if (draft.branchCursors.has(node.key)) {
             const more2 = root.ownerDocument.createElement("button");
             more2.type = "button";
             more2.dataset.scopeMore = node.key;
             more2.textContent = (draft.branches.get(node.key)?.length || 0) >= 20 ? "Show more folders" : "Continue loading folders";
-            children.appendChild(more2);
+            children2.appendChild(more2);
           }
-          wrapper.appendChild(children);
+          wrapper.appendChild(children2);
         }
         host.appendChild(wrapper);
       }
@@ -79869,7 +80425,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash46 } from "node:crypto";
+import { createHash as createHash47 } from "node:crypto";
 function escapeHtml(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -79929,14 +80485,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash46("sha256").update(normalised).digest("hex");
+  return createHash47("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml(input.title) : `<a class="lead" href="${escapeHtml(leadHref)}">${escapeHtml(input.title)}</a> <span class="crumb">/</span> ${escapeHtml(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash46("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash47("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -82893,7 +83449,7 @@ var init_agent_instructions = __esm(() => {
     "",
     "Ask Olympus whenever my question might be answered from my own records: what someone told me, " + "what a document or contract says, or when something happened. " + "If you are not sure, ask it anyway. You do not need me to mention Olympus.",
     "",
-    "Ask one question at a time, in plain words, and wait for each answer before asking the next. " + "Answers can take a minute.",
+    "Ask one question at a time, in plain words, and wait for each answer before asking the next. " + "Answers can take a few minutes. If Olympus says it is still working and gives you a job_id, " + "call source_answer_result with that job_id, again while it says working, and pass on the answer it returns. " + "Do not ask the same question again.",
     "",
     "Pass on what Olympus answers with its citations, and say plainly what it could not find. " + "Do not guess past it or fill gaps from memory.",
     "",
@@ -83673,7 +84229,7 @@ var init_control_ui_contract = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac3, randomBytes as randomBytes9, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -84047,7 +84603,7 @@ function dashboardControlExpiresAtMs(parts) {
 function mintDashboardControlSession(authToken, origin, nowMs) {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes9(24).toString("base64url"),
+    nonce: randomBytes10(24).toString("base64url"),
     issuedSeconds: nowSeconds,
     originTag: dashboardControlOriginTag(authToken, origin)
   };
@@ -84170,7 +84726,7 @@ function verifyGatewayCallbackPeerHeader(value, authToken) {
   const expected = createHmac3("sha256", authToken).update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${peer}`).digest("base64url");
   const presentedBytes = Buffer.from(presented, "ascii");
   const expectedBytes = Buffer.from(expected, "ascii");
-  if (presentedBytes.length !== expectedBytes.length || !timingSafeEqual4(presentedBytes, expectedBytes))
+  if (presentedBytes.length !== expectedBytes.length || !timingSafeEqual5(presentedBytes, expectedBytes))
     return;
   return peer;
 }
@@ -84281,7 +84837,7 @@ function constantTimeStringEqual(actual, expected) {
   const expectedPadded = new Uint8Array(maxLength);
   actualPadded.set(actualBytes.slice(0, maxLength));
   expectedPadded.set(expectedBytes.slice(0, maxLength));
-  return timingSafeEqual4(actualPadded, expectedPadded) && actualBytes.byteLength === expectedBytes.byteLength;
+  return timingSafeEqual5(actualPadded, expectedPadded) && actualBytes.byteLength === expectedBytes.byteLength;
 }
 function workerAuthRequiredResponse() {
   return new Response(JSON.stringify({
@@ -85892,7 +86448,7 @@ function renderDispositionNode(node, ancestorState, editable) {
   const locked = selectable.length > 0 || !editable ? "" : lockedReason(node, ancestorState);
   const countLine = `${node.counts.items} ${node.counts.items === 1 ? "item" : "items"}` + (node.counts.excluded_items > 0 ? ` · ${node.counts.excluded_items} no ingestion` : "") + (node.counts.metadata_only_items > 0 ? ` · ${node.counts.metadata_only_items} metadata only` : "");
   const control = `<div class="stored-controls" aria-hidden="true">${STATE_ORDER.map((state) => renderStateRadio(node, state, selectable.includes(state))).join("")}</div>`;
-  const children = node.children.length > 0 ? `<div class="children">${node.children.map((child) => renderDispositionNode(child, node.state, editable)).join("")}</div>` : "";
+  const children2 = node.children.length > 0 ? `<div class="children">${node.children.map((child) => renderDispositionNode(child, node.state, editable)).join("")}</div>` : "";
   const status = node.mixed_below ? "Mixed" : PICKER_STATE_LABELS[node.state];
   const row = `<span class="folder-icon" aria-hidden="true">▰</span><span class="node-name">${escapeHtml2(node.name)}</span>` + `<span class="node-counts">${escapeHtml2(`${node.counts.items}`)}</span>` + `<span class="node-state" data-folder-status>${escapeHtml2(status)}</span>`;
   const data = `data-path="${escapeHtml2(node.path)}" data-name="${escapeHtml2(node.name)}"` + ` data-counts="${escapeHtml2(countLine)}" data-search="${escapeHtml2(`${node.display_path} ${node.name}`.toLowerCase())}"` + ` data-state="${node.state}" data-origin="${node.origin}" data-selectable="${escapeHtml2(selectable.join(","))}"` + (locked === "" ? "" : ` data-locked="${escapeHtml2(locked)}"`);
@@ -85907,7 +86463,7 @@ function renderDispositionNode(node, ancestorState, editable) {
           <details class="node"${node.depth === 1 ? " open" : ""}>
             <summary class="folder-row" ${data}>${row}</summary>
             ${control}
-            ${children}
+            ${children2}
           </details>`;
 }
 function renderStateRadio(node, state, enabled) {
@@ -85965,7 +86521,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash47 } from "node:crypto";
+import { createHash as createHash48 } from "node:crypto";
 function parseStructuredChatScope(value) {
   const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -85993,7 +86549,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash47("sha256").update(value).digest("hex");
+  return createHash48("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -86198,7 +86754,7 @@ function safeDetail(value) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash48, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
+import { createHash as createHash49, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 import { readFileSync as readFileSync38, statSync as statSync11 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
 import { join as join60, resolve as resolve9 } from "node:path";
@@ -86353,7 +86909,7 @@ function createEmailSourceWorker(options = {}) {
               const sourceAnswerRequest = await parseSourceIndexAnswerRequest(request);
               requestParsed = true;
               caller = sourceAnswerRequest.caller;
-              const result = await retrySqliteBusy(() => sourceAnswer.answer(sourceAnswerRequest));
+              const result = await runWithAnalystAbortSignal(callerCancellationSignal(request.signal), () => retrySqliteBusy(() => sourceAnswer.answer(sourceAnswerRequest)));
               assertNoRawEmailFields(result);
               const response = json(result);
               await emitSourceAnswerLatencyRecords({
@@ -87674,13 +88230,13 @@ function createEmailSourceWorker(options = {}) {
           }, 503);
         }
         if (isCredentialRefreshBusyError(error2)) {
-          const retryAfterMs2 = error2.retryAfterMs ?? CREDENTIAL_REFRESH_BUSY_RETRY_MS;
+          const retryAfterMs3 = error2.retryAfterMs ?? CREDENTIAL_REFRESH_BUSY_RETRY_MS;
           return json({
             error: {
               code: "credential_refresh_busy",
               message: "The credential is being refreshed by another process; retry shortly.",
               retryable: true,
-              retry_at: new Date(Date.now() + retryAfterMs2).toISOString()
+              retry_at: new Date(Date.now() + retryAfterMs3).toISOString()
             },
             policy: { raw_email_exposed: false }
           }, 503);
@@ -87877,6 +88433,24 @@ function requireCurrentFileEmbeddingScope(store, resolver) {
     filters,
     signature: JSON.stringify({ accountScope, filters })
   };
+}
+function callerCancellationSignal(signal) {
+  const controller = new AbortController;
+  const abort = () => {
+    const reason = signal.reason;
+    if (reason instanceof Error && reason.name === "AbortError") {
+      controller.abort(reason);
+      return;
+    }
+    const error2 = new Error("The caller cancelled this answer.");
+    error2.name = "AbortError";
+    controller.abort(error2);
+  };
+  if (signal.aborted)
+    abort();
+  else
+    signal.addEventListener("abort", abort, { once: true });
+  return controller.signal;
 }
 function scrubSourceWorkerLogMessage(message) {
   return String(message).slice(0, 200).replace(/[A-Za-z0-9._~+/=-]{24,}/g, "<redacted>");
@@ -89250,7 +89824,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual5(createHash48("sha256").update(expected).digest(), createHash48("sha256").update(state).digest());
+  return timingSafeEqual6(createHash49("sha256").update(expected).digest(), createHash49("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -89852,6 +90426,7 @@ function mostPrivateTrustDomain(domains) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger";
 var init_email_source = __esm(() => {
+  init_analyst();
   init_file_lease();
   init_email_policy();
   init_publisher_oauth_client();
@@ -90178,7 +90753,7 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash49 } from "node:crypto";
+import { createHash as createHash50 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -90868,7 +91443,7 @@ function createCanonicalDropboxSchedulerSource(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash49("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash50("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -91492,7 +92067,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash49("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash50("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -93589,20 +94164,46 @@ function createInProcessOperationContext(input) {
     email: { ...input.config.email, enabled: true, baseUrl: IN_PROCESS_WORKER_BASE_URL },
     sourceIndex: { ...input.config.sourceIndex, enabled: input.sourceIndexReadEnabled }
   };
+  const client = detachableSignal(input.signal);
   const transport = new DirectHttpEmailTransport((url, init) => {
-    const signals = [init.signal, input.signal].filter((signal) => signal != null);
+    const signals = [init.signal, client.signal].filter((signal) => signal != null);
     const request = new Request(url, {
       ...init,
       ...signals.length > 0 ? { signal: signals.length === 1 ? signals[0] : AbortSignal.any(signals) } : {}
     });
     return input.workerFetch(markInProcessRemoteRequest(request));
   }, undefined, config2.email.requestTimeoutSeconds * 1000);
+  const owner = sourceAnswerJobOwner(input.caller);
   return {
     config: config2,
     delphi: new DelphiClient(config2, createDelphiTransport(config2)),
     email: new EmailClient(config2, transport),
-    caller: input.caller
+    caller: input.caller,
+    ...input.sourceAnswerJobs && owner ? {
+      sourceAnswerJobs: {
+        registry: input.sourceAnswerJobs,
+        owner,
+        ...input.signal ? { clientSignal: input.signal } : {},
+        detachFromClient: client.detach
+      }
+    } : {}
   };
+}
+function detachableSignal(upstream) {
+  if (!upstream)
+    return { signal: undefined, detach: () => {
+      return;
+    } };
+  const controller = new AbortController;
+  if (upstream.aborted) {
+    controller.abort(upstream.reason);
+    return { signal: controller.signal, detach: () => {
+      return;
+    } };
+  }
+  const follow = () => controller.abort(upstream.reason);
+  upstream.addEventListener("abort", follow, { once: true });
+  return { signal: controller.signal, detach: () => upstream.removeEventListener("abort", follow) };
 }
 function bearerToken(header) {
   if (!header)
@@ -93635,9 +94236,81 @@ var init_remote_mcp = __esm(() => {
   init_remote_connections();
   init_remote_oauth_store();
   init_remote_public_url();
+  init_source_answer_jobs();
   init_server3();
   init_remote_request_body();
 });
+
+// connect-relay/shared/rate-limit.ts
+class KeyedTokenBuckets {
+  spec;
+  now;
+  buckets = new Map;
+  constructor(spec, now = Date.now) {
+    this.spec = spec;
+    this.now = now;
+  }
+  take(key) {
+    const now = this.now();
+    const bucket = this.buckets.get(key) ?? { tokens: this.spec.capacity, at: now };
+    bucket.tokens = Math.min(this.spec.capacity, bucket.tokens + (now - bucket.at) / 1000 * this.spec.refillPerSecond);
+    bucket.at = now;
+    if (bucket.tokens < 1) {
+      this.buckets.set(key, bucket);
+      return false;
+    }
+    bucket.tokens -= 1;
+    this.buckets.set(key, bucket);
+    if (this.buckets.size > 1e4)
+      this.sweep(now);
+    return true;
+  }
+  sweep(now) {
+    for (const [key, bucket] of this.buckets) {
+      const tokens = bucket.tokens + (now - bucket.at) / 1000 * this.spec.refillPerSecond;
+      if (tokens >= this.spec.capacity)
+        this.buckets.delete(key);
+    }
+  }
+}
+
+class KeyedCounter {
+  counts = new Map;
+  tryAcquire(key, max) {
+    const current = this.counts.get(key) ?? 0;
+    if (current >= max)
+      return;
+    this.counts.set(key, current + 1);
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      const remaining = (this.counts.get(key) ?? 1) - 1;
+      if (remaining > 0)
+        this.counts.set(key, remaining);
+      else
+        this.counts.delete(key);
+    };
+  }
+  get(key) {
+    return this.counts.get(key) ?? 0;
+  }
+}
+function addressKey(address) {
+  if (!address)
+    return "unknown";
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+  if (mapped)
+    return mapped[1];
+  if (!address.includes(":"))
+    return address;
+  const [head = "", tail = ""] = address.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = address.includes("::") ? [...left, ...Array(8 - left.length - right.length).fill("0"), ...right] : left;
+  return `${groups.slice(0, 4).map((group) => (group || "0").toLowerCase().replace(/^0+(?=.)/, "")).join(":")}::/64`;
+}
 
 // src/workers/remote-oauth/redirect-uris.ts
 function isAcceptableRedirectUri(value) {
@@ -94062,7 +94735,7 @@ var init_cimd = __esm(() => {
 });
 
 // src/workers/remote-oauth/consent-page.ts
-import { randomBytes as randomBytes10 } from "node:crypto";
+import { randomBytes as randomBytes11 } from "node:crypto";
 function hostnameOf(host) {
   try {
     return new URL(`https://${host}`).hostname;
@@ -94092,7 +94765,7 @@ function consentSecurityHeaders(nonce, redirectOrigin) {
   };
 }
 function renderConsentPage(input) {
-  const nonce = randomBytes10(16).toString("base64");
+  const nonce = randomBytes11(16).toString("base64");
   const name = escapeHtml4(input.clientName);
   const provenance = input.verifiedHost ? `<div class="host">${escapeHtml4(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
   const redirectHostname = hostnameOf(input.redirectHost);
@@ -94137,7 +94810,7 @@ ${error2}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderConsentErrorPage(message) {
-  const nonce = randomBytes10(16).toString("base64");
+  const nonce = randomBytes11(16).toString("base64");
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -94199,7 +94872,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash50, randomBytes as randomBytes11, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHash as createHash51, randomBytes as randomBytes12, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -94249,6 +94922,27 @@ function createRemoteOAuthHandler(options) {
     for (const [hash2, entry] of codes)
       if (entry.expiresAt <= at)
         codes.delete(hash2);
+  };
+  const admitPending = (caller, clientId) => {
+    const evictFairShare = (scope) => {
+      const held = new Map;
+      for (const [, entry] of scope)
+        held.set(entry.caller, (held.get(entry.caller) ?? 0) + 1);
+      const heaviest = Math.max(0, ...held.values());
+      const candidates = scope.filter(([, entry]) => held.get(entry.caller) === heaviest);
+      const victim = candidates.find(([, entry]) => !entry.pinned) ?? candidates[0];
+      if (victim)
+        pending.delete(victim[0]);
+    };
+    const own = [...pending].filter(([, entry]) => entry.caller === caller);
+    if (own.length >= MAX_PENDING_CONSENTS_PER_CALLER) {
+      pending.delete((own.find(([, entry]) => !entry.pinned) ?? own[0])[0]);
+    }
+    const sameClient = [...pending].filter(([, entry]) => entry.client.clientId === clientId);
+    if (sameClient.length >= MAX_PENDING_CONSENTS_PER_CLIENT)
+      evictFairShare(sameClient);
+    if (pending.size >= MAX_PENDING_CONSENTS)
+      evictFairShare([...pending]);
   };
   const resolveClient = async (clientId) => {
     if (isClientIdMetadataUrl(clientId)) {
@@ -94308,15 +95002,9 @@ function createRemoteOAuthHandler(options) {
     }
     sweep();
     const caller = callerKey(request);
-    let callerPending = 0;
-    for (const entry2 of pending.values())
-      if (entry2.caller === caller)
-        callerPending += 1;
-    if (callerPending >= MAX_PENDING_CONSENTS_PER_CALLER || pending.size >= MAX_PENDING_CONSENTS) {
-      return errorPage(429, "Too many approvals are waiting. Finish or close one, or try again in a few minutes.");
-    }
-    const requestId = randomBytes11(16).toString("hex");
-    const csrf = randomBytes11(32).toString("base64url");
+    admitPending(caller, client.clientId);
+    const requestId = randomBytes12(16).toString("hex");
+    const csrf = randomBytes12(32).toString("base64url");
     const entry = {
       caller,
       client,
@@ -94326,7 +95014,8 @@ function createRemoteOAuthHandler(options) {
       state,
       csrf,
       attempts: 0,
-      expiresAt: now() + CONSENT_REQUEST_TTL_MS
+      expiresAt: now() + CONSENT_REQUEST_TTL_MS,
+      pinned: false
     };
     pending.set(requestId, entry);
     return consentPage(requestId, entry, u);
@@ -94357,7 +95046,7 @@ function createRemoteOAuthHandler(options) {
     sweep();
     const entry = /^[a-f0-9]{32}$/.test(requestId) ? pending.get(requestId) : undefined;
     if (!entry)
-      return errorPage(400, "This approval has expired. Start again from the app.");
+      return errorPage(400, "This approval has expired or was replaced by a newer one. Start again from the app.");
     const csrf = form.get("csrf") ?? "";
     const cookie = readCookie(request, consentCookieName(requestId)) ?? "";
     if (!constantTimeEqual(csrf, entry.csrf) || !constantTimeEqual(cookie, entry.csrf)) {
@@ -94380,6 +95069,8 @@ function createRemoteOAuthHandler(options) {
       return consentPage(requestId, entry, u, `Too many wrong codes were tried from here. Wait ${Math.ceil(wait / 1000)} seconds, then try again.`, false);
     }
     await pacer.hold(wait);
+    if (normalizePairingCode(form.get("pairing_code") ?? "") !== undefined)
+      entry.pinned = true;
     const check = options.connections().oauth.checkPairingCode(form.get("pairing_code") ?? "");
     if (!check.ok) {
       if (check.reason === "malformed") {
@@ -94394,7 +95085,7 @@ function createRemoteOAuthHandler(options) {
     }
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
-    const code = randomBytes11(32).toString("base64url");
+    const code = randomBytes12(32).toString("base64url");
     codes.set(sha2566(code), {
       clientId: entry.client.clientId,
       displayName: entry.client.clientName,
@@ -94442,7 +95133,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash50("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash51("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -94566,7 +95257,7 @@ function callerKeyFor(request, trusted) {
   if (request.headers.get("x-olympus-relay") !== "1" || !trusted(request))
     return "direct";
   const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded ? `relay:${forwarded.slice(0, 64)}` : "direct";
+  return forwarded ? `relay:${addressKey(forwarded.slice(0, 64))}` : "direct";
 }
 function pairingPacer(now, sleep5) {
   const callers = new Map;
@@ -94692,10 +95383,10 @@ function consentCookie(requestId, value, secure, maxAgeSeconds) {
 function constantTimeEqual(left, right) {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
-  return a.length === b.length && a.length > 0 && timingSafeEqual6(a, b);
+  return a.length === b.length && a.length > 0 && timingSafeEqual7(a, b);
 }
 function sha2566(value) {
-  return createHash50("sha256").update(value).digest("hex");
+  return createHash51("sha256").update(value).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -94752,9 +95443,10 @@ function jsonResponse2(status, body, headers = {}) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }
   });
 }
-var REMOTE_OAUTH_PATHS, ROUTED_PATHS, AUTHORIZATION_CODE_TTL_MS = 60000, CONSENT_REQUEST_TTL_MS, CONSENT_MAX_ATTEMPTS = 5, MAX_PENDING_CONSENTS = 256, MAX_PENDING_CONSENTS_PER_CALLER = 8, PAIRING_FAILURE_WINDOW_MS, PAIRING_PER_CALLER_MAX_DELAY_MS = 60000, PAIRING_GLOBAL_FAILURES_BEFORE_DELAY = 20, PAIRING_GLOBAL_DELAY_MS = 2000, PAIRING_MAX_HELD_MS = 1e4, PAIRING_MAX_TRACKED_CALLERS = 1024, MAX_LIVE_CODES = 256, MAX_FORM_BYTES, MAX_REGISTRATION_BYTES, CONNECT_BODY_DEADLINE_MS = 1e4, PKCE_VERIFIER_PATTERN, PKCE_CHALLENGE_PATTERN, LOOPBACK_HOSTNAMES4;
+var REMOTE_OAUTH_PATHS, ROUTED_PATHS, AUTHORIZATION_CODE_TTL_MS = 60000, CONSENT_REQUEST_TTL_MS, CONSENT_MAX_ATTEMPTS = 5, MAX_PENDING_CONSENTS = 256, MAX_PENDING_CONSENTS_PER_CALLER = 8, MAX_PENDING_CONSENTS_PER_CLIENT = 128, PAIRING_FAILURE_WINDOW_MS, PAIRING_PER_CALLER_MAX_DELAY_MS = 60000, PAIRING_GLOBAL_FAILURES_BEFORE_DELAY = 20, PAIRING_GLOBAL_DELAY_MS = 2000, PAIRING_MAX_HELD_MS = 1e4, PAIRING_MAX_TRACKED_CALLERS = 1024, MAX_LIVE_CODES = 256, MAX_FORM_BYTES, MAX_REGISTRATION_BYTES, CONNECT_BODY_DEADLINE_MS = 1e4, PKCE_VERIFIER_PATTERN, PKCE_CHALLENGE_PATTERN, LOOPBACK_HOSTNAMES4;
 var init_handler = __esm(() => {
   init_operation_caller();
+  init_remote_oauth_store();
   init_remote_public_url();
   init_cimd();
   init_remote_request_body();
@@ -94803,7 +95495,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash51 } from "node:crypto";
+import { createHash as createHash52 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -94820,7 +95512,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text, etag: `"${createHash51("sha256").update(text).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text, etag: `"${createHash52("sha256").update(text).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -94955,7 +95647,9 @@ function buildRemoteOpenApiSpec(options = {}) {
       description: [
         "Ask the owner's Olympus source index questions, under the same privacy rules as their own assistant.",
         "Authenticate every call with the connection token from `olympus connections add <name>` as a bearer token.",
-        "Call source_answer one at a time; an answer can take several minutes."
+        "Call source_answer one at a time; an answer can take several minutes.",
+        'When one takes longer than about 200 seconds, source_answer returns {"status": "working", "job_id": ...} instead and keeps working:',
+        "call source_answer_result with that job_id, again while it says working, to get the answer."
       ].join(" ")
     },
     servers: [{ url: options.serverUrl ?? "/" }],
@@ -95012,6 +95706,8 @@ function openApiOperation(operation, config2) {
       403: errorRef,
       404: errorRef,
       413: errorRef,
+      429: errorRef,
+      504: errorRef,
       500: errorRef,
       502: errorRef,
       503: errorRef
@@ -95026,7 +95722,7 @@ function firstSentence(text) {
   const match = /^(.+?[.!?])(\s|$)/.exec(text);
   return (match?.[1] ?? text).slice(0, 120);
 }
-var REMOTE_OPENAPI_SPEC_PATH = "/openapi.json", REMOTE_OPENAPI_TOOLS_PREFIX = "/api/v1/tools/", REMOTE_OPENAPI_MAX_BODY_BYTES, REMOTE_OPENAPI_API_VERSION = "1.0.0", TOOL_PATH_PATTERN, CALLER_FACING_ERRORS, INTERNAL_ERROR_MESSAGES;
+var REMOTE_OPENAPI_SPEC_PATH = "/openapi.json", REMOTE_OPENAPI_TOOLS_PREFIX = "/api/v1/tools/", REMOTE_OPENAPI_MAX_BODY_BYTES, REMOTE_OPENAPI_API_VERSION = "1.1.0", TOOL_PATH_PATTERN, CALLER_FACING_ERRORS, INTERNAL_ERROR_MESSAGES;
 var init_remote_openapi = __esm(() => {
   init_config();
   init_operation_error();
@@ -95042,7 +95738,11 @@ var init_remote_openapi = __esm(() => {
     unsupported_filter: 400,
     email_policy_violation: 403,
     source_index_policy_violation: 403,
-    source_index_not_enabled: 503
+    source_index_not_enabled: 503,
+    source_answer_busy: 429,
+    source_answer_job_not_found: 404,
+    source_answer_deadline: 504,
+    source_answer_too_large: 502
   };
   INTERNAL_ERROR_MESSAGES = {
     email_unreachable: "Olympus could not reach its source worker in time. Retry later.",
@@ -97471,6 +98171,19 @@ async function main() {
       setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env })
     });
   }
+  const { SourceAnswerJobRegistry: SourceAnswerJobRegistry2, sourceAnswerJobLimitsFromEnv: sourceAnswerJobLimitsFromEnv2 } = await Promise.resolve().then(() => (init_source_answer_jobs(), exports_source_answer_jobs));
+  const sourceAnswerJobs = new SourceAnswerJobRegistry2({
+    limits: sourceAnswerJobLimitsFromEnv2(process.env, "remote"),
+    isOwnerRevoked: (owner) => {
+      if (!owner.startsWith("remote:"))
+        return false;
+      const id = owner.slice("remote:".length);
+      const record3 = remoteConnections()?.list().find((connection) => connection.id === id);
+      return record3 === undefined || record3.revokedAt !== null;
+    }
+  });
+  const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30000);
+  sourceAnswerJobSweep.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -97479,7 +98192,8 @@ async function main() {
       sourceIndexReadEnabled,
       workerFetch: worker.fetch,
       caller,
-      signal
+      signal,
+      sourceAnswerJobs
     })
   };
   const { createRemoteOpenApiHandler: createRemoteOpenApiHandler2, withRemoteOpenApiRoutes: withRemoteOpenApiRoutes2 } = await Promise.resolve().then(() => (init_remote_openapi(), exports_remote_openapi));
@@ -98458,7 +99172,7 @@ init_messaging_pairing();
 init_messaging_capture();
 init_config();
 init_dashboard_launch();
-import { randomBytes as randomBytes12 } from "node:crypto";
+import { randomBytes as randomBytes13 } from "node:crypto";
 import { readFileSync as readFileSync40, openSync as openSync11, closeSync as closeSync11, writeSync as writeSync2 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -102636,7 +103350,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes12(32).toString("base64url");
+  return randomBytes13(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};

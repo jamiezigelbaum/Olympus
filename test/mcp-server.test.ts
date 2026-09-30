@@ -15,7 +15,11 @@ describe('MCP server surface', () => {
 
     // The watch operations need the authenticated OpenClaw route, which MCP
     // has no way to mint, so advertising them here was advertising a refusal.
-    expect(mcpNames).toEqual(nativeNames.filter((name) => !name.startsWith('source_watch')));
+    // source_answer_result is MCP-only: native OpenClaw never hands a slow
+    // answer off (see src/core/public-surface.ts).
+    expect(mcpNames.filter((name) => name !== 'source_answer_result'))
+      .toEqual(nativeNames.filter((name) => !name.startsWith('source_watch')));
+    expect(nativeNames).not.toContain('source_answer_result');
     expect(nativeNames).toContain('source_watches');
     expect(mcpNames).not.toContain('source_watches');
     expect(mcpNames).toContain('source_answer');

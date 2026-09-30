@@ -2,7 +2,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { createAnalyst } from '../src/core/analyst.ts';
+import { createAnalyst, runWithAnalystAbortSignal } from '../src/core/analyst.ts';
+import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
+import { defaultConfig } from '../src/core/config.ts';
+import { DelphiClient, DirectHttpDelphiTransport } from '../src/core/delphi.ts';
 import { createVeniceAnalystModel } from '../src/core/analyst-venice.ts';
 import type { Analyst } from '../src/core/contracts.ts';
 import type { LocalContentProviderMap } from '../src/core/evidence-pack.ts';
@@ -389,6 +392,116 @@ describe('secure analyst pool', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 3_000);
+
+  // The default local analyst is the real Delphi adapter over HTTP. A caller
+  // that goes away (a disconnect, a hand-off job's deadline, a native tool
+  // abort) must end the route as a cancellation: not a lane failure that
+  // feeds the breaker, and not a reason to try the next lane.
+  describe('caller cancellation through the real Delphi adapter', () => {
+    function hangingDelphiAnalyst(onAbort: () => void): Analyst {
+      const fetchImpl = async (_url: string, init: RequestInit): Promise<Response> =>
+        await new Promise<Response>((_resolve, reject) => {
+          const abort = () => {
+            onAbort();
+            reject(init.signal?.reason ?? new DOMException('aborted', 'AbortError'));
+          };
+          if (init.signal?.aborted) abort();
+          else init.signal?.addEventListener('abort', abort, { once: true });
+        });
+      const delphi = new DelphiClient(defaultConfig(), new DirectHttpDelphiTransport(fetchImpl, 60_000));
+      return createAnalyst(createDelphiAnalystModel(delphi, { lane: 'fast', preflightTimeoutMs: 0 }));
+    }
+
+    function countingAnalyst(): Analyst & { calls: number } {
+      const analyst = {
+        calls: 0,
+        async analyze(pack: Parameters<Analyst['analyze']>[0]) {
+          analyst.calls += 1;
+          return successfulLocalAnalyst().analyze(pack, { localOnly: true });
+        },
+      };
+      return analyst;
+    }
+
+    const members = [
+      { id: 'local-source-answer', backend: 'local' as const },
+      { id: 'venice-private', backend: 'venice' as const },
+    ];
+
+    function handlerFor(local: Analyst, next: Analyst, state: SecureAnalystPoolState) {
+      return createAnalystSourceIndexAnswerHandler({
+        analyst: local,
+        lanes: secureLanes,
+        trustedAnalystTimeoutMs: 2_000,
+        localAnalystTimeoutMs: 2_000,
+        secureAnalystPool: { sloMs: 4_000, reserveMs: 100, lastLegTimeoutMs: 2_000, failureThreshold: 1, cooldownMs: 60_000 },
+        secureAnalystPoolState: state,
+        sovereigntyAnalystRoute: () => secureRoute([
+          routeStep('local-source-answer', 'local', 'local-model', local),
+          routeStep('venice-private', 'venice', 'zai-org-glm-5-2', next),
+        ]),
+      });
+    }
+
+    test('a cancel is not a lane failure: no breaker count, no fallback lane', async () => {
+      let modelAborted = false;
+      const local = hangingDelphiAnalyst(() => { modelAborted = true; });
+      const next = countingAnalyst();
+      const state = new SecureAnalystPoolState({ failureThreshold: 1, cooldownMs: 60_000 });
+      const handler = handlerFor(local, next, state);
+      const caller = new AbortController();
+      const cancelled = new Error('The caller cancelled this answer.');
+      cancelled.name = 'AbortError';
+      setTimeout(() => caller.abort(cancelled), 30);
+
+      const error = await runWithAnalystAbortSignal(
+        caller.signal,
+        () => handler.answer({ question: 'Summarize the secure evidence.', include_secure_local: true }),
+      ).catch((caught: unknown) => caught);
+
+      expect(modelAborted).toBe(true);
+      expect((error as Error).name).toBe('AbortError');
+      expect(next.calls).toBe(0);
+      // Breaker threshold 1: had the cancel counted, the local member would now be skipped.
+      expect(state.plan('secure_local', members, 'explicit_order')).toMatchObject({ breakerSkipped: [] });
+    }, 3_000);
+
+    test('a real lane timeout still counts and still falls through', async () => {
+      const local = hangingDelphiAnalyst(() => undefined);
+      const next = countingAnalyst();
+      const state = new SecureAnalystPoolState({ failureThreshold: 1, cooldownMs: 60_000 });
+      const handler = createAnalystSourceIndexAnswerHandler({
+        analyst: local,
+        lanes: secureLanes,
+        trustedAnalystTimeoutMs: 2_000,
+        localAnalystTimeoutMs: 2_000,
+        secureAnalystPool: { sloMs: 4_000, reserveMs: 100, lastLegTimeoutMs: 2_000, failureThreshold: 1, cooldownMs: 60_000 },
+        secureAnalystPoolState: state,
+        sovereigntyAnalystRoute: () => secureRoute([
+          routeStep('local-source-answer', 'local', 'local-model', hangingDelphiAnalystWithTimeout()),
+          routeStep('venice-private', 'venice', 'zai-org-glm-5-2', next),
+        ]),
+      });
+
+      const result = await handler.answer({ question: 'Summarize the secure evidence.', include_secure_local: true });
+
+      expect(result.answer).toContain('A bounded local answer.');
+      expect(next.calls).toBe(1);
+      expect(state.plan('secure_local', members, 'explicit_order').breakerSkipped.map((member) => member.id))
+        .toEqual(['local-source-answer']);
+    }, 3_000);
+
+    // The lane's own request budget expiring: Delphi's timeout, not the caller's.
+    function hangingDelphiAnalystWithTimeout(): Analyst {
+      const fetchImpl = async (_url: string, init: RequestInit): Promise<Response> =>
+        await new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('timed out', 'AbortError')), { once: true });
+        });
+      const delphi = new DelphiClient(defaultConfig(), new DirectHttpDelphiTransport(fetchImpl, 40));
+      return createAnalyst(createDelphiAnalystModel(delphi, { lane: 'fast', preflightTimeoutMs: 0 }));
+    }
+  });
+
 });
 
 function secureRoute(steps: SovereigntyAnalystRouteStep[]): SovereigntyAnalystRoutePlan {

@@ -43,7 +43,7 @@ export const REMOTE_OPENAPI_MAX_BODY_BYTES = REMOTE_REQUEST_MAX_BODY_BYTES;
  * parameter, or a response shape changes. A fixed value keeps the
  * unauthenticated spec from naming the installed build.
  */
-export const REMOTE_OPENAPI_API_VERSION = '1.0.0';
+export const REMOTE_OPENAPI_API_VERSION = '1.1.0';
 
 const TOOL_PATH_PATTERN = /^\/api\/v1\/tools\/([a-z][a-z0-9_]{0,63})$/;
 
@@ -198,6 +198,10 @@ const CALLER_FACING_ERRORS: Partial<Record<OperationErrorCode, number>> = {
   email_policy_violation: 403,
   source_index_policy_violation: 403,
   source_index_not_enabled: 503,
+  source_answer_busy: 429,
+  source_answer_job_not_found: 404,
+  source_answer_deadline: 504,
+  source_answer_too_large: 502,
 };
 
 const INTERNAL_ERROR_MESSAGES: Partial<Record<OperationErrorCode, string>> = {
@@ -262,6 +266,8 @@ export function buildRemoteOpenApiSpec(options: { serverUrl?: string } = {}): Re
         'Ask the owner\'s Olympus source index questions, under the same privacy rules as their own assistant.',
         'Authenticate every call with the connection token from `olympus connections add <name>` as a bearer token.',
         'Call source_answer one at a time; an answer can take several minutes.',
+        'When one takes longer than about 200 seconds, source_answer returns {"status": "working", "job_id": ...} instead and keeps working:',
+        'call source_answer_result with that job_id, again while it says working, to get the answer.',
       ].join(' '),
     },
     servers: [{ url: options.serverUrl ?? '/' }],
@@ -319,6 +325,8 @@ function openApiOperation(operation: Operation, config: OlympusConfig): Record<s
       403: errorRef,
       404: errorRef,
       413: errorRef,
+      429: errorRef,
+      504: errorRef,
       500: errorRef,
       502: errorRef,
       503: errorRef,

@@ -22,6 +22,13 @@ export interface ObtainCertificateOptions {
   readonly dns: AcmeDnsPublisher;
   /** Must be true: the caller has shown the CA's subscriber agreement to the user. */
   readonly termsOfServiceAgreed: boolean;
+  /**
+   * The ARI identifier of the certificate this order renews (RFC 9773
+   * `replaces`). Let's Encrypt exempts such orders from its rate limits. If
+   * the CA refuses it (already replaced, or not this account's), the order is
+   * placed again without it.
+   */
+  readonly replaces?: string;
   readonly fetch?: typeof fetch;
   /** Wait after publishing before asking the CA to validate. */
   readonly propagationDelayMs?: number;
@@ -71,6 +78,13 @@ export async function fetchTermsOfService(directoryUrl: string, fetchImpl: typeo
   const terms = directory.meta?.termsOfService;
   return typeof terms === 'string' && /^https?:\/\//.test(terms) ? terms : undefined;
 }
+
+const NOT_A_REPLACES_REFUSAL = new Set([
+  'urn:ietf:params:acme:error:rateLimited',
+  'urn:ietf:params:acme:error:serverInternal',
+  'urn:ietf:params:acme:error:badNonce',
+  'urn:ietf:params:acme:error:userActionRequired',
+]);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -135,7 +149,17 @@ export async function obtainCertificate(options: ObtainCertificateOptions): Prom
   kid = account.headers.get('location') ?? undefined;
   if (!kid) throw new AcmeError('ACME account has no URL');
 
-  const order = await post(directory.newOrder, { identifiers: [{ type: 'dns', value: options.hostname }] });
+  const identifiers = [{ type: 'dns', value: options.hostname }];
+  let order: AcmeResponse;
+  try {
+    order = await post(directory.newOrder, { identifiers, ...(options.replaces ? { replaces: options.replaces } : {}) });
+  } catch (error) {
+    // Only a refusal of `replaces` itself earns a plain retry; a rate limit or
+    // a CA outage would refuse the plain order too, and spend budget doing so.
+    const type = error instanceof AcmeError ? (error.problem as { type?: unknown } | undefined)?.type : undefined;
+    if (!options.replaces || typeof type !== 'string' || NOT_A_REPLACES_REFUSAL.has(type)) throw error;
+    order = await post(directory.newOrder, { identifiers });
+  }
   const orderUrl = order.headers.get('location');
   if (!orderUrl) throw new AcmeError('ACME order has no URL');
   const authorizations = order.body.authorizations as string[];

@@ -48,7 +48,7 @@ import {
   type RelayEvent,
   type RelayLimits,
 } from './public-path.ts';
-import { publicKeyOf, type InstallRegistry } from './registry.ts';
+import { publicKeyOf, type InstallRegistry, type RegistryCounts } from './registry.ts';
 
 export interface RelayConfig {
   /** e.g. `connect.olympusplugin.ai`. Install hostnames are `<install-id>.<zone>`. */
@@ -74,10 +74,38 @@ export interface RelayConfig {
   readonly sweepIntervalMs?: number;
 }
 
+/** What the operator's `revoke` did. */
+export interface RevokeResult {
+  readonly installId: string;
+  /** False when the id was already revoked. */
+  readonly revoked: boolean;
+  readonly wasRegistered: boolean;
+  readonly wasOnline: boolean;
+  /** `removed` now; `pending` retried by the hourly sweep (DNS budget or provider error); `none` there was none. */
+  readonly addressRecord: 'removed' | 'pending' | 'none';
+}
+
+/** Counts only: the relay's status names no install. */
+export interface RelayStatus extends RegistryCounts {
+  readonly online: number;
+  readonly publicConnections: number;
+  readonly pendingPublicConnections: number;
+  readonly startedAt: string;
+}
+
 export interface RelayHandle {
   readonly port: number;
   readonly host: string;
   onlineInstalls(): string[];
+  /**
+   * Operator revocation: removes the install, ends its session and waiting
+   * connections, removes its address record within the DNS budget, and
+   * refuses the id at registration from now on. No restart.
+   */
+  revoke(installId: string): Promise<RevokeResult>;
+  /** Lets a revoked id register again. */
+  restore(installId: string): boolean;
+  status(): RelayStatus;
   /** Expires unused registrations now (also runs on a timer). */
   sweep(now?: number): Promise<string[]>;
   close(): Promise<void>;
@@ -223,6 +251,11 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         }
         if ((message.type === 'attach') !== (plane === 'data')) {
           fail('bad_request', plane === 'data' ? 'the data host only accepts attach' : 'attach must use the data host');
+          return 'stop';
+        }
+        if (config.registry.isRevoked(installId)) {
+          log('auth_rejected', { reason: 'revoked' });
+          fail('revoked', 'this install was revoked by the relay operator');
           return 'stop';
         }
         if (message.type === 'attach') {
@@ -400,6 +433,64 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     sendSession(session, { type: 'error', code: 'bad_request', message: 'unknown message type' });
   }
 
+  /** Removes one queued address record, within the DNS budget. */
+  const removeAddressRecord = async (installId: string): Promise<'removed' | 'failed' | 'no-budget'> => {
+    if (!globalDnsCalls.take('relay')) return 'no-budget';
+    const hostname = hostnameFor(installId, zone);
+    try {
+      await config.dns.removeAddress(hostname);
+    } catch {
+      return 'failed'; // Retried next sweep.
+    }
+    if (config.registry.pendingAddressRemovals().includes(installId)) {
+      config.registry.addressRemoved(installId);
+      return 'removed';
+    }
+    // The install re-registered while the removal was in flight and
+    // reclaimed the record we just deleted: put it back, or record that it
+    // is gone so the next publish re-creates it.
+    if (!config.registry.get(installId)?.hasAddressRecord) return 'removed';
+    try {
+      if (!globalDnsCalls.take('relay')) throw new Error('no DNS budget');
+      await config.dns.ensureAddress(hostname);
+    } catch {
+      config.registry.addressLost(installId);
+    }
+    return 'removed';
+  };
+
+  const revoke = async (installId: string): Promise<RevokeResult> => {
+    if (!INSTALL_ID_PATTERN.test(installId)) throw new Error('not an install id');
+    const wasRegistered = config.registry.get(installId) !== undefined;
+    const live = sessions.get(installId);
+    const revoked = config.registry.revoke(installId);
+    if (revoked) log('install_revoked', { installId });
+    // Ending the session also clears its ACME TXT values and answers any
+    // waiting agent connection with the offline alert (closeSession).
+    if (live) {
+      live.socket.end(encodeLine({ type: 'error', code: 'revoked', message: 'this install was revoked by the relay operator' }));
+      setTimeout(() => live.socket.destroy(), 1_000).unref();
+    }
+    let addressRecord: RevokeResult['addressRecord'] = 'none';
+    if (config.registry.pendingAddressRemovals().includes(installId)) {
+      addressRecord = (await removeAddressRecord(installId)) === 'removed' ? 'removed' : 'pending';
+    }
+    return { installId, revoked, wasRegistered, wasOnline: live !== undefined, addressRecord };
+  };
+
+  const startedAt = new Date().toISOString();
+  const status = (): RelayStatus => {
+    let publicConnections = 0;
+    for (const count of active.values()) publicConnections += count;
+    return {
+      ...config.registry.counts(),
+      online: sessions.size,
+      publicConnections,
+      pendingPublicConnections: pending.size,
+      startedAt,
+    };
+  };
+
   const sweep = async (now = Date.now()): Promise<string[]> => {
     const expired = config.registry.expire(
       now,
@@ -414,27 +505,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     // Address records are removed within the DNS budget; a failed or deferred
     // removal stays counted and is retried on the next sweep.
     for (const installId of config.registry.pendingAddressRemovals()) {
-      if (!globalDnsCalls.take('relay')) break;
-      const hostname = hostnameFor(installId, zone);
-      try {
-        await config.dns.removeAddress(hostname);
-      } catch {
-        continue; // Retried next sweep.
-      }
-      if (config.registry.pendingAddressRemovals().includes(installId)) {
-        config.registry.addressRemoved(installId);
-        continue;
-      }
-      // The install re-registered while the removal was in flight and
-      // reclaimed the record we just deleted: put it back, or record that it
-      // is gone so the next publish re-creates it.
-      if (!config.registry.get(installId)?.hasAddressRecord) continue;
-      try {
-        if (!globalDnsCalls.take('relay')) throw new Error('no DNS budget');
-        await config.dns.ensureAddress(hostname);
-      } catch {
-        config.registry.addressLost(installId);
-      }
+      if ((await removeAddressRecord(installId)) === 'no-budget') break;
     }
     return expired.map((record) => record.installId);
   };
@@ -445,6 +516,13 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     port: (publicServer.address() as AddressInfo).port,
     host: listenHost,
     onlineInstalls: () => [...sessions.keys()],
+    revoke,
+    restore: (installId) => {
+      const restored = config.registry.restore(installId);
+      if (restored) log('install_restored', { installId });
+      return restored;
+    },
+    status,
     sweep,
     close: async () => {
       clearInterval(sweepTimer);

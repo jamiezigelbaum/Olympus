@@ -1177,6 +1177,30 @@ describe('analyst-backed source_answer handler', () => {
     expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
   });
 
+  test('a caller cancellation during an explicit Venice or cloud leg ends the answer without a fallback leg', async () => {
+    for (const provider of ['venice', 'cloud'] as const) {
+      const local = scriptedAnalyst(citingFirstCandidate('Local must not run.', 'local claim'));
+      const cancelling: Analyst = {
+        async analyze() {
+          const error = new Error('The caller cancelled this answer.');
+          error.name = 'AbortError';
+          throw error;
+        },
+      };
+      const handler = createAnalystSourceIndexAnswerHandler({
+        analyst: local.analyst,
+        ...(provider === 'venice' ? { veniceAnalyst: () => cancelling } : { cloudAnalyst: cancelling }),
+        lanes: () => lanesFixture({ internal: ['doc-1'] }),
+      });
+
+      const error = await handler.answer({ question: 'What did the notes say?', analyst_provider: provider })
+        .catch((caught: unknown) => caught);
+
+      expect((error as Error).name).toBe('AbortError');
+      expect(local.calls).toHaveLength(0);
+    }
+  });
+
   test('explicit standard-cloud constraint over secure-local evidence refuses before route resolution', async () => {
     const local = scriptedAnalyst(
       citingFirstCandidate('Local must not run.', 'local claim'),

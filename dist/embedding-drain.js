@@ -988,13 +988,23 @@ var init_public_surface = __esm(() => {
     "argus_list_models",
     "argus_complete",
     "source_answer",
+    "source_answer_result",
     "source_index_status",
     "source_index_search",
     "olympus_doctor"
   ];
-  V0_4_PUBLIC_CLI_OPERATIONS = V0_4_PUBLIC_MCP_TOOLS;
+  V0_4_PUBLIC_CLI_OPERATIONS = [
+    "argus_ping",
+    "argus_list_models",
+    "argus_complete",
+    "source_answer",
+    "source_index_status",
+    "source_index_search",
+    "olympus_doctor"
+  ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
+    "source_answer_result",
     "source_index_status"
   ];
   V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
@@ -20522,6 +20532,7 @@ init_venice_models();
 init_sovereignty();
 
 // src/workers/email-source/index.ts
+init_analyst();
 init_file_lease();
 init_email_policy();
 init_publisher_oauth_client();
@@ -20842,7 +20853,7 @@ var AGENT_INSTRUCTION_TEXT = [
   "",
   "Ask Olympus whenever my question might be answered from my own records: what someone told me, " + "what a document or contract says, or when something happened. " + "If you are not sure, ask it anyway. You do not need me to mention Olympus.",
   "",
-  "Ask one question at a time, in plain words, and wait for each answer before asking the next. " + "Answers can take a minute.",
+  "Ask one question at a time, in plain words, and wait for each answer before asking the next. " + "Answers can take a few minutes. If Olympus says it is still working and gives you a job_id, " + "call source_answer_result with that job_id, again while it says working, and pass on the answer it returns. " + "Do not ask the same question again.",
   "",
   "Pass on what Olympus answers with its citations, and say plainly what it could not find. " + "Do not guess past it or fill gaps from memory.",
   "",

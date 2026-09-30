@@ -34,8 +34,13 @@ describe('operation exposure policy', () => {
     const sessionRouteOnly = ['source_watch_create', 'source_watches', 'source_watch_cancel'];
     const native = surfaceNames('native');
     for (const name of sessionRouteOnly) expect(native).toContain(name);
+    // source_answer_result is the other way round: only surfaces that hand a
+    // slow answer off to a job (MCP, remote) can serve it.
+    expect(native).not.toContain('source_answer_result');
+    expect(surfaceNames('cli')).not.toContain('source_answer_result');
+    expect(surfaceNames('mcp')).toContain('source_answer_result');
     for (const surface of ['mcp', 'cli'] as const) {
-      const names = surfaceNames(surface);
+      const names = surfaceNames(surface).filter((operation) => operation !== 'source_answer_result');
       for (const name of sessionRouteOnly) expect(names).not.toContain(name);
       // Nothing else moved: the two surfaces differ by exactly those three.
       expect(names).toEqual(native.filter((operation) => !sessionRouteOnly.includes(operation)));

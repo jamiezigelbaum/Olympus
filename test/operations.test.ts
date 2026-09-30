@@ -22,6 +22,7 @@ describe('operations', () => {
       'argus_list_models',
       'argus_complete',
       'source_answer',
+      'source_answer_result',
       'source_index_status',
       'source_index_search',
       'source_watch_create',

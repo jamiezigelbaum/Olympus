@@ -7,9 +7,14 @@
  * `unactivatedTtlMs`; one with no session for `inactiveTtlMs` is dropped with
  * its address record. That keeps a registration flood from filling the
  * registry or the DNS zone permanently.
+ *
+ * The operator can revoke an install (`server/admin.ts revoke`): its record
+ * goes, its address record is queued for removal, and its id is refused at
+ * registration from then on, since an install otherwise re-registers itself
+ * automatically. `restore` lifts that.
  */
 import { appendFile } from 'node:fs/promises';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { KeyObject } from 'node:crypto';
 import { installIdForPublicKey, publicKeyFromSpki } from '../shared/protocol.ts';
@@ -46,14 +51,33 @@ export interface InstallRegistry {
   addressRemoved(installId: string): void;
   /** A live install's address record was deleted from DNS; the next publish re-creates it. */
   addressLost(installId: string): void;
+  /** Removes the install (if registered) and refuses its id from now on. False if already revoked. */
+  revoke(installId: string): boolean;
+  /** Lets a revoked id register again. False if it was not revoked. */
+  restore(installId: string): boolean;
+  isRevoked(installId: string): boolean;
+  counts(): RegistryCounts;
   size(): number;
   /** Resolves when every accepted change is durable. */
   flush(): Promise<void>;
 }
 
+/** Aggregate numbers only: safe to print, names no install. */
+export interface RegistryCounts {
+  readonly registered: number;
+  readonly activated: number;
+  readonly addressRecords: number;
+  readonly pendingAddressRemovals: number;
+  readonly revoked: number;
+}
+
 type LogEntry =
   | { op: 'register'; installId: string; publicKey: string; at: number }
-  | { op: 'seen' | 'activate' | 'address' | 'remove' | 'address-removed' | 'orphan-address' | 'address-lost'; installId: string; at: number };
+  | {
+      op: 'seen' | 'activate' | 'address' | 'remove' | 'address-removed' | 'orphan-address' | 'address-lost' | 'revoke' | 'restore';
+      installId: string;
+      at: number;
+    };
 
 /** Rewrites of `seen` are throttled: a daily resolution is enough for a 90-day expiry. */
 const SEEN_RESOLUTION_MS = 24 * 60 * 60_000;
@@ -62,6 +86,7 @@ export class MemoryInstallRegistry implements InstallRegistry {
   protected readonly records = new Map<string, InstallRecord>();
   private addressRecords = 0;
   protected readonly orphanAddresses = new Set<string>();
+  protected readonly revoked = new Set<string>();
 
   constructor(
     private readonly maxInstalls = 100_000,
@@ -73,6 +98,7 @@ export class MemoryInstallRegistry implements InstallRegistry {
   }
 
   register(installId: string, publicKey: string): boolean {
+    if (this.revoked.has(installId)) return false;
     if (this.records.has(installId)) return true;
     if (this.records.size >= this.maxInstalls) return false;
     const at = this.now();
@@ -144,6 +170,38 @@ export class MemoryInstallRegistry implements InstallRegistry {
     this.append(entry);
   }
 
+  revoke(installId: string): boolean {
+    if (this.revoked.has(installId)) return false;
+    const entry: LogEntry = { op: 'revoke', installId, at: this.now() };
+    this.apply(entry);
+    this.append(entry);
+    return true;
+  }
+
+  restore(installId: string): boolean {
+    if (!this.revoked.has(installId)) return false;
+    const entry: LogEntry = { op: 'restore', installId, at: this.now() };
+    this.apply(entry);
+    this.append(entry);
+    return true;
+  }
+
+  isRevoked(installId: string): boolean {
+    return this.revoked.has(installId);
+  }
+
+  counts(): RegistryCounts {
+    let activated = 0;
+    for (const record of this.records.values()) if (record.activatedAt !== undefined) activated += 1;
+    return {
+      registered: this.records.size,
+      activated,
+      addressRecords: this.addressRecords,
+      pendingAddressRemovals: this.orphanAddresses.size,
+      revoked: this.revoked.size,
+    };
+  }
+
   size(): number {
     return this.records.size;
   }
@@ -179,9 +237,14 @@ export class MemoryInstallRegistry implements InstallRegistry {
         }
         return;
       case 'remove':
+      case 'revoke':
         // The address record stays counted until DNS confirms its removal.
         if (record?.hasAddressRecord) this.orphanAddresses.add(entry.installId);
         this.records.delete(entry.installId);
+        if (entry.op === 'revoke') this.revoked.add(entry.installId);
+        return;
+      case 'restore':
+        this.revoked.delete(entry.installId);
         return;
       case 'orphan-address':
         if (!this.orphanAddresses.has(entry.installId)) {
@@ -244,6 +307,7 @@ export class FileInstallRegistry extends MemoryInstallRegistry {
       if (record.hasAddressRecord) lines.push(JSON.stringify({ op: 'address', installId: record.installId, at: record.registeredAt }));
     }
     for (const installId of this.orphanAddresses) lines.push(JSON.stringify({ op: 'orphan-address', installId, at: 0 }));
+    for (const installId of this.revoked) lines.push(JSON.stringify({ op: 'revoke', installId, at: 0 }));
     const temporary = `${this.path}.tmp.${process.pid}`;
     writeFileSync(temporary, lines.length ? `${lines.join('\n')}\n` : '', { mode: 0o600 });
     renameSync(temporary, this.path);
@@ -261,6 +325,41 @@ export class FileInstallRegistry extends MemoryInstallRegistry {
     await this.writes;
     if (this.failed) throw this.failed;
   }
+}
+
+/**
+ * Reads a registry log without writing to it (no compaction), for the admin
+ * command's offline status while the relay is stopped.
+ */
+export function readRegistrySnapshot(path: string): MemoryInstallRegistry {
+  return new RegistrySnapshot(existsSync(path) ? readFileSync(path, 'utf8') : '');
+}
+
+class RegistrySnapshot extends MemoryInstallRegistry {
+  constructor(log: string) {
+    super();
+    for (const line of log.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        this.apply(JSON.parse(line) as LogEntry);
+      } catch {
+        // A torn line, as the file registry tolerates.
+      }
+    }
+  }
+}
+
+/**
+ * Appends a revocation to a registry log directly. Only for a relay that is
+ * not running (the admin command falls back to it when the relay's socket is
+ * unreachable); the relay applies it when it next starts, and its sweep then
+ * removes the address record within the DNS budget.
+ */
+export function appendOfflineRevocation(path: string, installId: string, at = Date.now()): void {
+  // After a torn final line, start a fresh one rather than extend it.
+  const existing = existsSync(path) ? readFileSync(path) : Buffer.alloc(0);
+  const separator = existing.length > 0 && existing[existing.length - 1] !== 0x0a ? '\n' : '';
+  appendFileSync(path, `${separator}${JSON.stringify({ op: 'revoke', installId, at } satisfies LogEntry)}\n`, { mode: 0o600 });
 }
 
 export function publicKeyOf(record: InstallRecord): KeyObject {

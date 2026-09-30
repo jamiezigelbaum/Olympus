@@ -8,6 +8,7 @@ import { X509Certificate, createPublicKey, randomBytes, verify, type KeyObject }
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dns01Value, jwkThumbprint } from '../../client/acme.ts';
+import { ariCertId, type RenewalWindow } from '../../client/ari.ts';
 
 interface Authorization {
   status: 'pending' | 'valid' | 'invalid';
@@ -22,6 +23,7 @@ interface Order {
   authorization: string;
   certificate?: string;
   account: string;
+  replaces?: string;
 }
 
 export interface MockAcme {
@@ -30,6 +32,12 @@ export interface MockAcme {
   readonly accounts: number;
   /** Publish a different subscriber agreement (a path under the server). */
   setTermsOfService(path: string): void;
+  /** ARI: the window suggested for every issued certificate; undefined turns ARI off. */
+  setRenewalWindow(window: RenewalWindow | undefined): void;
+  /** The `replaces` value of each order placed, in order (undefined when absent). */
+  readonly replacements: Array<string | undefined>;
+  /** ARI lookups answered (certificate identifiers). */
+  readonly renewalInfoRequests: string[];
   close(): Promise<void>;
 }
 
@@ -45,6 +53,11 @@ export async function startMockAcme(options: {
   const issued: string[] = [];
   let base = '';
   let termsPath = '/terms/v1.pdf';
+  let renewalWindow: RenewalWindow | undefined;
+  // ARI identifier -> { account, replaced } for every certificate issued.
+  const issuedById = new Map<string, { account: string; identifier: string; replaced: boolean }>();
+  const replacements: Array<string | undefined> = [];
+  const renewalInfoRequests: string[] = [];
   let counter = 0;
   const id = () => String(++counter);
 
@@ -68,6 +81,16 @@ export async function startMockAcme(options: {
         newAccount: `${base}/new-account`,
         newOrder: `${base}/new-order`,
         meta: { termsOfService: `${base}${termsPath}` },
+        ...(renewalWindow ? { renewalInfo: `${base}/renewal-info` } : {}),
+      });
+    }
+    if (req.method === 'GET' && req.url?.startsWith('/renewal-info/') && renewalWindow) {
+      const certId = decodeURIComponent(req.url.slice('/renewal-info/'.length));
+      if (!issuedById.has(certId)) return problem(404, 'malformed', 'unknown certificate');
+      renewalInfoRequests.push(certId);
+      res.setHeader('retry-after', '21600');
+      return json(200, {
+        suggestedWindow: { start: new Date(renewalWindow.start).toISOString(), end: new Date(renewalWindow.end).toISOString() },
       });
     }
     if (req.url === '/new-nonce') {
@@ -117,10 +140,21 @@ export async function startMockAcme(options: {
     }
     if (req.url === '/new-order') {
       const identifier = payload?.identifiers?.[0]?.value as string;
+      const replaces = typeof payload?.replaces === 'string' ? payload.replaces : undefined;
+      replacements.push(replaces);
+      if (replaces !== undefined) {
+        // RFC 9773 section 5: the replaced certificate must be this account's,
+        // for these identifiers, and not already replaced.
+        const previous = issuedById.get(replaces);
+        if (!previous || previous.account !== accountUrl || previous.identifier !== identifier) {
+          return problem(400, 'malformed', 'replaces names no certificate of this account');
+        }
+        if (previous.replaced) return problem(409, 'alreadyReplaced', 'certificate already replaced');
+      }
       const authorizationId = id();
       authorizations.set(authorizationId, { status: 'pending', identifier, token: randomBytes(16).toString('base64url'), account: accountUrl! });
       const orderId = id();
-      orders.set(orderId, { status: 'pending', identifier, authorization: authorizationId, account: accountUrl! });
+      orders.set(orderId, { status: 'pending', identifier, authorization: authorizationId, account: accountUrl!, ...(replaces ? { replaces } : {}) });
       return json(
         201,
         { status: 'pending', identifiers: [{ type: 'dns', value: identifier }], authorizations: [`${base}/authz/${authorizationId}`], finalize: `${base}/finalize/${orderId}` },
@@ -156,6 +190,9 @@ export async function startMockAcme(options: {
         const certificateId = id();
         certificates.set(certificateId, pem);
         issued.push(order.identifier);
+        const certId = ariCertId(pem);
+        if (certId) issuedById.set(certId, { account: order.account, identifier: order.identifier, replaced: false });
+        if (order.replaces) issuedById.get(order.replaces)!.replaced = true;
         order.status = 'valid';
         order.certificate = `${base}/cert/${certificateId}`;
       }
@@ -180,6 +217,11 @@ export async function startMockAcme(options: {
     setTermsOfService(path) {
       termsPath = path;
     },
+    setRenewalWindow(window) {
+      renewalWindow = window;
+    },
+    replacements,
+    renewalInfoRequests,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());

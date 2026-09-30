@@ -50,7 +50,8 @@ export type RelayErrorCode =
   | 'rate_limited'
   | 'capacity'
   | 'unknown_connection'
-  | 'replaced';
+  | 'replaced'
+  | 'revoked';
 
 export type ClientFirstMessage = HelloMessage | RegisterMessage | AttachMessage;
 export type ClientSessionMessage = PingMessage | AcmeDnsMessage;

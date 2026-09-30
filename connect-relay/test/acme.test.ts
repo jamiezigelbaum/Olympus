@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AcmeError, obtainCertificate, type AcmeDnsPublisher } from '../client/acme.ts';
-import { certificateIsFresh } from '../client/connect.ts';
+import { ariCertId, fetchRenewalInfo, selectRenewalTime } from '../client/ari.ts';
+import { ariRenewalDue, certificateIsFresh, latestRenewalMoment } from '../client/connect.ts';
 import { createCsr } from '../client/csr.ts';
 import { MemoryDnsProvider } from '../server/dns.ts';
 import { startMockAcme, type MockAcme } from './helpers/mock-acme.ts';
@@ -110,5 +111,82 @@ describe('ACME DNS-01 client', () => {
       }),
     ).rejects.toThrow('subscriber agreement');
     expect(acme.accounts).toBe(before);
+  });
+});
+
+describe('ACME Renewal Information (RFC 9773)', () => {
+  const issue = (accountKey = p256(), replaces?: string) =>
+    obtainCertificate({
+      directoryUrl: acme.directoryUrl,
+      accountKey,
+      certificateKey: p256(),
+      hostname: HOST,
+      dns: relayPublisher(HOST),
+      termsOfServiceAgreed: true,
+      pollIntervalMs: 10,
+      ...(replaces ? { replaces } : {}),
+    });
+
+  test('the certificate identifier is base64url(AKI keyIdentifier).base64url(serial), leading zero kept', () => {
+    // Serials with the top bit set carry a 0x00 content octet (RFC 9773 section 4.1).
+    for (let i = 0; i < 6; i += 1) {
+      const { cert } = ca.issue(HOST);
+      const path = join(ca.dir, `ari-${i}.pem`);
+      writeFileSync(path, cert);
+      const text = execFileSync('openssl', ['x509', '-in', path, '-noout', '-serial', '-ext', 'authorityKeyIdentifier'], { encoding: 'utf8' });
+      const serialHex = /serial=([0-9A-F]+)/.exec(text)![1]!;
+      const akiHex = /Authority Key Identifier:\s*\n\s*(?:keyid:)?([0-9A-F:]+)/.exec(text)![1]!.replaceAll(':', '');
+      const serial = Buffer.from(serialHex.length % 2 ? `0${serialHex}` : serialHex, 'hex');
+      const content = serial[0]! & 0x80 ? Buffer.concat([Buffer.from([0]), serial]) : serial;
+      expect(ariCertId(cert)).toBe(`${Buffer.from(akiHex, 'hex').toString('base64url')}.${content.toString('base64url')}`);
+    }
+    expect(ariCertId('not a certificate')).toBeUndefined();
+  });
+
+  test('the window is read from the CA, and a moment is picked inside it', async () => {
+    const pem = await issue();
+    acme.setRenewalWindow(undefined);
+    expect(await fetchRenewalInfo(acme.directoryUrl, pem)).toBeUndefined();
+    const window = { start: Date.parse('2026-10-01T00:00:00Z'), end: Date.parse('2026-10-03T00:00:00Z') };
+    acme.setRenewalWindow(window);
+    try {
+      const info = await fetchRenewalInfo(acme.directoryUrl, pem);
+      expect(info).toMatchObject({ certId: ariCertId(pem), window, retryAfterMs: 6 * 60 * 60 * 1000 });
+      expect(selectRenewalTime(window, () => 0)).toBe(window.start);
+      expect(selectRenewalTime(window, () => 0.5)).toBe(window.start + 24 * 60 * 60 * 1000);
+      expect(selectRenewalTime(window, () => 0.999999)).toBeLessThan(window.end);
+    } finally {
+      acme.setRenewalWindow(undefined);
+    }
+  });
+
+  test('a CA window past expiry cannot let the certificate lapse', () => {
+    const { cert } = ca.issue(HOST);
+    const x509 = new X509Certificate(cert);
+    const notBefore = Date.parse(x509.validFrom);
+    const notAfter = Date.parse(x509.validTo);
+    const latest = latestRenewalMoment(cert);
+    expect(latest).toBe(notAfter - (notAfter - notBefore) / 6);
+    // A window 200 days out, beyond this 90-day certificate's expiry.
+    const farRenewAt = selectRenewalTime({ start: notAfter + 110 * 86_400_000, end: notAfter + 111 * 86_400_000 });
+    expect(ariRenewalDue(cert, farRenewAt, notBefore + 86_400_000)).toBe(false);
+    expect(ariRenewalDue(cert, farRenewAt, latest - 1)).toBe(false);
+    expect(ariRenewalDue(cert, farRenewAt, latest)).toBe(true);
+    expect(ariRenewalDue(cert, farRenewAt, notAfter - 86_400_000)).toBe(true);
+    // An earlier CA moment still wins.
+    expect(ariRenewalDue(cert, notBefore + 2 * 86_400_000, notBefore + 3 * 86_400_000)).toBe(true);
+  });
+
+  test('a renewal order names the certificate it replaces; a refused replaces falls back to a plain order', async () => {
+    const accountKey = p256();
+    const first = await issue(accountKey);
+    const id = ariCertId(first)!;
+    const before = acme.replacements.length;
+    await issue(accountKey, id);
+    expect(acme.replacements.slice(before)).toEqual([id]);
+    // Replacing it again is refused (alreadyReplaced); the order still goes through, plainly.
+    const again = await issue(accountKey, id);
+    expect(new X509Certificate(again).checkHost(HOST)).toBe(HOST);
+    expect(acme.replacements.slice(before)).toEqual([id, id, undefined]);
   });
 });
