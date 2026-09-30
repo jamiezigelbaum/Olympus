@@ -21273,6 +21273,16 @@ var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
     why: "Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only " + "re-list an item when it changes). No model, endpoint or epoch changes and no existing vector " + "is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded " + "per pass, with the backlog and estimated cost shown on the source page and in doctor.",
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: "complete"
+  },
+  {
+    entry_id: "decision-2026-09-30-gmail-catch-up",
+    recorded_at: "2026-09-30T22:30:00.000Z",
+    kind: "model_decision",
+    what: "Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks " + "a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the " + "store's approved identity.",
+    scope: { corpora: ["internal.email"] },
+    why: "The owner approved the one-time cloud embedding spend for the mail backlog (estimated " + "US$20-25 at the provider's published rate) on 2026-09-30. No model, endpoint or epoch changes " + "and no existing vector is re-embedded; bounded per pass, with the backlog and estimated cost " + "shown on the source page and in doctor.",
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+    status: "complete"
   }
 ];
 
@@ -22108,6 +22118,7 @@ var EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 var CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true;
 var WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE = {
   [SCHEDULER_SOURCE_IDS.readwise]: true,
+  [SCHEDULER_SOURCE_IDS.gmail]: true,
   [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
   [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
   [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP

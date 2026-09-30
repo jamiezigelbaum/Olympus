@@ -773,13 +773,14 @@ describe('review round 2: scope binding, store-wide sweep, isolation, gate', () 
     expect(task.last_result?.counts).toMatchObject({ items_failed: 1, chunks_embedded: 1 });
   });
 
-  test('the store-wide sweep is a per-source setting: on for Readwise, the owner\'s answer for chat lanes', () => {
+  test('the store-wide sweep is a per-source setting: on for Readwise and Gmail, the owner\'s answer for chat lanes', () => {
     expect(wholeStoreEmbeddingSweepAllowed('readwise.library')).toBe(true);
+    expect(wholeStoreEmbeddingSweepAllowed('gmail.email')).toBe(true);
     for (const chat of ['x.bookmarks', 'whatsapp.personal.messages', 'telegram.messages']) {
       expect(wholeStoreEmbeddingSweepAllowed(chat)).toBe(CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP);
     }
-    // Scoped file and mail lanes never sweep store-wide.
-    for (const scoped of ['gmail.email', 'google_drive.docs', 'dropbox.files']) {
+    // Scoped file lanes never sweep store-wide.
+    for (const scoped of ['google_drive.docs', 'dropbox.files']) {
       expect(wholeStoreEmbeddingSweepAllowed(scoped)).toBe(false);
     }
   });

@@ -1282,11 +1282,14 @@ export const CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true;
  * Per source: may its embedding sweep embed store-wide (every hybrid-served
  * chunk still missing a vector), not only what its syncs queued? Readwise: yes,
  * owner decision 2026-09-24 (embedding ledger decision-2026-09-24-readwise-hybrid).
- * Scoped file and mail lanes (Gmail, Drive, Dropbox) are absent: they stay
- * queue-only under their scope binding, and Dropbox keeps its own embed tasks.
+ * Gmail: yes, owner decision 2026-09-30 (embedding ledger
+ * decision-2026-09-30-gmail-catch-up), so its old backlog embeds once. The file
+ * lanes (Drive, Dropbox) are absent: they stay queue-only under their scope
+ * binding, and Dropbox keeps its own embed tasks.
  */
 export const WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE: Readonly<Record<string, boolean>> = {
   [SCHEDULER_SOURCE_IDS.readwise]: true,
+  [SCHEDULER_SOURCE_IDS.gmail]: true,
   [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
   [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
   [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
