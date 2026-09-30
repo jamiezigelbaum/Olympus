@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0-beta.8 - 2026-09-30
+
+A one-time catch-up so existing Gmail mail becomes searchable by meaning.
+
+- **Gmail backlog embedding (#111).** Gmail's embedding sweep now also embeds
+  every chunk in the internal mail store that is still missing a vector, not
+  only the chunks a sync queued, so mail indexed before hybrid search embeds
+  once on the store's approved embedding identity. Each pass is bounded, and
+  the source page and `doctor` show the remaining backlog with its estimated
+  token count and cost. No model, endpoint or epoch changes and no existing
+  vector is re-embedded; the secure mail store, Google Drive and Dropbox stay
+  queue-only. The decision is recorded in the embedding ledger
+  (`decision-2026-09-30-gmail-catch-up`).
+- **README banner (#110).** The README opens with the Olympus banner image.
+
 ## 0.4.0-beta.7 - 2026-09-30
 
 A compatibility fix for OpenClaw 2026.9.7's plugin updater, slow answers for
