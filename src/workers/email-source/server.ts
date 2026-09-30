@@ -3474,7 +3474,6 @@ export async function main(): Promise<void> {
       // is served hybrid, and its embedding policy is not disabled. Scoped
       // lanes stay queue-only: their queued items carry the scope-bound
       // provider their sync used, and nothing else is embedded.
-      const wholeStoreAllowed = wholeStoreEmbeddingSweepAllowed(source.sourceId);
       const hybridServed = (corpusId: string): boolean => {
         // A tier store opened after boot has no full definition yet; the
         // registry's declaration of the same corpus stands in for it.
@@ -3488,7 +3487,7 @@ export async function main(): Promise<void> {
         if (!corpusIds.has(store.corpusId)) return [];
         const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
         return provider
-          ? [{ store, provider, wholeStore: wholeStoreAllowed && hybridServed(store.corpusId) }]
+          ? [{ store, provider, wholeStore: wholeStoreEmbeddingSweepAllowed(source.sourceId, store.corpusId) && hybridServed(store.corpusId) }]
           : [];
       });
       // A source with no store that embeds (a keyword-only lane) gets no sweep.

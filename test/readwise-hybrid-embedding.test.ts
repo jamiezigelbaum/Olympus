@@ -775,7 +775,11 @@ describe('review round 2: scope binding, store-wide sweep, isolation, gate', () 
 
   test('the store-wide sweep is a per-source setting: on for Readwise and Gmail, the owner\'s answer for chat lanes', () => {
     expect(wholeStoreEmbeddingSweepAllowed('readwise.library')).toBe(true);
-    expect(wholeStoreEmbeddingSweepAllowed('gmail.email')).toBe(true);
+    // Gmail: only the internal store; the secure and public-safe mail stores never sweep store-wide.
+    expect(wholeStoreEmbeddingSweepAllowed('gmail.email', 'internal.email')).toBe(true);
+    expect(wholeStoreEmbeddingSweepAllowed('gmail.email', 'secure_local.email.private')).toBe(false);
+    expect(wholeStoreEmbeddingSweepAllowed('gmail.email', 'public_safe.email')).toBe(false);
+    expect(wholeStoreEmbeddingSweepAllowed('gmail.email')).toBe(false);
     for (const chat of ['x.bookmarks', 'whatsapp.personal.messages', 'telegram.messages']) {
       expect(wholeStoreEmbeddingSweepAllowed(chat)).toBe(CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP);
     }

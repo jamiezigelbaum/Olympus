@@ -91231,8 +91231,9 @@ function createReadwiseSchedulerSource(input) {
     lastSyncCompletedAt: () => input.liveSync?.lastStoreRunCompletedAt()
   };
 }
-function wholeStoreEmbeddingSweepAllowed(sourceId) {
-  return WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId] === true;
+function wholeStoreEmbeddingSweepAllowed(sourceId, corpusId) {
+  const allowed = WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId];
+  return allowed === true || Array.isArray(allowed) && corpusId !== undefined && allowed.includes(corpusId);
 }
 function withEmbeddingSweep(sources, targetsFor) {
   return sources.map((source) => {
@@ -91966,7 +91967,7 @@ var init_source_scheduler = __esm(() => {
   EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
   WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE = {
     [SCHEDULER_SOURCE_IDS.readwise]: true,
-    [SCHEDULER_SOURCE_IDS.gmail]: true,
+    [SCHEDULER_SOURCE_IDS.gmail]: ["internal.email"],
     [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
     [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
     [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP
@@ -97426,7 +97427,6 @@ async function main() {
     const sweptSources = withEmbeddingSweep(sources, (source) => {
       const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
       corpusIds.add(source.corpusId);
-      const wholeStoreAllowed = wholeStoreEmbeddingSweepAllowed(source.sourceId);
       const hybridServed = (corpusId) => {
         const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === corpusId) ?? sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === corpusId);
         return definition !== undefined && definition.activationMode !== "lexical_only" && definition.embeddingPolicy !== "disabled";
@@ -97435,7 +97435,7 @@ async function main() {
         if (!corpusIds.has(store.corpusId))
           return [];
         const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
-        return provider ? [{ store, provider, wholeStore: wholeStoreAllowed && hybridServed(store.corpusId) }] : [];
+        return provider ? [{ store, provider, wholeStore: wholeStoreEmbeddingSweepAllowed(source.sourceId, store.corpusId) && hybridServed(store.corpusId) }] : [];
       });
       return targets().length > 0 ? targets : undefined;
     });

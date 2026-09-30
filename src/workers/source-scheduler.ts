@@ -1282,22 +1282,25 @@ export const CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true;
  * Per source: may its embedding sweep embed store-wide (every hybrid-served
  * chunk still missing a vector), not only what its syncs queued? Readwise: yes,
  * owner decision 2026-09-24 (embedding ledger decision-2026-09-24-readwise-hybrid).
- * Gmail: yes, owner decision 2026-09-30 (embedding ledger
- * decision-2026-09-30-gmail-catch-up), so its old backlog embeds once. The file
+ * Gmail: only its internal (non-secure) store, owner decision 2026-09-30
+ * (embedding ledger decision-2026-09-30-gmail-catch-up), so that backlog embeds
+ * once; the secure mail store stays queue-only. A list names the only corpora
+ * of the source that may sweep store-wide. The file
  * lanes (Drive, Dropbox) are absent: they stay queue-only under their scope
  * binding, and Dropbox keeps its own embed tasks.
  */
-export const WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE: Readonly<Record<string, boolean>> = {
+export const WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE: Readonly<Record<string, boolean | readonly string[]>> = {
   [SCHEDULER_SOURCE_IDS.readwise]: true,
-  [SCHEDULER_SOURCE_IDS.gmail]: true,
+  [SCHEDULER_SOURCE_IDS.gmail]: ['internal.email'],
   [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
   [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
   [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
 };
 
-/** Whether a source's sweep may run store-wide; see WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE. */
-export function wholeStoreEmbeddingSweepAllowed(sourceId: string): boolean {
-  return WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId] === true;
+/** Whether a source's store may sweep store-wide; see WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE. */
+export function wholeStoreEmbeddingSweepAllowed(sourceId: string, corpusId?: string): boolean {
+  const allowed = WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId];
+  return allowed === true || (Array.isArray(allowed) && corpusId !== undefined && allowed.includes(corpusId));
 }
 
 /**
