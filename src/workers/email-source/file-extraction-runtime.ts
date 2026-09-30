@@ -48,7 +48,10 @@ import {
   createRestGoogleDriveApiClient,
   GOOGLE_DRIVE_PROVIDER,
 } from '../google-connectors/drive.ts';
-import { GoogleDriveExtractionSource } from '../google-connectors/drive-extraction-source.ts';
+import {
+  GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY,
+  GoogleDriveExtractionSource,
+} from '../google-connectors/drive-extraction-source.ts';
 import type { GoogleDailyRequestBudget } from '../google-connectors/request-budget.ts';
 import { WhatsAppExtractionSource } from '../whatsapp/extraction-source.ts';
 import {
@@ -61,6 +64,7 @@ import {
 import {
   LocalFileExtractionJobStore,
   defaultFileExtractionJobsDbPath,
+  type ExtractionLaneKey,
 } from '../file-extraction/job-store.ts';
 import {
   createDefaultExtractorRegistry,
@@ -118,6 +122,8 @@ export interface FileExtractionCorpusConfig {
    */
   resolveCredentialHandle?: () => string | undefined;
   ownerConnectorId?: string;
+  /** The account a lane of this corpus is keyed by, when its scope key does not say. */
+  resolveAccountScope?: () => string;
   maxTrustTierForRemote?: 'S3' | 'S4';
   allowDefaultDeferred?: boolean;
 }
@@ -373,6 +379,12 @@ export function fileExtractionCorporaRoster(input: {
   };
   /** True when the WhatsApp connector store exists. */
   whatsapp?: boolean;
+  /** Present when the Drive connector stores exist: their PDFs are catalogued by name only. */
+  googleDrive?: {
+    corpusIds: readonly string[];
+    resolveCredentialHandle: () => string | undefined;
+    resolveAccountScope: () => string;
+  };
 }): FileExtractionCorpusConfig[] {
   const configuredDropbox = input.configured.find(
     (corpus) => corpus.corpusId === DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
@@ -413,11 +425,46 @@ export function fileExtractionCorporaRoster(input: {
       ownerConnectorId: WHATSAPP_PRODUCT_CONNECTOR_ID,
     });
   }
+  for (const corpusId of input.googleDrive?.corpusIds ?? []) {
+    canonicalIds.add(corpusId);
+    canonical.push({
+      corpusId,
+      provider: GOOGLE_DRIVE_PROVIDER,
+      scopes: [GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY],
+      resolveCredentialHandle: input.googleDrive!.resolveCredentialHandle,
+      resolveAccountScope: input.googleDrive!.resolveAccountScope,
+      ownerConnectorId: GOOGLE_DRIVE_PROVIDER,
+    });
+  }
   return [
     ...input.configured.filter((corpus) => !canonicalIds.has(corpus.corpusId)),
     ...canonical,
   ];
 }
+
+/**
+ * The file lanes whose PDFs an owner-triggered drain reads: every served file
+ * corpus, keyed by its current approved scopes.
+ */
+export function pdfExtractionLanes(
+  roster: readonly FileExtractionCorpusConfig[],
+  servedCorpusIds: readonly string[],
+): ExtractionLaneKey[] {
+  const served = new Set(servedCorpusIds);
+  return roster
+    .filter((config) => served.has(config.corpusId)
+      && (config.provider === 'dropbox' || config.provider === GOOGLE_DRIVE_PROVIDER))
+    .flatMap((config) => (config.resolveScopes?.() ?? config.scopes).map((approvedScopeKey) => ({
+      corpusId: config.corpusId,
+      provider: config.provider,
+      accountScope: config.resolveAccountScope?.()
+        ?? DROPBOX_SCOPE_ACCOUNT.exec(approvedScopeKey)?.[1]
+        ?? 'personal',
+      approvedScopeKey,
+    })));
+}
+
+const DROPBOX_SCOPE_ACCOUNT = /^dropbox\.([a-z0-9_-]+):/i;
 
 /**
  * The roster, from one JSON key.

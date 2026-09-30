@@ -60,6 +60,7 @@ import {
   type PairingPathRefusal,
 } from '../../core/pairing-session-paths.ts';
 import type { V04PublicSourceId } from '../../core/public-source-capabilities.ts';
+import { TEXT_EXTRACTOR_KIND } from '../file-extraction/extractors/text.ts';
 import { TRANSCRIPTION_EXTRACTOR_KIND } from '../file-extraction/extractors/transcription.ts';
 import type { ExtractionLaneKey } from '../file-extraction/job-store.ts';
 import type { ExtractionPolicyDecision } from '../file-extraction/types.ts';
@@ -69,6 +70,7 @@ import type {
   ExtractionRunResult,
   FileExtractionRunner,
 } from '../file-extraction/runner.ts';
+import { drainPdfExtraction } from '../file-extraction/runner.ts';
 import type {
   SourceAnswerSelectedItem,
   SourceIndexAnswerHandler,
@@ -414,6 +416,8 @@ export interface EmailSourceWorkerOptions {
    * `fileExtractionAliasFor`.
    */
   fileExtraction?: FileExtractionRunner;
+  /** The file lanes whose PDFs `/source/index/files/extract-pdfs` drains, resolved per call. */
+  pdfExtractionLanes?: () => readonly ExtractionLaneKey[];
   dropboxEvalShardExport?: DropboxEvalShardExportHandler;
   dropboxSourceExport?: DropboxSourceExportHandler;
   sourceIndexEmbeddingProvider?: SourceEmbeddingProvider;
@@ -711,6 +715,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
       };
     });
   const fileExtraction = options.fileExtraction;
+  const pdfExtractionLanes = options.pdfExtractionLanes;
   const dropboxEvalShardExport = options.dropboxEvalShardExport;
   const dropboxSourceExport = options.dropboxSourceExport;
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
@@ -2578,6 +2583,42 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             dry_run: result.dryRun,
             reason: result.reason,
           });
+        }
+
+        // The owner's word to extract the PDF backlog now rather than at the
+        // scheduler's trickle. Bounded per call; the CLI repeats it.
+        if (request.method === 'POST' && url.pathname === `${basePath}/source/index/files/extract-pdfs`) {
+          const runner = requireFileExtractionRunner(fileExtraction);
+          const record = await parseObjectBody(request);
+          const maxSeconds = Math.min(
+            Math.max(1, Math.floor(asOptionalNumber(record.max_seconds, 'max_seconds') ?? 240)),
+            900,
+          );
+          const lanes = await drainPdfExtraction({
+            runner,
+            lanes: pdfExtractionLanes?.() ?? [],
+            requeue: record.requeue === true,
+            deadlineMs: Date.now() + maxSeconds * 1_000,
+            extractorKind: TEXT_EXTRACTOR_KIND,
+          });
+          const body = {
+            kind: 'pdf_extraction_drain',
+            lanes: lanes.map((lane) => ({
+              corpus_id: lane.corpusId,
+              provider: lane.provider,
+              scope_key_hash: lane.scopeKeyHash,
+              candidates_requeued: lane.candidatesRequeued,
+              jobs_processed: lane.jobsProcessed,
+              jobs_indexed: lane.jobsIndexed,
+              jobs_metadata_only: lane.jobsMetadataOnly,
+              jobs_failed: lane.jobsFailed,
+              jobs_remaining: lane.jobsRemaining,
+              paused: lane.paused,
+            })),
+            policy: { worker_private_surface: true, source_text_returned: false },
+          };
+          assertNoRawEmailFields(body);
+          return json(body);
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/index/files/status`) {

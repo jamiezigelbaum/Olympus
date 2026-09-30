@@ -10533,6 +10533,7 @@ function itemSearchText(item, title, reactionLine) {
     ] : [],
     ...metadataStringList(item.metadata, "identityAliases"),
     ...metadataStringList(item.metadata, "aliases"),
+    ...metadataStringList(item.metadata, "attachments"),
     reactionLine
   ];
   const seen = new Set;
@@ -15256,6 +15257,24 @@ var init_local_index = __esm(() => {
     `).get(modelId, ...params);
       return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
     }
+    pdfExtractionBacklog() {
+      const row = this.db.query(`
+      SELECT
+        SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
+        COALESCE(SUM(chars), 0) AS chars
+      FROM (
+        SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
+        FROM items i
+        WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
+      )
+    `).get();
+      return {
+        pendingPdfs: row.pending ?? 0,
+        extractedPdfs: row.extracted ?? 0,
+        extractedChars: row.chars
+      };
+    }
     embeddingTierExclusionFilter() {
       const tierExcluded = this.tierHiddenItemPks();
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
@@ -17226,6 +17245,28 @@ var init_dropbox_files = __esm(() => {
   init_connector_store2();
 });
 
+// src/workers/google-connectors/classification.ts
+function accountFromGoogleHandle(handle, fallback = "personal") {
+  const trimmed = handle?.trim();
+  if (!trimmed)
+    return fallback;
+  const match = /^[a-z_]+\.([a-z0-9_-]+)(?:\.|$)/i.exec(trimmed);
+  return match?.[1] ?? fallback;
+}
+function metadataString2(metadata, key) {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function metadataStringArray2(metadata, key) {
+  const value = metadata[key];
+  if (!Array.isArray(value))
+    return [];
+  return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
+}
+var init_classification = __esm(() => {
+  init_sensitivity_map();
+});
+
 // src/workers/credential-broker/unpaired-sources.ts
 var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
 var init_unpaired_sources = __esm(() => {
@@ -17278,28 +17319,6 @@ var init_connect = __esm(() => {
 function sourceInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
 }
-
-// src/workers/google-connectors/classification.ts
-function accountFromGoogleHandle(handle, fallback = "personal") {
-  const trimmed = handle?.trim();
-  if (!trimmed)
-    return fallback;
-  const match = /^[a-z_]+\.([a-z0-9_-]+)(?:\.|$)/i.exec(trimmed);
-  return match?.[1] ?? fallback;
-}
-function metadataString2(metadata, key) {
-  const value = metadata[key];
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-function metadataStringArray2(metadata, key) {
-  const value = metadata[key];
-  if (!Array.isArray(value))
-    return [];
-  return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
-}
-var init_classification = __esm(() => {
-  init_sensitivity_map();
-});
 
 // src/workers/google-connectors/request-budget.ts
 var GoogleRequestBudgetError;
@@ -18601,6 +18620,7 @@ function rawItemFromGmailMessage(message, account, options = {}) {
       labels: message.labelIds ?? [],
       attachmentCount: attachments.count,
       attachmentBytesDeclared: attachments.bytes,
+      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
       attachmentsNotIngested: attachments.count,
       locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message.id)}`,
       contentHash: hashString4(`${message.historyId ?? ""}:${metadataOnly ? "metadata_only" : text}`)
@@ -18610,16 +18630,27 @@ function rawItemFromGmailMessage(message, account, options = {}) {
 }
 function gmailAttachmentInventory(part) {
   if (!part)
-    return { count: 0, bytes: 0 };
-  const filenameBearing = Boolean(part.filename?.trim());
-  let count = filenameBearing ? 1 : 0;
-  let bytes = filenameBearing && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : 0;
+    return { count: 0, bytes: 0, lines: [] };
+  const filename = part.filename?.trim();
+  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
+  let count = filename ? 1 : 0;
+  let bytes = size ?? 0;
+  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
   for (const child of part.parts ?? []) {
     const nested = gmailAttachmentInventory(child);
     count += nested.count;
     bytes += nested.bytes;
+    lines.push(...nested.lines);
   }
-  return { count, bytes };
+  return { count, bytes, lines };
+}
+function gmailAttachmentLine(filename, part, size) {
+  const details = [
+    part.mimeType?.trim() || undefined,
+    size !== undefined ? `${size} bytes` : undefined,
+    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined
+  ].filter((value) => Boolean(value));
+  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
 }
 function metadataCount(metadata, key) {
   const value = metadata[key];
@@ -18714,7 +18745,7 @@ function safeProviderDetail2(value) {
 function hashString4(value) {
   return createHash9("sha256").update(value).digest("hex");
 }
-var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS;
+var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_mail_source_scope();
   init_sender_rules();
@@ -19622,6 +19653,9 @@ import { createHash as createHash16 } from "node:crypto";
 import { existsSync as existsSync11, lstatSync as lstatSync3, mkdirSync as mkdirSync11, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname17, isAbsolute as isAbsolute3 } from "node:path";
 
+// src/workers/email-source/server.ts
+init_classification();
+
 // src/core/messaging-capture.ts
 init_atomic_file();
 init_secret_store();
@@ -20114,6 +20148,11 @@ var IMAGE_MIME_TYPES = new Set([
   "image/tiff",
   "image/webp"
 ]);
+var GENERIC_MIME_TYPES = new Set([
+  "application/octet-stream",
+  "binary/octet-stream",
+  "application/binary"
+]);
 
 // src/workers/file-extraction/extractors/ocr.ts
 init_command_runner();
@@ -20180,6 +20219,7 @@ var SINK_SKIP_SETTLEMENTS = Object.freeze({
   [EXTRACTION_SINK_SKIPPED_EMPTY_TEXT]: "metadata_only",
   [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only"
 });
+var PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
 
 // src/workers/file-extraction/tiered-store-sink.ts
 init_types();
@@ -21566,13 +21606,13 @@ init_config();
 init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
+import { createHash as createHash13 } from "node:crypto";
 init_connector_store();
 init_google_connectors();
 init_readwise();
 init_embeddings();
 init_x_bookmarks();
 init_live_control2();
-import { createHash as createHash13 } from "node:crypto";
 // src/workers/whatsapp/index.ts
 init_live_connector();
 init_store_sync();

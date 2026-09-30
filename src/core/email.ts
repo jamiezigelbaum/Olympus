@@ -485,6 +485,34 @@ export class EmailClient {
     return parseSourceIndexStatusResult(data);
   }
 
+  /** One bounded pass of the owner-triggered PDF backlog drain. */
+  async extractPdfs(options: { requeue?: boolean; maxSeconds?: number } = {}): Promise<Record<string, unknown>> {
+    if (!this.config.email.enabled) {
+      throw new OperationError(
+        'email_not_configured',
+        'Private source worker is disabled.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before extracting PDFs.',
+      );
+    }
+    const response = await this.transport.requestJson(
+      `${this.config.email.baseUrl}/source/index/files/extract-pdfs`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(options.requeue ? { requeue: true } : {}),
+          ...(options.maxSeconds !== undefined ? { max_seconds: options.maxSeconds } : {}),
+        }),
+      },
+      // The worker starts no job after max_seconds, and one job (a text pass
+      // plus OCR) can take up to ten minutes to finish.
+      { timeoutMs: ((options.maxSeconds ?? 240) + 600) * 1_000 },
+    );
+    const data = asRecord(response);
+    assertNoRawEmailFields(data);
+    return data;
+  }
+
   async xBookmarksContentRecovery(
     options: XBookmarksContentRecoveryOptions = {},
   ): Promise<Record<string, unknown>> {

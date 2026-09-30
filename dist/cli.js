@@ -7385,6 +7385,7 @@ var init_public_surface = __esm(() => {
     "source answer",
     "source index status",
     "source index search",
+    "source extract-pdfs",
     "data export",
     "data verify",
     "data delete",
@@ -16489,6 +16490,7 @@ function itemSearchText(item, title, reactionLine) {
     ] : [],
     ...metadataStringList(item.metadata, "identityAliases"),
     ...metadataStringList(item.metadata, "aliases"),
+    ...metadataStringList(item.metadata, "attachments"),
     reactionLine
   ];
   const seen = new Set;
@@ -21214,6 +21216,24 @@ var init_local_index = __esm(() => {
         ${filter}
     `).get(modelId, ...params);
       return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+    }
+    pdfExtractionBacklog() {
+      const row = this.db.query(`
+      SELECT
+        SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
+        COALESCE(SUM(chars), 0) AS chars
+      FROM (
+        SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
+        FROM items i
+        WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
+      )
+    `).get();
+      return {
+        pendingPdfs: row.pending ?? 0,
+        extractedPdfs: row.extracted ?? 0,
+        extractedChars: row.chars
+      };
     }
     embeddingTierExclusionFilter() {
       const tierExcluded = this.tierHiddenItemPks();
@@ -30421,6 +30441,7 @@ function rawItemFromGmailMessage(message, account, options = {}) {
       labels: message.labelIds ?? [],
       attachmentCount: attachments.count,
       attachmentBytesDeclared: attachments.bytes,
+      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
       attachmentsNotIngested: attachments.count,
       locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message.id)}`,
       contentHash: hashString3(`${message.historyId ?? ""}:${metadataOnly ? "metadata_only" : text}`)
@@ -30430,16 +30451,27 @@ function rawItemFromGmailMessage(message, account, options = {}) {
 }
 function gmailAttachmentInventory(part) {
   if (!part)
-    return { count: 0, bytes: 0 };
-  const filenameBearing = Boolean(part.filename?.trim());
-  let count = filenameBearing ? 1 : 0;
-  let bytes = filenameBearing && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : 0;
+    return { count: 0, bytes: 0, lines: [] };
+  const filename = part.filename?.trim();
+  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
+  let count = filename ? 1 : 0;
+  let bytes = size ?? 0;
+  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
   for (const child of part.parts ?? []) {
     const nested = gmailAttachmentInventory(child);
     count += nested.count;
     bytes += nested.bytes;
+    lines.push(...nested.lines);
   }
-  return { count, bytes };
+  return { count, bytes, lines };
+}
+function gmailAttachmentLine(filename, part, size) {
+  const details = [
+    part.mimeType?.trim() || undefined,
+    size !== undefined ? `${size} bytes` : undefined,
+    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined
+  ].filter((value) => Boolean(value));
+  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
 }
 function metadataCount(metadata, key) {
   const value = metadata[key];
@@ -30534,7 +30566,7 @@ function safeProviderDetail(value) {
 function hashString3(value) {
   return createHash16("sha256").update(value).digest("hex");
 }
-var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS;
+var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_mail_source_scope();
   init_sender_rules();
@@ -42407,6 +42439,22 @@ class EmailClient {
     assertNoSourceIndexOperationalLeakFields(data);
     return parseSourceIndexStatusResult(data);
   }
+  async extractPdfs(options = {}) {
+    if (!this.config.email.enabled) {
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before extracting PDFs.");
+    }
+    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/files/extract-pdfs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...options.requeue ? { requeue: true } : {},
+        ...options.maxSeconds !== undefined ? { max_seconds: options.maxSeconds } : {}
+      })
+    }, { timeoutMs: ((options.maxSeconds ?? 240) + 600) * 1000 });
+    const data = asRecord8(response);
+    assertNoRawEmailFields(data);
+    return data;
+  }
   async xBookmarksContentRecovery(options = {}) {
     if (!this.config.email.enabled) {
       throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before recovering X bookmark content.");
@@ -44836,7 +44884,8 @@ function createSourceIndexStatusHandler(options = {}) {
         const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId) : undefined;
         const status = store ? connectorStoreStatus(corpus, store.status(statusScope), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store)) : configuredCorpusStatus(corpus);
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
-        const resolved = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId) : enforced;
+        const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId) : enforced;
+        const resolved = store && corpus.family === "file" ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true ? availability?.modelId : undefined) : withBacklog;
         if (maxAgeMs > 0)
           cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
@@ -45066,6 +45115,28 @@ function withEmbeddingBacklogEstimate(status, store, modelId) {
     }
   };
 }
+function withPdfExtractionBacklog(status, store, modelId) {
+  const backlog = store.pdfExtractionBacklog();
+  if (backlog.pendingPdfs === 0 && backlog.extractedPdfs === 0)
+    return status;
+  const averageChars = backlog.extractedPdfs > 0 ? backlog.extractedChars / backlog.extractedPdfs : FALLBACK_PDF_EXTRACTED_CHARS;
+  const estimatedTokens = Math.ceil(backlog.pendingPdfs * averageChars / 4);
+  return {
+    ...status,
+    pdf_extraction: {
+      pending_pdfs: backlog.pendingPdfs,
+      extracted_pdfs: backlog.extractedPdfs,
+      ...modelId ? {
+        estimate_after_extraction: {
+          model_id: modelId,
+          estimated_tokens: estimatedTokens,
+          estimated_cost_usd: estimatedEmbeddingCostUsd(estimatedTokens, modelId),
+          price_source: embeddingModelEstimate(modelId).source
+        }
+      } : {}
+    }
+  };
+}
 function lastRefreshFromConnectorStoreSync(sync) {
   return {
     sync_run_id: sync.syncRunId,
@@ -45088,7 +45159,7 @@ function providerFromCorpusId(corpusId) {
   }
   return parts[0] || "unknown";
 }
-var ITEMS_EMBEDDED_COUNT_KEY = "items_embedded", DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000;
+var ITEMS_EMBEDDED_COUNT_KEY = "items_embedded", DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, FALLBACK_PDF_EXTRACTED_CHARS = 50000;
 var init_status = __esm(() => {
   init_corpus();
   init_embedding_cost_estimates();
@@ -71232,7 +71303,7 @@ function requireNonEmpty7(value, label) {
     throw new Error(`${label} is required.`);
   return trimmed2;
 }
-var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES;
+var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES, GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY = "google_drive.docs";
 var init_drive_extraction_source = __esm(() => {
   init_file_extraction_source();
   init_drive();
@@ -71385,6 +71456,25 @@ class LocalFileExtractionJobStore {
     const workerHash = hashString5(workerId);
     const claimed = [];
     this.db.transaction(() => {
+      this.db.query(`
+        UPDATE extraction_jobs
+        SET status = 'failed_terminal',
+            last_error_kind = ?,
+            leased_by_hash = NULL,
+            leased_until = NULL,
+            lease_token = NULL,
+            lease_grant_ordinal = NULL,
+            next_retry_at = NULL,
+            updated_at = ?
+        WHERE corpus_id = ?
+          AND provider = ?
+          AND account_scope = ?
+          AND approved_scope_key = ?
+          AND status = 'leased'
+          AND leased_until IS NOT NULL
+          AND leased_until < ?
+          AND attempts >= ?
+      `).run(EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND, now, lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, now, MAX_EXTRACTION_RETRY_ATTEMPTS);
       for (const row of this.leaseCandidateRows(lane, request, now, limit)) {
         const claimGrant = this.mintClaimGrant();
         const claim = this.db.query(`
@@ -72316,7 +72406,7 @@ function hashString5(value) {
 function nowIso4() {
   return new Date().toISOString();
 }
-var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 3, FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES;
+var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 3, FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES;
 var init_job_store = __esm(() => {
   init_sqlite_migrations();
   NETWORK_ERROR_KINDS = new Set([
@@ -72433,11 +72523,12 @@ function normalizeMimeType2(input) {
 }
 function resolveExtractionMimeType(refMimeType, fetchedMimeType) {
   const enqueued = normalizeMimeType2(refMimeType);
-  const fetched = normalizeMimeType2(fetchedMimeType);
-  if (!fetched || fetched === "application/octet-stream" || fetched === "binary/octet-stream") {
+  if (enqueued && !GENERIC_MIME_TYPES.has(enqueued))
     return enqueued;
-  }
-  return fetched;
+  return normalizeMimeType2(fetchedMimeType) ?? enqueued;
+}
+function hasPdfSignature(bytes) {
+  return bytes.length >= 5 && bytes[0] === 37 && bytes[1] === 80 && bytes[2] === 68 && bytes[3] === 70 && bytes[4] === 45;
 }
 function sanitizeErrorDetail(body, maxChars = 120) {
   return body.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, maxChars);
@@ -72446,7 +72537,7 @@ function sanitizeThrownError(error2, maxChars = 120) {
   const detail = error2 instanceof Error ? `${error2.name || "Error"}: ${error2.message}` : String(error2);
   return sanitizeErrorDetail(detail, maxChars);
 }
-var DEFAULT_MAX_BOUNDED_TEXT_CHARS = 2000000, BOUNDED_TEXT_TRUNCATED_WARNING = "bounded_text_truncated", BOUNDED_TEXT_TRUNCATION_REASON = "max_bounded_text_chars", DEFAULT_MAX_TABLE_SAMPLE_ROWS = 25, DEFAULT_MAX_TABLE_SAMPLE_COLUMNS = 25, PDF_MIME_TYPE = "application/pdf", DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document", XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation", TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, ARTIFACT_KIND_BY_STRUCTURAL_KIND;
+var DEFAULT_MAX_BOUNDED_TEXT_CHARS = 2000000, BOUNDED_TEXT_TRUNCATED_WARNING = "bounded_text_truncated", BOUNDED_TEXT_TRUNCATION_REASON = "max_bounded_text_chars", DEFAULT_MAX_TABLE_SAMPLE_ROWS = 25, DEFAULT_MAX_TABLE_SAMPLE_COLUMNS = 25, PDF_MIME_TYPE = "application/pdf", DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document", XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation", TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, ARTIFACT_KIND_BY_STRUCTURAL_KIND, GENERIC_MIME_TYPES;
 var init_bounded_text = __esm(() => {
   TEXT_MIME_TYPES = new Set([
     "application/json",
@@ -72483,6 +72574,11 @@ var init_bounded_text = __esm(() => {
     image: "image_description",
     media: "image_description"
   };
+  GENERIC_MIME_TYPES = new Set([
+    "application/octet-stream",
+    "binary/octet-stream",
+    "application/binary"
+  ]);
 });
 
 // src/workers/file-extraction/extractors/document-formats.ts
@@ -72984,6 +73080,7 @@ function createTextExtractor(options = {}) {
   const pdfTextCommandRunner = options.pdfTextCommandRunner ?? runExtractionCommand;
   const pdfTextTimeoutMs = options.pdfTextTimeoutMs ?? DEFAULT_PDF_TEXT_TIMEOUT_MS;
   const imageMediaDescriptor = options.imageMediaDescriptor ?? false;
+  const pdfOcr = options.pdfOcr;
   return {
     kind,
     version: version2,
@@ -72996,7 +73093,7 @@ function createTextExtractor(options = {}) {
       const bytes = input.bytes;
       if (!bytes)
         return missingBytesFailure();
-      const mimeType = normalizeMimeType2(input.mimeType ?? input.ref.mimeType);
+      const mimeType = hasPdfSignature(bytes) ? PDF_MIME_TYPE : normalizeMimeType2(input.mimeType ?? input.ref.mimeType);
       const context = {
         bytes,
         mimeType,
@@ -73019,7 +73116,8 @@ function createTextExtractor(options = {}) {
           context,
           ...pdfTextCommand ? { command: pdfTextCommand } : {},
           commandRunner: pdfTextCommandRunner,
-          timeoutMs: pdfTextTimeoutMs
+          timeoutMs: pdfTextTimeoutMs,
+          ...pdfOcr ? { ocr: pdfOcr } : {}
         });
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
@@ -73195,12 +73293,15 @@ function officeDocumentPropertiesSlice(context, entries) {
 }
 async function extractPdfText(input) {
   if (input.command) {
-    return extractPdfTextWithCommand({
+    const viaCommand = await extractPdfTextWithCommand({
       context: input.context,
       command: input.command,
       commandRunner: input.commandRunner,
-      timeoutMs: input.timeoutMs
+      timeoutMs: input.timeoutMs,
+      ...input.ocr ? { ocr: input.ocr } : {}
     });
+    if (viaCommand)
+      return viaCommand;
   }
   const streamTexts = extractPdfTextStreams(input.context.bytes);
   const bounded = boundText(normalizeExtractedText(streamTexts.join(`
@@ -73208,7 +73309,8 @@ async function extractPdfText(input) {
   return pdfTextExtractionResult({
     context: input.context,
     bounded,
-    warnings: ["pdf_text_layer_only"]
+    warnings: ["pdf_text_layer_only"],
+    ...input.ocr ? { ocr: input.ocr } : {}
   });
 }
 async function extractPdfTextWithCommand(input) {
@@ -73227,19 +73329,36 @@ async function extractPdfTextWithCommand(input) {
         "-"
       ],
       timeoutMs: input.timeoutMs
+    }).catch((error2) => {
+      if (isCommandMissing(error2))
+        return;
+      throw error2;
     });
+    if (!result)
+      return;
     const bounded = boundText(normalizeExtractedText(result.stdout), input.context.maxBoundedTextChars);
     return pdfTextExtractionResult({
       context: input.context,
       bounded,
-      warnings: ["pdf_text_layer_only", "pdf_text_poppler"]
+      warnings: ["pdf_text_layer_only", "pdf_text_poppler"],
+      ...input.ocr ? { ocr: input.ocr } : {}
     });
   } finally {
     await rm3(tempDir, { recursive: true, force: true });
   }
 }
-function pdfTextExtractionResult(input) {
+function isCommandMissing(error2) {
+  return error2?.code === "ENOENT";
+}
+async function pdfTextExtractionResult(input) {
   if (!input.bounded.text) {
+    const ocrOutput = await input.ocr?.({
+      bytes: input.context.bytes,
+      mimeType: PDF_MIME_TYPE,
+      sizeBytes: input.context.sizeBytes
+    });
+    if (ocrOutput)
+      return ocrOutput;
     if (pdfAppearsImageOnly(input.context.bytes)) {
       return mediaDescriptorOutput({
         mimeType: input.context.mimeType,
@@ -73502,10 +73621,39 @@ function createOcrExtractor(options = {}) {
     }
   };
 }
+function createPdfOcr(options = {}) {
+  const commandRunner = options.commandRunner ?? runExtractionCommand;
+  return async ({ bytes, mimeType, sizeBytes }) => {
+    try {
+      return await runOcrLane(() => extractPdfOcr({
+        bytes,
+        mimeType,
+        sizeBytes,
+        maxBoundedTextChars: options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS,
+        commandRunner: async (request) => {
+          try {
+            return await commandRunner(request);
+          } catch (error2) {
+            if (isCommandMissing(error2))
+              throw new OcrUnavailableError;
+            throw error2;
+          }
+        },
+        timeoutMs: options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS
+      }));
+    } catch (error2) {
+      if (error2 instanceof OcrUnavailableError)
+        return;
+      throw error2;
+    }
+  };
+}
 async function runOcrLane(run) {
   try {
     return await run();
   } catch (error2) {
+    if (error2 instanceof OcrUnavailableError)
+      throw error2;
     if (error2 instanceof ExtractionCommandTimeoutError) {
       return { status: "failed_retryable", errorKind: "ocr_command_timeout" };
     }
@@ -73659,7 +73807,7 @@ function imageExtensionForMimeType(mimeType) {
     return ".heif";
   return ".img";
 }
-var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND = "ocrmypdf", OCR_IMAGE_COMMAND = "tesseract", TEMP_DIR_PREFIX3 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS;
+var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND = "ocrmypdf", OCR_IMAGE_COMMAND = "tesseract", TEMP_DIR_PREFIX3 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
 var init_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -73669,6 +73817,8 @@ var init_ocr = __esm(() => {
     "ocrmypdf_pdf_signed",
     "ocrmypdf_pdf_invalid"
   ];
+  OcrUnavailableError = class OcrUnavailableError extends Error {
+  };
 });
 
 // src/workers/file-extraction/extractors/remote-vlm.ts
@@ -74411,7 +74561,11 @@ function createDefaultExtractorRegistry(config2 = {}) {
     createTextExtractor({
       ...config2.text?.pdfTextCommand !== undefined ? { pdfTextCommand: config2.text.pdfTextCommand } : {},
       ...config2.text?.pdfTextTimeoutMs !== undefined ? { pdfTextTimeoutMs: config2.text.pdfTextTimeoutMs } : {},
-      ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {}
+      ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {},
+      pdfOcr: createPdfOcr({
+        ...config2.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config2.ocr.ocrTimeoutMs } : {},
+        ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {}
+      })
     }),
     createOcrExtractor({
       ...config2.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config2.ocr.ocrTimeoutMs } : {},
@@ -75295,7 +75449,65 @@ function summarizeEgressDestinations(values) {
 function hashToken(value) {
   return createHash45("sha256").update(value).digest("hex");
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS;
+async function drainPdfExtraction(input) {
+  const now = input.now ?? Date.now;
+  const results = [];
+  for (const lane of input.lanes) {
+    const result = {
+      corpusId: lane.corpusId,
+      provider: lane.provider,
+      scopeKeyHash: createHash45("sha256").update(lane.approvedScopeKey).digest("hex").slice(0, 16),
+      candidatesRequeued: 0,
+      jobsProcessed: 0,
+      jobsIndexed: 0,
+      jobsMetadataOnly: 0,
+      jobsFailed: 0,
+      jobsRemaining: 0,
+      paused: false
+    };
+    if (input.requeue) {
+      let cursor;
+      for (;; ) {
+        const plan = await input.runner.plan({
+          ...lane,
+          limit: PDF_DRAIN_PLAN_PAGE,
+          mimeTypes: PDF_MIME_TYPES,
+          extractorKind: input.extractorKind,
+          policyDecision: "index_allowed",
+          force: true,
+          ...cursor !== undefined ? { cursor } : {}
+        });
+        result.candidatesRequeued += plan.jobsQueued + plan.jobsForced;
+        if (plan.done || plan.nextCursor === undefined)
+          break;
+        cursor = plan.nextCursor;
+      }
+    }
+    while (now() < input.deadlineMs) {
+      const run = await input.runner.run({
+        ...lane,
+        limit: PDF_DRAIN_BATCH,
+        leaseSeconds: 1800,
+        extractorKind: input.extractorKind,
+        preflightExtractorKinds: [input.extractorKind]
+      });
+      result.jobsProcessed += run.processedJobs;
+      result.jobsIndexed += run.counts.indexed;
+      result.jobsMetadataOnly += run.counts.metadata_only;
+      result.jobsFailed += run.counts.failed_retryable + run.counts.failed_terminal;
+      if (run.paused) {
+        result.paused = true;
+        break;
+      }
+      if (run.leasedJobs === 0)
+        break;
+    }
+    result.jobsRemaining = input.runner.counts(lane).filter((count) => count.extractorKind === input.extractorKind && (count.status === "queued" || count.status === "failed_retryable" || count.status === "leased")).reduce((sum2, count) => sum2 + count.jobs, 0);
+    results.push(result);
+  }
+  return results;
+}
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_types();
   init_file_extraction_source();
@@ -75312,6 +75524,7 @@ var init_runner = __esm(() => {
     [EXTRACTION_SINK_SKIPPED_EMPTY_TEXT]: "metadata_only",
     [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only"
   });
+  PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
 });
 
 // src/workers/file-extraction/tiered-store-sink.ts
@@ -75816,10 +76029,30 @@ function fileExtractionCorporaRoster(input) {
       ownerConnectorId: WHATSAPP_PRODUCT_CONNECTOR_ID
     });
   }
+  for (const corpusId of input.googleDrive?.corpusIds ?? []) {
+    canonicalIds.add(corpusId);
+    canonical2.push({
+      corpusId,
+      provider: GOOGLE_DRIVE_PROVIDER,
+      scopes: [GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY],
+      resolveCredentialHandle: input.googleDrive.resolveCredentialHandle,
+      resolveAccountScope: input.googleDrive.resolveAccountScope,
+      ownerConnectorId: GOOGLE_DRIVE_PROVIDER
+    });
+  }
   return [
     ...input.configured.filter((corpus) => !canonicalIds.has(corpus.corpusId)),
     ...canonical2
   ];
+}
+function pdfExtractionLanes(roster, servedCorpusIds) {
+  const served = new Set(servedCorpusIds);
+  return roster.filter((config2) => served.has(config2.corpusId) && (config2.provider === "dropbox" || config2.provider === GOOGLE_DRIVE_PROVIDER)).flatMap((config2) => (config2.resolveScopes?.() ?? config2.scopes).map((approvedScopeKey) => ({
+    corpusId: config2.corpusId,
+    provider: config2.provider,
+    accountScope: config2.resolveAccountScope?.() ?? DROPBOX_SCOPE_ACCOUNT.exec(approvedScopeKey)?.[1] ?? "personal",
+    approvedScopeKey
+  })));
 }
 function parseFileExtractionCorporaEnv(raw) {
   if (!raw?.trim())
@@ -75977,7 +76210,7 @@ function optionalString10(value) {
     return;
   return value.trim();
 }
-var FILE_EXTRACTION_ENABLED_ENV = "OLYMPUS_FILE_EXTRACTION_ENABLED", FILE_EXTRACTION_CORPORA_ENV = "OLYMPUS_FILE_EXTRACTION_CORPORA_JSON", FILE_EXTRACTION_WORKER_ID_ENV = "OLYMPUS_FILE_EXTRACTION_WORKER_ID", FILE_EXTRACTION_SYNC_CONNECTOR_ID = "file-extraction-factory";
+var FILE_EXTRACTION_ENABLED_ENV = "OLYMPUS_FILE_EXTRACTION_ENABLED", FILE_EXTRACTION_CORPORA_ENV = "OLYMPUS_FILE_EXTRACTION_CORPORA_JSON", FILE_EXTRACTION_WORKER_ID_ENV = "OLYMPUS_FILE_EXTRACTION_WORKER_ID", FILE_EXTRACTION_SYNC_CONNECTOR_ID = "file-extraction-factory", DROPBOX_SCOPE_ACCOUNT;
 var init_file_extraction_runtime = __esm(() => {
   init_credential_broker();
   init_types();
@@ -75994,6 +76227,7 @@ var init_file_extraction_runtime = __esm(() => {
   init_store_sink();
   init_tiered_store_sink();
   init_tiered_extraction();
+  DROPBOX_SCOPE_ACCOUNT = /^dropbox\.([a-z0-9_-]+):/i;
 });
 
 // src/workers/file-extraction/readiness-ledger.ts
@@ -86531,6 +86765,7 @@ function createEmailSourceWorker(options = {}) {
     };
   });
   const fileExtraction = options.fileExtraction;
+  const pdfExtractionLanes2 = options.pdfExtractionLanes;
   const dropboxEvalShardExport = options.dropboxEvalShardExport;
   const dropboxSourceExport = options.dropboxSourceExport;
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
@@ -87735,6 +87970,36 @@ function createEmailSourceWorker(options = {}) {
             dry_run: result.dryRun,
             reason: result.reason
           });
+        }
+        if (request.method === "POST" && url.pathname === `${basePath}/source/index/files/extract-pdfs`) {
+          const runner = requireFileExtractionRunner(fileExtraction);
+          const record3 = await parseObjectBody(request);
+          const maxSeconds = Math.min(Math.max(1, Math.floor(asOptionalNumber(record3.max_seconds, "max_seconds") ?? 240)), 900);
+          const lanes = await drainPdfExtraction({
+            runner,
+            lanes: pdfExtractionLanes2?.() ?? [],
+            requeue: record3.requeue === true,
+            deadlineMs: Date.now() + maxSeconds * 1000,
+            extractorKind: TEXT_EXTRACTOR_KIND
+          });
+          const body = {
+            kind: "pdf_extraction_drain",
+            lanes: lanes.map((lane) => ({
+              corpus_id: lane.corpusId,
+              provider: lane.provider,
+              scope_key_hash: lane.scopeKeyHash,
+              candidates_requeued: lane.candidatesRequeued,
+              jobs_processed: lane.jobsProcessed,
+              jobs_indexed: lane.jobsIndexed,
+              jobs_metadata_only: lane.jobsMetadataOnly,
+              jobs_failed: lane.jobsFailed,
+              jobs_remaining: lane.jobsRemaining,
+              paused: lane.paused
+            })),
+            policy: { worker_private_surface: true, source_text_returned: false }
+          };
+          assertNoRawEmailFields(body);
+          return json(body);
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/files/status`) {
           const runner = requireFileExtractionRunner(fileExtraction);
@@ -90178,7 +90443,9 @@ var init_email_source = __esm(() => {
   init_messaging_capture();
   init_unpaired_sources();
   init_pairing_session_paths();
+  init_text();
   init_transcription();
+  init_runner();
   init_answer_latency_log();
   init_answer_latency_trace();
   init_status();
@@ -91070,57 +91337,18 @@ function createCanonicalDropboxSchedulerSource(input) {
   }
   if (input.fileExtraction) {
     for (const approvedScopeKey of extractionScopes) {
-      const scopeHash = schedulerScopeHash(approvedScopeKey);
-      const accountScope = accountFromApprovedScope(approvedScopeKey) ?? "personal";
-      tasks.push({
-        id: `dropbox.files_extract.${scopeHash}`,
-        kind: "extract",
-        writer: true,
-        run: async (context) => {
-          const plan = await input.fileExtraction.plan({
-            corpusId: input.policy.corpusId,
-            provider: "dropbox",
-            accountScope,
-            approvedScopeKey,
-            limit: input.policy.content.plan_limit,
-            policyDecision: "index_allowed",
-            ...context?.checkpoint ? { cursor: context.checkpoint } : {}
-          });
-          const run = await input.fileExtraction.run({
-            corpusId: input.policy.corpusId,
-            provider: "dropbox",
-            accountScope,
-            approvedScopeKey,
-            limit: input.policy.content.batch_size,
-            preflightExtractorKinds: plan.extractorKinds
-          });
-          const counts = {
-            candidates_seen: plan.candidates,
-            jobs_queued: plan.jobsQueued,
-            jobs_existing: plan.jobsExisting,
-            jobs_unroutable: plan.jobsUnroutable,
-            jobs_processed: run.processedJobs,
-            jobs_indexed: run.counts.indexed,
-            jobs_metadata_only: run.counts.metadata_only,
-            jobs_unsupported: run.counts.skipped_unsupported,
-            jobs_too_large: run.counts.skipped_too_large,
-            jobs_failed_retryable: run.counts.failed_retryable,
-            jobs_failed_terminal: run.counts.failed_terminal
-          };
-          if (run.paused) {
-            throw new SourceSchedulerTaskFailure("Dropbox extraction paused at the extractor health gate.", {
-              errorKind: run.preflightErrorKind ?? run.pauseReason ?? "extractor_health_probe_failed",
-              ...run.pauseReason ? { warnings: [run.pauseReason] } : {},
-              counts
-            });
-          }
-          return {
-            status: plan.jobsQueued > 0 || run.processedJobs > 0 ? "progress" : "idle",
-            counts,
-            checkpoint: plan.done ? null : plan.nextCursor ?? context?.checkpoint ?? null
-          };
-        }
-      });
+      tasks.push(fileExtractionSchedulerTask({
+        id: `dropbox.files_extract.${schedulerScopeHash(approvedScopeKey)}`,
+        runner: input.fileExtraction,
+        lane: {
+          corpusId: input.policy.corpusId,
+          provider: "dropbox",
+          accountScope: accountFromApprovedScope(approvedScopeKey) ?? "personal",
+          approvedScopeKey
+        },
+        planLimit: input.policy.content.plan_limit,
+        batchSize: input.policy.content.batch_size
+      }));
     }
   }
   if (input.embeddingProvider) {
@@ -91174,6 +91402,52 @@ function createCanonicalDropboxSchedulerSource(input) {
       if (completions.some((completedAt) => completedAt === undefined))
         return;
       return completions.sort()[0];
+    }
+  };
+}
+function fileExtractionSchedulerTask(input) {
+  return {
+    id: input.id,
+    kind: "extract",
+    writer: true,
+    run: async (context) => {
+      const plan = await input.runner.plan({
+        ...input.lane,
+        limit: input.planLimit,
+        policyDecision: "index_allowed",
+        ...input.mimeTypes ? { mimeTypes: input.mimeTypes } : {},
+        ...context?.checkpoint ? { cursor: context.checkpoint } : {}
+      });
+      const run = await input.runner.run({
+        ...input.lane,
+        limit: input.batchSize,
+        preflightExtractorKinds: plan.extractorKinds
+      });
+      const counts = {
+        candidates_seen: plan.candidates,
+        jobs_queued: plan.jobsQueued,
+        jobs_existing: plan.jobsExisting,
+        jobs_unroutable: plan.jobsUnroutable,
+        jobs_processed: run.processedJobs,
+        jobs_indexed: run.counts.indexed,
+        jobs_metadata_only: run.counts.metadata_only,
+        jobs_unsupported: run.counts.skipped_unsupported,
+        jobs_too_large: run.counts.skipped_too_large,
+        jobs_failed_retryable: run.counts.failed_retryable,
+        jobs_failed_terminal: run.counts.failed_terminal
+      };
+      if (run.paused) {
+        throw new SourceSchedulerTaskFailure("File extraction paused at the extractor health gate.", {
+          errorKind: run.preflightErrorKind ?? run.pauseReason ?? "extractor_health_probe_failed",
+          ...run.pauseReason ? { warnings: [run.pauseReason] } : {},
+          counts
+        });
+      }
+      return {
+        status: plan.jobsQueued > 0 || run.processedJobs > 0 ? "progress" : "idle",
+        counts,
+        checkpoint: plan.done ? null : plan.nextCursor ?? context?.checkpoint ?? null
+      };
     }
   };
 }
@@ -91563,7 +91837,20 @@ function createGoogleDriveConnectorStoreSchedulerSource(input) {
             throw googleDriveSchedulerFailure(error2);
           }
         }
-      }
+      },
+      ...input.fileExtraction ? [GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID].filter((corpusId) => input.fileExtraction.corpusIds().includes(corpusId)).map((corpusId) => fileExtractionSchedulerTask({
+        id: `google_drive.docs_extract.${schedulerScopeHash(corpusId)}`,
+        runner: input.fileExtraction,
+        lane: {
+          corpusId,
+          provider: GOOGLE_DRIVE_PROVIDER,
+          accountScope: input.extractionAccountScope ?? "personal",
+          approvedScopeKey: GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY
+        },
+        planLimit: 25,
+        batchSize: 2,
+        mimeTypes: ["application/pdf"]
+      })) : []
     ],
     lastSyncCompletedAt: lastCompletedAt
   };
@@ -91928,6 +92215,7 @@ var init_source_scheduler = __esm(() => {
   init_operation_error();
   init_source_ingestion_policy();
   init_dropbox_files();
+  init_drive_extraction_source();
   init_connector_store();
   init_google_connectors();
   init_readwise();
@@ -96714,6 +97002,13 @@ async function main() {
   const readConnectorStores = connectorStores;
   const configuredFileExtractionCorpora = parseFileExtractionCorporaEnv(process.env.OLYMPUS_FILE_EXTRACTION_CORPORA_JSON);
   const dropboxExtractionScopes = dropboxPolicyFullExtractionScopeKeys(dropboxIngestionPolicy);
+  const selectedGoogleDriveExtractionHandle = () => selectedSourceCredentialHandle({
+    env: process.env,
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
+    provider: "google_drive",
+    capability: "google_drive.docs.sync",
+    handles: readActiveConnectedHandles(process.env)
+  });
   const fileExtractionCorpora = fileExtractionCorporaRoster({
     configured: configuredFileExtractionCorpora,
     ...dropboxConnectorStore ? {
@@ -96742,7 +97037,17 @@ async function main() {
         })?.handle
       }
     } : {},
-    ...whatsappConnectorStore ? { whatsapp: true } : {}
+    ...whatsappConnectorStore ? { whatsapp: true } : {},
+    ...googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? {
+      googleDrive: {
+        corpusIds: [googleDriveInternalConnectorStore.corpusId, googleDriveSecureConnectorStore.corpusId],
+        resolveCredentialHandle: () => selectedGoogleDriveExtractionHandle()?.handle,
+        resolveAccountScope: () => {
+          const handle = selectedGoogleDriveExtractionHandle();
+          return handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle);
+        }
+      }
+    } : {}
   });
   if (dropboxConnectorStore && dropboxExtractionScopes.length > 0 && !dropboxHandle) {
     console.warn(`[file-extraction] corpus=${DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID} provider=dropbox deferred ` + "reason=no_credential_handle — extraction starts on the next scheduler pass after Dropbox is " + "connected, with no restart.");
@@ -97381,7 +97686,9 @@ async function main() {
           config: olympusConfig,
           ...currentGoogleDriveConnectorStoreSync ? { liveSync: currentGoogleDriveConnectorStoreSync } : {},
           ...googleDriveInternalConnectorStore ? { internalStore: googleDriveInternalConnectorStore } : {},
-          ...googleDriveSecureConnectorStore ? { secureStore: googleDriveSecureConnectorStore } : {}
+          ...googleDriveSecureConnectorStore ? { secureStore: googleDriveSecureConnectorStore } : {},
+          ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
+          extractionAccountScope: currentGoogleDriveHandle?.accountRole?.trim() || accountFromGoogleHandle(currentGoogleDriveHandle?.handle)
         });
         return source && currentGoogleDriveScopeRef && fileSourceScopeAuthority ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentGoogleDriveScopeRef }) : undefined;
       }),
@@ -97722,6 +98029,7 @@ async function main() {
     dropboxIngestionPolicy,
     ...sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {},
     ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
+    ...fileExtractionRuntime ? { pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora, fileExtractionRuntime.corpusIds) } : {},
     ...connectorStores.length > 0 ? { connectorStores } : {},
     ...tierLanes.length > 0 ? {
       connectorStoreTierSiblings: (corpusId) => [
@@ -98401,6 +98709,7 @@ function mergeConnectorStores(stores) {
 }
 var INGESTION_DISPOSITION_SOURCES, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES;
 var init_server4 = __esm(async () => {
+  init_classification();
   init_package_root();
   init_messaging_capture();
   init_messaging_pairing();
@@ -101904,6 +102213,20 @@ async function main2() {
     }
     return;
   }
+  if (args[0] === "source" && args[1] === "extract-pdfs" && !isHelpRequest(args)) {
+    try {
+      console.log(JSON.stringify(await runExtractPdfsCommand(args.slice(2)), null, 2));
+    } catch (error2) {
+      if (error2 instanceof OperationError) {
+        console.error(`Error [${error2.code}]: ${error2.message}`);
+        if (error2.suggestion)
+          console.error(`Fix: ${error2.suggestion}`);
+        process.exit(1);
+      }
+      throw error2;
+    }
+    return;
+  }
   if (args[0] === "tier") {
     try {
       console.log(JSON.stringify(await runTierCommand(args.slice(1)), null, 2));
@@ -102065,6 +102388,8 @@ function v04PublicCliCommandName(args) {
   const [group, command] = commandArgs;
   if (group === "setup" || group === "dashboard" || group === "serve")
     return group;
+  if (group === "source" && command === "extract-pdfs")
+    return "source extract-pdfs";
   if (group === "sovereignty" || group === "sensitivity" || group === "worker" || group === "connect" || group === "connections" || group === "data" || group === "tier") {
     return command ? `${group} ${command}` : undefined;
   }
@@ -102427,6 +102752,7 @@ function printHelp() {
   console.log("  olympus source answer <question>");
   console.log("  olympus source index status");
   console.log("  olympus source index search <query> --corpus-id <corpus>");
+  console.log("  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]");
   console.log(`  olympus setup --preset ${SOVEREIGNTY_PRESETS.join("|")} --yes [--cloud-lane subscription|api-key]`);
   console.log(`  olympus sovereignty init --preset ${SOVEREIGNTY_PRESETS.join("|")} [--path ~/.olympus/sovereignty.json]`);
   console.log("  olympus sensitivity validate [--path ~/.olympus/sensitivity-map.json]");
@@ -102485,6 +102811,7 @@ var PUBLIC_LEAF_USAGE = {
   "connections status": "olympus connections status",
   "connections terms": "olympus connections terms [--accept]",
   dashboard: "olympus dashboard [--read-only] [--no-open]",
+  "source extract-pdfs": "olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]",
   "data export": "olympus data export --output <dir> [--source <id>]",
   "data verify": "olympus data verify --input <dir>",
   "data delete": "olympus data delete --all|--source <id> [--dry-run]",
@@ -102522,7 +102849,8 @@ var COMMAND_GROUP_HELP = {
     "Commands:",
     "  olympus source answer <question>",
     "  olympus source index status",
-    "  olympus source index search <query> --corpus-id <corpus>"
+    "  olympus source index search <query> --corpus-id <corpus>",
+    "  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]"
   ],
   "source index": [
     "Usage: olympus source index <command>",
@@ -103866,6 +104194,54 @@ function formatCliFatalError(error2) {
   }
   return lines;
 }
+async function runExtractPdfsCommand(args) {
+  let run = false;
+  let requeue = false;
+  let maxMinutes = 50;
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--run")
+      run = true;
+    else if (arg === "--requeue")
+      requeue = true;
+    else if (arg === "--max-minutes") {
+      maxMinutes = Number(args[index + 1]);
+      index += 1;
+      if (!Number.isFinite(maxMinutes) || maxMinutes <= 0 || maxMinutes > 1440) {
+        throw new OperationError("invalid_params", "--max-minutes must be between 1 and 1440.");
+      }
+    } else {
+      throw new OperationError("invalid_params", `Unknown extract-pdfs option: ${arg}`);
+    }
+  }
+  if (requeue && !run) {
+    throw new OperationError("invalid_params", "--requeue only applies with --run.");
+  }
+  const email2 = makeContext2().email;
+  const backlog = async () => {
+    const status = await email2.sourceIndexStatus({ includeItems: false });
+    return status.corpora.filter((corpus) => corpus.pdf_extraction !== undefined).map((corpus) => ({ corpus_id: corpus.corpus_id, ...corpus.pdf_extraction }));
+  };
+  if (!run)
+    return { kind: "pdf_extraction_backlog", corpora: await backlog() };
+  const deadline = Date.now() + maxMinutes * 60000;
+  const passes = [];
+  let first = true;
+  for (;; ) {
+    const secondsLeft = Math.floor((deadline - Date.now()) / 1000);
+    if (secondsLeft <= 0)
+      break;
+    const pass = await email2.extractPdfs({ requeue: requeue && first, maxSeconds: Math.min(secondsLeft, 240) });
+    first = false;
+    passes.push(pass);
+    const lanes = Array.isArray(pass.lanes) ? pass.lanes : [];
+    const progressed = lanes.some((lane) => Number(lane.jobs_processed) > 0);
+    const paused = lanes.some((lane) => lane.paused === true);
+    if (!progressed || paused)
+      break;
+  }
+  return { kind: "pdf_extraction_run", passes, corpora: await backlog() };
+}
 export {
   v04PublicCliCommandName,
   runXReconcileRecovery,
@@ -103873,6 +104249,7 @@ export {
   runSourceSchedulerUnparkCancel,
   runSourceSchedulerUnpark,
   runGoogleRequestBudgetFutureRecovery,
+  runExtractPdfsCommand,
   runDashboardTokenCommand,
   runDashboardCommand,
   runConnectionsTermsCommand,

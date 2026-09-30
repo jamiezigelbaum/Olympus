@@ -35,6 +35,7 @@ import {
   appendBoundedTextWarnings,
   boundText,
   buildDerivation,
+  hasPdfSignature,
   mediaDescriptorOutput,
   normalizeExtractedText,
   normalizeMimeType,
@@ -95,6 +96,13 @@ export interface TextExtractorOptions {
   pdfTextCommandRunner?: ExtractionCommandRunner;
   pdfTextTimeoutMs?: number;
   /**
+   * Reads a PDF with no text layer by OCR. Injected by the registry (the OCR
+   * lane owns the command), so this module stays free of it. Answers
+   * undefined when OCR is not installed, which leaves the item visibly
+   * `ocr_required` instead of failing it.
+   */
+  pdfOcr?: PdfOcr;
+  /**
    * Emit a media descriptor for an image instead of declining it.
    *
    * The production lane decided this per job by testing the requested kind
@@ -104,6 +112,12 @@ export interface TextExtractorOptions {
    */
   imageMediaDescriptor?: boolean;
 }
+
+export type PdfOcr = (input: {
+  bytes: Uint8Array;
+  mimeType: string;
+  sizeBytes: number;
+}) => Promise<ExtractorOutput | undefined>;
 
 interface DerivedSlice {
   derivation: ExtractionDerivation;
@@ -130,6 +144,7 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
   const pdfTextCommandRunner = options.pdfTextCommandRunner ?? runExtractionCommand;
   const pdfTextTimeoutMs = options.pdfTextTimeoutMs ?? DEFAULT_PDF_TEXT_TIMEOUT_MS;
   const imageMediaDescriptor = options.imageMediaDescriptor ?? false;
+  const pdfOcr = options.pdfOcr;
   return {
     kind,
     version,
@@ -141,7 +156,9 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
     async extract(input: ExtractorInput): Promise<ExtractorOutput> {
       const bytes = input.bytes;
       if (!bytes) return missingBytesFailure();
-      const mimeType = normalizeMimeType(input.mimeType ?? input.ref.mimeType);
+      const mimeType = hasPdfSignature(bytes)
+        ? PDF_MIME_TYPE
+        : normalizeMimeType(input.mimeType ?? input.ref.mimeType);
       const context: FormatContext = {
         bytes,
         mimeType,
@@ -165,6 +182,7 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
           ...(pdfTextCommand ? { command: pdfTextCommand } : {}),
           commandRunner: pdfTextCommandRunner,
           timeoutMs: pdfTextTimeoutMs,
+          ...(pdfOcr ? { ocr: pdfOcr } : {}),
         });
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
@@ -381,14 +399,17 @@ async function extractPdfText(input: {
   command?: string;
   commandRunner: ExtractionCommandRunner;
   timeoutMs: number;
+  ocr?: PdfOcr;
 }): Promise<ExtractorOutput> {
   if (input.command) {
-    return extractPdfTextWithCommand({
+    const viaCommand = await extractPdfTextWithCommand({
       context: input.context,
       command: input.command,
       commandRunner: input.commandRunner,
       timeoutMs: input.timeoutMs,
+      ...(input.ocr ? { ocr: input.ocr } : {}),
     });
+    if (viaCommand) return viaCommand;
   }
   const streamTexts = extractPdfTextStreams(input.context.bytes);
   const bounded = boundText(
@@ -399,15 +420,22 @@ async function extractPdfText(input: {
     context: input.context,
     bounded,
     warnings: ['pdf_text_layer_only'],
+    ...(input.ocr ? { ocr: input.ocr } : {}),
   });
 }
 
+/**
+ * Undefined when the command is not installed: the inline decoder then reads
+ * the text layer instead, so a host without poppler degrades rather than
+ * failing every PDF.
+ */
 async function extractPdfTextWithCommand(input: {
   context: FormatContext;
   command: string;
   commandRunner: ExtractionCommandRunner;
   timeoutMs: number;
-}): Promise<ExtractorOutput> {
+  ocr?: PdfOcr;
+}): Promise<ExtractorOutput | undefined> {
   const tempDir = await mkdtemp(join(tmpdir(), TEMP_DIR_PREFIX));
   try {
     const inputPath = join(tempDir, 'input.pdf');
@@ -423,7 +451,11 @@ async function extractPdfTextWithCommand(input: {
         '-',
       ],
       timeoutMs: input.timeoutMs,
+    }).catch((error: unknown) => {
+      if (isCommandMissing(error)) return undefined;
+      throw error;
     });
+    if (!result) return undefined;
     const bounded = boundText(
       normalizeExtractedText(result.stdout),
       input.context.maxBoundedTextChars,
@@ -432,18 +464,31 @@ async function extractPdfTextWithCommand(input: {
       context: input.context,
       bounded,
       warnings: ['pdf_text_layer_only', 'pdf_text_poppler'],
+      ...(input.ocr ? { ocr: input.ocr } : {}),
     });
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
 }
 
-function pdfTextExtractionResult(input: {
+export function isCommandMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+}
+
+async function pdfTextExtractionResult(input: {
   context: FormatContext;
   bounded: BoundedText;
   warnings: readonly string[];
-}): ExtractorOutput {
+  ocr?: PdfOcr;
+}): Promise<ExtractorOutput> {
   if (!input.bounded.text) {
+    // No text layer: a scan. OCR reads it when the host has OCR installed.
+    const ocrOutput = await input.ocr?.({
+      bytes: input.context.bytes,
+      mimeType: PDF_MIME_TYPE,
+      sizeBytes: input.context.sizeBytes,
+    });
+    if (ocrOutput) return ocrOutput;
     if (pdfAppearsImageOnly(input.context.bytes)) {
       return mediaDescriptorOutput({
         mimeType: input.context.mimeType,

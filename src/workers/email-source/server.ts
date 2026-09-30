@@ -1,3 +1,4 @@
+import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
 import {
   MessagingCaptureSupervisor,
@@ -15,6 +16,7 @@ import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   createFileExtractionRuntime,
+  pdfExtractionLanes,
   fileExtractionCorporaRoster,
   parseFileExtractionCorporaEnv,
 } from './file-extraction-runtime.ts';
@@ -2323,6 +2325,13 @@ export async function main(): Promise<void> {
   // Dropbox lane the moment the owner connects an account, and it hands that
   // lane THIS runtime — so a roster frozen around a missing boot handle meant
   // the lane emitted no extract task until the process restarted.
+  const selectedGoogleDriveExtractionHandle = () => selectedSourceCredentialHandle({
+    env: process.env,
+    pinEnvName: 'OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE',
+    provider: 'google_drive',
+    capability: 'google_drive.docs.sync',
+    handles: readActiveConnectedHandles(process.env),
+  });
   const fileExtractionCorpora = fileExtractionCorporaRoster({
     configured: configuredFileExtractionCorpora,
     ...(dropboxConnectorStore
@@ -2359,6 +2368,18 @@ export async function main(): Promise<void> {
         }
       : {}),
     ...(whatsappConnectorStore ? { whatsapp: true } : {}),
+    ...(googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
+      ? {
+          googleDrive: {
+            corpusIds: [googleDriveInternalConnectorStore.corpusId, googleDriveSecureConnectorStore.corpusId],
+            resolveCredentialHandle: () => selectedGoogleDriveExtractionHandle()?.handle,
+            resolveAccountScope: () => {
+              const handle = selectedGoogleDriveExtractionHandle();
+              return handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle);
+            },
+          },
+        }
+      : {}),
   });
   if (dropboxConnectorStore && dropboxExtractionScopes.length > 0 && !dropboxHandle) {
     console.warn(
@@ -3367,6 +3388,9 @@ export async function main(): Promise<void> {
           ...(currentGoogleDriveConnectorStoreSync ? { liveSync: currentGoogleDriveConnectorStoreSync } : {}),
           ...(googleDriveInternalConnectorStore ? { internalStore: googleDriveInternalConnectorStore } : {}),
           ...(googleDriveSecureConnectorStore ? { secureStore: googleDriveSecureConnectorStore } : {}),
+          ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
+          extractionAccountScope: currentGoogleDriveHandle?.accountRole?.trim()
+            || accountFromGoogleHandle(currentGoogleDriveHandle?.handle),
           });
           return source && currentGoogleDriveScopeRef && fileSourceScopeAuthority
             ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentGoogleDriveScopeRef })
@@ -3840,6 +3864,9 @@ export async function main(): Promise<void> {
     dropboxIngestionPolicy,
     ...(sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {}),
     ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
+    ...(fileExtractionRuntime
+      ? { pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora, fileExtractionRuntime.corpusIds) }
+      : {}),
     ...(connectorStores.length > 0 ? { connectorStores } : {}),
     ...(tierLanes.length > 0
       ? {
