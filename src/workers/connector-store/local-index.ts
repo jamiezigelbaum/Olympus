@@ -2449,9 +2449,18 @@ export class LocalConnectorStore {
    * (superseded and staged), and of copies held back from embedding (pending
    * classification). Empty for a store with no routed copies.
    */
-  private tierHiddenItemPks(): { hidden: number[]; held: number[]; metadataLayer: number[]; moving: number } {
+  private tierHiddenItemPks(): {
+    hidden: number[];
+    held: number[];
+    metadataLayer: number[];
+    /** The subset of `metadataLayer` whose text no current copy holds yet: still to be read. */
+    metadataLayerContentUnread: number[];
+    moving: number;
+  } {
     const ledger = this.visibilityLedger();
-    if (!ledger || !ledger.corpusHasCopies(this.corpusId)) return { hidden: [], held: [], metadataLayer: [], moving: 0 };
+    if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
+      return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+    }
     const pksFor = (identities: ReadonlyArray<{ provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }>): number[] => {
       const lookup = this.db.query(`
         SELECT item_pk FROM items
@@ -2480,6 +2489,7 @@ export class LocalConnectorStore {
       // (e.g. kept vectors after a split move) but never serves, counts or
       // embeds them.
       metadataLayer: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer')),
+      metadataLayerContentUnread: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_content_unread')),
       moving: ledger.corpusCopyCounts(this.corpusId).moving,
     };
   }
@@ -8622,6 +8632,20 @@ export class LocalConnectorStore {
       ${namesOnlyNotIn}`;
     const parityWhere = `${contentWhere}
       ${heldNotIn}`;
+    // Which files the scope asks to be read. A names copy whose text no copy
+    // holds yet is still waiting to be read, so it counts here even though it
+    // stays out of every text, chunk and parity count above: counting it as
+    // names only reported a freshly chosen Full folder as already finished.
+    const unread = new Set(tier.metadataLayerContentUnread);
+    const keptNamesOnlyPks = tier.metadataLayer.filter((pk) => !unread.has(pk));
+    const fileNamesOnlyNotIn = keptNamesOnlyPks.length > 0
+      ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
+      : '';
+    const fileScopeWhere = `${scope?.contentAllowed === false ? 'AND 0' : ''}
+      ${accountScope ? 'AND i.account_scope = ?' : ''}
+      ${contentFilters.sql}
+      ${hiddenNotIn}
+      ${fileNamesOnlyNotIn}`;
     const jsonList = (pks: readonly number[]): string[] => (pks.length > 0 ? [JSON.stringify(pks)] : []);
     const itemParams = [...(accountScope ? [accountScope] : []), ...itemFilters.params, ...jsonList(tier.hidden)];
     const contentParams = [
@@ -8631,6 +8655,12 @@ export class LocalConnectorStore {
       ...jsonList(tier.metadataLayer),
     ];
     const parityParams = [...contentParams, ...jsonList(tier.held)];
+    const fileScopeParams = [
+      ...(accountScope ? [accountScope] : []),
+      ...contentFilters.params,
+      ...jsonList(tier.hidden),
+      ...jsonList(keptNamesOnlyPks),
+    ];
     const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
@@ -8661,7 +8691,7 @@ export class LocalConnectorStore {
         (SELECT COUNT(*) FROM items i
           WHERE i.tombstoned = 0
             AND LOWER(i.mime_type) <> 'inode/directory'
-            ${contentWhere}
+            ${fileScopeWhere}
         ) AS full_ingestion_files
     `).get(
       ...itemParams,
@@ -8671,7 +8701,7 @@ export class LocalConnectorStore {
       ...parityParams,
       ...parityParams,
       ...contentParams,
-      ...contentParams,
+      ...fileScopeParams,
     ) as {
       items: number;
       files: number;
@@ -8690,8 +8720,8 @@ export class LocalConnectorStore {
         FROM items i
         WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory'
-          ${contentWhere}
-      `).all(...contentParams) as Array<{
+          ${fileScopeWhere}
+      `).all(...fileScopeParams) as Array<{
         locator_uri: string | null;
         title: string | null;
         mime_type: string | null;

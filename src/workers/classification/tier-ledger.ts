@@ -1581,13 +1581,26 @@ export class TierLedger {
    */
   corpusCopyIdentities(
     corpusId: string,
-    filter: 'superseded' | 'staged' | 'held' | 'metadata_layer',
+    filter: 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread',
   ): TierLedgerIdentity[] {
+    // `metadata_layer_content_unread`: a names copy here whose text no current
+    // copy anywhere holds yet. That item is still waiting to be read (the
+    // extraction view's candidate rule), not kept as names only.
     const where = filter === 'held'
       ? `copy_state = 'current' AND embed_hold = 1`
       : filter === 'metadata_layer'
         ? `copy_state = 'current' AND layers = 'metadata'`
-        : `copy_state = '${filter === 'superseded' ? 'superseded' : 'staged'}'`;
+        : filter === 'metadata_layer_content_unread'
+          ? `copy_state = 'current' AND layers = 'metadata'
+            AND NOT EXISTS (
+              SELECT 1 FROM tier_copies other
+              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+                AND other.conversation_key = tier_copies.conversation_key
+                AND other.provider_item_id = tier_copies.provider_item_id
+                AND other.corpus_id <> tier_copies.corpus_id
+                AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
+            )`
+          : `copy_state = '${filter === 'superseded' ? 'superseded' : 'staged'}'`;
     const page = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
       WHERE corpus_id = ? AND ${where}

@@ -389,3 +389,28 @@ describe('P1c: content that lands after listing', () => {
     expect(searchIds(lane.stores.secure_local, 'diagnosis')).toEqual([]);
   });
 });
+
+describe('P1c: status counts a names copy awaiting its text as a file to read', () => {
+  test('a freshly listed item in a Full scope is to-read, not names only; once its text lands elsewhere it leaves this store\'s count', async () => {
+    const dir = workspace();
+    await populateLegacy(dir);
+    const lane = openLane(dir);
+    cleanups.unshift(() => lane.close());
+    await listAll(lane, [...LEGACY, ...NEW]);
+
+    const before = lane.stores.internal!.status({}).counts;
+    expect(before.fullIngestionFiles).toBe(NEW.length);
+    expect(before.scopeMetadataOnlyFiles).toBe(0);
+    expect(before.itemsWithText).toBe(0);
+    expect(before.chunks).toBe(0);
+
+    for (const spec of NEW) await lane.sink.accept(request(spec.id, spec.body));
+
+    // new-scan's text lives in Private now: its names copy here is kept as
+    // names only and counted where its text is.
+    const after = lane.stores.internal!.status({}).counts;
+    expect(after.itemsWithText).toBe(1);
+    expect(after.fullIngestionFiles).toBe(1);
+    expect(lane.stores.secure_local!.status({}).counts.itemsWithText).toBe(LEGACY.length + 1);
+  });
+});
