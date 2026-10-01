@@ -21,6 +21,7 @@
  */
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, notInstalledDashboard, offlineDashboard } from '../shared/dashboard-contract.ts';
 import DASHBOARD_RESOURCE_READ from './generated/chatgpt-dashboard.json';
+import PRIVATE_ANSWER_RESOURCE_READ from './generated/chatgpt-private-answer.json';
 import CHATGPT_SURFACE from './generated/chatgpt-tools.json';
 
 /** Newest first; an `initialize` asking for one of these gets it back. */
@@ -34,6 +35,13 @@ export const CHATGPT_TOOLS = CHATGPT_SURFACE.tools;
 export const CHATGPT_RESOURCES = CHATGPT_SURFACE.resources;
 /** The engine's resources/read of ui://olympus/dashboard: the dashboard lane's real bundle. */
 export const DASHBOARD_RESOURCE_CONTENTS = DASHBOARD_RESOURCE_READ.contents;
+/**
+ * The engine's resources/read of ui://olympus/private-answer. Served offline
+ * too, so a rendered panel loads; its fetch then gets the relay's
+ * `mac_offline` answer (relay.ts, `/private/<id>`).
+ */
+export const PRIVATE_ANSWER_RESOURCE_URI = 'ui://olympus/private-answer';
+export const PRIVATE_ANSWER_RESOURCE_CONTENTS = PRIVATE_ANSWER_RESOURCE_READ.contents;
 
 export const DASHBOARD_TOOL = CHATGPT_TOOLS.find((tool) => tool.name === DASHBOARD_TOOL_NAME)!;
 if (!DASHBOARD_TOOL) throw new Error('generated ChatGPT tool manifest has no dashboard tool');
@@ -96,6 +104,7 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
     case 'resources/templates/list':
       return rpcResult(id, { resourceTemplates: [] });
     case 'resources/read':
+      if (args.uri === PRIVATE_ANSWER_RESOURCE_URI) return rpcResult(id, { contents: PRIVATE_ANSWER_RESOURCE_CONTENTS });
       if (args.uri !== DASHBOARD_RESOURCE_URI) return rpcError(id, -32002, 'Resource not found');
       return rpcResult(id, { contents: DASHBOARD_RESOURCE_CONTENTS });
     case 'tools/call':

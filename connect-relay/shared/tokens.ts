@@ -6,6 +6,15 @@
  *   access token         oly2.<installId>.<secret>
  *   refresh token        oly2r.<installId>.<secret>
  *   authorization code   oly2c.<installId>.<secret>
+ *   private-answer job   oly2p.<installId>.<secret>   (`/private/<id>`, see below)
+ *
+ * A private-answer job id names one answer the ChatGPT private-answer panel
+ * may collect, once, directly from `https://<relay>/private/<id>`: the relay
+ * routes it to the install that minted it, and only that engine knows the
+ * job (single use, ten minutes; src/workers/chatgpt/private-answer-jobs.ts).
+ * The answer itself is end-to-end sealed to a key the panel generates, so the
+ * relay forwards ciphertext only (docs/design/chatgpt-plugin.md, "Private
+ * answer panel").
  *
  * `<secret>` is 32 random bytes, base64url (43 characters). The relay never
  * validates the secret; the engine does, against its own database, so a token
@@ -21,15 +30,16 @@ import { randomBytes } from 'node:crypto';
  */
 export const AUTHENTICATED_RESPONSE_HEADER = 'x-olympus-authenticated';
 
-export type CredentialKind = 'access' | 'refresh' | 'code';
+export type CredentialKind = 'access' | 'refresh' | 'code' | 'private';
 
-const PREFIX: Record<CredentialKind, string> = { access: 'oly2', refresh: 'oly2r', code: 'oly2c' };
+const PREFIX: Record<CredentialKind, string> = { access: 'oly2', refresh: 'oly2r', code: 'oly2c', private: 'oly2p' };
 const SECRET = '[A-Za-z0-9_-]{43}';
 const INSTALL = '[a-z2-7]{32}';
 const PATTERN: Record<CredentialKind, RegExp> = {
   access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
   refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
   code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+  private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`),
 };
 
 export function mintCredential(kind: CredentialKind, installId: string): string {

@@ -10133,11 +10133,12 @@ function credentialInstallId(kind, value) {
 }
 var AUTHENTICATED_RESPONSE_HEADER = "x-olympus-authenticated", PREFIX, SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
 var init_tokens = __esm(() => {
-  PREFIX = { access: "oly2", refresh: "oly2r", code: "oly2c" };
+  PREFIX = { access: "oly2", refresh: "oly2r", code: "oly2c", private: "oly2p" };
   PATTERN = {
     access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
     refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
-    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`)
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
   };
 });
 
@@ -71836,8 +71837,31 @@ var init_identity = __esm(() => {
   init_protocol2();
 });
 
+// connect-relay/shared/private-answer.ts
+function isPanelOrigin(origin, extraOrigins = []) {
+  if (typeof origin !== "string" || origin.length > 255)
+    return false;
+  if (origin === `https://${SANDBOX_HOST}` || SANDBOX_SUBDOMAIN.test(origin))
+    return true;
+  return extraOrigins.includes(origin);
+}
+function privateAnswerJobId(path) {
+  if (!PRIVATE_ANSWER_PATH_PATTERN.test(path))
+    return;
+  return path.slice(PRIVATE_ANSWER_PATH_PREFIX.length);
+}
+function privateAnswerInstallId(jobId) {
+  return credentialInstallId("private", jobId);
+}
+var PRIVATE_ANSWER_PATH_PREFIX = "/private/", PRIVATE_ANSWER_PATH_PATTERN, PRIVATE_ANSWER_MAX_REQUEST_BYTES = 512, SANDBOX_HOST = "web-sandbox.oaiusercontent.com", SANDBOX_SUBDOMAIN;
+var init_private_answer = __esm(() => {
+  init_tokens();
+  PRIVATE_ANSWER_PATH_PATTERN = /^\/private\/oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
+  SANDBOX_SUBDOMAIN = /^https:\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.web-sandbox\.oaiusercontent\.com$/;
+});
+
 // connect-relay/client/forward.ts
-function forwardPath(rawPath, allowed = FORWARDED_PATHS) {
+function forwardPath(rawPath, allowed = FORWARDED_PATHS, method = "POST") {
   if (typeof rawPath !== "string" || rawPath.length > 2048 || !rawPath.startsWith("/") || rawPath.startsWith("//"))
     return;
   const pathOnly = rawPath.split("?", 1)[0];
@@ -71849,7 +71873,10 @@ function forwardPath(rawPath, allowed = FORWARDED_PATHS) {
   } catch {
     return;
   }
-  if (url.pathname !== pathOnly || !allowed.includes(url.pathname))
+  if (url.pathname !== pathOnly)
+    return;
+  const postPattern = method === "POST" && url.search === "" && POST_PATH_PATTERNS.some((pattern) => pattern.test(url.pathname));
+  if (!allowed.includes(url.pathname) && !postPattern)
     return;
   return `${url.pathname}${url.search}`;
 }
@@ -71874,9 +71901,11 @@ function forwardResponseHeaders(headers) {
   });
   return out;
 }
-var RELAY_HEADER = "x-olympus-relay", FORWARDED_PATHS, DEMO_AUTHORIZE_PATH = "/connect/demo/authorize", FORWARDED_METHODS, HOP_BY_HOP, UNTRUSTED;
+var RELAY_HEADER = "x-olympus-relay", FORWARDED_PATHS, POST_PATH_PATTERNS, DEMO_AUTHORIZE_PATH = "/connect/demo/authorize", FORWARDED_METHODS, HOP_BY_HOP, UNTRUSTED;
 var init_forward = __esm(() => {
+  init_private_answer();
   FORWARDED_PATHS = ["/mcp", "/connect/token", "/connect/revoke"];
+  POST_PATH_PATTERNS = [PRIVATE_ANSWER_PATH_PATTERN];
   FORWARDED_METHODS = new Set(["GET", "POST", "DELETE"]);
   HOP_BY_HOP = new Set([
     "connection",
@@ -72110,7 +72139,7 @@ class RelayClient {
     }
     const request = {
       method,
-      path: FORWARDED_METHODS.has(method) && typeof message.path === "string" ? forwardPath(message.path, this.options.forwardedPaths) : undefined,
+      path: FORWARDED_METHODS.has(method) && typeof message.path === "string" ? forwardPath(message.path, this.options.forwardedPaths, method) : undefined,
       headers,
       buffer: new Uint8Array(new ArrayBuffer(0)),
       bytes: 0,
@@ -97554,6 +97583,14 @@ summary{cursor:pointer;border-radius:0.375rem}
 });
 
 // src/workers/chatgpt/dashboard-resource.ts
+var exports_dashboard_resource = {};
+__export(exports_dashboard_resource, {
+  dashboardResourceMeta: () => dashboardResourceMeta,
+  dashboardResourceHtml: () => dashboardResourceHtml,
+  MCP_APP_MIME_TYPE: () => MCP_APP_MIME_TYPE,
+  DASHBOARD_UI_DOMAIN: () => DASHBOARD_UI_DOMAIN,
+  DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE
+});
 function dashboardResourceMeta() {
   return {
     ui: { csp: { connectDomains: [], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
@@ -97915,6 +97952,212 @@ var init_dashboard_view_model = __esm(() => {
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
 });
 
+// src/workers/chatgpt/private-answer-contract.ts
+var exports_private_answer_contract = {};
+__export(exports_private_answer_contract, {
+  UNAVAILABLE_PRIVATE_ANSWER_MODEL: () => UNAVAILABLE_PRIVATE_ANSWER_MODEL,
+  PRIVATE_MATCH_COUNT_CAP: () => PRIVATE_MATCH_COUNT_CAP,
+  PRIVATE_ANSWER_RESOURCE_URI: () => PRIVATE_ANSWER_RESOURCE_URI,
+  PRIVATE_ANSWER_META_KEY: () => PRIVATE_ANSWER_META_KEY,
+  PRIVATE_ANSWER_JOB_TTL_MS: () => PRIVATE_ANSWER_JOB_TTL_MS
+});
+var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_MATCH_COUNT_CAP = 50, UNAVAILABLE_PRIVATE_ANSWER_MODEL;
+var init_private_answer_contract = __esm(() => {
+  PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
+  UNAVAILABLE_PRIVATE_ANSWER_MODEL = {
+    status: () => ({ state: "no_model" }),
+    answerPrivately: async () => {
+      throw new Error("no private answer model");
+    }
+  };
+});
+
+// src/workers/chatgpt/private-answer-resource.ts
+function privateAnswerResourceMeta(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN) {
+  return {
+    ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: true },
+    "openai/widgetDescription": "Shows how many private items match and, when the user asks, a private answer that ChatGPT never receives."
+  };
+}
+function privateAnswerResourceHtml(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN) {
+  return privateAnswerPageHtml({ relayOrigin });
+}
+function privateAnswerPageHtml(options) {
+  const config2 = JSON.stringify({ relayOrigin: options.relayOrigin, metaKey: PRIVATE_ANSWER_META_KEY }).replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Olympus private answer</title>
+<style>
+:root { color-scheme: light dark; --text: #0d0d0d; --muted: #5d5d5d; --line: #d9d9d9; --accent: #5b45c2; --on-accent: #fff; }
+@media (prefers-color-scheme: dark) { :root { --text: #ececec; --muted: #b4b4b4; --line: #4a4a4a; --accent: #a594f0; --on-accent: #14121f; } }
+body { margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--text); background: transparent; }
+#root { padding: 12px 16px; }
+#root:empty { padding: 0; }
+.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.badge { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
+button { font: inherit; border: 0; border-radius: 8px; padding: 6px 12px; background: var(--accent); color: var(--on-accent); cursor: pointer; }
+button:disabled { opacity: .6; cursor: default; }
+.answer { white-space: pre-wrap; margin: 8px 0 0; }
+.muted { color: var(--muted); }
+ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="root" aria-live="polite"></div>
+<script>
+(function () {
+  "use strict";
+  var CONFIG = ${config2};
+  var root = document.getElementById("root");
+  var info = null;
+  var phase = "idle";
+  var message = "";
+  var result = null;
+
+  function post(msg) { if (window.parent && window.parent !== window) window.parent.postMessage(msg, "*"); }
+  var nextId = 1;
+  function request(method, params) { post({ jsonrpc: "2.0", id: nextId++, method: method, params: params || {} }); }
+  function notify(method, params) { post({ jsonrpc: "2.0", method: method, params: params || {} }); }
+
+  function accept(meta) {
+    var value = meta && typeof meta === "object" ? meta[CONFIG.metaKey] : null;
+    if (!value || value.v !== 1 || typeof value.count !== "number" || value.count <= 0) return;
+    if (info && info.jobId === value.jobId) return;
+    info = value; phase = "idle"; message = ""; result = null; render();
+  }
+  window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) return;
+    var msg = event.data;
+    if (!msg || msg.jsonrpc !== "2.0") return;
+    if (msg.method === "ui/notifications/tool-result" && msg.params) accept(msg.params._meta);
+  });
+  function readGlobals() { var host = window.openai; if (host && host.toolResponseMetadata) accept(host.toolResponseMetadata); }
+  window.addEventListener("openai:set_globals", readGlobals);
+
+  function b64urlToBytes(text) {
+    var s = text.replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    var bin = atob(s), out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function bytesToB64url(bytes) {
+    var bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/, "");
+  }
+  var subtle = window.crypto && window.crypto.subtle;
+
+  async function open(jobId, privateKey, sealed) {
+    var enc = new TextEncoder();
+    var macKey = await subtle.importKey("raw", b64urlToBytes(sealed.macPublicKey), { name: "ECDH", namedCurve: "P-256" }, false, []);
+    var shared = await subtle.deriveBits({ name: "ECDH", public: macKey }, privateKey, 256);
+    var ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+    var key = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: enc.encode(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    var plain = await subtle.decrypt({ name: "AES-GCM", iv: b64urlToBytes(sealed.iv), additionalData: enc.encode(jobId) }, key, b64urlToBytes(sealed.ciphertext));
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+
+  var FAIL = {
+    claimed: "This private answer was already opened somewhere else. Ask again to get a new one.",
+    gone: "This private answer is no longer available. Ask again to get a new one.",
+    failed: "Olympus could not answer this privately on your Mac.",
+    mac_offline: "Your Mac is offline. Ask again when your Mac is awake and online.",
+    forbidden: "This panel cannot reach Olympus from here.",
+    invalid: "Olympus could not read this request.",
+    network: "Olympus could not be reached. Try again shortly."
+  };
+
+  async function show() {
+    if (!info || !info.jobId || phase === "working") return;
+    if (!subtle) { phase = "error"; message = FAIL.forbidden; render(); return; }
+    phase = "working"; message = "Preparing the private answer on your Mac..."; render();
+    var jobId = info.jobId;
+    try {
+      var pair = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+      var publicKey = bytesToB64url(new Uint8Array(await subtle.exportKey("raw", pair.publicKey)));
+      var deadline = Date.now() + 10 * 60 * 1000;
+      for (;;) {
+        var response = await fetch(CONFIG.relayOrigin + "/private/" + jobId, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ v: 1, publicKey: publicKey }), credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer"
+        });
+        var body = null;
+        try { body = await response.json(); } catch (e) { body = null; }
+        var status = body && typeof body.status === "string" ? body.status : "";
+        if (response.status === 200 && status === "ready") {
+          result = await open(jobId, pair.privateKey, body);
+          phase = "done"; message = ""; render(); return;
+        }
+        if ((response.status === 202 && status === "pending") || response.status === 429 || (response.status === 503 && status !== "mac_offline")) {
+          if (Date.now() > deadline) { phase = "error"; message = FAIL.gone; render(); return; }
+          var wait = Number(response.headers.get("retry-after")) || 2;
+          await new Promise(function (resolve) { setTimeout(resolve, Math.min(10, Math.max(1, wait)) * 1000); });
+          continue;
+        }
+        phase = "error"; message = FAIL[status] || FAIL.network; render(); return;
+      }
+    } catch (error) {
+      phase = "error"; message = FAIL.network; render();
+    }
+  }
+
+  function el(tag, text, cls) { var node = document.createElement(tag); if (text) node.textContent = text; if (cls) node.className = cls; return node; }
+  function render() {
+    root.textContent = "";
+    if (info) {
+      var n = info.count >= 50 ? "50+" : String(info.count);
+      var row = el("div", null, "row");
+      row.appendChild(el("strong", n + (info.count === 1 ? " private item matches" : " private items match")));
+      row.appendChild(el("span", "Not sent to ChatGPT", "badge"));
+      root.appendChild(row);
+      if (info.state === "no_model") root.appendChild(el("p", "Set up a private answer model in Olympus on your Mac to see a private answer here.", "muted"));
+      else if (info.state === "model_downloading") root.appendChild(el("p", "The private answer model is still downloading" + (typeof info.percent === "number" ? " (" + info.percent + "%)" : "") + ". Ask again when it is ready.", "muted"));
+      else if (phase === "done" && result) {
+        root.appendChild(el("p", String(result.answer || ""), "answer"));
+        var cites = Array.isArray(result.citations) ? result.citations : [];
+        if (cites.length) {
+          var list = el("ol");
+          cites.forEach(function (c) { list.appendChild(el("li", [c.source, c.title, c.date].filter(Boolean).join(" \\u00b7 "))); });
+          root.appendChild(list);
+        }
+      } else {
+        var button = el("button", "Show private answer");
+        button.disabled = phase === "working" || phase === "error";
+        button.addEventListener("click", show);
+        root.appendChild(button);
+        if (message) root.appendChild(el("p", message, "muted"));
+      }
+    }
+    var height = Math.ceil(document.documentElement.scrollHeight || 0);
+    if (window.openai && typeof window.openai.notifyIntrinsicHeight === "function") window.openai.notifyIntrinsicHeight(height);
+    notify("ui/notifications/size-changed", { height: height });
+  }
+
+  readGlobals();
+  render();
+  request("ui/initialize", { protocolVersion: "2026-01-26", appInfo: { name: "olympus-private-answer", version: "1" }, appCapabilities: {} });
+  notify("ui/notifications/initialized");
+})();
+</script>
+</body>
+</html>
+`;
+}
+var PRIVATE_ANSWER_RESOURCE, PRIVATE_ANSWER_RELAY_ORIGIN = "https://mcp.olympusplugin.ai";
+var init_private_answer_resource = __esm(() => {
+  init_dashboard_resource();
+  init_private_answer_contract();
+  PRIVATE_ANSWER_RESOURCE = {
+    uri: PRIVATE_ANSWER_RESOURCE_URI,
+    name: "Olympus private answer",
+    mimeType: MCP_APP_MIME_TYPE
+  };
+});
+
 // src/workers/chatgpt/response-builder.ts
 function dashboardToolResult(view) {
   const structured = copyDashboardViewModel(view);
@@ -98054,7 +98297,8 @@ function answerToolResult(raw, options = {}) {
   if (!record3 || typeof record3.answer !== "string") {
     return errorToolResult(new OperationError("source_index_error", "unexpected answer shape"));
   }
-  let privateMatched = options.privateMatched === true;
+  const panel = copyPrivateMatch(options.privateMatch);
+  let privateMatched = options.privateMatched === true || panel !== undefined;
   const citations = [];
   for (const value of Array.isArray(record3.evidence) ? record3.evidence : []) {
     const evidence = asRecord17(value);
@@ -98081,11 +98325,45 @@ function answerToolResult(raw, options = {}) {
   }
   if (notes.length > 0)
     textParts.push("", ...notes);
+  const structuredContent = {
+    status: "answered",
+    answer,
+    citations: shownCitations,
+    ...notes.length > 0 ? { notes } : {}
+  };
+  if (!panel)
+    return { content: [{ type: "text", text: textParts.join(`
+`) }], structuredContent };
+  structuredContent.privateMatch = {
+    count: panel.count,
+    panelState: panel.state,
+    ...panel.percent !== undefined ? { percent: panel.percent } : {}
+  };
   return {
     content: [{ type: "text", text: textParts.join(`
 `) }],
-    structuredContent: { status: "answered", answer, citations: shownCitations, ...notes.length > 0 ? { notes } : {} }
+    structuredContent,
+    _meta: { [PRIVATE_ANSWER_META_KEY]: panel }
   };
+}
+function copyPrivateMatch(match) {
+  if (!match || !finite2(match.count))
+    return;
+  const count2 = Math.min(PRIVATE_MATCH_COUNT_CAP, whole(match.count));
+  if (count2 === 0)
+    return;
+  const state = PANEL_STATES.has(match.panelState) ? match.panelState : "no_model";
+  const out = { v: 1, count: count2, state };
+  if (state === "ready") {
+    if (typeof match.jobId !== "string" || credentialInstallId("private", match.jobId) === undefined) {
+      out.state = "no_model";
+    } else {
+      out.jobId = match.jobId;
+    }
+  }
+  if (state === "model_downloading" && finite2(match.percent))
+    out.percent = Math.max(0, Math.min(100, Math.round(match.percent)));
+  return out;
 }
 function citationFrom(evidence) {
   const source = sourceLabel3(evidence.provider, evidence.family);
@@ -98139,6 +98417,12 @@ function dashboardToolMeta() {
     "openai/ui": { entrypoints: [{ type: "global" }] }
   };
 }
+function answerToolMeta() {
+  return {
+    ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_URI },
+    "openai/outputTemplate": PRIVATE_ANSWER_RESOURCE_URI
+  };
+}
 function text(value) {
   if (typeof value !== "string")
     return "";
@@ -98185,11 +98469,13 @@ function safeHref2(value) {
 function asRecord17(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
-var MAX_TEXT = 400, MAX_ANSWER, MAX_CITATIONS = 20, UNSAFE_CHARS, FIX_TOOLS, FIX_HREF_HOST = "olympusplugin.ai", CONNECTION_STATES, CONNECTION_ACTIONS, STATUSES, UNITS, EMBEDDING_STATES, ANSWER_KINDS, CITABLE_TRUST_DOMAINS, PENDING_TEXT, PRIVATE_ANSWER_WITHHELD = "Olympus can answer this only from private items, which stay on your Mac.", ERROR_TEXT, ChatGptSurfaceError;
+var MAX_TEXT = 400, MAX_ANSWER, MAX_CITATIONS = 20, UNSAFE_CHARS, FIX_TOOLS, FIX_HREF_HOST = "olympusplugin.ai", CONNECTION_STATES, CONNECTION_ACTIONS, STATUSES, UNITS, EMBEDDING_STATES, ANSWER_KINDS, CITABLE_TRUST_DOMAINS, PENDING_TEXT, PANEL_STATES, PRIVATE_ANSWER_WITHHELD = "Olympus can answer this only from private items, which stay on your Mac.", ERROR_TEXT, ChatGptSurfaceError;
 var init_response_builder = __esm(() => {
   init_operation_error();
   init_source_dashboard();
   init_vocabulary();
+  init_tokens();
+  init_private_answer_contract();
   MAX_ANSWER = 64 * 1024;
   UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
   FIX_TOOLS = new Set([DASHBOARD_TOOL_NAME]);
@@ -98201,6 +98487,7 @@ var init_response_builder = __esm(() => {
   ANSWER_KINDS = new Set(["built_in", "venice", "local"]);
   CITABLE_TRUST_DOMAINS = new Set(["public_safe", "internal"]);
   PENDING_TEXT = "Olympus is still preparing this answer on the Mac. Call source_answer_result with this job_id " + "(repeat while it says working). Do not ask the question again.";
+  PANEL_STATES = new Set(["ready", "no_model", "model_downloading"]);
   ERROR_TEXT = {
     invalid_params: "The request was not valid. Check the arguments and try again.",
     invalid_request: "The request was not valid. Check the arguments and try again.",
@@ -98255,7 +98542,7 @@ async function callChatGptTool(name, args, ctx, options, signal) {
         if (!question)
           throw new ChatGptSurfaceError("invalid_params");
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
-        const [raw, privateMatched] = await Promise.all([
+        const [raw, probed] = await Promise.all([
           runOperation(SOURCE_ANSWER_TOOL.name, ctx, {
             question,
             include_secure_local: false,
@@ -98264,18 +98551,20 @@ async function callChatGptTool(name, args, ctx, options, signal) {
           }),
           probe(question, ctx).catch(() => false)
         ]);
+        const match = normalizeProbe(probed);
+        const privateMatch = match.count > 0 ? beginPrivateAnswer(question, match, options) : undefined;
         const jobId = pendingJobId(raw);
         if (jobId)
-          rememberPrivateMatch(jobId, privateMatched);
-        return answerToolResult(raw, { privateMatched });
+          rememberPrivateMatch(jobId, privateMatch);
+        return answerToolResult(raw, { privateMatched: privateMatch !== undefined, ...privateMatch ? { privateMatch } : {} });
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
         const jobId = typeof args.job_id === "string" ? args.job_id.trim() : "";
         if (!jobId)
           throw new ChatGptSurfaceError("invalid_params");
         const raw = await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId });
-        const privateMatched = privateMatchForJob(jobId, pendingJobId(raw) === undefined);
-        return answerToolResult(raw, { privateMatched });
+        const privateMatch = privateMatchForJob(jobId, pendingJobId(raw) === undefined);
+        return answerToolResult(raw, { privateMatched: privateMatch !== undefined, ...privateMatch ? { privateMatch } : {} });
       }
       default:
         throw new ChatGptSurfaceError("unknown_tool");
@@ -98284,23 +98573,49 @@ async function callChatGptTool(name, args, ctx, options, signal) {
     return errorToolResult(error2);
   }
 }
+function normalizeProbe(value) {
+  if (value === true)
+    return { count: 1, evidence: [] };
+  if (typeof value === "number")
+    return { count: Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0, evidence: [] };
+  if (value && typeof value === "object" && Number.isFinite(value.count)) {
+    return { count: Math.max(0, Math.floor(value.count)), evidence: Array.isArray(value.evidence) ? value.evidence : [] };
+  }
+  return { count: 0, evidence: [] };
+}
+function beginPrivateAnswer(question, match, options) {
+  if (!options.privateAnswers)
+    return { count: match.count, panelState: "no_model" };
+  try {
+    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence });
+  } catch {
+    return { count: match.count, panelState: "no_model" };
+  }
+}
 async function defaultPrivateMatchProbe(question, ctx) {
   const query = question.slice(0, PROBE_QUERY_MAX_CHARS);
   const corpora = createPublicSourceCorpusRegistry(ctx.config.sourceIndex.corpusRegistry).list("search").filter((corpus) => corpus.trustDomain === "secure_local");
+  const none = { count: 0, evidence: [] };
   if (corpora.length === 0)
-    return false;
-  const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: 1, allTiers: false }).then((result) => Array.isArray(result.hits) && result.hits.length > 0, () => false));
+    return none;
+  const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
   const timeout = new Promise((resolve10) => {
-    const timer = setTimeout(() => resolve10(false), PROBE_TIMEOUT_MS);
+    const timer = setTimeout(() => resolve10(none), PROBE_TIMEOUT_MS);
     timer.unref?.();
   });
-  return Promise.race([Promise.all(searches).then((hits) => hits.some(Boolean)), timeout]);
+  return Promise.race([
+    Promise.all(searches).then((perCorpus) => {
+      const evidence = perCorpus.flat();
+      return { count: evidence.length, evidence };
+    }),
+    timeout
+  ]);
 }
 function pendingJobId(raw) {
   const record3 = typeof raw === "object" && raw !== null ? raw : undefined;
   return record3?.status === "working" && typeof record3.job_id === "string" ? record3.job_id : undefined;
 }
-function rememberPrivateMatch(jobId, matched) {
+function rememberPrivateMatch(jobId, match) {
   const now = Date.now();
   for (const [id, entry] of privateMatchByJob)
     if (entry.expiresAt <= now)
@@ -98311,13 +98626,13 @@ function rememberPrivateMatch(jobId, matched) {
       break;
     privateMatchByJob.delete(oldest);
   }
-  privateMatchByJob.set(jobId, { matched, expiresAt: now + PRIVATE_MATCH_TTL_MS });
+  privateMatchByJob.set(jobId, { match, expiresAt: now + PRIVATE_MATCH_TTL_MS });
 }
 function privateMatchForJob(jobId, done) {
   const entry = privateMatchByJob.get(jobId);
   if (done)
     privateMatchByJob.delete(jobId);
-  return entry !== undefined && entry.expiresAt > Date.now() && entry.matched;
+  return entry !== undefined && entry.expiresAt > Date.now() ? entry.match : undefined;
 }
 async function runOperation(name, ctx, params) {
   const operation = findOperationByName(name);
@@ -98337,6 +98652,16 @@ async function dashboardViewModel(options, signal) {
   return buildChatGptDashboardViewModel(view, embedding ? { embedding } : {});
 }
 function readChatGptResource(uri) {
+  if (uri === PRIVATE_ANSWER_RESOURCE_URI) {
+    return {
+      contents: [{
+        uri: PRIVATE_ANSWER_RESOURCE.uri,
+        mimeType: PRIVATE_ANSWER_RESOURCE.mimeType,
+        text: privateAnswerResourceHtml(),
+        _meta: privateAnswerResourceMeta()
+      }]
+    };
+  }
   if (uri !== DASHBOARD_RESOURCE_URI) {
     throw new McpError(ErrorCode.InvalidParams, "Unknown resource.");
   }
@@ -98353,12 +98678,12 @@ function createChatGptMcpServer(makeOperationContext, options) {
   const server = new Server({ name: "olympus", version: VERSION }, { capabilities: { tools: {}, resources: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listChatGptTools(makeOperationContext()) }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal));
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [{ ...DASHBOARD_RESOURCE }] }));
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: CHATGPT_RESOURCES.map((resource) => ({ ...resource })) }));
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
   return server;
 }
-var READ_ONLY, OAUTH2_REQUIRED, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, ANSWER_TOOLS, CHATGPT_TOOLS, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000;
+var READ_ONLY, OAUTH2_REQUIRED, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, ANSWER_TOOLS, CHATGPT_TOOLS, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
   init_server2();
   init_types2();
@@ -98368,6 +98693,8 @@ var init_mcp_surface = __esm(() => {
   init_version();
   init_dashboard_resource();
   init_dashboard_view_model();
+  init_private_answer_contract();
+  init_private_answer_resource();
   init_response_builder();
   READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
   OAUTH2_REQUIRED = [{ type: "oauth2", scopes: [] }];
@@ -98409,7 +98736,8 @@ var init_mcp_surface = __esm(() => {
       additionalProperties: false
     },
     annotations: READ_ONLY,
-    securitySchemes: OAUTH2_REQUIRED
+    securitySchemes: OAUTH2_REQUIRED,
+    _meta: answerToolMeta()
   };
   SOURCE_ANSWER_RESULT_TOOL = {
     name: "source_answer_result",
@@ -98426,7 +98754,8 @@ var init_mcp_surface = __esm(() => {
       additionalProperties: false
     },
     annotations: READ_ONLY,
-    securitySchemes: OAUTH2_REQUIRED
+    securitySchemes: OAUTH2_REQUIRED,
+    _meta: answerToolMeta()
   };
   SOURCE_STATUS_TOOL = {
     name: "source_index_status",
@@ -98444,6 +98773,7 @@ var init_mcp_surface = __esm(() => {
   CHATGPT_TOOLS = [DASHBOARD_TOOL, SOURCE_STATUS_TOOL, ...ANSWER_TOOLS];
   privateMatchByJob = new Map;
   PRIVATE_MATCH_TTL_MS = 30 * 60000;
+  CHATGPT_RESOURCES = [DASHBOARD_RESOURCE, PRIVATE_ANSWER_RESOURCE];
 });
 
 // src/workers/remote-request-body.ts
@@ -99696,6 +100026,302 @@ var init_handler = __esm(() => {
   PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/;
   PKCE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
   LOOPBACK_HOSTNAMES4 = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
+// src/workers/chatgpt/private-answer-crypto.ts
+function toBase64Url(bytes) {
+  return Buffer.from(bytes).toString("base64url");
+}
+function fromBase64Url(value, expectedBytes) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 1e6 || !/^[A-Za-z0-9_-]+$/.test(value))
+    return;
+  const bytes = new Uint8Array(Buffer.from(value, "base64url"));
+  if (expectedBytes !== undefined && bytes.byteLength !== expectedBytes)
+    return;
+  return bytes;
+}
+async function importPanelPublicKey(value) {
+  const raw = fromBase64Url(value, RAW_PUBLIC_KEY_BYTES);
+  if (!raw || raw[0] !== 4)
+    return;
+  try {
+    const key = await subtle().importKey("raw", raw, { name: "ECDH", namedCurve: PRIVATE_ANSWER_CURVE }, false, []);
+    return { key, raw: toBase64Url(raw) };
+  } catch {
+    return;
+  }
+}
+async function aesKey(privateKey, peerPublicKey, jobId, usage) {
+  const shared = await subtle().deriveBits({ name: "ECDH", public: peerPublicKey }, privateKey, 256);
+  const ikm = await subtle().importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+  return subtle().deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf82(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
+}
+async function sealPrivateAnswer(jobId, panelPublicKey, plaintext) {
+  const mac2 = await subtle().generateKey({ name: "ECDH", namedCurve: PRIVATE_ANSWER_CURVE }, false, ["deriveBits"]);
+  const key = await aesKey(mac2.privateKey, panelPublicKey, jobId, "encrypt");
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const ciphertext = await subtle().encrypt({ name: "AES-GCM", iv, additionalData: utf82(jobId) }, key, utf82(plaintext));
+  const macPublicKey = new Uint8Array(await subtle().exportKey("raw", mac2.publicKey));
+  return { macPublicKey: toBase64Url(macPublicKey), iv: toBase64Url(iv), ciphertext: toBase64Url(new Uint8Array(ciphertext)) };
+}
+var PRIVATE_ANSWER_CURVE = "P-256", RAW_PUBLIC_KEY_BYTES = 65, IV_BYTES = 12, subtle = () => globalThis.crypto.subtle, utf82 = (value) => new TextEncoder().encode(value);
+
+// src/workers/chatgpt/private-answer-jobs.ts
+var exports_private_answer_jobs = {};
+__export(exports_private_answer_jobs, {
+  withPrivateAnswerRoute: () => withPrivateAnswerRoute,
+  plaintextOf: () => plaintextOf,
+  isPrivateAnswerRequest: () => isPrivateAnswerRequest,
+  createPrivateAnswerHandler: () => createPrivateAnswerHandler,
+  PrivateAnswerJobs: () => PrivateAnswerJobs
+});
+import { randomBytes as randomBytes16 } from "node:crypto";
+
+class PrivateAnswerJobs {
+  jobs;
+  now;
+  ttlMs;
+  maxJobs;
+  maxClaimsPerJob;
+  claimRate;
+  analysisTimeoutMs;
+  tokens;
+  refilledAt;
+  queue;
+  options;
+  constructor(options) {
+    this.options = options;
+    this.jobs = new Map;
+    this.queue = Promise.resolve();
+    this.now = options.now ?? Date.now;
+    this.ttlMs = options.ttlMs ?? PRIVATE_ANSWER_JOB_TTL_MS;
+    this.maxJobs = options.maxJobs ?? 200;
+    this.maxClaimsPerJob = options.maxClaimsPerJob ?? 400;
+    this.claimRate = options.claimRate ?? { capacity: 60, refillPerSecond: 10 };
+    this.analysisTimeoutMs = options.analysisTimeoutMs ?? 5 * 60000;
+    this.tokens = this.claimRate.capacity;
+    this.refilledAt = this.now();
+  }
+  get size() {
+    return this.jobs.size;
+  }
+  begin(input) {
+    const count2 = Math.max(0, Math.min(PRIVATE_MATCH_COUNT_CAP, Math.floor(input.count)));
+    const status = this.options.model().status();
+    if (status.state === "model_downloading") {
+      return {
+        count: count2,
+        panelState: "model_downloading",
+        ...typeof status.percent === "number" && Number.isFinite(status.percent) ? { percent: Math.max(0, Math.min(100, Math.round(status.percent))) } : {}
+      };
+    }
+    if (status.state !== "ready")
+      return { count: count2, panelState: "no_model" };
+    const installId = this.options.installId();
+    if (!installId || count2 === 0 || input.evidence.length === 0)
+      return { count: count2, panelState: "no_model" };
+    this.sweep();
+    while (this.jobs.size >= this.maxJobs) {
+      const oldest = this.jobs.keys().next().value;
+      if (oldest === undefined)
+        break;
+      this.drop(oldest);
+    }
+    const id = `oly2p.${installId}.${randomBytes16(32).toString("base64url")}`;
+    this.jobs.set(id, {
+      id,
+      expiresAt: this.now() + this.ttlMs,
+      question: input.question.slice(0, MAX_QUESTION_CHARS),
+      evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
+      claims: 0
+    });
+    return { count: count2, panelState: "ready", jobId: id };
+  }
+  async claim(jobId, publicKey) {
+    if (!this.takeToken())
+      return { status: 429, body: { status: "rate_limited" }, retryAfterSeconds: 5 };
+    this.sweep();
+    const job = this.jobs.get(jobId);
+    if (!job || privateAnswerInstallId(jobId) !== this.options.installId())
+      return gone();
+    const panel = await importPanelPublicKey(publicKey);
+    if (!panel)
+      return { status: 400, body: { status: "invalid" } };
+    if (this.jobs.get(jobId) !== job)
+      return gone();
+    if (job.claimKey !== undefined && job.claimKey !== panel.raw)
+      return { status: 409, body: { status: "claimed" } };
+    job.claims += 1;
+    if (job.claims > this.maxClaimsPerJob) {
+      this.drop(jobId);
+      return gone();
+    }
+    if (job.claimKey === undefined) {
+      job.claimKey = panel.raw;
+      job.panelKey = panel.key;
+      this.startAnalysis(job);
+    }
+    const outcome = job.outcome;
+    if (!outcome)
+      return { status: 202, body: { status: "pending" }, retryAfterSeconds: PENDING_RETRY_SECONDS };
+    this.drop(jobId);
+    if (outcome.kind === "failed")
+      return { status: 200, body: { status: "failed" } };
+    const sealed = await sealPrivateAnswer(jobId, job.panelKey, outcome.plaintext);
+    return { status: 200, body: { status: "ready", v: 1, ...sealed } };
+  }
+  sweep(at = this.now()) {
+    for (const [id, job] of this.jobs)
+      if (job.expiresAt <= at)
+        this.drop(id);
+  }
+  drop(id) {
+    const job = this.jobs.get(id);
+    if (!job)
+      return;
+    job.abort?.abort();
+    job.question = undefined;
+    job.evidence = undefined;
+    this.jobs.delete(id);
+  }
+  startAnalysis(job) {
+    const abort = new AbortController;
+    job.abort = abort;
+    this.queue = this.queue.then(async () => {
+      if (abort.signal.aborted || this.jobs.get(job.id) !== job)
+        return;
+      const question = job.question ?? "";
+      const evidence = job.evidence ?? [];
+      job.question = undefined;
+      job.evidence = undefined;
+      const timer = setTimeout(() => abort.abort(), this.analysisTimeoutMs);
+      timer.unref?.();
+      try {
+        const result = await this.options.model().answerPrivately(question, evidence, abort.signal);
+        if (abort.signal.aborted)
+          throw new Error("aborted");
+        job.outcome = { kind: "answered", plaintext: JSON.stringify(plaintextOf(result)) };
+      } catch {
+        job.outcome = { kind: "failed" };
+      } finally {
+        clearTimeout(timer);
+      }
+    });
+  }
+  takeToken() {
+    const at = this.now();
+    this.tokens = Math.min(this.claimRate.capacity, this.tokens + (at - this.refilledAt) / 1000 * this.claimRate.refillPerSecond);
+    this.refilledAt = at;
+    if (this.tokens < 1)
+      return false;
+    this.tokens -= 1;
+    return true;
+  }
+}
+function gone() {
+  return { status: 410, body: { status: "gone" } };
+}
+function clean(value, max) {
+  if (typeof value !== "string")
+    return;
+  const text2 = value.replace(UNSAFE_CHARS2, " ").trim().slice(0, max);
+  return text2 || undefined;
+}
+function plaintextOf(result) {
+  const citations = [];
+  for (const value of Array.isArray(result.citations) ? result.citations : []) {
+    if (citations.length >= MAX_CITATIONS2)
+      break;
+    if (typeof value !== "object" || value === null)
+      continue;
+    const record3 = value;
+    const citation = {};
+    const title = clean(record3.title, MAX_CITATION_TEXT);
+    const source = clean(record3.source, MAX_CITATION_TEXT);
+    const date4 = clean(record3.date, 32);
+    if (title)
+      citation.title = title;
+    if (source)
+      citation.source = source;
+    if (date4)
+      citation.date = date4;
+    if (Object.keys(citation).length > 0)
+      citations.push(citation);
+  }
+  return { v: 1, answer: (typeof result.answer === "string" ? result.answer : "").replace(UNSAFE_CHARS2, "").slice(0, MAX_ANSWER_CHARS), citations };
+}
+function isPrivateAnswerRequest(request) {
+  return new URL(request.url).pathname.startsWith("/private/");
+}
+function withPrivateAnswerRoute(privateAnswer, rest) {
+  return (request) => isPrivateAnswerRequest(request) ? privateAnswer(request) : rest(request);
+}
+function createPrivateAnswerHandler(options) {
+  return async (request) => {
+    const url = new URL(request.url);
+    const jobId = url.search ? undefined : privateAnswerJobId(url.pathname);
+    if (!options.isRelayed(request) || !jobId)
+      return reply({ status: 404, body: { status: "gone" } });
+    if (request.method !== "POST")
+      return reply({ status: 405, body: { status: "invalid" } }, { Allow: "POST" });
+    if (!isPanelOrigin(request.headers.get("origin"), options.extraOrigins?.() ?? [])) {
+      return reply({ status: 403, body: { status: "forbidden" } });
+    }
+    const text2 = await boundedText(request, PRIVATE_ANSWER_MAX_REQUEST_BYTES);
+    if (text2 === undefined)
+      return reply({ status: 413, body: { status: "invalid" } });
+    let body;
+    try {
+      body = JSON.parse(text2);
+    } catch {
+      return reply({ status: 400, body: { status: "invalid" } });
+    }
+    const record3 = typeof body === "object" && body !== null && !Array.isArray(body) ? body : undefined;
+    if (!record3 || record3.v !== 1)
+      return reply({ status: 400, body: { status: "invalid" } });
+    return reply(await options.jobs.claim(jobId, record3.publicKey));
+  };
+}
+function reply(claim, extra = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    ...extra
+  };
+  if (claim.retryAfterSeconds !== undefined)
+    headers["Retry-After"] = String(claim.retryAfterSeconds);
+  return new Response(JSON.stringify(claim.body), { status: claim.status, headers });
+}
+async function boundedText(request, max) {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > max)
+    return;
+  if (!request.body)
+    return "";
+  const reader = request.body.getReader();
+  const chunks2 = [];
+  let total = 0;
+  for (;; ) {
+    const { done, value } = await reader.read();
+    if (done)
+      break;
+    total += value.byteLength;
+    if (total > max) {
+      reader.cancel().catch(() => {
+        return;
+      });
+      return;
+    }
+    chunks2.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks2));
+}
+var MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, UNSAFE_CHARS2;
+var init_private_answer_jobs = __esm(() => {
+  init_private_answer();
+  init_private_answer_contract();
+  MAX_ANSWER_CHARS = 64 * 1024;
+  UNSAFE_CHARS2 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
 });
 
 // src/workers/remote-openapi.ts
@@ -102433,6 +103059,15 @@ async function main() {
   });
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30000);
   sourceAnswerJobSweep.unref?.();
+  const { PrivateAnswerJobs: PrivateAnswerJobs2, createPrivateAnswerHandler: createPrivateAnswerHandler2, withPrivateAnswerRoute: withPrivateAnswerRoute2 } = await Promise.resolve().then(() => (init_private_answer_jobs(), exports_private_answer_jobs));
+  const { UNAVAILABLE_PRIVATE_ANSWER_MODEL: UNAVAILABLE_PRIVATE_ANSWER_MODEL2 } = await Promise.resolve().then(() => (init_private_answer_contract(), exports_private_answer_contract));
+  const { DASHBOARD_UI_DOMAIN: DASHBOARD_UI_DOMAIN2 } = await Promise.resolve().then(() => (init_dashboard_resource(), exports_dashboard_resource));
+  const privateAnswers = new PrivateAnswerJobs2({
+    model: () => UNAVAILABLE_PRIVATE_ANSWER_MODEL2,
+    installId: () => remotePublicUrls()?.installId
+  });
+  const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30000);
+  privateAnswerSweep.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -102454,7 +103089,11 @@ async function main() {
     hostname,
     port,
     idleTimeout: 0,
-    fetch: withRemoteOAuthRoutes2(createRemoteOAuthHandler2({
+    fetch: withPrivateAnswerRoute2(createPrivateAnswerHandler2({
+      jobs: privateAnswers,
+      isRelayed: isRelayedRequest2,
+      extraOrigins: () => [DASHBOARD_UI_DOMAIN2]
+    }), withRemoteOAuthRoutes2(createRemoteOAuthHandler2({
       publicUrls: remotePublicUrls,
       isRelayed: isRelayedRequest2,
       demoConsent: () => resolveDemoConsent2(olympusConfig.remote, () => demoInstallMarked2(remoteAccessDir2(process.env))),
@@ -102463,6 +103102,7 @@ async function main() {
       ...remoteAgentOptions,
       chatgpt: {
         servesRequest: isRelayedRequest2,
+        privateAnswers,
         dashboardView: async (signal) => {
           const response = await worker.fetch(new Request("http://olympus-worker.internal/dashboard.json", signal ? { signal } : {}));
           if (!response.ok)
@@ -102470,7 +103110,7 @@ async function main() {
           return await response.json();
         }
       }
-    }), withWorkerBearerAuth(worker.fetch, { authToken }))))
+    }), withWorkerBearerAuth(worker.fetch, { authToken })))))
   });
   sourceScheduler?.start();
   await reconcileCaptures();
@@ -103436,7 +104076,7 @@ init_messaging_pairing();
 init_messaging_capture();
 init_config();
 init_dashboard_launch();
-import { randomBytes as randomBytes16 } from "node:crypto";
+import { randomBytes as randomBytes17 } from "node:crypto";
 import { readFileSync as readFileSync44, openSync as openSync12, closeSync as closeSync12, writeSync as writeSync3 } from "node:fs";
 import { createInterface as createInterface2 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -107861,7 +108501,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes16(32).toString("base64url");
+  return randomBytes17(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};

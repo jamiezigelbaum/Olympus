@@ -15,9 +15,17 @@
  */
 
 /** Must equal RELAYED_REQUEST_HEADER in src/core/remote-access.ts (a test holds them equal). */
+import { PRIVATE_ANSWER_PATH_PATTERN } from '../shared/private-answer.ts';
+
 export const RELAY_HEADER = 'x-olympus-relay';
 
 export const FORWARDED_PATHS = ['/mcp', '/connect/token', '/connect/revoke'] as const;
+/**
+ * The private answer panel's one-time collection, POST only and exactly
+ * `/private/oly2p.<installId>.<secret>` with no query
+ * (src/workers/chatgpt/private-answer-jobs.ts). Nothing else under the prefix.
+ */
+const POST_PATH_PATTERNS: readonly RegExp[] = [PRIVATE_ANSWER_PATH_PATTERN];
 /**
  * Reviewer sign-in, forwarded only by a demo install (its data directory
  * carries the demo marker; src/core/remote-access.ts `demoInstallMarked`).
@@ -49,7 +57,7 @@ const UNTRUSTED = /^(forwarded|x-forwarded-.*|x-real-ip|x-olympus-relay.*|cookie
  * backslashes are refused rather than normalized, so the worker can never
  * resolve a forwarded path differently than this check did.
  */
-export function forwardPath(rawPath: string, allowed: readonly string[] = FORWARDED_PATHS): string | undefined {
+export function forwardPath(rawPath: string, allowed: readonly string[] = FORWARDED_PATHS, method = 'POST'): string | undefined {
   if (typeof rawPath !== 'string' || rawPath.length > 2048 || !rawPath.startsWith('/') || rawPath.startsWith('//')) return undefined;
   const pathOnly = rawPath.split('?', 1)[0]!;
   if (/%2e|%2f|%5c|\\/i.test(pathOnly) || pathOnly.split('/').some((segment) => segment === '.' || segment === '..')) return undefined;
@@ -59,7 +67,9 @@ export function forwardPath(rawPath: string, allowed: readonly string[] = FORWAR
   } catch {
     return undefined;
   }
-  if (url.pathname !== pathOnly || !allowed.includes(url.pathname)) return undefined;
+  if (url.pathname !== pathOnly) return undefined;
+  const postPattern = method === 'POST' && url.search === '' && POST_PATH_PATTERNS.some((pattern) => pattern.test(url.pathname));
+  if (!allowed.includes(url.pathname) && !postPattern) return undefined;
   return `${url.pathname}${url.search}`;
 }
 

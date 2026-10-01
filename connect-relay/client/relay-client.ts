@@ -303,7 +303,7 @@ export class RelayClient {
     const request: Inbound = {
       method,
       path: FORWARDED_METHODS.has(method) && typeof message.path === 'string'
-        ? forwardPath(message.path, this.options.forwardedPaths)
+        ? forwardPath(message.path, this.options.forwardedPaths, method)
         : undefined,
       headers,
       buffer: new Uint8Array(new ArrayBuffer(0)),

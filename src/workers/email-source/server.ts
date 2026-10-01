@@ -4054,6 +4054,19 @@ export async function main(): Promise<void> {
   });
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30_000);
   sourceAnswerJobSweep.unref?.();
+  // One-time private answers for ChatGPT's private answer panel
+  // (docs/design/chatgpt-plugin.md, "Private answer panel"). The private
+  // model lane provides the `built_in` model; until then every private match
+  // reports `no_model` with counts only.
+  const { PrivateAnswerJobs, createPrivateAnswerHandler, withPrivateAnswerRoute } = await import('../chatgpt/private-answer-jobs.ts');
+  const { UNAVAILABLE_PRIVATE_ANSWER_MODEL } = await import('../chatgpt/private-answer-contract.ts');
+  const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
+  const privateAnswers = new PrivateAnswerJobs({
+    model: () => UNAVAILABLE_PRIVATE_ANSWER_MODEL,
+    installId: () => remotePublicUrls()?.installId,
+  });
+  const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30_000);
+  privateAnswerSweep.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -4083,7 +4096,11 @@ export async function main(): Promise<void> {
     // OAuth metadata and `/connect/*` routes serve the approval flow; every
     // other route keeps the worker bearer. See workers/remote-mcp.ts,
     // workers/remote-openapi.ts and workers/remote-oauth/handler.ts.
-    fetch: withRemoteOAuthRoutes(
+    fetch: withPrivateAnswerRoute(createPrivateAnswerHandler({
+      jobs: privateAnswers,
+      isRelayed: isRelayedRequest,
+      extraOrigins: () => [DASHBOARD_UI_DOMAIN],
+    }), withRemoteOAuthRoutes(
       createRemoteOAuthHandler({
         publicUrls: remotePublicUrls,
         isRelayed: isRelayedRequest,
@@ -4101,6 +4118,7 @@ export async function main(): Promise<void> {
           // dashboard tool reads the view `/dashboard.json` serves, in-process.
           chatgpt: {
             servesRequest: isRelayedRequest,
+            privateAnswers,
             dashboardView: async (signal?: AbortSignal) => {
               const response = await worker.fetch(new Request(
                 'http://olympus-worker.internal/dashboard.json',
@@ -4113,7 +4131,7 @@ export async function main(): Promise<void> {
         }),
         withWorkerBearerAuth(worker.fetch, { authToken }),
       )),
-    ),
+    )),
   });
   sourceScheduler?.start();
   await reconcileCaptures();

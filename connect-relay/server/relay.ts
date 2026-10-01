@@ -16,7 +16,11 @@
  *   may reuse one connection for many users, so routing never sticks to a
  *   connection;
  * - `GET /.well-known/openai-apps-challenge`: the domain verification token,
- *   when one is configured.
+ *   when one is configured;
+ * - `POST /private/<job id>` (and its CORS preflight): the private answer
+ *   panel collecting one sealed answer, routed by the install the job id
+ *   names; only ChatGPT widget origins pass CORS. The relay forwards
+ *   ciphertext it holds no key for (shared/private-answer.ts).
  *
  * The relay mints, validates and stores no token: the install does. A caller
  * with no token, and an authorized request for an install that is registered
@@ -45,6 +49,14 @@ import {
 import { INSTALL_URL } from '../shared/dashboard-contract.ts';
 import { KeyedCounter, KeyedTokenBuckets, addressKey } from '../shared/rate-limit.ts';
 import { credentialInstallId } from '../shared/tokens.ts';
+import {
+  PRIVATE_ANSWER_MAX_REQUEST_BYTES,
+  PRIVATE_ANSWER_PATH_PREFIX,
+  isPanelOrigin,
+  privateAnswerCorsHeaders,
+  privateAnswerInstallId,
+  privateAnswerJobId,
+} from '../shared/private-answer.ts';
 import { authorizeBridge } from './authorize-bridge.ts';
 import {
   ConfirmedCredentials,
@@ -91,6 +103,12 @@ export interface RelayConfig {
    * in front). Off for tests that talk to the relay directly.
    */
   readonly trustProxy?: boolean;
+  /**
+   * Panel origins accepted for `/private/<id>` beyond ChatGPT's widget
+   * sandbox (shared/private-answer.ts). Defaults to the relay's own origin,
+   * which the panel declares as its dedicated `_meta.ui.domain`.
+   */
+  readonly panelOrigins?: readonly string[];
   readonly limits?: Partial<RelayLimits>;
   readonly log?: RelayLog;
   /** How often unused registrations are swept (default hourly). */
@@ -188,6 +206,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const registrationsGlobal = new KeyedTokenBuckets(limits.registrationsGlobal, now);
   const sessionAttempts = new KeyedTokenBuckets(limits.sessionAttemptsPerIp, now);
   const publicRequests = new KeyedTokenBuckets(limits.publicRequestsPerIp, now);
+  const privateFetches = new KeyedTokenBuckets(limits.privateFetchesPerIp, now);
+  const panelOrigins = config.panelOrigins ?? [origin.origin];
   const sessionsPerIp = new KeyedCounter();
   const uploads = new UploadBudget(limits);
   const queueBudget = new QueueBudget(limits.maxQueuedBytes);
@@ -465,6 +485,48 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     return toInstall({ installId: demoInstallId, request, path, body, lane: 'unverified', dashboard: false, offline: unavailable, unknown: unavailable });
   };
 
+  /**
+   * `/private/<job id>`: the private answer panel's one-time collection. CORS
+   * is answered here, for ChatGPT widget origins only; the POST is routed by
+   * the install its job id names, never logged beyond that install's tag, and
+   * capped at a tiny body. The relay sees the panel's public key and the
+   * sealed answer, never a key that opens it.
+   */
+  const privateAnswer = async (request: Request, url: URL, ip: string): Promise<Response> => {
+    const requestOrigin = request.headers.get('origin');
+    const allowed = isPanelOrigin(requestOrigin, panelOrigins);
+    const cors = allowed ? privateAnswerCorsHeaders(requestOrigin) : {};
+    const reply = (status: number, body: Record<string, unknown>, headers: Record<string, string> = {}) =>
+      json(status, body, { ...cors, ...headers });
+    const jobId = url.search ? undefined : privateAnswerJobId(url.pathname);
+    const installId = privateAnswerInstallId(jobId);
+    if (!jobId || !installId) return reply(404, { status: 'gone' });
+    if (request.method === 'OPTIONS') {
+      return allowed ? new Response(null, { status: 204, headers: { ...cors, 'Cache-Control': 'no-store' } }) : reply(403, { status: 'forbidden' });
+    }
+    if (request.method !== 'POST') return reply(405, { status: 'invalid' }, { Allow: 'POST, OPTIONS' });
+    if (!allowed) return reply(403, { status: 'forbidden' });
+    if (!privateFetches.take(ip)) return reply(429, { status: 'rate_limited' }, { 'Retry-After': '5' });
+    const read = await readBody(request, PRIVATE_ANSWER_MAX_REQUEST_BYTES, ip);
+    if (!read.ok) return reply(read.response.status, { status: read.response.status === 413 ? 'invalid' : 'busy' }, { 'Retry-After': '5' });
+    const response = await toInstall({
+      installId,
+      request,
+      path: url.pathname,
+      body: read.body,
+      lane: 'unverified',
+      dashboard: false,
+      offline: () => reply(503, { status: 'mac_offline' }, { 'Retry-After': '30' }),
+      unknown: () => reply(410, { status: 'gone' }),
+    });
+    if (response.headers.get('access-control-allow-origin') === requestOrigin) return response;
+    // The install's own answer: the relay adds CORS (installs cannot set it).
+    const headers = new Headers(response.headers);
+    for (const [name, value] of Object.entries(cors)) headers.set(name, value);
+    headers.set('Cache-Control', 'no-store');
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  };
+
   // -------------------------------------------------------------------------
   // Install sessions
 
@@ -582,6 +644,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           return new Response(token, { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
         }
         default:
+          if (path.startsWith(PRIVATE_ANSWER_PATH_PREFIX)) return privateAnswer(request, url, ip);
           return json(404, { error: 'not_found' });
       }
     },

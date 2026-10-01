@@ -33,6 +33,25 @@ describe('the forwarded surface', () => {
     }
   });
 
+  test('a private-answer collection is forwarded only as a POST of exactly /private/<job id>', () => {
+    const jobId = mintCredential('private', INSTALL);
+    expect(credentialInstallId('private', jobId)).toBe(INSTALL);
+    expect(credentialInstallId('access', jobId)).toBeUndefined();
+    expect(forwardPath(`/private/${jobId}`, undefined, 'POST')).toBe(`/private/${jobId}`);
+    for (const [path, method] of [
+      [`/private/${jobId}`, 'GET'],
+      [`/private/${jobId}`, 'DELETE'],
+      [`/private/${jobId}?x=1`, 'POST'],
+      [`/private/${jobId}/`, 'POST'],
+      [`/private/${mintCredential('access', INSTALL)}`, 'POST'],
+      ['/private/', 'POST'],
+      [`/private/../mcp`, 'POST'],
+      [`/private/${jobId}%2f..`, 'POST'],
+    ] as const) {
+      expect(forwardPath(path, undefined, method), `${method} ${path}`).toBeUndefined();
+    }
+  });
+
   test('inbound relay and forwarding headers are dropped and the relay marker is set', () => {
     const headers = forwardRequestHeaders([
       ['x-olympus-relay', 'forged'],
