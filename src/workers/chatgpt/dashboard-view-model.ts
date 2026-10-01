@@ -31,6 +31,7 @@ import {
   dashboardSyncKeepsFailing,
   dashboardWorkingSummary,
   type DashboardStatus,
+  DASHBOARD_CHATGPT_VOCABULARY,
 } from '../dashboard/vocabulary.ts';
 import {
   DASHBOARD_TOOL_NAME,
@@ -40,27 +41,6 @@ import {
   type DashboardSource,
   type DashboardViewModelV1,
 } from './dashboard-contract.ts';
-
-/**
- * Copy this producer needs that vocabulary.ts does not export yet. The
- * dashboard lane owns vocabulary.ts; these are proposals to move there, kept
- * here only so the producer runs today. Every value is a fixed string.
- */
-export const PENDING_VOCABULARY = {
-  installingNoSource: 'Connect a source to begin',
-  installingModel: 'Getting search ready on your Mac',
-  installingFirstIndex: 'Indexing your sources for the first time',
-  connectOnMac: 'Connect sources in Olympus on your Mac.',
-  reconnect: 'Reconnect',
-  checkAgain: 'Check again',
-  openOnMac: 'Open Olympus on your Mac',
-  stageReading: 'Reading',
-  stageSearchable: 'Indexing',
-  embeddingNeedsAttention: 'Search has stopped working on your Mac.',
-  answerModelNeedsAttention: 'Answers have stopped working on your Mac.',
-  fixOnMac: 'Open Olympus on your Mac to fix this.',
-  privateMatches: 'Some matching items are private and stay on your Mac.',
-} as const;
 
 /** Static, product-owned labels for answer models. Never the card's own text. */
 const ANSWER_MODEL_LABELS = { venice: 'Venice', local: 'Local models', built_in: 'Built-in' } as const;
@@ -131,11 +111,11 @@ export function buildChatGptDashboardViewModel(
 
   const embedding = options.embedding ?? embeddingFromModelSetup(view.model_setup);
   if (embedding.state === 'failed') {
-    needsYou.push({ id: 'model:embedding', sentence: PENDING_VOCABULARY.embeddingNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.openOnMac) });
+    needsYou.push({ id: 'model:embedding', sentence: DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention, fix: onMacFix(DASHBOARD_CHATGPT_VOCABULARY.openOnMac) });
   }
   const answers = answersFromModelSetup(view.model_setup);
   if (answers && !answers.ready) {
-    needsYou.push({ id: 'model:answers', sentence: PENDING_VOCABULARY.answerModelNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.openOnMac) });
+    needsYou.push({ id: 'model:answers', sentence: DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention, fix: onMacFix(DASHBOARD_CHATGPT_VOCABULARY.openOnMac) });
   }
 
   const progress = overallProgress(rows.map((row) => row.card), rows.map((row) => row.status));
@@ -216,8 +196,8 @@ function attentionItem(
   const reauth = card.connection.state === 'reauth_required'
     || (card.connection.state !== 'connected' && card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card));
   const fix = reauth
-    ? onMacFix(PENDING_VOCABULARY.reconnect)
-    : { label: PENDING_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {} };
+    ? onMacFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect)
+    : { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {} };
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 
@@ -225,11 +205,11 @@ function attentionItem(
 function connectFix(kind: DashboardSourceAction['kind']): DashboardFix | undefined {
   if (kind === 'none') return undefined;
   const label = kind === 'needs_setup' ? 'Set up' : 'Connect';
-  return { label, disabledReason: PENDING_VOCABULARY.connectOnMac };
+  return { label, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac };
 }
 
 function onMacFix(label: string): DashboardFix {
-  return { label, disabledReason: PENDING_VOCABULARY.fixOnMac };
+  return { label, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.fixOnMac };
 }
 
 function connectionFor(input: {
@@ -242,16 +222,16 @@ function connectionFor(input: {
   if (input.embedding.state === 'downloading') {
     return {
       state,
-      progress: { percent: clampPercent(input.embedding.percent ?? 0), label: PENDING_VOCABULARY.installingModel },
+      progress: { percent: clampPercent(input.embedding.percent ?? 0), label: DASHBOARD_CHATGPT_VOCABULARY.installingModel },
     };
   }
   if (!input.connected) {
-    return { state, progress: { percent: 0, label: PENDING_VOCABULARY.installingNoSource } };
+    return { state, progress: { percent: 0, label: DASHBOARD_CHATGPT_VOCABULARY.installingNoSource } };
   }
   if (!input.anyAnswerReady) {
     return {
       state,
-      progress: { percent: clampPercent(input.progress?.percent ?? 0), label: PENDING_VOCABULARY.installingFirstIndex },
+      progress: { percent: clampPercent(input.progress?.percent ?? 0), label: DASHBOARD_CHATGPT_VOCABULARY.installingFirstIndex },
     };
   }
   return { state: 'ready' };
@@ -328,10 +308,10 @@ function overallProgress(
   if (inScope <= 0 || !anyUnfinished) return undefined;
   const progressUnit: Unit = mixed || unit === undefined ? 'items' : unit;
   const details: NonNullable<DashboardViewModelV1['progress']>['details'] = [
-    { stage: PENDING_VOCABULARY.stageReading, unit: progressUnit, done: read, total: inScope },
+    { stage: DASHBOARD_CHATGPT_VOCABULARY.stageReading, unit: progressUnit, done: read, total: inScope },
   ];
   if (embeddedKnown) {
-    details.push({ stage: PENDING_VOCABULARY.stageSearchable, unit: progressUnit, done: embedded, total: inScope });
+    details.push({ stage: DASHBOARD_CHATGPT_VOCABULARY.stageSearchable, unit: progressUnit, done: embedded, total: inScope });
   }
   return {
     unit: progressUnit,
