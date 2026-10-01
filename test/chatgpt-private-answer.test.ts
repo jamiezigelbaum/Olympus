@@ -35,6 +35,7 @@ import { PrivateAnswerJobs, createPrivateAnswerHandler } from '../src/workers/ch
 import { privateAnswerPageHtml, privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { copyPrivateMatch } from '../src/workers/chatgpt/response-builder.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
+import { DASHBOARD_CHATGPT_VOCABULARY } from '../src/workers/dashboard/vocabulary.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
@@ -62,6 +63,15 @@ function readyModel(overrides: Partial<PrivateAnswerModel> = {}): PrivateAnswerM
 
 function makeJobs(model: PrivateAnswerModel, clock = { now: 1_000_000 }, extra: Partial<ConstructorParameters<typeof PrivateAnswerJobs>[0]> = {}) {
   return new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, now: () => clock.now, ...extra });
+}
+
+/** Nothing model-visible (text, structuredContent) tells the model a private match exists. */
+function expectNoPrivateMatchVisible(result: Record<string, unknown>, meta: Record<string, unknown>): void {
+  const visible = JSON.stringify({ content: result.content, structuredContent: result.structuredContent });
+  expect(visible).not.toContain(String(meta.jobId));
+  expect(visible).not.toMatch(/privateMatch|panelState|private item|Private item|olympus\/privateAnswer/);
+  expect(visible).not.toContain(DASHBOARD_CHATGPT_VOCABULARY.privateMatches);
+  expect(result.structuredContent as Record<string, unknown>).not.toHaveProperty('privateMatch');
 }
 
 async function settled(jobs: PrivateAnswerJobs): Promise<void> {
@@ -286,13 +296,13 @@ describe('one-time jobs', () => {
     expect(unlinked.size).toBe(0);
   });
 
-  test('claims are rate limited; pending polls by the claiming key are rate limited per job but never destroy it', async () => {
+  test('claims of live jobs are rate limited; pending polls by the claiming key are rate limited per job but never destroy it', async () => {
     const limited = makeJobs(readyModel(), { now: 0 }, { claimRate: { capacity: 2, refillPerSecond: 0 } });
     const panel = await generatePanelKeyPair();
-    const id = mintCredential('private', INSTALL);
-    await limited.claim(id, panel.publicKey);
-    await limited.claim(id, panel.publicKey);
-    expect(await limited.claim(id, panel.publicKey)).toMatchObject({ status: 429, body: { status: 'rate_limited' } });
+    const live = limited.begin({ question: 'q', count: 1, evidence: EVIDENCE }).jobId!;
+    await limited.claim(live, panel.publicKey);
+    await limited.claim(live, panel.publicKey);
+    expect(await limited.claim(live, panel.publicKey)).toMatchObject({ status: 429, body: { status: 'rate_limited' } });
 
     // A replay of the claiming key hammering a pending job: 429s, never a deletion.
     let release!: () => void;
@@ -319,7 +329,50 @@ describe('one-time jobs', () => {
     expect((await polled.claim(jobId!, panel.publicKey)).status).toBe(410);
   });
 
-  test('a reset that never resolves does not hold the slot', async () => {
+  test('made-up job ids spend no claim tokens: after 100 junk claims a real claim still succeeds', async () => {
+    const jobs = makeJobs(readyModel(), { now: 0 }, { claimRate: { capacity: 2, refillPerSecond: 0 } });
+    const panel = await generatePanelKeyPair();
+    for (let i = 0; i < 100; i += 1) {
+      expect(await jobs.claim(mintCredential('private', INSTALL), panel.publicKey)).toEqual({ status: 410, body: { status: 'gone' } });
+    }
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE });
+    expect((await jobs.claim(jobId!, panel.publicKey)).status).toBe(202);
+    await settled(jobs);
+    const ready = await jobs.claim(jobId!, panel.publicKey);
+    expect(ready.body.status).toBe('ready');
+  });
+
+  test('after a deadline the next analysis waits for the model reset, so two inferences never overlap', async () => {
+    const events: string[] = [];
+    let finishReset!: () => void;
+    const model = readyModel({
+      answerPrivately: (question) => {
+        events.push(`start:${question}`);
+        return question === 'stuck' ? new Promise(() => {}) : Promise.resolve({ answer: 'next answer', citations: [] });
+      },
+      reset: () => {
+        events.push('reset:start');
+        return new Promise<void>((resolve) => { finishReset = () => { events.push('reset:done'); resolve(); }; });
+      },
+    });
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 20, resetTimeoutMs: 60_000, audit: () => {} });
+    const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE }).jobId!;
+    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
+    const panel = await generatePanelKeyPair();
+    await jobs.claim(stuck, panel.publicKey);
+    await jobs.claim(next, panel.publicKey);
+    await Bun.sleep(80);
+    // The stuck job failed and its reset is running: the next one has not started.
+    expect(await jobs.claim(stuck, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
+    expect(events).toEqual(['start:stuck', 'reset:start']);
+    expect((await jobs.claim(next, panel.publicKey)).status).toBe(202);
+    finishReset();
+    await settled(jobs);
+    expect(events).toEqual(['start:stuck', 'reset:start', 'reset:done', 'start:next']);
+    expect((await jobs.claim(next, panel.publicKey)).body.status).toBe('ready');
+  });
+
+  test('a reset that never resolves holds the next analysis only until the reset timeout', async () => {
     let resets = 0;
     const model = readyModel({
       answerPrivately: (question) => (question === 'stuck'
@@ -327,13 +380,13 @@ describe('one-time jobs', () => {
         : Promise.resolve({ answer: 'next answer', citations: [] })),
       reset: () => { resets += 1; return new Promise<void>(() => {}); },
     });
-    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 30, resetTimeoutMs: 60_000, audit: () => {} });
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 30, resetTimeoutMs: 40, audit: () => {} });
     const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE }).jobId!;
     const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(stuck, panel.publicKey);
     await jobs.claim(next, panel.publicKey);
-    await Bun.sleep(100);
+    await Bun.sleep(150);
     expect(await jobs.claim(stuck, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
     const ready = await jobs.claim(next, panel.publicKey);
     expect(ready.body.status).toBe('ready');
@@ -440,7 +493,7 @@ describe('sentinel: over the real MCP surface', () => {
       sourceAnswer: {
         async answer() {
           return {
-            answer: 'Only private items matched.',
+            answer: 'The released evidence does not answer this.',
             evidence: [],
             audit: { searched_corpora: [], skipped_corpora: [], lane_audits: [], latency_ms: 1, raw_source_exposed: false },
             policy: { raw_source_exposed: false, source_packets_exposed: false, internal_content_exposed: false, secure_local_content_exposed: false, castor_safe_bridge: true },
@@ -469,7 +522,7 @@ describe('sentinel: over the real MCP surface', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test('the private answer reaches only the panel, sealed; tool text and structuredContent carry counts only', async () => {
+  test('the private answer reaches only the panel, sealed; tool text and structuredContent say nothing about a private match', async () => {
     const { token } = store.create('ChatGPT');
     const client = new Client({ name: 'private-answer-test', version: '1.0.0' });
     await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
@@ -486,10 +539,9 @@ describe('sentinel: over the real MCP surface', () => {
     const meta = (result._meta as Record<string, unknown>)[PRIVATE_ANSWER_META_KEY] as Record<string, unknown>;
     expect(Object.keys(meta).sort()).toEqual(['count', 'jobId', 'state', 'v']);
     expect(meta).toMatchObject({ v: 1, count: 2, state: 'ready' });
-    expect(result.structuredContent).toMatchObject({ privateMatch: { count: 2, panelState: 'ready' } });
-    // The model-visible channels never carry the job id.
-    expect(JSON.stringify(result.content)).not.toContain(String(meta.jobId));
-    expect(JSON.stringify(result.structuredContent)).not.toContain(String(meta.jobId));
+    // The model-visible channels never carry the job id, the count, the
+    // state or any note that Private items exist.
+    expectNoPrivateMatchVisible(result, meta);
     expect(JSON.stringify(resource)).toContain('Show private answer');
 
     // The panel collects it directly (as through the relay).

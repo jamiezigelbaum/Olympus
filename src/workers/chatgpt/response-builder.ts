@@ -305,9 +305,11 @@ export interface ChatGptCitation {
 }
 
 export interface AnswerResultOptions {
-  /** A Private item matched the question (found by the surface's own probe). */
-  privateMatched?: boolean;
-  /** The private answer panel's summary and job, when Private items matched. */
+  /**
+   * The private answer panel's summary and job, when Private items matched.
+   * It reaches the panel only, in `_meta`; nothing model-visible changes, so
+   * the model cannot learn whether Private items match.
+   */
   privateMatch?: PrivateMatchSummary & { jobId?: string };
 }
 
@@ -332,8 +334,9 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   if (!record || typeof record.answer !== 'string') {
     return errorToolResult(new OperationError('source_index_error', 'unexpected answer shape'));
   }
-  const panel = copyPrivateMatch(options.privateMatch);
-  let privateMatched = options.privateMatched === true || panel !== undefined;
+  // Set only when Private evidence reached this answer despite the request
+  // (a policy breach the answer is withheld for), never by the probe.
+  let privateMatched = false;
   const citations: ChatGptCitation[] = [];
   for (const value of Array.isArray(record.evidence) ? record.evidence : []) {
     const evidence = asRecord(value);
@@ -363,17 +366,22 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
     citations: shownCitations,
     ...(notes.length > 0 ? { notes } : {}),
   };
-  if (!panel) return { content: [{ type: 'text', text: textParts.join('\n') }], structuredContent };
-  structuredContent.privateMatch = {
-    count: panel.count,
-    panelState: panel.state,
-    ...(panel.percent !== undefined ? { percent: panel.percent } : {}),
-  };
-  return {
-    content: [{ type: 'text', text: textParts.join('\n') }],
-    structuredContent,
-    _meta: { [PRIVATE_ANSWER_META_KEY]: panel },
-  };
+  return withPrivateAnswerMeta({ content: [{ type: 'text', text: textParts.join('\n') }], structuredContent }, options.privateMatch);
+}
+
+/**
+ * Adds the private answer panel's `_meta` (count, state, one-time job id) to
+ * a result, and nothing else: `content` and `structuredContent` are left
+ * exactly as they were, with or without a match.
+ */
+export function withPrivateAnswerMeta(
+  result: ChatGptToolResult,
+  match: (PrivateMatchSummary & { jobId?: string }) | undefined,
+): ChatGptToolResult {
+  const panel = copyPrivateMatch(match);
+  if (!panel) return result;
+  const meta = typeof result._meta === 'object' && result._meta !== null ? result._meta as Record<string, unknown> : {};
+  return { ...result, _meta: { ...meta, [PRIVATE_ANSWER_META_KEY]: panel } };
 }
 
 /* ------------------------------------------------------------------ */
@@ -397,7 +405,9 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   if (!record || !Array.isArray(record.evidence)) {
     return errorToolResult(new OperationError('source_index_error', 'unexpected search shape'));
   }
-  let privateMatched = options.privateMatched === true;
+  // Set only when a non-citable item reached the search output (dropped
+  // here); the probe's private match goes to the panel's `_meta` alone.
+  let privateMatched = false;
   let flagged = false;
   const evidence: SearchEvidence[] = [];
   for (const value of record.evidence) {
@@ -450,10 +460,10 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
     }
   }
   if (notes.length > 0) lines.push(...notes);
-  return {
+  return withPrivateAnswerMeta({
     content: [{ type: 'text', text: lines.join('\n').trim() }],
     structuredContent: structured as unknown as Record<string, unknown>,
-  };
+  }, options.privateMatch);
 }
 
 function plural(count: number, noun: string): string {

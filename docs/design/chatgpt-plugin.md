@@ -224,16 +224,18 @@ private answer into the normal chat. Secret items are never answered from.
 
 ### What the user sees
 
-ChatGPT calls an answer tool (`source_answer` today; `olympus_search` from
-the native-tools lane uses the same hook). ChatGPT's model gets Public and
-Personal evidence as before, plus `structuredContent.privateMatch =
-{count, panelState}` when Private items match: a capped count (50) and a
-state, never titles or text. Under the answer, the `ui://olympus/private-answer`
-panel says "N private items match", carries the badge **"Not sent to
+ChatGPT calls `olympus_search` (the primary answer tool) or `source_answer`;
+both carry the same hook and link the `ui://olympus/private-answer` panel on
+every result. ChatGPT's model gets Public and Personal evidence as before and
+**nothing** about a private match: no count, no state, no note (review
+2026-10-01: a model-visible count is an oracle for testing queries against
+Private holdings). The count and state travel only in the widget-only
+`_meta`; with no match the panel renders nothing (zero height). With one,
+the panel says "N private items match", carries the badge **"Not sent to
 ChatGPT"**, and offers **Show private answer**. On click, the panel fetches
 the answer itself, from the relay, and shows it as text.
 
-`panelState` is `ready` (a private model is ready; a job exists),
+The `_meta` state is `ready` (a private model is ready; a job exists),
 `no_model` (no private model set up; counts only, no job) or
 `model_downloading` (the built-in private model is downloading, with a
 percent when known; counts only, no job).
@@ -275,14 +277,22 @@ percent when known; counts only, no job).
      enforced outside the model call (default 5 minutes): the engine marks
      the job `failed` and frees the slot first, then runs the model's
      `reset()` in the background with its own timeout to kill or reset its
-     runtime, so neither a model that ignores abort nor a hung reset can
-     block the queue. Inference never starts after the deadline, even when
-     the evidence refresh returns late.
+     runtime. The next analysis waits for that reset (bounded by its
+     timeout), so two inferences never overlap and the reset cannot kill the
+     next job. Inference never starts after the deadline, even when the
+     evidence refresh returns late.
+   - **Claim budget.** An unknown, expired or wrong-install id answers 410
+     without spending the install-wide claim budget, so made-up ids cannot
+     lock out a real panel. The claim-time search on a pinned Private corpus
+     passes the tier ledger's visibility gate too, so an item re-tiered
+     since the search is never read.
 5. **Poll.** While the model works, the same key gets **202 `pending`** with
    `Retry-After: 2`; the panel polls with the same key.
 6. **Collect.** When done, the engine generates its own ephemeral P-256 pair,
    derives `HKDF-SHA256(ECDH(mac, panel), salt = empty, info = job id)` as an
-   AES-256-GCM key, seals `{v:1, answer, citations}` with a random 12-byte IV
+   AES-256-GCM key, seals `{v:1, answer, citations, unanswered?}`, padded
+   with trailing spaces to 1, 4, 16 or 64 KiB (then multiples of 64 KiB) so
+   the ciphertext length tells the relay only the bucket, with a random 12-byte IV
    and the job id as additional data, and answers **200**
    `{status:"ready", v:1, macPublicKey, iv, ciphertext}`. The panel derives
    the same key and decrypts locally. Collection is **idempotent for the
@@ -324,7 +334,7 @@ relay), `busy` (503).
 ### Who can read the answer
 
 - **OpenAI** sees the tool result, `_meta` included, so it knows the job id
-  and the count. It never sees the panel's private key or the sealed answer
+  and the count (the model does not: `_meta` stays out of its context). It never sees the panel's private key or the sealed answer
   (the fetch goes from the user's browser to the relay, not through
   ChatGPT's tool channel).
 - **The relay** sees the panel's public key, the engine's public key and the
@@ -364,10 +374,17 @@ context, and never transits OpenAI's servers.
   `src/workers/chatgpt/private-answer-resource.ts`, the single module the
   dashboard lane replaces (like `dashboard-resource.ts`). The contract is
   `private-answer-contract.ts`.
-- The private-model lane provides `PrivateAnswerModel` (an AnalystModel named
-  `built_in`): `status()` and `answerPrivately(question, evidence)`. Until it
-  lands the engine wires an unavailable stub, so every match reports
-  `no_model`.
+- The private-model lane's built-in model backs `PrivateAnswerModel`
+  (`src/workers/chatgpt/private-answer-model.ts`): `status()` is `ready` once
+  the model is downloaded, verified and prepared, `model_downloading` while
+  it installs, else `no_model`; `answerPrivately` maps the Private hits to
+  `analyst-built-in.ts answerPrivately` and its answer, citations and
+  unanswered gaps into the sealed payload; `reset()` stops the model server.
+  The worker shares one built-in model instance between the panel, the tier
+  sniffer (registered before the sniffer is resolved) and the Private answer
+  pool's fallback.
+- The panel builds a fetch URL only from a job id of the exact routable
+  `oly2p.` shape.
 
 ## Build sequence (today)
 

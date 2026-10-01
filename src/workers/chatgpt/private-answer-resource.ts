@@ -61,7 +61,8 @@ button { font: inherit; border: 0; border-radius: 8px; padding: 6px 12px; backgr
 button:disabled { opacity: .6; cursor: default; }
 .answer { white-space: pre-wrap; margin: 8px 0 0; }
 .muted { color: var(--muted); }
-ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
+ol, ul { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
+html, body { min-height: 0; }
 </style>
 </head>
 <body>
@@ -75,6 +76,8 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
   var phase = "idle";
   var message = "";
   var result = null;
+  // The one job id shape the panel will put in a URL (connect-relay/shared/tokens.ts).
+  var JOB_ID = /^oly2p\\.[a-z2-7]{32}\\.[A-Za-z0-9_-]{43}$/;
 
   function post(msg) { if (window.parent && window.parent !== window) window.parent.postMessage(msg, "*"); }
   var nextId = 1;
@@ -83,8 +86,15 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
 
   function accept(meta) {
     var value = meta && typeof meta === "object" ? meta[CONFIG.metaKey] : null;
-    if (!value || value.v !== 1 || typeof value.count !== "number" || value.count <= 0) return;
-    if (info && info.jobId === value.jobId) return;
+    if (!value || value.v !== 1 || typeof value.count !== "number" || value.count <= 0) {
+      // No private match on this result: render nothing at all.
+      if (info) { info = null; phase = "idle"; message = ""; result = null; render(); }
+      return;
+    }
+    if (value.state === "ready" && !(typeof value.jobId === "string" && JOB_ID.test(value.jobId))) {
+      value = { v: 1, count: value.count, state: "no_model" };
+    }
+    if (info && info.jobId === value.jobId && info.state === value.state) return;
     info = value; phase = "idle"; message = ""; result = null; render();
   }
   window.addEventListener("message", function (event) {
@@ -131,7 +141,7 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
   };
 
   async function show() {
-    if (!info || !info.jobId || phase === "working") return;
+    if (!info || typeof info.jobId !== "string" || !JOB_ID.test(info.jobId) || phase === "working") return;
     if (!subtle) { phase = "error"; message = FAIL.forbidden; render(); return; }
     phase = "working"; message = "Preparing the private answer on your Mac..."; render();
     var jobId = info.jobId;
@@ -183,6 +193,13 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
           cites.forEach(function (c) { list.appendChild(el("li", [c.source, c.title, c.date].filter(Boolean).join(" \\u00b7 "))); });
           root.appendChild(list);
         }
+        var gaps = Array.isArray(result.unanswered) ? result.unanswered : [];
+        if (gaps.length) {
+          root.appendChild(el("p", "Not answered by these items:", "muted"));
+          var missing = el("ul");
+          gaps.forEach(function (g) { missing.appendChild(el("li", String(g))); });
+          root.appendChild(missing);
+        }
       } else {
         var button = el("button", "Show private answer");
         button.disabled = phase === "working" || phase === "error";
@@ -191,7 +208,7 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
         if (message) root.appendChild(el("p", message, "muted"));
       }
     }
-    var height = Math.ceil(document.documentElement.scrollHeight || 0);
+    var height = info ? Math.ceil(document.documentElement.scrollHeight || 0) : 0;
     if (window.openai && typeof window.openai.notifyIntrinsicHeight === "function") window.openai.notifyIntrinsicHeight(height);
     notify("ui/notifications/size-changed", { height: height });
   }

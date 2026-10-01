@@ -67,6 +67,21 @@ async function aesKey(privateKey: CryptoKey, peerPublicKey: CryptoKey, jobId: st
   );
 }
 
+/** Plaintext sizes the sealed answer is padded to, so its length tells the relay only the bucket. */
+export const PRIVATE_ANSWER_PAD_BUCKETS = [1024, 4096, 16_384, 65_536] as const;
+
+/**
+ * Pads a JSON plaintext with trailing spaces to the next bucket (UTF-8 bytes;
+ * beyond the largest, the next multiple of it). JSON.parse ignores trailing
+ * whitespace, so the panel reads the same value.
+ */
+export function padPrivateAnswerPlaintext(json: string): string {
+  const bytes = utf8(json).byteLength;
+  const largest = PRIVATE_ANSWER_PAD_BUCKETS[PRIVATE_ANSWER_PAD_BUCKETS.length - 1]!;
+  const target = PRIVATE_ANSWER_PAD_BUCKETS.find((bucket) => bytes <= bucket) ?? Math.ceil(bytes / largest) * largest;
+  return json + ' '.repeat(target - bytes);
+}
+
 /** Seals `plaintext` to the panel's public key with a fresh engine key pair. */
 export async function sealPrivateAnswer(jobId: string, panelPublicKey: CryptoKey, plaintext: string): Promise<SealedPrivateAnswer> {
   const mac = await subtle().generateKey({ name: 'ECDH', namedCurve: PRIVATE_ANSWER_CURVE }, false, ['deriveBits']) as CryptoKeyPair;

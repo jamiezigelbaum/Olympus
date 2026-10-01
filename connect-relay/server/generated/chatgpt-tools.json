@@ -70,7 +70,13 @@
           "type": "oauth2",
           "scopes": []
         }
-      ]
+      ],
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://olympus/private-answer"
+        },
+        "openai/outputTemplate": "ui://olympus/private-answer"
+      }
     },
     {
       "name": "source_index_status",

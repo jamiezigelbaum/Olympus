@@ -15,7 +15,8 @@
  *    Private-eligible now (Secret included) is dropped. Until the model is
  *    done, the claiming key gets 202 `pending` with Retry-After.
  * 3. When it is done, the claiming key gets 200 `ready` with the answer
- *    sealed to that key (private-answer-crypto.ts). The same key gets the
+ *    sealed to that key (private-answer-crypto.ts), padded to a size bucket
+ *    so the ciphertext length does not reveal the answer length. The same key gets the
  *    same sealed bytes again until the job expires, so a replay of the
  *    panel's request (by anyone who saw it) is harmless and cannot consume
  *    the answer: only the holder of the panel's private key can open it.
@@ -29,7 +30,9 @@
  * Pending polls by the claiming key are rate limited per job (429), never
  * destructive. Unknown, expired (ten minutes from creation) and wrong-install
  * jobs answer 410 `gone`: the endpoint is no oracle for which ids existed.
- * Analyses run one at a time; claims are rate limited. Nothing here is
+ * Analyses run one at a time, and after a deadline the next one waits for
+ * the model's reset (bounded). Claims of live jobs are rate limited; a claim
+ * of an unknown id spends nothing. Nothing here is
  * persisted: an engine restart forgets every job.
  */
 import { randomBytes } from 'node:crypto';
@@ -49,7 +52,7 @@ import {
   type PrivateEvidenceItem,
   type PrivateMatchSummary,
 } from './private-answer-contract.ts';
-import { importPanelPublicKey, sealPrivateAnswer, type SealedPrivateAnswer } from './private-answer-crypto.ts';
+import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer, type SealedPrivateAnswer } from './private-answer-crypto.ts';
 
 /** A content-free local audit event: no job id, no question, no key. */
 export type PrivateAnswerAuditEvent = 'claimed_by_other_key' | 'analysis_deadline';
@@ -103,6 +106,7 @@ export interface ClaimResponse {
 
 const MAX_ANSWER_CHARS = 64 * 1024;
 const MAX_CITATIONS = 20;
+const MAX_UNANSWERED = 10;
 const MAX_CITATION_TEXT = 300;
 const MAX_QUESTION_CHARS = 4_000;
 const MAX_EVIDENCE_ITEMS = 50;
@@ -145,12 +149,15 @@ export class PrivateAnswerJobs {
   private tokens: number;
   private refilledAt: number;
   private queue: Promise<void>;
+  /** A deadline's background reset, bounded by resetTimeoutMs; the next analysis waits for it. */
+  private resetting: Promise<void> | undefined;
   private readonly options: PrivateAnswerJobsOptions;
 
   constructor(options: PrivateAnswerJobsOptions) {
     this.options = options;
     this.jobs = new Map();
     this.queue = Promise.resolve();
+    this.resetting = undefined;
     this.now = options.now ?? Date.now;
     this.ttlMs = options.ttlMs ?? PRIVATE_ANSWER_JOB_TTL_MS;
     this.maxJobs = options.maxJobs ?? 200;
@@ -216,11 +223,12 @@ export class PrivateAnswerJobs {
 
   /** One panel POST: claim, poll, or collect (idempotent for the claiming key until expiry). */
   async claim(jobId: string, publicKey: unknown): Promise<ClaimResponse> {
-    if (!this.takeToken()) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: 5 };
     this.sweep();
     const job = this.jobs.get(jobId);
-    // Wrong install, unknown or expired: one answer for all.
+    // Wrong install, unknown or expired: one answer for all, and no claim
+    // token spent, so a flood of made-up ids cannot lock out a real panel.
     if (!job || privateAnswerInstallId(jobId) !== this.options.installId()) return gone();
+    if (!this.takeToken()) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: 5 };
     const panel = await importPanelPublicKey(publicKey);
     if (!panel) return { status: 400, body: { status: 'invalid' } };
     // The job may have gone while the key was imported.
@@ -262,6 +270,10 @@ export class PrivateAnswerJobs {
     const abort = new AbortController();
     job.abort = abort;
     this.queue = this.queue.then(async () => {
+      // A model reset after an earlier deadline finishes (or times out)
+      // first, so two inferences never overlap and the reset cannot kill
+      // this job's run.
+      if (this.resetting) await this.resetting;
       if (abort.signal.aborted || this.jobs.get(job.id) !== job) return;
       const question = job.question ?? '';
       const cached = job.evidence ?? [];
@@ -282,7 +294,7 @@ export class PrivateAnswerJobs {
         if (evidence.length === 0) throw new Error('no private evidence');
         const model = this.options.model();
         const result = await model.answerPrivately(question, evidence, abort.signal);
-        return sealPrivateAnswer(job.id, panelKey, JSON.stringify(plaintextOf(result)));
+        return sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(plaintextOf(result))));
       })();
       work.catch(() => undefined);
       try {
@@ -317,7 +329,11 @@ export class PrivateAnswerJobs {
       timer = setTimeout(resolve, this.resetTimeoutMs);
       (timer as { unref?: () => void }).unref?.();
     });
-    void Promise.race([reset.catch(() => undefined), timeout]).finally(() => clearTimeout(timer));
+    const settled: Promise<void> = Promise.race([reset.then(() => undefined, () => undefined), timeout]).finally(() => {
+      clearTimeout(timer);
+      if (this.resetting === settled) this.resetting = undefined;
+    });
+    this.resetting = settled;
   }
 
   private takePoll(job: Job): boolean {
@@ -350,7 +366,7 @@ function clean(value: unknown, max: number): string | undefined {
 }
 
 /** The decrypted payload, field by field: text only, bounded. */
-export function plaintextOf(result: { answer: unknown; citations?: unknown }): PrivateAnswerPlaintextV1 {
+export function plaintextOf(result: { answer: unknown; citations?: unknown; unanswered?: unknown }): PrivateAnswerPlaintextV1 {
   const citations: PrivateAnswerCitation[] = [];
   for (const value of Array.isArray(result.citations) ? result.citations : []) {
     if (citations.length >= MAX_CITATIONS) break;
@@ -365,7 +381,18 @@ export function plaintextOf(result: { answer: unknown; citations?: unknown }): P
     if (date) citation.date = date;
     if (Object.keys(citation).length > 0) citations.push(citation);
   }
-  return { v: 1, answer: (typeof result.answer === 'string' ? result.answer : '').replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER_CHARS), citations };
+  const unanswered: string[] = [];
+  for (const value of Array.isArray(result.unanswered) ? result.unanswered : []) {
+    if (unanswered.length >= MAX_UNANSWERED) break;
+    const line = clean(value, MAX_CITATION_TEXT);
+    if (line) unanswered.push(line);
+  }
+  return {
+    v: 1,
+    answer: (typeof result.answer === 'string' ? result.answer : '').replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER_CHARS),
+    citations,
+    ...(unanswered.length > 0 ? { unanswered } : {}),
+  };
 }
 
 /* ------------------------------------------------------------------ */

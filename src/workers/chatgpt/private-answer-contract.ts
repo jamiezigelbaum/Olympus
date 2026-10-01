@@ -3,13 +3,15 @@
  * docs/design/chatgpt-plugin.md, "Private answer panel", is the narrative.
  *
  * - Resource: `ui://olympus/private-answer` (MCP Apps HTML), linked from the
- *   answer tools' `_meta.ui.resourceUri`. Rendered under every answer; it
- *   shows nothing unless the result's `_meta` carries a private match.
+ *   answer tools' and olympus_search's `_meta.ui.resourceUri`. Rendered under
+ *   every result; it renders nothing (zero height) unless the result's
+ *   `_meta` carries a private match.
  * - Tool result `_meta[PRIVATE_ANSWER_META_KEY]`: PrivateAnswerMetaV1 below.
  *   Widget-only; never the model's context. It carries no key, no token, no
  *   answer text.
- * - Tool result `structuredContent.privateMatch`: { count, panelState } (the
- *   model may see it; counts and state only).
+ * - Nothing about a private match is model-visible: no count, no state, no
+ *   note in `structuredContent` or the text. The model cannot learn whether
+ *   Private items match (an existence oracle otherwise).
  * - Endpoint: `POST <relayOrigin>/private/<jobId>` with
  *   `{"v":1,"publicKey":"<base64url raw P-256 point>"}`; responses carry
  *   `status` (connect-relay/shared/private-answer.ts PrivateAnswerWireStatus).
@@ -59,6 +61,8 @@ export interface PrivateAnswerPlaintextV1 {
   v: 1;
   answer: string;
   citations: PrivateAnswerCitation[];
+  /** What the private items could not answer, when the model said so. */
+  unanswered?: string[];
 }
 
 /** One Private search hit as the worker returned it. Opaque here: only the private model reads it. */
@@ -75,7 +79,7 @@ export interface PrivateAnswerModel {
     question: string,
     evidence: readonly PrivateEvidenceItem[],
     signal?: AbortSignal,
-  ): Promise<{ answer: string; citations: PrivateAnswerCitation[] }>;
+  ): Promise<{ answer: string; citations: PrivateAnswerCitation[]; unanswered?: string[] }>;
   /**
    * Kill or reset the model runtime (its child process or session). Called
    * when an analysis passes its hard deadline, after the engine has already

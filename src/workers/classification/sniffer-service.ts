@@ -6,10 +6,16 @@
 
 import type { AnalystModel } from '../../core/analyst.ts';
 import {
+  CLASSIFICATION_LEDGER_OWNER_APPROVAL,
   appendClassificationLedgerEntryOnce,
   isClassifierApproved,
   readClassificationLedger,
+  type ClassificationLedgerEntry,
 } from '../classification-ledger.ts';
+import { moveTieredItem } from '../connector-store/tier-move.ts';
+import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import { BUILT_IN_EMBEDDING_PROVIDER } from '../source-index/built-in-embedding/provider.ts';
+import { BUILT_IN_SNIFFER_LANE } from './built-in-sniffer.ts';
 import type { InstalledTierClassification } from './installed-tier-classification.ts';
 import { snifferPromptVersions } from './sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
@@ -25,6 +31,7 @@ import { existsSync } from 'node:fs';
 import { TierSnifferStore } from './sniffer-store.ts';
 import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
+import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import { TierLedger, tierLedgerPathForStore } from './tier-ledger.ts';
 
 export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60_000;
@@ -62,6 +69,40 @@ export interface TierSnifferServiceOptions {
   shouldYield?: () => boolean;
   now?: () => Date;
   log?: (line: string) => void;
+  /**
+   * The built-in private model is approved by default (owner default
+   * 2026-10-01): with this set and the lane exactly the built-in model's
+   * (local, profile and model `built_in`), the owner approval for the current
+   * prompt version is written to the classification ledger automatically,
+   * again whenever the prompt version changes (new owner words). An owner
+   * revocation of that version is respected. Any other lane, remote ones
+   * included, still waits for the owner's own approval.
+   */
+  autoApproveBuiltIn?: boolean;
+  /**
+   * Automatic tier moves (owner approval 2026-10-01): queued moves (a held
+   * item the sniffer judged Personal after all queues one) are carried out
+   * right after the pass, at most `maxPerPass` items, ONLY while `localEmbeddingsOnly()` says
+   * every configured embedding is the built-in local model AND every store of
+   * the item's set embeds with it (free, nothing leaves the Mac). Otherwise
+   * the move stays queued for the owner-approved `olympus tier migrate` path.
+   */
+  autoMoves?: {
+    localEmbeddingsOnly: () => boolean;
+    /** The embedding ledger each automatic move is recorded in. */
+    embeddingLedgerPath: string;
+    maxPerPass?: number;
+  };
+}
+
+export const DEFAULT_AUTO_MOVES_PER_PASS = 25;
+export const BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = 'built-in local model, nothing leaves the Mac (owner default 2026-10-01)';
+
+export interface TierAutoMoveReport {
+  moved: number;
+  failed: number;
+  /** Queued moves left for the owner-approved migration (a store not on the built-in embedding model). */
+  notEligible: number;
 }
 
 export interface TierClassificationBacklog {
@@ -78,7 +119,7 @@ export type TierSnifferTick =
   | { state: 'skipped_running' }
   | { state: 'awaiting_owner_approval'; modelId: string; promptVersion: string }
   | { state: 'model_unavailable'; modelId: string }
-  | { state: 'ran'; report: SnifferPassReport }
+  | { state: 'ran'; report: SnifferPassReport; autoMoves?: TierAutoMoveReport }
   | { state: 'failed'; error: string };
 
 export class TierSnifferService {
@@ -237,7 +278,26 @@ export class TierSnifferService {
     const versions = snifferPromptVersions(ownerContext);
     const ledger = await readClassificationLedger(this.options.classificationLedgerPath);
     const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
-    if (!isClassifierApproved(ledger.entries, key)) {
+    if (!isClassifierApproved(ledger.entries, key) && this.options.autoApproveBuiltIn && isBuiltInLane(lane)
+      && !ownerRevoked(ledger.entries, key)) {
+      await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
+        recorded_at: (this.options.now?.() ?? new Date()).toISOString(),
+        kind: 'classifier_model_decision',
+        what: `The built-in private model is approved for the privacy sniffer with prompt ${versions.approval} by the owner's default for built-in local models.`,
+        why: BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON,
+        model_id: lane.modelId,
+        prompt_version: versions.approval,
+        lane: lane.kind,
+        profile_id: lane.profileId,
+        approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+        status: 'complete',
+        entry_id: `sniffer-default-approval:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`,
+      });
+    }
+    const approved = this.options.autoApproveBuiltIn && isBuiltInLane(lane)
+      ? isClassifierApproved((await readClassificationLedger(this.options.classificationLedgerPath)).entries, key)
+      : isClassifierApproved(ledger.entries, key);
+    if (!approved) {
       // Until then no question is sent anywhere: flagged items wait, pending
       // and held Private, and their questions stay queued for the approval.
       // Make the open decision visible once, never as an approval.
@@ -283,7 +343,93 @@ export class TierSnifferService {
         + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}.`,
       );
     }
-    return { state: 'ran', report };
+    const autoMoves = this.options.autoMoves && !signal.aborted && this.options.autoMoves.localEmbeddingsOnly()
+      ? await this.runAutoMoves(this.options.autoMoves, signal)
+      : undefined;
+    return { state: 'ran', report, ...(autoMoves ? { autoMoves } : {}) };
+  }
+
+  /** Carries out queued moves the sniffer's verdicts made, bounded per pass. */
+  private async runAutoMoves(
+    options: NonNullable<TierSnifferServiceOptions['autoMoves']>,
+    signal: AbortSignal,
+  ): Promise<TierAutoMoveReport> {
+    const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0 };
+    let budget = Math.max(0, options.maxPerPass ?? DEFAULT_AUTO_MOVES_PER_PASS);
+    for (const ledgerPath of this.ledgerPaths()) {
+      if (budget === 0 || signal.aborted) break;
+      const set = tierSetForLedger(ledgerPath);
+      if (!set) continue;
+      const queued = set.ledger.listMoving({ limit: budget })
+        .filter((record) => record.routed
+          && record.targetMetadataTier !== null && record.targetContentTier !== null
+          && record.targetMetadataTier !== 'secrets' && record.targetContentTier !== 'secrets');
+      if (queued.length === 0) continue;
+      if (!setEmbedsWithBuiltInOnly(set)) {
+        report.notEligible += queued.length;
+        continue;
+      }
+      for (const record of queued) {
+        if (budget === 0 || signal.aborted) break;
+        budget -= 1;
+        try {
+          const identity = {
+            provider: record.provider,
+            accountScope: record.accountScope,
+            providerItemId: record.providerItemId,
+            ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
+          };
+          const source = set.ledger.copies(identity).find((copy) => copy.state === 'current');
+          const exported = source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
+          if (!exported) throw new Error('no current copy');
+          await moveTieredItem({
+            set,
+            identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
+            target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
+            embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: 'system-automatic', why: AUTO_MOVE_WHY },
+          });
+          report.moved += 1;
+        } catch {
+          // The move stays queued (held, never shown twice); the next pass or
+          // the owner-approved migration picks it up.
+          report.failed += 1;
+        }
+      }
+    }
+    if (report.moved > 0 || report.failed > 0) {
+      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} left queued.`);
+    }
+    return report;
+  }
+}
+
+const AUTO_MOVE_WHY = 'Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).';
+
+function isBuiltInLane(lane: SnifferLane): boolean {
+  return lane.kind === BUILT_IN_SNIFFER_LANE.kind
+    && lane.profileId === BUILT_IN_SNIFFER_LANE.profileId
+    && lane.modelId === BUILT_IN_SNIFFER_LANE.modelId;
+}
+
+/** Whether the newest owner-signed entry for this exact key is a revocation. */
+function ownerRevoked(entries: readonly ClassificationLedgerEntry[], key: { lane: string; profileId: string; modelId: string; promptVersion: string }): boolean {
+  for (const entry of entries) {
+    if (entry.model_id !== key.modelId || entry.prompt_version !== key.promptVersion
+      || entry.lane !== key.lane || entry.profile_id !== key.profileId) continue;
+    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL) continue;
+    if (entry.kind === 'classifier_model_revoked') return true;
+    if (entry.kind === 'classifier_model_decision' && entry.status === 'complete') return false;
+  }
+  return false;
+}
+
+/** Every open store of the set embeds (if at all) with the built-in local model only. */
+function setEmbedsWithBuiltInOnly(set: TieredStoreSet): boolean {
+  try {
+    return set.openStores().every((store) => store.embeddingAuthorities()
+      .every((authority) => authority.provider === BUILT_IN_EMBEDDING_PROVIDER));
+  } catch {
+    return false;
   }
 }
 

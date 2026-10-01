@@ -14155,6 +14155,15 @@ class TierLedger {
     })();
     return flipped;
   }
+  listMoving(options = {}) {
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
+    const rows = this.db.query(`
+      SELECT * FROM tier_items WHERE state = 'moving'
+      ORDER BY decided_at, provider, account_scope, provider_item_id, conversation_key
+      LIMIT ?
+    `).all(limit);
+    return rows.map(recordFromRow);
+  }
   listPending(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
     const rows = options.after ? this.db.query(`
@@ -22808,6 +22817,15 @@ var init_local_index = __esm(() => {
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
 
+// src/workers/connector-store/tier-set-registry.ts
+function registerTierSetForLedger(ledgerPath, set) {
+  (tierSets ??= new Map).set(ledgerPath, set);
+}
+function tierSetForLedger(ledgerPath) {
+  return tierSets?.get(ledgerPath);
+}
+var tierSets;
+
 // src/workers/connector-store/secrets-disposition.ts
 function secretsDisposition() {
   return SECRETS_DISPOSITION;
@@ -22881,6 +22899,7 @@ class TieredStoreSet {
     if (!this.legs.has("secure_local"))
       throw new Error("A tiered store set needs a secure_local leg.");
     registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
+    registerTierSetForLedger(this.ledger.dbPath, this);
   }
   store(trustDomain, options = {}) {
     const leg = this.legs.get(trustDomain);
@@ -90403,7 +90422,7 @@ function createEmailSourceWorker(options = {}) {
               corpusId: run.store.corpusId,
               trustDomain: run.store.trustDomain
             })));
-            const visible = new Set(tiered && options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
+            const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
             const perRun = runs.map((run) => tagged.filter((hit) => hit.corpusId === run.store.corpusId && visible.has(hit)));
             const merged = [];
             for (let rank = 0;merged.length < searchRequest.maxResults && perRun.some((hits2) => hits2.length > rank); rank += 1) {
@@ -90413,7 +90432,7 @@ function createEmailSourceWorker(options = {}) {
                   merged.push(hit);
               }
             }
-            const hits = tiered ? merged : tagged;
+            const hits = tiered ? merged : tagged.filter((hit) => visible.has(hit));
             const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? [] : [];
             const locatorsExposed = hits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
             const safeResult = {
@@ -93580,6 +93599,28 @@ function builtInAnalystEnabled(env = process.env, platform2 = `${process.platfor
 function resolveBuiltInReasoningModel(env = process.env, totalMemoryBytes = totalmem()) {
   return pickBuiltInReasoningModel(totalMemoryBytes, env[BUILT_IN_ANALYST_MODEL_ENV]?.trim() || "auto");
 }
+function builtInPrivateModelStatus(env = process.env, totalMemoryBytes = totalmem()) {
+  const spec = resolveBuiltInReasoningModel(env, totalMemoryBytes);
+  const enabled = builtInAnalystEnabled(env) && spec !== undefined;
+  if (!spec) {
+    return {
+      enabled: false,
+      state: "not_started",
+      modelId: "",
+      percent: 0,
+      label: "This computer does not have enough memory for the built-in private model",
+      bytesDone: 0,
+      bytesTotal: 0,
+      updatedAt: new Date(0).toISOString()
+    };
+  }
+  return {
+    ...readBuiltInReasoningStatus(spec, env),
+    enabled,
+    displayName: spec.displayName,
+    downloadBytes: spec.file.bytes
+  };
+}
 function createBuiltInAnalystModel(options = {}) {
   const env = options.env ?? process.env;
   const totalMemoryBytes = options.totalMemoryBytes ?? totalmem();
@@ -93742,7 +93783,61 @@ function withBuiltInFallback(primary, builtIn) {
 function isLocalServiceDown(error2) {
   return error2 instanceof OperationError && error2.code === "argus_unreachable" && !/timed out/i.test(error2.message);
 }
-var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 300000, DEFAULT_IDLE_SHUTDOWN_SECONDS = 600, DEFAULT_STARTUP_TIMEOUT_MS3 = 120000;
+async function answerPrivately(question, evidence, options = {}) {
+  const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
+  const pack = privateEvidencePack(question, evidence);
+  const analyst = createAnalyst(model, { auditSuspiciousDrafts: true });
+  const run = () => analyst.analyze(pack, {
+    localOnly: true,
+    ...options.maxAnswerChars !== undefined ? { maxAnswerChars: options.maxAnswerChars } : {}
+  });
+  const result = options.signal ? await runWithAnalystAbortSignal(options.signal, run) : await run();
+  const byId = new Map(evidence.map((item) => [item.id, item]));
+  return {
+    answer: result.escalation ? PRIVATE_ANSWER_NOT_FOUND : result.answer,
+    citations: result.citations.map((citation) => {
+      const id = citation.provenance.sourceItem.providerItemId;
+      const item = byId.get(id);
+      return {
+        id,
+        ...item?.title ? { title: item.title } : {},
+        ...item?.locator ? { locator: item.locator } : {},
+        claim: citation.claim
+      };
+    }),
+    unanswered: [...result.unanswered],
+    modelId: `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`
+  };
+}
+function privateEvidencePack(question, evidence) {
+  const candidates = evidence.map((item) => ({
+    provenance: {
+      sourceItem: {
+        family: "file",
+        provider: "private-answer",
+        accountScope: "local",
+        providerItemId: item.id,
+        localItemId: item.id
+      },
+      citation: {
+        ...item.title ? { title: item.title } : {},
+        ...item.source ? { sourceLabel: item.source } : {},
+        ...item.locator ? { uri: item.locator } : {},
+        ...item.date ? { authoredAt: item.date } : {}
+      }
+    },
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    chunks: [item.text]
+  }));
+  return {
+    question,
+    candidates,
+    coverage: { searchedCorpora: ["private-answer"], skippedCorpora: [], extractionGaps: [] },
+    builtAt: new Date().toISOString()
+  };
+}
+var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 300000, DEFAULT_IDLE_SHUTDOWN_SECONDS = 600, DEFAULT_STARTUP_TIMEOUT_MS3 = 120000, PRIVATE_ANSWER_NOT_FOUND = "These private items do not answer this question.", sharedPanelModel;
 var init_analyst_built_in = __esm(() => {
   init_analyst();
   init_operation_error();
@@ -97127,6 +97222,9 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/built-in-sniffer.ts
+function registerBuiltInPrivateModel(model) {
+  registered2 = model;
+}
 function registeredBuiltInPrivateModel() {
   return registered2;
 }
@@ -97760,7 +97858,23 @@ class TierSnifferService {
     const versions2 = snifferPromptVersions(ownerContext);
     const ledger = await readClassificationLedger(this.options.classificationLedgerPath);
     const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions2.approval };
-    if (!isClassifierApproved(ledger.entries, key)) {
+    if (!isClassifierApproved(ledger.entries, key) && this.options.autoApproveBuiltIn && isBuiltInLane(lane) && !ownerRevoked(ledger.entries, key)) {
+      await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
+        recorded_at: (this.options.now?.() ?? new Date).toISOString(),
+        kind: "classifier_model_decision",
+        what: `The built-in private model is approved for the privacy sniffer with prompt ${versions2.approval} by the owner's default for built-in local models.`,
+        why: BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON,
+        model_id: lane.modelId,
+        prompt_version: versions2.approval,
+        lane: lane.kind,
+        profile_id: lane.profileId,
+        approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+        status: "complete",
+        entry_id: `sniffer-default-approval:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions2.approval}`
+      });
+    }
+    const approved = this.options.autoApproveBuiltIn && isBuiltInLane(lane) ? isClassifierApproved((await readClassificationLedger(this.options.classificationLedgerPath)).entries, key) : isClassifierApproved(ledger.entries, key);
+    if (!approved) {
       await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
         recorded_at: (this.options.now?.() ?? new Date).toISOString(),
         kind: "classifier_model_decision",
@@ -97799,7 +97913,79 @@ class TierSnifferService {
     if (report.calls > 0 || report.verdictsApplied > 0) {
       this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}.`);
     }
-    return { state: "ran", report };
+    const autoMoves = this.options.autoMoves && !signal.aborted && this.options.autoMoves.localEmbeddingsOnly() ? await this.runAutoMoves(this.options.autoMoves, signal) : undefined;
+    return { state: "ran", report, ...autoMoves ? { autoMoves } : {} };
+  }
+  async runAutoMoves(options, signal) {
+    const report = { moved: 0, failed: 0, notEligible: 0 };
+    let budget = Math.max(0, options.maxPerPass ?? DEFAULT_AUTO_MOVES_PER_PASS);
+    for (const ledgerPath of this.ledgerPaths()) {
+      if (budget === 0 || signal.aborted)
+        break;
+      const set2 = tierSetForLedger(ledgerPath);
+      if (!set2)
+        continue;
+      const queued = set2.ledger.listMoving({ limit: budget }).filter((record3) => record3.routed && record3.targetMetadataTier !== null && record3.targetContentTier !== null && record3.targetMetadataTier !== "secrets" && record3.targetContentTier !== "secrets");
+      if (queued.length === 0)
+        continue;
+      if (!setEmbedsWithBuiltInOnly(set2)) {
+        report.notEligible += queued.length;
+        continue;
+      }
+      for (const record3 of queued) {
+        if (budget === 0 || signal.aborted)
+          break;
+        budget -= 1;
+        try {
+          const identity = {
+            provider: record3.provider,
+            accountScope: record3.accountScope,
+            providerItemId: record3.providerItemId,
+            ...record3.conversationKey ? { providerConversationId: record3.conversationKey } : {}
+          };
+          const source = set2.ledger.copies(identity).find((copy) => copy.state === "current");
+          const exported = source ? set2.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
+          if (!exported)
+            throw new Error("no current copy");
+          await moveTieredItem({
+            set: set2,
+            identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
+            target: { metadataTier: record3.targetMetadataTier, contentTier: record3.targetContentTier },
+            embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY }
+          });
+          report.moved += 1;
+        } catch {
+          report.failed += 1;
+        }
+      }
+    }
+    if (report.moved > 0 || report.failed > 0) {
+      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} left queued.`);
+    }
+    return report;
+  }
+}
+function isBuiltInLane(lane) {
+  return lane.kind === BUILT_IN_SNIFFER_LANE.kind && lane.profileId === BUILT_IN_SNIFFER_LANE.profileId && lane.modelId === BUILT_IN_SNIFFER_LANE.modelId;
+}
+function ownerRevoked(entries, key) {
+  for (const entry of entries) {
+    if (entry.model_id !== key.modelId || entry.prompt_version !== key.promptVersion || entry.lane !== key.lane || entry.profile_id !== key.profileId)
+      continue;
+    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
+      continue;
+    if (entry.kind === "classifier_model_revoked")
+      return true;
+    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
+      return false;
+  }
+  return false;
+}
+function setEmbedsWithBuiltInOnly(set2) {
+  try {
+    return set2.openStores().every((store) => store.embeddingAuthorities().every((authority) => authority.provider === BUILT_IN_EMBEDDING_PROVIDER));
+  } catch {
+    return false;
   }
 }
 function tierSnifferServiceEnv(env) {
@@ -97817,9 +98003,12 @@ function positiveInteger7(value, fallback, minimum) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000;
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000, DEFAULT_AUTO_MOVES_PER_PASS = 25, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_classification_ledger();
+  init_tier_move();
+  init_provider();
+  init_built_in_sniffer();
   init_sniffer();
   init_sniffer_resolver();
   init_sniffer_store();
@@ -101480,8 +101669,9 @@ function buildChatGptDashboardViewModel(view, options = {}) {
   if (embedding.state === "failed") {
     needsYou.push({ id: "model:embedding", sentence: DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention, fix: checkAgainFix() });
   }
-  const answers = answersFromModelSetup(view.model_setup);
-  if (answers && !answers.ready) {
+  const answers = answersFromModelSetup(view.model_setup) ?? builtInAnswers(options.privateModel);
+  const answersNeedAttention = answers !== undefined && !answers.ready && (answers.kind !== "built_in" || options.privateModel?.state === "failed");
+  if (answersNeedAttention) {
     needsYou.push({ id: "model:answers", sentence: DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention, fix: checkAgainFix() });
   }
   if (options.privacy && !options.privacy.configured) {
@@ -101494,7 +101684,7 @@ function buildChatGptDashboardViewModel(view, options = {}) {
   const progress = overallProgress(rows);
   const connected = rows.some(({ card }) => dashboardIsConnectedSource(card));
   const anyAnswerReady = rows.some(({ card }) => card.answer_readiness.state === "ready");
-  const connection = connectionFor({ connected, anyAnswerReady, embedding, progress });
+  const connection = connectionFor({ connected, anyAnswerReady, embedding, progress, privateModel: options.privateModel });
   return {
     v: 1,
     connection,
@@ -101703,9 +101893,13 @@ function scopeFix(definition, card) {
 function connectionFor(input) {
   if (input.embedding.state === "downloading") {
     const state = "installing";
+    let percent = clampPercent3(input.embedding.percent ?? 0);
+    if (input.privateModel && PRIVATE_MODEL_INSTALLING.has(input.privateModel.state)) {
+      percent = Math.min(percent, clampPercent3(input.privateModel.percent ?? 0));
+    }
     return {
       state,
-      progress: { percent: clampPercent3(input.embedding.percent ?? 0), label: DASHBOARD_CHATGPT_VOCABULARY.installingModel }
+      progress: { percent, label: DASHBOARD_CHATGPT_VOCABULARY.installingModel }
     };
   }
   return { state: "ready" };
@@ -101716,6 +101910,11 @@ function embeddingFromModelSetup(setup) {
   const required4 = setup.cards.filter((card) => card.required);
   const failed = required4.some((card) => card.state === "needs_attention" || card.state === "not_configured");
   return { kind: "custom", state: failed ? "failed" : "ready" };
+}
+function builtInAnswers(model) {
+  if (!model)
+    return;
+  return { kind: "built_in", label: ANSWER_MODEL_LABELS.built_in, ready: model.state === "ready" || model.state === "loading" };
 }
 function answersFromModelSetup(setup) {
   if (!setup)
@@ -101908,7 +102107,7 @@ function isoOrUndefined(value) {
 function isoOrNow(value, now) {
   return isoOrUndefined(value) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, FIXABLE_STALLS, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE;
+var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, FIXABLE_STALLS, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE, PRIVATE_MODEL_INSTALLING;
 var init_dashboard_view_model = __esm(() => {
   init_phases();
   init_source_dashboard();
@@ -101957,6 +102156,7 @@ var init_dashboard_view_model = __esm(() => {
     extraction: "reading",
     embedding: "indexing"
   };
+  PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
 });
 
 // src/workers/chatgpt/model-choice.ts
@@ -102047,23 +102247,9 @@ var init_model_choice = __esm(() => {
 });
 
 // src/workers/chatgpt/private-answer-contract.ts
-var exports_private_answer_contract = {};
-__export(exports_private_answer_contract, {
-  UNAVAILABLE_PRIVATE_ANSWER_MODEL: () => UNAVAILABLE_PRIVATE_ANSWER_MODEL,
-  PRIVATE_MATCH_COUNT_CAP: () => PRIVATE_MATCH_COUNT_CAP,
-  PRIVATE_ANSWER_RESOURCE_URI: () => PRIVATE_ANSWER_RESOURCE_URI,
-  PRIVATE_ANSWER_META_KEY: () => PRIVATE_ANSWER_META_KEY,
-  PRIVATE_ANSWER_JOB_TTL_MS: () => PRIVATE_ANSWER_JOB_TTL_MS
-});
-var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_MATCH_COUNT_CAP = 50, UNAVAILABLE_PRIVATE_ANSWER_MODEL;
+var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_MATCH_COUNT_CAP = 50;
 var init_private_answer_contract = __esm(() => {
   PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
-  UNAVAILABLE_PRIVATE_ANSWER_MODEL = {
-    status: () => ({ state: "no_model" }),
-    answerPrivately: async () => {
-      throw new Error("no private answer model");
-    }
-  };
 });
 
 // src/workers/chatgpt/response-builder.ts
@@ -102237,8 +102423,7 @@ function answerToolResult(raw, options = {}) {
   if (!record3 || typeof record3.answer !== "string") {
     return errorToolResult(new OperationError("source_index_error", "unexpected answer shape"));
   }
-  const panel = copyPrivateMatch(options.privateMatch);
-  let privateMatched = options.privateMatched === true || panel !== undefined;
+  let privateMatched = false;
   const citations = [];
   for (const value of Array.isArray(record3.evidence) ? record3.evidence : []) {
     const evidence = asRecord18(value);
@@ -102271,27 +102456,22 @@ function answerToolResult(raw, options = {}) {
     citations: shownCitations,
     ...notes.length > 0 ? { notes } : {}
   };
+  return withPrivateAnswerMeta({ content: [{ type: "text", text: textParts.join(`
+`) }], structuredContent }, options.privateMatch);
+}
+function withPrivateAnswerMeta(result, match) {
+  const panel = copyPrivateMatch(match);
   if (!panel)
-    return { content: [{ type: "text", text: textParts.join(`
-`) }], structuredContent };
-  structuredContent.privateMatch = {
-    count: panel.count,
-    panelState: panel.state,
-    ...panel.percent !== undefined ? { percent: panel.percent } : {}
-  };
-  return {
-    content: [{ type: "text", text: textParts.join(`
-`) }],
-    structuredContent,
-    _meta: { [PRIVATE_ANSWER_META_KEY]: panel }
-  };
+    return result;
+  const meta2 = typeof result._meta === "object" && result._meta !== null ? result._meta : {};
+  return { ...result, _meta: { ...meta2, [PRIVATE_ANSWER_META_KEY]: panel } };
 }
 function searchToolResult(raw, options = {}) {
   const record3 = asRecord18(raw);
   if (!record3 || !Array.isArray(record3.evidence)) {
     return errorToolResult(new OperationError("source_index_error", "unexpected search shape"));
   }
-  let privateMatched = options.privateMatched === true;
+  let privateMatched = false;
   let flagged = false;
   const evidence = [];
   for (const value of record3.evidence) {
@@ -102357,11 +102537,11 @@ function searchToolResult(raw, options = {}) {
   }
   if (notes.length > 0)
     lines.push(...notes);
-  return {
+  return withPrivateAnswerMeta({
     content: [{ type: "text", text: lines.join(`
 `).trim() }],
     structuredContent: structured
-  };
+  }, options.privateMatch);
 }
 function plural4(count2, noun) {
   return `${count2} ${noun}${count2 === 1 ? "" : "s"}`;
@@ -103374,7 +103554,8 @@ button { font: inherit; border: 0; border-radius: 8px; padding: 6px 12px; backgr
 button:disabled { opacity: .6; cursor: default; }
 .answer { white-space: pre-wrap; margin: 8px 0 0; }
 .muted { color: var(--muted); }
-ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
+ol, ul { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
+html, body { min-height: 0; }
 </style>
 </head>
 <body>
@@ -103388,6 +103569,8 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
   var phase = "idle";
   var message = "";
   var result = null;
+  // The one job id shape the panel will put in a URL (connect-relay/shared/tokens.ts).
+  var JOB_ID = /^oly2p\\.[a-z2-7]{32}\\.[A-Za-z0-9_-]{43}$/;
 
   function post(msg) { if (window.parent && window.parent !== window) window.parent.postMessage(msg, "*"); }
   var nextId = 1;
@@ -103396,8 +103579,15 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
 
   function accept(meta) {
     var value = meta && typeof meta === "object" ? meta[CONFIG.metaKey] : null;
-    if (!value || value.v !== 1 || typeof value.count !== "number" || value.count <= 0) return;
-    if (info && info.jobId === value.jobId) return;
+    if (!value || value.v !== 1 || typeof value.count !== "number" || value.count <= 0) {
+      // No private match on this result: render nothing at all.
+      if (info) { info = null; phase = "idle"; message = ""; result = null; render(); }
+      return;
+    }
+    if (value.state === "ready" && !(typeof value.jobId === "string" && JOB_ID.test(value.jobId))) {
+      value = { v: 1, count: value.count, state: "no_model" };
+    }
+    if (info && info.jobId === value.jobId && info.state === value.state) return;
     info = value; phase = "idle"; message = ""; result = null; render();
   }
   window.addEventListener("message", function (event) {
@@ -103444,7 +103634,7 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
   };
 
   async function show() {
-    if (!info || !info.jobId || phase === "working") return;
+    if (!info || typeof info.jobId !== "string" || !JOB_ID.test(info.jobId) || phase === "working") return;
     if (!subtle) { phase = "error"; message = FAIL.forbidden; render(); return; }
     phase = "working"; message = "Preparing the private answer on your Mac..."; render();
     var jobId = info.jobId;
@@ -103496,6 +103686,13 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
           cites.forEach(function (c) { list.appendChild(el("li", [c.source, c.title, c.date].filter(Boolean).join(" \\u00b7 "))); });
           root.appendChild(list);
         }
+        var gaps = Array.isArray(result.unanswered) ? result.unanswered : [];
+        if (gaps.length) {
+          root.appendChild(el("p", "Not answered by these items:", "muted"));
+          var missing = el("ul");
+          gaps.forEach(function (g) { missing.appendChild(el("li", String(g))); });
+          root.appendChild(missing);
+        }
       } else {
         var button = el("button", "Show private answer");
         button.disabled = phase === "working" || phase === "error";
@@ -103504,7 +103701,7 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
         if (message) root.appendChild(el("p", message, "muted"));
       }
     }
-    var height = Math.ceil(document.documentElement.scrollHeight || 0);
+    var height = info ? Math.ceil(document.documentElement.scrollHeight || 0) : 0;
     if (window.openai && typeof window.openai.notifyIntrinsicHeight === "function") window.openai.notifyIntrinsicHeight(height);
     notify("ui/notifications/size-changed", { height: height });
   }
@@ -103568,7 +103765,9 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
           options.evidenceSearch({ question, ...limit ? { limit } : {} }, signal),
           probe(question, ctx).catch(() => false)
         ]);
-        return searchToolResult(raw, { privateMatched: normalizeProbe(probed).count > 0 });
+        const match = normalizeProbe(probed);
+        const privateMatch = match.count > 0 ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later) }, options) : undefined;
+        return searchToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       case SOURCE_ANSWER_TOOL.name: {
         if (!answerToolsListed(ctx, options))
@@ -103594,7 +103793,7 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
           return answerToolResult(raw);
         }
         const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
-        return answerToolResult(raw, { privateMatched: privateMatch !== undefined, ...privateMatch ? { privateMatch } : {} });
+        return answerToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
         if (!answerToolsListed(ctx, options))
@@ -103606,7 +103805,7 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
         const done = pendingJobId(raw) === undefined;
         const pending = privateMatchForJob(jobId, done);
         const privateMatch = done && pending ? beginPrivateAnswer(pending, options) : undefined;
-        return answerToolResult(raw, { privateMatched: privateMatch !== undefined, ...privateMatch ? { privateMatch } : {} });
+        return answerToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       default:
         if (isSetupTool(name))
@@ -103703,7 +103902,17 @@ async function dashboardViewModel(options, signal) {
   } catch {
     privacy = undefined;
   }
-  return buildChatGptDashboardViewModel(view, { ...embedding ? { embedding } : {}, ...privacy ? { privacy } : {} });
+  let privateModel;
+  try {
+    privateModel = options.privateModel?.();
+  } catch {
+    privateModel = undefined;
+  }
+  return buildChatGptDashboardViewModel(view, {
+    ...embedding ? { embedding } : {},
+    ...privacy ? { privacy } : {},
+    ...privateModel ? { privateModel } : {}
+  });
 }
 function readChatGptResource(uri) {
   if (uri === PRIVATE_ANSWER_RESOURCE_URI) {
@@ -103847,7 +104056,8 @@ var init_mcp_surface = __esm(() => {
       additionalProperties: false
     },
     annotations: READ_ONLY,
-    securitySchemes: OAUTH2_REQUIRED2
+    securitySchemes: OAUTH2_REQUIRED2,
+    _meta: answerToolMeta()
   };
   ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL];
   CHATGPT_TOOLS = [
@@ -105150,6 +105360,12 @@ async function aesKey(privateKey, peerPublicKey, jobId, usage) {
   const ikm = await subtle().importKey("raw", shared, "HKDF", false, ["deriveKey"]);
   return subtle().deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf82(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
 }
+function padPrivateAnswerPlaintext(json2) {
+  const bytes = utf82(json2).byteLength;
+  const largest = PRIVATE_ANSWER_PAD_BUCKETS[PRIVATE_ANSWER_PAD_BUCKETS.length - 1];
+  const target = PRIVATE_ANSWER_PAD_BUCKETS.find((bucket) => bytes <= bucket) ?? Math.ceil(bytes / largest) * largest;
+  return json2 + " ".repeat(target - bytes);
+}
 async function sealPrivateAnswer(jobId, panelPublicKey, plaintext) {
   const mac2 = await subtle().generateKey({ name: "ECDH", namedCurve: PRIVATE_ANSWER_CURVE }, false, ["deriveBits"]);
   const key = await aesKey(mac2.privateKey, panelPublicKey, jobId, "encrypt");
@@ -105158,7 +105374,10 @@ async function sealPrivateAnswer(jobId, panelPublicKey, plaintext) {
   const macPublicKey = new Uint8Array(await subtle().exportKey("raw", mac2.publicKey));
   return { macPublicKey: toBase64Url(macPublicKey), iv: toBase64Url(iv), ciphertext: toBase64Url(new Uint8Array(ciphertext)) };
 }
-var PRIVATE_ANSWER_CURVE = "P-256", RAW_PUBLIC_KEY_BYTES = 65, IV_BYTES = 12, subtle = () => globalThis.crypto.subtle, utf82 = (value) => new TextEncoder().encode(value);
+var PRIVATE_ANSWER_CURVE = "P-256", RAW_PUBLIC_KEY_BYTES = 65, IV_BYTES = 12, subtle = () => globalThis.crypto.subtle, utf82 = (value) => new TextEncoder().encode(value), PRIVATE_ANSWER_PAD_BUCKETS;
+var init_private_answer_crypto = __esm(() => {
+  PRIVATE_ANSWER_PAD_BUCKETS = [1024, 4096, 16384, 65536];
+});
 
 // src/workers/chatgpt/private-answer-jobs.ts
 var exports_private_answer_jobs = {};
@@ -105196,11 +105415,13 @@ class PrivateAnswerJobs {
   tokens;
   refilledAt;
   queue;
+  resetting;
   options;
   constructor(options) {
     this.options = options;
     this.jobs = new Map;
     this.queue = Promise.resolve();
+    this.resetting = undefined;
     this.now = options.now ?? Date.now;
     this.ttlMs = options.ttlMs ?? PRIVATE_ANSWER_JOB_TTL_MS;
     this.maxJobs = options.maxJobs ?? 200;
@@ -105250,12 +105471,12 @@ class PrivateAnswerJobs {
     return { count: count2, panelState: "ready", jobId: id };
   }
   async claim(jobId, publicKey) {
-    if (!this.takeToken())
-      return { status: 429, body: { status: "rate_limited" }, retryAfterSeconds: 5 };
     this.sweep();
     const job = this.jobs.get(jobId);
     if (!job || privateAnswerInstallId(jobId) !== this.options.installId())
       return gone();
+    if (!this.takeToken())
+      return { status: 429, body: { status: "rate_limited" }, retryAfterSeconds: 5 };
     const panel = await importPanelPublicKey(publicKey);
     if (!panel)
       return { status: 400, body: { status: "invalid" } };
@@ -105299,6 +105520,8 @@ class PrivateAnswerJobs {
     const abort = new AbortController;
     job.abort = abort;
     this.queue = this.queue.then(async () => {
+      if (this.resetting)
+        await this.resetting;
       if (abort.signal.aborted || this.jobs.get(job.id) !== job)
         return;
       const question = job.question ?? "";
@@ -105320,7 +105543,7 @@ class PrivateAnswerJobs {
           throw new Error("no private evidence");
         const model = this.options.model();
         const result = await model.answerPrivately(question, evidence, abort.signal);
-        return sealPrivateAnswer(job.id, panelKey, JSON.stringify(plaintextOf(result)));
+        return sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(plaintextOf(result))));
       })();
       work.catch(() => {
         return;
@@ -105356,9 +105579,16 @@ class PrivateAnswerJobs {
       timer = setTimeout(resolve10, this.resetTimeoutMs);
       timer.unref?.();
     });
-    Promise.race([reset.catch(() => {
+    const settled = Promise.race([reset.then(() => {
       return;
-    }), timeout]).finally(() => clearTimeout(timer));
+    }, () => {
+      return;
+    }), timeout]).finally(() => {
+      clearTimeout(timer);
+      if (this.resetting === settled)
+        this.resetting = undefined;
+    });
+    this.resetting = settled;
   }
   takePoll(job) {
     const at = this.now();
@@ -105409,7 +105639,20 @@ function plaintextOf(result) {
     if (Object.keys(citation).length > 0)
       citations.push(citation);
   }
-  return { v: 1, answer: (typeof result.answer === "string" ? result.answer : "").replace(UNSAFE_CHARS2, "").slice(0, MAX_ANSWER_CHARS), citations };
+  const unanswered = [];
+  for (const value of Array.isArray(result.unanswered) ? result.unanswered : []) {
+    if (unanswered.length >= MAX_UNANSWERED)
+      break;
+    const line = clean(value, MAX_CITATION_TEXT);
+    if (line)
+      unanswered.push(line);
+  }
+  return {
+    v: 1,
+    answer: (typeof result.answer === "string" ? result.answer : "").replace(UNSAFE_CHARS2, "").slice(0, MAX_ANSWER_CHARS),
+    citations,
+    ...unanswered.length > 0 ? { unanswered } : {}
+  };
 }
 function isPrivateAnswerRequest(request) {
   return new URL(request.url).pathname.startsWith("/private/");
@@ -105477,15 +105720,105 @@ async function boundedText(request, max) {
   }
   return new TextDecoder().decode(Buffer.concat(chunks2));
 }
-var MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, UNSAFE_CHARS2, defaultAudit = (event) => {
+var MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_UNANSWERED = 10, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, UNSAFE_CHARS2, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
 };
 var init_private_answer_jobs = __esm(() => {
   init_private_answer();
   init_private_answer_contract();
+  init_private_answer_crypto();
   MAX_ANSWER_CHARS = 64 * 1024;
   UNSAFE_CHARS2 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
 });
+
+// src/workers/chatgpt/private-answer-model.ts
+var exports_private_answer_model = {};
+__export(exports_private_answer_model, {
+  privateEvidenceItems: () => privateEvidenceItems,
+  createBuiltInPrivateAnswerModel: () => createBuiltInPrivateAnswerModel
+});
+function createBuiltInPrivateAnswerModel(options) {
+  const { model } = options;
+  return {
+    status() {
+      if (!model)
+        return { state: "no_model" };
+      if (options.available())
+        return { state: "ready" };
+      let status;
+      try {
+        status = model.status();
+      } catch {
+        return { state: "no_model" };
+      }
+      if (status.state === "downloading" || status.state === "verifying" || status.state === "loading") {
+        return { state: "model_downloading", ...Number.isFinite(status.percent) ? { percent: status.percent } : {} };
+      }
+      return { state: "no_model" };
+    },
+    async answerPrivately(question, evidence, signal) {
+      if (!model)
+        throw new Error("no private answer model");
+      const items = privateEvidenceItems(evidence);
+      if (items.length === 0)
+        throw new Error("no private evidence");
+      const result = await options.answer(question, items, { model, ...signal ? { signal } : {} });
+      const byId = new Map(items.map((item) => [item.id, item]));
+      const citations = [];
+      const seen = new Set;
+      for (const citation of result.citations) {
+        if (seen.has(citation.id))
+          continue;
+        seen.add(citation.id);
+        const item = byId.get(citation.id);
+        const title = citation.title ?? item?.title;
+        citations.push({
+          ...title ? { title } : {},
+          ...item?.source ? { source: item.source } : {},
+          ...item?.date ? { date: item.date } : {}
+        });
+      }
+      return { answer: result.answer, citations, unanswered: [...result.unanswered] };
+    },
+    async reset() {
+      await model?.stop();
+    }
+  };
+}
+function privateEvidenceItems(hits) {
+  const items = [];
+  hits.forEach((hit, index) => {
+    const sourceItem = record3(hit.sourceItem);
+    const provenance = record3(hit.provenance);
+    const citation = record3(provenance?.citation);
+    const content = record3(hit.internalContent);
+    const title = string4(citation?.title) ?? string4(hit.title);
+    const passage = string4(content?.passage) ?? string4(hit.excerpt) ?? string4(hit.text);
+    const text2 = (passage ?? title)?.slice(0, MAX_PASSAGE_CHARS);
+    if (!text2)
+      return;
+    const id = string4(sourceItem?.localItemId) ?? string4(sourceItem?.providerItemId) ?? `item-${index + 1}`;
+    const locator = string4(hit.locator) ?? string4(citation?.uri) ?? string4(content?.url);
+    const source = string4(citation?.sourceLabel) ?? string4(sourceItem?.provider);
+    const date4 = string4(citation?.authoredAt) ?? string4(content?.authoredAt) ?? string4(citation?.updatedAt);
+    items.push({
+      id: items.some((item) => item.id === id) ? `${id}#${index + 1}` : id,
+      text: text2,
+      ...title ? { title } : {},
+      ...locator ? { locator } : {},
+      ...source ? { source } : {},
+      ...date4 ? { date: date4 } : {}
+    });
+  });
+  return items;
+}
+function record3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+function string4(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+var MAX_PASSAGE_CHARS = 6000;
 
 // src/workers/remote-openapi.ts
 var exports_remote_openapi = {};
@@ -106554,6 +106887,30 @@ function createWorkerBuiltInAnalystModel(env) {
     return;
   return createBuiltInAnalystModel({ env });
 }
+function createWorkerSharedBuiltInModel(env) {
+  const base = createWorkerBuiltInAnalystModel(env);
+  if (!base)
+    return;
+  let prepared = false;
+  const installedOnDisk = () => {
+    try {
+      const state = base.status().state;
+      return state === "loading" || state === "ready";
+    } catch {
+      return false;
+    }
+  };
+  const model = {
+    ...base,
+    async prepare() {
+      await base.prepare();
+      prepared = installedOnDisk();
+    }
+  };
+  if (installedOnDisk())
+    model.prepare();
+  return { model, available: () => prepared && installedOnDisk() };
+}
 function sovereigntyAnalystRoutePlan(input) {
   const profiles = input.pool.explicitOrder ?? input.pool.members;
   const steps = profiles.flatMap((profile) => {
@@ -106910,6 +107267,8 @@ async function main() {
   const bootSecretResolver = new WorkerBootSecretResolver({
     resolveSecretRefValueSync: (secretRef, env) => resolveSecretRefValueSync(secretRef, { env })
   });
+  const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env);
+  registerBuiltInPrivateModel(workerBuiltInModel ? { model: workerBuiltInModel.model, available: workerBuiltInModel.available } : undefined);
   const snifferRuntime = resolveTierSnifferRuntime({
     engine: sovereigntyEngine,
     ...registeredBuiltInPrivateModel() ? { builtIn: registeredBuiltInPrivateModel() } : {}
@@ -107735,7 +108094,7 @@ async function main() {
       ...veniceAnalystTimeoutMs !== undefined ? { timeoutMs: veniceAnalystTimeoutMs } : {}
     });
     const localSourceAnswerModel = createDelphiAnalystModel(new DelphiClient(olympusConfig), process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs } : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs });
-    const builtInAnalystModel = createWorkerBuiltInAnalystModel(process.env);
+    const builtInAnalystModel = workerBuiltInModel?.model;
     const sovereigntyAnalysts = await createSovereigntyAnalystMap({
       engine: sovereigntyEngine,
       olympusConfig,
@@ -108540,17 +108899,22 @@ async function main() {
       if (!owner.startsWith("remote:"))
         return false;
       const id = owner.slice("remote:".length);
-      const record3 = remoteConnections()?.list().find((connection) => connection.id === id);
-      return record3 === undefined || record3.revokedAt !== null;
+      const record4 = remoteConnections()?.list().find((connection) => connection.id === id);
+      return record4 === undefined || record4.revokedAt !== null;
     }
   });
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30000);
   sourceAnswerJobSweep.unref?.();
   const { PrivateAnswerJobs: PrivateAnswerJobs2, createPrivateAnswerHandler: createPrivateAnswerHandler2, withPrivateAnswerRoute: withPrivateAnswerRoute2 } = await Promise.resolve().then(() => (init_private_answer_jobs(), exports_private_answer_jobs));
-  const { UNAVAILABLE_PRIVATE_ANSWER_MODEL: UNAVAILABLE_PRIVATE_ANSWER_MODEL2 } = await Promise.resolve().then(() => (init_private_answer_contract(), exports_private_answer_contract));
+  const { createBuiltInPrivateAnswerModel: createBuiltInPrivateAnswerModel2 } = await Promise.resolve().then(() => exports_private_answer_model);
   const { DASHBOARD_UI_DOMAIN: DASHBOARD_UI_DOMAIN2 } = await Promise.resolve().then(() => (init_dashboard_resource(), exports_dashboard_resource));
+  const privateAnswerModel = createBuiltInPrivateAnswerModel2({
+    model: workerBuiltInModel?.model,
+    available: () => workerBuiltInModel?.available() ?? false,
+    answer: answerPrivately
+  });
   const privateAnswers = new PrivateAnswerJobs2({
-    model: () => UNAVAILABLE_PRIVATE_ANSWER_MODEL2,
+    model: () => privateAnswerModel,
     installId: () => remotePublicUrls()?.installId
   });
   const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30000);
@@ -108660,6 +109024,12 @@ async function main() {
         ...chatgptEvidenceSearch ? { evidenceSearch: chatgptEvidenceSearch } : {},
         answerModelAvailable: chatgptAnswerModelAvailable,
         embedding: chatgptEmbeddingState,
+        privateModel: () => {
+          if (!workerBuiltInModel)
+            return;
+          const status = builtInPrivateModelStatus(process.env);
+          return status.enabled ? { state: status.state, percent: status.percent } : undefined;
+        },
         privacy: () => {
           const settings = readChatGptPrivacySettings2(process.env, pendingClassificationCount());
           return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
@@ -108688,7 +109058,15 @@ async function main() {
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
     shouldYield: () => sourceAnswersInFlight > 0 || secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
-    log: (line) => console.log(line)
+    log: (line) => console.log(line),
+    ...snifferRuntime.source === "built_in" ? { autoApproveBuiltIn: true } : {},
+    autoMoves: {
+      localEmbeddingsOnly: () => ["public_safe", "internal", "secure_local"].every((domain) => {
+        const resolved = sovereigntyEngine.resolveEmbeddingProfile(domain);
+        return resolved === undefined || resolved.profile.provider === "built-in";
+      }),
+      embeddingLedgerPath: resolveEmbeddingLedgerPath(process.env)
+    }
   }) : undefined;
   preemptTierSniffer = tierSniffer ? () => tierSniffer.preempt() : undefined;
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
@@ -109157,11 +109535,11 @@ function validateConnectorStoreMountDeclaration(entry) {
   if (!entry || typeof entry !== "object") {
     throw new Error("Each connector store entry must be an object.");
   }
-  const record3 = entry;
-  const dbPath = typeof record3.dbPath === "string" ? record3.dbPath.trim() : "";
-  const corpusId = typeof record3.corpusId === "string" ? record3.corpusId.trim() : "";
-  const family = typeof record3.family === "string" ? record3.family.trim() : "";
-  const trustDomain = typeof record3.trustDomain === "string" ? record3.trustDomain.trim() : "";
+  const record4 = entry;
+  const dbPath = typeof record4.dbPath === "string" ? record4.dbPath.trim() : "";
+  const corpusId = typeof record4.corpusId === "string" ? record4.corpusId.trim() : "";
+  const family = typeof record4.family === "string" ? record4.family.trim() : "";
+  const trustDomain = typeof record4.trustDomain === "string" ? record4.trustDomain.trim() : "";
   if (!dbPath || !corpusId || !family || !trustDomain) {
     throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
   }
@@ -109174,15 +109552,15 @@ function validateConnectorStoreMountDeclaration(entry) {
   if (!isDeclarableSourceTrustDomain(trustDomain)) {
     throw new Error(`Connector store trustDomain must be one of: ${SOURCE_TRUST_DOMAINS.join(", ")} (or an "x-" extension id).`);
   }
-  const hasPrincipalProvider = Object.prototype.hasOwnProperty.call(record3, "principalProvider");
-  const hasPrincipalAccountScope = Object.prototype.hasOwnProperty.call(record3, "principalAccountScope");
+  const hasPrincipalProvider = Object.prototype.hasOwnProperty.call(record4, "principalProvider");
+  const hasPrincipalAccountScope = Object.prototype.hasOwnProperty.call(record4, "principalAccountScope");
   if (hasPrincipalProvider !== hasPrincipalAccountScope) {
     throw new Error("Connector store principal identity requires both principalProvider and principalAccountScope.");
   }
   let chatPrincipal;
   let principal;
   if (hasPrincipalProvider && hasPrincipalAccountScope) {
-    principal = canonicalConnectorStoreChatPrincipal(record3.principalProvider, record3.principalAccountScope);
+    principal = canonicalConnectorStoreChatPrincipal(record4.principalProvider, record4.principalAccountScope);
     if (family === "chat")
       chatPrincipal = principal;
   }

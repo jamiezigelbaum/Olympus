@@ -128,6 +128,19 @@ export interface ChatGptDashboardOptions {
   embedding?: DashboardViewModelV1['models']['embedding'];
   /** The owner's privacy settings, counts only (olympus_privacy_get). Absent: not reported. */
   privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
+  /**
+   * The built-in private model (analyst-built-in.ts builtInPrivateModelStatus),
+   * when it is on for this machine. It is the answer model shown when no
+   * Venice or local answer model is set up. Its download never puts the page
+   * into `installing`; it only joins the embedding download's percent.
+   */
+  privateModel?: BuiltInPrivateModelView;
+}
+
+export interface BuiltInPrivateModelView {
+  state: 'not_started' | 'downloading' | 'verifying' | 'loading' | 'ready' | 'failed';
+  /** 0-100. */
+  percent?: number;
 }
 
 export function buildChatGptDashboardViewModel(
@@ -168,8 +181,11 @@ export function buildChatGptDashboardViewModel(
   if (embedding.state === 'failed') {
     needsYou.push({ id: 'model:embedding', sentence: DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention, fix: checkAgainFix() });
   }
-  const answers = answersFromModelSetup(view.model_setup);
-  if (answers && !answers.ready) {
+  const answers = answersFromModelSetup(view.model_setup) ?? builtInAnswers(options.privateModel);
+  // A built-in model still downloading is not something for the owner to fix.
+  const answersNeedAttention = answers !== undefined && !answers.ready
+    && (answers.kind !== 'built_in' || options.privateModel?.state === 'failed');
+  if (answersNeedAttention) {
     needsYou.push({ id: 'model:answers', sentence: DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention, fix: checkAgainFix() });
   }
 
@@ -186,7 +202,7 @@ export function buildChatGptDashboardViewModel(
   const progress = overallProgress(rows);
   const connected = rows.some(({ card }) => dashboardIsConnectedSource(card));
   const anyAnswerReady = rows.some(({ card }) => card.answer_readiness.state === 'ready');
-  const connection = connectionFor({ connected, anyAnswerReady, embedding, progress });
+  const connection = connectionFor({ connected, anyAnswerReady, embedding, progress, privateModel: options.privateModel });
 
   return {
     v: 1,
@@ -507,16 +523,24 @@ function connectionFor(input: {
   anyAnswerReady: boolean;
   embedding: DashboardViewModelV1['models']['embedding'];
   progress: DashboardViewModelV1['progress'] | undefined;
+  privateModel?: BuiltInPrivateModelView | undefined;
 }): DashboardViewModelV1['connection'] {
   // `installing` disables every control on the page, so it covers only the
   // built-in model download. With no source yet, or a first index running,
   // Olympus is set up and the owner's next step is a control on the page:
   // Connect, or choosing folders.
+  // The built-in private model downloading alone never does: it joins the
+  // percent only while the embedding model is downloading too, so the bar
+  // reaches 100 when both are done.
   if (input.embedding.state === 'downloading') {
     const state: ConnectionState = 'installing';
+    let percent = clampPercent(input.embedding.percent ?? 0);
+    if (input.privateModel && PRIVATE_MODEL_INSTALLING.has(input.privateModel.state)) {
+      percent = Math.min(percent, clampPercent(input.privateModel.percent ?? 0));
+    }
     return {
       state,
-      progress: { percent: clampPercent(input.embedding.percent ?? 0), label: DASHBOARD_CHATGPT_VOCABULARY.installingModel },
+      progress: { percent, label: DASHBOARD_CHATGPT_VOCABULARY.installingModel },
     };
   }
   return { state: 'ready' };
@@ -528,6 +552,13 @@ function embeddingFromModelSetup(setup: ModelSetupView | undefined): DashboardVi
   const required = setup.cards.filter((card) => card.required);
   const failed = required.some((card) => card.state === 'needs_attention' || card.state === 'not_configured');
   return { kind: 'custom', state: failed ? 'failed' : 'ready' };
+}
+
+const PRIVATE_MODEL_INSTALLING = new Set<BuiltInPrivateModelView['state']>(['downloading', 'verifying']);
+
+function builtInAnswers(model: BuiltInPrivateModelView | undefined): DashboardViewModelV1['models']['answers'] {
+  if (!model) return undefined;
+  return { kind: 'built_in', label: ANSWER_MODEL_LABELS.built_in, ready: model.state === 'ready' || model.state === 'loading' };
 }
 
 function answersFromModelSetup(setup: ModelSetupView | undefined): DashboardViewModelV1['models']['answers'] {

@@ -678,7 +678,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     }
   });
 
-  test('answers use Public and Personal evidence only; a Private match adds one fixed sentence', async () => {
+  test('answers use Public and Personal evidence only; a Private match reaches the panel _meta only', async () => {
     const client = await connectClient();
     try {
       const result = await client.callTool({ name: 'source_answer', arguments: { question: 'When was the budget approved?' } });
@@ -690,9 +690,9 @@ describe('ChatGPT MCP surface over the remote handler', () => {
           { source: 'Google Drive', title: 'Budget plan 2026', url: 'https://docs.google.com/document/d/abc', date: '2026-03-01' },
         ],
         notes: ['Some matching items are private and stay on your Mac.'],
-        // The probe's boolean match counts as one item; no private model here.
-        privateMatch: { count: 1, panelState: 'no_model' },
       });
+      // The probe's boolean match counts as one item, for the panel only.
+      expect((result._meta as Record<string, unknown>)['olympus/privateAnswer']).toEqual({ v: 1, count: 1, state: 'no_model' });
     } finally {
       await client.close();
     }
@@ -708,9 +708,9 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         answer: 'Olympus can answer this only from private items, which stay on your Mac.',
         citations: [],
         notes: ['Some matching items are private and stay on your Mac.'],
-        // The probe's boolean match counts as one item; no private model here.
-        privateMatch: { count: 1, panelState: 'no_model' },
       });
+      // The probe's boolean match counts as one item, for the panel only.
+      expect((result._meta as Record<string, unknown>)['olympus/privateAnswer']).toEqual({ v: 1, count: 1, state: 'no_model' });
     } finally {
       await client.close();
     }

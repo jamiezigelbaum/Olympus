@@ -65,6 +65,8 @@ export interface ChatGptSurfaceOptions {
   embedding?: () => ChatGptDashboardOptions['embedding'];
   /** The owner's privacy settings, counts only, for the dashboard. */
   privacy?: () => ChatGptDashboardOptions['privacy'];
+  /** The built-in private model's install state, when it is on for this machine. */
+  privateModel?: () => ChatGptDashboardOptions['privateModel'];
   /** Setup from ChatGPT (setup-tools.ts). Absent: the setup tools answer "unavailable". */
   setup?: ChatGptSetupBackend;
   /**
@@ -209,6 +211,9 @@ export const SEARCH_TOOL: ChatGptToolDefinition = {
   },
   annotations: READ_ONLY,
   securitySchemes: OAUTH2_REQUIRED,
+  // The private answer panel renders under every search; it shows nothing
+  // unless the result's `_meta` carries a private match.
+  _meta: answerToolMeta(),
 };
 
 const ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL] as const;
@@ -274,7 +279,14 @@ export async function callChatGptTool(
           options.evidenceSearch({ question, ...(limit ? { limit } : {}) }, signal),
           probe(question, ctx).catch(() => false as const),
         ]);
-        return searchToolResult(raw, { privateMatched: normalizeProbe(probed).count > 0 });
+        // A private match goes to the private answer panel only (`_meta`):
+        // the job is created as this result is built, so its id is valid
+        // only once ChatGPT can see it.
+        const match = normalizeProbe(probed);
+        const privateMatch = match.count > 0
+          ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later) }, options)
+          : undefined;
+        return searchToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       case SOURCE_ANSWER_TOOL.name: {
         if (!answerToolsListed(ctx, options)) throw new ChatGptSurfaceError('unknown_tool');
@@ -305,7 +317,7 @@ export async function callChatGptTool(
           return answerToolResult(raw);
         }
         const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
-        return answerToolResult(raw, { privateMatched: privateMatch !== undefined, ...(privateMatch ? { privateMatch } : {}) });
+        return answerToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
         if (!answerToolsListed(ctx, options)) throw new ChatGptSurfaceError('unknown_tool');
@@ -315,7 +327,7 @@ export async function callChatGptTool(
         const done = pendingJobId(raw) === undefined;
         const pending = privateMatchForJob(jobId, done);
         const privateMatch = done && pending ? beginPrivateAnswer(pending, options) : undefined;
-        return answerToolResult(raw, { privateMatched: privateMatch !== undefined, ...(privateMatch ? { privateMatch } : {}) });
+        return answerToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       default:
         if (isSetupTool(name)) return await callSetupTool(name, args, options.setup);
@@ -452,7 +464,17 @@ async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?: Abort
     // An unreadable profile is not reported rather than reported as unset.
     privacy = undefined;
   }
-  return buildChatGptDashboardViewModel(view, { ...(embedding ? { embedding } : {}), ...(privacy ? { privacy } : {}) });
+  let privateModel: ChatGptDashboardOptions['privateModel'];
+  try {
+    privateModel = options.privateModel?.();
+  } catch {
+    privateModel = undefined;
+  }
+  return buildChatGptDashboardViewModel(view, {
+    ...(embedding ? { embedding } : {}),
+    ...(privacy ? { privacy } : {}),
+    ...(privateModel ? { privateModel } : {}),
+  });
 }
 
 /** Every MCP Apps resource this surface serves, in list order. */
