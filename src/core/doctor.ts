@@ -15,6 +15,10 @@ import {
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { inspectEngine } from './engine-service.ts';
+import { resolveOpenClawExecutable } from './openclaw-executable.ts';
+import { workerServicePaths } from './worker-service.ts';
 import type { DelphiClient } from './delphi.ts';
 import {
   environmentWithWorkerSetupEnv,
@@ -80,6 +84,43 @@ export interface DoctorDeps {
    * never reads the developer's own install.
    */
   workerEnvPath?: string;
+  /**
+   * What hosts the engine on this machine. Optional so a test never inspects
+   * the developer's own launchd; the `olympus doctor` operation passes
+   * `defaultDoctorHostProbe`.
+   */
+  hostProbe?: () => DoctorHostFacts | Promise<DoctorHostFacts>;
+}
+
+export interface DoctorHostFacts {
+  /** Absolute `openclaw` executable, when one is installed. */
+  openclawPath?: string;
+  /** The standalone engine LaunchAgent (macOS). */
+  engine: { installed: boolean; state: string };
+  /** The legacy worker unit from `olympus worker install`. */
+  legacyWorkerUnit: boolean;
+  /** Doctor is running inside the OpenClaw Gateway (the native tool surface). */
+  insideOpenClaw?: boolean;
+}
+
+export function defaultDoctorHostProbe(
+  env: Record<string, string | undefined> = process.env,
+  options: { insideOpenClaw?: boolean } = {},
+): DoctorHostFacts {
+  const home = env.HOME?.trim() || homedir();
+  const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
+  const engine = process.platform === 'darwin'
+    ? inspectEngine({ homeDir: home })
+    : { installed: false, state: 'not_loaded' };
+  const legacyWorkerUnit = process.platform === 'darwin' || process.platform === 'linux'
+    ? existsSync(workerServicePaths(process.platform, home).unitPath)
+    : false;
+  return {
+    ...(openclawPath ? { openclawPath } : {}),
+    engine: { installed: engine.installed, state: engine.state },
+    legacyWorkerUnit,
+    ...(options.insideOpenClaw ? { insideOpenClaw: true } : {}),
+  };
 }
 
 export interface DoctorResult {
@@ -123,6 +164,7 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
     ? input
     : doctorDepsWithLayeredEnvironment(input, inputEnv);
   const checks = [
+    ...(deps.hostProbe ? [await safeCheck('host', () => hostCheck(deps))] : []),
     await safeCheck('dependencies', () => dependencyCheck(deps)),
     await safeCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
     await safeCheck('sovereignty_prerequisites', () => sovereigntyPrerequisiteCheck(deps)),
@@ -340,6 +382,9 @@ async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const commandExists = deps.commandExists ?? defaultCommandExists;
   const bun = await commandExists('bun');
   const node = await commandExists('node');
+  // Node runs the plugin inside an OpenClaw host; the standalone engine and
+  // the CLI run on Bun alone.
+  const openclaw = await commandExists('openclaw');
   const gog = await commandExists('gog');
   const op = await commandExists('op');
   const python3 = await commandExists('python3');
@@ -349,9 +394,10 @@ async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const go = await commandExists('go');
   const missingRequired = [
     bun ? undefined : 'bun',
-    node ? undefined : 'node',
+    node || !openclaw ? undefined : 'node',
   ].filter((value): value is string => !!value);
   const optionalMissing = [
+    node || openclaw ? undefined : 'node (only for an OpenClaw host)',
     gog ? undefined : 'gog',
     op ? undefined : 'op',
     telethon ? undefined : 'python-telethon',
@@ -370,6 +416,66 @@ async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     ok: true,
     detail: `Required dependencies are present. Optional dependency gaps: ${optionalMissing.join(', ') || 'none'}.`,
   };
+}
+
+/**
+ * Which host runs the engine, and what is missing for it. OpenClaw is one
+ * optional host; the standalone engine LaunchAgent is the other. Without
+ * OpenClaw, nothing that needs it may be configured: today that is only the
+ * `openclaw infer` cloud analyst.
+ */
+async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const facts = await deps.hostProbe!();
+  const hosts: string[] = [];
+  if (facts.engine.installed) hosts.push(`standalone engine (${facts.engine.state})`);
+  if (facts.insideOpenClaw) hosts.push('OpenClaw (this Gateway)');
+  else if (facts.openclawPath) hosts.push(`OpenClaw (${facts.openclawPath})`);
+  if (facts.legacyWorkerUnit) hosts.push('worker unit from olympus worker install');
+  const hasOpenClaw = Boolean(facts.insideOpenClaw || facts.openclawPath);
+  const openclaw = facts.insideOpenClaw
+    ? 'Running inside OpenClaw'
+    : facts.openclawPath ? `OpenClaw is installed at ${facts.openclawPath}` : 'OpenClaw is not installed (optional)';
+  const cloudViaOpenClaw = cloudAnalystUsesOpenClaw(deps);
+  if (hosts.length === 0) {
+    return {
+      name: 'host',
+      ok: false,
+      detail: 'Nothing runs the Olympus engine on this machine: the standalone engine is not installed and OpenClaw is not installed.',
+      hint: 'On a Mac, run olympus engine install. With OpenClaw, install the Olympus plugin there instead.',
+    };
+  }
+  if (facts.engine.installed && facts.engine.state !== 'running' && !hasOpenClaw) {
+    return {
+      name: 'host',
+      ok: false,
+      detail: `The standalone engine is installed but ${facts.engine.state.replace('_', ' ')}. ${openclaw}.`,
+      hint: 'Run olympus engine logs to see why, then olympus engine install to load it again.',
+    };
+  }
+  if (cloudViaOpenClaw && !hasOpenClaw) {
+    return {
+      name: 'host',
+      ok: false,
+      detail: `Hosted by ${hosts.join(', ')}. The cloud analyst is set to answer through openclaw infer, but OpenClaw is not installed, so those answers fall back to the local analyst.`,
+      hint: 'Without OpenClaw, ChatGPT answers Public and Personal questions from Olympus evidence: remove OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED from worker.env and any openclaw-infer profile from sovereignty.json.',
+    };
+  }
+  return {
+    name: 'host',
+    ok: true,
+    detail: `Hosted by ${hosts.join(', ')}. ${openclaw}.`,
+  };
+}
+
+function cloudAnalystUsesOpenClaw(deps: DoctorDeps): boolean {
+  const env = deps.env ?? process.env;
+  if (/^(1|true|yes|on)$/i.test(env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED?.trim() ?? '')) return true;
+  try {
+    const engine = doctorSovereigntyEngine(deps);
+    return Boolean(engine && Object.values(engine.config.modelProfiles).some((profile) => profile.provider === 'openclaw-infer'));
+  } catch {
+    return false;
+  }
 }
 
 async function sovereigntyModelLaneCheck(deps: DoctorDeps): Promise<DoctorCheck> {

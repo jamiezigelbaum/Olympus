@@ -112,6 +112,8 @@ import {
   type RemoteConnectionRecord,
 } from './core/remote-connections.ts';
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
+import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
+import { inspectEngine } from './core/engine-service.ts';
 import {
   readRemoteAccessStatus,
   readTermsAcceptance,
@@ -132,6 +134,7 @@ const PUBLIC_CLI_HELP_GROUPS = new Set([
   'sovereignty',
   'sensitivity',
   'worker',
+  'engine',
   'connect',
   'connections',
   'data',
@@ -233,6 +236,31 @@ async function main(): Promise<void> {
       throw new OperationError('invalid_params', 'Native worker service invocation has unexpected arguments.');
     }
     await runWorkerForeground(args[1] ? { managedInstanceId: args[1] } : {});
+    return;
+  }
+
+  if (args[0] === 'engine') {
+    try {
+      const result = await runEngineCommand(args.slice(1));
+      if (result !== undefined) console.log(JSON.stringify(result, null, 2));
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
+  if (args[0] === '__engine-run') {
+    if (args.length !== 1) {
+      throw new OperationError('invalid_params', 'Engine host invocation has unexpected arguments.');
+    }
+    // Loaded only here: the host pulls in every native service adapter.
+    const { runEngineHostProcess } = await import('./core/engine-host.ts');
+    await runEngineHostProcess(import.meta.url);
     return;
   }
 
@@ -685,6 +713,7 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
     group === 'sovereignty'
     || group === 'sensitivity'
     || group === 'worker'
+    || group === 'engine'
     || group === 'connect'
     || group === 'connections'
     || group === 'data'
@@ -1115,6 +1144,8 @@ function printHelp(): void {
   console.log('  olympus sensitivity validate [--path ~/.olympus/sensitivity-map.json]');
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
+  console.log(`  ${ENGINE_CLI_USAGE['engine install']}`);
+  console.log('  olympus engine uninstall|status|restart|logs');
   console.log('  olympus dashboard [--read-only] [--no-open]');
   console.log('  olympus dashboard token');
   console.log('  olympus doctor');
@@ -1151,6 +1182,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'worker upgrade': 'olympus worker upgrade --artifact <path> [--platform darwin|linux]',
   'worker uninstall': 'olympus worker uninstall [--platform darwin|linux]',
   'worker run': 'olympus worker run',
+  ...ENGINE_CLI_USAGE,
   'connect google': 'olympus connect google --client-id <id>',
   'connect gmail': 'olympus connect gmail --client-id <id>',
   'connect google-drive': 'olympus connect google-drive --client-id <id>',
@@ -1228,6 +1260,12 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
   ],
   worker: [
     'Usage: olympus worker install|start|stop|restart|status|foreground|upgrade|uninstall',
+  ],
+  engine: [
+    'Usage: olympus engine <command>',
+    'Runs Olympus on this Mac without OpenClaw, as a per-user LaunchAgent.',
+    'Commands:',
+    ...Object.values(ENGINE_CLI_USAGE).map((usage) => `  ${usage}`),
   ],
   connect: [
     'Usage: olympus connect <source>',
@@ -2317,6 +2355,13 @@ function parseConnectOptions(args: string[]): {
 
 /** The supervised worker state delete custody reads, or `unknown` if unreadable. */
 function observedWorkerServiceState(): WorkerServiceState {
+  // The standalone engine supervises its own worker; a running engine is an
+  // active worker whatever the legacy worker unit says.
+  if (process.platform === 'darwin') {
+    const engine = inspectEngine();
+    if (engine.state === 'running') return 'active';
+    if (engine.state === 'unknown' && engine.installed) return 'unknown';
+  }
   const lifecycleStatus = runWorkerLifecycle('status');
   return lifecycleStatus.action === 'status' ? lifecycleStatus.service.state : 'unknown';
 }

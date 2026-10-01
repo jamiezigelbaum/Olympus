@@ -130,6 +130,11 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'worker upgrade',
   'worker uninstall',
   'worker run',
+  'engine install',
+  'engine uninstall',
+  'engine status',
+  'engine restart',
+  'engine logs',
   'connect google',
   'connect gmail',
   'connect google-drive',
@@ -180,6 +185,7 @@ export const V0_4_PACKAGE_INTERNAL_CLI_HELPERS = [
   '__oauth-detached-child',
   '__worker-service-run',
   '__relay-service-run',
+  '__engine-run',
 ] as const;
 
 export interface PublicDashboardRoute {

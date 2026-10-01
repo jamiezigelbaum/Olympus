@@ -150,7 +150,9 @@ export function runSetupDependencyCheck(input: {
     dependencyFinding({
       id: 'node',
       label: 'Node.js',
-      required: true,
+      // Only an OpenClaw host runs the plugin on Node; the standalone engine
+      // and the CLI need Bun alone.
+      required: commandExists('openclaw'),
       ok: commandExists('node'),
       detail: 'Runs installed JavaScript entrypoints in OpenClaw plugin hosts.',
       repairHint: repairHint(platform, 'node'),

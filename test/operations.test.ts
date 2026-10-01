@@ -112,6 +112,8 @@ describe('operations', () => {
         }),
       } as unknown as OperationContext['delphi'],
       email: {} as OperationContext['email'],
+      // Never this machine's launchd or OpenClaw: a running standalone engine.
+      doctorHostProbe: () => ({ engine: { installed: true, state: 'running' }, legacyWorkerUnit: false }),
     };
 
     const result = await doctor!.handler(ctx, {}) as { ok: boolean; checks: Array<{ name: string; ok: boolean }> };
@@ -121,6 +123,7 @@ describe('operations', () => {
     // (a fresh install never assumes a local model pool), so no profile is probed.
     expect(profiles).toEqual([]);
     expect(result.checks.map((check) => check.name)).toEqual([
+      'host',
       'dependencies',
       'source_capability_catalog',
       'sovereignty_prerequisites',

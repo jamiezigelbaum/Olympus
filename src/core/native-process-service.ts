@@ -4,6 +4,21 @@ const DEFAULT_READINESS_POLL_MS = 100;
 const DEFAULT_STOP_GRACE_MS = 2_000;
 const DEFAULT_RESTART_DELAYS_MS = [250, 1_000, 5_000, 15_000, 30_000] as const;
 
+/**
+ * Where supervised children write. Inside the OpenClaw Gateway they write
+ * nowhere (`ignore`): the Gateway's own log is not theirs to fill. The
+ * standalone engine host (core/engine-host.ts) runs under launchd with its
+ * stdout/stderr already redirected to ~/Library/Logs/Olympus, so it passes
+ * the children's output through to those files. Process-wide on purpose: it
+ * is a property of the host, set once before any service starts.
+ */
+export type NativeProcessChildStdio = 'ignore' | 'inherit';
+let childStdio: NativeProcessChildStdio = 'ignore';
+
+export function setNativeProcessChildStdio(mode: NativeProcessChildStdio): void {
+  childStdio = mode;
+}
+
 export interface NativeProcessServiceHealth {
   reportFailure(error: Error): void;
   clearFailure(): void;
@@ -255,7 +270,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     if (!isCurrent(lifetime)) throw new NativeProcessServiceStoppedError();
     const child = spawnChild(settings.command, [...settings.args], {
       env: settings.env,
-      stdio: 'ignore',
+      stdio: childStdio === 'inherit' ? ['ignore', 'inherit', 'inherit'] : 'ignore',
       detached: process.platform !== 'win32',
       ...(options.workingDirectory ? { cwd: options.workingDirectory } : {}),
     });
