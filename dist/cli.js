@@ -72468,7 +72468,7 @@ var init_identity = __esm(() => {
 function isPanelOrigin(origin, extraOrigins = []) {
   if (typeof origin !== "string" || origin.length > 255)
     return false;
-  if (origin === `https://${SANDBOX_HOST}` || SANDBOX_SUBDOMAIN.test(origin))
+  if (origin === `https://${SANDBOX_HOST}` || origin === `codex-sandbox://${SANDBOX_HOST}` || SANDBOX_SUBDOMAIN.test(origin))
     return true;
   return extraOrigins.includes(origin);
 }
@@ -72484,7 +72484,7 @@ var PRIVATE_ANSWER_PATH_PREFIX = "/private/", PRIVATE_ANSWER_PATH_PATTERN, PRIVA
 var init_private_answer = __esm(() => {
   init_tokens();
   PRIVATE_ANSWER_PATH_PATTERN = /^\/private\/oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
-  SANDBOX_SUBDOMAIN = /^https:\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.web-sandbox\.oaiusercontent\.com$/;
+  SANDBOX_SUBDOMAIN = /^(?:https|codex-sandbox):\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.web-sandbox\.oaiusercontent\.com$/;
 });
 
 // connect-relay/client/forward.ts
