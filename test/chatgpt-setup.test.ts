@@ -217,6 +217,11 @@ interface FakeBackendState {
   mailApprovals: OlympusMailScopeDraft[];
   approveError?: string;
   revision: string;
+  /** Provider pages of folder names, in the provider's own order; page i+1 follows cursor `p<i+1>`. */
+  pages?: string[][];
+  /** A worker code startOAuth / disconnect fail with. */
+  startError?: string;
+  disconnectError?: string;
 }
 
 function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
@@ -245,12 +250,27 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
   };
   return {
     async startOAuth() {
+      if (state.startError) throw new SetupBackendError(state.startError);
       return { authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=x', expiresAt: '2026-10-01T12:10:00.000Z' };
     },
     handoffLink() {
       return { url: `${RELAY_ORIGIN}/go/oly2g.${INSTALL_ID}.${'a'.repeat(43)}`, expiresAt: '2026-10-01T12:10:00.000Z' };
     },
-    async browseFolders(input) { return browse(input.parentKey); },
+    async browseFolders(input) {
+      if (!state.pages) return browse(input.parentKey);
+      const index = input.cursor ? Number(input.cursor.slice(1)) : 0;
+      const names = state.pages[index] ?? [];
+      return {
+        source_id: 'google_drive.docs',
+        account_generation: 'gen-1',
+        scope_revision: state.revision,
+        status: 'scope_pending',
+        nodes: names.map((name) => ({ key: `k-${name}`, name, kind: 'folder' as const, has_children: false, selectable: true })),
+        ...(index + 1 < state.pages.length ? { next_cursor: `p${index + 1}` } : {}),
+        selections: [],
+        whole_account_selected: false,
+      };
+    },
     async approveFolders(input) {
       if (state.approveError) throw new SetupBackendError(state.approveError);
       state.folderApprovals.push(input as unknown as Record<string, unknown>);
@@ -274,7 +294,9 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
       return { scopeRevision: 'rev-mail-2', started: true };
     },
     savedMailDraft() { return savedDraft; },
-    async disconnect() {},
+    async disconnect() {
+      if (state.disconnectError) throw new SetupBackendError(state.disconnectError);
+    },
     async setModels(choice) {
       if (choice.answers === 'local') throw new ModelChoiceRefusal('model_not_configured');
       return { changed: false, embedding: 'built_in', restarting: false };
@@ -397,6 +419,33 @@ describe('setup tools over the remote handler', () => {
     }
   });
 
+  test('each setup failure reads as its own fixed sentence, never the worker message or a generic one', async () => {
+    const client = await connectClient();
+    try {
+      const cases: Array<[keyof FakeBackendState, string, string, Record<string, unknown>, string]> = [
+        ['startError', 'model_setup_required', 'olympus_connect_source', { source: 'gmail' }, 'Search isn\'t ready on your Mac yet.'],
+        ['startError', 'oauth_start_invalid', 'olympus_connect_source', { source: 'gmail' }, 'couldn\'t open the sign-in page'],
+        ['startError', 'oauth_handback_unavailable', 'olympus_connect_source', { source: 'gmail' }, 'can\'t be connected from ChatGPT'],
+        ['disconnectError', 'source_not_connected', 'olympus_disconnect_source', { source_id: 'dropbox.files' }, 'isn\'t connected'],
+        ['disconnectError', 'disconnect_source_busy', 'olympus_disconnect_source', { source_id: 'dropbox.files' }, 'finishing a read'],
+      ];
+      const texts = new Set<string>();
+      for (const [field, code, tool, args, sentence] of cases) {
+        delete backendState.startError;
+        delete backendState.disconnectError;
+        (backendState as unknown as Record<string, unknown>)[field] = code;
+        const result = await call(client, tool, args);
+        expect(result.isError).toBe(true);
+        expect(result.content[0]!.text).toContain(sentence);
+        expect(result.content[0]!.text).not.toContain(code);
+        texts.add(result.content[0]!.text);
+      }
+      expect(texts.size).toBe(cases.length);
+    } finally {
+      await client.close();
+    }
+  });
+
   test('no tool accepts an API key: key entry is gone and the model switch takes no key', async () => {
     const client = await connectClient();
     try {
@@ -428,7 +477,8 @@ describe('setup tools over the remote handler', () => {
         account_generation: 'gen-1',
         scope_revision: 'rev-1',
         shown: 1,
-        has_more: true,
+        // The fake provider repeats its cursor; one level is read whole and sorted, so nothing more remains.
+        has_more: false,
         choices: 1,
         whole_account_selected: false,
       });
@@ -436,7 +486,6 @@ describe('setup tools over the remote handler', () => {
       expect(ui).toMatchObject({
         kind: 'folders',
         nodes: [{ key: 'folder-public', name: S('FOLDER_NAME'), kind: 'folder', has_children: true, selectable: true }],
-        next_cursor: 'cursor-1',
         selections: [{ key: 'folder-public', state: 'ingest' }],
       });
       expect(JSON.stringify(result.content)).not.toMatch(SENTINEL_PATTERN);
@@ -445,6 +494,42 @@ describe('setup tools over the remote handler', () => {
       expect(JSON.stringify(result)).not.toContain('folder-secret');
       // Never listed inside a Secrets location.
       expect((await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs', parent_key: 'folder-secret' })).isError).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('olympus_scope_list sorts a whole level by name, numbers numerically, before paging; cursors hold across pages', async () => {
+    // Provider order is arbitrary and spans provider pages.
+    const names = ['Apps', '4 Archive', '2 Areas', '10 Later', '1 Projects', '3 Resources'];
+    for (let i = 0; i < 230; i++) names.push(`Folder ${i}`);
+    backendState.pages = [names.slice(0, 3), names.slice(3, 120), names.slice(120)];
+    const client = await connectClient();
+    try {
+      const listed: string[] = [];
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        const result = await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs', ...(cursor ? { cursor } : {}) });
+        expect(result.isError).toBeFalsy();
+        const ui = result._meta?.[SCOPE_UI_META_KEY] as { nodes: Array<{ name: string }>; next_cursor?: string };
+        expect(ui.nodes.length).toBeLessThanOrEqual(100);
+        expect(result.structuredContent?.has_more).toBe(ui.next_cursor !== undefined);
+        listed.push(...ui.nodes.map((node) => node.name));
+        cursor = ui.next_cursor;
+        pages++;
+        // A folder added mid-way sorts into place without repeating or skipping the rest.
+        if (pages === 1) backendState.pages[2]!.push('0 Inbox', 'Zz new');
+      } while (cursor && pages < 10);
+      expect(pages).toBe(3);
+      expect(listed.slice(0, 6)).toEqual(['1 Projects', '2 Areas', '3 Resources', '4 Archive', '10 Later', 'Apps']);
+      expect(listed).toContain('Zz new');
+      expect(listed).not.toContain('0 Inbox'); // sorts before the cursor: it shows on the next fresh listing
+      expect(new Set(listed).size).toBe(listed.length);
+      expect(listed.filter((name) => name.startsWith('Folder ')).slice(0, 3)).toEqual(['Folder 0', 'Folder 1', 'Folder 2']);
+      expect(listed.indexOf('Folder 10')).toBeGreaterThan(listed.indexOf('Folder 9'));
+      // A cursor is bound to its level and its own format.
+      expect((await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs', cursor: 'p1' })).isError).toBe(true);
     } finally {
       await client.close();
     }

@@ -156,11 +156,135 @@ describe('dashboard view-model producer', () => {
       etaSeconds: 5400,
       stalled: false,
       details: [
+        // The first listing is still running, so it has a count and no total.
+        { stage: 'Finding items', unit: 'files', done: 200, total: 0 },
         { stage: 'Reading', unit: 'files', done: 50, total: 200 },
         { stage: 'Indexing', unit: 'files', done: 20, total: 200 },
       ],
     });
     expect(vm.sources[0]!.status).toBe('Working');
+    expect(vm.sources[0]!.progress).toEqual({ stage: 'listing', unit: 'files', done: 200, total: 0, percent: 0, stalled: false });
+  });
+
+  test('per-source progress names the first unfinished stage; reading counts the in-scope population only', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
+      family: 'file',
+      // A finished listing: 300 found, 100 of them names only (not read by policy).
+      connection: { state: 'synced', label: 'synced less than 1 hour ago' },
+      coverage: { indexed_items: 300, not_read_by_policy_items: 100, content_ready_items: 150, embedded_items: 0, embedded_files: 120 },
+      queue_health: { label: 'Working now', waiting: 10, active: 1 },
+      answer_readiness: { state: 'syncing', label: 'Syncing now' },
+      last_sync_at: NOW.toISOString(),
+      movement: { extraction_at: NOW.toISOString() } as never,
+    })]), { now: NOW });
+    const dropbox = vm.sources[0]!;
+    // Names-only items are done once listed: the reading total is 200, not 300.
+    expect(dropbox.progress).toEqual({ stage: 'reading', unit: 'files', done: 150, total: 200, percent: 75, stalled: false });
+    // Honesty rule: never Fresh, never "synced …", while a stage is unfinished.
+    expect(dropbox.status).toBe('Working');
+    expect(dropbox.detail).toBe('Reading');
+    expect(vm.progress).toMatchObject({ unit: 'files', percent: 75, itemsLeft: 50, stalled: false });
+    expect(vm.progress!.details).toEqual([
+      { stage: 'Reading', unit: 'files', done: 150, total: 200 },
+      { stage: 'Indexing', unit: 'files', done: 120, total: 200 },
+    ]);
+    expect(copyDashboardViewModel(vm)).toEqual(vm);
+  });
+
+  test('a finished source is done and may read Fresh; no overall progress remains', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
+      family: 'file',
+      coverage: { indexed_items: 300, not_read_by_policy_items: 100, content_ready_items: 200, embedded_items: 400, embedded_files: 200 },
+      last_sync_at: NOW.toISOString(),
+    })]), { now: NOW });
+    expect(vm.sources[0]!.progress).toEqual({ stage: 'done', unit: 'files', done: 200, total: 200, percent: 100, stalled: false });
+    expect(vm.sources[0]!.status).toBe('Fresh');
+    expect(vm.progress).toBeUndefined();
+  });
+
+  test('a source waiting for its folders is stalled on scope_pending, Needs you, fixed by the picker', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
+      family: 'file',
+      scope_selection: { required: true, kind: 'folders', status: 'scope_pending', connected: true },
+      connection: { state: 'synced', label: 'synced less than 1 hour ago' },
+      coverage: { indexed_items: 0, content_ready_items: 0, embedded_items: 0 },
+    })]), { now: NOW });
+    const dropbox = vm.sources[0]!;
+    expect(dropbox.progress).toEqual({ stage: 'listing', unit: 'files', done: 0, total: 0, percent: 0, stalled: true, stalledReason: 'scope_pending' });
+    expect(dropbox.status).toBe('Needs you');
+    expect(dropbox.primary).toEqual({ label: 'Choose folders', tool: 'olympus_scope_list', args: { source_id: 'dropbox.files' } });
+    expect(vm.needsYou.map((item) => item.fix)).toEqual([dropbox.primary!]);
+    expect(vm.progress?.stalled).toBe(true);
+  });
+
+  test('a source whose credential is gone mid-index is stalled on waiting_for_credentials and reconnects', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
+      family: 'file',
+      connection: { state: 'reauth_required', label: 'reauth required' },
+      coverage: { indexed_items: 300, content_ready_items: 100, embedded_items: 0, embedded_files: 50 },
+      last_sync_at: NOW.toISOString(),
+    })]), { now: NOW });
+    const dropbox = vm.sources[0]!;
+    expect(dropbox.progress).toMatchObject({ stage: 'reading', stalled: true, stalledReason: 'waiting_for_credentials' });
+    expect(dropbox.status).toBe('Needs you');
+    const reconnect = { label: 'Reconnect', tool: 'olympus_connect_source', args: { source: 'dropbox' } };
+    expect(dropbox.primary).toEqual(reconnect);
+    expect(vm.needsYou.map((item) => item.fix)).toEqual([reconnect]);
+  });
+
+  test('indexing waits on the built-in model download with a fixed reason', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
+      family: 'file',
+      coverage: { indexed_items: 100, content_ready_items: 100, embedded_items: 0, embedded_files: 0 },
+      last_sync_at: NOW.toISOString(),
+    })]), { now: NOW, embedding: { kind: 'built_in', state: 'downloading', percent: 40 } });
+    expect(vm.sources[0]!.progress).toMatchObject({ stage: 'indexing', done: 0, total: 100, stalled: true, stalledReason: 'model_downloading' });
+    expect(vm.sources[0]!.status).toBe('Working');
+  });
+
+  test('the response builder keeps progress to its closed sets', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', { family: 'file' })]), { now: NOW });
+    vm.sources[0]!.progress = { stage: 'nope' as never, unit: 'bytes' as never, done: -3, total: 2.6, percent: 140, stalled: false, stalledReason: S('REASON') as never };
+    expect(copyDashboardViewModel(vm).sources[0]!.progress).toEqual({ stage: 'listing', unit: 'items', done: 0, total: 3, percent: 100, stalled: false });
+    vm.sources[0]!.progress = { stage: 'reading', unit: 'files', done: 1, total: 2, percent: 50, stalled: true, stalledReason: S('REASON') as never };
+    expect(copyDashboardViewModel(vm).sources[0]!.progress).toEqual({ stage: 'reading', unit: 'files', done: 1, total: 2, percent: 50, stalled: true });
+  });
+
+  test('a source mid-sign-in is connecting: Needs you, ChatGPT wording, connect tool as its fix', () => {
+    const expiresAt = new Date(NOW.getTime() + 9 * 60_000).toISOString();
+    const vm = buildChatGptDashboardViewModel(view([card('gmail.email', {
+      configured: false,
+      coverage: { indexed_items: 0, content_ready_items: 0, embedded_items: 0 },
+      connection: {
+        state: 'awaiting_consent',
+        label: 'awaiting browser consent',
+        pending: { started_at: NOW.toISOString(), expires_at: expiresAt, expires_in_minutes: 9 },
+      },
+      answer_readiness: { state: 'disconnected', label: 'Connect this source' },
+    })]), { now: NOW });
+    const gmail = vm.sources[0]!;
+    const fix = { label: 'Open sign-in again', tool: 'olympus_connect_source', args: { source: 'gmail' } };
+    expect(gmail.connecting).toEqual({ expiresAt });
+    expect(gmail.status).toBe('Needs you');
+    expect(gmail.primary).toEqual(fix);
+    expect(gmail.progress).toBeUndefined();
+    expect(gmail.detail).toBe('Waiting for you to finish signing in…');
+    expect(vm.needsYou).toEqual([{ id: 'source:gmail.email', sentence: 'Gmail — waiting for you to finish signing in', fix }]);
+    // No local-dashboard phrasing reaches ChatGPT.
+    const wire = JSON.stringify(copyDashboardViewModel(vm));
+    expect(wire).not.toMatch(/tab|expires in|approve/i);
+    expect(copyDashboardViewModel(vm)).toEqual(vm);
+  });
+
+  test('an expired sign-in is not connecting', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('gmail.email', {
+      connection: {
+        state: 'awaiting_consent',
+        label: 'awaiting browser consent',
+        pending: { started_at: NOW.toISOString(), expires_at: new Date(NOW.getTime() - 1).toISOString(), expires_in_minutes: 0 },
+      },
+    })]), { now: NOW });
+    expect(vm.sources[0]!.connecting).toBeUndefined();
   });
 
   test('a source needing reauth is under needsYou with a reconnect tool call', () => {
