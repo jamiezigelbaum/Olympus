@@ -220,10 +220,9 @@ Package
 - [ ] ZIP contains only `plugin.json`, `mcp.json`, `skills/`, `assets/`. Not
       `SUBMISSION.md`, not `demo-data/`, no `.app.json`, no hooks.
 - [ ] Icons: square, ≥48 px, PNG/JPEG/WebP/SVG, ≤5 MiB (test enforced).
-      **`assets/icon.png` is to be replaced** with the owner's new original
-      icon (the current one looks like a platform emoji). Keep the path, so
-      `composerIcon` and `logo` need no change. Consider `composerIconDark`
-      / `logoDark`.
+      Done: the approved OCU mark is `assets/logo.png` and
+      `assets/composer-icon.png` (1024×1024, opaque white), brand colour
+      `#757575` (4.61:1 on white, 4.56:1 on black).
 - [ ] Skills pass the automated scan (no instructions to run unreviewed
       commands; the setup skill's `install.sh` placeholder must be replaced by
       the signed installer or removed before submission).
