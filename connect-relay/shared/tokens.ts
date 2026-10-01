@@ -6,6 +6,13 @@
  *   access token         oly2.<installId>.<secret>
  *   refresh token        oly2r.<installId>.<secret>
  *   authorization code   oly2c.<installId>.<secret>
+ *   one-time hand-off    oly2g.<installId>.<secret>   (`/go/<id>`, see below)
+ *
+ * A hand-off id is the path of a one-time link the engine gives the ChatGPT
+ * dashboard (`https://<relay>/go/<id>`): opened in any browser, the relay
+ * routes it to the install that minted it, and that engine answers with the
+ * page or redirect it stored for the id (a provider sign-in, the Mac-only key
+ * page). Single use and ten minutes, enforced by the engine.
  *
  * `<secret>` is 32 random bytes, base64url (43 characters). The relay never
  * validates the secret; the engine does, against its own database, so a token
@@ -21,16 +28,43 @@ import { randomBytes } from 'node:crypto';
  */
 export const AUTHENTICATED_RESPONSE_HEADER = 'x-olympus-authenticated';
 
-export type CredentialKind = 'access' | 'refresh' | 'code';
+export type CredentialKind = 'access' | 'refresh' | 'code' | 'handoff';
 
-const PREFIX: Record<CredentialKind, string> = { access: 'oly2', refresh: 'oly2r', code: 'oly2c' };
+const PREFIX: Record<CredentialKind, string> = { access: 'oly2', refresh: 'oly2r', code: 'oly2c', handoff: 'oly2g' };
 const SECRET = '[A-Za-z0-9_-]{43}';
 const INSTALL = '[a-z2-7]{32}';
 const PATTERN: Record<CredentialKind, RegExp> = {
   access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
   refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
   code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+  handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
 };
+
+/** The relay path prefix of a hand-off link. */
+export const HANDOFF_PATH_PREFIX = '/go/';
+
+/**
+ * The install a provider sign-in's bounced callback belongs to, when the
+ * engine started it for ChatGPT: its signed `state` names a nonce of the form
+ * `<installId>_<random>` (src/core/oauth-relay.ts). The relay reads only that
+ * prefix to route; the engine verifies the signature, nonce and origin.
+ */
+export function oauthHandbackInstallId(state: string | null | undefined): string | undefined {
+  if (typeof state !== 'string' || state.length > 2048) return undefined;
+  const dot = state.indexOf('.');
+  if (dot <= 0 || !/^[A-Za-z0-9_-]+$/.test(state.slice(0, dot))) return undefined;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(Buffer.from(state.slice(0, dot), 'base64url').toString('utf8'));
+  } catch {
+    return undefined;
+  }
+  const nonce = typeof payload === 'object' && payload !== null ? (payload as { nonce?: unknown }).nonce : undefined;
+  return typeof nonce === 'string' ? new RegExp(`^(${INSTALL})_[A-Za-z0-9_-]{16,90}$`).exec(nonce)?.[1] : undefined;
+}
+
+/** The provider callback paths the relay hands back to an install (publisher OAuth apps only). */
+export const OAUTH_HANDBACK_PATHS = ['/oauth/callback/gmail', '/oauth/callback/google-drive', '/oauth/callback/dropbox'] as const;
 
 export function mintCredential(kind: CredentialKind, installId: string): string {
   return `${PREFIX[kind]}.${installId}.${randomBytes(32).toString('base64url')}`;

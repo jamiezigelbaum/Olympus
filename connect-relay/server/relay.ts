@@ -44,7 +44,7 @@ import {
 } from '../shared/protocol.ts';
 import { INSTALL_URL } from '../shared/dashboard-contract.ts';
 import { KeyedCounter, KeyedTokenBuckets, addressKey } from '../shared/rate-limit.ts';
-import { credentialInstallId } from '../shared/tokens.ts';
+import { HANDOFF_PATH_PREFIX, OAUTH_HANDBACK_PATHS, credentialInstallId, oauthHandbackInstallId } from '../shared/tokens.ts';
 import { authorizeBridge } from './authorize-bridge.ts';
 import {
   ConfirmedCredentials,
@@ -450,6 +450,65 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     });
   };
 
+  /** A short plain page for a person's browser (hand-off links and provider callbacks). */
+  const browserPage = (status: number, text: string, headers: Record<string, string> = {}) => new Response(
+    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Olympus</title><p style="font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem">${text}</p>`,
+    {
+      status,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Referrer-Policy': 'no-referrer',
+        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'",
+        ...headers,
+      },
+    },
+  );
+  const expiredLink = () => browserPage(404, 'This Olympus link has expired or was already used. Go back to ChatGPT and try again.');
+  const macOffline = () => browserPage(503, 'Olympus on your Mac is offline. Wake your Mac, then try again from ChatGPT.', { 'Retry-After': '30' });
+
+  /**
+   * `GET /go/<oly2g.installId.secret>`: a one-time hand-off link, routed by
+   * the install it names. The engine owns single use and expiry.
+   */
+  const handoff = async (request: Request, path: string): Promise<Response> => {
+    if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
+    const installId = credentialInstallId('handoff', path.slice(HANDOFF_PATH_PREFIX.length));
+    if (!installId) return expiredLink();
+    return toInstall({
+      installId,
+      request,
+      path,
+      body: new Uint8Array(),
+      lane: 'unverified',
+      dashboard: false,
+      offline: macOffline,
+      unknown: expiredLink,
+    });
+  };
+
+  /**
+   * `GET /oauth/callback/<source>?code&state`: a publisher-app sign-in the
+   * engine started for ChatGPT, bounced here by the OAuth callback relay page.
+   * Routed by the install prefix of the state's nonce; the engine verifies the
+   * signed state, so a forged one opens nothing.
+   */
+  const oauthHandback = async (request: Request, url: URL): Promise<Response> => {
+    if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
+    const installId = oauthHandbackInstallId(url.searchParams.get('state'));
+    if (!installId) return expiredLink();
+    return toInstall({
+      installId,
+      request,
+      path: `${url.pathname}${url.search}`,
+      body: new Uint8Array(),
+      lane: 'unverified',
+      dashboard: false,
+      offline: macOffline,
+      unknown: expiredLink,
+    });
+  };
+
   /** Reviewer sign-in: GET the page, POST the form, both to the demo install only. */
   const demoSignIn = async (request: Request, path: string, ip: string): Promise<Response> => {
     const demoInstallId = config.demoInstallId;
@@ -553,6 +612,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       // bodies on every route are admitted and timed by readBody.
       const routableMcp = path === OAUTH_PATHS.mcp && credentialInstallId('access', /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')?.trim() ?? '')?.[1]);
       if (!routableMcp && !publicRequests.take(ip)) return tooMany();
+
+      if (path.startsWith(HANDOFF_PATH_PREFIX)) return handoff(request, path);
+      if ((OAUTH_HANDBACK_PATHS as readonly string[]).includes(path)) return oauthHandback(request, url);
 
       switch (path) {
         case OAUTH_PATHS.protectedResource:

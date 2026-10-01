@@ -33,6 +33,25 @@ describe('the forwarded surface', () => {
     }
   });
 
+  test('setup browser routes are forwarded for GET only, in their exact shapes', () => {
+    const link = `/go/${mintCredential('handoff', INSTALL)}`;
+    expect(forwardPath(link, undefined, 'GET')).toBe(link);
+    expect(forwardPath('/oauth/callback/gmail?code=c&state=s', undefined, 'GET')).toBe('/oauth/callback/gmail?code=c&state=s');
+    expect(forwardPath('/oauth/callback/dropbox?code=c', undefined, 'GET')).toBe('/oauth/callback/dropbox?code=c');
+    for (const [path, method] of [
+      [link, 'POST'],
+      ['/oauth/callback/gmail?code=c', 'POST'],
+      ['/oauth/callback/x?code=c', 'GET'],
+      ['/oauth/callback/gmail/done', 'GET'],
+      [`/go/${mintCredential('access', INSTALL)}`, 'GET'],
+      ['/go/anything', 'GET'],
+      [`${link}/..`, 'GET'],
+      ['/keys/abc', 'GET'],
+    ] as const) {
+      expect(forwardPath(path, undefined, method), `${method} ${path}`).toBeUndefined();
+    }
+  });
+
   test('inbound relay and forwarding headers are dropped and the relay marker is set', () => {
     const headers = forwardRequestHeaders([
       ['x-olympus-relay', 'forged'],
