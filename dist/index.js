@@ -3492,6 +3492,35 @@ var init_venice_models = __esm(() => {
   });
 });
 
+// src/workers/source-index/built-in-embedding/manifest.ts
+var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, BUILT_IN_EMBEDDING_MODEL;
+var init_manifest = __esm(() => {
+  ARCTIC_M_BASE = `https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v1.5/resolve/${ARCTIC_M_REVISION}`;
+  BUILT_IN_EMBEDDING_MODEL = {
+    modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
+    repository: "Snowflake/snowflake-arctic-embed-m-v1.5",
+    revision: ARCTIC_M_REVISION,
+    license: "Apache-2.0",
+    dimension: 768,
+    maxTokens: 512,
+    pooling: "cls",
+    queryPrefix: "Represent this sentence for searching relevant passages: ",
+    documentPrefix: "",
+    model: {
+      name: "model_quantized.onnx",
+      url: `${ARCTIC_M_BASE}/onnx/model_quantized.onnx`,
+      bytes: 110145162,
+      sha256: "a18f437b2466863901a0bdc14904cf93246f5ecce0b656fc773bc2b7b2f84f6e"
+    },
+    vocabulary: {
+      name: "vocab.txt",
+      url: `${ARCTIC_M_BASE}/vocab.txt`,
+      bytes: 231508,
+      sha256: "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+  };
+});
+
 // src/core/sovereignty.ts
 import { chmodSync, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync9, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
@@ -3588,6 +3617,9 @@ function validateSovereigntyConfig(rawConfig) {
     validateAnalystPoolShape(pool, domain);
     for (const profileId of pool.members) {
       const resolved = resolveProfile(config, profileId, `route ${domain}`);
+      if (resolved.profile.provider === "built-in") {
+        throw new OperationError("config_error", `sovereignty.routes.${domain} cannot use the built-in embedding profile "${profileId}" as an analyst.`);
+      }
       if (!profileAllowedForDomain(resolved.profile, domain)) {
         throw new OperationError("config_error", `${domain} cannot route to ${resolved.profile.trust} profile "${profileId}".`, hardInvariantSuggestion(domain));
       }
@@ -3669,6 +3701,13 @@ function buildEnvBridgeSovereigntyConfig(env = process.env) {
       secretRef: firstExistingSecretRef(env, ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY", "GEMINI_API_KEY"]) ?? "env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
       purpose: "embedding"
     };
+  } else if (embeddingProvider === "built-in") {
+    profiles["built-in-embedding"] = {
+      provider: "built-in",
+      trust: "local",
+      model: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_MODEL_ID,
+      purpose: "embedding"
+    };
   } else if (embeddingProvider === "venice") {
     profiles["venice-source-embedding"] = {
       provider: "venice",
@@ -3685,8 +3724,8 @@ function buildEnvBridgeSovereigntyConfig(env = process.env) {
     };
   }
   const defaultRoute = cloudEnabled ? ["cloud-openclaw-infer", "local-source-answer"] : ["local-source-answer"];
-  const internalEmbeddingProfile = embeddingProvider === "google-gemini" ? "gemini-source-embedding" : embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : null;
-  const secureEmbeddingProfile = embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : embeddingProvider === "venice" ? "venice-source-embedding" : null;
+  const internalEmbeddingProfile = embeddingProvider === "google-gemini" ? "gemini-source-embedding" : embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : embeddingProvider === "built-in" ? "built-in-embedding" : null;
+  const secureEmbeddingProfile = embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : embeddingProvider === "venice" ? "venice-source-embedding" : embeddingProvider === "built-in" ? "built-in-embedding" : null;
   const secureEmbeddingTrust = embeddingProvider === "venice" ? ["encrypted_cloud"] : ["local"];
   const secureAnalystMembers = profiles["venice-private"] ? ["local-source-answer", "venice-private"] : ["local-source-answer"];
   return {
@@ -3856,11 +3895,15 @@ function parseTrustDomainPolicy(record, label) {
 function validateProfile(id, profile) {
   if (!id.trim())
     throw new OperationError("config_error", "Sovereignty model profile ids must not be empty.");
-  if (!["local-openai-compatible", "openclaw-infer", "google-gemini", "venice", "anthropic", "openai-compatible"].includes(profile.provider)) {
+  if (!["local-openai-compatible", "openclaw-infer", "google-gemini", "venice", "anthropic", "openai-compatible", "built-in"].includes(profile.provider)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" has unsupported provider "${profile.provider}".`);
   }
   if (!["local", "encrypted_cloud", "standard_cloud"].includes(profile.trust)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
+  }
+  if (profile.provider === "built-in") {
+    validateBuiltInProfile(id, profile);
+    return;
   }
   if (profile.trust === "local" && profile.provider !== "local-openai-compatible") {
     throw new OperationError("config_error", `Sovereignty profile "${id}" cannot claim local trust with provider "${profile.provider}".`, 'Use provider "local-openai-compatible" for local analyst profiles.');
@@ -3884,6 +3927,20 @@ function validateProfile(id, profile) {
   }
   if (profile.secretRef !== undefined && !normalizeSecretRef(profile.secretRef)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" secretRef must use env:NAME or store:key.`);
+  }
+}
+function validateBuiltInProfile(id, profile) {
+  if (profile.trust !== "local") {
+    throw new OperationError("config_error", `Sovereignty profile "${id}" uses the built-in model, which is always local trust.`);
+  }
+  if (profile.baseUrl !== undefined || profile.secretRef !== undefined) {
+    throw new OperationError("config_error", `Sovereignty profile "${id}" uses the built-in model, which takes no baseUrl or secretRef.`);
+  }
+  if (profile.purpose !== undefined && profile.purpose !== "embedding") {
+    throw new OperationError("config_error", `Sovereignty profile "${id}" uses the built-in model, which only embeds.`);
+  }
+  if (!profile.model?.trim()) {
+    throw new OperationError("config_error", `Sovereignty profile "${id}" requires a model.`);
   }
 }
 function assertLocalProfileBaseUrl(id, baseUrl) {
@@ -4045,14 +4102,16 @@ function stringArrayField(value, label) {
   }
   return value.map((item) => item.trim()).filter(Boolean);
 }
-var SOVEREIGNTY_SCHEMA_VERSION = 1, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
+var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
 var init_sovereignty = __esm(() => {
   init_operation_error();
   init_config();
   init_secret_store();
   init_source_model_policy();
   init_venice_models();
+  init_manifest();
   init_source_model_policy();
+  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_MODEL.modelId;
   SecureAnalystPoolE2EEGateError = class SecureAnalystPoolE2EEGateError extends OperationError {
     profileId;
     modelId;
@@ -8011,6 +8070,11 @@ var init_embedding_identity = __esm(() => {
       providerKind: "venice",
       epochProviderToken: "venice",
       dimensionToken: "declared"
+    },
+    {
+      providerKind: "built-in",
+      epochProviderToken: "built-in",
+      dimensionToken: "declared"
     }
   ];
   CANONICAL_EMBEDDING_IDENTITIES = [
@@ -8031,6 +8095,12 @@ var init_embedding_identity = __esm(() => {
       modelId: "text-embedding-qwen3-8b",
       backend: "cloud",
       dimension: 4096
+    }),
+    canonicalIdentity({
+      provider: "built-in",
+      modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
+      backend: "local",
+      dimension: 768
     })
   ];
 });
@@ -13152,6 +13222,8 @@ var EMBEDDING_CREDENTIAL_NAMES = [
 ];
 var SYSTEM_ENV_NAMES = ["HOME", "PATH", "TMPDIR", "LANG", "XDG_DATA_HOME"];
 var EMBEDDING_SETTING_ENV_NAMES = new Set([
+  "OLYMPUS_BUILT_IN_EMBEDDING_DIR",
+  "OLYMPUS_BUILT_IN_EMBEDDING_THREADS",
   "OLYMPUS_CONFIG",
   "OLYMPUS_EMAIL_BASE_URL",
   "OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON",
