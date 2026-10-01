@@ -32,6 +32,7 @@ import {
   dashboardWorkingSummary,
   type DashboardStatus,
   DASHBOARD_CHATGPT_VOCABULARY,
+  DASHBOARD_CHATGPT_SETUP_LABELS as CHATGPT_SETUP_LABELS,
 } from '../dashboard/vocabulary.ts';
 import {
   CONNECT_SOURCE_TOOL_NAME,
@@ -51,18 +52,6 @@ import {
 /** Static, product-owned labels for answer models. Never the card's own text. */
 const ANSWER_MODEL_LABELS = { venice: 'Venice', local: 'Local models', built_in: 'Built-in' } as const;
 
-/**
- * Control labels for setup from ChatGPT. Product-owned, closed set; proposed
- * for src/workers/dashboard/vocabulary.ts (dashboard lane) as
- * DASHBOARD_CHATGPT_VOCABULARY entries.
- */
-export const CHATGPT_SETUP_LABELS = {
-  connect: 'Connect',
-  chooseFolders: 'Choose folders',
-  chooseMail: 'Choose mail',
-  disconnect: 'Disconnect',
-  changeModels: 'Change',
-} as const;
 
 /** Sources ChatGPT can connect: Olympus's own (publisher) OAuth apps, which return through the relay. */
 const CHATGPT_OAUTH_SOURCES = new Set<string>(['gmail', 'google-drive', 'dropbox']);

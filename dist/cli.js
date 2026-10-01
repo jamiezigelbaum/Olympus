@@ -45119,7 +45119,7 @@ function lowerFirst(value) {
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_PICKER_COPY;
+var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -45264,6 +45264,13 @@ var init_vocabulary = __esm(() => {
       messages: { one: "message", many: "messages" },
       items: { one: "item", many: "items" }
     }
+  };
+  DASHBOARD_CHATGPT_SETUP_LABELS = {
+    connect: "Connect",
+    chooseFolders: "Choose folders",
+    chooseMail: "Choose mail",
+    disconnect: "Disconnect",
+    changeModels: "Change"
   };
   DASHBOARD_CHATGPT_PICKER_COPY = {
     back: "Back to Olympus",
@@ -98756,14 +98763,15 @@ function chatgptPickerProgram(kit) {
     }
   };
 }
-var CHATGPT_PICKER_TOOLS, CHATGPT_PICKER_MAIL_ARGS, CHATGPT_SCOPE_META_KEY = "olympus/scope", CHATGPT_CONNECT_HOST = "mcp.olympusplugin.ai", CHATGPT_CONNECT_POLL_MS = 3000, CHATGPT_CONNECT_POLL_CAP_MS, CHATGPT_MAIL_SOURCE_ID = "gmail.email";
+var CHATGPT_PICKER_TOOLS, CHATGPT_PICKER_MAIL_ARGS, CHATGPT_SCOPE_META_KEY, CHATGPT_CONNECT_HOST = "mcp.olympusplugin.ai", CHATGPT_CONNECT_POLL_MS = 3000, CHATGPT_CONNECT_POLL_CAP_MS, CHATGPT_MAIL_SOURCE_ID = "gmail.email";
 var init_picker = __esm(() => {
   CHATGPT_PICKER_TOOLS = {
-    connectSource: "olympus_connect_source",
-    scopeList: "olympus_scope_list",
-    scopeSet: "olympus_scope_set"
+    connectSource: CONNECT_SOURCE_TOOL_NAME,
+    scopeList: SCOPE_LIST_TOOL_NAME,
+    scopeSet: SCOPE_SET_TOOL_NAME
   };
   CHATGPT_PICKER_MAIL_ARGS = { list: "draft", set: "mail" };
+  CHATGPT_SCOPE_META_KEY = SCOPE_UI_META_KEY;
   CHATGPT_CONNECT_POLL_CAP_MS = 3 * 60000;
 });
 
@@ -99055,7 +99063,7 @@ function buildChatGptDashboardViewModel(view, options = {}) {
       embedding,
       ...answers ? { answers } : {},
       change: {
-        label: CHATGPT_SETUP_LABELS.changeModels,
+        label: DASHBOARD_CHATGPT_SETUP_LABELS.changeModels,
         tool: DASHBOARD_TOOL_NAME,
         args: {},
         disabledReason: DASHBOARD_CHATGPT_VOCABULARY.changeModelsOnMac
@@ -99093,7 +99101,7 @@ function sourceEntry(definition, card, status, actionKind, degraded) {
   }
   if (status !== "Off" && DISCONNECT_SOURCE_IDS.has(definition.source_id)) {
     menu.push({
-      label: CHATGPT_SETUP_LABELS.disconnect,
+      label: DASHBOARD_CHATGPT_SETUP_LABELS.disconnect,
       tool: DISCONNECT_SOURCE_TOOL_NAME,
       args: { source_id: definition.source_id },
       destructive: true
@@ -99127,7 +99135,7 @@ function oauthSource(definition) {
 }
 function connectFix(definition) {
   const source = oauthSource(definition);
-  return source ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : { label: CHATGPT_SETUP_LABELS.connect, tool: DASHBOARD_TOOL_NAME, args: {}, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac };
+  return source ? { label: DASHBOARD_CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : { label: DASHBOARD_CHATGPT_SETUP_LABELS.connect, tool: DASHBOARD_TOOL_NAME, args: {}, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac };
 }
 function scopePending(card) {
   return card.scope_selection?.connected === true && card.scope_selection.status === "scope_pending";
@@ -99136,7 +99144,7 @@ function scopeFix(definition, card) {
   if (!card.scope_selection?.connected || !SCOPE_SOURCE_IDS.has(definition.source_id))
     return;
   return {
-    label: card.scope_selection.kind === "mail" ? CHATGPT_SETUP_LABELS.chooseMail : CHATGPT_SETUP_LABELS.chooseFolders,
+    label: card.scope_selection.kind === "mail" ? DASHBOARD_CHATGPT_SETUP_LABELS.chooseMail : DASHBOARD_CHATGPT_SETUP_LABELS.chooseFolders,
     tool: SCOPE_LIST_TOOL_NAME,
     args: { source_id: definition.source_id }
   };
@@ -99363,18 +99371,11 @@ function isoOrUndefined(value) {
 function isoOrNow(value, now) {
   return isoOrUndefined(value) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CHATGPT_SETUP_LABELS, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS;
+var ANSWER_MODEL_LABELS, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS;
 var init_dashboard_view_model = __esm(() => {
   init_source_dashboard();
   init_vocabulary();
   ANSWER_MODEL_LABELS = { venice: "Venice", local: "Local models", built_in: "Built-in" };
-  CHATGPT_SETUP_LABELS = {
-    connect: "Connect",
-    chooseFolders: "Choose folders",
-    chooseMail: "Choose mail",
-    disconnect: "Disconnect",
-    changeModels: "Change"
-  };
   CHATGPT_OAUTH_SOURCES = new Set(["gmail", "google-drive", "dropbox"]);
   SCOPE_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files"]);
   DISCONNECT_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);

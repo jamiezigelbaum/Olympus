@@ -15,26 +15,28 @@
  * drops the session.
  */
 import type { DASHBOARD_CHATGPT_PICKER_COPY } from '../vocabulary.ts';
+import {
+  CONNECT_SOURCE_TOOL_NAME,
+  SCOPE_LIST_TOOL_NAME,
+  SCOPE_SET_TOOL_NAME,
+  SCOPE_UI_META_KEY,
+} from '../../chatgpt/dashboard-contract.ts';
 
-/**
- * The backend tools the picker calls (src/workers/chatgpt/dashboard-contract.ts
- * setup additions: CONNECT_SOURCE_TOOL_NAME, SCOPE_LIST_TOOL_NAME,
- * SCOPE_SET_TOOL_NAME). One map, so a rename is a one-line change here.
- */
+/** The backend tools the picker calls, named by the contract (dashboard-contract.ts). */
 export const CHATGPT_PICKER_TOOLS = {
   /** {source} → structuredContent {status: 'open_link', openUrl} on the connect host's /go/ path. */
-  connectSource: 'olympus_connect_source',
+  connectSource: CONNECT_SOURCE_TOOL_NAME,
   /** {source_id, parent_key?, cursor?, draft?} → ScopeSummary; the picker data is in `_meta[scopeMetaKey]`. */
-  scopeList: 'olympus_scope_list',
+  scopeList: SCOPE_LIST_TOOL_NAME,
   /** {..., selections | mail} → {status: 'saved'} or {status: 'conflict'} with the fresh list in `_meta`. */
-  scopeSet: 'olympus_scope_set',
+  scopeSet: SCOPE_SET_TOOL_NAME,
 } as const;
 
 /** Argument names that carry the mail draft (list: the estimate; set: the save). */
 export const CHATGPT_PICKER_MAIL_ARGS = { list: 'draft', set: 'mail' } as const;
 
 /** The result `_meta` key that carries picker data (names, keys, cursors) to the widget only. */
-export const CHATGPT_SCOPE_META_KEY = 'olympus/scope';
+export const CHATGPT_SCOPE_META_KEY = SCOPE_UI_META_KEY;
 
 /** The only host an authorize link may point at; its path must start with /go/. */
 export const CHATGPT_CONNECT_HOST = 'mcp.olympusplugin.ai';
