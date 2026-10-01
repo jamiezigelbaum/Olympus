@@ -16,6 +16,7 @@ import {
 } from '../src/workers/dashboard/chatgpt/page.ts';
 import {
   DASHBOARD_CHATGPT_CONNECTION_COPY,
+  DASHBOARD_CHATGPT_PAGE_COPY,
   DASHBOARD_CHATGPT_VOCABULARY,
 } from '../src/workers/dashboard/vocabulary.ts';
 
@@ -360,6 +361,67 @@ describe('ready page', () => {
     expect(host.text()).not.toContain('about');
     host.push({ structuredContent: model({ progress: { ...PROGRESS, stalled: true } }) });
     expect(host.text()).toContain('First index: 42% done, 1,204 files left, stalled');
+  });
+
+  test('progress pauses while the Mac is unreachable: percent only, no items left, no ETA', async () => {
+    const paused = `First index: 42% done, ${DASHBOARD_CHATGPT_PAGE_COPY.progressPaused}`;
+    for (const connection of [{ state: 'mac_offline' }, { state: 'relay_unavailable' }] as const) {
+      const host = mount();
+      host.push({ structuredContent: model({ connection, progress: { ...PROGRESS, stalled: true } }) });
+      const line = host.win.document.querySelector('.progress-line')!;
+      expect(line.textContent).toBe(paused);
+      expect(line.className).not.toContain('stalled');
+      expect(host.text()).not.toContain('files left');
+      expect(host.text()).not.toContain('about 2 hr');
+      expect(host.win.document.querySelector('[role=progressbar]')!.getAttribute('aria-valuenow')).toBe('42');
+    }
+    // A relay that stops answering pauses progress already on screen.
+    const host = mount();
+    host.push({ structuredContent: model({ sources: SOURCES, progress: PROGRESS }) });
+    expect(host.text()).toContain('1,204 files left');
+    host.button('Disconnect').click();
+    host.button('Yes, disconnect').click();
+    host.respond('tools/call', undefined, { code: -1, message: 'gone' });
+    await sleep(0);
+    expect(host.win.document.querySelector('.progress-line')!.textContent).toBe(paused);
+    // The inline card says the same.
+    const inline = mount({ openai: { toolOutput: model({ connection: { state: 'mac_offline' }, progress: PROGRESS }), displayMode: 'inline' } });
+    expect(inline.text()).toContain(paused);
+    expect(inline.text()).not.toContain('left');
+  });
+
+  test('a source row keeps ⋯ beside the name at every width; status and actions wrap under it', () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [...SOURCES, { ...SOURCES[2]!, id: 'dropbox', label: 'Dropbox', menu: SOURCES[0]!.menu! }] }) });
+    const row = (label: string) => Array.from(host.win.document.querySelectorAll('.source'))
+      .find((node) => node.querySelector('.source-name')!.textContent === label)!;
+    const gmail = row('Gmail');
+    expect(gmail.className).toBe('row source has-menu');
+    expect(Array.from(gmail.children).map((node) => node.className)).toEqual(['source-main', 'menu']);
+    // The status sits in the name's line box, the detail under it, never beside ⋯.
+    expect(gmail.querySelector('.source-main .source-head .status')!.textContent).toBe('Fresh');
+    const dropbox = row('Dropbox');
+    expect(dropbox.className).toBe('row source has-actions has-menu');
+    expect(Array.from(dropbox.children).map((node) => node.className)).toEqual(['source-main', 'source-actions', 'menu']);
+    expect(dropbox.querySelector('.source-actions details')).toBeNull();
+    expect(row('Notes').className).toBe('row source');
+    // ⋯ is pinned to the last column of the first row; only the actions span the row when narrow.
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.row.source>.menu{grid-column:-2/-1;grid-row:1}');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.row.source>.menu[open]>summary{position:absolute;top:0.75rem;right:0}');
+    const narrow = CHATGPT_DASHBOARD_CSS.slice(CHATGPT_DASHBOARD_CSS.indexOf('@media (max-width:30rem)'));
+    expect(narrow).toContain('.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}');
+    expect(narrow).toContain('.row.source>.source-actions{grid-column:1/-1');
+    expect(narrow.slice(0, narrow.indexOf('}}'))).not.toContain('width:100%');
+  });
+
+  test('a needs-you dot has its own column, beside the sentence\'s first line at any text size', () => {
+    const host = mount();
+    host.push({ structuredContent: model({ needsYou: [{ id: 'x', sentence: 'Notes — paused', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {} } }] }) });
+    const row = host.win.document.querySelector('.row.need')!;
+    expect(Array.from(row.children).map((node) => node.className)).toEqual(['dot tone-warn', 'need-body']);
+    expect(Array.from(row.querySelector('.need-body')!.children).map((node) => node.className)).toEqual(['row-text', 'fix']);
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.row.need{display:grid;grid-template-columns:0.625rem minmax(0,1fr);align-items:start');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.need-body{display:flex;flex-wrap:wrap');
   });
 
   test('models stay collapsed and summarize readiness', () => {

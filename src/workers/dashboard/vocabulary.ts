@@ -939,6 +939,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   left: '{count} {unit} left',
   eta: 'about {duration}',
   stalled: 'stalled',
+  progressPaused: 'paused while your Mac is offline',
   details: 'Details',
   stageLine: '{stage}: {done} of {total} {unit}',
   models: 'Models',

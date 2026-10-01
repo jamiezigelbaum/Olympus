@@ -45091,6 +45091,7 @@ var init_vocabulary = __esm(() => {
     left: "{count} {unit} left",
     eta: "about {duration}",
     stalled: "stalled",
+    progressPaused: "paused while your Mac is offline",
     details: "Details",
     stageLine: "{stage}: {done} of {total} {unit}",
     models: "Models",
@@ -97118,8 +97119,8 @@ function chatgptDashboardClient(config2) {
     const list = el("ul", "rows");
     items.forEach((item, index) => {
       const key = "need:" + String(item.id || index);
-      const row = add(el("li", "row need"), el("span", "dot tone-warn"), el("p", "row-text", String(item.sentence || "")));
-      add(list, add(row, fixControl(item.fix, key, "main", true)));
+      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key, "main", true));
+      add(list, add(el("li", "row need"), el("span", "dot tone-warn"), body));
     });
     return add(section, list);
   }
@@ -97144,6 +97145,7 @@ function chatgptDashboardClient(config2) {
     if (source.primary)
       add(controls, fixControl(source.primary, "primary:" + id, "main", true));
     const menu = Array.isArray(source.menu) ? source.menu : [];
+    let menuBox = null;
     if (menu.length) {
       const glyph = el("span", "", "⋯");
       glyph.setAttribute("aria-hidden", "true");
@@ -97151,10 +97153,16 @@ function chatgptDashboardClient(config2) {
       const box = details("menu:" + id, add(el("span"), glyph, hidden), "menu");
       const panel = el("div", "menu-panel");
       menu.forEach((fix, index) => add(panel, fixControl(fix, "menu:" + id + ":" + index, "plain", true)));
-      add(controls, add(box, panel));
+      menuBox = add(box, panel);
     }
-    if (controls.childNodes.length)
+    if (controls.childNodes.length) {
+      row.className += " has-actions";
       add(row, controls);
+    }
+    if (menuBox) {
+      row.className += " has-menu";
+      add(row, menuBox);
+    }
     return row;
   }
   function sourcesSection(sources) {
@@ -97174,8 +97182,16 @@ function chatgptDashboardClient(config2) {
     }
     return section;
   }
+  function progressPaused() {
+    const current = connectionState();
+    return current === "mac_offline" || current === "relay_unavailable";
+  }
   function progressText(progress) {
     const parts = [fill(P.percentDone, { percent: percent(progress.percent) })];
+    if (progressPaused()) {
+      parts.push(P.progressPaused);
+      return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
+    }
     const left = Number(progress.itemsLeft) || 0;
     parts.push(fill(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
     if (typeof progress.etaSeconds === "number" && progress.etaSeconds > 0 && !progress.stalled) {
@@ -97189,7 +97205,8 @@ function chatgptDashboardClient(config2) {
     if (!progress)
       return null;
     const section = add(el("section", "section"), el("h2", "", P.progress));
-    const line = el("p", progress.stalled ? "progress-line stalled" : "progress-line", progressText(progress));
+    const stalled = progress.stalled && !progressPaused();
+    const line = el("p", stalled ? "progress-line stalled" : progressPaused() ? "progress-line paused" : "progress-line", progressText(progress));
     add(section, line, progressBar2(progress.percent, P.progress));
     const stages = Array.isArray(progress.details) ? progress.details : [];
     if (withDetails && stages.length) {
@@ -97447,8 +97464,18 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
 .row{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 1rem;padding:0.75rem 0;border-bottom:1px solid var(--line)}
 .row-text{flex:1 1 14rem;min-width:0}
-.need .dot{margin-top:0}
-.source-main{flex:1 1 16rem;min-width:0}
+.row.need{display:grid;grid-template-columns:0.625rem minmax(0,1fr);align-items:start;gap:0 0.75rem}
+.need-body{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem 1rem;min-width:0}
+.need .row-text{padding-top:max(0px,calc((2.25rem - 1.45em) / 2))}
+.need .dot{margin-top:calc((2.25rem - 0.625rem) / 2)}
+.row.source{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;position:relative}
+.row.source.has-actions{grid-template-columns:minmax(0,1fr) fit-content(50%)}
+.row.source.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}
+.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) fit-content(50%) 2.25rem}
+.row.source>.menu{grid-column:-2/-1;grid-row:1}
+.row.source>.menu[open]{grid-column:1/-1;grid-row:auto}
+.row.source>.menu[open]>summary{position:absolute;top:0.75rem;right:0}
+.source-main{min-width:0}
 .source-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .source-name{font-weight:600}
 .status{color:var(--muted);font-size:0.875rem}
@@ -97483,7 +97510,7 @@ summary{cursor:pointer;border-radius:0.375rem}
 .plain{margin:0.5rem 0;padding-left:1.25rem}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
-@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.source-actions{justify-content:flex-start;width:100%}.menu,.menu-panel{align-items:flex-start}}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu,.menu-panel{align-items:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 `;
 });
