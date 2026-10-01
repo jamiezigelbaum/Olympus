@@ -43910,12 +43910,21 @@ function dashboardActionLabel(label) {
   return /^re-?auth/i.test(label.trim()) ? DASHBOARD_RECONNECT_LABEL : label;
 }
 function pausedReason(source) {
+  const label = source.answer_readiness.label.trim();
+  const known = READINESS_REASONS[label];
+  if (known !== undefined)
+    return known;
+  if (label !== "" && label !== GENERIC_READINESS_ATTENTION_LABEL)
+    return lowerFirst(label);
   if ((source.queue_health.failing_tasks ?? 0) > 0)
     return "its sync keeps failing";
   if (source.queue_health.needs_attention > 0)
     return "some items could not be read";
   const relative6 = typeof source.freshness.hours === "number" ? dashboardRelativeFromHours(source.freshness.hours) : "";
   return relative6 ? `last synced ${relative6}, later than expected` : "it has not synced when expected";
+}
+function lowerFirst(value) {
+  return value.length > 0 ? value[0].toLowerCase() + value.slice(1) : value;
 }
 function dashboardProviderRefusalLine(source) {
   const code = source.connection.provider_refusal?.code ?? "";
@@ -44177,7 +44186,7 @@ function unknownStatus(value) {
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy";
+var DASHBOARD_STATUS_ORDER, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy";
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -44217,6 +44226,11 @@ var init_vocabulary = __esm(() => {
     "not_connected",
     "needs_setup"
   ]);
+  READINESS_REASONS = {
+    "Reauthenticate this source": DASHBOARD_SIGNED_OUT,
+    "Embedding lane needs attention": "indexing has stopped",
+    "Content extraction is stalled": "reading files has stalled"
+  };
   REDIRECT_REFUSAL_CODES = new Set([
     "redirect_uri_mismatch",
     "invalid_redirect_uri",
@@ -81179,12 +81193,12 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
   const notice = options.notice ?? pendingNote;
   const sheet = connectSetupSheet({
     id: sheetId,
-    heading: `${action.label} ${source.label}`,
+    heading: `${dashboardActionLabel(action.label)} ${source.label}`,
     intro: byo.plain_intro,
     promptText: byo.agent_prompt,
     source: action.source,
     fields,
-    submitLabel: action.label,
+    submitLabel: dashboardActionLabel(action.label),
     ...action.publisher_client ? {
       publisher: {
         intro: instructions.plain_intro,
@@ -81479,7 +81493,8 @@ function armLaneBanners(input) {
       lane: item.lane,
       words: item.words,
       ...item.href === undefined ? {} : { href: item.href },
-      ...item.hrefLabel === undefined ? {} : { hrefLabel: item.hrefLabel }
+      ...item.hrefLabel === undefined ? {} : { hrefLabel: item.hrefLabel },
+      ...item.detail === undefined ? {} : { detail: item.detail }
     });
   }
   return banners;
@@ -81856,6 +81871,7 @@ function actionableConditions(view, options) {
       actionable.push({
         lane: "Syncs",
         words: `${source.label} keeps failing to sync, so new material is not coming in.`,
+        ...schedule.last_error_kind ? { detail: `Last error: ${schedule.last_error_kind}` } : {},
         ...detailLink(source, basePath)
       });
       continue;
@@ -81877,6 +81893,7 @@ function actionableConditions(view, options) {
     actionable.push({
       lane: "Syncs",
       words: `${source.label} is syncing in a reduced mode.`,
+      detail: `The scheduler is running ${source.label} degraded — ${reason}.`,
       ...detailLink(source, basePath)
     });
   }
@@ -81945,7 +81962,7 @@ function renderProgress(view, options, now) {
   const bar = progress.percent === undefined ? "" : `<div class="lbar">${miniBar({ percent: progress.percent, label: `${DASHBOARD_INDEXING_NAME} ${Math.floor(progress.percent)} percent done` })}</div>`;
   const control = options?.embeddingRuntime === undefined ? "" : renderEmbeddingToggle(options.embeddingRuntime, options);
   return `
-        <div class="lane" data-indexing-progress><div class="lfacts">${escapeHtml(line)}</div>${bar}${control}</div>`;
+        <div class="lane indexing" data-indexing-progress><div class="lfacts">${escapeHtml(line)}</div>${bar}${control}</div>`;
 }
 function renderBanners(banners, lanes) {
   if (banners.length === 0)
@@ -81954,7 +81971,11 @@ function renderBanners(banners, lanes) {
   const rows = banners.map((banner) => {
     const stuck = stuckLanes.has(banner.lane) && banner.href === undefined;
     const why = stuck ? "has stopped moving" : banner.words;
-    const technical = banner.lastGoverning === undefined ? stuck ? banner.words : "" : `${stuck ? `${banner.words} ` : ""}Last governing condition: ${banner.lastGoverning}.`;
+    const technical = [
+      stuck ? banner.words : "",
+      banner.detail ?? "",
+      banner.lastGoverning === undefined ? "" : `Last governing condition: ${banner.lastGoverning}.`
+    ].filter((part) => part !== "").join(" ");
     const href = safeHref(banner.href);
     const row = attentionRow({
       label: laneOwnerName(banner.lane),
@@ -84284,7 +84305,7 @@ function renderDashboardSetupPage(view, options) {
 }
 function renderSetupSummary(view) {
   const ready = view.summary.answer_ready_sources;
-  const connected = view.sources.filter(dashboardIsConnectedSource).length;
+  const connected = view.sources.filter((source) => dashboardIsConnectedSource(source) && (source.connection.provider_refusal === undefined || source.coverage.indexed_items > 0) && source.connection.state !== "awaiting_consent").length;
   if (connected === 0)
     return "";
   return `<p class="setupsummary" aria-label="Setup summary">${escapeHtml(dashboardConnectedSummary(connected, ready))}</p>`;
