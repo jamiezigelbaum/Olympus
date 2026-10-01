@@ -11826,9 +11826,9 @@ class DirectHttpEmailTransport {
       response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, authToken), timeoutMs);
     } catch (error) {
       if (isAbortError2(error)) {
-        throw new OperationError("email_unreachable", `Private email lane timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
+        throw new OperationError("email_unreachable", `${workerLaneLabel(url)} timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
       }
-      throw new OperationError("email_unreachable", `Private email lane is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Gateway-side private email source worker is running.");
+      throw new OperationError("email_unreachable", `${workerLaneLabel(url)} is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Gateway-side private email source worker is running.");
     }
     if (!response.ok) {
       const body = await safeText2(response);
@@ -11836,7 +11836,7 @@ class DirectHttpEmailTransport {
       if (workerError) {
         throw new OperationError(workerError.code, workerError.message);
       }
-      throw new OperationError("email_error", `Private email lane returned HTTP ${response.status}.`, body || "Check the Gateway-side private email source worker logs.");
+      throw new OperationError("email_error", `${workerLaneLabel(url)} returned HTTP ${response.status}.`, body || "Check the Gateway-side private email source worker logs.");
     }
     return response.json();
   }
@@ -11868,6 +11868,13 @@ function isSourceIndexSearchRoute(url) {
   } catch {
     return false;
   }
+}
+function workerLaneLabel(url) {
+  try {
+    if (new URL(url).pathname.includes("/source/index/files/"))
+      return "Private file-source lane";
+  } catch {}
+  return "Private email lane";
 }
 function isAllowlistedEmailWorkerErrorResponse(status, url) {
   if (status === 400)

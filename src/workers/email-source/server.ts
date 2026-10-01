@@ -2389,6 +2389,19 @@ export async function main(): Promise<void> {
       + 'connected, with no restart.',
     );
   }
+  const assertFileSourceScopeCurrent = (provider: string): void => {
+    const sourceId = provider === 'dropbox'
+      ? 'dropbox.files' as const
+      : provider === 'google_drive'
+        ? 'google_drive.docs' as const
+        : undefined;
+    if (!sourceId) return;
+    const ref = fileSourceScopeAuthority?.policyRef(sourceId);
+    if (!ref || !fileSourceScopeAuthority) {
+      throw new OperationError('source_index_policy_violation', 'File-source scope approval is required.');
+    }
+    fileSourceScopeAuthority.assertCurrent(ref);
+  };
   const fileExtractionRuntime = createFileExtractionRuntime({
     env: process.env,
     enabled: fileExtractionCorpora.length > 0,
@@ -2400,17 +2413,7 @@ export async function main(): Promise<void> {
       : {}),
     scopeGuard: {
       assertAuthorized({ config }) {
-        const sourceId = config.provider === 'dropbox'
-          ? 'dropbox.files' as const
-          : config.provider === 'google_drive'
-            ? 'google_drive.docs' as const
-            : undefined;
-        if (!sourceId) return;
-        const ref = fileSourceScopeAuthority?.policyRef(sourceId);
-        if (!ref || !fileSourceScopeAuthority) {
-          throw new OperationError('source_index_policy_violation', 'File-source scope approval is required.');
-        }
-        fileSourceScopeAuthority.assertCurrent(ref);
+        assertFileSourceScopeCurrent(config.provider);
       },
       allowsRef({ config, store, ref }) {
         const sourceId = config.provider === 'dropbox'
@@ -3868,7 +3871,18 @@ export async function main(): Promise<void> {
     ...(sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {}),
     ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
     ...(fileExtractionRuntime
-      ? { pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora, fileExtractionRuntime.corpusIds) }
+      ? {
+          pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora, fileExtractionRuntime.corpusIds),
+          pdfExtractionLaneScopeApproved: (lane: { provider: string }) => {
+            try {
+              assertFileSourceScopeCurrent(lane.provider);
+              return true;
+            } catch (error) {
+              if (error instanceof OperationError && error.code === 'source_index_policy_violation') return false;
+              throw error;
+            }
+          },
+        }
       : {}),
     ...(connectorStores.length > 0 ? { connectorStores } : {}),
     ...(tierLanes.length > 0

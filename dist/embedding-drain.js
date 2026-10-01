@@ -20207,6 +20207,7 @@ function stripDataUrlPrefix(dataUrl) {
 }
 
 // src/workers/file-extraction/runner.ts
+init_operation_error();
 init_types();
 init_command_runner();
 
