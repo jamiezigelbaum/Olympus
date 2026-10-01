@@ -921,7 +921,11 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     }
   }
 
-  /** One thin line: › to open the folder, the name (opens it too), then the choice control at the right edge. */
+  /**
+   * One thin line: the folder's drill-in button (a narrow › column, then the
+   * name and its sizes, one tap target), then the choice control flush at the
+   * row's right edge. A leaf has the same narrow empty column, so names align.
+   */
   function folderRow(node: Any): HTMLElement {
     if (p.pick) return pickRow(node);
     const key = node.key;
@@ -931,31 +935,22 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     if (node.has_children) {
       const open = el('button', 'fname') as HTMLButtonElement;
       open.type = 'button';
-      // The › button is the keyboard target for opening; the name is the wide tap target.
-      open.tabIndex = -1;
-      open.setAttribute('data-key', 'picker:name:' + key);
+      open.setAttribute('data-key', 'picker:open:' + key);
+      open.setAttribute('aria-label', fill(Q.openFolder, { name: node.name }));
       if (busy) open.disabled = true;
       else open.addEventListener('click', () => drill(key));
+      const chevron = el('span', 'fopen', '›');
+      chevron.setAttribute('aria-hidden', 'true');
+      add(open, chevron);
       label = open;
-    } else label = el('p', 'fname leaf');
-    label.title = node.name;
-    nameParts(label, node.name, key, node);
-    // A disclosure chevron first (or an empty slot of the same width, so names line up),
-    // then the name, then the control flush at the row's right edge.
-    if (node.has_children) {
-      const chevron = el('button', 'fopen', '›') as HTMLButtonElement;
-      chevron.type = 'button';
-      chevron.setAttribute('data-key', 'picker:open:' + key);
-      chevron.setAttribute('aria-label', fill(Q.openFolder, { name: node.name }));
-      chevron.title = fill(Q.openFolder, { name: node.name });
-      if (busy) chevron.disabled = true;
-      else chevron.addEventListener('click', () => drill(key));
-      add(li, chevron);
     } else {
+      label = el('p', 'fname leaf');
       const spacer = el('span', 'fopen-gap');
       spacer.setAttribute('aria-hidden', 'true');
-      add(li, spacer);
+      add(label, spacer);
     }
+    label.title = node.name;
+    nameParts(label, node.name, key, node);
     add(li, label, folderControl(key, node.name, node));
     return li;
   }

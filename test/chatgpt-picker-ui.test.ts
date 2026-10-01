@@ -349,13 +349,18 @@ describe('folder picker', () => {
       expect(thisSeg(host, state).disabled).toBe(true);
       expect(thisSeg(host, state).getAttribute('aria-description')).toBe(Q.wholeOnlyFull);
     }
-    expect(rowOf(host, 'Tax Returns 2024').querySelector('.fname')!.textContent).toBe('Tax Returns 20242 GB· 1,200 files');
+    expect(rowOf(host, 'Tax Returns 2024').querySelector('.fname')!.textContent).toBe('›Tax Returns 20242 GB· 1,200 files');
     expect(rowOf(host, 'Medical Records').querySelector('.fname')!.textContent).toBe('Medical Records500 MB· 1 file');
-    // Every row: ›, the name, then one control.
+    // Every row: one drill-in button (› then the name) or a leaf name, then one control.
     for (const row of Array.from(doc(host).querySelectorAll('li.seg-row'))) {
       const opens = !!row.querySelector('.fopen');
-      // Chevron (or a same-width spacer for a leaf) first, then the name, and the control last, flush right.
-      expect(Array.from(row.children).map((child) => child.className)).toEqual([opens ? 'fopen' : 'fopen-gap', opens ? 'fname' : 'fname leaf', 'seg']);
+      // The control last, flush right.
+      expect(Array.from(row.children).map((child) => child.className)).toEqual([opens ? 'fname' : 'fname leaf', 'seg']);
+      // Inside the name: the narrow › column (or a same-width spacer for a leaf, so names align), then the name.
+      const name = row.firstElementChild!;
+      expect(name.tagName).toBe(opens ? 'BUTTON' : 'P');
+      expect(Array.from(name.children).slice(0, 2).map((child) => child.className)).toEqual([opens ? 'fopen' : 'fopen-gap', 'fname-main']);
+      expect(name.firstElementChild!.getAttribute('aria-hidden')).toBe('true');
       expect(row.lastElementChild!.getAttribute('role')).toBe('radiogroup');
       expect(Array.from(row.querySelectorAll('.seg-opt .seg-long')).map((node) => node.textContent)).toEqual(['Full', 'Names only', 'Skip']);
       expect(Array.from(row.querySelectorAll('.seg-opt .seg-short')).map((node) => node.textContent)).toEqual(['Full', 'Names', 'Skip']);
@@ -401,10 +406,11 @@ describe('folder picker', () => {
     expect(focused(host)).toBe('picker:seg:k-b:ingest');
     press('End');
     expect(focused(host)).toBe('picker:seg:k-b:exclude');
-    // The › is the keyboard way in; the wide name target stays out of the tab order.
-    const open = rowOf(host, 'Tax Returns 2024').querySelector('.fopen')!;
+    // The › and the name are one drill-in button: one tap target, one tab stop.
+    const open = rowOf(host, 'Tax Returns 2024').querySelector('.fname') as unknown as HTMLButtonElement;
     expect(open.getAttribute('aria-label')).toBe('Open Tax Returns 2024');
-    expect((rowOf(host, 'Tax Returns 2024').querySelector('.fname') as unknown as HTMLButtonElement).tabIndex).toBe(-1);
+    expect(open.getAttribute('data-key')).toBe('picker:open:k-a');
+    expect(open.tabIndex).toBe(0);
     expect(rowOf(host, 'Tax Returns 2024').querySelector('.fname')!.getAttribute('title')).toBe('Tax Returns 2024');
     // After a choice the chosen segment keeps focus and is the group's tab stop.
     tap(host, 'Medical Records', 'metadata_only');
@@ -746,8 +752,8 @@ describe('folder picker: a real first run (45 folders, nothing chosen)', () => {
       expect(row.querySelectorAll('.seg-opt:disabled').length).toBe(0);
       const name = row.querySelector('.fname-text')!.textContent!;
       expect(row.querySelector('.fname')!.getAttribute('title')).toBe(name);
-      // Only the name, the size and the file count are text; the control's words are its own.
-      expect(row.querySelector('.fname')!.textContent!.startsWith(name)).toBe(true);
+      // Only the ›, the name, the size and the file count are text; the control's words are its own.
+      expect(row.querySelector('.fname')!.textContent!.replace(/^›/, '').startsWith(name)).toBe(true);
     }
     const text = host.text();
     expect(text).not.toContain(Q.notIncluded);
@@ -877,7 +883,11 @@ describe('page rules', () => {
     expect(CHATGPT_DASHBOARD_CSS).toContain('.frow.seg-row{flex-direction:row;align-items:center;gap:0.25rem;min-height:3rem}');
     expect(CHATGPT_DASHBOARD_CSS).toMatch(/\.seg-opt\{[^}]*min-width:2\.75rem[^}]*height:2rem/);
     expect(CHATGPT_DASHBOARD_CSS).toContain('.seg-opt::before{content:"";position:absolute;inset:-0.4375rem 0}');
-    expect(CHATGPT_DASHBOARD_CSS).toContain('.fopen,.fopen-gap{flex:none;width:2.75rem;height:2.75rem;');
+    // The drill-in button (› plus name) keeps a 44px tap target; the › column is narrow, with a small gap before the name.
+    // The › sits in an 18px column outside the name's wrapping line, 5px before the name.
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.seg-row>.fname{position:relative;min-width:2.75rem;padding-left:1.4375rem;');
+    expect(CHATGPT_DASHBOARD_CSS).toMatch(/\.seg-row>\.fname\{[^}]*height:2\.75rem/);
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.seg-row>.fname>.fopen,.seg-row>.fname>.fopen-gap{position:absolute;left:0;top:0;width:1.125rem;height:2.75rem;');
     // Every control sits flush at the right edge, the level's own row included.
     expect(CHATGPT_DASHBOARD_CSS).toContain('.seg-row>.seg{margin-left:auto}');
     expect(CHATGPT_DASHBOARD_CSS).toContain('.this-row>.seg{margin-left:auto}');

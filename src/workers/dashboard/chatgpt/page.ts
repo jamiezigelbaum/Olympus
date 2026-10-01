@@ -215,10 +215,10 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .ftag{flex:none;font-size:0.75rem;font-weight:500;line-height:1.25rem;padding:0 0.4375rem;color:var(--muted);border:1px solid var(--line);border-radius:999px}
 .fmeta{flex:none;color:var(--muted);font-size:0.8125rem;font-weight:400}
 .fmeta.fcount{margin-left:-0.25rem}
-.fopen,.fopen-gap{flex:none;width:2.75rem;height:2.75rem;margin-left:-0.625rem}
-.fopen{display:inline-flex;align-items:center;justify-content:center;padding:0 0 0.125rem;font:inherit;font-size:1.375rem;line-height:1;color:var(--muted);background:none;border:0;border-radius:999px;cursor:pointer}
-.fopen:hover:not(:disabled){background:var(--surface);color:var(--text)}
-.fopen:disabled{cursor:default;opacity:0.5}
+.seg-row>.fname{position:relative;min-width:2.75rem;padding-left:1.4375rem;border-radius:0.5rem}
+.seg-row>.fname>.fopen,.seg-row>.fname>.fopen-gap{position:absolute;left:0;top:0;width:1.125rem;height:2.75rem;text-align:center}
+.seg-row>.fname>.fopen{font-size:1.375rem;color:var(--muted)}
+.seg-row>button.fname:hover:not(:disabled)>.fopen{color:var(--text)}
 .seg-row>.seg{margin-left:auto}
 .seg{flex:none;display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;background:var(--bg)}
 .seg-opt{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:2.75rem;height:2rem;margin:0;padding:0 0.75rem;font:inherit;font-size:0.8125rem;font-weight:500;color:var(--text);background:none;border:0;border-radius:999px;cursor:pointer;white-space:nowrap}
