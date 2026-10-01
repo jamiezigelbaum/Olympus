@@ -55,3 +55,7 @@ mcp.olympusplugin.ai {
 		flush_interval -1
 	}
 }
+
+# The olympusplugin.ai static site (site/deploy/Caddyfile.site), installed
+# beside this file by deploy/remote-install.sh.
+import /etc/caddy/olympus-site.caddy

@@ -27,6 +27,9 @@ install -m 0644 "$SRC/BUILD_SHA" "/opt/olympus-relay/olympus-relay-${SHORT}.sha"
 ln -sfn "/opt/olympus-relay/olympus-relay-${SHORT}" /usr/local/bin/olympus-relay
 
 install -m 0644 "$SRC/olympus-relay.service" /etc/systemd/system/olympus-relay.service
+# The static site: its Caddy blocks, and a directory the deploy user publishes into.
+install -m 0644 "$SRC/olympus-site.caddy" /etc/caddy/olympus-site.caddy
+install -d -m 0755 -o "${SUDO_USER:-relayadmin}" /srv/olympus-site
 install -m 0644 "$SRC/Caddyfile" /etc/caddy/Caddyfile.new
 caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.new
 mv /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
