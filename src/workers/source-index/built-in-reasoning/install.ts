@@ -82,12 +82,24 @@ export interface BuiltInReasoningInstallerOptions {
   lockWaitMs?: number;
   /** Unpacks a verified runtime archive into a directory (tests substitute it). */
   extractArchive?: (archivePath: string, targetDir: string) => void;
+  /** Longest a download may go without receiving a byte before it is abandoned (resumable). */
+  downloadStallMs?: number;
+  /** Longest the checksum pass over the model file may take. */
+  verifyTimeoutMs?: number;
+  /** One line per install stage; defaults to the worker log. */
+  log?: (line: string) => void;
 }
 
 export const BUILT_IN_REASONING_DIR_ENV = 'OLYMPUS_BUILT_IN_REASONING_DIR';
 const STALE_LOCK_MS = 60 * 60_000;
 const LOCK_POLL_MS = 1_000;
 const PROGRESS_WRITE_INTERVAL_MS = 500;
+/** No byte for this long and a download is abandoned; the partial file is kept and resumes on retry. */
+const DOWNLOAD_STALL_MS = 2 * 60_000;
+/** A checksum pass over a few gigabytes takes seconds to a minute or two; far past that, something is wrong. */
+const VERIFY_TIMEOUT_MS = 15 * 60_000;
+const EXTRACT_TIMEOUT_MS = 5 * 60_000;
+const LOG_PREFIX = '[built-in-model]';
 const RUNTIME_MARKER = 'olympus-runtime.json';
 const SERVER_BINARY = 'llama-server';
 
@@ -161,6 +173,30 @@ export async function installBuiltInReasoning(
   const paths = builtInReasoningPaths(model, options.env, runtime, platform);
   const reporter = new ProgressReporter(paths.statusPath, model.modelId, options.now, options.onProgress);
   const modelPath = join(paths.modelDir, model.file.name);
+  const log = options.log ?? ((line: string) => console.log(line));
+  const timing = {
+    downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS,
+    verifyTimeoutMs: options.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS,
+  };
+  const stage = async <T>(name: string, run: () => Promise<T> | T): Promise<T> => {
+    const started = Date.now();
+    log(`${LOG_PREFIX} model=${model.modelId} stage=${name} started`);
+    try {
+      const result = await run();
+      log(`${LOG_PREFIX} model=${model.modelId} stage=${name} done ms=${Date.now() - started}`);
+      return result;
+    } catch (error) {
+      const reason = error instanceof BuiltInReasoningInstallError ? error.reason : 'disk_write_failed';
+      log(`${LOG_PREFIX} model=${model.modelId} stage=${name} failed reason=${reason} ms=${Date.now() - started}`);
+      throw error;
+    }
+  };
+  // The install has finished only when the status file says so. Leaving the
+  // last stage's "verifying" behind kept every later boot reading the model
+  // as not ready, and nothing ever moved it on (owner fresh install,
+  // 2026-10-01). The server itself starts on demand and reports "loading"
+  // while it does.
+  const finished = (): void => reporter.set('ready', 'Built-in private model ready', 100);
 
   try {
     const archive = runtimeArchiveFor(platform, runtime);
@@ -178,29 +214,32 @@ export async function installBuiltInReasoning(
     });
 
     if (existsSync(modelPath) && runtimeInstalled(paths.runtimeDir, archive)) {
-      await verifyModelFile(modelPath, model, reporter);
+      await stage('verify', () => verifyModelFile(modelPath, model, reporter, timing.verifyTimeoutMs));
+      finished();
       return installed();
     }
 
-    await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
+    await stage('install', () => withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
       if (existsSync(modelPath) && runtimeInstalled(paths.runtimeDir, archive)) return;
       const fetchImpl = options.fetchImpl ?? fetch;
       const needModel = !existsSync(modelPath);
       const needRuntime = !runtimeInstalled(paths.runtimeDir, archive);
       reporter.begin((needModel ? model.file.bytes : 0) + (needRuntime ? archive.bytes : 0));
       if (needRuntime) {
-        await installRuntime(fetchImpl, paths.runtimeDir, archive, reporter, options.extractArchive ?? extractWithTar);
+        await stage('runtime', () => installRuntime(fetchImpl, paths.runtimeDir, archive, reporter,
+          options.extractArchive ?? extractWithTar, timing.downloadStallMs));
       }
       if (needModel) {
         ensureDirectory(paths.modelDir);
-        await downloadVerified(fetchImpl, model.file.url, modelPath, model.file.bytes, model.file.sha256, reporter,
-          `Downloading the built-in private model (${model.displayName})`);
+        await stage('download', () => downloadVerified(fetchImpl, model.file.url, modelPath, model.file.bytes, model.file.sha256,
+          reporter, `Downloading the built-in private model (${model.displayName})`, timing.downloadStallMs));
       }
-    });
-    await verifyModelFile(modelPath, model, reporter);
+    }));
+    await stage('verify', () => verifyModelFile(modelPath, model, reporter, timing.verifyTimeoutMs));
     if (!runtimeInstalled(paths.runtimeDir, archive)) {
       throw new BuiltInReasoningInstallError('runtime_load_failed', 'The built-in model server did not install completely.');
     }
+    finished();
     return installed();
   } catch (error) {
     const failure = error instanceof BuiltInReasoningInstallError
@@ -237,13 +276,16 @@ async function verifyModelFile(
   path: string,
   model: BuiltInReasoningModelSpec,
   reporter: ProgressReporter,
+  timeoutMs: number,
 ): Promise<void> {
   const key = `${path}:${model.file.sha256}`;
   verifiedThisProcess ??= new Set<string>();
   if (verifiedThisProcess.has(key)) return;
-  reporter.set('verifying', 'Checking the built-in private model', 99);
   const size = statSync(path).size;
-  const digest = size === model.file.bytes ? await sha256File(path) : undefined;
+  reporter.verifying('Checking the built-in private model', 0, model.file.bytes);
+  const digest = size === model.file.bytes
+    ? await sha256File(path, timeoutMs, (done) => reporter.verifying('Checking the built-in private model', done, model.file.bytes))
+    : undefined;
   if (digest !== model.file.sha256) {
     rmSync(path, { force: true });
     throw new BuiltInReasoningInstallError(
@@ -284,13 +326,14 @@ async function installRuntime(
   archive: PinnedRuntimeArchive,
   reporter: ProgressReporter,
   extract: (archivePath: string, targetDir: string) => void,
+  stallMs: number,
 ): Promise<void> {
   const staging = `${runtimeDir}.staging-${randomUUID()}`;
   ensureDirectory(staging);
   try {
     const archivePath = join(staging, archive.name);
     await downloadVerified(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter,
-      'Downloading the built-in model server');
+      'Downloading the built-in model server', stallMs);
     reporter.set('verifying', 'Unpacking the built-in model server');
     try {
       extract(archivePath, staging);
@@ -320,7 +363,11 @@ async function installRuntime(
  * the release's shared-library symlinks, which the server binary links against.
  */
 function extractWithTar(archivePath: string, targetDir: string): void {
-  const result = spawnSync('tar', ['-xzf', archivePath, '-C', targetDir], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const result = spawnSync('tar', ['-xzf', archivePath, '-C', targetDir], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    timeout: EXTRACT_TIMEOUT_MS,
+  });
+  if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(result.stderr?.toString().trim() || `tar exited with ${result.status ?? result.signal}`);
   }
@@ -367,6 +414,7 @@ async function downloadVerified(
   expectedSha256: string,
   reporter: ProgressReporter,
   label: string,
+  stallMs: number,
 ): Promise<void> {
   // One writer holds the install lock, so a fixed partial name is safe and lets
   // a multi-gigabyte download resume after a restart instead of starting over.
@@ -376,7 +424,7 @@ async function downloadVerified(
   if (existsSync(partial)) {
     const size = statSync(partial).size;
     if (size > 0 && size < expectedBytes) {
-      await hashInto(partial, hash);
+      await hashInto(partial, hash, VERIFY_TIMEOUT_MS);
       received = size;
       reporter.advance(size, label);
     } else {
@@ -384,12 +432,29 @@ async function downloadVerified(
     }
   }
   let response: Response;
+  // One controller covers the request and every read: any wait longer than
+  // `stallMs` for the next byte abandons the attempt (the partial file stays
+  // and the next attempt resumes from it) instead of leaving the status on
+  // "downloading" with nothing moving.
+  const controller = new AbortController();
+  let stallTimer: ReturnType<typeof setTimeout> | undefined;
+  const armStall = (): void => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
+  };
+  const disarmStall = (): void => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = undefined;
+  };
+  armStall();
   try {
     response = await fetchImpl(url, {
       redirect: 'follow',
+      signal: controller.signal,
       ...(received > 0 ? { headers: { Range: `bytes=${received}-` } } : {}),
     });
   } catch (error) {
+    disarmStall();
     throw new BuiltInReasoningInstallError(
       'download_failed',
       `Could not reach the download server for the built-in private model (${error instanceof Error ? error.message : String(error)}).`,
@@ -397,12 +462,14 @@ async function downloadVerified(
   }
   if (received > 0 && response.status !== 206) {
     // The server ignored the range: start over from byte zero.
+    disarmStall();
     rmSync(partial, { force: true });
     await response.body?.cancel().catch(() => undefined);
     reporter.advance(-received, label);
-    return downloadVerified(fetchImpl, url, target, expectedBytes, expectedSha256, reporter, label);
+    return downloadVerified(fetchImpl, url, target, expectedBytes, expectedSha256, reporter, label, stallMs);
   }
   if (!response.ok || !response.body) {
+    disarmStall();
     await response.body?.cancel().catch(() => undefined);
     throw new BuiltInReasoningInstallError(
       'download_failed',
@@ -418,8 +485,13 @@ async function downloadVerified(
   }
   try {
     const reader = response.body.getReader();
+    const aborted = new Promise<never>((_resolve, reject) => {
+      controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
+    });
+    aborted.catch(() => undefined);
     for (;;) {
-      const { done, value } = await reader.read();
+      armStall();
+      const { done, value } = await Promise.race([reader.read(), aborted]);
       if (done) break;
       received += value.byteLength;
       if (received > expectedBytes) {
@@ -437,6 +509,7 @@ async function downloadVerified(
       reporter.advance(value.byteLength, label);
     }
   } catch (error) {
+    disarmStall();
     try {
       closeSync(fd);
     } catch {
@@ -449,6 +522,7 @@ async function downloadVerified(
       `The built-in private model download was interrupted (${error instanceof Error ? error.message : String(error)}).`,
     );
   }
+  disarmStall();
   closeSync(fd);
   if (received !== expectedBytes || hash.digest('hex') !== expectedSha256) {
     rmSync(partial, { force: true });
@@ -460,18 +534,51 @@ async function downloadVerified(
   renameSync(partial, target);
 }
 
-function hashInto(path: string, hash: ReturnType<typeof createHash>): Promise<void> {
+/**
+ * Hashes `path` into `hash`, reporting bytes read. A pass that has not ended
+ * within `timeoutMs` (or whose stream closes without ending) fails instead of
+ * leaving its caller waiting forever.
+ */
+function hashInto(
+  path: string,
+  hash: ReturnType<typeof createHash>,
+  timeoutMs: number,
+  onProgress?: (bytesDone: number) => void,
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    createReadStream(path)
-      .on('data', (chunk) => hash.update(chunk))
-      .on('error', reject)
-      .on('end', () => resolve());
+    let done = 0;
+    let settled = false;
+    const stream = createReadStream(path);
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        stream.destroy();
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    const timer = setTimeout(() => finish(new BuiltInReasoningInstallError(
+      'checksum_mismatch',
+      `Checking ${path} did not finish within ${Math.round(timeoutMs / 60_000)} min.`,
+    )), timeoutMs);
+    stream
+      .on('data', (chunk) => {
+        hash.update(chunk);
+        done += chunk.length;
+        onProgress?.(done);
+      })
+      .on('error', (error) => finish(error))
+      .on('end', () => finish())
+      .on('close', () => finish(new Error(`Reading ${path} stopped before the end.`)));
   });
 }
 
-async function sha256File(path: string): Promise<string> {
+async function sha256File(path: string, timeoutMs: number, onProgress?: (bytesDone: number) => void): Promise<string> {
   const hash = createHash('sha256');
-  await hashInto(path, hash);
+  await hashInto(path, hash, timeoutMs, onProgress);
   return hash.digest('hex');
 }
 
@@ -584,6 +691,15 @@ class ProgressReporter {
       : 0;
     this.status = { ...this.status, bytesDone, percent, label, state: 'downloading' };
     this.emit(false);
+  }
+
+  /** The checksum pass: real bytes read over the file's size. */
+  verifying(label: string, bytesDone: number, bytesTotal: number): void {
+    const percent = bytesTotal > 0 ? Math.min(99, Math.floor((bytesDone / bytesTotal) * 100)) : 0;
+    const { failure: _failure, ...rest } = this.status;
+    const first = this.status.state !== 'verifying' || bytesDone === 0;
+    this.status = { ...rest, state: 'verifying', label, percent, bytesDone, bytesTotal };
+    this.emit(first || bytesDone >= bytesTotal);
   }
 
   set(state: BuiltInReasoningState, label: string, percent = this.status.percent): void {

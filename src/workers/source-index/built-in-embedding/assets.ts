@@ -436,13 +436,32 @@ function integrityAlgorithm(integrity: string): string {
   return algorithm;
 }
 
-export function sha256File(path: string): Promise<string> {
+/** Never waits forever: a pass that has not ended in `timeoutMs` (or closes early) fails. */
+export function sha256File(path: string, timeoutMs = 10 * 60_000): Promise<string> {
   return new Promise((resolve, reject) => {
     const hash = createHash('sha256');
-    createReadStream(path)
+    let settled = false;
+    const stream = createReadStream(path);
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        stream.destroy();
+        reject(error);
+      } else {
+        resolve(hash.digest('hex'));
+      }
+    };
+    const timer = setTimeout(() => finish(new BuiltInEmbeddingInstallError(
+      'checksum_mismatch',
+      `Checking ${path} did not finish within ${Math.round(timeoutMs / 60_000)} min.`,
+    )), timeoutMs);
+    stream
       .on('data', (chunk) => hash.update(chunk))
-      .on('error', reject)
-      .on('end', () => resolve(hash.digest('hex')));
+      .on('error', (error) => finish(error))
+      .on('end', () => finish())
+      .on('close', () => finish(new Error(`Reading ${path} stopped before the end.`)));
   });
 }
 

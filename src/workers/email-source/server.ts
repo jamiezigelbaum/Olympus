@@ -1134,7 +1134,13 @@ function createWorkerSharedBuiltInModel(
       prepared = installedOnDisk();
     },
   };
-  if (installedOnDisk()) void model.prepare();
+  // Any install this computer has started is re-checked at boot, whatever
+  // its status file says: a status file is one process's last word, not a
+  // fact about the disk. "verifying" or "downloading" left behind by a
+  // process that is gone (or a models directory copied mid-install) used to
+  // be trusted and stay there forever. prepare() re-verifies the pinned
+  // checksums, resumes or restarts a download, and ends ready or failed.
+  if (base.status().state !== 'not_started') void model.prepare();
   return { model, available: () => prepared && installedOnDisk() };
 }
 
