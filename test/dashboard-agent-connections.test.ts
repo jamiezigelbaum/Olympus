@@ -23,7 +23,7 @@ import { requestDashboardControl, parseDashboardControlParams } from '../src/cor
 import { defaultConfig } from '../src/core/config.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { AGENT_MINT_LIMIT, withWorkerBearerAuth } from '../src/workers/http.ts';
-import { allowedForwardPath, DEFAULT_ALLOWED_PATHS } from '../connect-relay/client/local-endpoint.ts';
+import { FORWARDED_PATHS, forwardPath } from '../connect-relay/client/forward.ts';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
 import {
   DASHBOARD_AGENT_CONTROL_PATHS,
@@ -214,7 +214,7 @@ describe('agent routes refuse remote-agent credentials and the relay never forwa
   });
 
   test('no /dashboard path is ever on the relay allowlist, however it is spelled', () => {
-    expect((DEFAULT_ALLOWED_PATHS as readonly string[]).some((path) => path.startsWith('/dashboard') || path === '/')).toBe(false);
+    expect((FORWARDED_PATHS as readonly string[]).some((path) => path.startsWith('/dashboard') || path === '/')).toBe(false);
     const probes = [
       ...V0_4_PUBLIC_DASHBOARD_ROUTES.map((route) => route.path),
       ...DASHBOARD_AGENT_CONTROL_PATHS,
@@ -227,7 +227,7 @@ describe('agent routes refuse remote-agent credentials and the relay never forwa
       '/DASHBOARD/agents/keys',
     ];
     for (const probe of probes) {
-      const forwarded = allowedForwardPath(probe, DEFAULT_ALLOWED_PATHS);
+      const forwarded = forwardPath(probe);
       expect(forwarded === undefined || !forwarded.toLowerCase().includes('dashboard')).toBe(true);
     }
   });

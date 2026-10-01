@@ -4008,8 +4008,8 @@ export async function main(): Promise<void> {
   // own config write.
   if (authToken) {
     dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      // The standalone engine's writer (createEngineConfigRemoteAccessWriter)
-      // is wired with engine-host detection; under OpenClaw the Gateway writes.
+      // Under OpenClaw the Gateway writes; the standalone engine's writer
+      // (its own config file and restart) is wired with its host detection.
       setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
     });
   }
