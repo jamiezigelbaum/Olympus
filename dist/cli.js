@@ -42600,9 +42600,9 @@ class DirectHttpEmailTransport {
       response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, authToken), timeoutMs);
     } catch (error) {
       if (isAbortError(error)) {
-        throw new OperationError("email_unreachable", `Private email lane timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
+        throw new OperationError("email_unreachable", `${workerLaneLabel(url)} timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
       }
-      throw new OperationError("email_unreachable", `Private email lane is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Gateway-side private email source worker is running.");
+      throw new OperationError("email_unreachable", `${workerLaneLabel(url)} is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Gateway-side private email source worker is running.");
     }
     if (!response.ok) {
       const body = await safeText2(response);
@@ -42610,7 +42610,7 @@ class DirectHttpEmailTransport {
       if (workerError) {
         throw new OperationError(workerError.code, workerError.message);
       }
-      throw new OperationError("email_error", `Private email lane returned HTTP ${response.status}.`, body || "Check the Gateway-side private email source worker logs.");
+      throw new OperationError("email_error", `${workerLaneLabel(url)} returned HTTP ${response.status}.`, body || "Check the Gateway-side private email source worker logs.");
     }
     return response.json();
   }
@@ -42642,6 +42642,13 @@ function isSourceIndexSearchRoute(url) {
   } catch {
     return false;
   }
+}
+function workerLaneLabel(url) {
+  try {
+    if (new URL(url).pathname.includes("/source/index/files/"))
+      return "Private file-source lane";
+  } catch {}
+  return "Private email lane";
 }
 function isAllowlistedEmailWorkerErrorResponse(status, url) {
   if (status === 400)
@@ -75461,6 +75468,9 @@ function summarizeEgressDestinations(values) {
 function hashToken(value) {
   return createHash45("sha256").update(value).digest("hex");
 }
+function isScopeApprovalRefusal(error2) {
+  return error2 instanceof OperationError && error2.code === "source_index_policy_violation";
+}
 async function drainPdfExtraction(input) {
   const now = input.now ?? Date.now;
   const results = [];
@@ -75477,23 +75487,47 @@ async function drainPdfExtraction(input) {
       jobsRemaining: 0,
       paused: false
     };
+    const remaining = () => input.runner.counts(lane).filter((count) => count.extractorKind === input.extractorKind && (count.status === "queued" || count.status === "failed_retryable" || count.status === "leased")).reduce((sum2, count) => sum2 + count.jobs, 0);
+    const pauseForScope = () => {
+      result.paused = true;
+      result.pauseReason = "scope_pending";
+      result.jobsRemaining = remaining();
+      results.push(result);
+    };
+    if (input.laneScopeApproved && !input.laneScopeApproved(lane)) {
+      pauseForScope();
+      continue;
+    }
+    let scopeRefused = false;
     if (input.requeue) {
       let cursor;
       for (;; ) {
-        const plan = await input.runner.plan({
-          ...lane,
-          limit: PDF_DRAIN_PLAN_PAGE,
-          mimeTypes: PDF_MIME_TYPES,
-          extractorKind: input.extractorKind,
-          policyDecision: "index_allowed",
-          force: true,
-          ...cursor !== undefined ? { cursor } : {}
-        });
+        let plan;
+        try {
+          plan = await input.runner.plan({
+            ...lane,
+            limit: PDF_DRAIN_PLAN_PAGE,
+            mimeTypes: PDF_MIME_TYPES,
+            extractorKind: input.extractorKind,
+            policyDecision: "index_allowed",
+            force: true,
+            ...cursor !== undefined ? { cursor } : {}
+          });
+        } catch (error2) {
+          if (!isScopeApprovalRefusal(error2))
+            throw error2;
+          scopeRefused = true;
+          break;
+        }
         result.candidatesRequeued += plan.jobsQueued + plan.jobsForced;
         if (plan.done || plan.nextCursor === undefined)
           break;
         cursor = plan.nextCursor;
       }
+    }
+    if (scopeRefused) {
+      pauseForScope();
+      continue;
     }
     while (now() < input.deadlineMs) {
       const run = await input.runner.run({
@@ -75509,18 +75543,20 @@ async function drainPdfExtraction(input) {
       result.jobsFailed += run.counts.failed_retryable + run.counts.failed_terminal;
       if (run.paused) {
         result.paused = true;
+        result.pauseReason = "extraction_paused";
         break;
       }
       if (run.leasedJobs === 0)
         break;
     }
-    result.jobsRemaining = input.runner.counts(lane).filter((count) => count.extractorKind === input.extractorKind && (count.status === "queued" || count.status === "failed_retryable" || count.status === "leased")).reduce((sum2, count) => sum2 + count.jobs, 0);
+    result.jobsRemaining = remaining();
     results.push(result);
   }
   return results;
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
+  init_operation_error();
   init_types();
   init_file_extraction_source();
   init_command_runner();
@@ -87043,6 +87079,7 @@ function createEmailSourceWorker(options = {}) {
   });
   const fileExtraction = options.fileExtraction;
   const pdfExtractionLanes2 = options.pdfExtractionLanes;
+  const pdfExtractionLaneScopeApproved = options.pdfExtractionLaneScopeApproved;
   const dropboxEvalShardExport = options.dropboxEvalShardExport;
   const dropboxSourceExport = options.dropboxSourceExport;
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
@@ -88255,6 +88292,7 @@ function createEmailSourceWorker(options = {}) {
           const lanes = await drainPdfExtraction({
             runner,
             lanes: pdfExtractionLanes2?.() ?? [],
+            ...pdfExtractionLaneScopeApproved ? { laneScopeApproved: pdfExtractionLaneScopeApproved } : {},
             requeue: record3.requeue === true,
             deadlineMs: Date.now() + maxSeconds * 1000,
             extractorKind: TEXT_EXTRACTOR_KIND
@@ -88271,7 +88309,8 @@ function createEmailSourceWorker(options = {}) {
               jobs_metadata_only: lane.jobsMetadataOnly,
               jobs_failed: lane.jobsFailed,
               jobs_remaining: lane.jobsRemaining,
-              paused: lane.paused
+              paused: lane.paused,
+              ...lane.pauseReason ? { pause_reason: lane.pauseReason } : {}
             })),
             policy: { worker_private_surface: true, source_text_returned: false }
           };
@@ -97404,6 +97443,16 @@ async function main() {
   if (dropboxConnectorStore && dropboxExtractionScopes.length > 0 && !dropboxHandle) {
     console.warn(`[file-extraction] corpus=${DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID} provider=dropbox deferred ` + "reason=no_credential_handle — extraction starts on the next scheduler pass after Dropbox is " + "connected, with no restart.");
   }
+  const assertFileSourceScopeCurrent = (provider) => {
+    const sourceId = provider === "dropbox" ? "dropbox.files" : provider === "google_drive" ? "google_drive.docs" : undefined;
+    if (!sourceId)
+      return;
+    const ref = fileSourceScopeAuthority?.policyRef(sourceId);
+    if (!ref || !fileSourceScopeAuthority) {
+      throw new OperationError("source_index_policy_violation", "File-source scope approval is required.");
+    }
+    fileSourceScopeAuthority.assertCurrent(ref);
+  };
   const fileExtractionRuntime = createFileExtractionRuntime({
     env: process.env,
     enabled: fileExtractionCorpora.length > 0,
@@ -97412,14 +97461,7 @@ async function main() {
     ...dropboxTierLane ? { tierSets: new Map([[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set]]) } : {},
     scopeGuard: {
       assertAuthorized({ config: config2 }) {
-        const sourceId = config2.provider === "dropbox" ? "dropbox.files" : config2.provider === "google_drive" ? "google_drive.docs" : undefined;
-        if (!sourceId)
-          return;
-        const ref = fileSourceScopeAuthority?.policyRef(sourceId);
-        if (!ref || !fileSourceScopeAuthority) {
-          throw new OperationError("source_index_policy_violation", "File-source scope approval is required.");
-        }
-        fileSourceScopeAuthority.assertCurrent(ref);
+        assertFileSourceScopeCurrent(config2.provider);
       },
       allowsRef({ config: config2, store, ref }) {
         const sourceId = config2.provider === "dropbox" ? "dropbox.files" : config2.provider === "google_drive" ? "google_drive.docs" : undefined;
@@ -98385,7 +98427,19 @@ async function main() {
     dropboxIngestionPolicy,
     ...sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {},
     ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
-    ...fileExtractionRuntime ? { pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora, fileExtractionRuntime.corpusIds) } : {},
+    ...fileExtractionRuntime ? {
+      pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora, fileExtractionRuntime.corpusIds),
+      pdfExtractionLaneScopeApproved: (lane) => {
+        try {
+          assertFileSourceScopeCurrent(lane.provider);
+          return true;
+        } catch (error2) {
+          if (error2 instanceof OperationError && error2.code === "source_index_policy_violation")
+            return false;
+          throw error2;
+        }
+      }
+    } : {},
     ...connectorStores.length > 0 ? { connectorStores } : {},
     ...tierLanes.length > 0 ? {
       connectorStoreTierSiblings: (corpusId) => [
@@ -104583,6 +104637,7 @@ async function runExtractPdfsCommand(args) {
     return { kind: "pdf_extraction_backlog", corpora: await backlog() };
   const deadline = Date.now() + maxMinutes * 60000;
   const passes = [];
+  const scopePending = new Map;
   let first = true;
   for (;; ) {
     const secondsLeft = Math.floor((deadline - Date.now()) / 1000);
@@ -104593,11 +104648,25 @@ async function runExtractPdfsCommand(args) {
     passes.push(pass);
     const lanes = Array.isArray(pass.lanes) ? pass.lanes : [];
     const progressed = lanes.some((lane) => Number(lane.jobs_processed) > 0);
-    const paused = lanes.some((lane) => lane.paused === true);
+    const paused = lanes.some((lane) => lane.paused === true && lane.pause_reason !== "scope_pending");
+    for (const lane of lanes) {
+      if (lane.pause_reason === "scope_pending") {
+        scopePending.set(`${String(lane.corpus_id)}:${String(lane.scope_key_hash)}`, {
+          corpus_id: lane.corpus_id,
+          provider: lane.provider,
+          pause_reason: "scope_pending"
+        });
+      }
+    }
     if (!progressed || paused)
       break;
   }
-  return { kind: "pdf_extraction_run", passes, corpora: await backlog() };
+  return {
+    kind: "pdf_extraction_run",
+    passes,
+    ...scopePending.size > 0 ? { lanes_scope_pending: [...scopePending.values()] } : {},
+    corpora: await backlog()
+  };
 }
 export {
   v04PublicCliCommandName,
