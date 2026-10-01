@@ -8,7 +8,14 @@
  * Copy: the UI owns the wording of the five connection states (the relay
  * renders two of them without vocabulary.ts). Every other sentence comes from
  * src/workers/dashboard/vocabulary.ts, which the dashboard lane owns. Nothing
- * tiered Private or Secret is ever included, folder names included.
+ * tiered Private or Secret is ever included, folder names included: every
+ * value passes the allowlisted response builder before it leaves the engine
+ * (structuredContent, _meta, errors alike).
+ *
+ * Not states here, by design: OAuth revoked (ChatGPT itself shows reconnect on
+ * 401); installed but not linked (shown on the Mac, where linking happens).
+ * Stale status is derived by the UI from `generatedAt`. Multiple Macs per
+ * ChatGPT account is v2.
  */
 import type { DashboardStatus } from '../dashboard/vocabulary.ts';
 
@@ -63,14 +70,23 @@ export interface DashboardViewModelV1 {
   /** Server-ordered, local group first. */
   sources: DashboardSource[];
   progress?: {
+    /** What is being counted, and whether this is the first build or a refresh. */
+    unit: 'files' | 'messages' | 'items';
+    phase: 'initial' | 'refresh';
     percent: number;
     itemsLeft: number;
+    /** Only once a rate has been measured. */
     etaSeconds?: number;
     stalled: boolean;
-    details: Array<{ stage: string; done: number; total: number }>;
+    details: Array<{ stage: string; unit: 'files' | 'messages' | 'items'; done: number; total: number }>;
   };
   models: {
-    embedding: { kind: 'built_in' | 'custom'; ready: boolean };
+    embedding: {
+      kind: 'built_in' | 'custom';
+      state: 'downloading' | 'ready' | 'failed';
+      /** `downloading` only. */
+      percent?: number;
+    };
     answers?: { kind: 'built_in' | 'venice' | 'local'; label: string; ready: boolean };
     /** Opens the model chooser. */
     change?: DashboardFix;
