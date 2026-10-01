@@ -36,6 +36,7 @@ import { isWellFormedOAuthAccessToken } from '../core/remote-oauth-store.ts';
 import { currentRemotePublicUrls, type RemotePublicUrls, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
 import { sourceAnswerJobOwner, type SourceAnswerJobRegistry } from '../core/source-answer-jobs.ts';
 import { createOlympusMcpServer } from '../mcp/server.ts';
+import { createChatGptMcpServer, type ChatGptSurfaceOptions } from './chatgpt/mcp-surface.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
@@ -53,6 +54,14 @@ export interface RemoteMcpHandlerOptions {
   publicUrls?: RemotePublicUrlsSource;
   /** `signal` is the remote client's request signal; see createInProcessOperationContext. */
   makeOperationContext: (caller: OperationCaller, signal: AbortSignal) => OperationContext;
+  /**
+   * The ChatGPT surface (workers/chatgpt): the answer tools with
+   * ChatGPT-written descriptions, the dashboard tool and its MCP Apps
+   * resource, every response through the allowlisted response builder.
+   * Served only to requests `servesRequest` accepts; every other caller keeps
+   * the remote operation surface unchanged.
+   */
+  chatgpt?: ChatGptSurfaceOptions & { servesRequest: (request: Request) => boolean };
 }
 
 export function isRemoteMcpRequest(request: Request): boolean {
@@ -95,7 +104,9 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     }
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
-    const server = createOlympusMcpServer('remote', () => ctx);
+    const server = options.chatgpt?.servesRequest(request)
+      ? createChatGptMcpServer(() => ctx, options.chatgpt)
+      : createOlympusMcpServer('remote', () => ctx);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {

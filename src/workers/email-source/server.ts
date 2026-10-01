@@ -277,7 +277,7 @@ import {
   createWhatsAppConnectorStoreSyncHandler,
   type WhatsAppConnectorStoreSyncHandler,
 } from '../whatsapp/index.ts';
-import { SqliteSourceDashboardHistory } from '../source-dashboard.ts';
+import { SqliteSourceDashboardHistory, type SourceDashboardViewModel } from '../source-dashboard.ts';
 import {
   SqliteSourceIngestionLedgerStore,
   buildSourceIngestionLedgerSnapshot,
@@ -4064,7 +4064,25 @@ export async function main(): Promise<void> {
         connections: () => remoteConnections({ create: true })!,
       }),
       withRemoteOpenApiRoutes(remoteOpenApi, withRemoteMcpRoute(
-        createRemoteMcpHandler(remoteAgentOptions),
+        createRemoteMcpHandler({
+          ...remoteAgentOptions,
+          // Relayed requests get the ChatGPT surface (docs/design/chatgpt-plugin.md):
+          // the hosted relay is the ChatGPT path, and only the relay's local
+          // endpoint can present the per-install relay secret. Direct and
+          // bearer connections keep the remote operation surface. The
+          // dashboard tool reads the view `/dashboard.json` serves, in-process.
+          chatgpt: {
+            servesRequest: trustRelayHeaders,
+            dashboardView: async (signal?: AbortSignal) => {
+              const response = await worker.fetch(new Request(
+                'http://olympus-worker.internal/dashboard.json',
+                signal ? { signal } : {},
+              ));
+              if (!response.ok) throw new Error(`dashboard view unavailable (${response.status})`);
+              return await response.json() as SourceDashboardViewModel;
+            },
+          },
+        }),
         withWorkerBearerAuth(worker.fetch, { authToken }),
       )),
     ),
