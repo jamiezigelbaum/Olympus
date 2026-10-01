@@ -44,6 +44,38 @@ export interface DashboardItem {
   fix: DashboardFix;
 }
 
+/** Why a source's ingestion is not moving. Fixed codes; the UI owns the words. */
+export type SourceStalledReason =
+  /** The source's sign-in is missing or expired: fix is `olympus_connect_source`. */
+  | 'waiting_for_credentials'
+  /** No folders or mail chosen yet: fix is `olympus_scope_list`. */
+  | 'scope_pending'
+  /** The provider keeps failing or refusing reads; it retries on its own. */
+  | 'provider_unavailable'
+  /** Indexing waits for the built-in search model to finish downloading. */
+  | 'model_downloading';
+
+/**
+ * One source's ingestion, at the first stage that is not finished:
+ * `listing` (finding the provider's items), `reading` (text extracted),
+ * `indexing` (searchable on the current model), or `done`. `done`/`total`
+ * count `unit` at that stage; `total` is 0 while it is not known yet (a first
+ * listing), and then `percent` is 0 too unless the listing's own walk is
+ * sized (folders), when `percent` is that walk's share. Items kept as names
+ * only (metadata-only folders) are finished once listed: they are never
+ * counted as unread.
+ */
+export interface SourceProgress {
+  stage: 'listing' | 'reading' | 'indexing' | 'done';
+  unit: 'files' | 'messages' | 'items';
+  done: number;
+  total: number;
+  percent: number;
+  stalled: boolean;
+  /** Only when `stalled`, and only when the reason is known. */
+  stalledReason?: SourceStalledReason;
+}
+
 export interface DashboardSource {
   id: string;
   label: string;
@@ -52,6 +84,22 @@ export interface DashboardSource {
   detail?: string;
   lastSyncAt?: string;
   primary?: DashboardFix;
+  /**
+   * Present only while a sign-in started for this source is still outstanding
+   * (a connect link or OAuth start the owner has not finished). `expiresAt` is
+   * when that attempt lapses (ISO). While present, `status` is `Needs you`,
+   * `primary` is `olympus_connect_source {source}` (a fresh link replaces the
+   * outstanding one), and Disconnect in `menu` cancels the attempt.
+   */
+  connecting?: { expiresAt: string };
+  /**
+   * Connected sources only (absent for Off and while `connecting`). Honesty
+   * rule: `status` is never `Fresh` while `progress.stage` is not `done`; it
+   * is `Working` while listing, reading or indexing, and `Needs you` when
+   * stalled on `waiting_for_credentials` or `scope_pending`, with `primary`
+   * the matching fix.
+   */
+  progress?: SourceProgress;
   /** Secondary actions for the ⋯ menu. */
   menu?: DashboardFix[];
 }
@@ -73,6 +121,7 @@ export interface DashboardViewModelV1 {
   needsYou: DashboardItem[];
   /** Server-ordered, local group first. */
   sources: DashboardSource[];
+  /** The sum of every connected source's `progress`; absent once all are `done`. */
   progress?: {
     /** What is being counted, and whether this is the first build or a refresh. */
     unit: 'files' | 'messages' | 'items';

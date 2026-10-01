@@ -42,6 +42,8 @@ import type {
   ScopeSummary,
   SearchEvidence,
   SearchResult,
+  SourceProgress,
+  SourceStalledReason,
 } from './dashboard-contract.ts';
 import {
   CONNECT_SOURCE_TOOL_NAME,
@@ -181,8 +183,31 @@ function copySource(source: DashboardSource): DashboardSource {
   if (source.detail) out.detail = text(source.detail);
   if (iso(source.lastSyncAt)) out.lastSyncAt = iso(source.lastSyncAt)!;
   if (source.primary) out.primary = copyFix(source.primary);
+  const connectingUntil = iso(source.connecting?.expiresAt);
+  if (connectingUntil) out.connecting = { expiresAt: connectingUntil };
+  if (source.progress) out.progress = copySourceProgress(source.progress);
   if (source.menu && source.menu.length > 0) out.menu = source.menu.map(copyFix);
   return out;
+}
+
+const SOURCE_STAGES = new Set<SourceProgress['stage']>(['listing', 'reading', 'indexing', 'done']);
+const STALLED_REASONS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending', 'provider_unavailable', 'model_downloading']);
+
+/** Enums from their closed sets, counts as whole numbers; a reason only on a stall. */
+function copySourceProgress(progress: SourceProgress): SourceProgress {
+  const stalled = progress.stalled === true;
+  const reason = stalled && STALLED_REASONS.has(progress.stalledReason as SourceStalledReason)
+    ? progress.stalledReason
+    : undefined;
+  return {
+    stage: SOURCE_STAGES.has(progress.stage) ? progress.stage : 'listing',
+    unit: UNITS.has(progress.unit) ? progress.unit : 'items',
+    done: whole(progress.done),
+    total: whole(progress.total),
+    percent: percent(progress.percent),
+    stalled,
+    ...(reason ? { stalledReason: reason } : {}),
+  };
 }
 
 function copyFix(fix: DashboardFix): DashboardFix {
@@ -637,7 +662,11 @@ type SurfaceOnlyErrorCode =
   | 'picker_unavailable'
   | 'confirm_whole_account'
   | 'embedding_change_needs_approval'
-  | 'model_not_configured';
+  | 'model_not_configured'
+  | 'sign_in_failed'
+  | 'source_not_connected'
+  | 'source_busy'
+  | 'disconnect_incomplete';
 
 const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   invalid_params: 'The request was not valid. Check the arguments and try again.',
@@ -658,11 +687,15 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   source_answer_deadline: 'Olympus took too long to answer. Ask a narrower question or try again.',
   source_answer_too_large: 'The answer was too large to return. Ask a narrower question.',
   unavailable: 'The Olympus dashboard is not available on the Mac right now. Try again shortly.',
-  models_not_ready: 'Olympus needs its models set up first. Add the key or choose another model in the Olympus panel.',
-  connect_unavailable: 'This source cannot be connected from ChatGPT on this Mac. Connect it in Olympus on the Mac.',
+  models_not_ready: 'Search isn\'t ready on your Mac yet. Finish setting up models in Olympus on your Mac, then try again.',
+  connect_unavailable: 'This source can\'t be connected from ChatGPT on this Mac. Connect it in Olympus on your Mac.',
   already_connected: 'This source already has a connected account. Disconnect it first to connect another.',
   not_connected: 'Connect this source before choosing what Olympus may read.',
-  not_linked: 'Olympus on the Mac is not linked to ChatGPT yet. Try again once it is.',
+  not_linked: 'Your Mac isn\'t linked to ChatGPT yet. Open Olympus on your Mac, then try again.',
+  sign_in_failed: 'Olympus couldn\'t open the sign-in page for this source. Try again.',
+  source_not_connected: 'This source isn\'t connected, so there is nothing to disconnect.',
+  source_busy: 'This source is finishing a read. Try again in a moment.',
+  disconnect_incomplete: 'Olympus couldn\'t finish disconnecting this source. Try again.',
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',
   confirm_whole_account: 'Choosing the whole account needs the owner\'s confirmation in the Olympus panel.',
   embedding_change_needs_approval: 'Changing the search model re-indexes every source and needs the owner\'s approval on the Mac.',

@@ -1570,7 +1570,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const record = await parseObjectBody(request);
           const source = parseDashboardOAuthSource(record.source);
-          assertDashboardModelsReady();
+          // A sign-in from ChatGPT (handback: relay) is not gated on model
+          // setup: ChatGPT writes the answers, so the Mac's answer model is
+          // irrelevant to it, and connecting stores a grant without reading
+          // anything. What reads private data stays gated: the scope approval
+          // and the first sync after connect both check readiness, so indexing
+          // simply waits for the models (owner live test, 2026-10-01: a Venice
+          // analyst without a key refused Connect from ChatGPT).
+          if (record.handback !== 'relay') assertDashboardModelsReady();
           const secretStore = dashboardSecretStore(sourceDashboard);
           const registry = readDashboardRegistry(sourceDashboard.registryPath);
           assertDashboardAccountCardinality(registry, source);

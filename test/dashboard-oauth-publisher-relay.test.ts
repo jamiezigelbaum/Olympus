@@ -47,6 +47,11 @@ import {
   type DashboardSourceAction,
 } from '../src/workers/source-dashboard.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import type { ModelSetupView } from '../src/core/model-setup.ts';
+import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
+import { createChatGptSetupBackend } from '../src/workers/chatgpt/setup-backend.ts';
+import { SetupBackendError } from '../src/workers/chatgpt/setup-tools.ts';
 import {
   createGatewayCallbackPeerHeader,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
@@ -98,6 +103,7 @@ function fixture(
     secretReads?: string[];
     secretWrites?: string[];
     handback?: { origin: string; installId: string };
+    modelSetup?: () => ModelSetupView;
   } = {},
 ): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-worker-'));
@@ -137,6 +143,7 @@ function fixture(
       secretStore,
       oauthFetch,
       ...(options.handback ? { oauthHandback: () => options.handback } : {}),
+      ...(options.modelSetup ? { modelSetup: options.modelSetup } : {}),
       // Only used by the 'expired state' scenario below: the real starter,
       // with its honest ~10-minute expiry replaced by a near-immediate one, so
       // the test can wait a few milliseconds instead of ten real minutes to
@@ -202,6 +209,52 @@ function statePayload(state: string): Record<string, unknown> {
 }
 
 describe('publisher-client relay flow', () => {
+  test('Disconnect from ChatGPT on a source mid-sign-in cancels the sign-in and succeeds', async () => {
+    const instance = fixture({}, { handback: { origin: 'https://mcp.olympusplugin.ai', installId: 'install-fixture' } });
+    const backend = createChatGptSetupBackend({
+      workerFetch: (request) => {
+        const headers = new Headers(request.headers);
+        headers.set('Authorization', 'Bearer dashboard-secret');
+        return instance.fetch(new Request(request, { headers }));
+      },
+      handoffs: createChatGptHandoffs(),
+      publicUrls: () => undefined,
+      sovereignty: { config: loadSovereigntyPreset('no-sensitive'), source: 'preset' },
+      credentialPresent: () => false,
+      requestReload: () => false,
+    });
+    await backend.startOAuth('dropbox');
+    await expect(backend.disconnect('dropbox.files')).resolves.toBeUndefined();
+    // The attempt is gone: nothing is left to cancel, and a second Disconnect
+    // honestly reports there is nothing connected.
+    const again = await instance.fetch(new Request(`${DASHBOARD_ORIGIN}/dashboard/connect/oauth/cancel`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer dashboard-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'dropbox' }),
+    }));
+    expect((await again.json()).cancelled).toBe(false);
+    const second = await backend.disconnect('dropbox.files').catch((error) => error);
+    expect(second).toBeInstanceOf(SetupBackendError);
+    expect((second as SetupBackendError).code).toBe('source_not_connected');
+  });
+
+  test('a ChatGPT (relay) sign-in starts while answer models are not set up; the Mac dashboard path stays gated', async () => {
+    // Owner live test, 2026-10-01: a Venice analyst named without its key
+    // refused Connect from ChatGPT with model_setup_required.
+    const notReady = (): ModelSetupView => ({
+      ready: false,
+      checked_at: '2026-10-01T12:00:00.000Z',
+      cards: [{ id: 'venice', label: 'Venice', required: true, state: 'not_configured', detail: 'Private model processing.' }],
+    });
+    const instance = fixture({}, { handback: { origin: 'https://mcp.olympusplugin.ai', installId: 'install-fixture' }, modelSetup: notReady });
+    const relayed = await startConnect(instance, { handback: 'relay' });
+    expect(relayed.status).toBe(200);
+    expect(new URL((await relayed.json()).authorization_url).origin).toBe('https://www.dropbox.com');
+    const local = await startConnect(fixture({}, { modelSetup: notReady }));
+    expect(local.status).toBe(409);
+    expect((await local.json()).error.code).toBe('model_setup_required');
+  });
+
   test('start sends the publisher app key, the relay URL, and a signed state naming this dashboard', async () => {
     const instance = fixture();
     const url = await authorizationUrl(await startConnect(instance));

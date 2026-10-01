@@ -14,6 +14,7 @@
  * leaves the engine.
  */
 import type { ModelSetupView } from '../../core/model-setup.ts';
+import { dashboardSourceProgress, type DashboardPhase } from '../dashboard/phases.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import {
   DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL,
@@ -32,6 +33,7 @@ import {
   dashboardWorkingSummary,
   type DashboardStatus,
   DASHBOARD_CHATGPT_VOCABULARY,
+  DASHBOARD_CHATGPT_PICKER_COPY,
   DASHBOARD_CHATGPT_SETUP_LABELS as CHATGPT_SETUP_LABELS,
 } from '../dashboard/vocabulary.ts';
 import {
@@ -47,10 +49,36 @@ import {
   type DashboardItem,
   type DashboardSource,
   type DashboardViewModelV1,
+  type SourceProgress,
+  type SourceStalledReason,
 } from './dashboard-contract.ts';
 
 /** Static, product-owned labels for answer models. Never the card's own text. */
 const ANSWER_MODEL_LABELS = { venice: 'Venice', local: 'Local models', built_in: 'Built-in' } as const;
+
+/**
+ * A source mid-sign-in, in ChatGPT's words. The engine's own line for this
+ * state ("waiting for you to approve in the Gmail tab · expires in 9m") speaks
+ * to the Mac's dashboard, where the provider's tab sits beside it; from
+ * ChatGPT the sign-in may be on another device, and the expiry travels as
+ * `connecting.expiresAt` for the page to word itself.
+ */
+const CONNECTING_DETAIL = DASHBOARD_CHATGPT_PICKER_COPY.connectWaiting;
+const CONNECTING_REASON = DASHBOARD_CHATGPT_PICKER_COPY.connectWaiting.replace(/…$/, '').replace(/^W/, 'w');
+
+/**
+ * A source's line while its first stage that is not done is still running.
+ * Replaces the freshness line ("synced just now"), which would claim a
+ * finished source over a bar that is not full.
+ */
+const STAGE_DETAIL: Readonly<Record<Exclude<SourceProgress['stage'], 'done'>, string>> = {
+  listing: 'Finding items',
+  reading: DASHBOARD_CHATGPT_VOCABULARY.stageReading,
+  indexing: DASHBOARD_CHATGPT_VOCABULARY.stageSearchable,
+};
+
+/** Stalled reasons the owner fixes from this page; the source then reads Needs you. */
+const FIXABLE_STALLS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending']);
 
 
 /** Sources ChatGPT can connect: Olympus's own (publisher) OAuth apps, which return through the relay. */
@@ -104,15 +132,24 @@ export function buildChatGptDashboardViewModel(
 ): DashboardViewModelV1 {
   const now = options.now ?? new Date();
   const degraded = scrubDegradations(view.degraded_credentials);
+  const embedding = options.embedding ?? embeddingFromModelSetup(view.model_setup);
   const rows = publicCards(view.sources).map(({ definition, card }) => {
     const scrubbed = scrubCard(definition, card);
-    const status = dashboardStatus({ source: scrubbed, ...(degraded ? { degradedCredentials: degraded } : {}) });
-    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind };
+    const connecting = connectingFor(definition, card, now);
+    const vocabularyStatus = dashboardStatus({ source: scrubbed, ...(degraded ? { degradedCredentials: degraded } : {}) });
+    const measured = connecting || vocabularyStatus === 'Off'
+      ? undefined
+      : measuredSourceProgress(card, scrubbed, embedding, vocabularyStatus, now);
+    const progress = measured?.progress;
+    // Mid-sign-in reads Needs you whatever else the card says: the owner's
+    // next step is finishing the sign-in.
+    const status: DashboardStatus = connecting ? 'Needs you' : honestStatus(vocabularyStatus, progress);
+    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress, counts: measured?.counts };
   });
 
   const sources: DashboardSource[] = rows
-    .map(({ definition, card, status, actionKind }, index) => ({
-      entry: sourceEntry(definition, card, status, actionKind, degraded),
+    .map(({ definition, card, status, actionKind, connecting, progress }, index) => ({
+      entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress),
       index,
     }))
     .sort((a, b) => groupRank(a.entry.group) - groupRank(b.entry.group) || a.index - b.index)
@@ -120,9 +157,8 @@ export function buildChatGptDashboardViewModel(
 
   const needsYou: DashboardItem[] = rows
     .filter(({ status }) => status === 'Needs you' || status === 'Failing')
-    .map(({ definition, card }) => attentionItem(definition, card, degraded));
+    .map(({ definition, card, connecting, progress }) => attentionItem(definition, card, degraded, connecting, progress));
 
-  const embedding = options.embedding ?? embeddingFromModelSetup(view.model_setup);
   // Models are status only in ChatGPT (owner decision 2026-10-01): the fix is
   // to check again; a built-in download retries on its own.
   if (embedding.state === 'failed') {
@@ -133,7 +169,7 @@ export function buildChatGptDashboardViewModel(
     needsYou.push({ id: 'model:answers', sentence: DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention, fix: checkAgainFix() });
   }
 
-  const progress = overallProgress(rows.map((row) => row.card), rows.map((row) => row.status));
+  const progress = overallProgress(rows);
   const connected = rows.some(({ card }) => dashboardIsConnectedSource(card));
   const anyAnswerReady = rows.some(({ card }) => card.answer_readiness.state === 'ready');
   const connection = connectionFor({ connected, anyAnswerReady, embedding, progress });
@@ -192,12 +228,22 @@ function sourceEntry(
   status: DashboardStatus,
   actionKind: DashboardSourceAction['kind'],
   degraded: WorkerCredentialDegradation[] | undefined,
+  connecting: Connecting | undefined,
+  progress: SourceProgress | undefined,
 ): DashboardSource {
-  const detail = dashboardSubLine(card, degraded ? { degradedCredentials: degraded } : undefined);
+  const inFlight = progress && progress.stage !== 'done' && status !== 'Needs you' && status !== 'Failing';
+  const detail = connecting
+    ? CONNECTING_DETAIL
+    : inFlight
+      ? STAGE_DETAIL[progress.stage as Exclude<SourceProgress['stage'], 'done'>]
+      : dashboardSubLine(card, degraded ? { degradedCredentials: degraded } : undefined);
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
-  const primary = status === 'Off'
-    ? (actionKind === 'none' ? undefined : connectFix(definition))
-    : scopePending(card) ? scopeFix(definition, card) : undefined;
+  const reconnect = progress?.stalledReason === 'waiting_for_credentials' ? reconnectFix(definition) : undefined;
+  const primary = connecting
+    ? connecting.fix
+    : status === 'Off'
+      ? (actionKind === 'none' ? undefined : connectFix(definition))
+      : scopePending(card) ? scopeFix(definition, card) : reconnect;
   const menu: DashboardFix[] = [];
   if (status !== 'Off' && card.scope_selection && !scopePending(card)) {
     const fix = scopeFix(definition, card);
@@ -219,6 +265,8 @@ function sourceEntry(
     ...(detail ? { detail } : {}),
     ...(lastSyncAt ? { lastSyncAt } : {}),
     ...(primary ? { primary } : {}),
+    ...(connecting ? { connecting: { expiresAt: connecting.expiresAt } } : {}),
+    ...(progress ? { progress } : {}),
     ...(menu.length > 0 ? { menu } : {}),
   };
 }
@@ -227,16 +275,173 @@ function attentionItem(
   definition: DashboardSupportedSourceDefinition,
   card: DashboardSourceCard,
   degraded: WorkerCredentialDegradation[] | undefined,
+  connecting: Connecting | undefined,
+  progress: SourceProgress | undefined,
 ): DashboardItem {
+  if (connecting) {
+    return { id: `source:${definition.source_id}`, sentence: `${definition.label} — ${CONNECTING_REASON}`, fix: connecting.fix };
+  }
   const reason = dashboardAttentionLine(card, degraded ? { degradedCredentials: degraded } : undefined);
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
   const reauth = card.connection.state === 'reauth_required'
+    || progress?.stalledReason === 'waiting_for_credentials'
     || (card.connection.state !== 'connected' && card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card));
-  const reconnect = reauth ? oauthSource(definition) : undefined;
+  const reconnect = reauth ? reconnectFix(definition) : undefined;
   const fix = reconnect
-    ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source: reconnect } }
-    : scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : checkAgainFix();
+    ?? (scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
+}
+
+interface Connecting {
+  expiresAt: string;
+  fix: DashboardFix;
+}
+
+/**
+ * The engine's pending sign-in for this source (`connection.state ===
+ * 'awaiting_consent'` with an unexpired `connection.pending`), when ChatGPT
+ * can start it again. Only the expiry time is read off the card.
+ */
+function connectingFor(
+  definition: DashboardSupportedSourceDefinition,
+  card: DashboardSourceCard,
+  now: Date,
+): Connecting | undefined {
+  if (card.connection.state !== 'awaiting_consent') return undefined;
+  const source = oauthSource(definition);
+  const expiresAt = isoOrUndefined(card.connection.pending?.expires_at);
+  if (!source || !expiresAt || Date.parse(expiresAt) <= now.getTime()) return undefined;
+  return {
+    expiresAt,
+    fix: { label: DASHBOARD_CHATGPT_PICKER_COPY.connectReopen, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } },
+  };
+}
+
+function reconnectFix(definition: DashboardSupportedSourceDefinition): DashboardFix | undefined {
+  const source = oauthSource(definition);
+  return source ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : undefined;
+}
+
+/**
+ * The status word, held to the progress bar: never Fresh while a stage is
+ * unfinished. A stall the owner fixes here reads Needs you; any other
+ * unfinished stage reads Working unless the vocabulary already said something
+ * more urgent (Needs you, Failing).
+ */
+function honestStatus(status: DashboardStatus, progress: SourceProgress | undefined): DashboardStatus {
+  if (!progress || progress.stage === 'done') return status;
+  if (progress.stalled && progress.stalledReason && FIXABLE_STALLS.has(progress.stalledReason)) return 'Needs you';
+  if (status === 'Needs you' || status === 'Failing') return status;
+  return 'Working';
+}
+
+const STAGE_FOR_PHASE: Readonly<Record<DashboardPhase['id'], Exclude<SourceProgress['stage'], 'done'>>> = {
+  metadata_sync: 'listing',
+  extraction: 'reading',
+  embedding: 'indexing',
+};
+
+/** Per-phase counts behind one source's progress, summed into the overall block. */
+interface StageCounts {
+  found: number;
+  reading?: { done: number; total: number };
+  indexing?: { done: number; total: number };
+}
+
+interface MeasuredSourceProgress {
+  progress: SourceProgress;
+  counts: StageCounts;
+}
+
+/**
+ * One source's progress from the engine's own three phase bars
+ * (dashboard/phases.ts, the "In Olympus" rows): the first phase that is not
+ * done names the stage. Only numbers and enums are read off the phases, never
+ * their words. The population is the phases' own in-scope one, so items kept
+ * as names only are finished once listed and never count as unread.
+ */
+function measuredSourceProgress(
+  card: DashboardSourceCard,
+  scrubbed: DashboardSourceCard,
+  embedding: DashboardViewModelV1['models']['embedding'],
+  status: DashboardStatus,
+  now: Date,
+): MeasuredSourceProgress {
+  const unit = unitFor(scrubbed);
+  const credentialsMissing = status === 'Needs you'
+    && (scrubbed.connection.state === 'reauth_required'
+      || (scrubbed.coverage.indexed_items > 0 && !dashboardIsConnectedSource(scrubbed)));
+  const found = count(scrubbed.coverage.indexed_items);
+  if (scopePending(scrubbed)) {
+    return {
+      progress: { stage: 'listing', unit, done: 0, total: 0, percent: 0, stalled: true, stalledReason: 'scope_pending' },
+      counts: { found: 0 },
+    };
+  }
+  let phases: DashboardPhase[];
+  try {
+    phases = dashboardSourceProgress(card, { now }).phases;
+  } catch {
+    phases = [];
+  }
+  const counts: StageCounts = { found };
+  for (const phase of phases) {
+    if (phase.measure.kind !== 'ratio' || phase.not_applicable) continue;
+    const entry = { done: count(Math.min(phase.measure.done, phase.measure.total)), total: count(phase.measure.total) };
+    if (phase.id === 'extraction') counts.reading = entry;
+    if (phase.id === 'embedding') counts.indexing = entry;
+  }
+  // An embedding row whose store publishes no per-item count is finished when
+  // the chunk backlog says nothing is missing; otherwise it is still indexing.
+  const embeddingBehind = (scrubbed.embedding_backlog?.missing_chunks ?? 0) > 0
+    || scrubbed.embedding_backlog?.refresh_needed === true;
+  const open = phases.find((phase) => phase.state !== 'done' && !(phase.unmeasured === true && !embeddingBehind));
+  if (!open) {
+    const summary = dashboardWorkingSummary(scrubbed);
+    const total = summary?.in_scope_items ?? 0;
+    const progress: SourceProgress = credentialsMissing
+      ? { stage: 'done', unit, done: total, total, percent: 100, stalled: true, stalledReason: 'waiting_for_credentials' }
+      : { stage: 'done', unit, done: total, total, percent: 100, stalled: false };
+    return { progress, counts };
+  }
+  const stage = STAGE_FOR_PHASE[open.id];
+  const measure = open.measure;
+  let done = 0;
+  let total = 0;
+  let percent = 0;
+  if (open.id === 'metadata_sync') {
+    // Listing counts the source's own items found so far; a folder walk's
+    // share, when the walk is sized, is the only percentage it has.
+    done = found;
+    if (measure.kind === 'ratio' && open.unit !== 'folders') total = measure.total;
+    if (measure.kind === 'ratio' && measure.total > 0) percent = clampPercent((measure.done / measure.total) * 100);
+  } else if (measure.kind === 'ratio') {
+    done = count(measure.done);
+    total = count(measure.total);
+    percent = total > 0 ? clampPercent((done / total) * 100) : 0;
+  } else if (measure.kind === 'indeterminate') {
+    done = count(measure.done);
+  } else {
+    total = count(measure.remaining);
+  }
+  const reason = stalledReason({ stage, open, scrubbed, embedding, credentialsMissing });
+  const stalled = reason !== undefined || open.state === 'stalled';
+  return { progress: { stage, unit, done, total, percent, stalled, ...(reason ? { stalledReason: reason } : {}) }, counts };
+}
+
+function stalledReason(input: {
+  stage: Exclude<SourceProgress['stage'], 'done'>;
+  open: DashboardPhase;
+  scrubbed: DashboardSourceCard;
+  embedding: DashboardViewModelV1['models']['embedding'];
+  credentialsMissing: boolean;
+}): SourceStalledReason | undefined {
+  if (input.credentialsMissing) return 'waiting_for_credentials';
+  if (input.stage === 'indexing' && input.embedding.state === 'downloading') return 'model_downloading';
+  if (input.open.state !== 'stalled') return undefined;
+  const failures = input.scrubbed.schedule?.consecutive_failures ?? 0;
+  if (failures > 0 || dashboardSyncKeepsFailing(input.scrubbed)) return 'provider_unavailable';
+  return undefined;
 }
 
 function checkAgainFix(): DashboardFix {
@@ -320,63 +525,62 @@ function unitFor(card: DashboardSourceCard): Unit {
 }
 
 /**
- * One progress block across connected sources, from the same per-source
- * working summary the dashboard's own cards use. Absent when every connected
- * source is fully working, or nothing gives a defensible denominator.
+ * One progress block over every connected source that is not done. Each
+ * stage's row sums that stage's counts across those sources (listing: items
+ * found so far, no total until a first listing finishes). The headline
+ * percentage is reading's when anything has a known in-scope total, else the
+ * sum of the sources' own stage counts. Absent once every source is done.
  */
 function overallProgress(
-  cards: readonly DashboardSourceCard[],
-  statuses: readonly DashboardStatus[],
+  rows: ReadonlyArray<{ card: DashboardSourceCard; progress?: SourceProgress | undefined; counts?: StageCounts | undefined }>,
 ): DashboardViewModelV1['progress'] | undefined {
-  let inScope = 0;
-  let read = 0;
-  let embedded = 0;
-  let embeddedKnown = true;
+  const open = rows.filter((row): row is { card: DashboardSourceCard; progress: SourceProgress; counts: StageCounts } =>
+    row.progress !== undefined && row.counts !== undefined && row.progress.stage !== 'done');
+  if (open.length === 0) return undefined;
   let eta: number | undefined;
-  let stalled = false;
   let initial = false;
-  let unit: Unit | undefined;
-  let mixed = false;
-  let anyUnfinished = false;
-  cards.forEach((card, index) => {
-    if (!dashboardIsConnectedSource(card)) return;
-    const summary = dashboardWorkingSummary(card);
-    if (!summary) return;
-    inScope += summary.in_scope_items;
-    read += summary.read_items;
-    if (typeof card.coverage.embedded_files === 'number') {
-      embedded += Math.min(summary.in_scope_items, Math.max(0, card.coverage.embedded_files));
-    } else {
-      embeddedKnown = false;
+  const units = new Set(open.map((row) => row.progress.unit));
+  const unit: Unit = units.size === 1 ? [...units][0]! : 'items';
+  const listing = { done: 0, any: false };
+  const reading = { done: 0, total: 0, any: false };
+  const indexing = { done: 0, total: 0, any: false };
+  let ownDone = 0;
+  let ownTotal = 0;
+  for (const { card, progress, counts } of open) {
+    if (progress.stage === 'listing') {
+      listing.any = true;
+      listing.done += counts.found;
     }
-    if (!summary.fully_working) anyUnfinished = true;
-    const cardUnit = unitFor(card);
-    if (unit === undefined) unit = cardUnit;
-    else if (unit !== cardUnit) mixed = true;
-    if (card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL) initial = true;
+    if (counts.reading) {
+      reading.any = true;
+      reading.done += counts.reading.done;
+      reading.total += counts.reading.total;
+    }
+    if (counts.indexing) {
+      indexing.any = true;
+      indexing.done += counts.indexing.done;
+      indexing.total += counts.indexing.total;
+    }
+    ownTotal += progress.total;
+    ownDone += progress.total > 0 ? Math.min(progress.done, progress.total) : 0;
+    if (card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || progress.stage === 'listing') initial = true;
     const minutes = card.progress?.eta_minutes;
     if (typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0) {
       eta = Math.max(eta ?? 0, Math.round(minutes * 60));
     }
-    if (dashboardSyncKeepsFailing(card) || (statuses[index] === 'Needs you' && card.queue_health.needs_attention > 0)) {
-      stalled = true;
-    }
-  });
-  if (inScope <= 0 || !anyUnfinished) return undefined;
-  const progressUnit: Unit = mixed || unit === undefined ? 'items' : unit;
-  const details: NonNullable<DashboardViewModelV1['progress']>['details'] = [
-    { stage: DASHBOARD_CHATGPT_VOCABULARY.stageReading, unit: progressUnit, done: read, total: inScope },
-  ];
-  if (embeddedKnown) {
-    details.push({ stage: DASHBOARD_CHATGPT_VOCABULARY.stageSearchable, unit: progressUnit, done: embedded, total: inScope });
   }
+  const details: NonNullable<DashboardViewModelV1['progress']>['details'] = [];
+  if (listing.any) details.push({ stage: STAGE_DETAIL.listing, unit, done: listing.done, total: 0 });
+  if (reading.any) details.push({ stage: STAGE_DETAIL.reading, unit, done: reading.done, total: reading.total });
+  if (indexing.any) details.push({ stage: STAGE_DETAIL.indexing, unit, done: indexing.done, total: indexing.total });
+  const [done, total] = reading.total > 0 ? [reading.done, reading.total] : [ownDone, ownTotal];
   return {
-    unit: progressUnit,
+    unit,
     phase: initial ? 'initial' : 'refresh',
-    percent: clampPercent((read / inScope) * 100),
-    itemsLeft: Math.max(0, inScope - read),
+    percent: total > 0 ? clampPercent((Math.min(done, total) / total) * 100) : 0,
+    itemsLeft: Math.max(0, total - done),
     ...(eta !== undefined ? { etaSeconds: eta } : {}),
-    stalled,
+    stalled: open.some((row) => row.progress.stalled),
     details,
   };
 }
