@@ -312,11 +312,97 @@ async function scopeList(backend: ChatGptSetupBackend, args: Record<string, unkn
     return mailList(await backend.browseMail(draft), secrets);
   }
   const parentKey = optionalString(args.parent_key);
-  const cursor = optionalString(args.cursor);
+  const after = args.cursor === undefined ? undefined : decodeSortedCursor(requiredString(args.cursor), parentKey);
   // Never list inside a Secrets location, even by its key.
   if (parentKey && isSecretFolder(secrets, parentKey)) throw new ChatGptSurfaceError('invalid_params');
-  const browse = await backend.browseFolders({ sourceId, ...(parentKey ? { parentKey } : {}), ...(cursor ? { cursor } : {}) });
-  return folderList(browse, secrets);
+  return sortedFolderPage(await browseWholeLevel(backend, sourceId, parentKey), secrets, parentKey, after);
+}
+
+/** Folders per page of `olympus_scope_list`, after sorting. */
+export const SCOPE_LIST_PAGE_SIZE = 100;
+/** Provider pages read for one level before sorting; a level larger than this lists what was read. */
+const MAX_PROVIDER_PAGES = 50;
+const FOLDER_COLLATOR = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+const SORTED_CURSOR_PREFIX = 'olysort1.';
+
+/**
+ * Every provider page of one folder level, so the level can be sorted before
+ * it is paged (providers page in their own order). All pages must come from
+ * one account and scope revision, or the listing is retried by the person.
+ */
+async function browseWholeLevel(
+  backend: ChatGptSetupBackend,
+  sourceId: ChatGptFolderSourceId,
+  parentKey: string | undefined,
+): Promise<OlympusFolderScopeBrowseResult> {
+  const first = await backend.browseFolders({ sourceId, ...(parentKey ? { parentKey } : {}) });
+  const nodes = [...first.nodes];
+  const seen = new Set<string>();
+  let cursor = first.next_cursor;
+  for (let page = 1; cursor && !seen.has(cursor) && page < MAX_PROVIDER_PAGES; page++) {
+    seen.add(cursor);
+    const next = await backend.browseFolders({ sourceId, ...(parentKey ? { parentKey } : {}), cursor });
+    if (next.account_generation !== first.account_generation || next.scope_revision !== first.scope_revision) {
+      throw new ChatGptSurfaceError('picker_unavailable');
+    }
+    nodes.push(...next.nodes);
+    cursor = next.next_cursor;
+  }
+  const unique = new Map(nodes.map((node) => [node.key, node]));
+  const { next_cursor: _providerCursor, ...rest } = first;
+  return { ...rest, nodes: [...unique.values()] };
+}
+
+interface SortPosition {
+  name: string;
+  key: string;
+}
+
+/** Alphabetical with numbers in numeric order ("1 Projects", "2 Areas", …, "10 x", "Apps"); key breaks ties. */
+function compareFolders(a: SortPosition, b: SortPosition): number {
+  return FOLDER_COLLATOR.compare(a.name, b.name) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+}
+
+/**
+ * One sorted page. The cursor names the last folder shown (its name and key),
+ * not an offset, so a folder added or removed between pages neither repeats
+ * nor skips the rest: the next page is every folder sorted after it.
+ */
+function sortedFolderPage(
+  browse: OlympusFolderScopeBrowseResult,
+  secrets: SecretLocations,
+  parentKey: string | undefined,
+  after: SortPosition | undefined,
+): FolderScopeList {
+  const list = folderList(browse, secrets);
+  const sorted = [...list.nodes].sort(compareFolders);
+  const rest = after ? sorted.filter((node) => compareFolders(node, after) > 0) : sorted;
+  const page = rest.slice(0, SCOPE_LIST_PAGE_SIZE);
+  const last = page.at(-1);
+  const { next_cursor: _unused, ...withoutCursor } = list;
+  return {
+    ...withoutCursor,
+    nodes: page,
+    ...(rest.length > page.length && last ? { next_cursor: encodeSortedCursor(parentKey, last) } : {}),
+  };
+}
+
+function encodeSortedCursor(parentKey: string | undefined, last: SortPosition): string {
+  const body = Buffer.from(JSON.stringify({ p: parentKey ?? '', n: last.name, k: last.key }), 'utf8').toString('base64url');
+  return `${SORTED_CURSOR_PREFIX}${body}`;
+}
+
+function decodeSortedCursor(value: string, parentKey: string | undefined): SortPosition {
+  if (!value.startsWith(SORTED_CURSOR_PREFIX)) throw new ChatGptSurfaceError('invalid_params');
+  try {
+    const parsed = JSON.parse(Buffer.from(value.slice(SORTED_CURSOR_PREFIX.length), 'base64url').toString('utf8')) as Record<string, unknown>;
+    if (parsed.p !== (parentKey ?? '') || typeof parsed.n !== 'string' || typeof parsed.k !== 'string' || !parsed.k) {
+      throw new Error('cursor');
+    }
+    return { name: parsed.n, key: parsed.k };
+  } catch {
+    throw new ChatGptSurfaceError('invalid_params');
+  }
 }
 
 async function scopeSet(backend: ChatGptSetupBackend, args: Record<string, unknown>): Promise<ChatGptToolResult> {
@@ -350,7 +436,7 @@ async function scopeSet(backend: ChatGptSetupBackend, args: Record<string, unkno
     if (!(error instanceof SetupBackendError) || error.code !== 'source_index_policy_violation') throw error;
     const current = sourceId === 'gmail.email'
       ? mailList(await backend.browseMail(), secrets)
-      : folderList(await backend.browseFolders({ sourceId }), secrets);
+      : sortedFolderPage(await browseWholeLevel(backend, sourceId, undefined), secrets, undefined, undefined);
     if (current.account_generation === accountGeneration && current.scope_revision === expectedRevision) throw error;
     return scopeConflictToolResult(current);
   }
@@ -467,15 +553,26 @@ function optionalString(value: unknown): string | undefined {
   return requiredString(value);
 }
 
-/** Backend and worker failures as the surface's fixed codes; nothing internal passes. */
+/**
+ * Backend and worker failures as the surface's fixed codes; nothing internal
+ * passes. Each code has its own honest sentence in response-builder.ts
+ * (ERROR_TEXT), so a failure never reads as a different one.
+ */
 const BACKEND_CODES: Record<string, ChatGptErrorCode> = {
   model_setup_required: 'models_not_ready',
   oauth_handback_unavailable: 'connect_unavailable',
   oauth_client_id_missing: 'connect_unavailable',
   oauth_client_secret_missing: 'connect_unavailable',
+  oauth_start_invalid: 'sign_in_failed',
   dashboard_account_cardinality_violation: 'already_connected',
   source_index_policy_violation: 'not_connected',
   source_index_not_enabled: 'picker_unavailable',
+  source_dashboard_not_supported: 'unavailable',
+  source_not_connected: 'source_not_connected',
+  disconnect_source_busy: 'source_busy',
+  disconnect_credential_delete_failed: 'disconnect_incomplete',
+  capture_stop_unconfirmed: 'disconnect_incomplete',
+  disconnect_scheduler_refresh_not_supported: 'disconnect_incomplete',
   invalid_request: 'invalid_params',
   disconnect_confirmation_required: 'invalid_params',
 };

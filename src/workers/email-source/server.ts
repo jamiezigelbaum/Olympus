@@ -267,6 +267,7 @@ import {
   SCHEDULER_SOURCE_IDS,
   type SourceSchedulerConstructionDecision,
   type SourceSchedulerSource,
+  type SourceScheduler,
 } from '../source-scheduler.ts';
 import {
   createSourceWatchExecutorCapability,
@@ -3731,7 +3732,7 @@ export async function main(): Promise<void> {
       if (sourceScheduler) {
         sourceScheduler.updateSources(schedulerSourcesForHandles(readActiveConnectedHandles(process.env)).sources);
         if (sourceScheduler.status().sources.some((source) => source.source_id === 'gmail.email')) {
-          await sourceScheduler.runSource('gmail.email', undefined, 'operator');
+          startApprovedSourceRun(sourceScheduler, 'gmail.email');
           started = true;
         }
       }
@@ -3859,7 +3860,7 @@ export async function main(): Promise<void> {
         sourceScheduler.updateSources(schedulerSourcesForHandles(readActiveConnectedHandles(process.env)).sources);
         if (fileSourceScopeMetadataEnabled(approval)
           && sourceScheduler.status().sources.some((source) => source.source_id === input.sourceId)) {
-          await sourceScheduler.runSource(input.sourceId, undefined, 'operator');
+          startApprovedSourceRun(sourceScheduler, input.sourceId);
           started = true;
         }
       }
@@ -4465,6 +4466,20 @@ export function connectorStoreLaneHandle(input: {
 }
 
 /** Select a source credential independently from any storage-lane enable. */
+/**
+ * Starts the first read after a scope approval without holding the approval's
+ * response open for it. That read is a whole sync pass (minutes for a large
+ * Dropbox), and awaiting it outlived the ChatGPT tool call: the picker saw the
+ * save fail, saved again with the revision the first save had just replaced,
+ * and got "The source scope changed" (owner live test, 2026-10-01). The
+ * scheduler owns the run from here; its status and the dashboard report it.
+ */
+export function startApprovedSourceRun(scheduler: { runSource: SourceScheduler['runSource'] }, sourceId: string): void {
+  void scheduler.runSource(sourceId, undefined, 'operator').catch(() => {
+    console.warn(`[source-scheduler] source=${sourceId} first run after scope approval failed; the next scheduled pass retries.`);
+  });
+}
+
 export function selectedSourceCredentialHandle(input: {
   env: Record<string, string | undefined>;
   pinEnvName: string;

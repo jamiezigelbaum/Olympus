@@ -19,6 +19,7 @@ import type {
   OlympusSourceScopeSelection,
 } from '../../control-ui-contract.ts';
 import { HANDOFF_PATH_PREFIX } from '../../../connect-relay/shared/tokens.ts';
+import type { ChatGptDisconnectSourceId, ChatGptOAuthSource } from './dashboard-contract.ts';
 import type { ChatGptHandoffs } from './handoff.ts';
 import {
   ANSWER_PROFILE_IDS,
@@ -32,6 +33,13 @@ import { loadSecretLocations } from './scope-privacy.ts';
 import { SetupBackendError, type ChatGptSetupBackend } from './setup-tools.ts';
 
 const WORKER_ORIGIN = 'http://olympus-worker.internal';
+
+/** The sign-in a Disconnect cancels: the source ChatGPT's Connect starts for it. */
+const DISCONNECT_OAUTH_SOURCES: Readonly<Partial<Record<ChatGptDisconnectSourceId, ChatGptOAuthSource>>> = {
+  'gmail.email': 'gmail',
+  'google_drive.docs': 'google-drive',
+  'dropbox.files': 'dropbox',
+};
 
 export interface ChatGptSetupBackendOptions {
   /** The worker's own fetch (no bearer: in process). */
@@ -154,7 +162,20 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
     savedMailDraft,
 
     async disconnect(sourceId) {
-      await post('/dashboard/disconnect', { source_id: sourceId, acknowledge: true });
+      // A sign-in still outstanding for this source is cancelled first, so
+      // Disconnect on a source mid-sign-in ends that attempt (a late return
+      // from the provider then finds nothing to complete) instead of failing
+      // with "not connected".
+      const oauth = DISCONNECT_OAUTH_SOURCES[sourceId];
+      const cancelled = oauth
+        ? (await post('/dashboard/connect/oauth/cancel', { source: oauth })).cancelled === true
+        : false;
+      try {
+        await post('/dashboard/disconnect', { source_id: sourceId, acknowledge: true });
+      } catch (error) {
+        if (cancelled && error instanceof SetupBackendError && error.code === 'source_not_connected') return;
+        throw error;
+      }
     },
 
     async setModels(choice) {
