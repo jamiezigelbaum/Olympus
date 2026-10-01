@@ -45912,12 +45912,7 @@ var init_vocabulary = __esm(() => {
     pageTitle: "Olympus private answer",
     title: "Private answer from your Mac",
     notSent: "Not sent to ChatGPT",
-    notSentAfterCount: " · not sent to ChatGPT",
-    count: {
-      one: "1 private item matches",
-      many: "{n} private items match"
-    },
-    capped: "50+",
+    hidden: "Private answer hidden",
     show: "Show",
     showLabel: "Show private answer",
     hide: "Hide",
@@ -103125,13 +103120,23 @@ textarea.text{resize:vertical;min-height:4.5rem}
 // src/workers/chatgpt/dashboard-resource.ts
 var exports_dashboard_resource = {};
 __export(exports_dashboard_resource, {
+  versionedResourceUri: () => versionedResourceUri,
+  matchesResourceUri: () => matchesResourceUri,
   dashboardResourceMeta: () => dashboardResourceMeta,
   dashboardResourceHtml: () => dashboardResourceHtml,
   MCP_APP_MIME_TYPE: () => MCP_APP_MIME_TYPE,
   DASHBOARD_UI_DOMAIN: () => DASHBOARD_UI_DOMAIN,
+  DASHBOARD_RESOURCE_VERSIONED_URI: () => DASHBOARD_RESOURCE_VERSIONED_URI,
   DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE,
   DASHBOARD_REDIRECT_DOMAINS: () => DASHBOARD_REDIRECT_DOMAINS
 });
+import { createHash as createHash54 } from "node:crypto";
+function versionedResourceUri(base, html2) {
+  return `${base}?v=${createHash54("sha256").update(html2).digest("hex").slice(0, 12)}`;
+}
+function matchesResourceUri(uri, base) {
+  return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
+}
 function dashboardResourceMeta() {
   return {
     ui: { csp: { connectDomains: [], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
@@ -103140,13 +103145,15 @@ function dashboardResourceMeta() {
   };
 }
 function dashboardResourceHtml() {
-  return chatgptDashboardPageHtml();
+  return DASHBOARD_HTML;
 }
-var MCP_APP_MIME_TYPE = "text/html;profile=mcp-app", DASHBOARD_RESOURCE, DASHBOARD_UI_DOMAIN = "https://mcp.olympusplugin.ai", DASHBOARD_REDIRECT_DOMAINS;
+var MCP_APP_MIME_TYPE = "text/html;profile=mcp-app", DASHBOARD_HTML, DASHBOARD_RESOURCE_VERSIONED_URI, DASHBOARD_RESOURCE, DASHBOARD_UI_DOMAIN = "https://mcp.olympusplugin.ai", DASHBOARD_REDIRECT_DOMAINS;
 var init_dashboard_resource = __esm(() => {
   init_page();
+  DASHBOARD_HTML = chatgptDashboardPageHtml();
+  DASHBOARD_RESOURCE_VERSIONED_URI = versionedResourceUri(DASHBOARD_RESOURCE_URI, DASHBOARD_HTML);
   DASHBOARD_RESOURCE = {
-    uri: DASHBOARD_RESOURCE_URI,
+    uri: DASHBOARD_RESOURCE_VERSIONED_URI,
     name: "Olympus dashboard",
     mimeType: MCP_APP_MIME_TYPE
   };
@@ -103786,6 +103793,722 @@ var init_private_answer_contract = __esm(() => {
   PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
 });
 
+// src/workers/dashboard/chatgpt/private-answer.ts
+function chatgptPrivateAnswerProgram(config2) {
+  const doc2 = document;
+  const root = doc2.getElementById("panel");
+  const T = config2.copy;
+  const JOB_ID = new RegExp(config2.jobIdPattern);
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  let info = null;
+  let phase = "idle";
+  let errorText = "";
+  let canRetry = false;
+  let answer = null;
+  let pair = null;
+  let run = 0;
+  let theme = "";
+  let focusAfter = "";
+  let nextId = 1;
+  const pending = {};
+  function post(message) {
+    if (window.parent && window.parent !== window)
+      window.parent.postMessage(message, "*");
+  }
+  function request(method, params, onResult) {
+    const id = nextId++;
+    pending[id] = onResult;
+    post({ jsonrpc: "2.0", id, method, params });
+  }
+  function notify(method, params) {
+    post({ jsonrpc: "2.0", method, params: params || {} });
+  }
+  function openai() {
+    return window.openai || null;
+  }
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent)
+      return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== "2.0")
+      return;
+    if (message.id !== undefined && pending[message.id]) {
+      const done = pending[message.id];
+      delete pending[message.id];
+      done(message.result);
+      return;
+    }
+    if (message.method === "ui/notifications/tool-result" && message.params)
+      accept(message.params._meta);
+    else if (message.method === "ui/notifications/host-context-changed")
+      hostContext(message.params);
+  });
+  function hostContext(context) {
+    if (!context || typeof context !== "object")
+      return;
+    if (context.theme === "light" || context.theme === "dark") {
+      theme = context.theme;
+      render();
+    }
+  }
+  function readGlobals() {
+    const host = openai();
+    if (!host)
+      return;
+    if (host.theme === "light" || host.theme === "dark")
+      theme = host.theme;
+    if (host.toolResponseMetadata)
+      accept(host.toolResponseMetadata, true);
+  }
+  window.addEventListener("openai:set_globals", () => {
+    readGlobals();
+    render();
+  });
+  function accept(meta2, quiet) {
+    const value = meta2 && typeof meta2 === "object" ? meta2[config2.metaKey] : null;
+    let next = null;
+    if (value && typeof value === "object" && value.v === 1 && typeof value.count === "number" && isFinite(value.count) && value.count >= 1 && (value.state === "ready" || value.state === "no_model" || value.state === "model_downloading")) {
+      const percent = typeof value.percent === "number" && isFinite(value.percent) ? Math.max(0, Math.min(100, Math.round(value.percent))) : -1;
+      next = {
+        count: Math.floor(value.count),
+        state: value.state,
+        jobId: value.state === "ready" && typeof value.jobId === "string" ? value.jobId : "",
+        percent: value.state === "model_downloading" ? percent : -1
+      };
+    }
+    const same = !!info && !!next && info.count === next.count && info.state === next.state && info.jobId === next.jobId && info.percent === next.percent;
+    if (same || !info && !next)
+      return;
+    if (!next || !info || next.jobId !== info.jobId) {
+      run++;
+      phase = "idle";
+      errorText = "";
+      canRetry = false;
+      answer = null;
+      pair = null;
+    }
+    info = next;
+    if (info && info.state === "ready" && phase === "idle")
+      collect(false);
+    else if (!quiet)
+      render();
+  }
+  const subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
+  const utf83 = (text) => new TextEncoder().encode(text);
+  function fromB64url(text) {
+    if (typeof text !== "string" || !text || !/^[A-Za-z0-9_-]+$/.test(text))
+      return null;
+    let s = text.replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4)
+      s += "=";
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0;i < bin.length; i++)
+      out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function toB64url(bytes) {
+    let bin = "";
+    for (let i = 0;i < bytes.length; i++)
+      bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  async function keyPair(jobId) {
+    if (pair && pair.jobId === jobId)
+      return pair;
+    const kept = await keptKey(jobId);
+    if (kept) {
+      pair = { jobId, privateKey: kept.privateKey, publicKey: kept.publicKey };
+      return pair;
+    }
+    const made = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+    const raw = new Uint8Array(await subtle.exportKey("raw", made.publicKey));
+    const fresh2 = { jobId, privateKey: made.privateKey, publicKey: toB64url(raw) };
+    await keepKey(jobId, fresh2.privateKey, fresh2.publicKey);
+    pair = fresh2;
+    return pair;
+  }
+  const KS = config2.keyStore;
+  function openStore2() {
+    return new Promise((resolve10) => {
+      let settled = false;
+      const finish2 = (db) => {
+        if (settled) {
+          if (db)
+            try {
+              db.close();
+            } catch {}
+          return;
+        }
+        settled = true;
+        resolve10(db);
+      };
+      try {
+        const factory = window.indexedDB;
+        if (!factory || typeof factory.open !== "function")
+          return finish2(null);
+        const opening = factory.open(KS.database, 1);
+        opening.onupgradeneeded = () => {
+          try {
+            const db = opening.result;
+            if (!db.objectStoreNames.contains(KS.store))
+              db.createObjectStore(KS.store);
+          } catch {}
+        };
+        opening.onsuccess = () => finish2(opening.result);
+        opening.onerror = () => finish2(null);
+        opening.onblocked = () => finish2(null);
+        setTimeout(() => finish2(null), KS.timeoutMs);
+      } catch {
+        finish2(null);
+      }
+    });
+  }
+  async function inStore(mode, work) {
+    const db = await openStore2();
+    if (!db)
+      return;
+    return new Promise((resolve10) => {
+      let settled = false;
+      const finish2 = (value) => {
+        if (settled)
+          return;
+        settled = true;
+        try {
+          db.close();
+        } catch {}
+        resolve10(value);
+      };
+      try {
+        const tx = db.transaction(KS.store, mode);
+        const req = work(tx.objectStore(KS.store));
+        tx.oncomplete = () => finish2(req ? req.result : true);
+        tx.onerror = () => finish2(undefined);
+        tx.onabort = () => finish2(undefined);
+        setTimeout(() => finish2(undefined), KS.timeoutMs);
+      } catch {
+        finish2(undefined);
+      }
+    });
+  }
+  async function keptKey(jobId) {
+    try {
+      const value = await inStore("readonly", (store) => store.get(jobId));
+      if (!value || typeof value !== "object")
+        return null;
+      const privateKey = value.privateKey;
+      const fresh2 = typeof value.createdAt === "number" && Date.now() - value.createdAt < KS.maxAgeMs;
+      if (!fresh2 || !privateKey || typeof privateKey !== "object" || privateKey.type !== "private")
+        return null;
+      if (typeof value.publicKey !== "string" || !/^[A-Za-z0-9_-]{87}$/.test(value.publicKey))
+        return null;
+      return { privateKey, publicKey: value.publicKey };
+    } catch {
+      return null;
+    }
+  }
+  async function keepKey(jobId, privateKey, publicKey) {
+    try {
+      await inStore("readwrite", (store) => {
+        store.put({ privateKey, publicKey, createdAt: Date.now() }, jobId);
+      });
+    } catch {}
+    dropOldKeys();
+  }
+  async function dropOldKeys() {
+    try {
+      const cutoff = Date.now() - KS.maxAgeMs;
+      await inStore("readwrite", (store) => {
+        const walk = store.openCursor();
+        walk.onsuccess = () => {
+          const cursor = walk.result;
+          if (!cursor)
+            return;
+          const value = cursor.value;
+          if (!value || typeof value.createdAt !== "number" || value.createdAt < cutoff)
+            cursor.delete();
+          cursor.continue();
+        };
+      });
+    } catch {}
+  }
+  async function open6(jobId, privateKey, sealed) {
+    const macRaw = fromB64url(sealed.macPublicKey);
+    const iv = fromB64url(sealed.iv);
+    const ciphertext = fromB64url(sealed.ciphertext);
+    if (!macRaw || macRaw.length !== 65 || !iv || iv.length !== 12 || !ciphertext)
+      throw new Error("malformed");
+    const macKey = await subtle.importKey("raw", macRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
+    const shared = await subtle.deriveBits({ name: "ECDH", public: macKey }, privateKey, 256);
+    const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+    const key = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key, ciphertext);
+    return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ""));
+  }
+  function readAnswer(value) {
+    if (!value || typeof value !== "object" || value.v !== 1 || typeof value.answer !== "string")
+      return null;
+    const sources = [];
+    const seen = {};
+    const citations = Array.isArray(value.citations) ? value.citations : [];
+    for (let i = 0;i < citations.length; i++) {
+      const c = citations[i];
+      if (!c || typeof c !== "object")
+        continue;
+      const name = typeof c.title === "string" && c.title.trim() ? c.title.trim() : typeof c.source === "string" && c.source.trim() ? c.source.trim() : "";
+      if (name && !seen[name]) {
+        seen[name] = true;
+        sources.push(name);
+      }
+    }
+    const unanswered = (Array.isArray(value.unanswered) ? value.unanswered : []).filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
+    return { text: value.answer, sources, unanswered };
+  }
+  function wait(ms) {
+    return new Promise((resolve10) => setTimeout(resolve10, ms));
+  }
+  function fail(text, retry, byUser) {
+    phase = "error";
+    errorText = text;
+    canRetry = retry;
+    focusAfter = byUser ? retry ? "retry" : "status" : "";
+    render();
+  }
+  function show() {
+    if (!answer)
+      return void collect(true);
+    phase = "revealed";
+    focusAfter = "answer";
+    render();
+  }
+  async function collect(byUser) {
+    if (!info || info.state !== "ready" || phase === "working")
+      return;
+    const jobId = info.jobId;
+    if (!JOB_ID.test(jobId) || !subtle || typeof window.fetch !== "function") {
+      fail(T.generic, false, byUser);
+      return;
+    }
+    const mine = ++run;
+    phase = "working";
+    errorText = "";
+    canRetry = false;
+    focusAfter = byUser ? "status" : "";
+    render();
+    const started = Date.now();
+    try {
+      const keys = await keyPair(jobId);
+      for (;; ) {
+        if (mine !== run)
+          return;
+        let response;
+        try {
+          response = await window.fetch(config2.relayOrigin + "/private/" + jobId, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
+            credentials: "omit",
+            cache: "no-store",
+            referrerPolicy: "no-referrer",
+            mode: "cors"
+          });
+        } catch {
+          if (mine === run)
+            fail(T.unreachable, true, byUser);
+          return;
+        }
+        if (mine !== run)
+          return;
+        let body = null;
+        try {
+          body = await response.json();
+        } catch {
+          body = null;
+        }
+        if (mine !== run)
+          return;
+        const status = body && typeof body.status === "string" ? body.status : "";
+        const code = response.status;
+        if (code === 200 && status === "ready") {
+          let opened = null;
+          try {
+            opened = readAnswer(await open6(jobId, keys.privateKey, body));
+          } catch {
+            opened = null;
+          }
+          if (mine !== run)
+            return;
+          if (!opened) {
+            fail(T.generic, false, byUser);
+            return;
+          }
+          answer = opened;
+          phase = "revealed";
+          focusAfter = byUser ? "answer" : "";
+          render();
+          return;
+        }
+        if (code === 200 && status === "failed")
+          return fail(T.failed, false, byUser);
+        if (code === 409)
+          return fail(T.claimed, false, byUser);
+        if (code === 410 || code === 404)
+          return fail(T.expired, false, byUser);
+        if (code === 429)
+          return fail(T.rateLimited, true, byUser);
+        const keepWaiting = code === 202 || code === 503 && status === "busy";
+        if (code === 503 && !keepWaiting)
+          return fail(T.macOffline, true, byUser);
+        if (!keepWaiting)
+          return fail(T.generic, false, byUser);
+        const header = Number(response.headers && response.headers.get ? response.headers.get("retry-after") : NaN);
+        const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
+        if (Date.now() - started + seconds * config2.secondMs > config2.pollCapMs) {
+          phase = "slow";
+          errorText = T.slow;
+          canRetry = true;
+          focusAfter = byUser ? "retry" : "";
+          render();
+          return;
+        }
+        await wait(seconds * config2.secondMs);
+      }
+    } catch {
+      if (mine === run)
+        fail(T.generic, false, byUser);
+    }
+  }
+  function hide() {
+    phase = "hidden";
+    focusAfter = "show";
+    render();
+  }
+  function el(tag, cls, text) {
+    const node = doc2.createElement(tag);
+    if (cls)
+      node.className = cls;
+    if (text)
+      node.textContent = text;
+    return node;
+  }
+  function fill(template, values) {
+    return template.replace(/\{(\w+)\}/g, (whole, key) => (key in values) ? values[key] : whole);
+  }
+  function button(label, key, onClick, name) {
+    const node = el("button", "btn", label);
+    node.type = "button";
+    node.setAttribute("data-key", key);
+    if (name)
+      node.setAttribute("aria-label", name);
+    node.addEventListener("click", onClick);
+    return node;
+  }
+  function lock() {
+    const svg = doc2.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "lock");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const body = doc2.createElementNS(SVG_NS, "rect");
+    body.setAttribute("x", "3.5");
+    body.setAttribute("y", "7");
+    body.setAttribute("width", "9");
+    body.setAttribute("height", "7");
+    body.setAttribute("rx", "1.5");
+    const shackle = doc2.createElementNS(SVG_NS, "path");
+    shackle.setAttribute("d", "M5.5 7V5a2.5 2.5 0 0 1 5 0v2");
+    svg.appendChild(body);
+    svg.appendChild(shackle);
+    return svg;
+  }
+  function sourcesLine(sources) {
+    const shown = sources.slice(0, 3);
+    let list = shown.join(", ");
+    if (sources.length > shown.length)
+      list += " " + fill(T.more, { n: String(sources.length - shown.length) });
+    return fill(T.sources, { list });
+  }
+  function card(open7) {
+    const node = el("section", open7 ? "card open" : "card");
+    node.setAttribute("aria-label", T.title);
+    const row = el("div", "row");
+    const icon = el("div", "icon");
+    icon.appendChild(lock());
+    row.appendChild(icon);
+    const text = el("div", "text");
+    text.appendChild(el("h2", "title", T.title));
+    const line = el("p", "sub");
+    line.setAttribute("role", "status");
+    line.setAttribute("aria-live", "polite");
+    line.setAttribute("tabindex", "-1");
+    line.setAttribute("data-key", "status");
+    text.appendChild(line);
+    row.appendChild(text);
+    node.appendChild(row);
+    return { card: node, text, line, row };
+  }
+  function cardView(current) {
+    const view = card(false);
+    const line = view.line;
+    if (current.state === "no_model") {
+      line.textContent = T.noModel;
+      return view.card;
+    }
+    if (current.state === "model_downloading") {
+      const known = current.percent >= 0;
+      line.textContent = known ? fill(T.downloading, { percent: String(current.percent) }) : T.downloadingUnknown;
+      if (known) {
+        const bar = el("div", "bar");
+        bar.setAttribute("role", "progressbar");
+        bar.setAttribute("aria-label", T.downloadingLabel);
+        bar.setAttribute("aria-valuemin", "0");
+        bar.setAttribute("aria-valuemax", "100");
+        bar.setAttribute("aria-valuenow", String(current.percent));
+        const fillBar = el("div", "bar-fill");
+        fillBar.style.width = current.percent + "%";
+        bar.appendChild(fillBar);
+        view.text.appendChild(bar);
+      }
+      return view.card;
+    }
+    if (phase === "error" || phase === "slow") {
+      line.className = "sub warn";
+      line.textContent = errorText;
+      if (canRetry)
+        view.row.appendChild(button(T.tryAgain, "retry", () => void collect(true)));
+      return view.card;
+    }
+    if (phase === "hidden" && answer) {
+      line.textContent = T.hidden;
+      view.row.appendChild(button(T.show, "show", show, T.showLabel));
+      return view.card;
+    }
+    line.className = "sub working";
+    line.appendChild(el("span", "spinner"));
+    line.appendChild(doc2.createTextNode(T.preparing));
+    return view.card;
+  }
+  function revealedView(shown) {
+    const view = card(true);
+    view.line.textContent = T.notSent;
+    view.row.appendChild(button(T.hide, "hide", hide, T.hideLabel));
+    const body = el("div", "answer");
+    body.setAttribute("tabindex", "-1");
+    body.setAttribute("data-key", "answer");
+    const paragraphs = shown.text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
+    for (const part of paragraphs)
+      body.appendChild(el("p", "", part));
+    view.card.appendChild(body);
+    if (shown.sources.length)
+      view.card.appendChild(el("p", "sub foot", sourcesLine(shown.sources)));
+    if (shown.unanswered.length)
+      view.card.appendChild(el("p", "sub foot", fill(T.unanswered, { list: shown.unanswered.join("; ") })));
+    return view.card;
+  }
+  function render() {
+    if (theme)
+      doc2.documentElement.setAttribute("data-theme", theme);
+    else
+      doc2.documentElement.removeAttribute("data-theme");
+    root.textContent = "";
+    if (info)
+      root.appendChild(phase === "revealed" && answer ? revealedView(answer) : cardView(info));
+    if (focusAfter) {
+      const key = focusAfter;
+      focusAfter = "";
+      const target = root.querySelector('[data-key="' + key + '"]');
+      if (target && typeof target.focus === "function")
+        target.focus();
+    }
+    observeCard();
+    reportHeight(true);
+    afterLayout();
+  }
+  function cardHeight() {
+    const node = info ? root.firstChild : null;
+    if (!node)
+      return 0;
+    let margins = 0;
+    if (typeof window.getComputedStyle === "function") {
+      const style = window.getComputedStyle(node);
+      margins = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
+    }
+    return Math.ceil((node.offsetHeight || 0) + margins);
+  }
+  let lastHeight = -1;
+  function reportHeight(force) {
+    const height = cardHeight();
+    if (!force && height === lastHeight)
+      return;
+    lastHeight = height;
+    const host = openai();
+    if (host && typeof host.notifyIntrinsicHeight === "function")
+      host.notifyIntrinsicHeight(height);
+    const width = info && root.firstChild ? Math.ceil(root.firstChild.offsetWidth || 0) : 0;
+    notify("ui/notifications/size-changed", width > 0 ? { width, height } : { height });
+  }
+  function afterLayout() {
+    const frame = window.requestAnimationFrame;
+    if (typeof frame === "function")
+      frame.call(window, () => reportHeight());
+    else
+      setTimeout(() => reportHeight(), 0);
+  }
+  let observer = null;
+  let observed = null;
+  function observeCard() {
+    if (!observer && typeof window.ResizeObserver === "function") {
+      observer = new window.ResizeObserver(() => reportHeight());
+    }
+    const node = info ? root.firstChild : null;
+    if (!observer || node === observed)
+      return;
+    if (observed)
+      observer.unobserve(observed);
+    observed = node;
+    if (node)
+      observer.observe(node);
+  }
+  const fonts = doc2.fonts;
+  if (fonts && fonts.ready && typeof fonts.ready.then === "function")
+    fonts.ready.then(() => reportHeight());
+  readGlobals();
+  render();
+  request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    appInfo: { name: "olympus-private-answer", version: "1" },
+    appCapabilities: {}
+  }, (result) => {
+    if (result && result.hostContext)
+      hostContext(result.hostContext);
+    notify("ui/notifications/initialized");
+  });
+}
+function vars2(palette, card) {
+  return [
+    `--text:${palette.text}`,
+    `--muted:${palette.muted}`,
+    `--line:${palette.line}`,
+    `--focus:${palette.focus}`,
+    `--run:${palette.run}`,
+    `--tint:${card.tint}`,
+    `--raise:${card.raise}`,
+    `--hair:${card.hair}`,
+    `--hover:${card.hover}`,
+    `--warning:${card.warning}`
+  ].join(";");
+}
+function chatgptPrivateAnswerPageHtml(options) {
+  const config2 = {
+    relayOrigin: options.relayOrigin,
+    metaKey: PRIVATE_ANSWER_META_KEY,
+    jobIdPattern: CHATGPT_PRIVATE_ANSWER_JOB_ID.source,
+    copy: DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY,
+    secondMs: options.secondMs ?? 1000,
+    pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
+    keyStore: { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, ...options.keyStore }
+  };
+  return [
+    "<!doctype html>",
+    '<html lang="en">',
+    "<head>",
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>${DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY.pageTitle}</title>`,
+    `<style>${CHATGPT_PRIVATE_ANSWER_CSS}</style>`,
+    "</head>",
+    "<body>",
+    '<div id="panel"></div>',
+    `<script>(${chatgptPrivateAnswerProgram.toString()})(${scriptJson2(config2)});</script>`,
+    "</body>",
+    "</html>",
+    ""
+  ].join(`
+`);
+}
+function scriptJson2(value) {
+  return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
+}
+var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
+var init_private_answer2 = __esm(() => {
+  init_vocabulary();
+  init_private_answer_contract();
+  init_page();
+  CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS = 2 * 60000;
+  CHATGPT_PRIVATE_ANSWER_KEY_STORE = {
+    database: "olympus-private-answer",
+    store: "keys",
+    maxAgeMs: 24 * 60 * 60000,
+    timeoutMs: 1500
+  };
+  CHATGPT_PRIVATE_ANSWER_JOB_ID = /^oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
+  CARD_LIGHT = { tint: "#f7f7f8", raise: "#ffffff", hair: "#e3e3e3", hover: "#ececec", warning: CHATGPT_DASHBOARD_LIGHT.warnLine };
+  CARD_DARK = { tint: "#2f2f2f", raise: "#3a3a3a", hair: "#4a4a4a", hover: "#444444", warning: CHATGPT_DASHBOARD_DARK.warnLine };
+  CHATGPT_PRIVATE_ANSWER_CSS = `
+:root{${vars2(CHATGPT_DASHBOARD_LIGHT, CARD_LIGHT)};color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){${vars2(CHATGPT_DASHBOARD_DARK, CARD_DARK)}}}
+:root[data-theme=dark]{${vars2(CHATGPT_DASHBOARD_DARK, CARD_DARK)};color-scheme:dark}
+:root[data-theme=light]{color-scheme:light}
+*{box-sizing:border-box}
+html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
+html:root,html:root>body{margin:0!important;padding:0!important;height:auto!important;min-height:0!important;display:block!important;background:transparent;color:var(--text);overflow:hidden}
+body{font-size:0.9375rem;overflow-wrap:anywhere}
+p,h2{margin:0}
+html:root>body #panel{display:block!important;height:auto!important;min-height:0!important}
+#panel:empty{display:none!important}
+html:root>body #panel>.card{display:block!important;height:auto!important;min-height:0!important;max-height:none!important;flex:none!important;align-self:flex-start!important}
+.card{margin:0;padding:0.75rem 0.875rem;border-radius:14px;background:var(--tint)}
+.row{display:flex;align-items:center;gap:0.75rem}
+.icon{flex:none;display:flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:50%;background:var(--raise);border:1px solid var(--hair)}
+.lock{width:1rem;height:1rem;fill:none;stroke:var(--text);stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
+.text{flex:1 1 auto;min-width:0}
+.title{font-size:0.9375rem;font-weight:600;line-height:1.35}
+.sub{color:var(--muted);font-size:0.8125rem;line-height:1.4;margin-top:0.0625rem}
+.sub:focus{outline:none}
+.sub.warn{color:var(--warning)}
+.working{display:flex;align-items:center;gap:0.5rem}
+.spinner{flex:none;width:0.75rem;height:0.75rem;border-radius:50%;border:2px solid var(--hair);border-top-color:var(--muted);animation:spin 0.9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bar{height:0.25rem;margin-top:0.375rem;border-radius:999px;background:var(--hair);overflow:hidden}
+.bar-fill{height:100%;background:var(--run)}
+.answer{margin-top:0.625rem;display:flex;flex-direction:column;gap:0.625rem;font-size:0.9375rem;line-height:1.6;white-space:pre-line}
+.answer:focus{outline:none}
+.foot{margin-top:0.5rem}
+.btn{flex:none;font:inherit;font-size:0.875rem;font-weight:500;line-height:1.25;min-height:2rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--raise);color:var(--text);cursor:pointer;-webkit-appearance:none;appearance:none;box-shadow:none}
+.btn:hover{background:var(--hover)}
+.btn:focus{outline:none}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){.spinner{animation-duration:3s}}
+`;
+});
+
+// src/workers/chatgpt/private-answer-resource.ts
+function privateAnswerResourceMeta(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN) {
+  return {
+    ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
+    "openai/widgetDescription": "Shows how many private items match and, when the user asks, a private answer that ChatGPT never receives."
+  };
+}
+function privateAnswerResourceHtml(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN) {
+  return relayOrigin === PRIVATE_ANSWER_RELAY_ORIGIN ? PRIVATE_ANSWER_HTML : privateAnswerPageHtml({ relayOrigin });
+}
+function privateAnswerPageHtml(options) {
+  return chatgptPrivateAnswerPageHtml(options);
+}
+var PRIVATE_ANSWER_RELAY_ORIGIN = "https://mcp.olympusplugin.ai", PRIVATE_ANSWER_HTML, PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, PRIVATE_ANSWER_RESOURCE;
+var init_private_answer_resource = __esm(() => {
+  init_dashboard_resource();
+  init_private_answer_contract();
+  init_private_answer2();
+  PRIVATE_ANSWER_HTML = chatgptPrivateAnswerPageHtml({ relayOrigin: PRIVATE_ANSWER_RELAY_ORIGIN });
+  PRIVATE_ANSWER_RESOURCE_VERSIONED_URI = versionedResourceUri(PRIVATE_ANSWER_RESOURCE_URI, PRIVATE_ANSWER_HTML);
+  PRIVATE_ANSWER_RESOURCE = {
+    uri: PRIVATE_ANSWER_RESOURCE_VERSIONED_URI,
+    name: "Olympus private answer",
+    mimeType: MCP_APP_MIME_TYPE
+  };
+});
+
 // src/workers/chatgpt/response-builder.ts
 function dashboardToolResult(view) {
   const structured = copyDashboardViewModel(view);
@@ -104360,15 +105083,15 @@ function errorCode(error2) {
 }
 function dashboardToolMeta() {
   return {
-    ui: { resourceUri: DASHBOARD_RESOURCE_URI },
-    "openai/outputTemplate": DASHBOARD_RESOURCE_URI,
+    ui: { resourceUri: DASHBOARD_RESOURCE_VERSIONED_URI },
+    "openai/outputTemplate": DASHBOARD_RESOURCE_VERSIONED_URI,
     "openai/ui": { entrypoints: [{ type: "global" }] }
   };
 }
 function answerToolMeta() {
   return {
-    ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_URI },
-    "openai/outputTemplate": PRIVATE_ANSWER_RESOURCE_URI
+    ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_VERSIONED_URI },
+    "openai/outputTemplate": PRIVATE_ANSWER_RESOURCE_VERSIONED_URI
   };
 }
 function text(value) {
@@ -104440,6 +105163,8 @@ var init_response_builder = __esm(() => {
   init_vocabulary();
   init_tokens();
   init_private_answer_contract();
+  init_dashboard_resource();
+  init_private_answer_resource();
   MAX_ANSWER = 64 * 1024;
   UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
   OAUTH_SOURCES = new Set(["gmail", "google-drive", "dropbox"]);
@@ -105109,605 +105834,6 @@ var init_setup_tools = __esm(() => {
   };
 });
 
-// src/workers/dashboard/chatgpt/private-answer.ts
-function chatgptPrivateAnswerProgram(config2) {
-  const doc2 = document;
-  const root = doc2.getElementById("panel");
-  const T = config2.copy;
-  const JOB_ID = new RegExp(config2.jobIdPattern);
-  const SVG_NS = "http://www.w3.org/2000/svg";
-  let info = null;
-  let phase = "idle";
-  let errorText = "";
-  let canRetry = false;
-  let answer = null;
-  let pair = null;
-  let run = 0;
-  let theme = "";
-  let focusAfter = "";
-  let nextId = 1;
-  const pending = {};
-  function post(message) {
-    if (window.parent && window.parent !== window)
-      window.parent.postMessage(message, "*");
-  }
-  function request(method, params, onResult) {
-    const id = nextId++;
-    pending[id] = onResult;
-    post({ jsonrpc: "2.0", id, method, params });
-  }
-  function notify(method, params) {
-    post({ jsonrpc: "2.0", method, params: params || {} });
-  }
-  function openai() {
-    return window.openai || null;
-  }
-  window.addEventListener("message", (event) => {
-    if (event.source !== window.parent)
-      return;
-    const message = event.data;
-    if (!message || message.jsonrpc !== "2.0")
-      return;
-    if (message.id !== undefined && pending[message.id]) {
-      const done = pending[message.id];
-      delete pending[message.id];
-      done(message.result);
-      return;
-    }
-    if (message.method === "ui/notifications/tool-result" && message.params)
-      accept(message.params._meta);
-    else if (message.method === "ui/notifications/host-context-changed")
-      hostContext(message.params);
-  });
-  function hostContext(context) {
-    if (!context || typeof context !== "object")
-      return;
-    if (context.theme === "light" || context.theme === "dark") {
-      theme = context.theme;
-      render();
-    }
-  }
-  function readGlobals() {
-    const host = openai();
-    if (!host)
-      return;
-    if (host.theme === "light" || host.theme === "dark")
-      theme = host.theme;
-    if (host.toolResponseMetadata)
-      accept(host.toolResponseMetadata, true);
-  }
-  window.addEventListener("openai:set_globals", () => {
-    readGlobals();
-    render();
-  });
-  function accept(meta2, quiet) {
-    const value = meta2 && typeof meta2 === "object" ? meta2[config2.metaKey] : null;
-    let next = null;
-    if (value && typeof value === "object" && value.v === 1 && typeof value.count === "number" && isFinite(value.count) && value.count >= 1 && (value.state === "ready" || value.state === "no_model" || value.state === "model_downloading")) {
-      const percent2 = typeof value.percent === "number" && isFinite(value.percent) ? Math.max(0, Math.min(100, Math.round(value.percent))) : -1;
-      next = {
-        count: Math.floor(value.count),
-        state: value.state,
-        jobId: value.state === "ready" && typeof value.jobId === "string" ? value.jobId : "",
-        percent: value.state === "model_downloading" ? percent2 : -1
-      };
-    }
-    const same = !!info && !!next && info.count === next.count && info.state === next.state && info.jobId === next.jobId && info.percent === next.percent;
-    if (same || !info && !next)
-      return;
-    if (!next || !info || next.jobId !== info.jobId) {
-      run++;
-      phase = "idle";
-      errorText = "";
-      canRetry = false;
-      answer = null;
-      pair = null;
-    }
-    info = next;
-    if (!quiet)
-      render();
-  }
-  const subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
-  const utf83 = (text2) => new TextEncoder().encode(text2);
-  function fromB64url(text2) {
-    if (typeof text2 !== "string" || !text2 || !/^[A-Za-z0-9_-]+$/.test(text2))
-      return null;
-    let s = text2.replace(/-/g, "+").replace(/_/g, "/");
-    while (s.length % 4)
-      s += "=";
-    const bin = atob(s);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0;i < bin.length; i++)
-      out[i] = bin.charCodeAt(i);
-    return out;
-  }
-  function toB64url(bytes) {
-    let bin = "";
-    for (let i = 0;i < bytes.length; i++)
-      bin += String.fromCharCode(bytes[i]);
-    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  }
-  async function keyPair(jobId) {
-    if (pair && pair.jobId === jobId)
-      return pair;
-    const made = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
-    const raw = new Uint8Array(await subtle.exportKey("raw", made.publicKey));
-    pair = { jobId, privateKey: made.privateKey, publicKey: toB64url(raw) };
-    return pair;
-  }
-  async function open6(jobId, privateKey, sealed) {
-    const macRaw = fromB64url(sealed.macPublicKey);
-    const iv = fromB64url(sealed.iv);
-    const ciphertext = fromB64url(sealed.ciphertext);
-    if (!macRaw || macRaw.length !== 65 || !iv || iv.length !== 12 || !ciphertext)
-      throw new Error("malformed");
-    const macKey = await subtle.importKey("raw", macRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
-    const shared = await subtle.deriveBits({ name: "ECDH", public: macKey }, privateKey, 256);
-    const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-    const key = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
-    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key, ciphertext);
-    return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ""));
-  }
-  function readAnswer(value) {
-    if (!value || typeof value !== "object" || value.v !== 1 || typeof value.answer !== "string")
-      return null;
-    const sources = [];
-    const seen = {};
-    const citations = Array.isArray(value.citations) ? value.citations : [];
-    for (let i = 0;i < citations.length; i++) {
-      const c = citations[i];
-      if (!c || typeof c !== "object")
-        continue;
-      const name = typeof c.title === "string" && c.title.trim() ? c.title.trim() : typeof c.source === "string" && c.source.trim() ? c.source.trim() : "";
-      if (name && !seen[name]) {
-        seen[name] = true;
-        sources.push(name);
-      }
-    }
-    const unanswered = (Array.isArray(value.unanswered) ? value.unanswered : []).filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
-    return { text: value.answer, sources, unanswered };
-  }
-  function wait(ms) {
-    return new Promise((resolve10) => setTimeout(resolve10, ms));
-  }
-  function fail(text2, retry) {
-    phase = "error";
-    errorText = text2;
-    canRetry = retry;
-    focusAfter = retry ? "retry" : "status";
-    render();
-  }
-  async function show() {
-    if (!info || info.state !== "ready" || phase === "working")
-      return;
-    if (answer) {
-      phase = "revealed";
-      focusAfter = "answer";
-      render();
-      return;
-    }
-    const jobId = info.jobId;
-    if (!JOB_ID.test(jobId) || !subtle || typeof window.fetch !== "function") {
-      fail(T.generic, false);
-      return;
-    }
-    const mine = ++run;
-    phase = "working";
-    errorText = "";
-    canRetry = false;
-    focusAfter = "status";
-    render();
-    const started = Date.now();
-    try {
-      const keys = await keyPair(jobId);
-      for (;; ) {
-        if (mine !== run)
-          return;
-        let response;
-        try {
-          response = await window.fetch(config2.relayOrigin + "/private/" + jobId, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
-            credentials: "omit",
-            cache: "no-store",
-            referrerPolicy: "no-referrer",
-            mode: "cors"
-          });
-        } catch {
-          if (mine === run)
-            fail(T.unreachable, true);
-          return;
-        }
-        if (mine !== run)
-          return;
-        let body = null;
-        try {
-          body = await response.json();
-        } catch {
-          body = null;
-        }
-        if (mine !== run)
-          return;
-        const status = body && typeof body.status === "string" ? body.status : "";
-        const code = response.status;
-        if (code === 200 && status === "ready") {
-          let opened = null;
-          try {
-            opened = readAnswer(await open6(jobId, keys.privateKey, body));
-          } catch {
-            opened = null;
-          }
-          if (mine !== run)
-            return;
-          if (!opened) {
-            fail(T.generic, false);
-            return;
-          }
-          answer = opened;
-          phase = "revealed";
-          focusAfter = "answer";
-          render();
-          return;
-        }
-        if (code === 200 && status === "failed")
-          return fail(T.failed, false);
-        if (code === 409)
-          return fail(T.claimed, false);
-        if (code === 410 || code === 404)
-          return fail(T.expired, false);
-        if (code === 429)
-          return fail(T.rateLimited, true);
-        const keepWaiting = code === 202 || code === 503 && status === "busy";
-        if (code === 503 && !keepWaiting)
-          return fail(T.macOffline, true);
-        if (!keepWaiting)
-          return fail(T.generic, false);
-        const header = Number(response.headers && response.headers.get ? response.headers.get("retry-after") : NaN);
-        const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
-        if (Date.now() - started + seconds * config2.secondMs > config2.pollCapMs) {
-          phase = "slow";
-          errorText = T.slow;
-          canRetry = true;
-          focusAfter = "retry";
-          render();
-          return;
-        }
-        await wait(seconds * config2.secondMs);
-      }
-    } catch {
-      if (mine === run)
-        fail(T.generic, false);
-    }
-  }
-  function hide() {
-    phase = "hidden";
-    focusAfter = "show";
-    render();
-  }
-  function el(tag, cls, text2) {
-    const node = doc2.createElement(tag);
-    if (cls)
-      node.className = cls;
-    if (text2)
-      node.textContent = text2;
-    return node;
-  }
-  function fill(template, values) {
-    return template.replace(/\{(\w+)\}/g, (whole2, key) => (key in values) ? values[key] : whole2);
-  }
-  function button(label, key, onClick, name) {
-    const node = el("button", "btn", label);
-    node.type = "button";
-    node.setAttribute("data-key", key);
-    if (name)
-      node.setAttribute("aria-label", name);
-    node.addEventListener("click", onClick);
-    return node;
-  }
-  function lock() {
-    const svg = doc2.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("class", "lock");
-    svg.setAttribute("viewBox", "0 0 16 16");
-    svg.setAttribute("aria-hidden", "true");
-    svg.setAttribute("focusable", "false");
-    const body = doc2.createElementNS(SVG_NS, "rect");
-    body.setAttribute("x", "3.5");
-    body.setAttribute("y", "7");
-    body.setAttribute("width", "9");
-    body.setAttribute("height", "7");
-    body.setAttribute("rx", "1.5");
-    const shackle = doc2.createElementNS(SVG_NS, "path");
-    shackle.setAttribute("d", "M5.5 7V5a2.5 2.5 0 0 1 5 0v2");
-    svg.appendChild(body);
-    svg.appendChild(shackle);
-    return svg;
-  }
-  function countLine(count2) {
-    if (count2 >= config2.countCap)
-      return fill(T.count.many, { n: T.capped });
-    return count2 === 1 ? T.count.one : fill(T.count.many, { n: String(count2) });
-  }
-  function sourcesLine(sources) {
-    const shown = sources.slice(0, 3);
-    let list = shown.join(", ");
-    if (sources.length > shown.length)
-      list += " " + fill(T.more, { n: String(sources.length - shown.length) });
-    return fill(T.sources, { list });
-  }
-  function card(open7) {
-    const node = el("section", open7 ? "card open" : "card");
-    node.setAttribute("aria-label", T.title);
-    const row = el("div", "row");
-    const icon = el("div", "icon");
-    icon.appendChild(lock());
-    row.appendChild(icon);
-    const text2 = el("div", "text");
-    text2.appendChild(el("h2", "title", T.title));
-    const line = el("p", "sub");
-    line.setAttribute("role", "status");
-    line.setAttribute("aria-live", "polite");
-    line.setAttribute("tabindex", "-1");
-    line.setAttribute("data-key", "status");
-    text2.appendChild(line);
-    row.appendChild(text2);
-    node.appendChild(row);
-    return { card: node, text: text2, line, row };
-  }
-  function cardView(current) {
-    const view = card(false);
-    const line = view.line;
-    if (current.state === "no_model") {
-      line.textContent = T.noModel;
-      return view.card;
-    }
-    if (current.state === "model_downloading") {
-      const known = current.percent >= 0;
-      line.textContent = known ? fill(T.downloading, { percent: String(current.percent) }) : T.downloadingUnknown;
-      if (known) {
-        const bar = el("div", "bar");
-        bar.setAttribute("role", "progressbar");
-        bar.setAttribute("aria-label", T.downloadingLabel);
-        bar.setAttribute("aria-valuemin", "0");
-        bar.setAttribute("aria-valuemax", "100");
-        bar.setAttribute("aria-valuenow", String(current.percent));
-        const fillBar = el("div", "bar-fill");
-        fillBar.style.width = current.percent + "%";
-        bar.appendChild(fillBar);
-        view.text.appendChild(bar);
-      }
-      return view.card;
-    }
-    if (phase === "working") {
-      line.className = "sub working";
-      line.appendChild(el("span", "spinner"));
-      line.appendChild(doc2.createTextNode(T.preparing));
-      return view.card;
-    }
-    if (phase === "error" || phase === "slow") {
-      line.className = "sub warn";
-      line.textContent = errorText;
-      if (canRetry)
-        view.row.appendChild(button(T.tryAgain, "retry", () => void show()));
-      return view.card;
-    }
-    line.textContent = countLine(current.count) + T.notSentAfterCount;
-    view.row.appendChild(button(T.show, "show", () => void show(), T.showLabel));
-    return view.card;
-  }
-  function revealedView(shown) {
-    const view = card(true);
-    view.line.textContent = T.notSent;
-    view.row.appendChild(button(T.hide, "hide", hide, T.hideLabel));
-    const body = el("div", "answer");
-    body.setAttribute("tabindex", "-1");
-    body.setAttribute("data-key", "answer");
-    const paragraphs = shown.text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
-    for (const part of paragraphs)
-      body.appendChild(el("p", "", part));
-    view.card.appendChild(body);
-    if (shown.sources.length)
-      view.card.appendChild(el("p", "sub foot", sourcesLine(shown.sources)));
-    if (shown.unanswered.length)
-      view.card.appendChild(el("p", "sub foot", fill(T.unanswered, { list: shown.unanswered.join("; ") })));
-    return view.card;
-  }
-  function render() {
-    if (theme)
-      doc2.documentElement.setAttribute("data-theme", theme);
-    else
-      doc2.documentElement.removeAttribute("data-theme");
-    root.textContent = "";
-    if (info)
-      root.appendChild(phase === "revealed" && answer ? revealedView(answer) : cardView(info));
-    if (focusAfter) {
-      const key = focusAfter;
-      focusAfter = "";
-      const target = root.querySelector('[data-key="' + key + '"]');
-      if (target && typeof target.focus === "function")
-        target.focus();
-    }
-    observeCard();
-    reportHeight(true);
-    afterLayout();
-  }
-  function cardHeight() {
-    const node = info ? root.firstChild : null;
-    if (!node)
-      return 0;
-    let margins = 0;
-    if (typeof window.getComputedStyle === "function") {
-      const style = window.getComputedStyle(node);
-      margins = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
-    }
-    return Math.ceil((node.offsetHeight || 0) + margins);
-  }
-  let lastHeight = -1;
-  function reportHeight(force) {
-    const height = cardHeight();
-    if (!force && height === lastHeight)
-      return;
-    lastHeight = height;
-    const host = openai();
-    if (host && typeof host.notifyIntrinsicHeight === "function")
-      host.notifyIntrinsicHeight(height);
-    const width = info && root.firstChild ? Math.ceil(root.firstChild.offsetWidth || 0) : 0;
-    notify("ui/notifications/size-changed", width > 0 ? { width, height } : { height });
-  }
-  function afterLayout() {
-    const frame = window.requestAnimationFrame;
-    if (typeof frame === "function")
-      frame.call(window, () => reportHeight());
-    else
-      setTimeout(() => reportHeight(), 0);
-  }
-  let observer = null;
-  let observed = null;
-  function observeCard() {
-    if (!observer && typeof window.ResizeObserver === "function") {
-      observer = new window.ResizeObserver(() => reportHeight());
-    }
-    const node = info ? root.firstChild : null;
-    if (!observer || node === observed)
-      return;
-    if (observed)
-      observer.unobserve(observed);
-    observed = node;
-    if (node)
-      observer.observe(node);
-  }
-  const fonts = doc2.fonts;
-  if (fonts && fonts.ready && typeof fonts.ready.then === "function")
-    fonts.ready.then(() => reportHeight());
-  readGlobals();
-  render();
-  request("ui/initialize", {
-    protocolVersion: "2026-01-26",
-    appInfo: { name: "olympus-private-answer", version: "1" },
-    appCapabilities: {}
-  }, (result) => {
-    if (result && result.hostContext)
-      hostContext(result.hostContext);
-    notify("ui/notifications/initialized");
-  });
-}
-function vars2(palette, card) {
-  return [
-    `--text:${palette.text}`,
-    `--muted:${palette.muted}`,
-    `--line:${palette.line}`,
-    `--focus:${palette.focus}`,
-    `--run:${palette.run}`,
-    `--tint:${card.tint}`,
-    `--raise:${card.raise}`,
-    `--hair:${card.hair}`,
-    `--hover:${card.hover}`,
-    `--warning:${card.warning}`
-  ].join(";");
-}
-function chatgptPrivateAnswerPageHtml(options) {
-  const config2 = {
-    relayOrigin: options.relayOrigin,
-    metaKey: PRIVATE_ANSWER_META_KEY,
-    countCap: PRIVATE_MATCH_COUNT_CAP,
-    jobIdPattern: CHATGPT_PRIVATE_ANSWER_JOB_ID.source,
-    copy: DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY,
-    secondMs: options.secondMs ?? 1000,
-    pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS
-  };
-  return [
-    "<!doctype html>",
-    '<html lang="en">',
-    "<head>",
-    '<meta charset="utf-8">',
-    '<meta name="viewport" content="width=device-width, initial-scale=1">',
-    `<title>${DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY.pageTitle}</title>`,
-    `<style>${CHATGPT_PRIVATE_ANSWER_CSS}</style>`,
-    "</head>",
-    "<body>",
-    '<div id="panel"></div>',
-    `<script>(${chatgptPrivateAnswerProgram.toString()})(${scriptJson2(config2)});</script>`,
-    "</body>",
-    "</html>",
-    ""
-  ].join(`
-`);
-}
-function scriptJson2(value) {
-  return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
-}
-var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
-var init_private_answer2 = __esm(() => {
-  init_vocabulary();
-  init_private_answer_contract();
-  init_page();
-  CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS = 2 * 60000;
-  CHATGPT_PRIVATE_ANSWER_JOB_ID = /^oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
-  CARD_LIGHT = { tint: "#f7f7f8", raise: "#ffffff", hair: "#e3e3e3", hover: "#ececec", warning: CHATGPT_DASHBOARD_LIGHT.warnLine };
-  CARD_DARK = { tint: "#2f2f2f", raise: "#3a3a3a", hair: "#4a4a4a", hover: "#444444", warning: CHATGPT_DASHBOARD_DARK.warnLine };
-  CHATGPT_PRIVATE_ANSWER_CSS = `
-:root{${vars2(CHATGPT_DASHBOARD_LIGHT, CARD_LIGHT)};color-scheme:light dark}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){${vars2(CHATGPT_DASHBOARD_DARK, CARD_DARK)}}}
-:root[data-theme=dark]{${vars2(CHATGPT_DASHBOARD_DARK, CARD_DARK)};color-scheme:dark}
-:root[data-theme=light]{color-scheme:light}
-*{box-sizing:border-box}
-html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
-html:root,html:root>body{margin:0!important;padding:0!important;height:auto!important;min-height:0!important;display:block!important;background:transparent;color:var(--text);overflow:hidden}
-body{font-size:0.9375rem;overflow-wrap:anywhere}
-p,h2{margin:0}
-html:root>body #panel{display:block!important;height:auto!important;min-height:0!important}
-#panel:empty{display:none!important}
-html:root>body #panel>.card{display:block!important;height:auto!important;min-height:0!important;max-height:none!important;flex:none!important;align-self:flex-start!important}
-.card{margin:0;padding:0.75rem 0.875rem;border-radius:14px;background:var(--tint)}
-.row{display:flex;align-items:center;gap:0.75rem}
-.icon{flex:none;display:flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:50%;background:var(--raise);border:1px solid var(--hair)}
-.lock{width:1rem;height:1rem;fill:none;stroke:var(--text);stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
-.text{flex:1 1 auto;min-width:0}
-.title{font-size:0.9375rem;font-weight:600;line-height:1.35}
-.sub{color:var(--muted);font-size:0.8125rem;line-height:1.4;margin-top:0.0625rem}
-.sub:focus{outline:none}
-.sub.warn{color:var(--warning)}
-.working{display:flex;align-items:center;gap:0.5rem}
-.spinner{flex:none;width:0.75rem;height:0.75rem;border-radius:50%;border:2px solid var(--hair);border-top-color:var(--muted);animation:spin 0.9s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.bar{height:0.25rem;margin-top:0.375rem;border-radius:999px;background:var(--hair);overflow:hidden}
-.bar-fill{height:100%;background:var(--run)}
-.answer{margin-top:0.625rem;display:flex;flex-direction:column;gap:0.625rem;font-size:0.9375rem;line-height:1.6;white-space:pre-line}
-.answer:focus{outline:none}
-.foot{margin-top:0.5rem}
-.btn{flex:none;font:inherit;font-size:0.875rem;font-weight:500;line-height:1.25;min-height:2rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--raise);color:var(--text);cursor:pointer;-webkit-appearance:none;appearance:none;box-shadow:none}
-.btn:hover{background:var(--hover)}
-.btn:focus{outline:none}
-.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-@media (prefers-reduced-motion:reduce){.spinner{animation-duration:3s}}
-`;
-});
-
-// src/workers/chatgpt/private-answer-resource.ts
-function privateAnswerResourceMeta(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN) {
-  return {
-    ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
-    "openai/widgetDescription": "Shows how many private items match and, when the user asks, a private answer that ChatGPT never receives."
-  };
-}
-function privateAnswerResourceHtml(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN) {
-  return privateAnswerPageHtml({ relayOrigin });
-}
-function privateAnswerPageHtml(options) {
-  return chatgptPrivateAnswerPageHtml(options);
-}
-var PRIVATE_ANSWER_RESOURCE, PRIVATE_ANSWER_RELAY_ORIGIN = "https://mcp.olympusplugin.ai";
-var init_private_answer_resource = __esm(() => {
-  init_dashboard_resource();
-  init_private_answer_contract();
-  init_private_answer2();
-  PRIVATE_ANSWER_RESOURCE = {
-    uri: PRIVATE_ANSWER_RESOURCE_URI,
-    name: "Olympus private answer",
-    mimeType: MCP_APP_MIME_TYPE
-  };
-});
-
 // src/workers/chatgpt/mcp-surface.ts
 function listChatGptTools(ctx, options = {}) {
   const tools = [DASHBOARD_TOOL, SEARCH_TOOL, SOURCE_STATUS_TOOL];
@@ -105904,22 +106030,22 @@ async function dashboardViewModel(options, signal) {
   });
 }
 function readChatGptResource(uri) {
-  if (uri === PRIVATE_ANSWER_RESOURCE_URI) {
+  if (matchesResourceUri(uri, PRIVATE_ANSWER_RESOURCE_URI)) {
     return {
       contents: [{
-        uri: PRIVATE_ANSWER_RESOURCE.uri,
+        uri,
         mimeType: PRIVATE_ANSWER_RESOURCE.mimeType,
         text: privateAnswerResourceHtml(),
         _meta: privateAnswerResourceMeta()
       }]
     };
   }
-  if (uri !== DASHBOARD_RESOURCE_URI) {
+  if (!matchesResourceUri(uri, DASHBOARD_RESOURCE_URI)) {
     throw new McpError(ErrorCode.InvalidParams, "Unknown resource.");
   }
   return {
     contents: [{
-      uri: DASHBOARD_RESOURCE.uri,
+      uri,
       mimeType: DASHBOARD_RESOURCE.mimeType,
       text: dashboardResourceHtml(),
       _meta: dashboardResourceMeta()
@@ -106461,7 +106587,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash54, randomBytes as randomBytes16, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createHash as createHash55, randomBytes as randomBytes16, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -106774,7 +106900,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash54("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash55("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -107026,7 +107152,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual8(a, b);
 }
 function sha2566(value) {
-  return createHash54("sha256").update(value).digest("hex");
+  return createHash55("sha256").update(value).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -107641,7 +107767,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash55 } from "node:crypto";
+import { createHash as createHash56 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -107658,7 +107784,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text2 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text2, etag: `"${createHash55("sha256").update(text2).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text2, etag: `"${createHash56("sha256").update(text2).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };

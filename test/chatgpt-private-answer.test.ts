@@ -19,7 +19,6 @@ import { defaultConfig } from '../src/core/config.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import {
   PRIVATE_ANSWER_META_KEY,
-  PRIVATE_ANSWER_RESOURCE_URI,
   type PrivateAnswerModel,
 } from '../src/workers/chatgpt/private-answer-contract.ts';
 import {
@@ -32,7 +31,7 @@ import {
   type SealedPrivateAnswer,
 } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs, createPrivateAnswerHandler } from '../src/workers/chatgpt/private-answer-jobs.ts';
-import { privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
+import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { copyPrivateMatch } from '../src/workers/chatgpt/response-builder.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { DASHBOARD_CHATGPT_VOCABULARY } from '../src/workers/dashboard/vocabulary.ts';
@@ -462,7 +461,7 @@ describe('the response builder', () => {
   test('the resource declares the relay as its one connect domain', () => {
     expect(privateAnswerResourceMeta()).toMatchObject({ ui: { csp: { connectDomains: ['https://mcp.olympusplugin.ai'], resourceDomains: [] } } });
     const answerTools = CHATGPT_TOOLS.filter((tool) => tool.name === 'source_answer' || tool.name === 'source_answer_result');
-    for (const tool of answerTools) expect(tool._meta).toEqual({ ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_URI }, 'openai/outputTemplate': PRIVATE_ANSWER_RESOURCE_URI });
+    for (const tool of answerTools) expect(tool._meta).toEqual({ ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_VERSIONED_URI }, 'openai/outputTemplate': PRIVATE_ANSWER_RESOURCE_VERSIONED_URI });
   });
 });
 
@@ -520,7 +519,7 @@ describe('sentinel: over the real MCP surface', () => {
     let resource: unknown;
     try {
       result = await client.callTool({ name: 'source_answer', arguments: { question: 'When does the lease end?' } }) as Record<string, unknown>;
-      resource = await client.readResource({ uri: PRIVATE_ANSWER_RESOURCE_URI });
+      resource = await client.readResource({ uri: PRIVATE_ANSWER_RESOURCE_VERSIONED_URI });
     } finally {
       await client.close();
     }

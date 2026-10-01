@@ -25,7 +25,8 @@ import { defaultConfig } from '../src/core/config.ts';
 import { openRemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
-import { PRIVATE_ANSWER_META_KEY, PRIVATE_ANSWER_RESOURCE_URI, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
+import { PRIVATE_ANSWER_META_KEY, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
+import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI } from '../src/workers/chatgpt/private-answer-resource.ts';
 import {
   PRIVATE_ANSWER_PAD_BUCKETS,
   generatePanelKeyPair,
@@ -186,7 +187,7 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
 
     // olympus_search always links the panel resource.
     const search = listed.find((tool) => tool.name === 'olympus_search')!;
-    expect(search._meta).toEqual({ ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_URI }, 'openai/outputTemplate': PRIVATE_ANSWER_RESOURCE_URI });
+    expect(search._meta).toEqual({ ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_VERSIONED_URI }, 'openai/outputTemplate': PRIVATE_ANSWER_RESOURCE_VERSIONED_URI });
     expect(CHATGPT_TOOLS.find((tool) => tool.name === 'olympus_search')!._meta).toEqual(search._meta as Record<string, unknown>);
 
     // The panel's `_meta`: count, state and the one-time job, nothing else.

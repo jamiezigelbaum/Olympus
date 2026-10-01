@@ -1444,14 +1444,8 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   title: 'Private answer from your Mac',
   /** The muted line under the title once the answer is shown. */
   notSent: 'Not sent to ChatGPT',
-  /** Joined after the count on the collapsed card's muted line. */
-  notSentAfterCount: ' · not sent to ChatGPT',
-  count: {
-    one: '1 private item matches',
-    many: '{n} private items match',
-  },
-  /** The count text when it reached the cap. */
-  capped: '50+',
+  /** The muted line once the person hid the answer; Show brings it back from memory. */
+  hidden: 'Private answer hidden',
   show: 'Show',
   /** The Show button's accessible name (its visible text is its start). */
   showLabel: 'Show private answer',

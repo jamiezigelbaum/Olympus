@@ -4,19 +4,30 @@
  *
  * It renders nothing (zero height) unless the result's widget-only `_meta`
  * says Private items match (private-answer-contract.ts). Then it is one
- * compact card: how many private items match, and "Show private answer",
- * which collects the answer straight from the relay, sealed to a key that
- * exists only in this frame, and shows it as text.
+ * compact card that collects the answer straight from the relay as soon as it
+ * renders, sealed to a key that exists only on this device, and shows it as
+ * text inside the card ("Hide" folds it away; "Show" brings it back from
+ * memory).
  *
  * `chatgptPrivateAnswerProgram` runs only in the sandboxed iframe: the page
  * inlines its source (`Function.prototype.toString`) with a JSON config, so it
  * stays self-contained, and it builds every node with `textContent`.
  *
- * Privacy: the decrypted answer, its sources and the job id live only in this
- * program's memory. Nothing goes to widget state, model context, follow-up
- * messages, tool calls, storage, the console or a URL. The one network call is
- * the POST to `<relayOrigin>/private/<job id>` (the resource CSP's one
- * connect domain).
+ * Privacy: the decrypted answer and its sources live only in this program's
+ * memory. Nothing goes to widget state, model context, follow-up messages,
+ * tool calls, storage, the console or a URL. The one network call is the POST
+ * to `<relayOrigin>/private/<job id>` (the resource CSP's one connect domain).
+ *
+ * The key pair is kept per job id in this origin's IndexedDB (database
+ * `olympus-private-answer`, store `keys`): ChatGPT re-mounts the widget on
+ * scroll, history and follow-ups, and a fresh key would be refused (the job
+ * is bound to the first key that claimed it). IndexedDB stores the private
+ * CryptoKey by structured clone, still non-extractable, and it never crosses
+ * to the host. Widget state does cross to the host (OpenAI), so the key never
+ * goes there: whoever holds the private key and can re-collect the sealed
+ * answer could open it. Entries older than a day are deleted when the panel
+ * next stores one. Without IndexedDB (a sandbox or private mode) the key
+ * lives in memory and a re-mount says the answer was opened elsewhere.
  *
  * Crypto mirrors private-answer-crypto.ts exactly: ECDH P-256 (the panel's
  * private key non-extractable), HKDF-SHA256 with an empty salt and
@@ -24,29 +35,41 @@
  * JSON is padded with trailing spaces.
  */
 import { DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY } from '../vocabulary.ts';
-import { PRIVATE_ANSWER_META_KEY, PRIVATE_MATCH_COUNT_CAP } from '../../chatgpt/private-answer-contract.ts';
+import { PRIVATE_ANSWER_META_KEY } from '../../chatgpt/private-answer-contract.ts';
 import { CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_LIGHT } from './page.ts';
 
 export interface ChatGptPrivateAnswerConfig {
   relayOrigin: string;
   metaKey: string;
-  countCap: number;
   /** Source of the job id pattern (connect-relay/shared/private-answer.ts). */
   jobIdPattern: string;
   copy: typeof DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY;
   /** One Retry-After second, in ms (tests shrink it). */
   secondMs: number;
-  /** How long one Show keeps polling before offering Try again. */
+  /** How long one collection keeps polling before offering Try again. */
   pollCapMs: number;
+  /** Where the key pair per job id is kept across re-mounts. */
+  keyStore: { database: string; store: string; maxAgeMs: number; timeoutMs: number };
 }
 
 export interface ChatGptPrivateAnswerPageOptions {
   relayOrigin: string;
   secondMs?: number;
   pollCapMs?: number;
+  /** Tests shorten the store's timeout. */
+  keyStore?: Partial<ChatGptPrivateAnswerConfig['keyStore']>;
 }
 
 export const CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS = 2 * 60_000;
+/** The panel's IndexedDB: one key pair per job id (key path: the job id). */
+export const CHATGPT_PRIVATE_ANSWER_KEY_STORE = {
+  database: 'olympus-private-answer',
+  store: 'keys',
+  /** Older entries are deleted; jobs themselves live ten minutes. */
+  maxAgeMs: 24 * 60 * 60_000,
+  /** A store that never answers (some sandboxes) falls back to memory after this. */
+  timeoutMs: 1500,
+} as const;
 /** The job ids the panel will put in a URL: exactly the relay's routable shape. */
 export const CHATGPT_PRIVATE_ANSWER_JOB_ID = /^oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
 
@@ -63,13 +86,14 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
 
   // What the tool result said; null renders nothing.
   let info: { count: number; state: string; jobId: string; percent: number } | null = null;
-  // idle | working | slow | revealed | hidden | error
+  // idle | working | slow | revealed | hidden | error. A ready job starts
+  // collecting as soon as it arrives; idle lasts only until then.
   let phase = 'idle';
   let errorText = '';
   let canRetry = false;
   // The decrypted answer, in memory only, for this job, until the frame unloads.
   let answer: { text: string; sources: string[]; unanswered: string[] } | null = null;
-  // The key pair this frame claimed the job with: retries and polls reuse it.
+  // The key pair this job is claimed with: retries, polls and re-mounts reuse it.
   let pair: { jobId: string; privateKey: CryptoKey; publicKey: string } | null = null;
   let run = 0;
   let theme = '';
@@ -156,7 +180,8 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       pair = null;
     }
     info = next;
-    if (!quiet) render();
+    if (info && info.state === 'ready' && phase === 'idle') void collect(false);
+    else if (!quiet) render();
   }
 
   // ---- crypto ------------------------------------------------------------
@@ -180,10 +205,118 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
 
   async function keyPair(jobId: string): Promise<{ jobId: string; privateKey: CryptoKey; publicKey: string }> {
     if (pair && pair.jobId === jobId) return pair;
+    const kept = await keptKey(jobId);
+    if (kept) {
+      pair = { jobId, privateKey: kept.privateKey, publicKey: kept.publicKey };
+      return pair;
+    }
     const made = await subtle!.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']) as CryptoKeyPair;
     const raw = new Uint8Array(await subtle!.exportKey('raw', made.publicKey));
-    pair = { jobId, privateKey: made.privateKey, publicKey: toB64url(raw) };
+    const fresh = { jobId, privateKey: made.privateKey, publicKey: toB64url(raw) };
+    await keepKey(jobId, fresh.privateKey, fresh.publicKey);
+    pair = fresh;
     return pair;
+  }
+
+  // ---- the key store (IndexedDB, this origin only) --------------------------
+  // Every failure here means "no stored key": the panel then keeps the pair in
+  // memory. Nothing in this section ever sees the answer.
+  const KS = config.keyStore;
+
+  function openStore(): Promise<IDBDatabase | null> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (db: IDBDatabase | null) => {
+        if (settled) {
+          if (db) try { db.close(); } catch { /* closed */ }
+          return;
+        }
+        settled = true;
+        resolve(db);
+      };
+      try {
+        const factory = (window as Any).indexedDB;
+        if (!factory || typeof factory.open !== 'function') return finish(null);
+        const opening = factory.open(KS.database, 1);
+        opening.onupgradeneeded = () => {
+          try {
+            const db = opening.result;
+            if (!db.objectStoreNames.contains(KS.store)) db.createObjectStore(KS.store);
+          } catch { /* the open then fails */ }
+        };
+        opening.onsuccess = () => finish(opening.result);
+        opening.onerror = () => finish(null);
+        opening.onblocked = () => finish(null);
+        setTimeout(() => finish(null), KS.timeoutMs);
+      } catch {
+        finish(null);
+      }
+    });
+  }
+
+  /** One transaction on the key store; resolves with the request's result, or undefined on any failure. */
+  async function inStore(mode: IDBTransactionMode, work: (store: IDBObjectStore) => IDBRequest | void): Promise<Any> {
+    const db = await openStore();
+    if (!db) return undefined;
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value: Any) => {
+        if (settled) return;
+        settled = true;
+        try { db.close(); } catch { /* closed */ }
+        resolve(value);
+      };
+      try {
+        const tx = db.transaction(KS.store, mode);
+        const req = work(tx.objectStore(KS.store));
+        tx.oncomplete = () => finish(req ? req.result : true);
+        tx.onerror = () => finish(undefined);
+        tx.onabort = () => finish(undefined);
+        setTimeout(() => finish(undefined), KS.timeoutMs);
+      } catch {
+        finish(undefined);
+      }
+    });
+  }
+
+  async function keptKey(jobId: string): Promise<{ privateKey: CryptoKey; publicKey: string } | null> {
+    try {
+      const value = await inStore('readonly', (store) => store.get(jobId));
+      if (!value || typeof value !== 'object') return null;
+      const privateKey = value.privateKey;
+      const fresh = typeof value.createdAt === 'number' && Date.now() - value.createdAt < KS.maxAgeMs;
+      if (!fresh || !privateKey || typeof privateKey !== 'object' || privateKey.type !== 'private') return null;
+      if (typeof value.publicKey !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(value.publicKey)) return null;
+      return { privateKey, publicKey: value.publicKey };
+    } catch {
+      return null;
+    }
+  }
+
+  async function keepKey(jobId: string, privateKey: CryptoKey, publicKey: string): Promise<void> {
+    try {
+      await inStore('readwrite', (store) => {
+        store.put({ privateKey, publicKey, createdAt: Date.now() }, jobId);
+      });
+    } catch { /* memory only */ }
+    void dropOldKeys();
+  }
+
+  /** Opportunistic: deletes pairs older than a day. Never waited on. */
+  async function dropOldKeys(): Promise<void> {
+    try {
+      const cutoff = Date.now() - KS.maxAgeMs;
+      await inStore('readwrite', (store) => {
+        const walk = store.openCursor();
+        walk.onsuccess = () => {
+          const cursor = walk.result;
+          if (!cursor) return;
+          const value = cursor.value;
+          if (!value || typeof value.createdAt !== 'number' || value.createdAt < cutoff) cursor.delete();
+          cursor.continue();
+        };
+      });
+    } catch { /* nothing to drop */ }
   }
 
   async function open(jobId: string, privateKey: CryptoKey, sealed: Any): Promise<Any> {
@@ -233,32 +366,39 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  function fail(text: string, retry: boolean): void {
+  function fail(text: string, retry: boolean, byUser: boolean): void {
     phase = 'error';
     errorText = text;
     canRetry = retry;
-    focusAfter = retry ? 'retry' : 'status';
+    focusAfter = byUser ? (retry ? 'retry' : 'status') : '';
     render();
   }
 
-  async function show(): Promise<void> {
+  /** Shows the answer kept in memory again; never a new request. */
+  function show(): void {
+    if (!answer) return void collect(true);
+    phase = 'revealed';
+    focusAfter = 'answer';
+    render();
+  }
+
+  /**
+   * Collects the answer for the current job. Starts by itself when a ready
+   * result arrives (`byUser` false: focus stays where it is) and again on
+   * Try again.
+   */
+  async function collect(byUser: boolean): Promise<void> {
     if (!info || info.state !== 'ready' || phase === 'working') return;
-    if (answer) {
-      phase = 'revealed';
-      focusAfter = 'answer';
-      render();
-      return;
-    }
     const jobId = info.jobId;
     if (!JOB_ID.test(jobId) || !subtle || typeof (window as Any).fetch !== 'function') {
-      fail(T.generic, false);
+      fail(T.generic, false, byUser);
       return;
     }
     const mine = ++run;
     phase = 'working';
     errorText = '';
     canRetry = false;
-    focusAfter = 'status';
+    focusAfter = byUser ? 'status' : '';
     render();
     const started = Date.now();
     try {
@@ -277,7 +417,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
             mode: 'cors',
           });
         } catch {
-          if (mine === run) fail(T.unreachable, true);
+          if (mine === run) fail(T.unreachable, true, byUser);
           return;
         }
         if (mine !== run) return;
@@ -299,36 +439,36 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
           }
           if (mine !== run) return;
           if (!opened) {
-            fail(T.generic, false);
+            fail(T.generic, false, byUser);
             return;
           }
           answer = opened;
           phase = 'revealed';
-          focusAfter = 'answer';
+          focusAfter = byUser ? 'answer' : '';
           render();
           return;
         }
-        if (code === 200 && status === 'failed') return fail(T.failed, false);
-        if (code === 409) return fail(T.claimed, false);
-        if (code === 410 || code === 404) return fail(T.expired, false);
-        if (code === 429) return fail(T.rateLimited, true);
+        if (code === 200 && status === 'failed') return fail(T.failed, false, byUser);
+        if (code === 409) return fail(T.claimed, false, byUser);
+        if (code === 410 || code === 404) return fail(T.expired, false, byUser);
+        if (code === 429) return fail(T.rateLimited, true, byUser);
         const keepWaiting = code === 202 || (code === 503 && status === 'busy');
-        if (code === 503 && !keepWaiting) return fail(T.macOffline, true);
-        if (!keepWaiting) return fail(T.generic, false);
+        if (code === 503 && !keepWaiting) return fail(T.macOffline, true, byUser);
+        if (!keepWaiting) return fail(T.generic, false, byUser);
         const header = Number(response.headers && response.headers.get ? response.headers.get('retry-after') : NaN);
         const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
         if (Date.now() - started + seconds * config.secondMs > config.pollCapMs) {
           phase = 'slow';
           errorText = T.slow;
           canRetry = true;
-          focusAfter = 'retry';
+          focusAfter = byUser ? 'retry' : '';
           render();
           return;
         }
         await wait(seconds * config.secondMs);
       }
     } catch {
-      if (mine === run) fail(T.generic, false);
+      if (mine === run) fail(T.generic, false, byUser);
     }
   }
 
@@ -374,11 +514,6 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     svg.appendChild(body);
     svg.appendChild(shackle);
     return svg;
-  }
-
-  function countLine(count: number): string {
-    if (count >= config.countCap) return fill(T.count.many, { n: T.capped });
-    return count === 1 ? T.count.one : fill(T.count.many, { n: String(count) });
   }
 
   function sourcesLine(sources: string[]): string {
@@ -437,20 +572,21 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       }
       return view.card;
     }
-    if (phase === 'working') {
-      line.className = 'sub working';
-      line.appendChild(el('span', 'spinner'));
-      line.appendChild(doc.createTextNode(T.preparing));
-      return view.card;
-    }
     if (phase === 'error' || phase === 'slow') {
       line.className = 'sub warn';
       line.textContent = errorText;
-      if (canRetry) view.row.appendChild(button(T.tryAgain, 'retry', () => void show()));
+      if (canRetry) view.row.appendChild(button(T.tryAgain, 'retry', () => void collect(true)));
       return view.card;
     }
-    line.textContent = countLine(current.count) + T.notSentAfterCount;
-    view.row.appendChild(button(T.show, 'show', () => void show(), T.showLabel));
+    if (phase === 'hidden' && answer) {
+      line.textContent = T.hidden;
+      view.row.appendChild(button(T.show, 'show', show, T.showLabel));
+      return view.card;
+    }
+    // idle (about to start) and working: the answer is on its way.
+    line.className = 'sub working';
+    line.appendChild(el('span', 'spinner'));
+    line.appendChild(doc.createTextNode(T.preparing));
     return view.card;
   }
 
@@ -606,11 +742,11 @@ export function chatgptPrivateAnswerPageHtml(options: ChatGptPrivateAnswerPageOp
   const config: ChatGptPrivateAnswerConfig = {
     relayOrigin: options.relayOrigin,
     metaKey: PRIVATE_ANSWER_META_KEY,
-    countCap: PRIVATE_MATCH_COUNT_CAP,
     jobIdPattern: CHATGPT_PRIVATE_ANSWER_JOB_ID.source,
     copy: DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY,
     secondMs: options.secondMs ?? 1000,
     pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
+    keyStore: { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, ...options.keyStore },
   };
   return [
     '<!doctype html>',

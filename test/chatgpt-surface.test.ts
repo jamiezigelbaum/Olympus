@@ -17,7 +17,9 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { defaultConfig } from '../src/core/config.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, type DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
-import { MCP_APP_MIME_TYPE } from '../src/workers/chatgpt/dashboard-resource.ts';
+import { DASHBOARD_RESOURCE_VERSIONED_URI, MCP_APP_MIME_TYPE, dashboardResourceHtml, matchesResourceUri, versionedResourceUri } from '../src/workers/chatgpt/dashboard-resource.ts';
+import { PRIVATE_ANSWER_RESOURCE_URI } from '../src/workers/chatgpt/private-answer-contract.ts';
+import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
@@ -656,8 +658,8 @@ describe('ChatGPT MCP surface over the remote handler', () => {
       }
       const dashboard = tools.find((tool) => tool.name === DASHBOARD_TOOL_NAME)!;
       expect(dashboard._meta).toEqual({
-        ui: { resourceUri: DASHBOARD_RESOURCE_URI },
-        'openai/outputTemplate': DASHBOARD_RESOURCE_URI,
+        ui: { resourceUri: DASHBOARD_RESOURCE_VERSIONED_URI },
+        'openai/outputTemplate': DASHBOARD_RESOURCE_VERSIONED_URI,
         'openai/ui': { entrypoints: [{ type: 'global' }] },
       });
       // A global entrypoint is opened with `{}`.
@@ -699,17 +701,61 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     try {
       const { resources } = await client.listResources();
       expect(resources).toEqual([
-        { uri: DASHBOARD_RESOURCE_URI, name: 'Olympus dashboard', mimeType: MCP_APP_MIME_TYPE },
-        { uri: 'ui://olympus/private-answer', name: 'Olympus private answer', mimeType: MCP_APP_MIME_TYPE },
+        { uri: DASHBOARD_RESOURCE_VERSIONED_URI, name: 'Olympus dashboard', mimeType: MCP_APP_MIME_TYPE },
+        { uri: PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, name: 'Olympus private answer', mimeType: MCP_APP_MIME_TYPE },
       ]);
-      const read = await client.readResource({ uri: DASHBOARD_RESOURCE_URI });
+      const read = await client.readResource({ uri: DASHBOARD_RESOURCE_VERSIONED_URI });
       const content = read.contents[0] as { uri: string; mimeType: string; text: string; _meta: Record<string, unknown> };
-      expect(content.uri).toBe(DASHBOARD_RESOURCE_URI);
+      expect(content.uri).toBe(DASHBOARD_RESOURCE_VERSIONED_URI);
       expect(content.mimeType).toBe('text/html;profile=mcp-app');
       expect(content.text).toContain('<!doctype html>');
       expect(content.text).toContain('tools/call');
       expect(content._meta).toMatchObject({ ui: { csp: { connectDomains: [], resourceDomains: [] }, domain: 'https://mcp.olympusplugin.ai' } });
       await expect(client.readResource({ uri: 'ui://olympus/other' })).rejects.toThrow();
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('resource URIs are content-versioned and identical in resources/list, resources/read and tool _meta', async () => {
+    // ChatGPT caches a resource by its URI: the URI changes with the HTML.
+    expect(DASHBOARD_RESOURCE_VERSIONED_URI).toBe(versionedResourceUri(DASHBOARD_RESOURCE_URI, dashboardResourceHtml()));
+    expect(PRIVATE_ANSWER_RESOURCE_VERSIONED_URI).toBe(versionedResourceUri(PRIVATE_ANSWER_RESOURCE_URI, privateAnswerResourceHtml()));
+    expect(DASHBOARD_RESOURCE_VERSIONED_URI).toMatch(/^ui:\/\/olympus\/dashboard\?v=[0-9a-f]{12}$/);
+    expect(PRIVATE_ANSWER_RESOURCE_VERSIONED_URI).toMatch(/^ui:\/\/olympus\/private-answer\?v=[0-9a-f]{12}$/);
+    const html = privateAnswerResourceHtml();
+    expect(versionedResourceUri(PRIVATE_ANSWER_RESOURCE_URI, html)).toBe(versionedResourceUri(PRIVATE_ANSWER_RESOURCE_URI, html));
+    expect(versionedResourceUri(PRIVATE_ANSWER_RESOURCE_URI, `${html} `)).not.toBe(versionedResourceUri(PRIVATE_ANSWER_RESOURCE_URI, html));
+    expect(matchesResourceUri(`${PRIVATE_ANSWER_RESOURCE_URI}?v=../../x`, PRIVATE_ANSWER_RESOURCE_URI)).toBe(false);
+
+    const client = await connectClient();
+    try {
+      const { resources } = await client.listResources();
+      const listed = resources.map((resource) => resource.uri);
+      const tools = (await client.listTools()).tools;
+      const linked = new Set(tools.flatMap((tool) => {
+        const meta = (tool._meta ?? {}) as { ui?: { resourceUri?: string }; 'openai/outputTemplate'?: string };
+        return [meta.ui?.resourceUri, meta['openai/outputTemplate']].filter((uri): uri is string => !!uri);
+      }));
+      expect([...linked].sort()).toEqual([...listed].sort());
+      for (const uri of listed) {
+        const read = await client.readResource({ uri });
+        expect((read.contents[0] as { uri: string }).uri).toBe(uri);
+      }
+      // Tool results cached before versioning (bare URI) or before an update
+      // (an older hash) still read the current page.
+      for (const [base, current, html] of [
+        [DASHBOARD_RESOURCE_URI, DASHBOARD_RESOURCE_VERSIONED_URI, dashboardResourceHtml()],
+        [PRIVATE_ANSWER_RESOURCE_URI, PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceHtml()],
+      ] as const) {
+        for (const uri of [base, `${base}?v=000000000000`]) {
+          const read = await client.readResource({ uri });
+          const content = read.contents[0] as { uri: string; text: string };
+          expect(content.uri).toBe(uri);
+          expect(content.text).toBe(html);
+        }
+        expect(current).not.toBe(base);
+      }
     } finally {
       await client.close();
     }
@@ -798,7 +844,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     try {
       captured.push(await settle(client.listTools()));
       captured.push(await settle(client.listResources()));
-      captured.push(await settle(client.readResource({ uri: DASHBOARD_RESOURCE_URI })));
+      captured.push(await settle(client.readResource({ uri: DASHBOARD_RESOURCE_VERSIONED_URI })));
       captured.push(await settle(client.readResource({ uri: `ui://${S('RESOURCE')}` })));
       captured.push(await settle(client.callTool({ name: DASHBOARD_TOOL_NAME, arguments: {} })));
       captured.push(await settle(client.callTool({ name: 'source_index_status', arguments: {} })));

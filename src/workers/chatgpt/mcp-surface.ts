@@ -30,7 +30,7 @@ import { createPublicSourceCorpusRegistry } from '../../core/source-corpus-regis
 import { VERSION } from '../../version.ts';
 import type { SourceDashboardViewModel } from '../source-dashboard.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, SEARCH_TOOL_NAME } from './dashboard-contract.ts';
-import { DASHBOARD_RESOURCE, dashboardResourceHtml, dashboardResourceMeta } from './dashboard-resource.ts';
+import { DASHBOARD_RESOURCE, dashboardResourceHtml, dashboardResourceMeta, matchesResourceUri } from './dashboard-resource.ts';
 import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from './dashboard-view-model.ts';
 import { callSetupTool, isSetupTool, SETUP_TOOLS, type ChatGptSetupBackend } from './setup-tools.ts';
 import { PRIVATE_ANSWER_RESOURCE_URI, type PrivateEvidenceItem, type PrivateMatchSummary } from './private-answer-contract.ts';
@@ -501,23 +501,28 @@ async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?: Abort
 /** Every MCP Apps resource this surface serves, in list order. */
 export const CHATGPT_RESOURCES = [DASHBOARD_RESOURCE, PRIVATE_ANSWER_RESOURCE] as const;
 
+/**
+ * resources/read. Accepts each resource's versioned URI, its bare base URI and
+ * older versions (tool results cached before an update); the contents echo
+ * the URI asked for and always carry the current page.
+ */
 export function readChatGptResource(uri: string): { contents: Array<Record<string, unknown>> } {
-  if (uri === PRIVATE_ANSWER_RESOURCE_URI) {
+  if (matchesResourceUri(uri, PRIVATE_ANSWER_RESOURCE_URI)) {
     return {
       contents: [{
-        uri: PRIVATE_ANSWER_RESOURCE.uri,
+        uri,
         mimeType: PRIVATE_ANSWER_RESOURCE.mimeType,
         text: privateAnswerResourceHtml(),
         _meta: privateAnswerResourceMeta(),
       }],
     };
   }
-  if (uri !== DASHBOARD_RESOURCE_URI) {
+  if (!matchesResourceUri(uri, DASHBOARD_RESOURCE_URI)) {
     throw new McpError(ErrorCode.InvalidParams, 'Unknown resource.');
   }
   return {
     contents: [{
-      uri: DASHBOARD_RESOURCE.uri,
+      uri,
       mimeType: DASHBOARD_RESOURCE.mimeType,
       text: dashboardResourceHtml(),
       _meta: dashboardResourceMeta(),

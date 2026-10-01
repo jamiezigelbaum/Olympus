@@ -315,9 +315,11 @@ describe('routing', () => {
         : [{ type: 'oauth2', scopes: [] }]);
     }
     const resources = await (await anonymous(rpc('resources/list'))).json();
+    // The engine advertises content-versioned URIs (`<base>?v=<hash>`).
+    expect(resources.result.resources).toEqual(generatedSurface.resources);
     expect(resources.result.resources).toEqual([
-      { uri: 'ui://olympus/dashboard', name: 'Olympus dashboard', mimeType: 'text/html;profile=mcp-app' },
-      { uri: 'ui://olympus/private-answer', name: 'Olympus private answer', mimeType: 'text/html;profile=mcp-app' },
+      { uri: expect.stringMatching(/^ui:\/\/olympus\/dashboard\?v=[0-9a-f]{12}$/), name: 'Olympus dashboard', mimeType: 'text/html;profile=mcp-app' },
+      { uri: expect.stringMatching(/^ui:\/\/olympus\/private-answer\?v=[0-9a-f]{12}$/), name: 'Olympus private answer', mimeType: 'text/html;profile=mcp-app' },
     ]);
     const panel = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/private-answer' }))).json();
     expect(panel.result.contents).toEqual(generatedPrivateAnswer.contents);

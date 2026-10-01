@@ -57,7 +57,6 @@ import type {
 } from './dashboard-contract.ts';
 import {
   CONNECT_SOURCE_TOOL_NAME,
-  DASHBOARD_RESOURCE_URI,
   DASHBOARD_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
   MODEL_RETRY_TOOL_NAME,
@@ -71,12 +70,13 @@ import { DASHBOARD_CHATGPT_VOCABULARY } from '../dashboard/vocabulary.ts';
 import { credentialInstallId } from '../../../connect-relay/shared/tokens.ts';
 import {
   PRIVATE_ANSWER_META_KEY,
-  PRIVATE_ANSWER_RESOURCE_URI,
   PRIVATE_MATCH_COUNT_CAP,
   type PrivateAnswerMetaV1,
   type PrivateAnswerPanelState,
   type PrivateMatchSummary,
 } from './private-answer-contract.ts';
+import { DASHBOARD_RESOURCE_VERSIONED_URI } from './dashboard-resource.ts';
+import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI } from './private-answer-resource.ts';
 
 export interface ChatGptTextContent {
   type: 'text';
@@ -885,9 +885,10 @@ export function errorMessage(error: unknown): string {
 /** The dashboard tool's `_meta`: MCP Apps link plus OpenAI's sidebar entrypoint. */
 export function dashboardToolMeta(): Record<string, unknown> {
   return {
-    ui: { resourceUri: DASHBOARD_RESOURCE_URI },
+    // Content-versioned: ChatGPT caches the page by this URI.
+    ui: { resourceUri: DASHBOARD_RESOURCE_VERSIONED_URI },
     // Legacy alias some ChatGPT clients still read.
-    'openai/outputTemplate': DASHBOARD_RESOURCE_URI,
+    'openai/outputTemplate': DASHBOARD_RESOURCE_VERSIONED_URI,
     'openai/ui': { entrypoints: [{ type: 'global' }] },
   };
 }
@@ -898,8 +899,8 @@ export function dashboardToolMeta(): Record<string, unknown> {
  */
 export function answerToolMeta(): Record<string, unknown> {
   return {
-    ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_URI },
-    'openai/outputTemplate': PRIVATE_ANSWER_RESOURCE_URI,
+    ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_VERSIONED_URI },
+    'openai/outputTemplate': PRIVATE_ANSWER_RESOURCE_VERSIONED_URI,
   };
 }
 
