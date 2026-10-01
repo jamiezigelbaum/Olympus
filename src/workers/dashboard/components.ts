@@ -22,7 +22,7 @@ import type {
 import type { EmbeddingRuntimeFacts } from './embedding-runtime.ts';
 import { dashboardSourceProgress, type DashboardPhaseId } from './phases.ts';
 import { DASHBOARD_STATUS_COLORS, DASHBOARD_THEME_CSS, DASHBOARD_THEME_TOKENS } from './theme.ts';
-import type { DashboardStatus } from './vocabulary.ts';
+import { dashboardActionLabel, type DashboardStatus } from './vocabulary.ts';
 
 export function escapeHtml(value: string): string {
   return value
@@ -329,6 +329,12 @@ export interface DashboardActionInput {
    * "Provider access" is the default.
    */
   providerLinkLabel?: string;
+  /**
+   * Why this control cannot be used right now. Set, the button renders
+   * visibly disabled with the reason beside it, and submits nothing — a
+   * blocked control never looks like a working one.
+   */
+  blockedReason?: string;
 }
 
 /**
@@ -336,7 +342,14 @@ export interface DashboardActionInput {
  * binds to (data-connect-kind / data-sync-kind), so the bearer-token path is
  * unchanged: the read-only dash_ token never reaches these routes.
  */
-export function actionButton(action: DashboardActionInput | undefined): string {
+export function actionButton(input: DashboardActionInput | undefined): string {
+  // Every label a button shows passes the vocabulary: the view model may still
+  // say Reauthenticate, the owner reads Reconnect.
+  const action = input === undefined ? undefined : { ...input, label: dashboardActionLabel(input.label) };
+  if (action?.blockedReason !== undefined && action.kind !== 'link' && (action.kind !== 'none' || action.sheet !== undefined)) {
+    return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml(action.label)}</button>`
+      + `<span class="hint">${escapeHtml(action.blockedReason)}</span></span>`;
+  }
   if (action === undefined || action.kind === 'none') {
     if (action?.sheet === undefined) return '';
     const sheetId = safeId(action.sheet);
@@ -441,7 +454,7 @@ export function dashboardControlGate(input: DashboardControlGateInput): string {
     + `<h4>Open dashboard controls</h4>`
     + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.</p>`
     + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>`
-    + `<button class="btn primary" type="button" data-copy-target="#${promptId}">Copy prompt</button>`
+    + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>`
     + `<span class="copystatus" data-copy-status aria-live="polite"></span>`
     + `<details><summary>Advanced: use a worker token</summary>`
     // No name: native form submission cannot put a bearer in a URL or body.
@@ -463,6 +476,8 @@ export interface DashboardAttentionRowInput {
   barPercent?: number;
   /** Warm attention tint (true) or plain panel weight (false). */
   attention?: boolean;
+  /** An error (a source that keeps failing) reads red rather than amber. */
+  tone?: 'warn' | 'error';
   /** This source's detail page. Absent means the row leads nowhere. */
   href?: string;
 }
@@ -482,9 +497,9 @@ export function attentionRow(input: DashboardAttentionRowInput): string {
   const bar = input.barPercent === undefined
     ? ''
     : progressBar({ percent: input.barPercent, label: `${clampPercent(input.barPercent)} percent` });
-  const klass = input.attention === true ? 'attncard' : 'attncard plain';
+  const klass = input.attention === true ? (input.tone === 'error' ? 'attncard error' : 'attncard') : 'attncard plain';
   const href = safeHref(input.href);
-  const control = actionButton(input.action) + actionButton(input.secondaryAction);
+  const control = rowControls(input.label, [input.action, input.secondaryAction]);
   if (href !== undefined && control === '') {
     // A div inside the anchor, not a span: the progress bar is flow content and
     // a span parent would have it reparented out of the row by the parser.
@@ -509,11 +524,48 @@ export function attentionRow(input: DashboardAttentionRowInput): string {
     + `</div>`;
 }
 
+/** Acts that are never a row's main action: they live in its ⋯ menu. */
+const MENU_ACTION_KINDS: ReadonlySet<DashboardActionInput['kind']> = new Set(['disconnect', 'unpair', 'oauth_cancel']);
+
+function isMenuAction(action: DashboardActionInput): boolean {
+  return action.quiet === true || MENU_ACTION_KINDS.has(action.kind);
+}
+
+/**
+ * A row's controls: its one main action as a button, and every secondary act
+ * (Disconnect, Unpair, Provider access, Cancel) behind one ⋯ menu, so a row
+ * never shows three action styles side by side (UX review 2026-10-01).
+ */
+export function rowControls(label: string, actions: ReadonlyArray<DashboardActionInput | undefined>): string {
+  const present = actions.filter((action): action is DashboardActionInput => action !== undefined);
+  const main = present.filter((action) => !isMenuAction(action)).map((action) => actionButton(action)).join('');
+  const menu = present.filter(isMenuAction).map((action) => actionButton({ ...action, quiet: false })).join('');
+  return main + rowMenu(label, menu);
+}
+
+/**
+ * The ⋯ menu: a native <details>, so it opens before any script runs and reads
+ * as a disclosure. Empty when the row has no secondary act.
+ */
+export function rowMenu(label: string, itemsHtml: string): string {
+  if (itemsHtml.trim() === '') return '';
+  return `<details class="rowmenu"><summary class="btn" aria-label="${escapeHtml(`More actions for ${label}`)}">⋯</summary>`
+    + `<div class="menu">${itemsHtml}</div></details>`;
+}
+
 export interface DashboardSetupRowInput {
   label: string;
   href?: string;
   /** One plain sentence about what connecting this source does. */
   blurb: string;
+  /**
+   * The one line shown on the row when the blurb is a set of instructions:
+   * the requirement and its most important caveat. Set, the full blurb and
+   * its link move behind a "How to set this up" disclosure.
+   */
+  summary?: string;
+  /** The caveat a reader must see before starting, e.g. "Needs paid X API access". */
+  caveat?: string;
   action: DashboardActionInput;
   /**
    * Where the key or app this row asks for actually lives, as a link out to
@@ -532,7 +584,16 @@ export function setupRow(input: DashboardSetupRowInput): string {
   // provider copy never reaches the page as markup.
   const link = input.blurbLink === undefined ? '' : externalLink(input.blurbLink);
   const blurbText = blurb === '' ? '' : escapeHtml(blurb);
-  const blurbBody = [blurbText, link].filter((part) => part !== '').join(' ');
+  const instructions = [blurbText, link].filter((part) => part !== '').join(' ');
+  const summary = (input.summary ?? '').trim();
+  const caveat = (input.caveat ?? '').trim();
+  const lead = [
+    caveat === '' ? '' : `<span class="caveat">${escapeHtml(caveat)}.</span>`,
+    summary === '' ? '' : escapeHtml(summary),
+  ].filter((part) => part !== '').join(' ');
+  const blurbBody = lead === ''
+    ? instructions
+    : `${lead}${instructions === '' ? '' : detailsDisclosure('How to set this up', `<p>${instructions}</p>`)}`;
   const blurbSpan = blurbBody === '' ? '' : `<span class="blurb">${blurbBody}</span>`;
   // The column closes up only when NOTHING is in it: a row whose whole blurb is
   // the key-location link still needs its column.
@@ -540,7 +601,9 @@ export function setupRow(input: DashboardSetupRowInput): string {
     + `${dotGlyph(DASHBOARD_STATUS_COLORS.Off)}`
     + (href ? `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>` : `<span class="name">${escapeHtml(input.label)}</span>`)
     + `${blurbSpan}`
-    + `${actionButton(input.action)}`
+    // The row's one main action is the filled button, on every row alike, so
+    // Connect never reads filled on one row and outlined on the next.
+    + `${actionButton({ ...input.action, primary: input.action.primary ?? true })}`
     + `</div>`;
 }
 
@@ -644,8 +707,37 @@ export function attentionBanner(input: DashboardAttentionBannerInput): string {
   return `<div class="attncard banner">`
     + `<div class="grow"><span class="name">${escapeHtml(input.label)}</span>`
     + `<span class="why"> — ${escapeHtml(input.sentence)}</span></div>`
-    + `${actionButton(input.action)}${actionButton(input.secondaryAction)}`
+    + `${rowControls(input.label, [input.action, input.secondaryAction])}`
     + `</div>`;
+}
+
+export interface DashboardBlockerBannerInput {
+  /** One sentence naming what is stopping the page. */
+  sentence: string;
+  /** The one control that clears it, when one exists. */
+  action?: DashboardActionInput;
+  /** A control that is not a source action (a model check), already rendered. */
+  controlHtml?: string;
+}
+
+/**
+ * The page's one blocker: full width, at the top, one sentence and one
+ * button. Only for a condition that stops the rest of the page.
+ */
+export function blockerBanner(input: DashboardBlockerBannerInput): string {
+  return `<div class="attncard banner blocker" role="status" data-blocker>`
+    + `<div class="grow"><span class="name">${escapeHtml(input.sentence)}</span></div>`
+    + `${input.controlHtml ?? actionButton(input.action)}`
+    + `</div>`;
+}
+
+/**
+ * The technical half of a problem: closed by default under one plain summary,
+ * so the row or sheet above it stays one sentence.
+ */
+export function detailsDisclosure(summary: string, body: string): string {
+  if (body.trim() === '') return '';
+  return `<details class="howto"><summary>${escapeHtml(summary)}</summary>${body}</details>`;
 }
 
 export interface DashboardAdvancedInput {
@@ -672,14 +764,19 @@ export interface DashboardMiniBarInput {
   /** 0..100. A lane with no denominator passes no bar at all. */
   percent: number;
   label: string;
+  /** Print the percent beside the bar, so it is never an unlabelled hairline. */
+  showPercent?: boolean;
 }
 
 /** The thin grey lane bar: progress, stated quietly, never in the run color. */
 export function miniBar(input: DashboardMiniBarInput): string {
   const percent = clampPercent(input.percent);
-  return `<span class="minibar" role="progressbar" aria-label="${escapeHtml(input.label)}" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100">`
+  const bar = `<span class="minibar" role="progressbar" aria-label="${escapeHtml(input.label)}" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100">`
     + `<i style="width:${percent}%"></i>`
     + `</span>`;
+  return input.showPercent === true
+    ? `<span class="labeledbar">${bar}<span class="pct" aria-hidden="true">${Math.floor(percent)}%</span></span>`
+    : bar;
 }
 
 /** The four outcomes a strip bar can carry. Colors stay out of the caller. */
@@ -759,7 +856,7 @@ export function backgroundRow(input: DashboardBackgroundRowInput): string {
   const lines = input.lines.map((line) => {
     const bar = line.percent === undefined
       ? '<span></span>'
-      : miniBar({ percent: line.percent, label: `${line.name} progress` });
+      : miniBar({ percent: line.percent, label: `${line.name} progress`, showPercent: true });
     return `<span class="bgl"><span class="nm">${escapeHtml(line.name)}</span>`
       + `<span class="fx">${escapeHtml(line.facts)}</span>${bar}</span>`;
   }).join('');
@@ -865,7 +962,7 @@ export function connectorSheet(input: DashboardSheetInput): string {
     + `<h4>${escapeHtml(input.heading)}</h4>`
     + `<p>${escapeHtml(input.intro)}</p>`
     + `<div class="promptbox" id="${promptId}">${escapeHtml(input.promptText)}</div>`
-    + `<button class="btn primary" type="button" data-copy-target="#${promptId}">${escapeHtml(input.copyButtonLabel)}</button>`
+    + `<button class="btn" type="button" data-copy-target="#${promptId}">${escapeHtml(input.copyButtonLabel)}</button>`
     + `<span class="copystatus" data-copy-status aria-live="polite"></span>`
     + `</div>`;
 }
@@ -909,6 +1006,8 @@ export interface DashboardConnectSheetInput {
   placeholders?: Partial<Record<DashboardConnectFieldName, string>>;
   /** A bounded sentence above everything, e.g. what the provider refused. */
   notice?: string;
+  /** The provider's own words behind the notice, under How to fix. */
+  noticeDetail?: string;
   /**
    * What the provider's own consent screen may say about the app asking, e.g.
    * Google's unverified-app warning. Shown only inside the sheet, so it meets
@@ -956,7 +1055,8 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
   }).join('');
   const notice = (input.notice === undefined || input.notice.trim() === ''
     ? ''
-    : `<p class="why">${escapeHtml(input.notice)}</p>`)
+    : `<p class="why">${escapeHtml(input.notice)}</p>`
+      + detailsDisclosure('How to fix', input.noticeDetail === undefined ? '' : `<p class="hint">${escapeHtml(input.noticeDetail)}</p>`))
     + (input.providerNote === undefined || input.providerNote.trim() === ''
       ? ''
       : `<p class="providernote">${escapeHtml(input.providerNote)}</p>`);
@@ -1110,7 +1210,7 @@ export function dashboardNeedsSetupSheet(
 export function dashboardOAuthConnectSheet(
   source: Pick<DashboardSourceCard, 'source_id' | 'label'>,
   action: Extract<DashboardSourceAction, { kind: 'oauth' }>,
-  options: { notice?: string; providerNote?: string } = {},
+  options: { notice?: string; noticeDetail?: string; providerNote?: string } = {},
 ): { sheetId: string; sheet: string } | undefined {
   const instructions = action.instructions;
   if (instructions === undefined) return undefined;
@@ -1139,12 +1239,12 @@ export function dashboardOAuthConnectSheet(
   const notice = options.notice ?? pendingNote;
   const sheet = connectSetupSheet({
     id: sheetId,
-    heading: `${action.label} ${source.label}`,
+    heading: `${dashboardActionLabel(action.label)} ${source.label}`,
     intro: byo.plain_intro,
     promptText: byo.agent_prompt,
     source: action.source,
     fields,
-    submitLabel: action.label,
+    submitLabel: dashboardActionLabel(action.label),
     // Publisher mode: Olympus's own registered app does the asking, so the
     // sheet leads with the button and keeps the bring-your-own walkthrough
     // one click away rather than deleting it. The sentence is the action's own
@@ -1161,6 +1261,7 @@ export function dashboardOAuthConnectSheet(
     ...(action.known_client_id ? { values: { client_id: action.known_client_id } } : {}),
     ...(action.pending_attempt ? { cancellable: true } : {}),
     ...(notice === undefined ? {} : { notice }),
+    ...(options.noticeDetail === undefined ? {} : { noticeDetail: options.noticeDetail }),
     ...(options.providerNote === undefined ? {} : { providerNote: options.providerNote }),
     ...redirectUriInput(action),
   });

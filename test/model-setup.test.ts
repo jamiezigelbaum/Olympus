@@ -75,6 +75,7 @@ describe('ModelSetupService status', () => {
       credentialState: (id) => states[id] ?? 'missing',
       fetch: asFetch(async () => { requests += 1; return json({}); }),
       now: () => new Date('2026-09-14T12:00:00.000Z'),
+      autoCheck: false,
     });
 
     expect(service.getStatus()).toEqual({
@@ -87,6 +88,64 @@ describe('ModelSetupService status', () => {
       ],
     });
     expect(requests).toBe(0);
+  });
+
+  test('checks configured local models on its own and reads Checking… until the answer lands', async () => {
+    let requests = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let clock = Date.parse('2026-09-14T12:00:00.000Z');
+    const service = new ModelSetupService({
+      config: localConfig(localChat),
+      credentialState: () => 'ready',
+      now: () => new Date(clock),
+      fetch: (async (input) => {
+        requests += 1;
+        await gate;
+        return String(input).endsWith('/models')
+          ? json({ data: [{ id: localChat.model }] })
+          : json({ choices: [{ message: { content: 'ready' } }] });
+      }) as typeof fetch,
+    });
+
+    // A status read (page open) starts the check; the card never claims
+    // "not configured" for a model nobody has tested yet.
+    const first = service.getStatus();
+    expect(first.cards[0]?.state).toBe('applying');
+    expect(first.cards[0]?.detail).toContain('Checking');
+    release();
+    const done = await service.checkLocalModels();
+    expect(done.cards[0]?.state).toBe('ready');
+    const afterFirst = requests;
+    expect(afterFirst).toBe(2);
+
+    // A fresh answer is not re-probed on every poll.
+    expect(service.getStatus().cards[0]?.state).toBe('ready');
+    expect(requests).toBe(afterFirst);
+
+    // An old answer is re-confirmed in the background without flipping the
+    // card back to Checking….
+    clock += 11 * 60_000;
+    expect(service.getStatus().cards[0]?.state).toBe('ready');
+    await service.checkLocalModels();
+    expect(requests).toBe(afterFirst + 2);
+  });
+
+  test('starts the local check when the worker starts, before any page is opened', async () => {
+    let requests = 0;
+    const service = new ModelSetupService({
+      config: localConfig(localChat),
+      credentialState: () => 'ready',
+      fetch: (async (input) => {
+        requests += 1;
+        return String(input).endsWith('/models')
+          ? json({ data: [{ id: localChat.model }] })
+          : json({ choices: [{ message: { content: 'ready' } }] });
+      }) as typeof fetch,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(requests).toBeGreaterThan(0);
+    expect((await service.checkLocalModels()).cards[0]?.state).toBe('ready');
   });
 
   test('does not demand Venice or local models when the active policy uses neither', () => {

@@ -746,9 +746,9 @@ describe('rendered picker page', () => {
     const html = renderSourceDispositionsHtml(fixtureView());
     expect(html).toContain('Castor Workfiles');
     expect(html).toContain('class="finder-window"');
-    expect(html).toContain('data-folder-status>No ingestion</span>');
-    expect(html).toContain('data-folder-status>Metadata only</span>');
-    expect(html).toContain('data-folder-status>Full ingestion</span>');
+    expect(html).toContain('data-folder-status>Skipped</span>');
+    expect(html).toContain('data-folder-status>Names only</span>');
+    expect(html).toContain('data-folder-status>Fully indexed</span>');
     expect(html).toContain('data-folder-status>Mixed</span>');
   });
 

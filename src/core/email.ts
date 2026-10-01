@@ -711,13 +711,13 @@ export class DirectHttpEmailTransport implements EmailTransport {
       if (isAbortError(error)) {
         throw new OperationError(
           'email_unreachable',
-          `Private email lane timed out at ${url} after ${timeoutMs}ms.`,
+          `${workerLaneLabel(url)} timed out at ${url} after ${timeoutMs}ms.`,
           'The private source worker did not answer within the configured request budget; check worker health before retrying.',
         );
       }
       throw new OperationError(
         'email_unreachable',
-        `Private email lane is unreachable at ${url}.`,
+        `${workerLaneLabel(url)} is unreachable at ${url}.`,
         error instanceof Error ? error.message : 'Check that the Gateway-side private email source worker is running.',
       );
     }
@@ -732,7 +732,7 @@ export class DirectHttpEmailTransport implements EmailTransport {
       }
       throw new OperationError(
         'email_error',
-        `Private email lane returned HTTP ${response.status}.`,
+        `${workerLaneLabel(url)} returned HTTP ${response.status}.`,
         body || 'Check the Gateway-side private email source worker logs.',
       );
     }
@@ -781,6 +781,16 @@ function isSourceIndexSearchRoute(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** File-source routes (PDF drain, file extraction) are not the email lane. */
+function workerLaneLabel(url: string): string {
+  try {
+    if (new URL(url).pathname.includes('/source/index/files/')) return 'Private file-source lane';
+  } catch {
+    // Fall through to the default label.
+  }
+  return 'Private email lane';
 }
 
 function isAllowlistedEmailWorkerErrorResponse(status: number, url: string): boolean {

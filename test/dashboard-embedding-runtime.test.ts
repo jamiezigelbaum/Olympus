@@ -525,23 +525,23 @@ describe('background page embedding block', () => {
     const html = renderBackground(facts());
 
     // The line that was already there, unchanged.
-    expect(html).toContain('74% embedded');
-    expect(html).toContain('52k of 200k chunks left');
-    expect(html).toContain('re-embed needed');
-    // And the four things the owner asked for.
+    // The owner's line: percent done, and no ETA until a rate is measured.
+    expect(html).toContain('Indexing — 74% done, estimating time left…');
+    // And the four things the owner asked for, now under Details.
     expect(html).toContain('Embeddings: running now (metadata caught up)');
     expect(html).toContain('No fixed hours');
     expect(html).toContain('secure-local-qwen3-embed · local (Delphi router)');
-    expect(html).toContain('Give embedding priority');
-    expect(html).toContain('Takes effect within a minute');
+    expect(html).toContain('>Index faster<');
+    expect(html).toContain('Syncing pauses until you turn this off.');
+    expect(html).toContain('takes effect within a minute');
   });
 
   test('renders the toggle in the position the override file is actually in', () => {
     const on = renderBackground(facts({ state: 'operator_priority', overrideOn: true, override: 'embedding_priority' }));
 
-    expect(on).toContain('Turn off embedding priority');
+    expect(on).toContain('Stop indexing faster');
     expect(on).toContain('name="on" value="false"');
-    expect(on).not.toContain('Give embedding priority');
+    expect(on).not.toContain('>Index faster<');
 
     const off = renderBackground(facts());
     expect(off).toContain('name="on" value="true"');
@@ -579,8 +579,8 @@ describe('background page embedding block', () => {
     // A paused arbiter is not a lane waiting its turn — nothing will ever start
     // it again on its own — so it reaches the top of the page rather than
     // sitting quietly as the lane's governing condition.
-    expect(html).toContain('Needs a look');
-    expect(html).toContain('The overnight guard is paused');
+    expect(html).toContain('Needs you');
+    expect(html).toContain('Background work is paused, so indexing will not start again until it is resumed.');
     expect(html).toContain('until the pause is lifted');
   });
 
@@ -594,7 +594,7 @@ describe('background page embedding block', () => {
     const html = renderBackground(facts(), { readOnly: true });
 
     expect(html).toContain('Embeddings: running now');
-    expect(html).toContain('worker bearer token');
+    expect(html).toContain('Index faster is off. Changing it needs dashboard controls');
     // The gate lives on the setup page only; this page asks for nothing.
     expect(html).not.toContain('data-control-session-kind="unlock"');
     expect(html).not.toContain('data-embedding-kind');
@@ -609,7 +609,7 @@ describe('background page embedding block', () => {
       embeddingRuntime: facts({ state: 'guard_paused', stateLine: 'Embeddings: off (guard paused)' }),
     });
 
-    expect(lanes.map((lane) => lane.name)).toContain('Embeddings');
+    expect(lanes.map((lane) => lane.name)).toContain('Indexing');
   });
 
   test('a paused lane is not counted as working, whatever the backlog says', () => {

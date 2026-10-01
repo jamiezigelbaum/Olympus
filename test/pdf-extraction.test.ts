@@ -37,6 +37,8 @@ import {
 } from '../src/workers/google-connectors/drive.ts';
 import { createGoogleDriveConnectorStoreSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { defaultConfig } from '../src/core/config.ts';
+import { OperationError } from '../src/core/operation-error.ts';
+import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 
 const TEXT_PDF = new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures/pdf/text-layer.pdf')));
 const SCANNED_PDF = new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures/pdf/scanned-receipt.pdf')));
@@ -260,6 +262,106 @@ describe('PDF extraction: queue recovery', () => {
 
       expect(result).toMatchObject({ candidatesRequeued: 2, jobsIndexed: 2, jobsRemaining: 0, paused: false });
       expect(written.map((request) => request.ref.providerItemId).sort()).toEqual(['id:1', 'id:2']);
+    } finally {
+      jobs.close();
+    }
+  });
+});
+
+describe('PDF extraction: a lane awaiting scope approval (#122)', () => {
+  const PENDING_LANE = {
+    corpusId: 'secure_local.pending.files',
+    provider: 'pending',
+    accountScope: 'personal',
+    approvedScopeKey: 'pending.personal:/',
+  };
+  // The pending lane's source refuses the way the worker's scope guard does.
+  const pendingCorpus = (): ExtractionRunnerCorpus => ({
+    corpusId: PENDING_LANE.corpusId,
+    trustDomain: 'secure_local',
+    source: async () => {
+      throw new OperationError('source_index_policy_violation', 'File-source scope approval is required.');
+    },
+    sink: { async accept() { throw new Error('a pending lane must not land text'); } },
+  });
+
+  test('the drain route skips the unapproved lane as scope_pending and drains the approved one', async () => {
+    const jobs = new LocalFileExtractionJobStore(':memory:');
+    const written: ExtractionSinkRequest[] = [];
+    try {
+      const registry = createDefaultExtractorRegistry();
+      const runner = createFileExtractionRunner({
+        jobs,
+        registry,
+        corpora: [
+          pendingCorpus(),
+          corpus({ refs: [pdfRef(1), pdfRef(2)], bytes: TEXT_PDF, written }),
+        ],
+      });
+      // A job already queued on the pending lane must not be leased or charged.
+      jobs.enqueue({
+        refs: [{ ...PENDING_LANE, providerItemId: 'p:1', localItemId: 'personal:p:1', mimeType: PDF, name: 'p.pdf' }],
+        extractorKind: 'local_text',
+        extractorVersion: registry.get('local_text')!.version,
+        policyDecision: 'index_allowed',
+      });
+      const worker = createEmailSourceWorker({
+        fileExtraction: runner,
+        pdfExtractionLanes: () => [PENDING_LANE, LANE],
+        pdfExtractionLaneScopeApproved: (lane) => lane.corpusId !== PENDING_LANE.corpusId,
+      });
+
+      const response = await worker.fetch(new Request('http://worker.test/v1/source/index/files/extract-pdfs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requeue: true, max_seconds: 60 }),
+      }));
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as { lanes: Array<Record<string, unknown>> };
+      expect(body.lanes).toEqual([
+        expect.objectContaining({
+          corpus_id: PENDING_LANE.corpusId,
+          paused: true,
+          pause_reason: 'scope_pending',
+          jobs_processed: 0,
+          candidates_requeued: 0,
+          jobs_remaining: 1,
+        }),
+        expect.objectContaining({
+          corpus_id: LANE.corpusId,
+          paused: false,
+          candidates_requeued: 2,
+          jobs_indexed: 2,
+          jobs_remaining: 0,
+        }),
+      ]);
+      expect(body.lanes[1]).not.toHaveProperty('pause_reason');
+      expect(written.map((request) => request.ref.providerItemId).sort()).toEqual(['id:1', 'id:2']);
+      expect(jobs.counts(PENDING_LANE)).toEqual([{ status: 'queued', extractorKind: 'local_text', jobs: 1 }]);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('approval withdrawn mid-call pauses that lane as scope_pending instead of failing the drain', async () => {
+    const jobs = new LocalFileExtractionJobStore(':memory:');
+    const written: ExtractionSinkRequest[] = [];
+    try {
+      const runner = createFileExtractionRunner({
+        jobs,
+        registry: createDefaultExtractorRegistry(),
+        corpora: [pendingCorpus(), corpus({ refs: [pdfRef(1)], bytes: TEXT_PDF, written })],
+      });
+      const results = await drainPdfExtraction({
+        runner,
+        lanes: [PENDING_LANE, LANE],
+        requeue: true,
+        deadlineMs: Date.now() + 60_000,
+        extractorKind: 'local_text',
+      });
+      expect(results[0]).toMatchObject({ paused: true, pauseReason: 'scope_pending', jobsProcessed: 0 });
+      expect(results[1]).toMatchObject({ paused: false, jobsIndexed: 1 });
     } finally {
       jobs.close();
     }

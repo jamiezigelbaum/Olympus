@@ -2943,6 +2943,7 @@ export async function runExtractPdfsCommand(args: readonly string[]): Promise<Re
 
   const deadline = Date.now() + maxMinutes * 60_000;
   const passes: unknown[] = [];
+  const scopePending = new Map<string, Record<string, unknown>>();
   let first = true;
   for (;;) {
     const secondsLeft = Math.floor((deadline - Date.now()) / 1_000);
@@ -2952,8 +2953,24 @@ export async function runExtractPdfsCommand(args: readonly string[]): Promise<Re
     passes.push(pass);
     const lanes = Array.isArray(pass.lanes) ? pass.lanes as Array<Record<string, unknown>> : [];
     const progressed = lanes.some((lane) => Number(lane.jobs_processed) > 0);
-    const paused = lanes.some((lane) => lane.paused === true);
+    // A lane waiting on scope approval is skipped by every pass; it must not
+    // stop the approved lanes from draining.
+    const paused = lanes.some((lane) => lane.paused === true && lane.pause_reason !== 'scope_pending');
+    for (const lane of lanes) {
+      if (lane.pause_reason === 'scope_pending') {
+        scopePending.set(`${String(lane.corpus_id)}:${String(lane.scope_key_hash)}`, {
+          corpus_id: lane.corpus_id,
+          provider: lane.provider,
+          pause_reason: 'scope_pending',
+        });
+      }
+    }
     if (!progressed || paused) break;
   }
-  return { kind: 'pdf_extraction_run', passes, corpora: await backlog() };
+  return {
+    kind: 'pdf_extraction_run',
+    passes,
+    ...(scopePending.size > 0 ? { lanes_scope_pending: [...scopePending.values()] } : {}),
+    corpora: await backlog(),
+  };
 }

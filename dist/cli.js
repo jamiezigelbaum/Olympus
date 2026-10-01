@@ -1005,8 +1005,6 @@ function createDefaultSecretStore(options = {}) {
     return new MacOSKeychainSecretStore({ runner });
   if (backend === "libsecret")
     return new LinuxLibsecretSecretStore({ runner });
-  if (backend === "1password")
-    return new OnePasswordSecretStore({ env, runner });
   if (backend !== "auto")
     throw new Error("Unsupported Olympus secret store backend.");
   const currentPlatform = options.platform ?? platform();
@@ -1222,39 +1220,6 @@ class LinuxLibsecretSecretStore {
     return [];
   }
 }
-
-class OnePasswordSecretStore {
-  label = "1password";
-  env;
-  runner;
-  constructor(options = {}) {
-    this.env = options.env ?? process.env;
-    this.runner = options.runner ?? runCommand;
-  }
-  async get(key) {
-    return this.getSync(key);
-  }
-  getSync(key) {
-    assertSafeKey(key);
-    const ref = this.env[`OLYMPUS_SECRET_REF_${envKeyFromSecretKey(key)}`]?.trim();
-    if (!ref)
-      return;
-    const brokerRead = this.env.OLYMPUS_OP_BROKER_READ_BIN?.trim() || "op-cached-read";
-    const result = this.runner(brokerRead, [ref]);
-    if (result.status !== 0)
-      throw new Error("1Password broker secret read failed.");
-    return result.stdout.trim() || undefined;
-  }
-  async set() {
-    throw new Error("1Password backend is read-only; create the item in 1Password and map it with OLYMPUS_SECRET_REF_<KEY>.");
-  }
-  async delete() {
-    throw new Error("1Password backend is read-only from Olympus.");
-  }
-  async list() {
-    return Object.keys(this.env).filter((name) => name.startsWith("OLYMPUS_SECRET_REF_")).map((name) => name.slice("OLYMPUS_SECRET_REF_".length).toLowerCase().replaceAll("__", ":").replaceAll("_", ".")).sort();
-  }
-}
 async function resolveSecretRefValue(secretRef, options = {}) {
   if (!secretRef)
     return;
@@ -1286,9 +1251,6 @@ function resolveSecretRefValueSync(secretRef, options = {}) {
 function assertSafeKey(key) {
   if (!isSafeSecretKey(key))
     throw new Error("Secret key must contain only safe label characters.");
-}
-function envKeyFromSecretKey(key) {
-  return key.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
 function commandExists(command, runner) {
   return runner(command, ["--version"]).status === 0;
@@ -43279,9 +43241,9 @@ class DirectHttpEmailTransport {
       response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, authToken), timeoutMs);
     } catch (error) {
       if (isAbortError(error)) {
-        throw new OperationError("email_unreachable", `Private email lane timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
+        throw new OperationError("email_unreachable", `${workerLaneLabel(url)} timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
       }
-      throw new OperationError("email_unreachable", `Private email lane is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Gateway-side private email source worker is running.");
+      throw new OperationError("email_unreachable", `${workerLaneLabel(url)} is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Gateway-side private email source worker is running.");
     }
     if (!response.ok) {
       const body = await safeText2(response);
@@ -43289,7 +43251,7 @@ class DirectHttpEmailTransport {
       if (workerError) {
         throw new OperationError(workerError.code, workerError.message);
       }
-      throw new OperationError("email_error", `Private email lane returned HTTP ${response.status}.`, body || "Check the Gateway-side private email source worker logs.");
+      throw new OperationError("email_error", `${workerLaneLabel(url)} returned HTTP ${response.status}.`, body || "Check the Gateway-side private email source worker logs.");
     }
     return response.json();
   }
@@ -43321,6 +43283,13 @@ function isSourceIndexSearchRoute(url) {
   } catch {
     return false;
   }
+}
+function workerLaneLabel(url) {
+  try {
+    if (new URL(url).pathname.includes("/source/index/files/"))
+      return "Private file-source lane";
+  } catch {}
+  return "Private email lane";
 }
 function isAllowlistedEmailWorkerErrorResponse(status, url) {
   if (status === 400)
@@ -44958,6 +44927,9 @@ function dashboardIsConnectedSource(source) {
     return true;
   return source.coverage.indexed_items > 0;
 }
+function dashboardStatusGroups(view, options) {
+  return groupSourcesByStatus(view.sources, resolveDegraded(view, options));
+}
 function dashboardConnectedStatusGroups(view, options) {
   return groupSourcesByStatus(view.sources.filter((source) => dashboardIsConnectedSource(source)), resolveDegraded(view, options));
 }
@@ -44993,14 +44965,13 @@ function dashboardAttentionLine(source, options) {
   const degradation = degradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
-    return clause ? `credential unavailable · ${clause}` : "credential unavailable";
+    return clause ? `can't sign in · ${clause}` : `can't sign in`;
   }
-  const refusal = source.connection.provider_refusal;
-  if (refusal)
-    return refusal.reason;
+  if (source.connection.provider_refusal)
+    return dashboardProviderRefusalLine(source);
   switch (source.connection.state) {
     case "reauth_required":
-      return "reauth required";
+      return DASHBOARD_SIGNED_OUT;
     case "awaiting_consent": {
       const base = `waiting for you to approve in the ${source.label} tab`;
       const minutes = source.connection.pending?.expires_in_minutes;
@@ -45008,17 +44979,116 @@ function dashboardAttentionLine(source, options) {
     }
     case "needs_setup":
     case "not_connected":
-      return source.coverage.indexed_items > 0 ? "connection lost · reauthenticate to resume syncing" : source.connection.label;
+      return source.coverage.indexed_items > 0 ? DASHBOARD_SIGNED_OUT : source.connection.label;
     default:
       break;
   }
   if (source.answer_readiness.state === "needs_attention")
-    return lowerFirst(source.answer_readiness.label);
+    return `paused — ${pausedReason(source)}`;
   if (source.queue_health.needs_attention > 0)
-    return "some work is stuck part-way through";
+    return "some items could not be read";
   if ((source.queue_health.retrying_tasks ?? 0) > 0)
-    return "a sync task is retrying itself";
+    return "a sync is retrying on its own";
   return "";
+}
+function dashboardActionLabel(label) {
+  return /^re-?auth/i.test(label.trim()) ? DASHBOARD_RECONNECT_LABEL : label;
+}
+function pausedReason(source) {
+  const label = source.answer_readiness.label.trim();
+  const known = READINESS_REASONS[label];
+  if (known !== undefined)
+    return known;
+  if (label !== "" && label !== GENERIC_READINESS_ATTENTION_LABEL)
+    return lowerFirst(label);
+  if ((source.queue_health.failing_tasks ?? 0) > 0)
+    return "its sync keeps failing";
+  if (source.queue_health.needs_attention > 0)
+    return "some items could not be read";
+  const relative6 = typeof source.freshness.hours === "number" ? dashboardRelativeFromHours(source.freshness.hours) : "";
+  return relative6 ? `last synced ${relative6}, later than expected` : "it has not synced when expected";
+}
+function lowerFirst(value) {
+  return value.length > 0 ? value[0].toLowerCase() + value.slice(1) : value;
+}
+function dashboardProviderRefusalLine(source) {
+  const code = source.connection.provider_refusal?.code ?? "";
+  if (REDIRECT_REFUSAL_CODES.has(code)) {
+    return `rejected the sign-in address — fix it in your ${source.label} app settings`;
+  }
+  if (code === "access_denied")
+    return "sign-in was declined — connect again to retry";
+  return "refused the sign-in — see How to fix";
+}
+function dashboardProviderRefusalSentence(source) {
+  const code = source.connection.provider_refusal?.code ?? "";
+  if (REDIRECT_REFUSAL_CODES.has(code)) {
+    return `${source.label} rejected the sign-in address. Fix it in your ${source.label} app settings, then connect again.`;
+  }
+  if (code === "access_denied")
+    return `${source.label} sign-in was declined. Connect again to retry.`;
+  return `${source.label} refused the sign-in. How to fix has the details.`;
+}
+function dashboardProviderRefusalDetail(source) {
+  return source.connection.provider_refusal?.reason;
+}
+function dashboardIndexingFacts(progress) {
+  if (progress.state === "done")
+    return "up to date";
+  const parts = [];
+  if (progress.percent !== undefined)
+    parts.push(`${Math.floor(progress.percent)}% done`);
+  if (progress.itemsLeft !== undefined && progress.itemsLeft > 0) {
+    parts.push(`${dashboardCount(progress.itemsLeft)} ${plural(progress.itemsLeft, "item")} left`);
+  }
+  switch (progress.state) {
+    case "moving":
+      parts.push(progress.etaMs !== undefined && progress.etaMs > 0 ? dashboardEtaWords(progress.etaMs) : "estimating time left…");
+      break;
+    case "stalled":
+      parts.push("stalled");
+      break;
+    case "paused":
+      parts.push("paused");
+      break;
+    case "off":
+      parts.push("switched off");
+      break;
+    case "unknown":
+      break;
+  }
+  return parts.join(", ");
+}
+function dashboardIndexingLine(progress) {
+  return `${DASHBOARD_INDEXING_NAME} — ${dashboardIndexingFacts(progress)}`;
+}
+function dashboardEtaWords(etaMs) {
+  const minutes = etaMs / 60000;
+  if (minutes < 1.5)
+    return "about a minute";
+  if (minutes < 60)
+    return `about ${Math.round(minutes)} minutes`;
+  const hours = minutes / 60;
+  if (hours < 1.5)
+    return "about an hour";
+  if (hours < 36)
+    return `about ${Math.round(hours)} hours`;
+  const days = Math.round(hours / 24);
+  return `about ${days} ${plural(days, "day")}`;
+}
+function dashboardJobsLine(running, stalled = 0) {
+  const head = running > 0 ? `${dashboardCount(running)} ${plural(running, "job")} running` : "nothing running";
+  return stalled > 0 ? `${head} · ${dashboardCount(stalled)} stalled` : head;
+}
+function dashboardConnectedSummary(connected, ready) {
+  return `${dashboardCount(connected)} ${plural(connected, "source")} connected, ${dashboardCount(ready)} ready to answer`;
+}
+function dashboardSetupLead(sourceId, instructions) {
+  const known = SETUP_LEADS[sourceId];
+  if (known !== undefined)
+    return known;
+  const first = /^.*?[.!?](?=\s|$)/.exec(instructions.trim())?.[0] ?? instructions.trim();
+  return { summary: first };
 }
 function dashboardWorkFraction(source) {
   if (source.coverage.indexed_items <= 0)
@@ -45135,7 +45205,7 @@ function dashboardSyncKeepsFailing(source) {
 }
 function workingLine(source) {
   const parts = [];
-  const firstIngest = source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? "first ingest" : undefined;
+  const firstIngest = source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? "first sync" : undefined;
   const readyWhileUpdating = source.answer_readiness.state === "ready" && source.coverage.indexed_items > 0 && (source.connection.state === "syncing" || source.queue_health.active > 0 || source.queue_health.waiting > 0);
   const summary = dashboardWorkingSummary(source);
   if (readyWhileUpdating) {
@@ -45160,7 +45230,7 @@ function workingLine(source) {
 }
 function waitingLine(source) {
   if (dashboardScopePending(source)) {
-    return source.scope_selection?.kind === "mail" ? "waiting for mail selection" : "waiting for folder selection";
+    return source.scope_selection?.kind === "mail" ? "choose which mail to include" : "choose which folders to include";
   }
   if (source.connection.state === "waiting_for_first_sync")
     return "waiting for the first sync";
@@ -45176,7 +45246,7 @@ function degradationClause(degradation) {
     case "stopped":
       return "retries stopped";
     case "resolved_restart_required":
-      return "resolved · restart required";
+      return "fixed · restart Olympus to use it";
     default:
       return "";
   }
@@ -45205,13 +45275,10 @@ function degradedInput(degraded) {
 function unknownStatus(value) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value };
 }
-function lowerFirst(value) {
-  return value.length > 0 ? value[0].toLowerCase() + value.slice(1) : value;
-}
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY;
+var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -45259,6 +45326,27 @@ var init_vocabulary = __esm(() => {
     "not_connected",
     "needs_setup"
   ]);
+  READINESS_REASONS = {
+    "Reauthenticate this source": DASHBOARD_SIGNED_OUT,
+    "Embedding lane needs attention": "indexing has stopped",
+    "Content extraction is stalled": "reading files has stalled"
+  };
+  REDIRECT_REFUSAL_CODES = new Set([
+    "redirect_uri_mismatch",
+    "invalid_redirect_uri",
+    "redirect_uri_not_registered"
+  ]);
+  SETUP_LEADS = {
+    "x.bookmarks": { caveat: "Needs paid X API access", summary: "Create an X app once, then add its Client ID and secret." },
+    "dropbox.files": { summary: "Needs the app key from your Dropbox developer account." },
+    "readwise.library": { summary: "Needs your Readwise access token." }
+  };
+  DASHBOARD_INDEX_FASTER = {
+    on: "Index faster",
+    off: "Stop indexing faster",
+    explainOn: "Syncing pauses until you turn this off.",
+    explainOff: "Syncing is paused until you turn this off."
+  };
   DASHBOARD_CHATGPT_VOCABULARY = {
     installingNoSource: "Connect a source to begin",
     installingModel: "Getting search ready on your Mac",
@@ -72916,6 +73004,8 @@ class ModelSetupService {
   now;
   localCheckState = "not_configured";
   localCheckPromise;
+  localCheckedAt;
+  autoCheck;
   constructor(options) {
     this.config = options.config;
     this.credentialState = options.credentialState;
@@ -72923,8 +73013,34 @@ class ModelSetupService {
     this.expectedEmbeddingDimension = options.expectedEmbeddingDimension;
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.now ?? (() => new Date);
+    this.autoCheck = options.autoCheck !== false;
+    if (this.autoCheck && this.localUsages().length > 0) {
+      const timer = setTimeout(() => this.refreshLocalCheck(), 0);
+      timer.unref?.();
+    }
   }
   getStatus() {
+    if (this.autoCheck)
+      this.refreshLocalCheck();
+    return this.status();
+  }
+  refreshLocalCheck() {
+    if (this.localCheckPromise)
+      return;
+    const checkedAt = this.localCheckedAt;
+    if (checkedAt !== undefined) {
+      const maxAge = this.localCheckState === "ready" ? LOCAL_RECHECK_READY_MS : LOCAL_RECHECK_NOT_READY_MS;
+      if (this.now().getTime() - checkedAt < maxAge)
+        return;
+    }
+    const local = this.localUsages();
+    if (local.length === 0 || this.aggregateCredentialState(local) !== "ready")
+      return;
+    this.checkLocalModels({ keepState: checkedAt !== undefined }).catch(() => {
+      return;
+    });
+  }
+  status() {
     const required4 = requiredModelProfiles(this.config);
     const cards = [];
     const gemini = required4.filter(({ profile }) => profile.provider === "google-gemini");
@@ -72945,30 +73061,33 @@ class ModelSetupService {
       cards
     };
   }
-  checkLocalModels() {
+  checkLocalModels(options = {}) {
     if (this.localCheckPromise)
       return this.localCheckPromise;
     const local = this.localUsages();
     if (local.length === 0)
-      return Promise.resolve(this.getStatus());
+      return Promise.resolve(this.status());
     const credentials = this.aggregateCredentialState(local);
     if (credentials !== "ready") {
       this.localCheckState = "not_configured";
-      return Promise.resolve(this.getStatus());
+      return Promise.resolve(this.status());
     }
     const targets = this.localTargets(local);
     if (!targets) {
       this.localCheckState = "needs_attention";
-      return Promise.resolve(this.getStatus());
+      this.localCheckedAt = this.now().getTime();
+      return Promise.resolve(this.status());
     }
-    this.localCheckState = "applying";
+    if (options.keepState !== true)
+      this.localCheckState = "applying";
     const check = this.runLocalChecks(targets).then((ready) => {
       this.localCheckState = ready ? "ready" : "needs_attention";
-      return this.getStatus();
+      return this.status();
     }).catch(() => {
       this.localCheckState = "needs_attention";
-      return this.getStatus();
+      return this.status();
     }).finally(() => {
+      this.localCheckedAt = this.now().getTime();
       this.localCheckPromise = undefined;
     });
     this.localCheckPromise = check;
@@ -73185,11 +73304,12 @@ function endpoint(baseUrl, suffix) {
 function isRecord2(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
-var DOMAINS, LOCAL_REQUEST_TIMEOUT_MS = 5000, LOCAL_RESPONSE_LIMIT_BYTES, CARD_COPY, LOCAL_UNCHECKED_DETAIL = "Check the configured local models to verify their model IDs and required endpoints.", LOCAL_CHECKING_DETAIL = "Checking the configured local model server.", LOCAL_ATTENTION_DETAIL = "Start the configured loopback model server and verify its model IDs and required endpoints.";
+var DOMAINS, LOCAL_REQUEST_TIMEOUT_MS = 5000, LOCAL_RECHECK_NOT_READY_MS = 60000, LOCAL_RECHECK_READY_MS, LOCAL_RESPONSE_LIMIT_BYTES, CARD_COPY, LOCAL_UNCHECKED_DETAIL = "Check the configured local models to verify their model IDs and required endpoints.", LOCAL_CHECKING_DETAIL = "Checking the configured local model server.", LOCAL_ATTENTION_DETAIL = "Start the configured loopback model server and verify its model IDs and required endpoints.";
 var init_model_setup = __esm(() => {
   init_http_timeout();
   init_embedding_identity();
   DOMAINS = ["public_safe", "internal", "secure_local"];
+  LOCAL_RECHECK_READY_MS = 10 * 60000;
   LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
   CARD_COPY = {
     gemini: {
@@ -77852,6 +77972,9 @@ function summarizeEgressDestinations(values) {
 function hashToken(value) {
   return createHash44("sha256").update(value).digest("hex");
 }
+function isScopeApprovalRefusal(error2) {
+  return error2 instanceof OperationError && error2.code === "source_index_policy_violation";
+}
 async function drainPdfExtraction(input) {
   const now = input.now ?? Date.now;
   const results = [];
@@ -77868,23 +77991,47 @@ async function drainPdfExtraction(input) {
       jobsRemaining: 0,
       paused: false
     };
+    const remaining = () => input.runner.counts(lane).filter((count) => count.extractorKind === input.extractorKind && (count.status === "queued" || count.status === "failed_retryable" || count.status === "leased")).reduce((sum2, count) => sum2 + count.jobs, 0);
+    const pauseForScope = () => {
+      result.paused = true;
+      result.pauseReason = "scope_pending";
+      result.jobsRemaining = remaining();
+      results.push(result);
+    };
+    if (input.laneScopeApproved && !input.laneScopeApproved(lane)) {
+      pauseForScope();
+      continue;
+    }
+    let scopeRefused = false;
     if (input.requeue) {
       let cursor;
       for (;; ) {
-        const plan = await input.runner.plan({
-          ...lane,
-          limit: PDF_DRAIN_PLAN_PAGE,
-          mimeTypes: PDF_MIME_TYPES,
-          extractorKind: input.extractorKind,
-          policyDecision: "index_allowed",
-          force: true,
-          ...cursor !== undefined ? { cursor } : {}
-        });
+        let plan;
+        try {
+          plan = await input.runner.plan({
+            ...lane,
+            limit: PDF_DRAIN_PLAN_PAGE,
+            mimeTypes: PDF_MIME_TYPES,
+            extractorKind: input.extractorKind,
+            policyDecision: "index_allowed",
+            force: true,
+            ...cursor !== undefined ? { cursor } : {}
+          });
+        } catch (error2) {
+          if (!isScopeApprovalRefusal(error2))
+            throw error2;
+          scopeRefused = true;
+          break;
+        }
         result.candidatesRequeued += plan.jobsQueued + plan.jobsForced;
         if (plan.done || plan.nextCursor === undefined)
           break;
         cursor = plan.nextCursor;
       }
+    }
+    if (scopeRefused) {
+      pauseForScope();
+      continue;
     }
     while (now() < input.deadlineMs) {
       const run = await input.runner.run({
@@ -77900,18 +78047,20 @@ async function drainPdfExtraction(input) {
       result.jobsFailed += run.counts.failed_retryable + run.counts.failed_terminal;
       if (run.paused) {
         result.paused = true;
+        result.pauseReason = "extraction_paused";
         break;
       }
       if (run.leasedJobs === 0)
         break;
     }
-    result.jobsRemaining = input.runner.counts(lane).filter((count) => count.extractorKind === input.extractorKind && (count.status === "queued" || count.status === "failed_retryable" || count.status === "leased")).reduce((sum2, count) => sum2 + count.jobs, 0);
+    result.jobsRemaining = remaining();
     results.push(result);
   }
   return results;
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
+  init_operation_error();
   init_types();
   init_file_extraction_source();
   init_command_runner();
@@ -80492,22 +80641,27 @@ var init_source_watch_runtime = __esm(() => {
 });
 
 // src/workers/dashboard/static-styles.ts
-var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; color: inherit; text-decoration: none; }
-.bgrow .bgl { display: grid; grid-template-columns: 110px 1fr 64px; gap: 12px; align-items: center; padding: 3px 0; }
-.bgrow .nm { font-weight: 500; font-size: 13px; color: var(--t2); }
-.bgrow .fx { color: var(--t3); font-size: 12px; }
-.bgrow .go { position: absolute; right: 14px; top: 10px; color: var(--t4); font-size: 13px; }
+var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; color: inherit; text-decoration: none; }
+.bgrow .bgl { display: grid; grid-template-columns: 20px 110px 1fr 220px; gap: 12px; align-items: center; padding: 4px 28px 4px 0; }
+.bgrow .bgl::before { content: ''; }
+.bgrow .nm { font-weight: 500; font-size: var(--fs-body); color: var(--t2); }
+.bgrow .fx { color: var(--t3); font-size: var(--fs-caption); }
+.bgrow .go { position: absolute; right: 16px; top: 14px; color: var(--t4); font-size: var(--fs-body); }
 .bgrow:hover .go, .bgrow:focus-visible .go { color: var(--link); }
 .bgrow:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-.minibar { display: block; width: 64px; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; justify-self: end; }
-.minibar i { display: block; height: 100%; background: var(--t3); }
+.minibar { display: block; width: 64px; height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; justify-self: end; }
+.minibar i { display: block; height: 100%; background: var(--run); }
+/* A bar always carries its number: the percent sits beside the track. */
+.labeledbar { display: flex; align-items: center; gap: 8px; justify-self: stretch; }
+.labeledbar .minibar { flex: 1; width: auto; }
+.labeledbar .pct { color: var(--t1); font-size: var(--fs-caption); font-weight: 600; font-variant-numeric: tabular-nums; min-width: 4ch; text-align: right; }
 .lanerow { display: grid; grid-template-columns: 110px 64px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.lanerow .nm { font-weight: 500; font-size: 13px; color: var(--t2); }
-.lanerow .st { color: var(--t3); font-size: 12px; }
+.lanerow .nm { font-weight: 500; font-size: var(--fs-body); color: var(--t2); }
+.lanerow .st { color: var(--t3); font-size: var(--fs-caption); }
 .lanerow .minibar { justify-self: start; }
 .lanestrip { display: flex; gap: 2px; }
 .lanestrip i { display: block; width: 7px; height: 20px; border-radius: 2px; }
-.disp { font-family: system-ui, sans-serif; font-size: 11px; letter-spacing: .04em; }
+.disp { font-family: system-ui, sans-serif; font-size: var(--fs-caption); letter-spacing: .04em; }
 .disp.heal { color: var(--good); }
 .disp.attn { color: var(--warn); }
 @media (max-width: 700px) {
@@ -80516,11 +80670,13 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
   /* The go arrow is absolutely positioned at the right edge, so the facts
      column keeps clear of it rather than running underneath. */
   .bgrow .bgl { grid-template-columns: 1fr auto; padding-right: 18px; }
+  .bgrow .bgl::before { display: none; }
+  .bgrow .labeledbar { grid-column: 1 / -1; }
 }
 `, DASHBOARD_PROGRESS_CSS = `.phase { margin: 0 0 14px; max-width: 520px; }
 .phase .ph { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.phase .pn { font-size: 12.5px; font-weight: 600; color: var(--t2); }
-.phase .pv { font-size: 12px; color: var(--t3); font-variant-numeric: tabular-nums; text-align: right; }
+.phase .pn { font-size: var(--fs-caption); font-weight: 600; color: var(--t2); }
+.phase .pv { font-size: var(--fs-caption); color: var(--t3); font-variant-numeric: tabular-nums; text-align: right; }
 .phase .bar { max-width: none; margin-top: 6px; height: 5px; border-radius: 3px; }
 .phase .pv .st { display: inline-block; margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--line2); font-weight: 600; color: var(--t2); }
 .phase.done .pv .st { color: var(--good); }
@@ -80532,10 +80688,10 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 .bar.indet.working { position: relative; }
 .bar.indet.working i { width: 34%; background: var(--run); animation: dashsweep 1.6s ease-in-out infinite; }
 @keyframes dashsweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(294%); } }
-.settled { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; color: var(--t2); font-size: 13px; max-width: 520px; }
+.settled { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; color: var(--t2); font-size: var(--fs-body); max-width: 520px; }
 .banner { margin-bottom: 6px; }
 .advanced { border-top: 1px solid var(--line); margin-top: 28px; padding-top: 4px; }
-.advanced > summary { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--t4); cursor: pointer; padding: 12px 0; list-style: none; }
+.advanced > summary { font-size: var(--fs-body); font-weight: 600; color: var(--t2); cursor: pointer; padding: 12px 0; list-style: none; }
 .advanced > summary::-webkit-details-marker { display: none; }
 .advanced > summary::before { content: '\\25B8 '; display: inline-block; transition: transform .12s ease; }
 .advanced[open] > summary::before { transform: rotate(90deg); }
@@ -80545,21 +80701,21 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 }
 `, DASHBOARD_POLICY_CSS = `.catrow { display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
 .catrow .name { font-weight: 600; color: var(--t2); }
-.catrow .what { color: var(--t4); font-size: 12px; }
-.catrow .tier { color: var(--t3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.catrow .what { color: var(--t4); font-size: var(--fs-caption); }
+.catrow .tier { color: var(--t3); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
 .scoperow { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; margin-bottom: 6px; }
-.scoperow .rid { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--t2); }
-.scoperow .what { color: var(--t3); font-size: 12.5px; }
+.scoperow .rid { font-family: var(--mono); font-size: var(--fs-caption); font-weight: 600; color: var(--t2); }
+.scoperow .what { color: var(--t3); font-size: var(--fs-caption); }
 .sect.gap { margin-top: 44px; }
-.quiet { color: var(--t4); font-size: 12px; margin: -2px 0 10px; max-width: 66ch; }
+.quiet { color: var(--t4); font-size: var(--fs-caption); margin: -2px 0 10px; max-width: 66ch; }
 .quiet.after { margin: 8px 0 0; }
-.tiersnote { color: var(--t3); font-size: 12.5px; margin: 0 0 12px; max-width: 66ch; }
-.tiernote { font-size: 12.5px; margin-top: 10px; }
+.tiersnote { color: var(--t3); font-size: var(--fs-caption); margin: 0 0 12px; max-width: 66ch; }
+.tiernote { font-size: var(--fs-caption); margin-top: 10px; }
 .pm { color: var(--t4); }
 .pm.yes { color: var(--good); }
 .tname { color: var(--t1); font-weight: 600; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { background: var(--panel); border: 1px solid var(--line2); border-radius: 999px; padding: 3px 11px; color: var(--t3); font-size: 12px; }
+.chip { background: var(--panel); border: 1px solid var(--line2); border-radius: 999px; padding: 3px 11px; color: var(--t3); font-size: var(--fs-caption); }
 .chip b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
 .vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 @media (max-width: 700px) {
@@ -80567,143 +80723,44 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 }
 `, DASHBOARD_NAV_CSS = `.top { position: sticky; top: 0; z-index: 12; background: var(--bg); padding-top: 2px; }
 .dnav { position: sticky; top: 39px; z-index: 11; display: flex; gap: 4px; margin: -8px 0 22px; border-bottom: 1px solid var(--line2); background: var(--bg); }
-.dnav .dnavlink { color: var(--t3); text-decoration: none; font-size: 12.5px; padding: 6px 12px 8px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.dnav .dnavlink { color: var(--t3); text-decoration: none; font-size: var(--fs-caption); padding: 6px 12px 8px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .dnav .dnavlink:hover { color: var(--link); }
 .dnav .dnavlink:focus-visible { outline: 1px solid var(--link); outline-offset: -2px; border-radius: 4px; }
 .dnav .dnavlink.on { color: var(--t1); border-bottom-color: var(--link-line); }
-`, SETUP_JOURNEY_CSS = `.setupsummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 18px; }
-.setupsummary .sumcard { min-width: 0; border: 1px solid var(--line2); border-radius: 8px; padding: 11px 12px; background: var(--panel); }
-.setupsummary b { display: block; color: var(--t4); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
-.setupsummary span { display: block; color: var(--t2); font-size: 13px; line-height: 1.3; }
-@media (max-width: 700px) { .setupsummary { grid-template-columns: 1fr; } }`, BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
+`, SETUP_JOURNEY_CSS = `.setupsummary { color: var(--t2); font-size: var(--fs-body); margin: 0 0 18px; }`, BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
 .lane .lanehd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.lane .lnm { font-weight: 600; font-size: 13.5px; color: var(--t2); }
-.lane .lstate { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
-.lane .lfacts { color: var(--t2); font-size: 12.5px; margin-top: 5px; font-variant-numeric: tabular-nums; }
-.lane .lmove { color: var(--t3); font-size: 12px; margin-top: 3px; font-variant-numeric: tabular-nums; }
-.lane .lreason { color: var(--warn); font-size: 12px; margin-top: 5px; max-width: 74ch; }
+.lane .lnm { font-weight: 600; font-size: var(--fs-body); color: var(--t2); }
+.lane .lstate { font-size: var(--fs-caption); white-space: nowrap; }
+.lane .lfacts { color: var(--t2); font-size: var(--fs-caption); margin-top: 5px; font-variant-numeric: tabular-nums; }
+.lane .lmove { color: var(--t3); font-size: var(--fs-caption); margin-top: 3px; font-variant-numeric: tabular-nums; }
+.lane .lreason { color: var(--warn); font-size: var(--fs-caption); margin-top: 5px; max-width: 74ch; }
 .lane .lreason.stuck { color: var(--bad); }
 .lane .lreason.unknown { color: var(--t3); }
 .lane .lbar { margin-top: 8px; }
-.lane .lbar .minibar { width: 100%; max-width: 340px; }
+.lane .lbar .minibar { width: 100%; max-width: 420px; }
+.lane .lbar .labeledbar { max-width: 480px; }
 .lane .lanestrip { margin-top: 8px; }
 .lane .lqueue { margin-top: 8px; border-top: 1px solid var(--line2); padding-top: 7px; }
-.lane .lq { color: var(--t3); font-size: 12px; line-height: 1.55; }
+.lane .lq { color: var(--t3); font-size: var(--fs-caption); line-height: 1.55; }
 .lane .lq b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
 .lane.quiet { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 9px 14px; }
-.lane.quiet .lquiet { color: var(--t4); font-size: 12px; }
-.info { color: var(--t3); font-size: 12.5px; line-height: 1.6; max-width: 74ch; }
-.infolink { margin-top: 8px; font-size: 12.5px; }
+.lane.quiet .lquiet { color: var(--t4); font-size: var(--fs-caption); }
+.info { color: var(--t3); font-size: var(--fs-caption); line-height: 1.6; max-width: 74ch; }
+.infolink { margin-top: 8px; font-size: var(--fs-caption); }
 .embblock { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin: -3px 0 7px; }
-.embblock .embstate { font-size: 13px; font-weight: 500; margin-bottom: 6px; }
-.embblock .embline { color: var(--t3); font-size: 12px; line-height: 1.5; margin-bottom: 4px; }
+.embblock .embstate { font-size: var(--fs-body); font-weight: 500; margin-bottom: 6px; }
+.embblock .embline { color: var(--t3); font-size: var(--fs-caption); line-height: 1.5; margin-bottom: 4px; }
 .embblock .embline.warn { color: var(--warn); }
 .embblock .rowform { margin: 8px 0 6px; }
 @media (max-width: 700px) {
   .lane .lanehd { flex-wrap: wrap; }
 }
 `, DISPOSITIONS_CSS = `
-      :root {
-        color-scheme: light;
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        color: #1c2523;
-        background: #f6f7f5;
-        --accent: #2f7d67;
-        --accent-strong: #276a57;
-        --accent-soft: #e7f0ec;
-        --warn: #9a6b1f;
-        --warn-soft: #f7efdd;
-        --danger: #b04a38;
-        --border: #e0e5e1;
-        --muted: #4d5955;
-        --faint: #616e69;
-        --card: #ffffff;
-        --radius-card: 10px;
-        --radius-control: 8px;
-      }
-      * { box-sizing: border-box; }
-      body { margin: 0; font-size: 14px; line-height: 1.55; }
-      main { max-width: 880px; margin: 0 auto; padding: 40px 24px 72px; }
-      header { margin-bottom: 24px; display: grid; gap: 8px; }
-      h1 { font-size: 24px; line-height: 1.15; margin: 0; letter-spacing: -0.01em; }
-      h2 { font-size: 16px; font-weight: 600; margin: 0; }
-      h3 { font-size: 14px; font-weight: 600; margin: 0; }
-      p { margin: 0; color: var(--muted); max-width: 72ch; }
-      .eyebrow { color: var(--faint); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
-      .subtle { color: var(--muted); font-size: 13px; }
-      code { background: #f0f3f1; border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
-
-      .warn-note { background: var(--warn-soft); border: 1px solid #e2c888; border-radius: var(--radius-card); padding: 11px 14px; color: #6f551f; font-size: 13px; }
-      .warn-note strong { color: #59410f; }
-
-      .auth { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 14px 16px; display: grid; gap: 6px; margin-bottom: 16px; }
-      .auth-status { font-size: 13px; }
-      .auth-status.authorized { color: var(--accent); font-weight: 500; }
-
-      .source-dispositions { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 18px 20px; display: grid; gap: 12px; margin-bottom: 16px; }
-      .source-head { display: grid; gap: 3px; }
-
-      .tree { display: grid; gap: 2px; }
-      .node { border-top: 1px solid var(--border); padding: 8px 0 8px 0; }
-      .node > .children { margin-left: 18px; border-left: 1px solid var(--border); padding-left: 12px; }
-      .node-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; cursor: default; }
-      /* A flex summary drops the native disclosure triangle in every engine, so
-         the affordance is drawn here. Without it a folder with children looks
-         exactly like one without, and the whole tree reads as flat. */
-      details.node > summary.node-head { cursor: pointer; list-style: none; }
-      details.node > summary.node-head::-webkit-details-marker { display: none; }
-      details.node > summary.node-head::before { content: "\\25B8"; color: var(--faint); font-size: 11px; width: 10px; }
-      details.node[open] > summary.node-head::before { content: "\\25BE"; }
-      .node.leaf > .node-head::before { content: ""; width: 10px; }
-      .node-name { font-weight: 500; }
-      .node-counts { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
-
-      /* Explicit and inherited are the distinction this page exists to draw, so
-         they are separated by fill, weight and a note — never by colour alone,
-         which a reader with low colour vision would not see at all. */
-      .chip { display: inline-flex; align-items: baseline; gap: 5px; border-radius: 999px; font-size: 12px; padding: 1px 9px; border: 1px solid var(--border); }
-      .chip-note { font-size: 11px; opacity: 0.85; }
-      .chip.explicit { font-weight: 600; }
-      .chip.explicit.exclude { background: #f6e2de; border-color: #dcb0a6; color: #7d2f20; }
-      .chip.explicit.metadata_only { background: var(--warn-soft); border-color: #d9c9a3; color: #6f551f; }
-      .chip.explicit.ingest { background: var(--accent-soft); border-color: #b6d3c8; color: var(--accent-strong); }
-      .chip.inherited { background: transparent; border-style: dashed; color: var(--faint); font-weight: 400; }
-      .chip.default { background: transparent; color: var(--faint); }
-      .mixed { font-size: 11.5px; color: var(--warn); border: 1px dotted #d9c9a3; border-radius: 999px; padding: 0 8px; }
-
-      .control { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 0 0; font-size: 13px; }
-      .control label { display: inline-flex; gap: 5px; align-items: center; color: var(--muted); }
-      .control label.locked { opacity: 0.5; }
-      .control-locked { font-size: 12.5px; color: var(--faint); margin: 6px 0 0; max-width: 70ch; }
-
-      .media-rules { background: #fbfcfb; border: 1px solid var(--border); border-radius: var(--radius-card); padding: 14px 16px; display: grid; gap: 6px; }
-      .media-rules ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-      .media-rules li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
-      .rule-criterion { font-size: 12.5px; color: #2a3733; }
-
-      .cleanup { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 18px 20px; display: grid; gap: 10px; margin-bottom: 16px; }
-      .copy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
-      label { display: grid; gap: 5px; color: var(--muted); font-size: 13px; }
-      input[readonly] { background: #f6f8f6; color: #2a3733; }
-      input { border: 1px solid #ccd5d1; border-radius: var(--radius-control); padding: 7px 10px; font: inherit; font-size: 13.5px; min-width: 0; }
-      button { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: var(--radius-control); padding: 7px 14px; font: inherit; font-size: 13.5px; font-weight: 500; cursor: pointer; justify-self: start; }
-      button.secondary { background: transparent; color: var(--accent); }
-      button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-      form { display: grid; gap: 10px; }
-      .action-message { color: var(--muted); font-size: 13px; min-height: 18px; }
-
-      @media (max-width: 720px) {
-        main { padding: 28px 16px 48px; }
-        .node > .children { margin-left: 8px; padding-left: 8px; }
-      }
-
-      /* Finder-style Olympus picker. These rules intentionally override the
-         retired light form above while the underlying save contract remains
-         unchanged. */
+      /* The folder and mail pickers. Element rules are scoped with :where()
+         to the picker page, so they keep zero extra specificity and never
+         restyle the dashboard pages that share the native stylesheet. */
       :root {
         color-scheme: dark;
-        color: var(--t1);
-        background: #0B0B0E;
         --accent: var(--link);
         --accent-strong: var(--link);
         --accent-soft: var(--panel2);
@@ -80711,11 +80768,37 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
         --muted: var(--t3);
         --faint: var(--t4);
         --card: var(--bg);
+        --radius-card: 10px;
+        --radius-control: 8px;
       }
-      body { background: #0B0B0E; color: var(--t1); }
+      :where(.picker-page) { color: var(--t1); font-size: var(--fs-body); line-height: 1.55; }
+      :where(.picker-page) h1 { font-size: var(--fs-title); line-height: 1.15; margin: 0; letter-spacing: -0.01em; }
+      :where(.picker-page) h2 { font-size: var(--fs-section); font-weight: 600; margin: 0; }
+      :where(.picker-page) h3 { font-size: var(--fs-row); font-weight: 600; margin: 0; }
+      :where(.picker-page) p { margin: 0; color: var(--t3); max-width: 72ch; }
+      .eyebrow { color: var(--t3); font-size: var(--fs-caption); }
+      .subtle { color: var(--t3); font-size: var(--fs-caption); }
+      :where(.picker-page) code { background: var(--panel2); border-radius: 4px; padding: 1px 5px; font-size: var(--fs-caption); }
+      .warn-note { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: var(--radius-card); padding: 11px 14px; color: var(--t2); font-size: var(--fs-body); }
+      .warn-note strong { color: var(--t1); }
+      .warn-note::before { content: '! '; color: var(--warn); font-weight: 800; }
+      .node-name { font-weight: 500; }
+      .node-counts { color: var(--t3); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
+      :where(.picker-page) label { display: grid; gap: 5px; color: var(--t3); font-size: var(--fs-caption); }
+      :where(.picker-page) input { border: 1px solid var(--field); border-radius: var(--radius-control); padding: 7px 10px; font: inherit; font-size: var(--fs-body); min-width: 0; background: var(--panel); color: var(--t1); }
+      :where(.picker-page) input::placeholder { color: var(--t4); }
+      :where(.picker-page) button { border: 1px solid var(--link-line); background: transparent; color: var(--link); border-radius: var(--radius-control); padding: 7px 14px; font: inherit; font-size: var(--fs-body); font-weight: 500; cursor: pointer; justify-self: start; }
+      :where(.picker-page) :is(button, input, summary):focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+      :where(.picker-page) form { display: grid; gap: 10px; }
+      .action-message { color: var(--t3); font-size: var(--fs-caption); min-height: 18px; }
+
+      @media (max-width: 720px) {
+        .node > .children { margin-left: 8px; padding-left: 8px; }
+      }
+
       .picker-page { max-width: 1180px; margin: 0 auto; padding: 28px 24px 72px; }
       .picker-header { margin: 0 0 18px; display: grid; gap: 5px; }
-      .picker-header h1 { color: var(--t1); font-size: 22px; }
+      .picker-header h1 { color: var(--t1); font-size: var(--fs-title); }
       .picker-header p { color: var(--t3); }
       .picker-header strong { color: var(--t2); }
       .source-dispositions { padding: 0; margin: 0 0 14px; border: 0; background: transparent; display: block; }
@@ -80724,70 +80807,71 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
       .finder-sidebar a.location { text-decoration: none; }
       .finder-window { min-height: 590px; display: grid; grid-template-columns: 180px minmax(420px, 1fr) 270px; grid-template-rows: 1fr auto; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); box-shadow: 0 12px 38px rgba(0,0,0,.34); }
       .finder-sidebar { grid-column: 1; grid-row: 1; padding: 15px 10px; background: rgba(255,255,255,.025); border-right: 1px solid var(--line2); }
-      .sidebar-label { padding: 0 9px 8px; color: var(--t4); font-size: 10px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; }
-      .location { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 6px; color: var(--t2); font-size: 12.5px; }
+      .sidebar-label { padding: 0 9px 8px; color: var(--t4); font-size: var(--fs-caption); font-weight: 600; }
+      .location { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 6px; color: var(--t2); font-size: var(--fs-caption); }
       .location.selected { background: var(--panel2); color: var(--t1); }
-      .location .folder-icon { color: var(--link); font-size: 10px; }
+      .location .folder-icon { color: var(--link); font-size: var(--fs-caption); }
       .finder-browser { grid-column: 2; grid-row: 1; min-width: 0; border-right: 1px solid var(--line2); }
       .finder-toolbar { min-height: 68px; display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 12px 16px; border-bottom: 1px solid var(--line2); }
-      .finder-toolbar h2 { color: var(--t1); font-size: 15px; }
-      .finder-toolbar p { color: var(--t4); font-size: 11.5px; margin-top: 2px; }
-      .finder-toolbar input { width: 180px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t1); font-size: 12px; }
-      .finder-columns { display: grid; grid-template-columns: minmax(180px, 1fr) 64px 128px; gap: 10px; padding: 6px 14px 6px 36px; border-bottom: 1px solid var(--line2); color: var(--t4); font-size: 10px; text-transform: uppercase; letter-spacing: .07em; }
+      .finder-toolbar h2 { color: var(--t1); font-size: var(--fs-row); }
+      .finder-toolbar p { color: var(--t4); font-size: var(--fs-caption); margin-top: 2px; }
+      .finder-toolbar input { width: 180px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t1); font-size: var(--fs-caption); }
+      .finder-columns { display: grid; grid-template-columns: minmax(180px, 1fr) 64px 128px; gap: 10px; padding: 6px 14px 6px 36px; border-bottom: 1px solid var(--line2); color: var(--t4); font-size: var(--fs-caption); }
       .tree { height: 468px; overflow: auto; display: block; padding: 6px; }
       /* Under the tree, not inside it: these count folders and items the tree
          does not list, so a reader who scrolls to the bottom of the tree has
          not seen them. */
       .tree-notes { padding: 8px 14px 10px; border-top: 1px solid var(--line2); display: grid; gap: 4px; }
-      .tree-notes .subtle { color: var(--t4); font-size: 11.5px; }
+      .tree-notes .subtle { color: var(--t4); font-size: var(--fs-caption); }
       .node { border: 0; padding: 0; }
       .node > .children { margin-left: 18px; padding-left: 0; border-left: 1px solid var(--line2); }
       details.node > summary.folder-row { list-style: none; }
       details.node > summary.folder-row::-webkit-details-marker { display: none; }
-      details.node > summary.folder-row::before { content: "\\25B8"; width: 12px; color: var(--t4); font-size: 10px; }
+      details.node > summary.folder-row::before { content: "\\25B8"; width: 12px; color: var(--t4); font-size: var(--fs-caption); }
       details.node[open] > summary.folder-row::before { content: "\\25BE"; }
       .folder-row { min-height: 31px; display: grid; grid-template-columns: 12px 15px minmax(150px, 1fr) 64px 128px; gap: 7px; align-items: center; padding: 4px 8px; border-radius: 6px; cursor: default; color: var(--t2); }
       .folder-row:hover { background: rgba(255,255,255,.035); }
-      .folder-row.selected { background: var(--link-line); color: var(--t1); }
+      .folder-row.selected { background: var(--selected); color: var(--t1); }
       .folder-row:focus-visible { outline: 1px solid var(--link); outline-offset: -1px; }
       .node.leaf .folder-row .disclosure { width: 12px; }
-      .folder-icon { color: var(--link); font-size: 11px; }
+      .folder-icon { color: var(--link); font-size: var(--fs-caption); }
       .node-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-      .node-counts, .node-state { color: var(--t3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+      .node-counts, .node-state { color: var(--t3); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
       .folder-row.selected .node-counts, .folder-row.selected .node-state { color: var(--t1); }
       .stored-controls { display: none; }
       .finder-inspector { grid-column: 3; grid-row: 1; padding: 22px 18px; background: rgba(255,255,255,.015); }
       .finder-inspector [data-inspector-empty] { padding-top: 120px; text-align: center; color: var(--t4); }
       .inspector-folder { color: var(--link); font-size: 30px; margin-bottom: 10px; }
-      .finder-inspector h3 { color: var(--t1); font-size: 15px; margin-bottom: 4px; }
-      .inspector-path { color: var(--t4); font-size: 11px; overflow-wrap: anywhere; }
-      .inspector-count { color: var(--t3); font-size: 12px; margin: 9px 0 18px; }
+      .finder-inspector h3 { color: var(--t1); font-size: var(--fs-row); margin-bottom: 4px; }
+      .inspector-path { color: var(--t4); font-size: var(--fs-caption); overflow-wrap: anywhere; }
+      .inspector-count { color: var(--t3); font-size: var(--fs-caption); margin: 9px 0 18px; }
       .choice-stack { display: grid; gap: 7px; }
-      .choice-stack button { width: 100%; display: grid; gap: 2px; justify-items: start; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t2); text-align: left; font-size: 12.5px; }
-      .choice-stack button span { color: var(--t4); font-size: 10.5px; font-weight: 400; }
+      .choice-stack button { width: 100%; display: grid; gap: 2px; justify-items: start; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t2); text-align: left; font-size: var(--fs-caption); }
+      .choice-stack button span { color: var(--t4); font-size: var(--fs-caption); font-weight: 400; }
       .choice-stack button.on { border-color: var(--link-line); background: var(--panel2); color: var(--t1); }
       .choice-stack button:disabled { opacity: .38; cursor: not-allowed; }
-      .inspector-note { color: var(--t4); font-size: 11px; margin-top: 12px; }
-      .finder-footer { grid-column: 1 / -1; grid-row: 2; min-height: 54px; display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 10px 14px; border-top: 1px solid var(--line2); color: var(--t3); font-size: 11.5px; }
+      .inspector-note { color: var(--t4); font-size: var(--fs-caption); margin-top: 12px; }
+      .finder-footer { grid-column: 1 / -1; grid-row: 2; min-height: 54px; display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 10px 14px; border-top: 1px solid var(--line2); color: var(--t3); font-size: var(--fs-caption); }
       .footer-actions { display: flex; gap: 8px; }
-      .finder-footer button { padding: 6px 16px; border: 1px solid var(--link-line); border-radius: 6px; background: var(--link-line); color: #E8EDF8; font-size: 12.5px; }
+      .finder-footer button { padding: 6px 16px; border: 1px solid var(--link-line); border-radius: 6px; background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); font-size: var(--fs-caption); }
       .finder-footer button.secondary { background: transparent; color: var(--t2); border-color: var(--line); }
       .action-message { color: var(--t3); min-height: 18px; margin-top: 8px; }
-      .scope-connection, .scope-browser-note { color: var(--t3); font-size: 12px; padding: 8px 12px; }
+      .scope-connection, .scope-browser-note { color: var(--t3); font-size: var(--fs-caption); padding: 8px 12px; }
       .scope-browser-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line2); }
       .scope-browser-toolbar button, .scope-browser-list button, [data-scope-more] { color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; padding: 6px 10px; cursor: pointer; }
       .scope-browser-list .scope-folder { display: flex; align-items: center; gap: 8px; padding: 4px 8px; }
       .scope-folder [data-scope-select] { flex: 1; border: 0; background: transparent; padding: 0; color: inherit; text-align: left; overflow-wrap: anywhere; }
       .scope-folder.selected [data-scope-select] { background: transparent; }
       .scope-folder [data-scope-open] { padding: 0; width: 14px; border: 0; background: transparent; color: inherit; }
-      .scope-folder-status { color: var(--t3); font-size: 11px; }
+      .scope-folder-status { color: var(--t3); font-size: var(--fs-caption); }
       .scope-folder.selected .scope-folder-status { color: var(--t1); }
-      .scope-whole-account, .scope-whole-confirm { margin: 12px; font-size: 12px; color: var(--t2); }
+      .scope-folder-status.mixed, .node-state.mixed { color: var(--warn); font-weight: 600; }
+      .scope-whole-account, .scope-whole-confirm { margin: 12px; font-size: var(--fs-caption); color: var(--t2); }
       .scope-whole-account { display: block; }
       .scope-whole-confirm:not([hidden]) { display: block; color: var(--warn); }
       [data-folder-scope-source] input[type="checkbox"] { width: auto; display: inline-block; margin: 0 6px 0 0; vertical-align: middle; }
       [data-folder-scope-source] [hidden] { display: none !important; }
-      .scope-review { border-top: 1px solid var(--line2); margin: 12px; padding-top: 12px; font-size: 12px; }
+      .scope-review { border-top: 1px solid var(--line2); margin: 12px; padding-top: 12px; font-size: var(--fs-caption); }
       .scope-review li { overflow-wrap: anywhere; margin: 5px 0; }
       [data-folder-scope-source] button:disabled { opacity: .4; cursor: not-allowed; }
       .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
@@ -80796,31 +80880,31 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
       .mail-scope-main { grid-column: 2; grid-row: 1; min-width: 0; border-right: 1px solid var(--line2); padding: 6px 0; }
       .mail-scope-group { border: 0; border-bottom: 1px solid var(--line2); margin: 0; padding: 12px 16px 14px; display: grid; gap: 8px; }
       .mail-scope-group:last-child { border-bottom: 0; }
-      .mail-scope-group legend { float: left; width: 100%; padding: 0; color: var(--t1); font-size: 13px; font-weight: 600; }
-      .mail-scope-help { color: var(--t4); font-size: 11.5px; }
+      .mail-scope-group legend { float: left; width: 100%; padding: 0; color: var(--t1); font-size: var(--fs-body); font-weight: 600; }
+      .mail-scope-help { color: var(--t4); font-size: var(--fs-caption); }
       .mail-scope-options { display: flex; flex-wrap: wrap; gap: 6px; }
-      .mail-scope-option { display: flex; align-items: flex-start; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t2); font-size: 12.5px; cursor: pointer; }
+      .mail-scope-option { display: flex; align-items: flex-start; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t2); font-size: var(--fs-caption); cursor: pointer; }
       .mail-scope-option:has(input:checked) { border-color: var(--link-line); background: var(--panel2); color: var(--t1); }
       .mail-scope-option input { width: auto; margin: 2px 0 0; padding: 0; }
       .mail-scope-option span { display: grid; gap: 1px; }
-      .mail-scope-option small { color: var(--t4); font-size: 10.5px; }
+      .mail-scope-option small { color: var(--t4); font-size: var(--fs-caption); }
       .mail-scope-labels { display: flex; flex-wrap: wrap; gap: 6px; max-height: 190px; overflow: auto; }
       .mail-scope-senders { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      .mail-scope-senders label { display: grid; gap: 4px; color: var(--t2); font-size: 12.5px; }
-      .mail-scope-senders small { color: var(--t4); font-size: 10.5px; }
+      .mail-scope-senders label { display: grid; gap: 4px; color: var(--t2); font-size: var(--fs-caption); }
+      .mail-scope-senders small { color: var(--t4); font-size: var(--fs-caption); }
       .mail-scope-senders textarea { width: 100%; resize: vertical; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t1); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 7px 9px; }
       .mail-scope-suggestions ul { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 3px; }
-      .mail-scope-suggestions li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 3px 6px; border-radius: 5px; color: var(--t2); font-size: 12px; }
+      .mail-scope-suggestions li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 3px 6px; border-radius: 5px; color: var(--t2); font-size: var(--fs-caption); }
       .mail-scope-suggestions li:hover { background: rgba(255,255,255,.035); }
       .mail-scope-suggestions .sender { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .mail-scope-suggestions .count { color: var(--t4); font-variant-numeric: tabular-nums; font-size: 11px; }
-      .mail-scope-suggestions button { padding: 3px 9px; font-size: 11px; color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; }
+      .mail-scope-suggestions .count { color: var(--t4); font-variant-numeric: tabular-nums; font-size: var(--fs-caption); }
+      .mail-scope-suggestions button { padding: 3px 9px; font-size: var(--fs-caption); color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; }
       .mail-scope-estimate { display: grid; align-content: start; gap: 10px; }
       .mail-scope-figures { margin: 0; display: grid; gap: 8px; }
       .mail-scope-figures div { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line2); padding-bottom: 6px; }
-      .mail-scope-figures dt { color: var(--t3); font-size: 12px; }
-      .mail-scope-figures dd { margin: 0; color: var(--t1); font-size: 12.5px; font-variant-numeric: tabular-nums; text-align: right; }
-      .mail-scope-estimate button { justify-self: start; padding: 6px 12px; font-size: 12px; color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 6px; }
+      .mail-scope-figures dt { color: var(--t3); font-size: var(--fs-caption); }
+      .mail-scope-figures dd { margin: 0; color: var(--t1); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; text-align: right; }
+      .mail-scope-estimate button { justify-self: start; padding: 6px 12px; font-size: var(--fs-caption); color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 6px; }
       [data-mail-scope-source] [hidden] { display: none !important; }
       [data-mail-scope-source] button:disabled, [data-mail-scope-source] input:disabled, [data-mail-scope-source] textarea:disabled { opacity: .45; cursor: not-allowed; }
       @media (max-width: 860px) {
@@ -80831,7 +80915,7 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
       }
 `, AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 4px 0 0; }
 .agentchoice { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
-.agentchoice > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 8px; align-items: baseline; font-size: 13px; color: var(--t2); }
+.agentchoice > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 8px; align-items: baseline; font-size: var(--fs-body); color: var(--t2); }
 .agentchoice > summary::-webkit-details-marker { display: none; }
 .agentchoice > summary::after { content: '\\25B8'; margin-left: auto; color: var(--t4); transition: transform .12s ease; }
 .agentchoice[open] > summary::after { transform: rotate(90deg); }
@@ -80849,21 +80933,21 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 .agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
 #agents { margin-top: 26px; }
 [data-remote-access] > .rowform { flex: 0 0 auto; margin-left: 8px; }
-.remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: 13px; color: var(--t2); }
+.remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: var(--fs-body); color: var(--t2); }
 .remoteterms[hidden] { display: none; }
 .remoteterms p { margin: 0 0 8px; max-width: 72ch; }
 .remoteterms .rowform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`, MODEL_SETUP_CSS = `
-.modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{border:1px solid var(--border,#333);border-radius:12px;padding:16px 18px;min-width:0}
-.modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:12.5px}
-.modelcard p{margin:6px 0 0}.source-model-gate{border:0;padding:0;margin:0;min-width:0}.source-model-gate[disabled]{opacity:.5}
+.modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
+.modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:var(--fs-caption)}
+.modelcard header b{font-size:var(--fs-row)}.modelcard p{margin:6px 0 0;color:var(--t2)}.modelintro{color:var(--t2);margin:0 0 4px;max-width:72ch}
 .modelaction{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:12px}
 .modelaction form{display:flex;flex:1 1 320px;flex-wrap:wrap;align-items:center;gap:8px;margin:0;min-width:0}
 .modelaction input[type=password]{flex:1 1 180px;min-width:0;width:auto}.modelaction a{white-space:nowrap}.modelaction .modelnote{color:var(--t3)}
 .modelcards .modelrow,.modelcards .sheet{margin:0}.modelcards .sheet .modelaction{margin:0}
 .modeltools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 16px}.modeltools p{margin:0;flex-basis:100%}
 .modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
-.modelextras{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin:-12px 0 24px}
+.modelextras{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 24px}
 `;
 
 // src/control-ui/browser-controller.ts
@@ -80981,7 +81065,7 @@ function mountDashboardController(options) {
       case "sync_now":
         return "Sync started. This card updates when it finishes.";
       case "set_embedding_priority":
-        return "Embedding preference saved.";
+        return "Saved.";
       case "disconnect":
         return "Disconnected. This card updates when Olympus confirms it.";
       case "unpair":
@@ -81583,6 +81667,11 @@ function mountDashboardController(options) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
       return;
+    const menu = target.closest("details.rowmenu");
+    queryAll("details.rowmenu[open]").forEach((open6) => {
+      if (open6 !== menu || target.closest("[data-sheet-toggle],a[href]"))
+        open6.open = false;
+    });
     const toggle = target.closest("[data-sheet-toggle]");
     if (toggle) {
       const selector = toggle.dataset.sheetToggle;
@@ -81620,6 +81709,16 @@ function mountDashboardController(options) {
       if (slot)
         clearAgentSecret(slot);
       refreshAgentList();
+      return;
+    }
+    const focusButton = target.closest("[data-focus-target]");
+    if (focusButton) {
+      const selector = focusButton.dataset.focusTarget;
+      const field = selector ? query(selector) : null;
+      if (field) {
+        field.scrollIntoView({ block: "center" });
+        field.focus();
+      }
       return;
     }
     const copy = target.closest("[data-copy-target]");
@@ -81661,7 +81760,7 @@ function mountDashboardController(options) {
     if (!anchor) {
       const row = target.closest("[data-dashboard-href]");
       const modified2 = event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
-      if (row && !modified2 && !target.closest("button,input,select,textarea,label,form")) {
+      if (row && !modified2 && !target.closest("button,input,select,textarea,label,form,summary,details")) {
         event.preventDefault();
         options.navigate(row.dataset.dashboardHref);
       }
@@ -81748,9 +81847,9 @@ function mountDispositionsController(options) {
   let appliedCanWrite;
   const root = options.root;
   const labels = {
-    ingest: "Full ingestion",
-    metadata_only: "Metadata only",
-    exclude: "No ingestion"
+    ingest: "Fully indexed",
+    metadata_only: "Names only",
+    exclude: "Skipped"
   };
   const scopeDrafts = new Map;
   function scopeMessage(form, text) {
@@ -81841,7 +81940,7 @@ function mountDispositionsController(options) {
     if (submit)
       submit.disabled = !allowed || !draft.loaded || !draft.generation || !draft.revision || !draft.whole && !hasSelection && !draft.edited || draft.whole && confirmation?.checked !== true;
     if (submit)
-      submit.textContent = draft.whole || hasSelection ? "Save scope and start" : "Save scope (no ingestion)";
+      submit.textContent = draft.whole || hasSelection ? "Save scope and start" : "Save scope (nothing indexed)";
     const cancel = form.querySelector("[data-scope-cancel]");
     if (cancel)
       cancel.disabled = draft.busy;
@@ -81849,10 +81948,41 @@ function mountDispositionsController(options) {
     if (confirmationLabel)
       confirmationLabel.hidden = !draft.whole;
   }
+  function scopeMixed(draft, key) {
+    const own = effectiveScopeState(draft, key);
+    for (const other of draft.selections.keys()) {
+      if (other !== key && (draft.ancestors.get(other) || []).includes(key) && effectiveScopeState(draft, other) !== own)
+        return true;
+    }
+    return false;
+  }
+  function scopeStatusText(draft, key) {
+    if (scopeMixed(draft, key))
+      return "Mixed";
+    const inherited = inheritedScopeState(draft, key);
+    const chosen = draft.selections.has(key);
+    return chosen || inherited ? `${labels[effectiveScopeState(draft, key)]}${inherited && !chosen ? " · inherited" : ""}` : "Not selected";
+  }
+  function scopeConsequence(draft) {
+    const counts = { ingest: 0, metadata_only: 0, exclude: 0 };
+    for (const key of draft.selections.keys())
+      counts[effectiveScopeState(draft, key)] += 1;
+    const folders = (count) => `${count} ${count === 1 ? "folder" : "folders"}`;
+    const entries = [["fully indexed", counts.ingest], ["names only", counts.metadata_only], ["skipped", counts.exclude]];
+    const phrase = (list) => list.filter(([, count]) => count > 0).map(([what, count], index) => `${index === 0 ? folders(count) : count} ${what}`);
+    if (draft.whole) {
+      const exceptions = phrase(entries.slice(1));
+      return `Entire account, including future folders, fully indexed${exceptions.length > 0 ? `; ${exceptions.join(", ")}` : ""}.`;
+    }
+    const parts = phrase(entries);
+    if (counts.ingest + counts.metadata_only === 0)
+      return "No folders selected. Nothing will be indexed.";
+    return `${parts.join(", ")}. All other folders stay out.`;
+  }
   function renderScopeReview(form, draft) {
     const summary = form.querySelector("[data-scope-summary]");
     if (summary)
-      summary.textContent = draft.whole ? "Entire account, including future folders, except the choices below." : `${Array.from(draft.selections.keys()).filter((key) => effectiveScopeState(draft, key) !== "exclude").length} folder(s) selected. All other folders stay out.`;
+      summary.textContent = scopeConsequence(draft);
     const list = form.querySelector("[data-scope-selections]");
     if (list) {
       list.replaceChildren();
@@ -81871,9 +82001,10 @@ function mountDispositionsController(options) {
         return;
       row.classList.toggle("selected", draft.selected?.key === key);
       const status = row.querySelector(".scope-folder-status");
-      const inherited = inheritedScopeState(draft, key);
-      if (status)
-        status.textContent = draft.selections.has(key) || inherited ? `${labels[effectiveScopeState(draft, key)]}${inherited ? " · inherited" : ""}` : "Not selected";
+      if (status) {
+        status.textContent = scopeStatusText(draft, key);
+        status.classList.toggle("mixed", status.textContent === "Mixed");
+      }
     });
     renderScopeReview(form, draft);
   }
@@ -81911,8 +82042,8 @@ function mountDispositionsController(options) {
         select.textContent = node.name;
         const status = root.ownerDocument.createElement("span");
         status.className = "scope-folder-status";
-        const inherited = inheritedScopeState(draft, node.key);
-        status.textContent = draft.selections.has(node.key) || inherited ? `${labels[effectiveScopeState(draft, node.key)]}${inherited ? " · inherited" : ""}` : "Not selected";
+        status.textContent = scopeStatusText(draft, node.key);
+        status.classList.toggle("mixed", status.textContent === "Mixed");
         const icon = root.ownerDocument.createElement("span");
         icon.className = "folder-icon";
         icon.textContent = "▰";
@@ -82472,7 +82603,7 @@ function mountDispositionsController(options) {
     if (count)
       count.textContent = row.dataset.counts || "";
     if (note) {
-      note.textContent = row.dataset.locked || form.dataset.locked || (row.dataset.origin === "default" ? "Uses the Full ingestion default until you choose otherwise." : row.dataset.origin === "inherited" ? "Inherited from the nearest folder choice above." : "This folder has its own choice.");
+      note.textContent = row.dataset.locked || form.dataset.locked || (row.dataset.origin === "default" ? "Fully indexed by default until you choose otherwise." : row.dataset.origin === "inherited" ? "Inherited from the nearest folder choice above." : "This folder has its own choice.");
     }
     const selectable = new Set((row.dataset.selectable || "").split(",").filter(Boolean));
     inspector.querySelectorAll("button[data-picker-state]").forEach((button) => {
@@ -82846,28 +82977,57 @@ function mountDispositionsController(options) {
 }
 
 // src/workers/dashboard/theme.ts
-var DASHBOARD_THEME_TOKENS, DASHBOARD_STATUS_COLORS, CSS_VARIABLE_NAMES, PAGE_BACKDROP = "#0B0B0E", MONO_STACK = '"Berkeley Mono","SF Mono",Menlo,Consolas,monospace', ROOT_BLOCK, DASHBOARD_THEME_CSS;
+var DASHBOARD_THEME_TOKENS, DASHBOARD_PAGE_BACKDROP, DASHBOARD_TYPE_SCALE, DASHBOARD_CONTRAST_PAIRS, DASHBOARD_STATUS_COLORS, CSS_VARIABLE_NAMES, PAGE_BACKDROP, MONO_STACK = '"Berkeley Mono","SF Mono",Menlo,Consolas,monospace', ROOT_BLOCK, DASHBOARD_THEME_CSS;
 var init_theme = __esm(() => {
   DASHBOARD_THEME_TOKENS = {
     bg: "#101014",
-    panel: "#15161A",
-    panel2: "#17181D",
-    line: "#26272C",
-    line2: "#1E1F24",
+    panel: "#17181D",
+    panel2: "#1B1C22",
+    line: "#30323A",
+    line2: "#24252B",
     t1: "#ECECEA",
-    t2: "#B9BAC0",
-    t3: "#7C7E86",
-    t4: "#55575E",
-    good: "#4E9468",
-    warn: "#B08430",
-    run: "#8F7BD8",
-    bad: "#C4574D",
-    off: "#6B6E76",
-    warnBg: "#1B1913",
-    warnLine: "#4A3D22",
-    link: "#8FA8E8",
-    linkLine: "#3A5AA8"
+    t2: "#C9CAD0",
+    t3: "#A9ABB3",
+    t4: "#8C8E97",
+    good: "#6CC08B",
+    warn: "#E3AA45",
+    run: "#AE9EF0",
+    bad: "#F08276",
+    off: "#8C8E97",
+    warnBg: "#261E10",
+    warnLine: "#8A6A2A",
+    errBg: "#2B1614",
+    errLine: "#B04A40",
+    link: "#9DB4F0",
+    linkLine: "#5A7BD6",
+    accent: "#3E63C8",
+    onAccent: "#FFFFFF",
+    field: "#6A6D77",
+    selected: "#2C4485"
   };
+  DASHBOARD_PAGE_BACKDROP = DASHBOARD_THEME_TOKENS.bg;
+  DASHBOARD_TYPE_SCALE = {
+    title: "22px",
+    section: "16px",
+    row: "15px",
+    body: "14px",
+    caption: "12.5px"
+  };
+  DASHBOARD_CONTRAST_PAIRS = [
+    ...["t1", "t2", "t3", "t4", "link", "warn", "bad", "good", "run"].flatMap((fg) => ["bg", "panel", "panel2", "warnBg", "errBg"].map((bg) => ({ fg, bg, min: 4.5 }))),
+    { fg: "onAccent", bg: "accent", min: 4.5 },
+    { fg: "t1", bg: "selected", min: 4.5 },
+    { fg: "t2", bg: "selected", min: 4.5 },
+    { fg: "accent", bg: "bg", min: 3 },
+    { fg: "linkLine", bg: "bg", min: 3 },
+    { fg: "linkLine", bg: "panel", min: 3 },
+    { fg: "field", bg: "bg", min: 3 },
+    { fg: "field", bg: "panel", min: 3 },
+    { fg: "field", bg: "panel2", min: 3 },
+    { fg: "warnLine", bg: "bg", min: 3 },
+    { fg: "errLine", bg: "bg", min: 3 },
+    { fg: "good", bg: "bg", min: 3 }
+  ];
   DASHBOARD_STATUS_COLORS = {
     Fresh: DASHBOARD_THEME_TOKENS.good,
     Working: DASHBOARD_THEME_TOKENS.run,
@@ -82893,34 +83053,59 @@ var init_theme = __esm(() => {
     off: "--off",
     warnBg: "--warn-bg",
     warnLine: "--warn-line",
+    errBg: "--err-bg",
+    errLine: "--err-line",
     link: "--link",
-    linkLine: "--link-line"
+    linkLine: "--link-line",
+    accent: "--accent-fill",
+    onAccent: "--on-accent",
+    field: "--field",
+    selected: "--selected"
   };
+  PAGE_BACKDROP = DASHBOARD_PAGE_BACKDROP;
   ROOT_BLOCK = [
     ":root {",
     ...Object.keys(CSS_VARIABLE_NAMES).map((key) => `  ${CSS_VARIABLE_NAMES[key]}: ${DASHBOARD_THEME_TOKENS[key]};`),
     `  --mono: ${MONO_STACK};`,
+    `  --fs-title: ${DASHBOARD_TYPE_SCALE.title};`,
+    `  --fs-section: ${DASHBOARD_TYPE_SCALE.section};`,
+    `  --fs-row: ${DASHBOARD_TYPE_SCALE.row};`,
+    `  --fs-body: ${DASHBOARD_TYPE_SCALE.body};`,
+    `  --fs-caption: ${DASHBOARD_TYPE_SCALE.caption};`,
     "}"
   ].join(`
 `);
   DASHBOARD_THEME_CSS = `${ROOT_BLOCK}
 * { box-sizing: border-box; }
-body { margin: 0; background: ${PAGE_BACKDROP}; color: var(--t1); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 20px 80px; }
+body { margin: 0; background: ${PAGE_BACKDROP}; color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
 a { color: var(--link); }
-.frame { max-width: 920px; margin: 0 auto; }
-.page { background: var(--bg); border: 1px solid var(--line); border-radius: 14px; padding: 30px 34px 38px; margin-top: 20px; box-shadow: 0 2px 12px rgba(0,0,0,.4); }
-.top { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; margin-bottom: 24px; }
-.brand { font-weight: 600; letter-spacing: .02em; font-size: 15px; }
+/* No card around the page: the page is the surface, as wide as a reading
+   layout allows, and every row below shares its left and right edges. */
+.frame { max-width: 1120px; margin: 0 auto; }
+.page { padding: 28px 0 40px; }
+.top { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; margin-bottom: 20px; }
+.brand { font-weight: 650; font-size: var(--fs-title); letter-spacing: -.01em; }
 .brand .lead { color: var(--t3); text-decoration: none; }
 .brand a.lead:hover, .brand a.lead:focus-visible { color: var(--link); }
 .brand .crumb { color: var(--t3); font-weight: 400; }
-.meta { color: var(--t3); font-size: 12px; }
+.meta { color: var(--t3); font-size: var(--fs-caption); }
 .meta b { font-weight: 600; }
-.sect { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--t4); margin: 0 0 8px; }
+/* Section headings: sentence case at a readable size, never tiny capitals. */
+.sect { font-size: var(--fs-section); font-weight: 600; color: var(--t1); margin: 28px 0 10px; }
 .sect.attn { color: var(--warn); }
+.sect.sub { font-size: var(--fs-body); color: var(--t2); margin: 18px 0 8px; }
+.sect.sub.attn { color: var(--warn); }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
-.attncard { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 9px; padding: 12px 15px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; gap: 14px; }
-.attncard.plain { background: var(--panel); border-color: var(--line2); }
+/* Every row is the same shape: a 20px lead column (icon or dot), the text,
+   then the controls, so names line up from section to section. */
+.attncard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 52px; }
+.attncard::before { content: ''; flex: 0 0 20px; align-self: center; }
+/* A problem is a tinted row with a 1px border and an icon, never a stripe. */
+.attncard:not(.plain) { background: var(--warn-bg); border-color: var(--warn-line); }
+.attncard:not(.plain)::before { content: '!'; height: 20px; border-radius: 50%; background: var(--warn); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
+.attncard.error { background: var(--err-bg); border-color: var(--err-line); }
+.attncard.error::before { background: var(--bad); }
+.attncard.plain { background: var(--panel); border-color: var(--line); }
 .attncard .grow { flex: 1; }
 /* The source page's ONE banner, and only it. A bare flex:1 gave the
    description a zero basis, so a banner carrying Sync now, its status text and
@@ -82931,35 +83116,62 @@ a { color: var(--link); }
    shape, and the mobile block below still owns what they do at 375px. */
 .attncard.banner { flex-wrap: wrap; }
 .attncard.banner .grow { flex: 1 1 320px; min-width: 0; }
-.attncard .name { font-weight: 600; }
-.attncard .why { color: var(--t3); font-size: 12.5px; }
+.attncard .name { font-weight: 600; font-size: var(--fs-row); }
+.attncard .why { color: var(--t2); font-size: var(--fs-body); }
 /* A warning row that carries no control is itself the link to the detail page,
    so its whole rectangle is the hit zone. */
 a.attncard.rowzone { display: flex; color: inherit; text-decoration: none; -webkit-user-drag: none; }
 a.attncard.rowzone:hover { border-color: var(--link); }
 a.attncard.rowzone:hover .name, a.attncard.rowzone:hover .go { color: var(--link); }
-a.attncard.rowzone:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-a.attncard.rowzone .go { color: var(--t4); font-size: 13px; }
+a.attncard.rowzone:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+a.attncard.rowzone .go { color: var(--t3); font-size: var(--fs-body); }
 /* A warning row that DOES carry a control keeps the control and links its name. */
-.attncard a.name { color: inherit; text-decoration: underline; text-decoration-color: var(--line2); text-underline-offset: 3px; }
+.attncard a.name { color: inherit; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
 .attncard a.name:hover { color: var(--link); text-decoration-color: var(--link); }
-.attncard a.go { color: var(--t4); font-size: 13px; text-decoration: none; padding: 0 2px; }
+.attncard a.go { color: var(--t3); font-size: var(--fs-body); text-decoration: none; padding: 0 2px; }
 .attncard a.go:hover { color: var(--link); }
-.attncard a.name:focus-visible { outline: 1px solid var(--link); outline-offset: 3px; border-radius: 4px; }
+.attncard a.name:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; border-radius: 4px; }
 .rowlink { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rowlink .btn { text-decoration: none; display: inline-block; }
 .blurb .ext { color: var(--link); }
-.hint { color: var(--t4); font-size: 12px; }
-.btn { border: 1px solid var(--link-line); color: var(--link); border-radius: 6px; padding: 4px 13px; font-size: 12.5px; background: none; cursor: pointer; white-space: nowrap; font: inherit; }
-.btn:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-.btn.primary { background: var(--link-line); color: #E8EDF8; }
-.btn.quiet { border-color: transparent; color: var(--t4); }
-.btn.quiet:hover { border-color: var(--line2); color: var(--t2); }
+.hint { color: var(--t3); font-size: var(--fs-caption); }
+/* Two button styles and no third: filled for the row's one main action,
+   outlined for everything else. Links are for navigation only. */
+.btn { border: 1px solid var(--link-line); color: var(--link); border-radius: 7px; padding: 6px 14px; font: inherit; font-size: var(--fs-body); font-weight: 500; line-height: 1.3; background: none; cursor: pointer; white-space: nowrap; }
+.btn:hover { background: var(--panel2); }
+.btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.btn.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
+.btn.primary:hover { filter: brightness(1.12); }
+/* A blocked control looks blocked and says why beside itself. */
+.btn:disabled, .btn[aria-disabled="true"] { background: transparent; border: 1px dashed var(--line); color: var(--t4); cursor: not-allowed; filter: none; }
+.blocked { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.blocked .hint { color: var(--t3); }
+.blocked .hint::before { content: '\\1F512\\FE0E  '; font-size: 11px; }
+/* The row's secondary acts (Disconnect, Provider access, Replace key, Cancel)
+   live behind one ⋯ menu: a native <details>, so it works before any script. */
+details.rowmenu { position: relative; flex: none; }
+details.rowmenu > summary { list-style: none; padding: 4px 10px; font-size: var(--fs-row); line-height: 1.2; letter-spacing: .08em; border-color: var(--line); color: var(--t2); }
+details.rowmenu > summary::-webkit-details-marker { display: none; }
+details.rowmenu[open] > summary { background: var(--panel2); }
+.rowmenu .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 200px; background: var(--panel2); border: 1px solid var(--line); border-radius: 9px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.45); display: grid; gap: 2px; }
+.rowmenu .menu form { display: grid; gap: 2px; margin: 0; }
+.rowmenu .menu .btn, .rowmenu .menu a.hint { display: block; width: 100%; text-align: left; border: 0; border-radius: 6px; padding: 7px 10px; color: var(--t1); font-size: var(--fs-body); text-decoration: none; background: none; }
+.rowmenu .menu .btn:hover, .rowmenu .menu a.hint:hover { background: var(--panel); color: var(--link); }
+.rowmenu .menu .actmsg { padding: 0 10px; }
+/* The page's one blocker: full width at the top, a real warning colour. */
+.attncard.blocker { margin: 0 0 24px; padding: 16px 18px; }
+.attncard.blocker .name { color: var(--t1); font-size: var(--fs-row); }
+/* Technical detail under a problem, closed by default. */
+details.howto { margin: 6px 0 0; }
+details.howto > summary { color: var(--link); font-size: var(--fs-caption); cursor: pointer; }
+details.howto > summary:hover { text-decoration: underline; }
+details.howto[open] > summary { margin-bottom: 6px; }
+details.howto p { margin: 0 0 6px; }
 .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
 .cards.four { grid-template-columns: repeat(4, 1fr); }
-.card { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; }
-.card .hd { display: flex; gap: 9px; align-items: center; font-weight: 600; font-size: 13.5px; }
-.card .ln { color: var(--t3); font-size: 12px; margin-top: 6px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.card .hd { display: flex; gap: 9px; align-items: center; font-weight: 600; font-size: var(--fs-row); }
+.card .ln { color: var(--t3); font-size: var(--fs-caption); margin-top: 6px; }
 /* The whole card is the link. Hover and focus land on the card, not the name:
    the border warms and the name follows it, so the affordance is the shape the
    pointer is actually over. -webkit-user-drag keeps a text selection inside the
@@ -82967,63 +83179,70 @@ a.attncard.rowzone .go { color: var(--t4); font-size: 13px; }
 a.card.cardlink { display: block; color: inherit; text-decoration: none; -webkit-user-drag: none; }
 a.card.cardlink:hover { border-color: var(--link-line); }
 a.card.cardlink:hover .hd { color: var(--link); }
-a.card.cardlink:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-.bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 9px; max-width: 340px; }
+a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.bar { height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-top: 9px; max-width: 420px; }
 .bar i { display: block; height: 100%; background: var(--run); }
-.foot { color: var(--t4); font-size: 12px; margin-top: 22px; }
+.foot { color: var(--t3); font-size: var(--fs-caption); margin-top: 24px; }
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0 22px; }
-.kpi { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 11px 13px; }
-.kpi .u { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--t4); }
-.kpi .n { font-size: 17px; font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums; }
-.kpi .s { font-size: 11px; color: var(--t3); margin-top: 1px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.kpi .u { font-size: var(--fs-caption); color: var(--t3); }
+.kpi .n { font-size: var(--fs-section); font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.kpi .s { font-size: var(--fs-caption); color: var(--t3); margin-top: 1px; }
 .selectioncounts { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 22px; }
 .selectioncounts div { display: flex; gap: 8px; align-items: baseline; }
-.selectioncounts span { color: var(--t3); font-size: 12.5px; }
-.selectioncounts b { color: var(--t1); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.dsect { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--t4); margin: 24px 0 8px; }
+.selectioncounts span { color: var(--t3); font-size: var(--fs-caption); }
+.selectioncounts b { color: var(--t1); font-size: var(--fs-body); font-weight: 600; font-variant-numeric: tabular-nums; }
+.dsect { font-size: var(--fs-section); font-weight: 600; color: var(--t1); margin: 28px 0 10px; }
 /* A heading one level under .dsect: sentence case, because it is a sentence
    about the chips beneath it rather than another section label. */
-.subsect { font-size: 11.5px; color: var(--t3); margin: 12px 0 6px; }
+.subsect { font-size: var(--fs-caption); color: var(--t3); margin: 12px 0 6px; }
 /* The who-acts summary, directly under its section heading — .foot's 22px top
    margin would detach it from the total it is explaining. */
-.reviewsum { color: var(--t3); font-size: 12px; margin: 0 0 4px; }
+.reviewsum { color: var(--t3); font-size: var(--fs-caption); margin: 0 0 4px; }
 .bigstrip { display: flex; gap: 3px; margin: 8px 0 4px; }
 .bigstrip i { width: 14px; height: 30px; border-radius: 2.5px; display: block; }
-.stripcap { display: flex; justify-content: space-between; color: var(--t4); font-size: 11px; margin-bottom: 4px; }
-.tip { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; font-family: var(--mono); font-size: 11.5px; color: var(--t2); margin: 10px 0 4px; max-width: 520px; }
-.tip .h { color: var(--t4); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-family: system-ui, sans-serif; margin-bottom: 4px; }
+.stripcap { display: flex; justify-content: space-between; color: var(--t3); font-size: var(--fs-caption); margin-bottom: 4px; }
+.tip { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; font-family: var(--mono); font-size: var(--fs-caption); color: var(--t2); margin: 10px 0 4px; max-width: 640px; }
+.tip .h { color: var(--t3); font-size: var(--fs-caption); font-family: system-ui, sans-serif; font-weight: 600; margin-bottom: 4px; }
 /* The consequence line under a failing check: plain language, in the page's own
    font, so the mechanical row above it stays the evidence and this stays the
    meaning. */
-.tip .cq { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; color: var(--t3); margin: 2px 0 8px 15px; }
+.tip .cq { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: var(--fs-caption); color: var(--t3); margin: 2px 0 8px 15px; }
 .tip > .cq:last-child { margin-bottom: 0; }
 /* Passing checks, collapsed. A page whose header reports a fault opens with the
    fault; the green rows are evidence a reader may unfold. */
-.evidence { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; font-family: var(--mono); font-size: 11.5px; color: var(--t2); margin: 6px 0 4px; max-width: 520px; }
-.evidence > summary { color: var(--t4); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-family: system-ui, sans-serif; cursor: pointer; }
-.evidence > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
+.evidence { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; font-family: var(--mono); font-size: var(--fs-caption); color: var(--t2); margin: 6px 0 4px; max-width: 640px; }
+.evidence > summary { color: var(--t3); font-size: var(--fs-caption); font-family: system-ui, sans-serif; font-weight: 600; cursor: pointer; }
+.evidence > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .evidence[open] > summary { margin-bottom: 4px; }
 .ok { color: var(--good); }
 .no { color: var(--bad); }
-table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
-th { text-align: left; color: var(--t4); font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
+table { border-collapse: collapse; width: 100%; font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
+th { text-align: left; color: var(--t3); font-size: var(--fs-caption); font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
 td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(--t2); }
-.setrow { display: grid; grid-template-columns: 15px 140px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px dashed var(--line); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.setrow.noblurb { grid-template-columns: 15px 1fr auto; }
-.setrow .name { font-weight: 600; color: var(--t2); }
-.setrow .blurb { color: var(--t4); font-size: 12px; }
+.setrow { display: grid; grid-template-columns: 20px minmax(140px, 200px) 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; min-height: 52px; }
+.setrow > .dot { justify-self: center; }
+.setrow.noblurb { grid-template-columns: 20px 1fr auto; }
+.setrow .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); }
+.setrow .blurb { color: var(--t2); font-size: var(--fs-body); }
+.setrow .blurb .caveat { color: var(--warn); font-weight: 600; }
+.setrow .blurb details.howto { color: var(--t3); font-size: var(--fs-caption); }
 .rowform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.keyfield { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; color: var(--t1); font: inherit; font-size: 12.5px; padding: 4px 9px; width: 170px; }
-.keyfield:focus-visible { outline: 1px solid var(--link); outline-offset: 1px; }
-.actmsg { color: var(--t3); font-size: 11.5px; }
+.keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
+.keyfield::placeholder { color: var(--t4); }
+.keyfield:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.actmsg { color: var(--t3); font-size: var(--fs-caption); }
 .actmsg:empty { display: none; }
-.copystatus { color: var(--t3); font-size: 11.5px; margin-left: 8px; }
-.sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 9px; padding: 16px 18px; margin: 12px 0 0; }
+.copystatus { color: var(--t3); font-size: var(--fs-caption); margin-left: 8px; }
+/* A panel opens in place: directly under the row that opened it, joined to
+   it, never further down the page. */
+.sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
-.sheet h4 { margin: 0 0 6px; font-size: 13.5px; }
-.sheet p { color: var(--t3); font-size: 12.5px; margin: 0 0 10px; max-width: 66ch; }
-.sheet .providernote { border-left: 2px solid var(--warn-line); padding-left: 10px; }
-.promptbox { background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 12px 14px; font-family: var(--mono); font-size: 11.5px; color: var(--t2); white-space: pre-wrap; user-select: all; margin-bottom: 10px; word-break: break-all; }
+.sheet h4 { margin: 0 0 6px; font-size: var(--fs-row); }
+.sheet p { color: var(--t2); font-size: var(--fs-body); margin: 0 0 10px; max-width: 72ch; }
+.sheet .providernote { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 9px 12px; }
+.sheet .providernote::before { content: '! '; color: var(--warn); font-weight: 800; }
+.promptbox { background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 12px 14px; font-family: var(--mono); font-size: var(--fs-caption); color: var(--t2); white-space: pre-wrap; user-select: all; margin-bottom: 10px; word-break: break-all; }
 /* The popup-blocked authorization link. Empty on every render that did not
    need it, so it must take no space until the script fills it in. */
 .authfallback { margin-left: 8px; }
@@ -83035,28 +83254,29 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 /* The numbered callback-registration walkthrough. Numbers are the point — the
    owner is following them in another window — so they stay outside the text
    column and the rows breathe. */
-.sheet .steps { margin: 0 0 14px; padding-left: 22px; color: var(--t3); font-size: 12.5px; max-width: 66ch; }
+.sheet .steps { margin: 0 0 14px; padding-left: 22px; color: var(--t2); font-size: var(--fs-body); max-width: 72ch; }
 .sheet .steps li { margin-bottom: 10px; }
 .sheet .steps li:last-child { margin-bottom: 0; }
-.sheet .steps b { color: var(--t2); font-weight: 600; }
+.sheet .steps b { color: var(--t1); font-weight: 600; }
 .sheet .steps .promptbox { margin-top: 6px; }
 .sheet .steps .ext { color: var(--link); }
 /* The agent prompt, now secondary to the steps above it. */
 .sheet .agentprompt { margin-top: 14px; }
-.sheet .agentprompt summary { color: var(--t3); font-size: 12.5px; cursor: pointer; margin-bottom: 8px; }
-.sheet .agentprompt summary:hover { color: var(--link); }
+.sheet .agentprompt summary { color: var(--link); font-size: var(--fs-caption); cursor: pointer; margin-bottom: 8px; }
+.sheet .agentprompt summary:hover { text-decoration: underline; }
 @media (max-width: 700px) {
-  .page { padding: 22px 18px 28px; }
+  body { padding: 0 16px 60px; }
+  .page { padding: 20px 0 28px; }
   .cards, .cards.four { grid-template-columns: 1fr 1fr; }
   .kpis { grid-template-columns: 1fr 1fr; }
-  .setrow { grid-template-columns: 15px 1fr auto; }
+  .setrow { grid-template-columns: 20px 1fr auto; }
   .setrow .blurb { grid-column: 1 / -1; grid-row: 2; }
   .setrow .btn { justify-self: end; width: max-content; }
   /* A row's control and its hint wrap under the reason rather than squeezing
      the name to nothing on a 375px screen. A whole-row link is excluded: its
      arrow is one glyph and belongs beside the text, not on a line of its own. */
   .attncard:not(.rowzone) { flex-wrap: wrap; }
-  .attncard:not(.rowzone) .grow { flex-basis: 100%; }
+  .attncard:not(.rowzone) .grow { flex-basis: calc(100% - 32px); }
   .rowlink { width: 100%; justify-content: flex-end; }
 }
 `;
@@ -83201,7 +83421,11 @@ function sourceCard(input) {
     return `<div class="card">${inner}</div>`;
   return `<a class="card cardlink" href="${escapeHtml(href)}">${inner}</a>`;
 }
-function actionButton(action) {
+function actionButton(input) {
+  const action = input === undefined ? undefined : { ...input, label: dashboardActionLabel(input.label) };
+  if (action?.blockedReason !== undefined && action.kind !== "link" && (action.kind !== "none" || action.sheet !== undefined)) {
+    return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml(action.label)}</button>` + `<span class="hint">${escapeHtml(action.blockedReason)}</span></span>`;
+  }
   if (action === undefined || action.kind === "none") {
     if (action?.sheet === undefined)
       return "";
@@ -83243,15 +83467,15 @@ function dashboardControlGate(input) {
   }
   const sheetId = `${DASHBOARD_CONTROL_GATE_ID}-how`;
   const promptId = `${sheetId}-prompt`;
-  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Open dashboard controls</span>` + `<span class="why"> — ask your agent for a fresh opening link. No token copying needed.</span></div>` + `<button class="btn primary" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Get opening link</button></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Open dashboard controls</h4>` + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn primary" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<details><summary>Advanced: use a worker token</summary>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn" type="submit">Unlock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></details></div>`;
+  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Open dashboard controls</span>` + `<span class="why"> — ask your agent for a fresh opening link. No token copying needed.</span></div>` + `<button class="btn primary" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Get opening link</button></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Open dashboard controls</h4>` + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<details><summary>Advanced: use a worker token</summary>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn" type="submit">Unlock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></details></div>`;
 }
 function attentionRow(input) {
   const why = (input.why ?? "").trim();
   const reason = why === "" ? "" : `<span class="why"> — ${escapeHtml(why)}</span>`;
   const bar = input.barPercent === undefined ? "" : progressBar({ percent: input.barPercent, label: `${clampPercent2(input.barPercent)} percent` });
-  const klass = input.attention === true ? "attncard" : "attncard plain";
+  const klass = input.attention === true ? input.tone === "error" ? "attncard error" : "attncard" : "attncard plain";
   const href = safeHref(input.href);
-  const control = actionButton(input.action) + actionButton(input.secondaryAction);
+  const control = rowControls(input.label, [input.action, input.secondaryAction]);
   if (href !== undefined && control === "") {
     return `<a class="${klass} rowzone" href="${escapeHtml(href)}">` + `<div class="grow"><span class="name">${escapeHtml(input.label)}</span>${reason}${bar}</div>` + `<span class="go" aria-hidden="true">→</span>` + `</a>`;
   }
@@ -83259,14 +83483,35 @@ function attentionRow(input) {
   const go = href === undefined ? "" : `<a class="go" href="${escapeHtml(href)}" aria-label="${escapeHtml(`${input.label} details`)}">→</a>`;
   return `<div class="${klass}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ""}>` + `<div class="grow">${name}${reason}${bar}</div>` + `${control}${go}` + `</div>`;
 }
+function isMenuAction(action) {
+  return action.quiet === true || MENU_ACTION_KINDS.has(action.kind);
+}
+function rowControls(label, actions) {
+  const present = actions.filter((action) => action !== undefined);
+  const main = present.filter((action) => !isMenuAction(action)).map((action) => actionButton(action)).join("");
+  const menu = present.filter(isMenuAction).map((action) => actionButton({ ...action, quiet: false })).join("");
+  return main + rowMenu(label, menu);
+}
+function rowMenu(label, itemsHtml) {
+  if (itemsHtml.trim() === "")
+    return "";
+  return `<details class="rowmenu"><summary class="btn" aria-label="${escapeHtml(`More actions for ${label}`)}">⋯</summary>` + `<div class="menu">${itemsHtml}</div></details>`;
+}
 function setupRow(input) {
   const href = safeHref(input.href);
   const blurb = input.blurb.trim();
   const link = input.blurbLink === undefined ? "" : externalLink(input.blurbLink);
   const blurbText = blurb === "" ? "" : escapeHtml(blurb);
-  const blurbBody = [blurbText, link].filter((part) => part !== "").join(" ");
+  const instructions = [blurbText, link].filter((part) => part !== "").join(" ");
+  const summary = (input.summary ?? "").trim();
+  const caveat = (input.caveat ?? "").trim();
+  const lead = [
+    caveat === "" ? "" : `<span class="caveat">${escapeHtml(caveat)}.</span>`,
+    summary === "" ? "" : escapeHtml(summary)
+  ].filter((part) => part !== "").join(" ");
+  const blurbBody = lead === "" ? instructions : `${lead}${instructions === "" ? "" : detailsDisclosure("How to set this up", `<p>${instructions}</p>`)}`;
   const blurbSpan = blurbBody === "" ? "" : `<span class="blurb">${blurbBody}</span>`;
-  return `<div class="${blurbBody === "" ? "setrow noblurb" : "setrow"}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ""}>` + `${dotGlyph(DASHBOARD_STATUS_COLORS.Off)}` + (href ? `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>` : `<span class="name">${escapeHtml(input.label)}</span>`) + `${blurbSpan}` + `${actionButton(input.action)}` + `</div>`;
+  return `<div class="${blurbBody === "" ? "setrow noblurb" : "setrow"}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ""}>` + `${dotGlyph(DASHBOARD_STATUS_COLORS.Off)}` + (href ? `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>` : `<span class="name">${escapeHtml(input.label)}</span>`) + `${blurbSpan}` + `${actionButton({ ...input.action, primary: input.action.primary ?? true })}` + `</div>`;
 }
 function progressBar(input) {
   const percent = clampPercent2(input.percent);
@@ -83282,7 +83527,15 @@ function phaseBar(input) {
   return `<div class="phase ${state}">${heading}` + `<div class="bar ${state}" role="progressbar" aria-label="${escapeHtml(input.label)}"` + ` aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-valuetext="${escapeHtml(`${input.facts} · ${input.stateWords}`)}"><i style="width:${percent}%"></i></div>` + `</div>`;
 }
 function attentionBanner(input) {
-  return `<div class="attncard banner">` + `<div class="grow"><span class="name">${escapeHtml(input.label)}</span>` + `<span class="why"> — ${escapeHtml(input.sentence)}</span></div>` + `${actionButton(input.action)}${actionButton(input.secondaryAction)}` + `</div>`;
+  return `<div class="attncard banner">` + `<div class="grow"><span class="name">${escapeHtml(input.label)}</span>` + `<span class="why"> — ${escapeHtml(input.sentence)}</span></div>` + `${rowControls(input.label, [input.action, input.secondaryAction])}` + `</div>`;
+}
+function blockerBanner(input) {
+  return `<div class="attncard banner blocker" role="status" data-blocker>` + `<div class="grow"><span class="name">${escapeHtml(input.sentence)}</span></div>` + `${input.controlHtml ?? actionButton(input.action)}` + `</div>`;
+}
+function detailsDisclosure(summary, body) {
+  if (body.trim() === "")
+    return "";
+  return `<details class="howto"><summary>${escapeHtml(summary)}</summary>${body}</details>`;
 }
 function advancedPanel(input) {
   if (input.body.trim() === "")
@@ -83291,12 +83544,13 @@ function advancedPanel(input) {
 }
 function miniBar(input) {
   const percent = clampPercent2(input.percent);
-  return `<span class="minibar" role="progressbar" aria-label="${escapeHtml(input.label)}" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100">` + `<i style="width:${percent}%"></i>` + `</span>`;
+  const bar = `<span class="minibar" role="progressbar" aria-label="${escapeHtml(input.label)}" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100">` + `<i style="width:${percent}%"></i>` + `</span>`;
+  return input.showPercent === true ? `<span class="labeledbar">${bar}<span class="pct" aria-hidden="true">${Math.floor(percent)}%</span></span>` : bar;
 }
 function backgroundRow(input) {
   const href = safeHref(input.href);
   const lines = input.lines.map((line) => {
-    const bar = line.percent === undefined ? "<span></span>" : miniBar({ percent: line.percent, label: `${line.name} progress` });
+    const bar = line.percent === undefined ? "<span></span>" : miniBar({ percent: line.percent, label: `${line.name} progress`, showPercent: true });
     return `<span class="bgl"><span class="nm">${escapeHtml(line.name)}</span>` + `<span class="fx">${escapeHtml(line.facts)}</span>${bar}</span>`;
   }).join("");
   if (href === undefined) {
@@ -83321,7 +83575,7 @@ function countChip(input) {
 function connectorSheet(input) {
   const id = safeId2(input.id);
   const promptId = `${id}-prompt`;
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `<p>${escapeHtml(input.intro)}</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(input.promptText)}</div>` + `<button class="btn primary" type="button" data-copy-target="#${promptId}">${escapeHtml(input.copyButtonLabel)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `<p>${escapeHtml(input.intro)}</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">${escapeHtml(input.copyButtonLabel)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</div>`;
 }
 function connectSetupSheet(input) {
   const id = safeId2(input.id);
@@ -83331,7 +83585,7 @@ function connectSetupSheet(input) {
     const placeholder = input.placeholders?.[field.name] ?? field.label;
     return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml(field.name)}"` + `${field.required ? " required" : ""}` + `${value === undefined ? "" : ` value="${escapeHtml(value)}"`}` + ` placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(field.label)}">`;
   }).join("");
-  const notice = (input.notice === undefined || input.notice.trim() === "" ? "" : `<p class="why">${escapeHtml(input.notice)}</p>`) + (input.providerNote === undefined || input.providerNote.trim() === "" ? "" : `<p class="providernote">${escapeHtml(input.providerNote)}</p>`);
+  const notice = (input.notice === undefined || input.notice.trim() === "" ? "" : `<p class="why">${escapeHtml(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail === undefined ? "" : `<p class="hint">${escapeHtml(input.noticeDetail)}</p>`)) + (input.providerNote === undefined || input.providerNote.trim() === "" ? "" : `<p class="providernote">${escapeHtml(input.providerNote)}</p>`);
   const registration = callbackRegistrationSteps(id, input.registration);
   const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml(input.redirectUri.guidance)}</p>`}`;
   const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml(input.source)}">` + `<button class="btn quiet" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
@@ -83383,12 +83637,12 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
   const notice = options.notice ?? pendingNote;
   const sheet = connectSetupSheet({
     id: sheetId,
-    heading: `${action.label} ${source.label}`,
+    heading: `${dashboardActionLabel(action.label)} ${source.label}`,
     intro: byo.plain_intro,
     promptText: byo.agent_prompt,
     source: action.source,
     fields,
-    submitLabel: action.label,
+    submitLabel: dashboardActionLabel(action.label),
     ...action.publisher_client ? {
       publisher: {
         intro: instructions.plain_intro,
@@ -83399,6 +83653,7 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
     ...action.known_client_id ? { values: { client_id: action.known_client_id } } : {},
     ...action.pending_attempt ? { cancellable: true } : {},
     ...notice === undefined ? {} : { notice },
+    ...options.noticeDetail === undefined ? {} : { noticeDetail: options.noticeDetail },
     ...options.providerNote === undefined ? {} : { providerNote: options.providerNote },
     ...redirectUriInput(action)
   });
@@ -83520,13 +83775,15 @@ function standaloneDashboardControllerScript(input) {
     })();
   </script>`;
 }
-var DONUT_CIRCUMFERENCE = 12.566, HEX_COLOR, DASHBOARD_CONTROL_GATE_ID = "dashboard-controls", DASHBOARD_WORKER_TOKEN_AGENT_PROMPT;
+var DONUT_CIRCUMFERENCE = 12.566, HEX_COLOR, DASHBOARD_CONTROL_GATE_ID = "dashboard-controls", DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, MENU_ACTION_KINDS;
 var init_components = __esm(() => {
   init_source_dashboard();
   init_phases();
   init_theme();
+  init_vocabulary();
   HEX_COLOR = /^#[0-9A-Fa-f]{3,8}$/;
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
+  MENU_ACTION_KINDS = new Set(["disconnect", "unpair", "oauth_cancel"]);
 });
 
 // src/workers/dashboard/lane-state.ts
@@ -83681,7 +83938,8 @@ function armLaneBanners(input) {
       lane: item.lane,
       words: item.words,
       ...item.href === undefined ? {} : { href: item.href },
-      ...item.hrefLabel === undefined ? {} : { hrefLabel: item.hrefLabel }
+      ...item.hrefLabel === undefined ? {} : { hrefLabel: item.hrefLabel },
+      ...item.detail === undefined ? {} : { detail: item.detail }
     });
   }
   return banners;
@@ -83724,7 +83982,50 @@ var init_nav = __esm(() => {
 function dashboardBackgroundLanes(view, options) {
   const now = options?.now ?? new Date;
   const basePath = options?.basePath;
-  return [embeddingsLane(view, options), visionLane(view, basePath), syncsLane(view, now, basePath)].filter((lane) => lane !== undefined);
+  return [embeddingsLane(view, options, now), visionLane(view, basePath), syncsLane(view, now, basePath)].filter((lane) => lane !== undefined);
+}
+function dashboardIndexingProgress(view, options, now) {
+  const lane = embeddingsLaneView(view, options, now);
+  const backlog = view.background_work?.embedding_backlog;
+  if (lane === undefined && backlog === undefined)
+    return;
+  const disabled = view.background_work?.embedding_lane_state === "embedding_lane_disabled";
+  const percent = lane?.fraction === undefined ? undefined : lane.fraction * 100;
+  const itemsLeft = indexItemsLeft(view.sources);
+  const base = {
+    ...percent === undefined ? {} : { percent },
+    ...itemsLeft === undefined ? {} : { itemsLeft }
+  };
+  if (backlog !== undefined && backlog.missing_chunks <= 0)
+    return { ...base, state: "done" };
+  if (disabled)
+    return { ...base, state: "off" };
+  const status = lane?.status;
+  if (status === undefined)
+    return { ...base, state: "unknown" };
+  if (status.stuck !== undefined)
+    return { ...base, state: "stalled" };
+  if (status.kind === "active") {
+    return { ...base, state: "moving", ...status.etaMs === undefined ? {} : { etaMs: status.etaMs } };
+  }
+  if (status.kind === "waiting")
+    return { ...base, state: "paused" };
+  if (status.kind === "done")
+    return { ...base, state: "done" };
+  return { ...base, state: "unknown" };
+}
+function indexItemsLeft(sources) {
+  const indexing = sources.filter((source) => source.embedding_backlog !== undefined);
+  if (indexing.length === 0)
+    return;
+  let left = 0;
+  for (const source of indexing) {
+    const files = source.coverage.embedded_files;
+    if (files === undefined)
+      return;
+    left += Math.max(0, source.coverage.content_ready_items - files);
+  }
+  return left;
 }
 function detailHref(source, basePath) {
   const path = basePath ?? DEFAULT_BASE_PATH2;
@@ -83735,7 +84036,7 @@ function detailLink(source, basePath) {
   return { href: detailHref(source, basePath), hrefLabel: `Open ${source.label} →` };
 }
 function dashboardBackgroundRowLines(lanes) {
-  return lanes.map((lane) => ({
+  return lanes.filter((lane) => (lane.facts ?? "").trim() !== "" || lane.fraction !== undefined).map((lane) => ({
     name: lane.name,
     facts: lane.facts,
     ...lane.fraction === undefined ? {} : { percent: lane.fraction * 100 }
@@ -83988,13 +84289,13 @@ function actionableConditions(view, options) {
   if (view.background_work?.embedding_lane_state === "embedding_lane_disabled") {
     actionable.push({
       lane: "Embeddings",
-      words: "The embedding lane is switched off, so nothing will embed the chunks that are left."
+      words: "Indexing is switched off, so new material will not become searchable."
     });
   }
   if (options?.embeddingRuntime?.state === "guard_paused") {
     actionable.push({
       lane: "Embeddings",
-      words: "The overnight guard is paused, so nothing will start or stop the embedding lane " + "until the pause is lifted."
+      words: "Background work is paused, so indexing will not start again until it is resumed."
     });
   }
   for (const source of view.sources) {
@@ -84002,7 +84303,7 @@ function actionableConditions(view, options) {
     if (drain === "held" || drain === "disabled") {
       actionable.push({
         lane: "Vision",
-        words: `Extraction is ${drain === "held" ? "held" : "switched off"} on ${source.label}, so no new text is being extracted from it.`,
+        words: `Reading new files is ${drain === "held" ? "paused" : "switched off"} on ${source.label}.`,
         ...detailLink(source, basePath)
       });
     }
@@ -84014,7 +84315,8 @@ function actionableConditions(view, options) {
     if (dashboardSyncKeepsFailing(source)) {
       actionable.push({
         lane: "Syncs",
-        words: `${source.label}'s scheduled sync keeps failing` + `${schedule.last_error_kind ? ` (${maskSecrets(schedule.last_error_kind)})` : ""}, so new material is not coming in.`,
+        words: `${source.label} keeps failing to sync, so new material is not coming in.`,
+        ...schedule.last_error_kind ? { detail: `Last error: ${schedule.last_error_kind}` } : {},
         ...detailLink(source, basePath)
       });
       continue;
@@ -84025,7 +84327,7 @@ function actionableConditions(view, options) {
       continue;
     actionable.push({
       lane: "Syncs",
-      words: `${source.label} has failed ${dashboardCount(schedule.consecutive_failures)} ` + `${plural2(schedule.consecutive_failures, "time")} in a row and nothing is scheduled to try it again.`,
+      words: `${source.label} has failed to sync ${dashboardCount(schedule.consecutive_failures)} ` + `${plural2(schedule.consecutive_failures, "time")} in a row and no retry is booked.`,
       ...detailLink(source, basePath)
     });
   }
@@ -84035,7 +84337,8 @@ function actionableConditions(view, options) {
       continue;
     actionable.push({
       lane: "Syncs",
-      words: `The scheduler is running ${source.label} degraded — ${maskSecrets(reason)}.`,
+      words: `${source.label} is syncing in a reduced mode.`,
+      detail: `The scheduler is running ${source.label} degraded — ${reason}.`,
       ...detailLink(source, basePath)
     });
   }
@@ -84045,14 +84348,14 @@ function renderDashboardBackgroundPage(view, options) {
   const now = options?.now ?? new Date;
   const lanes = backgroundLaneViews(view, options, now);
   const checked = dashboardCheckedLabel(view.generated_at, now);
-  const head = laneHeadline(lanes);
+  const head = jobsHeadline(lanes);
   return pageShell({
     title: "Olympus",
     crumb: "Background",
     ...options?.basePath === undefined ? {} : { basePath: options.basePath },
     meta: checked ? `${head} · ${checked}` : head,
     body: renderBackgroundBody(view, lanes, now, options),
-    styles: [DASHBOARD_LANE_CSS, DASHBOARD_NAV_CSS, BACKGROUND_CSS],
+    styles: [DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_NAV_CSS, BACKGROUND_CSS],
     controller: { ...options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken } },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
@@ -84067,7 +84370,7 @@ function renderBackgroundBody(view, lanes, now, options) {
   });
   if (lanes.length === 0) {
     return `${nav}
-        <div class="foot">No background lane is reporting right now.</div>${renderInformational(options)}`;
+        <div class="foot">Nothing is running in the background right now.</div>` + advancedPanel({ label: "Details", body: renderInformational(options) });
   }
   const banners = armLaneBanners({
     lanes: lanes.map((lane) => ({ name: lane.name, status: lane.status })),
@@ -84075,36 +84378,63 @@ function renderBackgroundBody(view, lanes, now, options) {
   });
   return [
     nav,
-    renderBanners(banners),
-    renderKpis(backgroundKpis(view, lanes)),
-    renderLanes(lanes),
+    renderBanners(banners, lanes),
+    renderProgress(view, options, now),
     renderRecentRuns(view, now),
-    renderInformational(options)
+    advancedPanel({
+      label: "Details",
+      body: [
+        renderKpis(backgroundKpis(view, lanes)),
+        renderLanes(lanes),
+        renderInformational(options)
+      ].join("")
+    })
   ].filter((section) => section.length > 0).join("");
 }
-function laneHeadline(lanes) {
-  if (lanes.length === 0)
-    return "nothing reporting";
+function jobsHeadline(lanes) {
   const stuck = lanes.filter((lane) => lane.status.stuck !== undefined).length;
-  if (stuck > 0)
-    return `${dashboardCount(stuck)} ${plural2(stuck, "lane")} not moving`;
   const working = lanes.filter((lane) => lane.status.kind === "active").length;
-  return working === 0 ? "no lane working" : `${dashboardCount(working)} ${plural2(working, "lane")} working`;
+  return dashboardJobsLine(working, stuck);
 }
-function renderBanners(banners) {
+function laneOwnerName(lane) {
+  return LANE_OWNER_NAMES[lane] ?? "A background job";
+}
+function renderProgress(view, options, now) {
+  const progress = dashboardIndexingProgress(view, options, now);
+  if (progress === undefined)
+    return "";
+  const line = dashboardIndexingLine(progress);
+  const bar = progress.percent === undefined ? "" : `<div class="lbar">${miniBar({ percent: progress.percent, label: `${DASHBOARD_INDEXING_NAME} ${Math.floor(progress.percent)} percent done`, showPercent: true })}</div>`;
+  const control = options?.embeddingRuntime === undefined ? "" : renderEmbeddingToggle(options.embeddingRuntime, options);
+  return `
+        <div class="lane indexing" data-indexing-progress><div class="lfacts">${escapeHtml(line)}</div>${bar}${control}</div>`;
+}
+function renderBanners(banners, lanes) {
   if (banners.length === 0)
     return "";
+  const stuckLanes = new Set(lanes.filter((lane) => lane.status.stuck !== undefined).map((lane) => lane.name));
   const rows = banners.map((banner) => {
-    const why = banner.lastGoverning === undefined ? banner.words : `${banner.words} Last governing condition: ${banner.lastGoverning}.`;
-    return attentionRow({
-      label: banner.lane,
+    const stuck = stuckLanes.has(banner.lane) && banner.href === undefined;
+    const why = stuck ? "has stopped moving" : banner.words;
+    const technical = [
+      stuck ? banner.words : "",
+      banner.detail ?? "",
+      banner.lastGoverning === undefined ? "" : `Last governing condition: ${banner.lastGoverning}.`
+    ].filter((part) => part !== "").join(" ");
+    const href = safeHref(banner.href);
+    const row = attentionRow({
+      label: laneOwnerName(banner.lane),
       why: maskSecrets(why),
       attention: true,
-      ...safeHref(banner.href) === undefined ? {} : { href: banner.href }
+      ...href === undefined ? {} : {
+        href,
+        action: { label: (banner.hrefLabel ?? "Open").replace(/\s*→$/, ""), kind: "link", href }
+      }
     });
+    return technical === "" ? row : `${row}${detailsDisclosure("Details", `<p class="hint">${escapeHtml(maskSecrets(technical))}</p>`)}`;
   }).join("");
   return `
-        <div class="sect attn">Needs a look</div>${rows}`;
+        <div class="sect attn">Needs you</div>${rows}`;
 }
 function laneStateTone(status) {
   if (status.stuck !== undefined)
@@ -84266,22 +84596,18 @@ function renderKpis(kpis) {
         <div class="kpis">${tiles}
         </div>`;
 }
-function embeddingsLane(view, options) {
+function embeddingsLane(view, options, now) {
   const backlog = view.background_work?.embedding_backlog;
   const disabled = view.background_work?.embedding_lane_state === "embedding_lane_disabled";
   const runtime = options?.embeddingRuntime;
   if (!backlog && !disabled && !runtime)
     return;
-  const facts = [];
   const checks4 = [];
   let fraction;
+  const progress = dashboardIndexingProgress(view, options, now);
   if (backlog) {
     fraction = backlog.chunks > 0 ? clampFraction2(backlog.embedded_chunks / backlog.chunks) : undefined;
-    if (fraction !== undefined)
-      facts.push(`${Math.round(fraction * 100)}% embedded`);
-    facts.push(backlog.missing_chunks > 0 ? `${compactCount(backlog.missing_chunks)} of ${compactCount(backlog.chunks)} chunks left` : `all ${compactCount(backlog.chunks)} chunks embedded`);
     if (backlog.refresh_needed) {
-      facts.push("re-embed needed");
       checks4.push({
         name: "EMBEDDING_PARITY",
         observed: `${dashboardCount(backlog.missing_chunks)} of ${dashboardCount(backlog.chunks)} chunks missing`,
@@ -84293,7 +84619,6 @@ function embeddingsLane(view, options) {
     }
   }
   if (disabled) {
-    facts.push("embedding lane disabled");
     checks4.push({
       name: "EMBEDDING_LANE",
       observed: "disabled",
@@ -84303,8 +84628,8 @@ function embeddingsLane(view, options) {
     });
   }
   return {
-    name: "Embeddings",
-    facts: facts.join(" · "),
+    name: DASHBOARD_INDEXING_NAME,
+    facts: progress === undefined ? "" : dashboardIndexingFacts(progress),
     working: runtime === undefined ? !disabled && (backlog?.missing_chunks ?? 0) > 0 : runtime.state === "running" || runtime.state === "operator_priority",
     checks: checks4,
     checksHeading: "Embeddings",
@@ -84319,17 +84644,16 @@ function visionLane(view, basePath) {
   if (queued === undefined && held.length === 0 && stuck.length === 0)
     return;
   const facts = [];
-  if (queued !== undefined)
-    facts.push(`${dashboardCount(queued)} ${plural2(queued, "job")} queued`);
+  if (queued !== undefined && queued > 0)
+    facts.push(`${dashboardCount(queued)} ${plural2(queued, "file")} waiting`);
   const waitingOn = view.sources.filter((source) => (source.vlm_extraction_queued ?? 0) > 0).map((source) => source.label);
   if (waitingOn.length > 0)
-    facts.push(waitingOn.join(", "));
-  if (held.length > 0) {
-    facts.push(`extraction held on ${dashboardCount(held.length)} ${plural2(held.length, "source")}`);
+    facts.push(`from ${waitingOn.join(", ")}`);
+  if (held.length > 0 || off.length > 0) {
+    facts.push(`paused on ${[...held, ...off].map((source) => source.label).join(", ")}`);
   }
-  if (off.length > 0) {
-    facts.push(`extraction off on ${dashboardCount(off.length)} ${plural2(off.length, "source")}`);
-  }
+  if (facts.length === 0)
+    facts.push("nothing waiting");
   const checks4 = [];
   for (const source of [...held, ...off]) {
     checks4.push({
@@ -84355,7 +84679,7 @@ function visionLane(view, basePath) {
     });
   }
   return {
-    name: "Vision",
+    name: DASHBOARD_READING_NAME,
     facts: facts.join(" · "),
     working: (queued ?? 0) > 0 && held.length === 0,
     checks: checks4,
@@ -84372,21 +84696,22 @@ function syncsLane(view, now, basePath) {
   if (running.length > 0) {
     facts.push(`${dashboardCount(running.length)} syncing now`);
   } else if (failing.length === 0) {
-    facts.push(`all ${dashboardCount(scheduled.length)} on schedule`);
-  } else {
-    facts.push(`${dashboardCount(scheduled.length - failing.length)} of ${dashboardCount(scheduled.length)} on schedule`);
+    facts.push("on schedule");
   }
-  const persistentlyFailing = failing.filter((source) => dashboardSyncKeepsFailing(source));
-  const retryingOnly = failing.length - persistentlyFailing.length;
+  const shownAbove = new Set(dashboardStatusGroups(view).filter((group) => group.status === "Needs you" || group.status === "Failing").flatMap((group) => group.sources));
+  const unlisted = failing.filter((source) => !shownAbove.has(source));
+  const persistentlyFailing = unlisted.filter((source) => dashboardSyncKeepsFailing(source));
+  const retrying = unlisted.filter((source) => !dashboardSyncKeepsFailing(source));
+  const retryingOnly = retrying.length;
   if (retryingOnly > 0) {
-    facts.push(`${dashboardCount(retryingOnly)} ${plural2(retryingOnly, "source")} retrying`);
+    facts.push(`${listLabels(retrying)} ${retryingOnly === 1 ? "is" : "are"} retrying on ${retryingOnly === 1 ? "its" : "their"} own`);
   }
   if (persistentlyFailing.length > 0) {
-    facts.push(`${dashboardCount(persistentlyFailing.length)} ${plural2(persistentlyFailing.length, "source")} failing`);
+    facts.push(`${listLabels(persistentlyFailing)} ${persistentlyFailing.length === 1 ? "keeps" : "keep"} failing`);
   }
   const queued = view.sources.reduce((total, source) => total + source.queue_health.waiting + source.queue_health.active, 0);
   if (queued > 0)
-    facts.push(`${dashboardCount(queued)} ${plural2(queued, "item")} queued`);
+    facts.push(`${dashboardCount(queued)} ${plural2(queued, "item")} waiting`);
   const next = nextRunLabel(scheduled, now);
   if (next)
     facts.push(next);
@@ -84397,8 +84722,8 @@ function syncsLane(view, now, basePath) {
       continue;
     const retryAt = schedule.next_run_at ? Date.parse(schedule.next_run_at) : Number.NaN;
     const booked = Number.isFinite(retryAt);
-    const retrying = source.queue_health.retrying_tasks ?? 0;
-    const selfHealing = !dashboardSyncKeepsFailing(source) && (booked || retrying > 0);
+    const retrying2 = source.queue_health.retrying_tasks ?? 0;
+    const selfHealing = !dashboardSyncKeepsFailing(source) && (booked || retrying2 > 0);
     checks4.push({
       name: "CONSECUTIVE_FAILURES",
       observed: `${source.label}: ${dashboardCount(schedule.consecutive_failures)}`,
@@ -84406,12 +84731,12 @@ function syncsLane(view, now, basePath) {
       ...schedule.last_error_kind ? { cause: schedule.last_error_kind } : {},
       ok: false,
       disposition: selfHealing ? "self_healing" : "needs_you",
-      ...selfHealing ? { dispositionNote: booked ? "requeued" : `${dashboardCount(retrying)} ${plural2(retrying, "task")} retrying` } : detailLink(source, basePath)
+      ...selfHealing ? { dispositionNote: booked ? "requeued" : `${dashboardCount(retrying2)} ${plural2(retrying2, "task")} retrying` } : detailLink(source, basePath)
     });
   }
   const strip = runStrip(scheduled);
   return {
-    name: "Syncs",
+    name: DASHBOARD_SYNCING_NAME,
     facts: facts.join(" · "),
     working: running.length > 0,
     checks: checks4,
@@ -84441,19 +84766,20 @@ function renderEmbeddingDetail(runtime, options) {
   if (runtime.override === "unreadable") {
     lines.push(`<div class="embline warn">The operator override file could not be read, so the toggle ` + `below cannot report its current position.</div>`);
   }
-  lines.push(renderEmbeddingToggle(runtime, options));
+  if (options?.readOnly !== true) {
+    lines.push('<div class="embline">The Index faster switch takes effect within a minute — the guard re-reads it on its next tick.</div>');
+  }
   return `
         <div class="embblock">${lines.join("")}
         </div>`;
 }
 function renderEmbeddingToggle(runtime, options) {
-  const takesEffect = '<div class="embline">Takes effect within a minute — the guard re-reads this on its next tick.</div>';
   if (options?.readOnly === true) {
-    return `<div class="embline">Embedding priority is ${runtime.overrideOn ? "on" : "off"}. ` + `Changing it asks for the worker bearer token, which this read-only link does not carry.</div>`;
+    return `<div class="embline">Index faster is ${runtime.overrideOn ? "on" : "off"}. ` + `Changing it needs dashboard controls, which this read-only link does not have.</div>`;
   }
-  const label = runtime.overrideOn ? "Turn off embedding priority" : "Give embedding priority";
-  const explain = runtime.overrideOn ? "Priority is on: the supervisors are parked and this lane keeps running. Turning it off restores normal arbitration." : "Turning this on parks the source-processing supervisors so this lane keeps running until you turn it off.";
-  return `<div class="embline">${escapeHtml(explain)}</div>` + `<form class="rowform" data-embedding-kind="operator_override">` + `<input type="hidden" name="on" value="${runtime.overrideOn ? "false" : "true"}">` + `<button class="btn" type="submit">${escapeHtml(label)}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + takesEffect;
+  const label = runtime.overrideOn ? DASHBOARD_INDEX_FASTER.off : DASHBOARD_INDEX_FASTER.on;
+  const explain = runtime.overrideOn ? DASHBOARD_INDEX_FASTER.explainOff : DASHBOARD_INDEX_FASTER.explainOn;
+  return `<form class="rowform" data-embedding-kind="operator_override">` + `<input type="hidden" name="on" value="${runtime.overrideOn ? "false" : "true"}">` + `<button class="btn" type="submit">${escapeHtml(label)}</button>` + `<span class="hint">${escapeHtml(explain)}</span>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
 }
 function runStrip(sources) {
   return sources.filter((source) => source.last_run !== undefined).sort((left, right) => runOrder(left) - runOrder(right)).map((source) => ({
@@ -84554,10 +84880,16 @@ function compactCount(value) {
   }
   return `${Math.round(value / 1e5) / 10}M`;
 }
+function listLabels(sources) {
+  const labels = sources.map((source) => source.label);
+  if (labels.length <= 1)
+    return labels[0] ?? "";
+  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+}
 function plural2(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var RECENT_RUN_LIMIT = 8, DEFAULT_BASE_PATH2 = "/dashboard", DETAIL_QUERY_PARAM = "source", EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger", SCHEDULER_SELF_PAUSE_SENTENCES, PARKED_EMBEDDING_STATES, LANE_STATE_WORDS, STRIP_TONE_COLORS;
+var RECENT_RUN_LIMIT = 8, DEFAULT_BASE_PATH2 = "/dashboard", DETAIL_QUERY_PARAM = "source", EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger", SCHEDULER_SELF_PAUSE_SENTENCES, PARKED_EMBEDDING_STATES, LANE_OWNER_NAMES, LANE_STATE_WORDS, STRIP_TONE_COLORS, DASHBOARD_READING_NAME = "Reading files", DASHBOARD_SYNCING_NAME = "Syncing";
 var init_background = __esm(() => {
   init_components();
   init_lane_state();
@@ -84580,6 +84912,11 @@ var init_background = __esm(() => {
     "parked",
     "guard_paused"
   ]);
+  LANE_OWNER_NAMES = {
+    Embeddings: DASHBOARD_INDEXING_NAME,
+    Vision: "Reading files",
+    Syncs: "Syncing"
+  };
   LANE_STATE_WORDS = {
     active: "Working now",
     waiting: "Waiting",
@@ -84594,167 +84931,6 @@ var init_background = __esm(() => {
   };
 });
 
-// src/workers/dashboard/pages/home.ts
-function renderDashboardHomePage(view, options) {
-  const groups = dashboardConnectedStatusGroups(view, options);
-  const background = renderBackgroundSection(view, options);
-  const blocks = groups.map((group, index) => renderSection(group, view, options, background === "" && index === groups.length - 1));
-  blocks.push(background);
-  blocks.push(renderSetupLink(options));
-  const nav = renderDashboardNav("home", {
-    ...options?.basePath === undefined ? {} : { basePath: options.basePath }
-  });
-  return pageShell({
-    title: "Olympus",
-    meta: dashboardHomeMeta(view, options),
-    body: [
-      nav,
-      ...blocks.filter((block) => block.length > 0)
-    ].join(`
-`),
-    styles: [DASHBOARD_LANE_CSS, DASHBOARD_NAV_CSS],
-    controller: { ...options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken } },
-    poll: {
-      unlocked: options?.controlSessionCsrfToken !== undefined,
-      ...options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }
-    },
-    ...options?.format === undefined ? {} : { format: options.format }
-  });
-}
-function renderSetupLink(options) {
-  return `<div class="foot"><a href="${escapeHtml(setupHref(options?.basePath))}">Connect more sources →</a></div>`;
-}
-function setupHref(basePath) {
-  const path = basePath ?? DEFAULT_BASE_PATH3;
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}${SETUP_QUERY_PARAM2}`;
-}
-function renderBackgroundSection(view, options) {
-  const lanes = dashboardBackgroundLanes(view, options);
-  if (lanes.length === 0)
-    return "";
-  return [
-    '<div class="sect">Background</div>',
-    backgroundRow({
-      href: backgroundHref(options?.basePath),
-      label: "Background work details",
-      lines: dashboardBackgroundRowLines(lanes)
-    })
-  ].join(`
-`);
-}
-function backgroundHref(basePath) {
-  const path = basePath ?? DEFAULT_BASE_PATH3;
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}${BACKGROUND_QUERY_PARAM2}`;
-}
-function renderSection(group, view, options, last) {
-  return ATTENTION_STATUSES.includes(group.status) ? renderAttentionSection(group, view, options) : renderCardSection(group, options, last);
-}
-function renderAttentionSection(group, view, options) {
-  const rows = group.sources.map((source) => {
-    const resolved = attentionAction(source, view, options);
-    const row = attentionRow({
-      label: source.label,
-      why: dashboardAttentionLine(source, options),
-      href: detailHref2(source, options?.basePath),
-      attention: true,
-      ...resolved === undefined ? {} : { action: resolved.action }
-    });
-    return resolved?.sheet === undefined ? row : `${row}
-${resolved.sheet}`;
-  });
-  return [sectionHeading(group, true), ...rows].join(`
-`);
-}
-function renderCardSection(group, options, last) {
-  const cards = group.sources.map((source) => {
-    const fraction = group.status === "Working" ? dashboardWorkFraction(source) : undefined;
-    return sourceCard({
-      label: source.label,
-      status: group.status,
-      subLine: dashboardSubLine(source, options),
-      href: detailHref2(source, options?.basePath),
-      ...fraction === undefined ? {} : { fraction }
-    });
-  });
-  return [
-    sectionHeading(group, false),
-    `<div class="cards"${gridStyle(group.sources.length, last)}>`,
-    ...cards,
-    "</div>"
-  ].join(`
-`);
-}
-function sectionHeading(group, attention) {
-  const text = escapeHtml(`${group.status} — ${group.sources.length}`);
-  return attention ? `<div class="sect attn">▲ ${text}</div>` : `<div class="sect">${text}</div>`;
-}
-function gridStyle(count, last) {
-  const rules = [];
-  if (count >= 4) {
-    rules.push("grid-template-columns:repeat(4,1fr)");
-  }
-  if (!last) {
-    rules.push("margin-bottom:22px");
-  }
-  return rules.length === 0 ? "" : ` style="${escapeHtml(rules.join("; "))}"`;
-}
-function detailHref2(source, basePath) {
-  const path = basePath ?? DEFAULT_BASE_PATH3;
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}${DETAIL_QUERY_PARAM2}=${encodeURIComponent(source.source_id)}`;
-}
-function attentionAction(source, view, options) {
-  const action = source.connection.action;
-  const reconnecting = source.coverage.indexed_items > 0;
-  if (action.kind === "needs_setup") {
-    if (!dashboardControlsAvailable(options)) {
-      return { action: lockedAction(reconnecting ? "Reauthenticate" : action.label, options?.basePath) };
-    }
-    const note = dashboardGoogleProviderNote(view, action);
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, note === undefined ? {} : { providerNote: note });
-    return {
-      action: { label: reconnecting ? "Reauthenticate" : action.label, kind: "none", sheet: sheetId, primary: true },
-      sheet
-    };
-  }
-  if (action.kind !== "oauth" && action.kind !== "api_key")
-    return;
-  const label = reconnecting && action.label === "Connect" ? "Reauthenticate" : action.label;
-  if (!dashboardControlsAvailable(options)) {
-    return { action: lockedAction(label, options?.basePath) };
-  }
-  if (action.kind === "oauth") {
-    const note = dashboardGoogleProviderNote(view, action);
-    const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
-      ...note === undefined ? {} : { providerNote: note }
-    });
-    if (connect) {
-      return {
-        action: { label, kind: "none", sheet: connect.sheetId, primary: true },
-        sheet: connect.sheet
-      };
-    }
-  }
-  return { action: { label, kind: action.kind, source: action.source, primary: true } };
-}
-function dashboardControlsAvailable(options) {
-  return options?.controlMode === "native" ? options.canWrite === true : options?.controlSessionCsrfToken !== undefined;
-}
-function lockedAction(label, basePath) {
-  return { label, kind: "link", href: `${setupHref(basePath)}#${DASHBOARD_CONTROL_GATE_ID}`, hint: "unlock controls in Setup" };
-}
-var ATTENTION_STATUSES, DEFAULT_BASE_PATH3 = "/dashboard", DETAIL_QUERY_PARAM2 = "source", BACKGROUND_QUERY_PARAM2 = "background", SETUP_QUERY_PARAM2 = "setup";
-var init_home = __esm(() => {
-  init_vocabulary();
-  init_components();
-  init_background();
-  init_nav();
-  ATTENTION_STATUSES = ["Needs you", "Failing"];
-});
-
 // src/workers/dashboard/attention.ts
 function dashboardAttentionBanner(source, options) {
   return credentialBanner(source, options) ?? scopeApprovalBanner(source, options) ?? terminalExtractionBanner(source, options) ?? syncFailingBanner(source, options) ?? laneStuckBanner(source, options.now ?? new Date, options);
@@ -84764,7 +84940,7 @@ function syncFailingBanner(source, options) {
     return;
   const errorKind = source.schedule?.last_error_kind;
   const condition = errorKind ? DASHBOARD_GUARD_CONSEQUENCES[errorKind] ?? errorKind : "nothing has reported a reason";
-  const action = syncNowAction(source, options);
+  const action = dashboardSyncNowAction(source, options);
   return {
     kind: "sync_failing",
     sentence: `${source.label}'s scheduled sync keeps failing, so new material is not coming in. Last condition on` + ` the lane: ${condition}. Olympus keeps retrying on its own.` + `${action === undefined ? " Ask" : " Try a sync now; if it still fails, ask"} your agent to look at the lane.`,
@@ -84772,7 +84948,7 @@ function syncFailingBanner(source, options) {
     agent_prompt: `Olympus says the ${source.label} scheduled sync keeps failing (last condition: ${condition}).` + ` Please check why the ${source.label} sync tasks fail — the worker logs and the scheduler state for this` + " source — and fix it using supported Olympus commands. Do not ask me to edit files, configuration, or code."
   };
 }
-function syncNowAction(source, options) {
+function dashboardSyncNowAction(source, options) {
   const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
   const syncSource = source.sync_now_available === false ? undefined : definition?.connect_action.kind === "oauth" || definition?.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
   if (syncSource === undefined)
@@ -84908,7 +85084,7 @@ function laneStuckBanner(source, now, options) {
   const condition = governingCondition(source, stalledPhases);
   const laneName = stalledPhases.length === 1 ? `${DASHBOARD_PHASE_LABELS[stalledPhases[0]].toLowerCase()} lane` : "lane";
   const stillness = idleHours === undefined ? "has stopped moving" : `has not moved for ${dashboardDuration(idleHours * 3600)}`;
-  const action = syncNowAction(source, options);
+  const action = dashboardSyncNowAction(source, options);
   return {
     kind: "lane_stuck",
     sentence: `${source.label} still has work to do and its ${laneName} ${stillness}. Last condition on the lane:` + ` ${condition}.${action === undefined ? "" : " Try a sync now;"}` + `${action === undefined ? " Ask" : " if it still does not move, ask"} your agent to look at the lane.`,
@@ -85035,6 +85211,186 @@ var init_attention = __esm(() => {
   };
 });
 
+// src/workers/dashboard/pages/home.ts
+function renderDashboardHomePage(view, options) {
+  const groups = dashboardConnectedStatusGroups(view, options);
+  const background = renderBackgroundSection(view, options);
+  const blocks = groups.map((group, index) => renderSection(group, view, options, background === "" && index === groups.length - 1));
+  blocks.push(background);
+  blocks.push(renderSetupLink(options));
+  const nav = renderDashboardNav("home", {
+    ...options?.basePath === undefined ? {} : { basePath: options.basePath }
+  });
+  return pageShell({
+    title: "Olympus",
+    meta: dashboardHomeMeta(view, options),
+    body: [
+      nav,
+      ...blocks.filter((block) => block.length > 0)
+    ].join(`
+`),
+    styles: [DASHBOARD_LANE_CSS, DASHBOARD_NAV_CSS],
+    controller: { ...options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken } },
+    poll: {
+      unlocked: options?.controlSessionCsrfToken !== undefined,
+      ...options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }
+    },
+    ...options?.format === undefined ? {} : { format: options.format }
+  });
+}
+function renderSetupLink(options) {
+  return `<div class="foot"><a href="${escapeHtml(setupHref(options?.basePath))}">Connect more sources →</a></div>`;
+}
+function setupHref(basePath) {
+  const path = basePath ?? DEFAULT_BASE_PATH3;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}${SETUP_QUERY_PARAM2}`;
+}
+function renderBackgroundSection(view, options) {
+  const lanes = dashboardBackgroundLanes(view, options);
+  if (lanes.length === 0)
+    return "";
+  return [
+    '<div class="sect">Background</div>',
+    backgroundRow({
+      href: backgroundHref(options?.basePath),
+      label: "Background work details",
+      lines: dashboardBackgroundRowLines(lanes)
+    })
+  ].join(`
+`);
+}
+function backgroundHref(basePath) {
+  const path = basePath ?? DEFAULT_BASE_PATH3;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}${BACKGROUND_QUERY_PARAM2}`;
+}
+function renderSection(group, view, options, last) {
+  return ATTENTION_STATUSES.includes(group.status) ? renderAttentionSection(group, view, options) : renderCardSection(group, options, last);
+}
+function renderAttentionSection(group, view, options) {
+  const rows = group.sources.map((source) => {
+    const resolved = attentionAction(source, view, options) ?? fallbackFix(source, options);
+    const row = attentionRow({
+      label: source.label,
+      why: dashboardAttentionLine(source, options),
+      href: detailHref2(source, options?.basePath),
+      attention: true,
+      ...group.status === "Failing" ? { tone: "error" } : {},
+      ...resolved === undefined ? {} : { action: resolved.action }
+    });
+    return resolved?.sheet === undefined ? row : `${row}
+${resolved.sheet}`;
+  });
+  return [sectionHeading(group, true), ...rows].join(`
+`);
+}
+function renderCardSection(group, options, last) {
+  const cards = group.sources.map((source) => {
+    const fraction = group.status === "Working" ? dashboardWorkFraction(source) : undefined;
+    return sourceCard({
+      label: source.label,
+      status: group.status,
+      subLine: dashboardSubLine(source, options),
+      href: detailHref2(source, options?.basePath),
+      ...fraction === undefined ? {} : { fraction }
+    });
+  });
+  return [
+    sectionHeading(group, false),
+    `<div class="cards"${gridStyle(group.sources.length, last)}>`,
+    ...cards,
+    "</div>"
+  ].join(`
+`);
+}
+function sectionHeading(group, attention) {
+  const text = escapeHtml(`${group.status} — ${group.sources.length}`);
+  return attention ? `<div class="sect attn">▲ ${text}</div>` : `<div class="sect">${text}</div>`;
+}
+function gridStyle(count, last) {
+  const rules = [];
+  if (count >= 4) {
+    rules.push("grid-template-columns:repeat(4,1fr)");
+  }
+  if (!last) {
+    rules.push("margin-bottom:22px");
+  }
+  return rules.length === 0 ? "" : ` style="${escapeHtml(rules.join("; "))}"`;
+}
+function detailHref2(source, basePath) {
+  const path = basePath ?? DEFAULT_BASE_PATH3;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}${DETAIL_QUERY_PARAM2}=${encodeURIComponent(source.source_id)}`;
+}
+function attentionAction(source, view, options) {
+  const action = source.connection.action;
+  const reconnecting = source.coverage.indexed_items > 0;
+  const blocked = view.model_setup !== undefined && !view.model_setup.ready ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
+  if (action.kind === "needs_setup") {
+    if (!dashboardControlsAvailable(options)) {
+      return { action: lockedAction(reconnecting ? DASHBOARD_RECONNECT_LABEL : action.label, options?.basePath) };
+    }
+    const note = dashboardGoogleProviderNote(view, action);
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, note === undefined ? {} : { providerNote: note });
+    return {
+      action: { label: reconnecting ? DASHBOARD_RECONNECT_LABEL : action.label, kind: "none", sheet: sheetId, primary: true, ...blocked },
+      sheet
+    };
+  }
+  if (action.kind !== "oauth" && action.kind !== "api_key")
+    return;
+  const label = reconnecting && action.label === "Connect" ? DASHBOARD_RECONNECT_LABEL : action.label;
+  if (!dashboardControlsAvailable(options)) {
+    return { action: lockedAction(label, options?.basePath) };
+  }
+  if (action.kind === "oauth") {
+    const note = dashboardGoogleProviderNote(view, action);
+    const connect = dashboardOAuthConnectSheet(source, action, {
+      ...dashboardRefusalNotice(source),
+      ...note === undefined ? {} : { providerNote: note }
+    });
+    if (connect) {
+      return {
+        action: { label, kind: "none", sheet: connect.sheetId, primary: true, ...blocked },
+        sheet: connect.sheet
+      };
+    }
+  }
+  return { action: { label, kind: action.kind, source: action.source, primary: true, ...blocked } };
+}
+function dashboardRefusalNotice(source) {
+  if (!source.connection.provider_refusal)
+    return {};
+  const detail = dashboardProviderRefusalDetail(source);
+  return {
+    notice: dashboardProviderRefusalSentence(source),
+    ...detail === undefined ? {} : { noticeDetail: detail }
+  };
+}
+function fallbackFix(source, options) {
+  const readOnly = !dashboardControlsAvailable(options);
+  const sync = dashboardSyncNowAction(source, { readOnly, setupPath: setupHref(options?.basePath) });
+  if (sync !== undefined)
+    return { action: sync };
+  return { action: { label: "See what happened", kind: "link", href: detailHref2(source, options?.basePath) } };
+}
+function dashboardControlsAvailable(options) {
+  return options?.controlMode === "native" ? options.canWrite === true : options?.controlSessionCsrfToken !== undefined;
+}
+function lockedAction(label, basePath) {
+  return { label, kind: "link", href: `${setupHref(basePath)}#${DASHBOARD_CONTROL_GATE_ID}`, hint: "unlock controls in Setup" };
+}
+var ATTENTION_STATUSES, DEFAULT_BASE_PATH3 = "/dashboard", DETAIL_QUERY_PARAM2 = "source", BACKGROUND_QUERY_PARAM2 = "background", SETUP_QUERY_PARAM2 = "setup";
+var init_home = __esm(() => {
+  init_vocabulary();
+  init_components();
+  init_background();
+  init_attention();
+  init_nav();
+  ATTENTION_STATUSES = ["Needs you", "Failing"];
+});
+
 // src/workers/dashboard/contract.ts
 function dashboardSensitivityCategories(view) {
   return view.sensitivity?.categories ?? [];
@@ -85121,7 +85477,7 @@ function renderDashboardDetailBody(source, options) {
     renderAttention(source, degraded, options),
     renderIngestionSelection(source),
     renderTotals(source),
-    renderProgress(source, progress, now),
+    renderProgress2(source, progress, now),
     renderScope(options?.scope, options?.folderPickerPath, options, source.scope_selection?.kind === "mail"),
     renderAdvanced(source, degraded, options, now),
     renderFoot(source, now)
@@ -85224,7 +85580,7 @@ function setupHref2(basePath) {
   const separator = path.includes("?") ? "&" : "?";
   return `${path}${separator}${SETUP_QUERY_PARAM3}`;
 }
-function renderProgress(source, progress, now) {
+function renderProgress2(source, progress, now) {
   const headingText = progress.delta ? "Current update" : source.connection.state === "syncing" || source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? "Initial ingestion" : "Ingestion";
   const heading = `
         <div class="dsect">${headingText}</div>`;
@@ -85747,33 +86103,94 @@ var init_detail = __esm(() => {
 function renderModelSetup(view) {
   if (!view)
     return "";
+  const bannerOwnsToggle = blockerOwnsLocalToggle(view);
   const cards = view.cards.map((card) => {
     if (card.state === "ready")
       return readyModelRow(card);
-    const state = { not_configured: "Not configured", applying: "Applying…", needs_attention: "Needs attention", ready: "Ready" }[card.state];
+    const state = modelStateWord(card);
     let action = "";
+    let sheet = "";
     if (card.id === "local") {
-      action = `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`;
+      if (card.state === "not_configured" && !bannerOwnsToggle) {
+        action = `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`;
+        sheet = localModelsSheet();
+      }
     } else {
       action = modelKeyAction(card, card.state === "applying" ? '<span class="modelnote">Key saved. Olympus is applying the configuration or waiting for another required key.</span>' : modelKeyForm(card));
     }
-    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml(card.label)}</b><span role="status">${state}</span></header>` + `<p>${escapeHtml(card.detail)}</p>${action}</section>`;
+    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml(card.label)}</b><span role="status">${escapeHtml(state)}</span></header>` + `<p>${escapeHtml(card.detail)}</p>${action}</section>${sheet}`;
   }).join("");
   const localCard = view.cards.some((card) => card.id === "local");
-  const extras = view.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn quiet" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn quiet" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" : '<div class="modeltools">' + (localCard ? "" : `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>";
-  return '<section aria-label="Models"><div class="sect">Models</div>' + (view.ready ? '<p class="quiet" role="status">Models are ready. You can connect sources below.</p>' : "<p>Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>") + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + (view.ready ? "" : '<p role="status">Finish the required model setup above to unlock new source connections.</p>') + "</section>" + connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Your agent can help connect models you already run. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" });
+  const extras = view.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
+  return '<section aria-label="Models"><div class="sect">Models</div>' + (view.ready ? '<p class="quiet" role="status">Models are ready. You can connect sources below.</p>' : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
+}
+function localModelsSheet() {
+  return connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Your agent can help connect models you already run. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" });
+}
+function blockingCard(view) {
+  return view.ready ? undefined : view.cards.find((entry) => entry.state !== "ready");
+}
+function blockerOwnsLocalToggle(view) {
+  const card = blockingCard(view);
+  return card?.id === "local" && card.state === "not_configured";
 }
 function readyModelRow(card) {
   const label = escapeHtml(card.label);
   const state = card.id === "local" ? "Ready" : "Ready · key connected";
   const head = `<div class="attncard plain modelrow" data-model-card="${card.id}">` + `<div class="grow"><span class="name">${label}</span><span class="why"> — ${state}</span></div>`;
-  if (card.id === "local")
-    return `${head}<button type="button" class="btn quiet" ${LOCAL_MODELS_TOGGLE}</div>`;
+  if (card.id === "local") {
+    return `${head}${rowMenu(card.label, `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`)}</div>${localModelsSheet()}`;
+  }
   const sheetId = `model-key-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
-  return `${head}<button type="button" class="btn quiet" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button></div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
+  const toggle = `<button type="button" class="btn" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button>`;
+  return `${head}${rowMenu(card.label, toggle)}</div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
+}
+function modelStateWord(card) {
+  if (card.state === "applying")
+    return card.id === "local" ? "Checking…" : "Applying…";
+  if (card.state === "needs_attention")
+    return card.id === "local" ? "Not answering" : "Needs attention";
+  if (card.state === "ready")
+    return "Ready";
+  return "Not configured";
+}
+function renderModelSetupBlocker(view) {
+  if (!view || view.ready)
+    return "";
+  const card = blockingCard(view);
+  if (!card) {
+    return blockerBanner({ sentence: view.attention ?? "Model setup is not finished, so sources stay locked." });
+  }
+  if (card.id === "local") {
+    if (card.state === "applying") {
+      return blockerBanner({ sentence: "Checking your local models… Sources unlock when the check passes." });
+    }
+    if (card.state === "needs_attention") {
+      return blockerBanner({
+        sentence: "Your local model server is not answering, so sources stay locked. Start it, then check again.",
+        controlHtml: `${CHECK_FORM_OPEN}<button class="btn primary" type="submit">Check again</button>${CHECK_FORM_TAIL}`
+      });
+    }
+    return blockerBanner({
+      sentence: "Connect your local models to start connecting sources.",
+      controlHtml: `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`
+    }) + localModelsSheet();
+  }
+  if (card.state === "applying") {
+    return blockerBanner({ sentence: `Applying your ${card.label} key… Sources unlock when it is ready.` });
+  }
+  if (card.state === "needs_attention")
+    return blockerBanner({ sentence: card.detail });
+  return blockerBanner({
+    sentence: `Add your ${card.label} API key to start connecting sources.`,
+    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${modelKeyFieldId(card)}">Add ${escapeHtml(card.label)} key</button>`
+  });
+}
+function modelKeyFieldId(card) {
+  return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
 }
 function modelKeyForm(card) {
-  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn" type="submit">Connect</button><span data-action-message role="status"></span></form>';
+  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield"${card.state === "ready" ? "" : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn primary" type="submit">Connect</button><span data-action-message role="status"></span></form>';
 }
 function modelKeyAction(card, lead) {
   const href = card.id === "gemini" ? "https://aistudio.google.com/apikey" : "https://venice.ai";
@@ -86252,15 +86669,14 @@ var init_agents = __esm(() => {
 function renderDashboardSetupPage(view, options) {
   const degraded = options?.degradedCredentials ?? view.degraded_credentials;
   const grouped = groupSources(view.sources, degraded);
-  const sections = SETUP_GROUPS.map((group) => {
-    const rendered = renderGroup(group, grouped[group.id], degraded, options?.basePath, view);
-    return group.id === "not_connected" && view.model_setup && !view.model_setup.ready && rendered ? `<fieldset class="source-model-gate" disabled aria-label="Sources: finish model setup first">${rendered}</fieldset>` : rendered;
-  }).filter((section) => section.length > 0);
+  const blocked = view.model_setup !== undefined && !view.model_setup.ready;
+  const sections = SETUP_GROUPS.map((group) => renderGroup(group, grouped[group.id], degraded, view, blocked, options)).filter((section) => section.length > 0);
   const body = [
     renderDashboardNav("setup", {
       ...options?.basePath === undefined ? {} : { basePath: options.basePath }
     }),
     options?.controlMode === "native" ? options.canWrite === false ? '<div class="attncard plain" data-write-capability-note>Read-only OpenClaw connection — reconnect with operator.write access to change sources.</div>' : "" : dashboardControlGate({ connected: options?.controlSessionCsrfToken !== undefined }),
+    renderModelSetupBlocker(view.model_setup),
     renderSetupSummary(view),
     renderModelSetup(view.model_setup),
     '<div class="sect">Sources</div>',
@@ -86293,9 +86709,10 @@ function renderDashboardSetupPage(view, options) {
 }
 function renderSetupSummary(view) {
   const ready = view.summary.answer_ready_sources;
-  const connected = view.sources.filter(dashboardIsConnectedSource).length;
-  const line = `${ready} answer-ready · ${connected} connected`;
-  return `<div class="setupsummary" aria-label="Setup summary">` + `<div class="sumcard"><b>Security preset</b><span>Configured</span></div>` + `<div class="sumcard"><b>Sources</b><span>${escapeHtml(line)}</span></div>` + `</div>`;
+  const connected = view.sources.filter((source) => dashboardIsConnectedSource(source) && (source.connection.provider_refusal === undefined || source.coverage.indexed_items > 0) && source.connection.state !== "awaiting_consent").length;
+  if (connected === 0)
+    return "";
+  return `<p class="setupsummary" aria-label="Setup summary">${escapeHtml(dashboardConnectedSummary(connected, ready))}</p>`;
 }
 function groupSources(sources, degraded) {
   const grouped = {
@@ -86335,19 +86752,22 @@ function setupGroupOf(source, degraded) {
       return "not_connected";
   }
 }
-function renderGroup(group, sources, degraded, basePath, view) {
+function renderGroup(group, sources, degraded, view, blocked, options) {
   if (sources.length === 0)
     return "";
-  const rows = sources.map((source) => group.id === "not_connected" ? renderSetupRow(source, view, basePath) : renderStateRow(group, source, degraded, basePath, view)).join(`
+  const basePath = options?.basePath;
+  const rows = sources.map((source) => group.id === "not_connected" ? renderSetupRow(source, view, blocked, basePath) : renderStateRow(group, source, degraded, view, blocked, options)).join(`
 `);
   return `${sectionHeading2(group.heading, sources.length, group.attention)}
 ${rows}`;
 }
 function sectionHeading2(heading, count, attention) {
   const marker = attention ? "▲ " : "";
-  return `<div class="sect${attention ? " attn" : ""}">${marker}${heading} — ${count}</div>`;
+  return `<div class="sect sub${attention ? " attn" : ""}">${marker}${heading} — ${count}</div>`;
 }
-function renderStateRow(group, source, degraded, basePath, view) {
+function renderStateRow(group, source, degraded, view, blocked, options) {
+  const basePath = options?.basePath;
+  const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
   const why = stateLine(group.id, source, degraded);
   const href = detailHref2(source, basePath);
   const action = source.connection.action;
@@ -86359,32 +86779,33 @@ function renderStateRow(group, source, degraded, basePath, view) {
       attention: group.attention,
       href,
       ...why ? { why } : {},
-      action: { label: source.coverage.indexed_items > 0 ? "Reauthenticate" : action.label, kind: "none", sheet: sheetId, primary: true },
+      action: { label: source.coverage.indexed_items > 0 ? DASHBOARD_RECONNECT_LABEL : action.label, kind: "none", sheet: sheetId, primary: true, ...gate },
       ...disconnect2 ? { secondaryAction: disconnect2 } : {}
     });
     return `${row}
 ${sheet}`;
   }
   if ((group.id === "needs_you" || group.id === "connecting") && action.kind === "oauth") {
-    const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
+    const connect2 = dashboardOAuthConnectSheet(source, action, {
+      ...dashboardRefusalNotice(source),
       ...providerNote(view, action)
     });
-    if (connect) {
+    if (connect2) {
       const secondary = group.id === "connecting" ? cancelAction(action) : custodyAction(source);
       const row = attentionRow({
         label: source.label,
         attention: group.attention,
         href,
         ...why ? { why } : {},
-        action: { label: action.label, kind: "none", sheet: connect.sheetId, primary: true },
+        action: { label: action.label, kind: "none", sheet: connect2.sheetId, primary: true, ...gate },
         ...secondary ? { secondaryAction: secondary } : {}
       });
       return `${row}
-${connect.sheet}`;
+${connect2.sheet}`;
     }
   }
-  const control = group.id === "needs_you" ? connectAction(source, true) : group.id === "working" || group.id === "waiting" || group.id === "fresh" ? custodyAction(source) : undefined;
+  const connect = connectAction(source, true);
+  const control = group.id === "needs_you" ? connect === undefined ? fallbackFix(source, options).action : { ...connect, ...gate } : group.id === "working" || group.id === "waiting" || group.id === "fresh" ? custodyAction(source) : undefined;
   const disconnect = group.id === "needs_you" ? custodyAction(source) : undefined;
   return attentionRow({
     label: source.label,
@@ -86395,8 +86816,9 @@ ${connect.sheet}`;
     ...disconnect ? { secondaryAction: disconnect } : {}
   });
 }
-function renderSetupRow(source, view, basePath) {
+function renderSetupRow(source, view, blocked, basePath) {
   const action = source.connection.action;
+  const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
   if (action.kind === "guided_session") {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
     const row = setupRow({
@@ -86422,7 +86844,8 @@ ${sheet}`;
       label: source.label,
       href: detailHref2(source, basePath),
       blurb: action.instructions.plain_intro,
-      action: { label: action.label, kind: "none", sheet: sheetId },
+      ...dashboardSetupLead(source.source_id, action.instructions.plain_intro),
+      action: { label: action.label, kind: "none", sheet: sheetId, ...gate },
       ...link2 === undefined ? {} : { blurbLink: link2 }
     });
     return `${row}
@@ -86430,7 +86853,7 @@ ${sheet}`;
   }
   if (action.kind === "oauth") {
     const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
+      ...dashboardRefusalNotice(source),
       ...providerNote(view, action)
     });
     if (connect) {
@@ -86438,7 +86861,7 @@ ${sheet}`;
         label: source.label,
         href: detailHref2(source, basePath),
         blurb: setupBlurb(source),
-        action: { label: action.label, kind: "none", sheet: connect.sheetId }
+        action: { label: action.label, kind: "none", sheet: connect.sheetId, ...gate }
       });
       return `${row}
 ${connect.sheet}`;
@@ -86449,7 +86872,8 @@ ${connect.sheet}`;
     label: source.label,
     href: detailHref2(source, basePath),
     blurb: setupBlurb(source),
-    action: connectAction(source, false) ?? { label: actionStateLabel(source), kind: "none" },
+    ...action.kind === "api_key" ? dashboardSetupLead(source.source_id, action.instructions.plain_intro) : {},
+    action: { ...connectAction(source, false) ?? { label: actionStateLabel(source), kind: "none" }, ...gate },
     ...link === undefined ? {} : { blurbLink: link }
   });
 }
@@ -86488,7 +86912,7 @@ function stateLine(group, source, degraded) {
 }
 function workingLine2(source) {
   const firstIngest = source.freshness.hours === undefined;
-  const parts = [firstIngest ? "first ingest" : "syncing"];
+  const parts = [firstIngest ? "first sync" : "syncing"];
   if (source.coverage.indexed_items > 0)
     parts.push(`${formatCount(source.coverage.indexed_items)} indexed so far`);
   const eta = source.progress?.eta_minutes;
@@ -88468,9 +88892,9 @@ function renderSourceDispositionsFragment(view, selectedSourceId) {
         <p class="eyebrow">Olympus / Sources</p>
         <h1>Choose folders</h1>
         <p>Connecting an account does not start indexing. Choose what Olympus may use,
-        then press <strong>Save scope and start</strong>. Unselected folders stay out. Choose <strong>Metadata only</strong>
+        then press <strong>Save scope and start</strong>. Unselected folders stay out. Choose <strong>Names only</strong>
         for large photo or video folders — or anything you want searchable by name and date without
-        processing its contents. Choose <strong>No ingestion</strong> to keep a folder out of Olympus
+        reading its contents. Choose <strong>Skipped</strong> to keep a folder out of Olympus
         entirely. New files inherit the nearest folder choice.</p>
       </header>
       ${sources}
@@ -88522,7 +88946,7 @@ function renderMailScopeSource(source, locations, selected) {
           ${source.content_after && source.status === "approved" ? `<p class="scope-connection">Full content since ${escapeHtml2(source.content_after.slice(0, 10))}</p>` : ""}
         </aside>
         <section class="finder-main mail-scope-main">
-          ${source.error ? `<p class="scope-browser-note">${escapeHtml2(source.error)}</p>` : source.connected ? "" : `<p class="scope-browser-note">Connect Gmail first, then return here to choose which mail Olympus may use. Connecting will not start ingestion.</p>
+          ${source.error ? `<p class="scope-browser-note">${escapeHtml2(source.error)}</p>` : source.connected ? "" : `<p class="scope-browser-note">Connect Gmail first, then return here to choose which mail Olympus may use. Connecting will not start indexing.</p>
           <a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml2(source.label)} →</a>`}
           <fieldset class="mail-scope-group">
             <legend>Store the body of mail from</legend>
@@ -88605,7 +89029,7 @@ function renderFolderScopeSource(source, locations, selected) {
           <div class="scope-browser-toolbar"><span data-scope-location>Folders</span>
             <button type="button" data-scope-browse-root${unavailable ? " disabled" : ""}>Update</button>
             <span data-scope-loading role="status" aria-live="polite" hidden>Loading folders…</span></div>
-          <p class="scope-browser-note">${source.error ? escapeHtml2(source.error) : source.connected ? "Opening this page loads folder names only. No file contents are read or indexed until you confirm your scope." : "Connect this account first, then return here to choose folders. Connecting will not start ingestion."}</p>
+          <p class="scope-browser-note">${source.error ? escapeHtml2(source.error) : source.connected ? "Opening this page loads folder names only. No file contents are read or indexed until you confirm your scope." : "Connect this account first, then return here to choose folders. Connecting will not start indexing."}</p>
           ${source.connected ? "" : `<a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml2(source.label)} →</a>`}
           <div class="tree-viewport scope-browser-list" data-scope-nodes role="list" aria-label="Folders"></div>
           <button type="button" data-scope-more hidden>Show more folders</button>
@@ -88617,10 +89041,10 @@ function renderFolderScopeSource(source, locations, selected) {
           <div data-scope-inspector-empty><div class="inspector-folder">▱</div><p>Select a folder</p></div>
           <div data-scope-inspector-content hidden><div class="inspector-folder">▰</div>
           <h3 data-scope-selected-name></h3><p class="inspector-path" data-scope-selected-path></p>
-          <div class="choice-stack" aria-label="Ingestion choice">
-            <button type="button" data-scope-state="ingest" disabled>Full ingestion<span>Read and index contents</span></button>
-            <button type="button" data-scope-state="metadata_only" disabled>Metadata only<span>Index names and dates; never contents</span></button>
-            <button type="button" data-scope-state="exclude" disabled>No ingestion<span>Keep this folder out</span></button>
+          <div class="choice-stack" aria-label="Indexing choice">
+            <button type="button" data-scope-state="ingest" disabled>Fully indexed<span>Read and index contents</span></button>
+            <button type="button" data-scope-state="metadata_only" disabled>Names only<span>Searchable by name and date</span></button>
+            <button type="button" data-scope-state="exclude" disabled>Skipped<span>Keep this folder out</span></button>
           </div><p class="inspector-note" data-scope-selected-note></p></div>
         </aside>
         <footer class="finder-footer"><span data-scope-summary>No folders selected.</span>
@@ -88704,7 +89128,7 @@ function standaloneSourceDispositionsControllerScript(csrfTokenJson) {
 function renderDispositionSource(source) {
   const counts = source.tree.counts;
   const fullItems = Math.max(0, counts.items - counts.excluded_items - counts.metadata_only_items);
-  const summary = source.store_present ? `${fullItems} full ingestion · ${counts.metadata_only_items} metadata only · ${counts.excluded_items} no ingestion` : "No folders discovered yet";
+  const summary = source.store_present ? `${fullItems} ${fullItems === 1 ? "item" : "items"} fully indexed, ${counts.metadata_only_items} names only, ${counts.excluded_items} skipped` : "No folders discovered yet";
   const nodes = source.tree.roots.length > 0 ? source.tree.roots.map((node) => renderDispositionNode(node, "ingest", source.editable_by_path)).join("") : '<p class="subtle">No folders to show yet. They appear after the first sync.</p>';
   const failed = source.error !== undefined ? `<p class="warn-note"><strong>This source's rules could not be loaded.</strong>
         ${escapeHtml2(source.error)}</p>` : "";
@@ -88749,10 +89173,10 @@ function renderDispositionSource(source) {
                 <h3 data-inspector-name></h3>
                 <p class="inspector-path" data-inspector-path></p>
                 <p class="inspector-count" data-inspector-count></p>
-                <div class="choice-stack" aria-label="Ingestion choice">
-                  <button type="button" data-picker-state="ingest">Full ingestion<span>Read and index contents</span></button>
-                  <button type="button" data-picker-state="metadata_only">Metadata only<span>Index names and dates</span></button>
-                  <button type="button" data-picker-state="exclude">No ingestion<span>Keep out of Olympus</span></button>
+                <div class="choice-stack" aria-label="Indexing choice">
+                  <button type="button" data-picker-state="ingest">Fully indexed<span>Read and index contents</span></button>
+                  <button type="button" data-picker-state="metadata_only">Names only<span>Searchable by name and date</span></button>
+                  <button type="button" data-picker-state="exclude">Skipped<span>Keep out of Olympus</span></button>
                 </div>
                 <p class="inspector-note" data-inspector-note></p>
               </div>
@@ -88768,11 +89192,11 @@ function renderDispositionSource(source) {
 function renderDispositionNode(node, ancestorState, editable) {
   const selectable = editable ? selectableDispositionStates(node, ancestorState) : [];
   const locked = selectable.length > 0 || !editable ? "" : lockedReason(node, ancestorState);
-  const countLine = `${node.counts.items} ${node.counts.items === 1 ? "item" : "items"}` + (node.counts.excluded_items > 0 ? ` · ${node.counts.excluded_items} no ingestion` : "") + (node.counts.metadata_only_items > 0 ? ` · ${node.counts.metadata_only_items} metadata only` : "");
+  const countLine = `${node.counts.items} ${node.counts.items === 1 ? "item" : "items"}` + (node.counts.excluded_items > 0 ? ` · ${node.counts.excluded_items} skipped` : "") + (node.counts.metadata_only_items > 0 ? ` · ${node.counts.metadata_only_items} names only` : "");
   const control = `<div class="stored-controls" aria-hidden="true">${STATE_ORDER.map((state) => renderStateRadio(node, state, selectable.includes(state))).join("")}</div>`;
   const children = node.children.length > 0 ? `<div class="children">${node.children.map((child) => renderDispositionNode(child, node.state, editable)).join("")}</div>` : "";
   const status = node.mixed_below ? "Mixed" : PICKER_STATE_LABELS[node.state];
-  const row = `<span class="folder-icon" aria-hidden="true">▰</span><span class="node-name">${escapeHtml2(node.name)}</span>` + `<span class="node-counts">${escapeHtml2(`${node.counts.items}`)}</span>` + `<span class="node-state" data-folder-status>${escapeHtml2(status)}</span>`;
+  const row = `<span class="folder-icon" aria-hidden="true">▰</span><span class="node-name">${escapeHtml2(node.name)}</span>` + `<span class="node-counts">${escapeHtml2(`${node.counts.items}`)}</span>` + `<span class="node-state${node.mixed_below ? " mixed" : ""}" data-folder-status>${escapeHtml2(status)}</span>`;
   const data = `data-path="${escapeHtml2(node.path)}" data-name="${escapeHtml2(node.name)}"` + ` data-counts="${escapeHtml2(countLine)}" data-search="${escapeHtml2(`${node.display_path} ${node.name}`.toLowerCase())}"` + ` data-state="${node.state}" data-origin="${node.origin}" data-selectable="${escapeHtml2(selectable.join(","))}"` + (locked === "" ? "" : ` data-locked="${escapeHtml2(locked)}"`);
   if (node.children.length === 0) {
     return `
@@ -88805,7 +89229,7 @@ function lockedReason(node, ancestorState) {
     return `Follows ${node.inherited_from ?? "the folder above"}, which is excluded. Nothing under an excluded ` + "folder can be brought back on its own — change the choice on that folder instead.";
   }
   if (ancestorState === "metadata_only") {
-    return `Follows ${node.inherited_from ?? "the folder above"}, which is metadata only. It can only be made ` + "stricter here.";
+    return `Follows ${node.inherited_from ?? "the folder above"}, which is set to names only. It can only be made ` + "stricter here.";
   }
   return "Decided by a rule that does not name a folder path. It is listed read-only beside the tree.";
 }
@@ -88836,9 +89260,9 @@ var init_source_dispositions = __esm(() => {
   STATE_ORDER = ["ingest", "metadata_only", "exclude"];
   NOT_EDITABLE_BY_PATH_REASON = "This source names folders by identity rather than by path, " + "so the folder tree cannot edit its rules.";
   PICKER_STATE_LABELS = {
-    ingest: "Full ingestion",
-    metadata_only: "Metadata only",
-    exclude: "No ingestion"
+    ingest: "Fully indexed",
+    metadata_only: "Names only",
+    exclude: "Skipped"
   };
 });
 
@@ -89119,6 +89543,7 @@ function createEmailSourceWorker(options = {}) {
   });
   const fileExtraction = options.fileExtraction;
   const pdfExtractionLanes2 = options.pdfExtractionLanes;
+  const pdfExtractionLaneScopeApproved = options.pdfExtractionLaneScopeApproved;
   const dropboxEvalShardExport = options.dropboxEvalShardExport;
   const dropboxSourceExport = options.dropboxSourceExport;
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
@@ -90342,6 +90767,7 @@ function createEmailSourceWorker(options = {}) {
           const lanes = await drainPdfExtraction({
             runner,
             lanes: pdfExtractionLanes2?.() ?? [],
+            ...pdfExtractionLaneScopeApproved ? { laneScopeApproved: pdfExtractionLaneScopeApproved } : {},
             requeue: record3.requeue === true,
             deadlineMs: Date.now() + maxSeconds * 1000,
             extractorKind: TEXT_EXTRACTOR_KIND
@@ -90358,7 +90784,8 @@ function createEmailSourceWorker(options = {}) {
               jobs_metadata_only: lane.jobsMetadataOnly,
               jobs_failed: lane.jobsFailed,
               jobs_remaining: lane.jobsRemaining,
-              paused: lane.paused
+              paused: lane.paused,
+              ...lane.pauseReason ? { pause_reason: lane.pauseReason } : {}
             })),
             policy: { worker_private_surface: true, source_text_returned: false }
           };
@@ -107913,6 +108340,16 @@ async function main() {
   if (dropboxConnectorStore && dropboxExtractionScopes.length > 0 && !dropboxHandle) {
     console.warn(`[file-extraction] corpus=${DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID} provider=dropbox deferred ` + "reason=no_credential_handle — extraction starts on the next scheduler pass after Dropbox is " + "connected, with no restart.");
   }
+  const assertFileSourceScopeCurrent = (provider) => {
+    const sourceId = provider === "dropbox" ? "dropbox.files" : provider === "google_drive" ? "google_drive.docs" : undefined;
+    if (!sourceId)
+      return;
+    const ref = fileSourceScopeAuthority?.policyRef(sourceId);
+    if (!ref || !fileSourceScopeAuthority) {
+      throw new OperationError("source_index_policy_violation", "File-source scope approval is required.");
+    }
+    fileSourceScopeAuthority.assertCurrent(ref);
+  };
   const fileExtractionRuntime = createFileExtractionRuntime({
     env: process.env,
     enabled: fileExtractionCorpora.length > 0,
@@ -107921,14 +108358,7 @@ async function main() {
     ...dropboxTierLane ? { tierSets: new Map([[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set]]) } : {},
     scopeGuard: {
       assertAuthorized({ config: config2 }) {
-        const sourceId = config2.provider === "dropbox" ? "dropbox.files" : config2.provider === "google_drive" ? "google_drive.docs" : undefined;
-        if (!sourceId)
-          return;
-        const ref = fileSourceScopeAuthority?.policyRef(sourceId);
-        if (!ref || !fileSourceScopeAuthority) {
-          throw new OperationError("source_index_policy_violation", "File-source scope approval is required.");
-        }
-        fileSourceScopeAuthority.assertCurrent(ref);
+        assertFileSourceScopeCurrent(config2.provider);
       },
       allowsRef({ config: config2, store, ref }) {
         const sourceId = config2.provider === "dropbox" ? "dropbox.files" : config2.provider === "google_drive" ? "google_drive.docs" : undefined;
@@ -108905,7 +109335,19 @@ async function main() {
     dropboxIngestionPolicy,
     ...sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {},
     ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
-    ...fileExtractionRuntime ? { pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora, fileExtractionRuntime.corpusIds) } : {},
+    ...fileExtractionRuntime ? {
+      pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora, fileExtractionRuntime.corpusIds),
+      pdfExtractionLaneScopeApproved: (lane) => {
+        try {
+          assertFileSourceScopeCurrent(lane.provider);
+          return true;
+        } catch (error2) {
+          if (error2 instanceof OperationError && error2.code === "source_index_policy_violation")
+            return false;
+          throw error2;
+        }
+      }
+    } : {},
     ...connectorStores.length > 0 ? { connectorStores } : {},
     ...tierLanes.length > 0 ? {
       connectorStoreTierSiblings: (corpusId) => [
@@ -112692,8 +113134,8 @@ function runSetupDependencyCheck(input = {}) {
       label: "1Password CLI",
       required: false,
       ok: commandExists2("op"),
-      detail: "Optional 1Password-backed secret-store integration.",
-      repairHint: "Install the 1Password CLI from https://developer.1password.com/docs/cli/get-started/ when using that backend."
+      detail: "Optional 1Password CLI for an approved named-item key fetch into a connect flow.",
+      repairHint: "Install the 1Password CLI from https://developer.1password.com/docs/cli/get-started/ when fetching keys through it."
     }),
     dependencyFinding({
       id: "python-telethon",
@@ -115437,6 +115879,7 @@ async function runExtractPdfsCommand(args) {
     return { kind: "pdf_extraction_backlog", corpora: await backlog() };
   const deadline = Date.now() + maxMinutes * 60000;
   const passes = [];
+  const scopePending2 = new Map;
   let first = true;
   for (;; ) {
     const secondsLeft = Math.floor((deadline - Date.now()) / 1000);
@@ -115447,11 +115890,25 @@ async function runExtractPdfsCommand(args) {
     passes.push(pass);
     const lanes = Array.isArray(pass.lanes) ? pass.lanes : [];
     const progressed = lanes.some((lane) => Number(lane.jobs_processed) > 0);
-    const paused = lanes.some((lane) => lane.paused === true);
+    const paused = lanes.some((lane) => lane.paused === true && lane.pause_reason !== "scope_pending");
+    for (const lane of lanes) {
+      if (lane.pause_reason === "scope_pending") {
+        scopePending2.set(`${String(lane.corpus_id)}:${String(lane.scope_key_hash)}`, {
+          corpus_id: lane.corpus_id,
+          provider: lane.provider,
+          pause_reason: "scope_pending"
+        });
+      }
+    }
     if (!progressed || paused)
       break;
   }
-  return { kind: "pdf_extraction_run", passes, corpora: await backlog() };
+  return {
+    kind: "pdf_extraction_run",
+    passes,
+    ...scopePending2.size > 0 ? { lanes_scope_pending: [...scopePending2.values()] } : {},
+    corpora: await backlog()
+  };
 }
 export {
   v04PublicCliCommandName,

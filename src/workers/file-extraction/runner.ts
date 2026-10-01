@@ -43,6 +43,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { OperationError } from '../../core/operation-error.ts';
 import {
   SOURCE_TRUST_TIERS,
   type SourceTrustDomain,
@@ -1203,6 +1204,15 @@ export interface PdfExtractionDrainLaneResult {
    */
   jobsRemaining: number;
   paused: boolean;
+  /**
+   * Why the lane was paused. `scope_pending`: the lane's file source has no
+   * current scope approval, so it was skipped without touching its queue.
+   */
+  pauseReason?: 'scope_pending' | 'extraction_paused';
+}
+
+function isScopeApprovalRefusal(error: unknown): boolean {
+  return error instanceof OperationError && error.code === 'source_index_policy_violation';
 }
 
 /**
@@ -1213,10 +1223,16 @@ export interface PdfExtractionDrainLaneResult {
  * reads them again. Extraction then runs in small batches until the lane is
  * empty or the budget is spent; the caller repeats the call to continue. Each
  * extracted PDF lands in its store awaiting embedding by the normal pipeline.
+ *
+ * A lane whose file source is not scope-approved is skipped and reported as
+ * paused with `scope_pending`; the approved lanes still drain. The check runs
+ * before anything leases a job, so a pending lane is never charged attempts.
  */
 export async function drainPdfExtraction(input: {
   runner: FileExtractionRunner;
   lanes: readonly ExtractionLaneKey[];
+  // False for a lane whose file source has no current scope approval.
+  laneScopeApproved?: (lane: ExtractionLaneKey) => boolean;
   requeue: boolean;
   deadlineMs: number;
   extractorKind: string;
@@ -1237,22 +1253,49 @@ export async function drainPdfExtraction(input: {
       jobsRemaining: 0,
       paused: false,
     };
+    const remaining = () => input.runner.counts(lane)
+      .filter((count) => count.extractorKind === input.extractorKind
+        && (count.status === 'queued' || count.status === 'failed_retryable' || count.status === 'leased'))
+      .reduce((sum, count) => sum + count.jobs, 0);
+    const pauseForScope = () => {
+      result.paused = true;
+      result.pauseReason = 'scope_pending';
+      result.jobsRemaining = remaining();
+      results.push(result);
+    };
+    if (input.laneScopeApproved && !input.laneScopeApproved(lane)) {
+      pauseForScope();
+      continue;
+    }
+    let scopeRefused = false;
     if (input.requeue) {
       let cursor: string | undefined;
       for (;;) {
-        const plan = await input.runner.plan({
-          ...lane,
-          limit: PDF_DRAIN_PLAN_PAGE,
-          mimeTypes: PDF_MIME_TYPES,
-          extractorKind: input.extractorKind,
-          policyDecision: 'index_allowed',
-          force: true,
-          ...(cursor !== undefined ? { cursor } : {}),
-        });
+        let plan: Awaited<ReturnType<FileExtractionRunner['plan']>>;
+        try {
+          plan = await input.runner.plan({
+            ...lane,
+            limit: PDF_DRAIN_PLAN_PAGE,
+            mimeTypes: PDF_MIME_TYPES,
+            extractorKind: input.extractorKind,
+            policyDecision: 'index_allowed',
+            force: true,
+            ...(cursor !== undefined ? { cursor } : {}),
+          });
+        } catch (error) {
+          // Approval withdrawn between the check and the plan.
+          if (!isScopeApprovalRefusal(error)) throw error;
+          scopeRefused = true;
+          break;
+        }
         result.candidatesRequeued += plan.jobsQueued + plan.jobsForced;
         if (plan.done || plan.nextCursor === undefined) break;
         cursor = plan.nextCursor;
       }
+    }
+    if (scopeRefused) {
+      pauseForScope();
+      continue;
     }
     while (now() < input.deadlineMs) {
       const run = await input.runner.run({
@@ -1268,14 +1311,12 @@ export async function drainPdfExtraction(input: {
       result.jobsFailed += run.counts.failed_retryable + run.counts.failed_terminal;
       if (run.paused) {
         result.paused = true;
+        result.pauseReason = 'extraction_paused';
         break;
       }
       if (run.leasedJobs === 0) break;
     }
-    result.jobsRemaining = input.runner.counts(lane)
-      .filter((count) => count.extractorKind === input.extractorKind
-        && (count.status === 'queued' || count.status === 'failed_retryable' || count.status === 'leased'))
-      .reduce((sum, count) => sum + count.jobs, 0);
+    result.jobsRemaining = remaining();
     results.push(result);
   }
   return results;

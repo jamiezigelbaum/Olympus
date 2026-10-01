@@ -3,6 +3,12 @@ import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 
 describe('EmailClient', () => {
+  test('a file-source route failure is labelled as the file-source lane, not the email lane', async () => {
+    const transport = new DirectHttpEmailTransport(async () => new Response('{}', { status: 403 }));
+    await expect(transport.requestJson('http://worker.test/v1/source/index/files/extract-pdfs', { method: 'POST' }))
+      .rejects.toMatchObject({ code: 'email_error', message: 'Private file-source lane returned HTTP 403.' });
+  });
+
   test('keeps non-allowlisted and malformed worker failures on the generic email error boundary', async () => {
     const probes = [
       {

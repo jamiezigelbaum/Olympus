@@ -163,7 +163,7 @@ starting with the automatic download and existing-install checks. Its install
 command for a clean machine is:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.10.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.11.tgz --force --accept-capabilities
 # On OpenClaw 2026.7.1, omit both flags for a clean install.
 # On newer hosts, --force also overwrites an existing plugin: check first.
 openclaw plugins enable olympus
@@ -222,7 +222,7 @@ source connectors. Domain-agent imports and other source families are outside
 the v0.4 public roster.
 
 Tokens live in an encrypted local secret store by default, or in an explicitly
-configured OS/1Password secret store when supported, never in plain text.
+configured OS secret store when supported, never in plain text.
 Ingestion, classification, and indexing all run in one supervised local
 worker — `olympus worker install` makes it start on login. All seven declared
 sources sync through the canonical connector-store runtime; v0.4 supports one

@@ -1968,8 +1968,6 @@ function createDefaultSecretStore(options = {}) {
     return new MacOSKeychainSecretStore({ runner });
   if (backend === "libsecret")
     return new LinuxLibsecretSecretStore({ runner });
-  if (backend === "1password")
-    return new OnePasswordSecretStore({ env, runner });
   if (backend !== "auto")
     throw new Error("Unsupported Olympus secret store backend.");
   const currentPlatform = options.platform ?? platform();
@@ -2185,39 +2183,6 @@ class LinuxLibsecretSecretStore {
     return [];
   }
 }
-
-class OnePasswordSecretStore {
-  label = "1password";
-  env;
-  runner;
-  constructor(options = {}) {
-    this.env = options.env ?? process.env;
-    this.runner = options.runner ?? runCommand;
-  }
-  async get(key) {
-    return this.getSync(key);
-  }
-  getSync(key) {
-    assertSafeKey(key);
-    const ref = this.env[`OLYMPUS_SECRET_REF_${envKeyFromSecretKey(key)}`]?.trim();
-    if (!ref)
-      return;
-    const brokerRead = this.env.OLYMPUS_OP_BROKER_READ_BIN?.trim() || "op-cached-read";
-    const result = this.runner(brokerRead, [ref]);
-    if (result.status !== 0)
-      throw new Error("1Password broker secret read failed.");
-    return result.stdout.trim() || undefined;
-  }
-  async set() {
-    throw new Error("1Password backend is read-only; create the item in 1Password and map it with OLYMPUS_SECRET_REF_<KEY>.");
-  }
-  async delete() {
-    throw new Error("1Password backend is read-only from Olympus.");
-  }
-  async list() {
-    return Object.keys(this.env).filter((name) => name.startsWith("OLYMPUS_SECRET_REF_")).map((name) => name.slice("OLYMPUS_SECRET_REF_".length).toLowerCase().replaceAll("__", ":").replaceAll("_", ".")).sort();
-  }
-}
 async function resolveSecretRefValue(secretRef, options = {}) {
   if (!secretRef)
     return;
@@ -2249,9 +2214,6 @@ function resolveSecretRefValueSync(secretRef, options = {}) {
 function assertSafeKey(key) {
   if (!isSafeSecretKey(key))
     throw new Error("Secret key must contain only safe label characters.");
-}
-function envKeyFromSecretKey(key) {
-  return key.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
 function commandExists(command, runner) {
   return runner(command, ["--version"]).status === 0;
@@ -19884,7 +19846,7 @@ var init_scheduler_markers = __esm(() => {
 });
 
 // src/workers/dashboard/vocabulary.ts
-var DASHBOARD_UNCONNECTED_STATES;
+var DASHBOARD_UNCONNECTED_STATES, REDIRECT_REFUSAL_CODES;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -19892,6 +19854,11 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_UNCONNECTED_STATES = new Set([
     "not_connected",
     "needs_setup"
+  ]);
+  REDIRECT_REFUSAL_CODES = new Set([
+    "redirect_uri_mismatch",
+    "invalid_redirect_uri",
+    "redirect_uri_not_registered"
   ]);
 });
 
@@ -20552,6 +20519,7 @@ init_worker_auth();
 // src/core/model-setup.ts
 init_http_timeout();
 init_embedding_identity();
+var LOCAL_RECHECK_READY_MS = 10 * 60000;
 var LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
 // src/workers/email-source/server.ts
@@ -21071,6 +21039,7 @@ function stripDataUrlPrefix(dataUrl) {
 }
 
 // src/workers/file-extraction/runner.ts
+init_operation_error();
 init_types();
 init_command_runner();
 
@@ -21491,24 +21460,53 @@ init_phases();
 // src/workers/dashboard/theme.ts
 var DASHBOARD_THEME_TOKENS = {
   bg: "#101014",
-  panel: "#15161A",
-  panel2: "#17181D",
-  line: "#26272C",
-  line2: "#1E1F24",
+  panel: "#17181D",
+  panel2: "#1B1C22",
+  line: "#30323A",
+  line2: "#24252B",
   t1: "#ECECEA",
-  t2: "#B9BAC0",
-  t3: "#7C7E86",
-  t4: "#55575E",
-  good: "#4E9468",
-  warn: "#B08430",
-  run: "#8F7BD8",
-  bad: "#C4574D",
-  off: "#6B6E76",
-  warnBg: "#1B1913",
-  warnLine: "#4A3D22",
-  link: "#8FA8E8",
-  linkLine: "#3A5AA8"
+  t2: "#C9CAD0",
+  t3: "#A9ABB3",
+  t4: "#8C8E97",
+  good: "#6CC08B",
+  warn: "#E3AA45",
+  run: "#AE9EF0",
+  bad: "#F08276",
+  off: "#8C8E97",
+  warnBg: "#261E10",
+  warnLine: "#8A6A2A",
+  errBg: "#2B1614",
+  errLine: "#B04A40",
+  link: "#9DB4F0",
+  linkLine: "#5A7BD6",
+  accent: "#3E63C8",
+  onAccent: "#FFFFFF",
+  field: "#6A6D77",
+  selected: "#2C4485"
 };
+var DASHBOARD_PAGE_BACKDROP = DASHBOARD_THEME_TOKENS.bg;
+var DASHBOARD_TYPE_SCALE = {
+  title: "22px",
+  section: "16px",
+  row: "15px",
+  body: "14px",
+  caption: "12.5px"
+};
+var DASHBOARD_CONTRAST_PAIRS = [
+  ...["t1", "t2", "t3", "t4", "link", "warn", "bad", "good", "run"].flatMap((fg) => ["bg", "panel", "panel2", "warnBg", "errBg"].map((bg) => ({ fg, bg, min: 4.5 }))),
+  { fg: "onAccent", bg: "accent", min: 4.5 },
+  { fg: "t1", bg: "selected", min: 4.5 },
+  { fg: "t2", bg: "selected", min: 4.5 },
+  { fg: "accent", bg: "bg", min: 3 },
+  { fg: "linkLine", bg: "bg", min: 3 },
+  { fg: "linkLine", bg: "panel", min: 3 },
+  { fg: "field", bg: "bg", min: 3 },
+  { fg: "field", bg: "panel", min: 3 },
+  { fg: "field", bg: "panel2", min: 3 },
+  { fg: "warnLine", bg: "bg", min: 3 },
+  { fg: "errLine", bg: "bg", min: 3 },
+  { fg: "good", bg: "bg", min: 3 }
+];
 var DASHBOARD_STATUS_COLORS = {
   Fresh: DASHBOARD_THEME_TOKENS.good,
   Working: DASHBOARD_THEME_TOKENS.run,
@@ -21534,36 +21532,60 @@ var CSS_VARIABLE_NAMES = {
   off: "--off",
   warnBg: "--warn-bg",
   warnLine: "--warn-line",
+  errBg: "--err-bg",
+  errLine: "--err-line",
   link: "--link",
-  linkLine: "--link-line"
+  linkLine: "--link-line",
+  accent: "--accent-fill",
+  onAccent: "--on-accent",
+  field: "--field",
+  selected: "--selected"
 };
-var PAGE_BACKDROP = "#0B0B0E";
+var PAGE_BACKDROP = DASHBOARD_PAGE_BACKDROP;
 var MONO_STACK = '"Berkeley Mono","SF Mono",Menlo,Consolas,monospace';
 var ROOT_BLOCK = [
   ":root {",
   ...Object.keys(CSS_VARIABLE_NAMES).map((key) => `  ${CSS_VARIABLE_NAMES[key]}: ${DASHBOARD_THEME_TOKENS[key]};`),
   `  --mono: ${MONO_STACK};`,
+  `  --fs-title: ${DASHBOARD_TYPE_SCALE.title};`,
+  `  --fs-section: ${DASHBOARD_TYPE_SCALE.section};`,
+  `  --fs-row: ${DASHBOARD_TYPE_SCALE.row};`,
+  `  --fs-body: ${DASHBOARD_TYPE_SCALE.body};`,
+  `  --fs-caption: ${DASHBOARD_TYPE_SCALE.caption};`,
   "}"
 ].join(`
 `);
 var DASHBOARD_THEME_CSS = `${ROOT_BLOCK}
 * { box-sizing: border-box; }
-body { margin: 0; background: ${PAGE_BACKDROP}; color: var(--t1); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 20px 80px; }
+body { margin: 0; background: ${PAGE_BACKDROP}; color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
 a { color: var(--link); }
-.frame { max-width: 920px; margin: 0 auto; }
-.page { background: var(--bg); border: 1px solid var(--line); border-radius: 14px; padding: 30px 34px 38px; margin-top: 20px; box-shadow: 0 2px 12px rgba(0,0,0,.4); }
-.top { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; margin-bottom: 24px; }
-.brand { font-weight: 600; letter-spacing: .02em; font-size: 15px; }
+/* No card around the page: the page is the surface, as wide as a reading
+   layout allows, and every row below shares its left and right edges. */
+.frame { max-width: 1120px; margin: 0 auto; }
+.page { padding: 28px 0 40px; }
+.top { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; margin-bottom: 20px; }
+.brand { font-weight: 650; font-size: var(--fs-title); letter-spacing: -.01em; }
 .brand .lead { color: var(--t3); text-decoration: none; }
 .brand a.lead:hover, .brand a.lead:focus-visible { color: var(--link); }
 .brand .crumb { color: var(--t3); font-weight: 400; }
-.meta { color: var(--t3); font-size: 12px; }
+.meta { color: var(--t3); font-size: var(--fs-caption); }
 .meta b { font-weight: 600; }
-.sect { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--t4); margin: 0 0 8px; }
+/* Section headings: sentence case at a readable size, never tiny capitals. */
+.sect { font-size: var(--fs-section); font-weight: 600; color: var(--t1); margin: 28px 0 10px; }
 .sect.attn { color: var(--warn); }
+.sect.sub { font-size: var(--fs-body); color: var(--t2); margin: 18px 0 8px; }
+.sect.sub.attn { color: var(--warn); }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
-.attncard { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 9px; padding: 12px 15px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; gap: 14px; }
-.attncard.plain { background: var(--panel); border-color: var(--line2); }
+/* Every row is the same shape: a 20px lead column (icon or dot), the text,
+   then the controls, so names line up from section to section. */
+.attncard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 52px; }
+.attncard::before { content: ''; flex: 0 0 20px; align-self: center; }
+/* A problem is a tinted row with a 1px border and an icon, never a stripe. */
+.attncard:not(.plain) { background: var(--warn-bg); border-color: var(--warn-line); }
+.attncard:not(.plain)::before { content: '!'; height: 20px; border-radius: 50%; background: var(--warn); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
+.attncard.error { background: var(--err-bg); border-color: var(--err-line); }
+.attncard.error::before { background: var(--bad); }
+.attncard.plain { background: var(--panel); border-color: var(--line); }
 .attncard .grow { flex: 1; }
 /* The source page's ONE banner, and only it. A bare flex:1 gave the
    description a zero basis, so a banner carrying Sync now, its status text and
@@ -21574,35 +21596,62 @@ a { color: var(--link); }
    shape, and the mobile block below still owns what they do at 375px. */
 .attncard.banner { flex-wrap: wrap; }
 .attncard.banner .grow { flex: 1 1 320px; min-width: 0; }
-.attncard .name { font-weight: 600; }
-.attncard .why { color: var(--t3); font-size: 12.5px; }
+.attncard .name { font-weight: 600; font-size: var(--fs-row); }
+.attncard .why { color: var(--t2); font-size: var(--fs-body); }
 /* A warning row that carries no control is itself the link to the detail page,
    so its whole rectangle is the hit zone. */
 a.attncard.rowzone { display: flex; color: inherit; text-decoration: none; -webkit-user-drag: none; }
 a.attncard.rowzone:hover { border-color: var(--link); }
 a.attncard.rowzone:hover .name, a.attncard.rowzone:hover .go { color: var(--link); }
-a.attncard.rowzone:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-a.attncard.rowzone .go { color: var(--t4); font-size: 13px; }
+a.attncard.rowzone:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+a.attncard.rowzone .go { color: var(--t3); font-size: var(--fs-body); }
 /* A warning row that DOES carry a control keeps the control and links its name. */
-.attncard a.name { color: inherit; text-decoration: underline; text-decoration-color: var(--line2); text-underline-offset: 3px; }
+.attncard a.name { color: inherit; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
 .attncard a.name:hover { color: var(--link); text-decoration-color: var(--link); }
-.attncard a.go { color: var(--t4); font-size: 13px; text-decoration: none; padding: 0 2px; }
+.attncard a.go { color: var(--t3); font-size: var(--fs-body); text-decoration: none; padding: 0 2px; }
 .attncard a.go:hover { color: var(--link); }
-.attncard a.name:focus-visible { outline: 1px solid var(--link); outline-offset: 3px; border-radius: 4px; }
+.attncard a.name:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; border-radius: 4px; }
 .rowlink { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rowlink .btn { text-decoration: none; display: inline-block; }
 .blurb .ext { color: var(--link); }
-.hint { color: var(--t4); font-size: 12px; }
-.btn { border: 1px solid var(--link-line); color: var(--link); border-radius: 6px; padding: 4px 13px; font-size: 12.5px; background: none; cursor: pointer; white-space: nowrap; font: inherit; }
-.btn:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-.btn.primary { background: var(--link-line); color: #E8EDF8; }
-.btn.quiet { border-color: transparent; color: var(--t4); }
-.btn.quiet:hover { border-color: var(--line2); color: var(--t2); }
+.hint { color: var(--t3); font-size: var(--fs-caption); }
+/* Two button styles and no third: filled for the row's one main action,
+   outlined for everything else. Links are for navigation only. */
+.btn { border: 1px solid var(--link-line); color: var(--link); border-radius: 7px; padding: 6px 14px; font: inherit; font-size: var(--fs-body); font-weight: 500; line-height: 1.3; background: none; cursor: pointer; white-space: nowrap; }
+.btn:hover { background: var(--panel2); }
+.btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.btn.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
+.btn.primary:hover { filter: brightness(1.12); }
+/* A blocked control looks blocked and says why beside itself. */
+.btn:disabled, .btn[aria-disabled="true"] { background: transparent; border: 1px dashed var(--line); color: var(--t4); cursor: not-allowed; filter: none; }
+.blocked { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.blocked .hint { color: var(--t3); }
+.blocked .hint::before { content: '\\1F512\\FE0E  '; font-size: 11px; }
+/* The row's secondary acts (Disconnect, Provider access, Replace key, Cancel)
+   live behind one ⋯ menu: a native <details>, so it works before any script. */
+details.rowmenu { position: relative; flex: none; }
+details.rowmenu > summary { list-style: none; padding: 4px 10px; font-size: var(--fs-row); line-height: 1.2; letter-spacing: .08em; border-color: var(--line); color: var(--t2); }
+details.rowmenu > summary::-webkit-details-marker { display: none; }
+details.rowmenu[open] > summary { background: var(--panel2); }
+.rowmenu .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 200px; background: var(--panel2); border: 1px solid var(--line); border-radius: 9px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.45); display: grid; gap: 2px; }
+.rowmenu .menu form { display: grid; gap: 2px; margin: 0; }
+.rowmenu .menu .btn, .rowmenu .menu a.hint { display: block; width: 100%; text-align: left; border: 0; border-radius: 6px; padding: 7px 10px; color: var(--t1); font-size: var(--fs-body); text-decoration: none; background: none; }
+.rowmenu .menu .btn:hover, .rowmenu .menu a.hint:hover { background: var(--panel); color: var(--link); }
+.rowmenu .menu .actmsg { padding: 0 10px; }
+/* The page's one blocker: full width at the top, a real warning colour. */
+.attncard.blocker { margin: 0 0 24px; padding: 16px 18px; }
+.attncard.blocker .name { color: var(--t1); font-size: var(--fs-row); }
+/* Technical detail under a problem, closed by default. */
+details.howto { margin: 6px 0 0; }
+details.howto > summary { color: var(--link); font-size: var(--fs-caption); cursor: pointer; }
+details.howto > summary:hover { text-decoration: underline; }
+details.howto[open] > summary { margin-bottom: 6px; }
+details.howto p { margin: 0 0 6px; }
 .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
 .cards.four { grid-template-columns: repeat(4, 1fr); }
-.card { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; }
-.card .hd { display: flex; gap: 9px; align-items: center; font-weight: 600; font-size: 13.5px; }
-.card .ln { color: var(--t3); font-size: 12px; margin-top: 6px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.card .hd { display: flex; gap: 9px; align-items: center; font-weight: 600; font-size: var(--fs-row); }
+.card .ln { color: var(--t3); font-size: var(--fs-caption); margin-top: 6px; }
 /* The whole card is the link. Hover and focus land on the card, not the name:
    the border warms and the name follows it, so the affordance is the shape the
    pointer is actually over. -webkit-user-drag keeps a text selection inside the
@@ -21610,63 +21659,70 @@ a.attncard.rowzone .go { color: var(--t4); font-size: 13px; }
 a.card.cardlink { display: block; color: inherit; text-decoration: none; -webkit-user-drag: none; }
 a.card.cardlink:hover { border-color: var(--link-line); }
 a.card.cardlink:hover .hd { color: var(--link); }
-a.card.cardlink:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-.bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 9px; max-width: 340px; }
+a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.bar { height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-top: 9px; max-width: 420px; }
 .bar i { display: block; height: 100%; background: var(--run); }
-.foot { color: var(--t4); font-size: 12px; margin-top: 22px; }
+.foot { color: var(--t3); font-size: var(--fs-caption); margin-top: 24px; }
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0 22px; }
-.kpi { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 11px 13px; }
-.kpi .u { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--t4); }
-.kpi .n { font-size: 17px; font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums; }
-.kpi .s { font-size: 11px; color: var(--t3); margin-top: 1px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.kpi .u { font-size: var(--fs-caption); color: var(--t3); }
+.kpi .n { font-size: var(--fs-section); font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.kpi .s { font-size: var(--fs-caption); color: var(--t3); margin-top: 1px; }
 .selectioncounts { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 22px; }
 .selectioncounts div { display: flex; gap: 8px; align-items: baseline; }
-.selectioncounts span { color: var(--t3); font-size: 12.5px; }
-.selectioncounts b { color: var(--t1); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.dsect { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--t4); margin: 24px 0 8px; }
+.selectioncounts span { color: var(--t3); font-size: var(--fs-caption); }
+.selectioncounts b { color: var(--t1); font-size: var(--fs-body); font-weight: 600; font-variant-numeric: tabular-nums; }
+.dsect { font-size: var(--fs-section); font-weight: 600; color: var(--t1); margin: 28px 0 10px; }
 /* A heading one level under .dsect: sentence case, because it is a sentence
    about the chips beneath it rather than another section label. */
-.subsect { font-size: 11.5px; color: var(--t3); margin: 12px 0 6px; }
+.subsect { font-size: var(--fs-caption); color: var(--t3); margin: 12px 0 6px; }
 /* The who-acts summary, directly under its section heading — .foot's 22px top
    margin would detach it from the total it is explaining. */
-.reviewsum { color: var(--t3); font-size: 12px; margin: 0 0 4px; }
+.reviewsum { color: var(--t3); font-size: var(--fs-caption); margin: 0 0 4px; }
 .bigstrip { display: flex; gap: 3px; margin: 8px 0 4px; }
 .bigstrip i { width: 14px; height: 30px; border-radius: 2.5px; display: block; }
-.stripcap { display: flex; justify-content: space-between; color: var(--t4); font-size: 11px; margin-bottom: 4px; }
-.tip { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; font-family: var(--mono); font-size: 11.5px; color: var(--t2); margin: 10px 0 4px; max-width: 520px; }
-.tip .h { color: var(--t4); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-family: system-ui, sans-serif; margin-bottom: 4px; }
+.stripcap { display: flex; justify-content: space-between; color: var(--t3); font-size: var(--fs-caption); margin-bottom: 4px; }
+.tip { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; font-family: var(--mono); font-size: var(--fs-caption); color: var(--t2); margin: 10px 0 4px; max-width: 640px; }
+.tip .h { color: var(--t3); font-size: var(--fs-caption); font-family: system-ui, sans-serif; font-weight: 600; margin-bottom: 4px; }
 /* The consequence line under a failing check: plain language, in the page's own
    font, so the mechanical row above it stays the evidence and this stays the
    meaning. */
-.tip .cq { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; color: var(--t3); margin: 2px 0 8px 15px; }
+.tip .cq { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: var(--fs-caption); color: var(--t3); margin: 2px 0 8px 15px; }
 .tip > .cq:last-child { margin-bottom: 0; }
 /* Passing checks, collapsed. A page whose header reports a fault opens with the
    fault; the green rows are evidence a reader may unfold. */
-.evidence { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; font-family: var(--mono); font-size: 11.5px; color: var(--t2); margin: 6px 0 4px; max-width: 520px; }
-.evidence > summary { color: var(--t4); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-family: system-ui, sans-serif; cursor: pointer; }
-.evidence > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
+.evidence { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; font-family: var(--mono); font-size: var(--fs-caption); color: var(--t2); margin: 6px 0 4px; max-width: 640px; }
+.evidence > summary { color: var(--t3); font-size: var(--fs-caption); font-family: system-ui, sans-serif; font-weight: 600; cursor: pointer; }
+.evidence > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .evidence[open] > summary { margin-bottom: 4px; }
 .ok { color: var(--good); }
 .no { color: var(--bad); }
-table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
-th { text-align: left; color: var(--t4); font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
+table { border-collapse: collapse; width: 100%; font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
+th { text-align: left; color: var(--t3); font-size: var(--fs-caption); font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
 td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(--t2); }
-.setrow { display: grid; grid-template-columns: 15px 140px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px dashed var(--line); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.setrow.noblurb { grid-template-columns: 15px 1fr auto; }
-.setrow .name { font-weight: 600; color: var(--t2); }
-.setrow .blurb { color: var(--t4); font-size: 12px; }
+.setrow { display: grid; grid-template-columns: 20px minmax(140px, 200px) 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; min-height: 52px; }
+.setrow > .dot { justify-self: center; }
+.setrow.noblurb { grid-template-columns: 20px 1fr auto; }
+.setrow .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); }
+.setrow .blurb { color: var(--t2); font-size: var(--fs-body); }
+.setrow .blurb .caveat { color: var(--warn); font-weight: 600; }
+.setrow .blurb details.howto { color: var(--t3); font-size: var(--fs-caption); }
 .rowform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.keyfield { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; color: var(--t1); font: inherit; font-size: 12.5px; padding: 4px 9px; width: 170px; }
-.keyfield:focus-visible { outline: 1px solid var(--link); outline-offset: 1px; }
-.actmsg { color: var(--t3); font-size: 11.5px; }
+.keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
+.keyfield::placeholder { color: var(--t4); }
+.keyfield:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.actmsg { color: var(--t3); font-size: var(--fs-caption); }
 .actmsg:empty { display: none; }
-.copystatus { color: var(--t3); font-size: 11.5px; margin-left: 8px; }
-.sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 9px; padding: 16px 18px; margin: 12px 0 0; }
+.copystatus { color: var(--t3); font-size: var(--fs-caption); margin-left: 8px; }
+/* A panel opens in place: directly under the row that opened it, joined to
+   it, never further down the page. */
+.sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
-.sheet h4 { margin: 0 0 6px; font-size: 13.5px; }
-.sheet p { color: var(--t3); font-size: 12.5px; margin: 0 0 10px; max-width: 66ch; }
-.sheet .providernote { border-left: 2px solid var(--warn-line); padding-left: 10px; }
-.promptbox { background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 12px 14px; font-family: var(--mono); font-size: 11.5px; color: var(--t2); white-space: pre-wrap; user-select: all; margin-bottom: 10px; word-break: break-all; }
+.sheet h4 { margin: 0 0 6px; font-size: var(--fs-row); }
+.sheet p { color: var(--t2); font-size: var(--fs-body); margin: 0 0 10px; max-width: 72ch; }
+.sheet .providernote { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 9px 12px; }
+.sheet .providernote::before { content: '! '; color: var(--warn); font-weight: 800; }
+.promptbox { background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 12px 14px; font-family: var(--mono); font-size: var(--fs-caption); color: var(--t2); white-space: pre-wrap; user-select: all; margin-bottom: 10px; word-break: break-all; }
 /* The popup-blocked authorization link. Empty on every render that did not
    need it, so it must take no space until the script fills it in. */
 .authfallback { margin-left: 8px; }
@@ -21678,34 +21734,37 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 /* The numbered callback-registration walkthrough. Numbers are the point — the
    owner is following them in another window — so they stay outside the text
    column and the rows breathe. */
-.sheet .steps { margin: 0 0 14px; padding-left: 22px; color: var(--t3); font-size: 12.5px; max-width: 66ch; }
+.sheet .steps { margin: 0 0 14px; padding-left: 22px; color: var(--t2); font-size: var(--fs-body); max-width: 72ch; }
 .sheet .steps li { margin-bottom: 10px; }
 .sheet .steps li:last-child { margin-bottom: 0; }
-.sheet .steps b { color: var(--t2); font-weight: 600; }
+.sheet .steps b { color: var(--t1); font-weight: 600; }
 .sheet .steps .promptbox { margin-top: 6px; }
 .sheet .steps .ext { color: var(--link); }
 /* The agent prompt, now secondary to the steps above it. */
 .sheet .agentprompt { margin-top: 14px; }
-.sheet .agentprompt summary { color: var(--t3); font-size: 12.5px; cursor: pointer; margin-bottom: 8px; }
-.sheet .agentprompt summary:hover { color: var(--link); }
+.sheet .agentprompt summary { color: var(--link); font-size: var(--fs-caption); cursor: pointer; margin-bottom: 8px; }
+.sheet .agentprompt summary:hover { text-decoration: underline; }
 @media (max-width: 700px) {
-  .page { padding: 22px 18px 28px; }
+  body { padding: 0 16px 60px; }
+  .page { padding: 20px 0 28px; }
   .cards, .cards.four { grid-template-columns: 1fr 1fr; }
   .kpis { grid-template-columns: 1fr 1fr; }
-  .setrow { grid-template-columns: 15px 1fr auto; }
+  .setrow { grid-template-columns: 20px 1fr auto; }
   .setrow .blurb { grid-column: 1 / -1; grid-row: 2; }
   .setrow .btn { justify-self: end; width: max-content; }
   /* A row's control and its hint wrap under the reason rather than squeezing
      the name to nothing on a 375px screen. A whole-row link is excluded: its
      arrow is one glyph and belongs beside the text, not on a line of its own. */
   .attncard:not(.rowzone) { flex-wrap: wrap; }
-  .attncard:not(.rowzone) .grow { flex-basis: 100%; }
+  .attncard:not(.rowzone) .grow { flex-basis: calc(100% - 32px); }
   .rowlink { width: 100%; justify-content: flex-end; }
 }
 `;
 
 // src/workers/dashboard/components.ts
+init_vocabulary();
 var DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
+var MENU_ACTION_KINDS = new Set(["disconnect", "unpair", "oauth_cancel"]);
 
 // src/workers/dashboard/index.ts
 init_vocabulary();
@@ -21727,9 +21786,6 @@ var PARKED_EMBEDDING_STATES = new Set([
   "guard_paused"
 ]);
 
-// src/workers/dashboard/pages/detail.ts
-init_source_dashboard();
-
 // src/workers/dashboard/attention.ts
 init_source_dashboard();
 init_phases();
@@ -21742,6 +21798,7 @@ var HEALTHY_CONNECTION_STATES = new Set([
 ]);
 
 // src/workers/dashboard/pages/detail.ts
+init_source_dashboard();
 init_phases();
 init_scheduler_markers();
 init_vocabulary();

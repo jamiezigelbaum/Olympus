@@ -418,6 +418,8 @@ export interface EmailSourceWorkerOptions {
   fileExtraction?: FileExtractionRunner;
   /** The file lanes whose PDFs `/source/index/files/extract-pdfs` drains, resolved per call. */
   pdfExtractionLanes?: () => readonly ExtractionLaneKey[];
+  /** False for a drain lane whose file source has no current scope approval. */
+  pdfExtractionLaneScopeApproved?: (lane: ExtractionLaneKey) => boolean;
   dropboxEvalShardExport?: DropboxEvalShardExportHandler;
   dropboxSourceExport?: DropboxSourceExportHandler;
   sourceIndexEmbeddingProvider?: SourceEmbeddingProvider;
@@ -724,6 +726,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     });
   const fileExtraction = options.fileExtraction;
   const pdfExtractionLanes = options.pdfExtractionLanes;
+  const pdfExtractionLaneScopeApproved = options.pdfExtractionLaneScopeApproved;
   const dropboxEvalShardExport = options.dropboxEvalShardExport;
   const dropboxSourceExport = options.dropboxSourceExport;
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
@@ -2629,6 +2632,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const lanes = await drainPdfExtraction({
             runner,
             lanes: pdfExtractionLanes?.() ?? [],
+            ...(pdfExtractionLaneScopeApproved ? { laneScopeApproved: pdfExtractionLaneScopeApproved } : {}),
             requeue: record.requeue === true,
             deadlineMs: Date.now() + maxSeconds * 1_000,
             extractorKind: TEXT_EXTRACTOR_KIND,
@@ -2646,6 +2650,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               jobs_failed: lane.jobsFailed,
               jobs_remaining: lane.jobsRemaining,
               paused: lane.paused,
+              ...(lane.pauseReason ? { pause_reason: lane.pauseReason } : {}),
             })),
             policy: { worker_private_surface: true, source_text_returned: false },
           };

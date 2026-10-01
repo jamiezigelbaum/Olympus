@@ -12,8 +12,12 @@
 import type { DashboardAgentsView } from '../../agent-connections.ts';
 import type { DashboardSourceCard, SourceDashboardViewModel } from '../../source-dashboard.ts';
 import {
+  DASHBOARD_MODELS_BLOCKED_REASON,
+  DASHBOARD_RECONNECT_LABEL,
   dashboardAttentionLine,
   dashboardConnectedStatusGroups,
+  dashboardProviderRefusalDetail,
+  dashboardProviderRefusalSentence,
   dashboardHomeMeta,
   dashboardSubLine,
   dashboardWorkFraction,
@@ -35,6 +39,7 @@ import {
   type DashboardActionInput,
 } from '../components.ts';
 import { dashboardBackgroundLanes, dashboardBackgroundRowLines } from './background.ts';
+import { dashboardSyncNowAction } from '../attention.ts';
 import type { EmbeddingRuntimeFacts } from '../embedding-runtime.ts';
 import { DASHBOARD_NAV_CSS, renderDashboardNav } from '../nav.ts';
 
@@ -195,7 +200,7 @@ function renderAttentionSection(
   options: DashboardPageOptions | undefined,
 ): string {
   const rows = group.sources.map((source) => {
-    const resolved = attentionAction(source, view, options);
+    const resolved = attentionAction(source, view, options) ?? fallbackFix(source, options);
     const row = attentionRow({
       label: source.label,
       why: dashboardAttentionLine(source, options),
@@ -203,6 +208,7 @@ function renderAttentionSection(
       // links its name to detail; the row without one becomes the link.
       href: detailHref(source, options?.basePath),
       attention: true,
+      ...(group.status === 'Failing' ? { tone: 'error' as const } : {}),
       ...(resolved === undefined ? {} : { action: resolved.action }),
     });
     // The act happens HERE (owner ruling, 2026-09-01): a setup sheet opens
@@ -292,6 +298,11 @@ function attentionAction(
   // "Connect" on a source holding 4,000 files reads as a demand to set up
   // something the owner already set up (owner note, 2026-09-01).
   const reconnecting = source.coverage.indexed_items > 0;
+  // Connecting is refused by the worker until models are ready, so the button
+  // says so instead of looking like it works.
+  const blocked = view.model_setup !== undefined && !view.model_setup.ready
+    ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON }
+    : {};
   // A source whose app key was never registered has a real path forward, and
   // it opens right here: the same sheet the setup page offers — copyable
   // prompt plus the client-key form the oauth start route accepts — under
@@ -299,17 +310,17 @@ function attentionAction(
   // when the operator's client id is missing, so the row must not dead-end.
   if (action.kind === 'needs_setup') {
     if (!dashboardControlsAvailable(options)) {
-      return { action: lockedAction(reconnecting ? 'Reauthenticate' : action.label, options?.basePath) };
+      return { action: lockedAction(reconnecting ? DASHBOARD_RECONNECT_LABEL : action.label, options?.basePath) };
     }
     const note = dashboardGoogleProviderNote(view, action);
     const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, note === undefined ? {} : { providerNote: note });
     return {
-      action: { label: reconnecting ? 'Reauthenticate' : action.label, kind: 'none', sheet: sheetId, primary: true },
+      action: { label: reconnecting ? DASHBOARD_RECONNECT_LABEL : action.label, kind: 'none', sheet: sheetId, primary: true, ...blocked },
       sheet,
     };
   }
   if (action.kind !== 'oauth' && action.kind !== 'api_key') return undefined;
-  const label = reconnecting && action.label === 'Connect' ? 'Reauthenticate' : action.label;
+  const label = reconnecting && action.label === 'Connect' ? DASHBOARD_RECONNECT_LABEL : action.label;
   if (!dashboardControlsAvailable(options)) {
     return { action: lockedAction(label, options?.basePath) };
   }
@@ -321,17 +332,45 @@ function attentionAction(
   if (action.kind === 'oauth') {
     const note = dashboardGoogleProviderNote(view, action);
     const connect = dashboardOAuthConnectSheet(source, action, {
-      ...(source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}),
+      ...dashboardRefusalNotice(source),
       ...(note === undefined ? {} : { providerNote: note }),
     });
     if (connect) {
       return {
-        action: { label, kind: 'none', sheet: connect.sheetId, primary: true },
+        action: { label, kind: 'none', sheet: connect.sheetId, primary: true, ...blocked },
         sheet: connect.sheet,
       };
     }
   }
-  return { action: { label, kind: action.kind, source: action.source, primary: true } };
+  return { action: { label, kind: action.kind, source: action.source, primary: true, ...blocked } };
+}
+
+/**
+ * A provider refusal for a connect sheet: the translated sentence on top, the
+ * provider's own words under How to fix. Empty when nothing was refused.
+ */
+export function dashboardRefusalNotice(source: DashboardSourceCard): { notice?: string; noticeDetail?: string } {
+  if (!source.connection.provider_refusal) return {};
+  const detail = dashboardProviderRefusalDetail(source);
+  return {
+    notice: dashboardProviderRefusalSentence(source),
+    ...(detail === undefined ? {} : { noticeDetail: detail }),
+  };
+}
+
+/**
+ * The fix for a problem row with no connect control: Sync now where the worker
+ * can run one, otherwise the source page where the problem is explained. A
+ * problem row never ends without a button.
+ */
+export function fallbackFix(
+  source: DashboardSourceCard,
+  options: DashboardPageOptions | undefined,
+): { action: DashboardActionInput; sheet?: string } {
+  const readOnly = !dashboardControlsAvailable(options);
+  const sync = dashboardSyncNowAction(source, { readOnly, setupPath: setupHref(options?.basePath) });
+  if (sync !== undefined) return { action: sync };
+  return { action: { label: 'See what happened', kind: 'link', href: detailHref(source, options?.basePath) } };
 }
 
 function dashboardControlsAvailable(options: DashboardPageOptions | undefined): boolean {

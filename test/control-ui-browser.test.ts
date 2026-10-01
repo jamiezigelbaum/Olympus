@@ -1042,7 +1042,7 @@ describe('folder scope before ingestion', () => {
     connect.dispatchEvent(modified); expect(modified.defaultPrevented).toBe(false);
     click(drive, '[data-scope-switch="dropbox.files"]');
     expect(dropbox.hidden).toBe(false);
-    expect(dropbox.querySelector('.scope-folder-status')?.textContent).toBe('Metadata only');
+    expect(dropbox.querySelector('.scope-folder-status')?.textContent).toBe('Names only');
     expect(reads).toHaveLength(2); expect(writes).toHaveLength(0);
     controller.dispose();
   });
@@ -1140,7 +1140,7 @@ describe('folder scope before ingestion', () => {
     click(root, '[data-scope-select]'); click(root, '[data-scope-state="metadata_only"]');
     click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
     expect(reads).toBe(2);
-    expect(root.querySelector('.scope-folder-status')?.textContent).toBe('Metadata only');
+    expect(root.querySelector('.scope-folder-status')?.textContent).toBe('Names only');
     expect(writes).toBe(0);
     expect(form.querySelector('[data-scope-nodes]')?.getAttribute('aria-busy')).toBe('false');
     controller.dispose();

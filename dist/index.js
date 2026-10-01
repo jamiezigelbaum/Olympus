@@ -1926,8 +1926,6 @@ function createDefaultSecretStore(options = {}) {
     return new MacOSKeychainSecretStore({ runner });
   if (backend === "libsecret")
     return new LinuxLibsecretSecretStore({ runner });
-  if (backend === "1password")
-    return new OnePasswordSecretStore({ env, runner });
   if (backend !== "auto")
     throw new Error("Unsupported Olympus secret store backend.");
   const currentPlatform = options.platform ?? platform();
@@ -2143,39 +2141,6 @@ class LinuxLibsecretSecretStore {
     return [];
   }
 }
-
-class OnePasswordSecretStore {
-  label = "1password";
-  env;
-  runner;
-  constructor(options = {}) {
-    this.env = options.env ?? process.env;
-    this.runner = options.runner ?? runCommand;
-  }
-  async get(key) {
-    return this.getSync(key);
-  }
-  getSync(key) {
-    assertSafeKey(key);
-    const ref = this.env[`OLYMPUS_SECRET_REF_${envKeyFromSecretKey(key)}`]?.trim();
-    if (!ref)
-      return;
-    const brokerRead = this.env.OLYMPUS_OP_BROKER_READ_BIN?.trim() || "op-cached-read";
-    const result = this.runner(brokerRead, [ref]);
-    if (result.status !== 0)
-      throw new Error("1Password broker secret read failed.");
-    return result.stdout.trim() || undefined;
-  }
-  async set() {
-    throw new Error("1Password backend is read-only; create the item in 1Password and map it with OLYMPUS_SECRET_REF_<KEY>.");
-  }
-  async delete() {
-    throw new Error("1Password backend is read-only from Olympus.");
-  }
-  async list() {
-    return Object.keys(this.env).filter((name) => name.startsWith("OLYMPUS_SECRET_REF_")).map((name) => name.slice("OLYMPUS_SECRET_REF_".length).toLowerCase().replaceAll("__", ":").replaceAll("_", ".")).sort();
-  }
-}
 async function resolveSecretRefValue(secretRef, options = {}) {
   if (!secretRef)
     return;
@@ -2192,9 +2157,6 @@ async function resolveSecretRefValue(secretRef, options = {}) {
 function assertSafeKey(key) {
   if (!isSafeSecretKey(key))
     throw new Error("Secret key must contain only safe label characters.");
-}
-function envKeyFromSecretKey(key) {
-  return key.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
 function commandExists(command, runner) {
   return runner(command, ["--version"]).status === 0;
@@ -6445,7 +6407,7 @@ var init_answer_ready_coverage = __esm(() => {
 });
 
 // src/workers/dashboard/vocabulary.ts
-var DASHBOARD_UNCONNECTED_STATES;
+var DASHBOARD_UNCONNECTED_STATES, REDIRECT_REFUSAL_CODES;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -6453,6 +6415,11 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_UNCONNECTED_STATES = new Set([
     "not_connected",
     "needs_setup"
+  ]);
+  REDIRECT_REFUSAL_CODES = new Set([
+    "redirect_uri_mismatch",
+    "invalid_redirect_uri",
+    "redirect_uri_not_registered"
   ]);
 });
 
@@ -11962,9 +11929,9 @@ class DirectHttpEmailTransport {
       response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, authToken), timeoutMs);
     } catch (error) {
       if (isAbortError2(error)) {
-        throw new OperationError("email_unreachable", `Private email lane timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
+        throw new OperationError("email_unreachable", `${workerLaneLabel(url)} timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
       }
-      throw new OperationError("email_unreachable", `Private email lane is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Gateway-side private email source worker is running.");
+      throw new OperationError("email_unreachable", `${workerLaneLabel(url)} is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Gateway-side private email source worker is running.");
     }
     if (!response.ok) {
       const body = await safeText2(response);
@@ -11972,7 +11939,7 @@ class DirectHttpEmailTransport {
       if (workerError) {
         throw new OperationError(workerError.code, workerError.message);
       }
-      throw new OperationError("email_error", `Private email lane returned HTTP ${response.status}.`, body || "Check the Gateway-side private email source worker logs.");
+      throw new OperationError("email_error", `${workerLaneLabel(url)} returned HTTP ${response.status}.`, body || "Check the Gateway-side private email source worker logs.");
     }
     return response.json();
   }
@@ -12004,6 +11971,13 @@ function isSourceIndexSearchRoute(url) {
   } catch {
     return false;
   }
+}
+function workerLaneLabel(url) {
+  try {
+    if (new URL(url).pathname.includes("/source/index/files/"))
+      return "Private file-source lane";
+  } catch {}
+  return "Private email lane";
 }
 function isAllowlistedEmailWorkerErrorResponse(status, url) {
   if (status === 400)

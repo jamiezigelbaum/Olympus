@@ -67,8 +67,8 @@ describe('donutGlyph', () => {
   test('renders the mockup geometry and the dasharray for a fraction', () => {
     const svg = donutGlyph(0.49);
     expect(svg).toContain('viewBox="0 0 14 14"');
-    expect(svg).toContain('<circle cx="7" cy="7" r="6" stroke="#8F7BD8" stroke-width="1.5"/>');
-    expect(svg).toContain('r="2" stroke="#8F7BD8" stroke-width="4"');
+    expect(svg).toContain('<circle cx="7" cy="7" r="6" stroke="#AE9EF0" stroke-width="1.5"/>');
+    expect(svg).toContain('r="2" stroke="#AE9EF0" stroke-width="4"');
     expect(svg).toContain('stroke-dasharray="6.16 12.566"');
     expect(svg).toContain('transform="rotate(-90 7 7)"');
     expect(svg).toContain('aria-hidden="true"');
@@ -89,23 +89,23 @@ describe('donutGlyph', () => {
   test('refuses a color that is not a literal hex', () => {
     const svg = donutGlyph(0.5, 'red" onload="evil()');
     expect(svg).not.toContain('onload');
-    expect(svg).toContain('#8F7BD8');
+    expect(svg).toContain('#AE9EF0');
   });
 });
 
 describe('waitingGlyph and dotGlyph', () => {
   test('waiting is a grey double ring with no progress claim', () => {
     const svg = waitingGlyph();
-    expect(svg).toContain('<circle cx="7" cy="7" r="6" stroke="#6B6E76" stroke-width="1.5"/>');
-    expect(svg).toContain('<circle cx="7" cy="7" r="2.6" stroke="#6B6E76" stroke-width="1.5"/>');
+    expect(svg).toContain('<circle cx="7" cy="7" r="6" stroke="#8C8E97" stroke-width="1.5"/>');
+    expect(svg).toContain('<circle cx="7" cy="7" r="2.6" stroke="#8C8E97" stroke-width="1.5"/>');
     expect(svg).not.toContain('stroke-dasharray');
   });
 
   test('dot renders the given hex and refuses anything else', () => {
-    expect(dotGlyph('#4E9468')).toBe('<span class="dot" style="background:#4E9468"></span>');
+    expect(dotGlyph('#6CC08B')).toBe('<span class="dot" style="background:#6CC08B"></span>');
     const hostile = dotGlyph('red;} body{display:none} .x{color:red');
     expect(hostile).not.toContain('display:none');
-    expect(hostile).toContain('#6B6E76');
+    expect(hostile).toContain('#8C8E97');
   });
 });
 
@@ -116,16 +116,16 @@ describe('statusGlyph', () => {
 
   test('Working falls back to a plain ring when no fraction is defensible', () => {
     const svg = statusGlyph('Working');
-    expect(svg).toContain('stroke="#8F7BD8"');
+    expect(svg).toContain('stroke="#AE9EF0"');
     expect(svg).not.toContain('stroke-dasharray');
   });
 
   test('the other five words each get their own glyph', () => {
     expect(statusGlyph('Waiting')).toContain('r="2.6"');
-    expect(statusGlyph('Fresh')).toBe('<span class="dot" style="background:#4E9468"></span>');
-    expect(statusGlyph('Needs you')).toContain('#B08430');
-    expect(statusGlyph('Failing')).toContain('#C4574D');
-    expect(statusGlyph('Off')).toContain('#26272C');
+    expect(statusGlyph('Fresh')).toBe('<span class="dot" style="background:#6CC08B"></span>');
+    expect(statusGlyph('Needs you')).toContain('#E3AA45');
+    expect(statusGlyph('Failing')).toContain('#F08276');
+    expect(statusGlyph('Off')).toContain('#30323A');
   });
 });
 
@@ -377,7 +377,7 @@ describe('attentionRow', () => {
         hint: 'needs the worker token',
       },
     });
-    expect(html).toContain('<a class="btn" href="/dashboard?setup">Reauthenticate</a>');
+    expect(html).toContain('<a class="btn" href="/dashboard?setup">Reconnect</a>');
     expect(html).toContain('<span class="hint">needs the worker token</span>');
     expect(html).not.toContain('<form');
   });

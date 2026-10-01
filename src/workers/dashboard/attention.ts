@@ -185,7 +185,7 @@ function syncFailingBanner(
   if (!dashboardSyncKeepsFailing(source)) return undefined;
   const errorKind = source.schedule?.last_error_kind;
   const condition = errorKind ? DASHBOARD_GUARD_CONSEQUENCES[errorKind] ?? errorKind : 'nothing has reported a reason';
-  const action = syncNowAction(source, options);
+  const action = dashboardSyncNowAction(source, options);
   return {
     kind: 'sync_failing',
     sentence: `${source.label}'s scheduled sync keeps failing, so new material is not coming in. Last condition on`
@@ -205,9 +205,9 @@ function syncFailingBanner(
  * source carries no connect action at all. A read-only reader gets the gate
  * link instead of a button that can only 401.
  */
-function syncNowAction(
+export function dashboardSyncNowAction(
   source: DashboardSourceCard,
-  options: DashboardAttentionOptions,
+  options: Pick<DashboardAttentionOptions, 'readOnly' | 'setupPath'>,
 ): DashboardActionInput | undefined {
   const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
   const syncSource = source.sync_now_available === false
@@ -455,7 +455,7 @@ function laneStuckBanner(
   // The one act a route exists for is a manual sync, offered wherever the
   // source has a sync route (the oauth and api-key families). The agent prompt
   // is the second act and the only one for a paired chat source.
-  const action = syncNowAction(source, options);
+  const action = dashboardSyncNowAction(source, options);
   return {
     kind: 'lane_stuck',
     sentence: `${source.label} still has work to do and its ${laneName} ${stillness}. Last condition on the lane:`

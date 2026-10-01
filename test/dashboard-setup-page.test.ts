@@ -76,7 +76,7 @@ describe('dashboard first-run page', () => {
     ].map((heading) => html.indexOf(heading));
     expect(order).not.toContain(-1);
     expect([...order].sort((left, right) => left - right)).toEqual(order);
-    expect(segmentFor(html, 'Dropbox')).toContain('reauth required');
+    expect(segmentFor(html, 'Dropbox')).toContain('signed out');
     expect(segmentFor(html, 'Google Drive')).toContain('waiting for you to approve in the Google Drive tab · expires in 9m');
     expect(segmentFor(html, 'Readwise')).toContain('synced 41 minutes ago');
     // Every engaged row click-throughs to its detail page — home's rule — so
@@ -197,7 +197,7 @@ describe('dashboard first-run page', () => {
       }),
     ]));
 
-    expect(segmentFor(html, 'Gmail')).toContain('first ingest · 4,812 indexed so far · ~38m left');
+    expect(segmentFor(html, 'Gmail')).toContain('first sync · 4,812 indexed so far · ~38m left');
     // The provider-side total does not exist on the view model, so no bar.
     expect(html).not.toContain('class="bar"');
     expect(html).not.toContain('role="progressbar"');
@@ -256,11 +256,9 @@ describe('dashboard first-run page', () => {
       'source_health',
       'cited_answer_readiness',
     ]);
-    expect(html).toContain('aria-label="Setup summary"');
-    expect(html).toContain('Security preset');
-    // Two counts, two names: "0 sources ready" beside four Fresh cards read as
-    // a contradiction (owner note, 2026-09-01).
-    expect(html).toContain('<b>Sources</b><span>0 answer-ready · 0 connected</span>');
+    // Nothing connected yet, so no summary line; the preset tile is gone.
+    expect(html).not.toContain('aria-label="Setup summary"');
+    expect(html).not.toContain('Security preset');
     expect(html).not.toContain('sources ready');
     expect(html).not.toContain('Advanced Google BYO required');
     expect(html).toContain('Available to connect — 7');
@@ -390,7 +388,7 @@ describe('dashboard first-run page', () => {
       }),
     ]));
     const row = segmentFor(html, 'Dropbox');
-    expect(row).toContain('>Reauthenticate</button>');
+    expect(row).toContain('>Reconnect</button>');
     expect(row).toContain('>Disconnect Dropbox</button>');
   });
 
@@ -425,8 +423,8 @@ describe('dashboard first-run page', () => {
     // degraded credential or a stalled answer lane is never headed "Fresh".
     expect(html).toContain('▲ Needs you — 2');
     expect(html).not.toContain('Fresh —');
-    expect(segmentFor(html, 'Dropbox')).toContain('credential unavailable');
-    expect(segmentFor(html, 'Gmail')).toContain('embedding lane needs attention');
+    expect(segmentFor(html, 'Dropbox')).toContain("can&#39;t sign in");
+    expect(segmentFor(html, 'Gmail')).toContain('paused — indexing has stopped');
   });
 });
 

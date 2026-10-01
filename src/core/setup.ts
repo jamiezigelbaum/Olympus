@@ -170,8 +170,8 @@ export function runSetupDependencyCheck(input: {
       label: '1Password CLI',
       required: false,
       ok: commandExists('op'),
-      detail: 'Optional 1Password-backed secret-store integration.',
-      repairHint: 'Install the 1Password CLI from https://developer.1password.com/docs/cli/get-started/ when using that backend.',
+      detail: 'Optional 1Password CLI for an approved named-item key fetch into a connect flow.',
+      repairHint: 'Install the 1Password CLI from https://developer.1password.com/docs/cli/get-started/ when fetching keys through it.',
     }),
     dependencyFinding({
       id: 'python-telethon',

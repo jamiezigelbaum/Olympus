@@ -1,9 +1,21 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  DASHBOARD_CONTRAST_PAIRS,
   DASHBOARD_STATUS_COLORS,
   DASHBOARD_THEME_CSS,
   DASHBOARD_THEME_TOKENS,
+  DASHBOARD_TYPE_SCALE,
 } from '../src/workers/dashboard/theme.ts';
+import {
+  AGENT_CONNECT_CSS,
+  BACKGROUND_CSS,
+  DASHBOARD_NAV_CSS,
+  DASHBOARD_POLICY_CSS,
+  DASHBOARD_PROGRESS_CSS,
+  DISPOSITIONS_CSS,
+  MODEL_SETUP_CSS,
+  SETUP_JOURNEY_CSS,
+} from '../src/workers/dashboard/static-styles.ts';
 import {
   DASHBOARD_LANE_CSS,
   attentionRow,
@@ -21,29 +33,83 @@ import {
   type DashboardStatus,
 } from '../src/workers/dashboard/vocabulary.ts';
 
-// The Calm Field palette, copied off the mockup's :root block rather than off
-// the token object, so a drifted value fails here instead of agreeing with
-// itself.
+// The palette, written out rather than read off the token object, so a drifted
+// value fails here instead of agreeing with itself. Release 3 of the
+// 2026-10-01 UX review raised secondary text, warnings and errors to WCAG AA.
 const MOCKUP_TOKENS: Array<[string, string]> = [
   ['--bg', '#101014'],
-  ['--panel', '#15161A'],
-  ['--panel2', '#17181D'],
-  ['--line', '#26272C'],
-  ['--line2', '#1E1F24'],
+  ['--panel', '#17181D'],
+  ['--panel2', '#1B1C22'],
+  ['--line', '#30323A'],
+  ['--line2', '#24252B'],
   ['--t1', '#ECECEA'],
-  ['--t2', '#B9BAC0'],
-  ['--t3', '#7C7E86'],
-  ['--t4', '#55575E'],
-  ['--good', '#4E9468'],
-  ['--warn', '#B08430'],
-  ['--run', '#8F7BD8'],
-  ['--bad', '#C4574D'],
-  ['--off', '#6B6E76'],
-  ['--warn-bg', '#1B1913'],
-  ['--warn-line', '#4A3D22'],
-  ['--link', '#8FA8E8'],
-  ['--link-line', '#3A5AA8'],
+  ['--t2', '#C9CAD0'],
+  ['--t3', '#A9ABB3'],
+  ['--t4', '#8C8E97'],
+  ['--good', '#6CC08B'],
+  ['--warn', '#E3AA45'],
+  ['--run', '#AE9EF0'],
+  ['--bad', '#F08276'],
+  ['--off', '#8C8E97'],
+  ['--warn-bg', '#261E10'],
+  ['--warn-line', '#8A6A2A'],
+  ['--err-bg', '#2B1614'],
+  ['--err-line', '#B04A40'],
+  ['--link', '#9DB4F0'],
+  ['--link-line', '#5A7BD6'],
+  ['--accent-fill', '#3E63C8'],
+  ['--on-accent', '#FFFFFF'],
+  ['--field', '#6A6D77'],
+  ['--selected', '#2C4485'],
 ];
+
+/** WCAG 2.x relative luminance and contrast ratio. */
+function luminance(hex: string): number {
+  const channels = [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16) / 255)
+    .map((value) => (value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!;
+}
+
+function contrast(a: string, b: string): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+describe('dashboard contrast (WCAG AA)', () => {
+  test('the contrast check itself matches known ratios', () => {
+    expect(contrast('#FFFFFF', '#000000')).toBeCloseTo(21, 5);
+    expect(contrast('#777777', '#FFFFFF')).toBeCloseTo(4.48, 2);
+  });
+
+  test('every text and component colour meets AA on every surface it is painted on', () => {
+    const failures = DASHBOARD_CONTRAST_PAIRS
+      .map(({ fg, bg, min }) => ({ pair: `${fg} on ${bg}`, ratio: contrast(DASHBOARD_THEME_TOKENS[fg], DASHBOARD_THEME_TOKENS[bg]), min }))
+      .filter(({ ratio, min }) => ratio < min)
+      .map(({ pair, ratio, min }) => `${pair}: ${ratio.toFixed(2)} < ${min}`);
+    expect(failures).toEqual([]);
+    expect(DASHBOARD_CONTRAST_PAIRS.length).toBeGreaterThan(40);
+  });
+
+  test('the stylesheets paint text only from tokens', () => {
+    // A literal colour would be a pair the check above never sees.
+    const sheets = [DASHBOARD_THEME_CSS, DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_POLICY_CSS, DASHBOARD_NAV_CSS,
+      BACKGROUND_CSS, DISPOSITIONS_CSS, AGENT_CONNECT_CSS, MODEL_SETUP_CSS, SETUP_JOURNEY_CSS].join('\n');
+    const literalText = [...sheets.matchAll(/(?<![-\w])color:\s*(#[0-9A-Fa-f]{3,8})/g)].map((match) => match[1]);
+    expect(literalText).toEqual([]);
+  });
+
+  test('every font size is one of the five type-scale tokens', () => {
+    const sheets = [DASHBOARD_THEME_CSS, DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_POLICY_CSS, DASHBOARD_NAV_CSS,
+      BACKGROUND_CSS, DISPOSITIONS_CSS, AGENT_CONNECT_CSS, MODEL_SETUP_CSS, SETUP_JOURNEY_CSS].join('\n');
+    const sizes = new Set([...sheets.matchAll(/font-size:\s*([^;}]+)/g)].map((match) => match[1]!.trim()));
+    const allowed = new Set(Object.keys(DASHBOARD_TYPE_SCALE).map((name) => `var(--fs-${name})`));
+    // Two decorative glyphs (the inspector folder and the blocked-control lock)
+    // are icons, not text on the scale.
+    const off = [...sizes].filter((size) => !allowed.has(size) && size !== '30px' && size !== '11px');
+    expect(off).toEqual([]);
+    expect(sheets).not.toContain('text-transform: uppercase');
+  });
+});
 
 describe('dashboard theme tokens', () => {
   test('publishes every Calm Field token at the mockup value', () => {
