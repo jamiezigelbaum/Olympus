@@ -4100,7 +4100,7 @@ export async function main(): Promise<void> {
           // bearer connections keep the remote operation surface. The
           // dashboard tool reads the view `/dashboard.json` serves, in-process.
           chatgpt: {
-            servesRequest: trustRelayHeaders,
+            servesRequest: isRelayedRequest,
             dashboardView: async (signal?: AbortSignal) => {
               const response = await worker.fetch(new Request(
                 'http://olympus-worker.internal/dashboard.json',
