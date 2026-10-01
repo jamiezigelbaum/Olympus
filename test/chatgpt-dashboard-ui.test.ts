@@ -306,14 +306,50 @@ describe('ready page', () => {
     host.push({ structuredContent: model({ sources: SOURCES }) });
     const rows = Array.from(host.win.document.querySelectorAll('.source'));
     expect(rows.map((row) => row.querySelector('.source-name')!.textContent)).toEqual(['Notes', 'Gmail', 'Google Drive']);
+    expect(rows[2]!.className).toBe('row source mac');
     expect(rows[0]!.textContent).toContain('Working');
     expect(rows[0]!.textContent).toContain('Synced 2 hr ago');
     expect(rows[1]!.textContent).toContain('1,204 messages · Synced 5 min ago');
     const menu = rows[1]!.querySelector('details.menu')!;
     expect(menu.querySelector('summary')!.textContent).toContain('More actions for Gmail');
     expect(menu.querySelector('button')!.textContent).toBe('Disconnect');
-    expect(rows[2]!.textContent).toContain('Connect sources in Olympus on your Mac.');
-    expect((rows[2]!.querySelector('button') as unknown as HTMLButtonElement).disabled).toBe(true);
+    expect(rows[2]!.textContent).toBe('Google Drive');
+  });
+
+  test('Mac-only sources group under one heading and sentence, with no buttons; connectable rows are outlined', () => {
+    const host = mount();
+    const onMac = (id: string, label: string) => ({ id, label, group: 'cloud' as const, status: 'Off' as const, detail: 'not connected',
+      primary: { label: 'Connect', tool: 'olympus_dashboard', args: {}, disabledReason: 'Connect sources in Olympus on your Mac.' } });
+    host.push({ structuredContent: model({
+      needsYou: [{ id: 'source:gmail.email', sentence: 'Gmail — choose mail', fix: { label: 'Choose mail', tool: 'olympus_scope_list', args: { source_id: 'gmail.email' } } }],
+      sources: [
+        onMac('x.bookmarks', 'X'),
+        { id: 'gmail.email', label: 'Gmail', group: 'cloud', status: 'Off', detail: 'not connected', primary: { label: 'Connect', tool: 'olympus_connect_source', args: { source: 'gmail' } } },
+        { id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Off', primary: { label: 'Connect', tool: 'olympus_connect_source', args: { source: 'dropbox' } } },
+        onMac('telegram', 'Telegram'), onMac('whatsapp', 'WhatsApp'), onMac('readwise.library', 'Readwise'),
+        { id: 'x2', label: 'Readwise (connected)', group: 'cloud', status: 'Fresh', primary: { label: 'Check', disabledReason: 'Connect sources in Olympus on your Mac.' } },
+      ],
+    }) });
+    const doc = host.win.document;
+    const mac = doc.querySelector('.rows.mac-only')!;
+    expect(Array.from(mac.querySelectorAll('.source-name')).map((node) => node.textContent)).toEqual(['X', 'Telegram', 'WhatsApp', 'Readwise']);
+    expect(mac.querySelectorAll('button').length).toBe(0);
+    expect(mac.previousElementSibling!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.sourcesOnMacHelp);
+    expect(mac.previousElementSibling!.previousElementSibling!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.sourcesOnMac);
+    expect(host.text().split('Connect sources in Olympus on your Mac.').length).toBeLessThanOrEqual(2);
+    // A connected source stays in its group even with a disabled fix.
+    expect(mac.textContent).not.toContain('connected)');
+    // At most one accent on the page, never on a source row.
+    expect(doc.querySelectorAll('.btn.primary').length).toBe(1);
+    expect(doc.querySelectorAll('.source .btn.primary').length).toBe(0);
+    expect(doc.querySelector('.btn.primary')!.textContent).toBe('Choose mail');
+    // Not connected is said once: no status word beside the name.
+    const gmail = Array.from(doc.querySelectorAll('.row.source')).find((row) => row.querySelector('.source-name')!.textContent === 'Gmail')!;
+    expect(gmail.querySelector('.status')).toBeNull();
+    expect(gmail.textContent).toBe('GmailNot connectedConnect');
+    const dropbox = Array.from(doc.querySelectorAll('.row.source')).find((row) => row.querySelector('.source-name')!.textContent === 'Dropbox')!;
+    expect(dropbox.textContent).toContain('Not connected');
+    expect(dropbox.textContent!.match(/Off|not connected/g)).toBeNull();
   });
 
   test('a destructive fix confirms inline in its row before it runs', async () => {
@@ -392,7 +428,7 @@ describe('ready page', () => {
 
   test('a source row keeps ⋯ beside the name at every width; status and actions wrap under it', () => {
     const host = mount();
-    host.push({ structuredContent: model({ sources: [...SOURCES, { ...SOURCES[2]!, id: 'dropbox', label: 'Dropbox', menu: SOURCES[0]!.menu! }] }) });
+    host.push({ structuredContent: model({ sources: [...SOURCES, { ...SOURCES[2]!, id: 'dropbox', label: 'Dropbox', primary: { label: 'Connect', tool: 'olympus_connect_source', args: { source: 'dropbox' } }, menu: SOURCES[0]!.menu! }] }) });
     const row = (label: string) => Array.from(host.win.document.querySelectorAll('.source'))
       .find((node) => node.querySelector('.source-name')!.textContent === label)!;
     const gmail = row('Gmail');

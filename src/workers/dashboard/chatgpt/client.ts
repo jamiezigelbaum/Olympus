@@ -468,16 +468,20 @@ export function chatgptDashboardClient(
     const row = el('li', 'row source');
     const main = el('div', 'source-main');
     const head = add(el('p', 'source-head'), el('span', 'dot tone-' + tone), el('span', 'source-name', String(source.label || '')));
-    add(head, el('span', 'status', status));
+    // Off is said once, under the name ("Not connected"), never twice.
+    const off = status === 'Off';
+    if (!off) add(head, el('span', 'status', status));
     add(main, head);
     const meta: string[] = [];
-    if (typeof source.detail === 'string' && source.detail) meta.push(source.detail);
+    if (off) meta.push(capitalise(typeof source.detail === 'string' && source.detail ? source.detail : P.notConnected));
+    else if (typeof source.detail === 'string' && source.detail) meta.push(source.detail);
     if (typeof source.lastSyncAt === 'string' && ago(source.lastSyncAt)) meta.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
     if (meta.length) add(main, el('p', 'muted', meta.join(' · ')));
     add(row, main);
     const controls = el('div', 'source-actions');
     const context = { id, label: String(source.label || id) };
-    if (source.primary) add(controls, fixControl(source.primary, 'primary:' + id, 'main', true, context));
+    // Row buttons are all outlined; the accent belongs to the page's one primary action.
+    if (source.primary) add(controls, fixControl(source.primary, 'primary:' + id, 'plain', true, context));
     const menu = Array.isArray(source.menu) ? source.menu : [];
     let menuBox: HTMLElement | null = null;
     if (menu.length) {
@@ -501,12 +505,25 @@ export function chatgptDashboardClient(
     return row;
   }
 
+  /** Not connected, and its only fix is set up on the Mac: no button here, just its name in one group. */
+  function macOnly(source: Any): boolean {
+    const fix = source && source.primary;
+    return String(source && source.status) === 'Off' && !!fix && !!fix.disabledReason
+      && (!fix.tool || fix.tool === config.toolName);
+  }
+
+  function capitalise(text: string): string {
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+  }
+
   function sourcesSection(sources: Any[]): HTMLElement {
     const section = add(el('section', 'section'), el('h2', '', P.sources));
     if (!sources.length) return add(section, el('p', 'muted', P.noSources));
+    const onMac = sources.filter(macOnly);
+    const here = sources.filter((source) => !macOnly(source));
     // Server order within each group; the local group always comes first.
-    const ordered = sources.filter((source) => source.group === 'local')
-      .concat(sources.filter((source) => source.group !== 'local'));
+    const ordered = here.filter((source) => source.group === 'local')
+      .concat(here.filter((source) => source.group !== 'local'));
     let group = '';
     let list: HTMLElement | null = null;
     for (const source of ordered) {
@@ -516,6 +533,12 @@ export function chatgptDashboardClient(
         list = add(section, el('ul', 'rows')).lastChild as HTMLElement;
       }
       add(list, sourceRow(source));
+    }
+    if (onMac.length) {
+      add(section, el('h3', '', P.sourcesOnMac), el('p', 'muted mac-help', P.sourcesOnMacHelp));
+      const rows = el('ul', 'rows mac-only');
+      for (const source of onMac) add(rows, add(el('li', 'row source mac'), el('span', 'source-name', String(source.label || source.id || ''))));
+      add(section, rows);
     }
     return section;
   }

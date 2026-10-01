@@ -45219,6 +45219,9 @@ var init_vocabulary = __esm(() => {
     sources: "Sources",
     sourcesLocal: "On your Mac",
     sourcesCloud: "Accounts",
+    sourcesOnMac: "Set up on your Mac",
+    sourcesOnMacHelp: "These connect on your Mac in Olympus. They'll show up here once connected.",
+    notConnected: "Not connected",
     noSources: "No sources yet.",
     progress: "Progress",
     progressInitial: "First index",
@@ -97481,10 +97484,14 @@ function chatgptDashboardClient(config2, pickerProgram) {
     const row = el("li", "row source");
     const main = el("div", "source-main");
     const head = add(el("p", "source-head"), el("span", "dot tone-" + tone), el("span", "source-name", String(source.label || "")));
-    add(head, el("span", "status", status));
+    const off = status === "Off";
+    if (!off)
+      add(head, el("span", "status", status));
     add(main, head);
     const meta2 = [];
-    if (typeof source.detail === "string" && source.detail)
+    if (off)
+      meta2.push(capitalise(typeof source.detail === "string" && source.detail ? source.detail : P.notConnected));
+    else if (typeof source.detail === "string" && source.detail)
       meta2.push(source.detail);
     if (typeof source.lastSyncAt === "string" && ago(source.lastSyncAt))
       meta2.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
@@ -97494,7 +97501,7 @@ function chatgptDashboardClient(config2, pickerProgram) {
     const controls = el("div", "source-actions");
     const context = { id, label: String(source.label || id) };
     if (source.primary)
-      add(controls, fixControl(source.primary, "primary:" + id, "main", true, context));
+      add(controls, fixControl(source.primary, "primary:" + id, "plain", true, context));
     const menu = Array.isArray(source.menu) ? source.menu : [];
     let menuBox = null;
     if (menu.length) {
@@ -97516,11 +97523,20 @@ function chatgptDashboardClient(config2, pickerProgram) {
     }
     return row;
   }
+  function macOnly(source) {
+    const fix = source && source.primary;
+    return String(source && source.status) === "Off" && !!fix && !!fix.disabledReason && (!fix.tool || fix.tool === config2.toolName);
+  }
+  function capitalise(text) {
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+  }
   function sourcesSection(sources) {
     const section = add(el("section", "section"), el("h2", "", P.sources));
     if (!sources.length)
       return add(section, el("p", "muted", P.noSources));
-    const ordered = sources.filter((source) => source.group === "local").concat(sources.filter((source) => source.group !== "local"));
+    const onMac = sources.filter(macOnly);
+    const here = sources.filter((source) => !macOnly(source));
+    const ordered = here.filter((source) => source.group === "local").concat(here.filter((source) => source.group !== "local"));
     let group = "";
     let list = null;
     for (const source of ordered) {
@@ -97530,6 +97546,13 @@ function chatgptDashboardClient(config2, pickerProgram) {
         list = add(section, el("ul", "rows")).lastChild;
       }
       add(list, sourceRow(source));
+    }
+    if (onMac.length) {
+      add(section, el("h3", "", P.sourcesOnMac), el("p", "muted mac-help", P.sourcesOnMacHelp));
+      const rows = el("ul", "rows mac-only");
+      for (const source of onMac)
+        add(rows, add(el("li", "row source mac"), el("span", "source-name", String(source.label || source.id || ""))));
+      add(section, rows);
     }
     return section;
   }
@@ -99146,6 +99169,8 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .source-main{min-width:0}
 .source-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .source-name{font-weight:600}
+.mac-help{margin:0 0 0.25rem}
+.row.source.mac .source-name{font-weight:500}
 .status{color:var(--muted);font-size:0.875rem}
 .source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
