@@ -3,10 +3,15 @@
  * `olympus_dashboard` tool, rendered by `ui://olympus/dashboard`. The engine
  * produces every state except `mac_offline` and `not_installed` (the relay
  * answers those) and `relay_unavailable` (the UI derives it when a tool call
- * fails). See docs/design/chatgpt-plugin.md. Strings come from
- * src/workers/dashboard/vocabulary.ts; nothing tiered Private or Secret is
- * ever included, folder names included.
+ * fails). See docs/design/chatgpt-plugin.md.
+ *
+ * Copy: the UI owns the wording of the five connection states (the relay
+ * renders two of them without vocabulary.ts). Every other sentence comes from
+ * src/workers/dashboard/vocabulary.ts, which the dashboard lane owns. Nothing
+ * tiered Private or Secret is ever included, folder names included.
  */
+import type { DashboardStatus } from '../dashboard/vocabulary.ts';
+
 export type ConnectionState = 'not_installed' | 'installing' | 'ready' | 'mac_offline' | 'relay_unavailable';
 
 export interface DashboardFix {
@@ -14,7 +19,12 @@ export interface DashboardFix {
   /** Run through tools/call from the UI. */
   tool?: string;
   args?: Record<string, unknown>;
+  /** olympusplugin.ai only: openExternal needs the plugin's redirect domains. */
   href?: string;
+  /** Shown on a disabled control. */
+  disabledReason?: string;
+  /** The UI confirms first; matches the tool's destructive annotation. */
+  destructive?: boolean;
 }
 
 export interface DashboardItem {
@@ -23,18 +33,35 @@ export interface DashboardItem {
   fix: DashboardFix;
 }
 
+export interface DashboardSource {
+  id: string;
+  label: string;
+  group: 'local' | 'cloud';
+  status: DashboardStatus;
+  detail?: string;
+  lastSyncAt?: string;
+  primary?: DashboardFix;
+  /** Secondary actions for the ⋯ menu. */
+  menu?: DashboardFix[];
+}
+
 export interface DashboardViewModelV1 {
   v: 1;
+  /** State and data only: the UI holds the copy for connection states. */
   connection: {
     state: ConnectionState;
     /** ISO time; `mac_offline` only. */
     lastSeenAt?: string;
-    action?: { id: 'install' | 'open_olympus' | 'wake_mac' | 'retry'; label: string; href?: string };
+    action?: { id: 'install' | 'open_olympus' | 'wake_mac' | 'retry'; href?: string };
+    /** `installing` only: model download, first index. */
+    progress?: { percent: number; label: string };
   };
   /** At most one banner. */
   blocker?: DashboardItem;
+  /** Includes an unreachable local model; models never block on their own. */
   needsYou: DashboardItem[];
-  sources: Array<{ id: string; label: string; status: 'ready' | 'working' | 'needs_you' | 'off'; detail?: string }>;
+  /** Server-ordered, local group first. */
+  sources: DashboardSource[];
   progress?: {
     percent: number;
     itemsLeft: number;
@@ -42,7 +69,12 @@ export interface DashboardViewModelV1 {
     stalled: boolean;
     details: Array<{ stage: string; done: number; total: number }>;
   };
-  models: { embedding: { kind: 'built_in' | 'custom'; ready: boolean }; answers?: { label: string; ready: boolean } };
+  models: {
+    embedding: { kind: 'built_in' | 'custom'; ready: boolean };
+    answers?: { kind: 'built_in' | 'venice' | 'local'; label: string; ready: boolean };
+    /** Opens the model chooser. */
+    change?: DashboardFix;
+  };
   generatedAt: string;
 }
 

@@ -133,30 +133,10 @@ the `ui://olympus/dashboard` resource. All strings come from
 `src/workers/dashboard/vocabulary.ts`; nothing tiered Private or Secret is
 ever included, folder names included.
 
-```ts
-type ConnectionState =
-  | 'not_installed'      // relay: no linked install for this caller
-  | 'installing'         // engine: linked, first-run setup not finished
-  | 'ready'              // engine: normal
-  | 'mac_offline'        // relay: install known, no live session
-  | 'relay_unavailable'; // UI only: tool calls to the relay fail
-
-interface DashboardViewModelV1 {
-  v: 1;
-  connection: {
-    state: ConnectionState;
-    lastSeenAt?: string;             // ISO; mac_offline only
-    action?: { id: 'install' | 'open_olympus' | 'wake_mac' | 'retry'; label: string; href?: string };
-  };
-  blocker?: { id: string; sentence: string; fix: Fix };   // at most one banner
-  needsYou: Array<{ id: string; sentence: string; fix: Fix }>;
-  sources: Array<{ id: string; label: string; status: 'ready' | 'working' | 'needs_you' | 'off'; detail?: string }>;
-  progress?: { percent: number; itemsLeft: number; etaSeconds?: number; stalled: boolean; details: Array<{ stage: string; done: number; total: number }> };
-  models: { embedding: { kind: 'built_in' | 'custom'; ready: boolean }; answers?: { label: string; ready: boolean } };
-  generatedAt: string;
-}
-type Fix = { label: string; tool?: string; args?: Record<string, unknown>; href?: string };
-```
+The TypeScript definition in `src/workers/chatgpt/dashboard-contract.ts` is
+the contract (v1, agreed with the dashboard lane 2026-10-01). The UI holds
+the copy for connection states; all other sentences come from
+`vocabulary.ts`. Folder and mail pickers get their own data tool in v2.
 
 `installing` covers model download, first index build and no source connected
 yet. `relay_unavailable` is never sent by a server: the UI derives it from a
