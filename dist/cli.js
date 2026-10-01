@@ -45219,6 +45219,9 @@ var init_vocabulary = __esm(() => {
     sources: "Sources",
     sourcesLocal: "On your Mac",
     sourcesCloud: "Accounts",
+    sourcesOnMac: "Set up on your Mac",
+    sourcesOnMacHelp: "These connect on your Mac in Olympus. They'll show up here once connected.",
+    notConnected: "Not connected",
     noSources: "No sources yet.",
     progress: "Progress",
     progressInitial: "First index",
@@ -45286,52 +45289,63 @@ var init_vocabulary = __esm(() => {
     connectFailed: "Olympus could not start signing in to {source}. Try again.",
     connected: "{source} is connected.",
     foldersTitle: "Choose folders",
-    foldersIntro: "Choose which {source} folders Olympus may read. Nothing starts until you save.",
+    foldersIntro: "Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.",
     mailTitle: "Choose mail",
     mailIntro: "Choose which {source} mail Olympus may read. Nothing starts until you save.",
     loadingFolders: "Loading folders…",
     loadingMail: "Reading your labels and senders…",
     loadFailed: "Olympus could not load this list. Try again.",
-    search: "Search listed folders",
-    searchEmpty: "No listed folder matches.",
+    up: "Back",
+    upTo: "Back to {name}",
+    pathMore: "…",
+    accountRow: "Everything in {source}",
+    accountHelp: "The choice for every folder you have not set yourself.",
+    exceptions: "Exceptions ({n})",
+    foldersHeading: "Folders",
+    thisFolder: "This folder:",
+    change: "Change",
+    unknownFolder: "A folder not opened yet",
+    insideFolder: "A folder inside {name}",
     noFolders: "No folders here.",
     loadMore: "Load more folders",
-    expand: "Show folders inside {name}",
-    collapse: "Hide folders inside {name}",
-    choiceFor: "Choice for {name}",
+    choiceFor: "Choice for {name}: {state}",
     states: { ingest: "Fully indexed", metadata_only: "Names only", exclude: "Skipped" },
-    notSelected: "Not selected",
-    sameAsParent: "Same as its parent ({state})",
-    sameAsAccount: "Same as the entire account ({state})",
-    inherited: "inherited",
-    mixed: "Mixed",
-    mixedHelp: "folders inside differ",
-    meaningTitle: "What these choices mean",
-    meanings: [
-      "Fully indexed: Olympus reads the files and can answer from them.",
-      "Names only: Olympus keeps file names and dates, never what is inside.",
-      "Skipped: Olympus ignores the folder and everything in it.",
-      "Not selected: the folder stays out unless a folder above it is chosen."
-    ],
-    folderSize: "{size}",
+    statesLower: { ingest: "fully indexed", metadata_only: "names only", exclude: "skipped" },
+    notIncluded: "Not included",
+    fromParent: "{state} · from {parent}",
+    fromAccount: "{state} · whole account",
+    mixedSome: "Mixed: some {state}",
+    consequences: {
+      ingest: "Olympus reads the files and can answer from them.",
+      metadata_only: "Olympus keeps file names and dates, never what is inside.",
+      exclude: "Olympus ignores this folder and everything in it.",
+      parent: "Follow the folder above, and change with it.",
+      none: "Only the folders you choose are read.",
+      wholeIngest: "Olympus reads every folder, now and later, except the ones you set otherwise."
+    },
+    sameAsParent: "Same as parent ({state})",
+    sameAsAccount: "Same as everything else ({state})",
+    inheritedFrom: "Inherited from {parent}",
+    overridden: "This folder is set to {own}, but {parent} is {state}, which wins.",
+    notPossible: "Not possible while {parent} is {state}.",
+    keepOwn: { one: "{n} folder inside keeps its own choice.", many: "{n} folders inside keep their own choice." },
+    done: "Done",
+    capReached: "You have {max} folder choices, the most Olympus can save. Set a folder back to Same as parent to choose another.",
     folderFiles: { one: "{n} file", many: "{n} files" },
-    wholeAccount: "Use the entire account, including folders added later",
     wholePrompt: "Olympus will read every folder in {source}, now and later, except folders you mark Names only or Skipped.",
     wholeConfirm: "Yes, use the entire account",
-    wholeConfirmed: "Entire account confirmed.",
     summaryTitle: "What happens when you save",
-    summaryNone: "No folders chosen yet, so nothing will be read.",
-    summaryWhole: "The entire account, including folders added later.",
+    summaryNone: "Nothing chosen yet, so nothing will be read.",
+    summaryWhole: "Everything else in {source}: fully indexed, including folders added later.",
     summaryFolder: { one: "folder", many: "folders" },
     summaryIngest: "{n} fully indexed",
     summaryMetadata: "{n} with names only",
     summaryExclude: "{n} skipped",
-    summarySize: "About {size} will be fully indexed.",
-    summaryRest: "Folders you do not choose stay out.",
+    summarySize: "about {size}",
     needChoice: "Choose at least one folder first.",
     needConfirm: "Confirm the entire account first.",
-    saveFolders: "Save scope and start",
-    saveNoStart: "Save scope",
+    saveFolders: "Save and start",
+    saveNoStart: "Save",
     saveMail: "Save and start",
     saving: "Saving…",
     saveFailed: "Olympus could not save. Your choices are still here. Try again.",
@@ -97463,17 +97477,30 @@ function chatgptDashboardClient(config2, pickerProgram) {
     });
     return add(section, list);
   }
+  function sourceItem(source) {
+    const items = state.data && Array.isArray(state.data.needsYou) ? state.data.needsYou : [];
+    return items.filter((item) => item && item.id === "source:" + String(source && source.id))[0] || null;
+  }
   function sourceRow(source) {
     const id = String(source.id || source.label);
     const status = String(source.status || "");
-    const tone = config2.statusTone[status] || "off";
-    const row = el("li", "row source");
+    const item = sourceItem(source);
+    const tone = item ? "warn" : config2.statusTone[status] || "off";
+    const row = el("li", item ? "row source need-row" : "row source");
     const main = el("div", "source-main");
-    const head = add(el("p", "source-head"), el("span", "dot tone-" + tone), el("span", "source-name", String(source.label || "")));
-    add(head, el("span", "status", status));
+    const dot = el("span", "dot tone-" + tone);
+    dot.setAttribute("aria-hidden", "true");
+    const head = add(el("p", "source-head"), dot, el("span", "source-name", String(source.label || "")));
+    const off = status === "Off" && !item;
+    if (!off)
+      add(head, el("span", "sr", " — " + (item ? P.needsYou : status)));
     add(main, head);
     const meta2 = [];
-    if (typeof source.detail === "string" && source.detail)
+    if (item)
+      meta2.push(capitalise(itemReason(item, source)));
+    else if (off)
+      meta2.push(capitalise(typeof source.detail === "string" && source.detail ? source.detail : P.notConnected));
+    else if (typeof source.detail === "string" && source.detail)
       meta2.push(source.detail);
     if (typeof source.lastSyncAt === "string" && ago(source.lastSyncAt))
       meta2.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
@@ -97482,9 +97509,10 @@ function chatgptDashboardClient(config2, pickerProgram) {
     add(row, main);
     const controls = el("div", "source-actions");
     const context = { id, label: String(source.label || id) };
-    if (source.primary)
-      add(controls, fixControl(source.primary, "primary:" + id, "main", true, context));
-    const menu = Array.isArray(source.menu) ? source.menu : [];
+    const fix = item && item.fix ? item.fix : source.primary;
+    if (fix)
+      add(controls, fixControl(fix, "primary:" + id, "plain", true, context));
+    const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry) => !fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool);
     let menuBox = null;
     if (menu.length) {
       const glyph = el("span", "", "⋯");
@@ -97492,7 +97520,7 @@ function chatgptDashboardClient(config2, pickerProgram) {
       const hidden = el("span", "sr", fill(P.moreActions, { source: String(source.label || "") }));
       const box = details("menu:" + id, add(el("span"), glyph, hidden), "menu");
       const panel = el("div", "menu-panel");
-      menu.forEach((fix, index) => add(panel, fixControl(fix, "menu:" + id + ":" + index, "plain", true, context)));
+      menu.forEach((fix2, index) => add(panel, fixControl(fix2, "menu:" + id + ":" + index, "plain", true, context)));
       menuBox = add(box, panel);
     }
     if (controls.childNodes.length) {
@@ -97505,11 +97533,28 @@ function chatgptDashboardClient(config2, pickerProgram) {
     }
     return row;
   }
+  function itemReason(item, source) {
+    const sentence = String(item.sentence || "");
+    const prefix = String(source.label || "") + " — ";
+    if (sentence.indexOf(prefix) === 0)
+      return sentence.slice(prefix.length);
+    return typeof source.detail === "string" && source.detail ? source.detail : sentence;
+  }
+  function macOnly(source) {
+    const fix = source && source.primary;
+    return String(source && source.status) === "Off" && !!fix && !!fix.disabledReason && !sourceItem(source) && (!fix.tool || fix.tool === config2.toolName);
+  }
+  function capitalise(text) {
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+  }
   function sourcesSection(sources) {
     const section = add(el("section", "section"), el("h2", "", P.sources));
     if (!sources.length)
       return add(section, el("p", "muted", P.noSources));
-    const ordered = sources.filter((source) => source.group === "local").concat(sources.filter((source) => source.group !== "local"));
+    const onMac = sources.filter(macOnly);
+    const here = sources.filter((source) => !macOnly(source));
+    const first = (group2) => here.filter((source) => group2(source) && sourceItem(source)).concat(here.filter((source) => group2(source) && !sourceItem(source)));
+    const ordered = first((source) => source.group === "local").concat(first((source) => source.group !== "local"));
     let group = "";
     let list = null;
     for (const source of ordered) {
@@ -97519,6 +97564,13 @@ function chatgptDashboardClient(config2, pickerProgram) {
         list = add(section, el("ul", "rows")).lastChild;
       }
       add(list, sourceRow(source));
+    }
+    if (onMac.length) {
+      add(section, el("h3", "", P.sourcesOnMac), el("p", "muted mac-help", P.sourcesOnMacHelp));
+      const rows = el("ul", "rows mac-only");
+      for (const source of onMac)
+        add(rows, add(el("li", "row source mac"), el("span", "source-name", String(source.label || source.id || ""))));
+      add(section, rows);
     }
     return section;
   }
@@ -97625,7 +97677,8 @@ function chatgptDashboardClient(config2, pickerProgram) {
     }
     add(page, data.blocker ? itemBanner(data.blocker, "blocker", true) : null);
     add(page, staleLine());
-    add(page, needsYouSection(Array.isArray(data.needsYou) ? data.needsYou : []));
+    const listed = (Array.isArray(data.sources) ? data.sources : []).map((source) => "source:" + String(source && source.id));
+    add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : []).filter((item) => item && listed.indexOf(item.id) < 0)));
     add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
     add(page, progressSection(data.progress, true));
     add(page, modelsSection(data.models));
@@ -97735,8 +97788,8 @@ function chatgptPickerProgram(kit) {
   let p = null;
   let session = 0;
   let timer = null;
-  let searchRows = [];
-  let searchEmpty = null;
+  const ACCOUNT = "@account";
+  const MAX_RULES2 = 100;
   function handles(fix) {
     return !!fix && (fix.tool === T.connectSource || fix.tool === T.scopeList);
   }
@@ -97750,7 +97803,6 @@ function chatgptPickerProgram(kit) {
     const key = p ? p.returnKey : "";
     p = null;
     session++;
-    searchRows = [];
     kit.close(notice, refresh, key);
   }
   function start(fix, sourceId, sourceLabel3, returnKey) {
@@ -97911,13 +97963,15 @@ function chatgptPickerProgram(kit) {
       rootCursor: "",
       branches: new Map,
       cursors: new Map,
-      expanded: new Set,
       catalog: new Map,
       ancestors: new Map,
       own: new Map,
       whole: false,
       wholeConfirmed: false,
-      search: "",
+      path: [],
+      sheet: "",
+      sheetReturn: "",
+      capHit: false,
       draft: null,
       labels: [],
       categories: [],
@@ -97959,7 +98013,7 @@ function chatgptPickerProgram(kit) {
     p.retry = retry;
     kit.render(focus);
   }
-  function list(parentKey, append) {
+  function list(parentKey, append, after) {
     const cursor = append ? parentKey ? p.cursors.get(parentKey) : p.rootCursor : "";
     const args = { source_id: p.id };
     if (parentKey)
@@ -97968,7 +98022,7 @@ function chatgptPickerProgram(kit) {
       args.cursor = cursor;
     p.loading = parentKey || "root";
     p.error = "";
-    const focus = append ? "picker:more:" + parentKey : parentKey ? "picker:open:" + parentKey : "picker:back";
+    const focus = append ? "picker:more:" + parentKey : p.loaded ? "" : "picker:back";
     kit.render(focus);
     const mine = session;
     kit.call(T.scopeList, args).then((result) => {
@@ -97976,25 +98030,26 @@ function chatgptPickerProgram(kit) {
         return;
       const page = scopeData(result);
       if (!validBrowse(page)) {
-        failLoad(() => list(parentKey, append), "picker:retry");
+        failLoad(() => list(parentKey, append, after), "picker:retry");
         return;
       }
       if (p.loaded && (page.account_generation !== p.generation || page.scope_revision !== p.revision)) {
         reload(Q.conflict, parentKey || append ? null : page);
         return;
       }
-      takeFolders(page, parentKey, append, focus);
+      takeFolders(page, parentKey, append, focus, after);
     }, () => {
       if (mine !== session || !p)
         return;
-      failLoad(() => list(parentKey, append), "picker:retry");
+      failLoad(() => list(parentKey, append, after), "picker:retry");
     });
   }
-  function takeFolders(page, parentKey, append, focus) {
+  function takeFolders(page, parentKey, append, focus, after) {
     if (!p.loaded) {
       p.generation = page.account_generation;
       p.revision = page.scope_revision;
       p.whole = page.whole_account_selected === true;
+      p.wholeConfirmed = p.whole;
       const saved = Array.isArray(page.selections) ? page.selections : [];
       for (const selection of saved) {
         if (!selection || typeof selection.key !== "string" || STATES.indexOf(selection.state) < 0)
@@ -98004,7 +98059,7 @@ function chatgptPickerProgram(kit) {
       }
       p.loaded = true;
     }
-    const trail = parentKey ? (p.ancestors.get(parentKey) || []).concat([parentKey]) : [];
+    const trail = parentKey ? trailOf(parentKey) : [];
     const previous = append ? parentKey ? p.branches.get(parentKey) || [] : p.roots : [];
     const seen = {};
     for (const node of previous)
@@ -98018,7 +98073,6 @@ function chatgptPickerProgram(kit) {
     const next = typeof page.next_cursor === "string" && page.next_cursor ? page.next_cursor : "";
     if (parentKey) {
       p.branches.set(parentKey, nodes);
-      p.expanded.add(parentKey);
       if (next)
         p.cursors.set(parentKey, next);
       else
@@ -98028,33 +98082,61 @@ function chatgptPickerProgram(kit) {
       p.rootCursor = next;
     }
     p.loading = "";
-    kit.render(focus);
+    if (after)
+      after();
+    else
+      kit.render(focus);
+  }
+  function trailOf(key) {
+    return (p.ancestors.get(key) || []).concat([key]);
+  }
+  function nameOf(key) {
+    const node = p.catalog.get(key);
+    if (node && typeof node.name === "string" && node.name)
+      return node.name;
+    const above = (p.ancestors.get(key) || []).filter((ancestor) => {
+      const known = p.catalog.get(ancestor);
+      return known && typeof known.name === "string" && known.name;
+    });
+    return above.length ? fill(Q.insideFolder, { name: p.catalog.get(above[above.length - 1]).name }) : Q.unknownFolder;
+  }
+  function shortPath(key) {
+    const node = p.catalog.get(key);
+    if (!node || typeof node.name !== "string" || !node.name)
+      return nameOf(key);
+    const ancestors = p.ancestors.get(key) || [];
+    const parent = ancestors.length ? p.catalog.get(ancestors[ancestors.length - 1]) : null;
+    return parent && typeof parent.name === "string" && parent.name ? parent.name + " / " + node.name : node.name;
   }
   function inherited(key) {
     let state = p.whole ? "ingest" : "";
-    const ancestors = p.ancestors.get(key) || [];
-    for (const ancestor of ancestors) {
+    let from = p.whole ? ACCOUNT : "";
+    for (const ancestor of p.ancestors.get(key) || []) {
       const choice = p.own.get(ancestor);
-      if (choice === "exclude")
-        return "exclude";
-      if (choice === "metadata_only")
+      if (choice === "exclude") {
+        state = "exclude";
+        from = ancestor;
+      } else if (choice === "metadata_only" && state !== "exclude") {
         state = "metadata_only";
-      else if (choice === "ingest" && !state)
+        from = ancestor;
+      } else if (choice === "ingest" && (state === "" || state === "ingest")) {
         state = "ingest";
+        from = ancestor;
+      }
     }
-    return state;
+    return { state, from };
   }
   function effective(key) {
-    const from = inherited(key);
-    const own = p.own.get(key);
+    const from = inherited(key).state;
+    const own = p.own.get(key) || "";
     if (from === "exclude" || own === "exclude")
       return "exclude";
     if (from === "metadata_only")
       return "metadata_only";
-    return own || from || "exclude";
+    return own || from;
   }
   function allowed(key, state) {
-    const from = inherited(key);
+    const from = inherited(key).state;
     if (!state)
       return true;
     if (from === "exclude")
@@ -98063,21 +98145,46 @@ function chatgptPickerProgram(kit) {
       return state !== "ingest";
     return true;
   }
+  function descendants(key) {
+    const out = [];
+    p.own.forEach((_state, other) => {
+      if (other !== key && (p.ancestors.get(other) || []).indexOf(key) >= 0)
+        out.push(other);
+    });
+    return out;
+  }
   function mixed(key) {
     const mine = effective(key);
-    let differs = false;
-    p.own.forEach((_state, other) => {
-      if (differs || other === key)
-        return;
-      const ancestors = p.ancestors.get(other) || [];
-      if (ancestors.indexOf(key) >= 0 && effective(other) !== mine)
-        differs = true;
-    });
-    return differs;
+    for (const other of descendants(key)) {
+      const theirs = effective(other);
+      if (theirs !== mine)
+        return theirs;
+    }
+    return "";
   }
-  function hasAncestorChoice(key) {
-    const ancestors = p.ancestors.get(key) || [];
-    return ancestors.some((ancestor) => p.own.has(ancestor));
+  function stateName(state) {
+    return state ? Q.states[state] : Q.notIncluded;
+  }
+  function sourceName(from) {
+    return from === ACCOUNT ? fill(Q.accountRow, { source: p.label }) : nameOf(from);
+  }
+  function statusText(key) {
+    const own = p.own.get(key) || "";
+    const from = inherited(key);
+    const state = effective(key);
+    let text;
+    if (own && state === own)
+      text = stateName(own);
+    else if (from.from === ACCOUNT && state === from.state)
+      text = fill(Q.fromAccount, { state: stateName(state) });
+    else if (from.from)
+      text = fill(Q.fromParent, { state: stateName(state), parent: nameOf(from.from) });
+    else
+      text = stateName(state);
+    const differs = mixed(key);
+    if (differs)
+      text += " · " + fill(Q.mixedSome, { state: Q.statesLower[differs] });
+    return text;
   }
   function size(bytes) {
     const units = ["bytes", "KB", "MB", "GB", "TB"];
@@ -98100,127 +98207,103 @@ function chatgptPickerProgram(kit) {
     }
     return parts.join(" · ");
   }
+  function exceptions() {
+    const out = [];
+    p.own.forEach((state, key) => {
+      if (state !== inherited(key).state)
+        out.push(key);
+    });
+    return out;
+  }
   function choose(key, value) {
-    if (value && STATES.indexOf(value) < 0)
+    if (p.saving)
       return;
-    if (value)
-      p.own.set(key, value);
-    else
-      p.own.delete(key);
-    p.edited = true;
-    p.saveError = "";
-    kit.render("picker:choice:" + key);
-  }
-  function folderRow(node) {
-    const key = node.key;
-    const li = el("li", "folder-item");
-    const row = el("div", "folder");
-    const toggle = el("span", "folder-toggle");
-    if (node.has_children) {
-      const open6 = p.expanded.has(key);
-      const loadingHere = p.loading === key;
-      const control = kit.button(open6 ? "▾" : "▸", "picker:open:" + key, loadingHere ? null : () => {
-        if (open6) {
-          p.expanded.delete(key);
-          kit.render("picker:open:" + key);
-        } else if (p.branches.has(key)) {
-          p.expanded.add(key);
-          kit.render("picker:open:" + key);
-        } else
-          list(key, false);
-      }, "plain");
-      control.className = "btn icon-btn";
-      control.setAttribute("aria-expanded", String(open6));
-      control.setAttribute("aria-label", fill(open6 ? Q.collapse : Q.expand, { name: node.name }));
-      add(toggle, control);
-    }
-    const text = el("div", "folder-text");
-    const nameLine = add(el("p", "folder-name"), el("span", "", node.name));
-    const own = p.own.get(key);
-    const from = inherited(key);
-    let status = "";
-    if (mixed(key))
-      status = Q.mixed + " — " + Q.mixedHelp;
-    else if (own || from) {
-      status = Q.states[effective(key)];
-      if (!own && from)
-        status += " · " + Q.inherited;
-    } else
-      status = Q.notSelected;
-    add(text, nameLine);
-    const metaParts = [status];
-    const meta2 = nodeMeta(node);
-    if (meta2)
-      metaParts.push(meta2);
-    add(text, el("p", "muted folder-meta", metaParts.join(" · ")));
-    const choice = el("select", "choice");
-    choice.setAttribute("data-key", "picker:choice:" + key);
-    choice.setAttribute("aria-label", fill(Q.choiceFor, { name: node.name }));
-    if (node.selectable === false || p.saving)
-      choice.disabled = true;
-    const none = el("option", "", from ? fill(hasAncestorChoice(key) ? Q.sameAsParent : Q.sameAsAccount, { state: Q.states[from] }) : Q.notSelected);
-    none.value = "";
-    add(choice, none);
-    for (const state of STATES) {
-      const option2 = el("option", "", Q.states[state]);
-      option2.value = state;
-      if (!allowed(key, state))
-        option2.disabled = true;
-      add(choice, option2);
-    }
-    choice.value = own || "";
-    choice.addEventListener("change", () => choose(key, choice.value));
-    add(row, toggle, text, choice);
-    add(li, row);
-    const record3 = { li, name: String(node.name).toLowerCase(), children: [] };
-    if (node.has_children && p.expanded.has(key)) {
-      const children = p.branches.get(key) || [];
-      const group2 = el("ul", "tree");
-      group2.setAttribute("role", "group");
-      for (const child of children) {
-        const built = folderRow(child);
-        record3.children.push(built.row);
-        add(group2, built.li);
+    if (key === ACCOUNT) {
+      const whole = value === "ingest";
+      if (whole !== p.whole) {
+        p.whole = whole;
+        p.wholeConfirmed = false;
+        p.edited = true;
       }
-      if (!children.length && p.loading !== key)
-        add(group2, el("li", "muted folder-empty", Q.noFolders));
-      if (p.cursors.has(key))
-        add(group2, add(el("li", "folder-more"), loadMore(key)));
-      add(li, group2);
+    } else {
+      if (value && STATES.indexOf(value) < 0)
+        return;
+      if (value && !allowed(key, value))
+        return;
+      if (value && !p.own.has(key) && p.own.size >= MAX_RULES2) {
+        p.capHit = true;
+        kit.render("picker:sheet:parent");
+        return;
+      }
+      if (value)
+        p.own.set(key, value);
+      else
+        p.own.delete(key);
+      p.edited = true;
     }
-    if (p.loading === key) {
-      const line = el("p", "muted folder-loading", Q.loadingFolders);
-      line.setAttribute("role", "status");
-      add(li, line);
-    }
-    return { li, row: record3 };
+    p.capHit = false;
+    p.saveError = "";
+    kit.render("picker:sheet:" + (value || "parent"));
   }
-  function loadMore(parentKey) {
-    const busy = p.loading === (parentKey || "root");
-    return kit.button(busy ? Q.loadingFolders : Q.loadMore, "picker:more:" + parentKey, busy ? null : () => list(parentKey, true), "plain");
+  function openSheet(key, returnKey) {
+    if (p.saving)
+      return;
+    p.sheet = key;
+    p.sheetReturn = returnKey;
+    p.capHit = false;
+    const own = key === ACCOUNT ? p.whole ? "ingest" : "" : p.own.get(key) || "";
+    kit.render("picker:sheet:" + (own || "parent"));
   }
-  function applySearch() {
-    const needle = String(p && p.search || "").trim().toLowerCase();
-    let any2 = false;
-    const visit = (record3) => {
-      let show = !needle || record3.name.indexOf(needle) >= 0;
-      for (const child of record3.children)
-        if (visit(child))
-          show = true;
-      record3.li.hidden = !show;
-      if (show)
-        any2 = true;
-      return show;
+  function closeSheet() {
+    const focus = p.sheetReturn || "picker:back";
+    p.sheet = "";
+    p.sheetReturn = "";
+    p.capHit = false;
+    kit.render(focus);
+  }
+  function drill(key) {
+    if (p.loading || p.saving)
+      return;
+    const arrive = () => {
+      p.path = trailOf(key);
+      kit.render("picker:up");
     };
-    for (const record3 of searchRows)
-      visit(record3);
-    if (searchEmpty)
-      searchEmpty.hidden = !needle || any2 || !searchRows.length;
+    if (p.branches.has(key))
+      arrive();
+    else
+      list(key, false, arrive);
+  }
+  function jump(key) {
+    if (p.loading || p.saving)
+      return;
+    const trail = trailOf(key);
+    const mine = session;
+    const step = (index) => {
+      if (mine !== session || !p)
+        return;
+      if (index >= trail.length) {
+        p.path = trail;
+        kit.render("picker:up");
+        return;
+      }
+      if (p.branches.has(trail[index]))
+        step(index + 1);
+      else
+        list(trail[index], false, () => step(index + 1));
+    };
+    step(0);
+  }
+  function up() {
+    const left = p.path.pop();
+    p.sheet = "";
+    kit.render(left ? "picker:open:" + left : "picker:back");
   }
   function counts() {
     const totals = { ingest: 0, metadata_only: 0, exclude: 0 };
     p.own.forEach((_state, key) => {
-      totals[effective(key)]++;
+      const state = effective(key);
+      if (state)
+        totals[state]++;
     });
     return totals;
   }
@@ -98270,22 +98353,19 @@ function chatgptPickerProgram(kit) {
       parts.push(part);
     }
     if (p.whole)
-      lines.push(Q.summaryWhole);
-    if (parts.length)
-      lines.push(parts.join(", ") + ".");
-    else if (!p.whole)
+      lines.push(fill(Q.summaryWhole, { source: p.label }));
+    if (parts.length) {
+      const bytes = indexedBytes();
+      lines.push(parts.join(", ") + (bytes > 0 ? " · " + fill(Q.summarySize, { size: size(bytes) }) : ""));
+    } else if (!p.whole)
       lines.push(Q.summaryNone);
-    const bytes = indexedBytes();
-    if (bytes > 0)
-      lines.push(fill(Q.summarySize, { size: size(bytes) }));
-    if (!p.whole)
-      lines.push(Q.summaryRest);
     return lines;
   }
   function anyChosen() {
     let chosen = false;
     p.own.forEach((_state, key) => {
-      if (effective(key) !== "exclude")
+      const state = effective(key);
+      if (state === "ingest" || state === "metadata_only")
         chosen = true;
     });
     return chosen;
@@ -98294,8 +98374,8 @@ function chatgptPickerProgram(kit) {
     if (!canSaveFolders())
       return;
     const selections = [];
-    p.own.forEach((_state, key) => {
-      selections.push({ key, state: effective(key), ancestor_keys: (p.ancestors.get(key) || []).slice() });
+    p.own.forEach((state, key) => {
+      selections.push({ key, state, ancestor_keys: (p.ancestors.get(key) || []).slice() });
     });
     const args = {
       source_id: p.id,
@@ -98309,7 +98389,7 @@ function chatgptPickerProgram(kit) {
     save(args, "picker:save");
   }
   function canSaveFolders() {
-    if (!p.loaded || p.saving || !p.generation || !p.revision)
+    if (!p.loaded || p.saving || !p.generation || !p.revision || p.own.size > MAX_RULES2)
       return false;
     if (p.whole)
       return p.wholeConfirmed;
@@ -98318,6 +98398,7 @@ function chatgptPickerProgram(kit) {
   function save(args, focus) {
     p.saving = true;
     p.saveError = "";
+    p.sheet = "";
     kit.render(focus);
     const mine = session;
     kit.call(T.scopeSet, args).then((result) => {
@@ -98344,107 +98425,262 @@ function chatgptPickerProgram(kit) {
       kit.render(focus);
     });
   }
-  function wholeControl() {
-    const box = el("div", "whole");
-    const label = el("label", "opt");
-    const input = el("input");
-    input.type = "checkbox";
-    input.checked = p.whole;
-    input.disabled = !p.loaded || p.saving;
-    input.setAttribute("data-key", "picker:whole");
-    input.addEventListener("change", () => {
-      p.whole = input.checked;
+  function wholeConfirm() {
+    const confirm = el("div", "confirm-box");
+    confirm.setAttribute("role", "alert");
+    add(confirm, el("p", "strong", fill(Q.wholePrompt, { source: p.label })), add(el("div", "actions"), kit.button(Q.wholeConfirm, "picker:whole:yes", p.saving ? null : () => {
+      p.wholeConfirmed = true;
+      kit.render(p.sheet ? "picker:sheet:done" : "picker:choice:" + ACCOUNT);
+    }, "danger"), kit.button(Q.cancel, "picker:whole:no", p.saving ? null : () => {
+      p.whole = false;
       p.wholeConfirmed = false;
-      p.edited = true;
-      kit.render(p.whole ? "picker:whole:no" : "picker:whole");
-    });
-    add(box, add(label, input, el("span", "", Q.wholeAccount)));
-    if (p.whole && !p.wholeConfirmed) {
-      const confirm = el("div", "confirm-box");
-      confirm.setAttribute("role", "alert");
-      add(confirm, el("p", "strong", fill(Q.wholePrompt, { source: p.label })), add(el("div", "actions"), kit.button(Q.wholeConfirm, "picker:whole:yes", () => {
-        p.wholeConfirmed = true;
-        kit.render("picker:whole");
-      }, "danger"), kit.button(Q.cancel, "picker:whole:no", () => {
-        p.whole = false;
-        kit.render("picker:whole");
-      }, "plain")));
-      add(box, confirm);
-    } else if (p.whole) {
-      add(box, el("p", "muted", Q.wholeConfirmed));
+      kit.render(p.sheet ? "picker:sheet:parent" : "picker:choice:" + ACCOUNT);
+    }, "plain")));
+    return confirm;
+  }
+  function twoLine(cls, key, top, bottom, onClick, label) {
+    const control = el("button", cls);
+    control.type = "button";
+    control.setAttribute("data-key", key);
+    add(control, add(el("span", "two-line"), el("span", "two-top", top), el("span", "two-bottom", bottom)));
+    const chevron = el("span", "chev", "›");
+    chevron.setAttribute("aria-hidden", "true");
+    add(control, chevron);
+    if (label)
+      control.setAttribute("aria-label", label);
+    if (onClick)
+      control.addEventListener("click", onClick);
+    else
+      control.disabled = true;
+    return control;
+  }
+  function statusButton(key, name, text, enabled, focusKey, meta2) {
+    const control = el("button", "fstatus");
+    control.type = "button";
+    add(control, el("span", "fstatus-text", text));
+    if (meta2)
+      add(control, el("span", "fmeta", meta2));
+    control.setAttribute("data-key", focusKey);
+    control.setAttribute("aria-haspopup", "dialog");
+    control.setAttribute("aria-label", fill(Q.choiceFor, { name, state: text }) + (meta2 ? " · " + meta2 : ""));
+    if (enabled && !p.saving)
+      control.addEventListener("click", () => openSheet(key, focusKey));
+    else
+      control.disabled = true;
+    return control;
+  }
+  function folderRow(node) {
+    const key = node.key;
+    const li = el("li", "frow");
+    if (node.has_children) {
+      const open6 = el("button", "fname");
+      open6.type = "button";
+      open6.setAttribute("data-key", "picker:open:" + key);
+      add(open6, el("span", "fname-text", node.name));
+      const chevron = el("span", "chev", "›");
+      chevron.setAttribute("aria-hidden", "true");
+      add(open6, chevron);
+      if (p.loading || p.saving)
+        open6.disabled = true;
+      else
+        open6.addEventListener("click", () => drill(key));
+      add(li, open6);
+    } else
+      add(li, add(el("p", "fname leaf"), el("span", "fname-text", node.name)));
+    add(li, statusButton(key, node.name, statusText(key), node.selectable !== false, "picker:choice:" + key, nodeMeta(node)));
+    return li;
+  }
+  function loadMore(parentKey) {
+    const busy = p.loading === (parentKey || "root");
+    return kit.button(busy ? Q.loadingFolders : Q.loadMore, "picker:more:" + parentKey, busy || p.loading ? null : () => list(parentKey, true), "plain");
+  }
+  function levelList(parentKey, nodes, hasMore) {
+    const listNode = el("ul", "flist");
+    for (const node of nodes)
+      add(listNode, folderRow(node));
+    if (!nodes.length)
+      add(listNode, el("li", "muted fempty", Q.noFolders));
+    if (hasMore)
+      add(listNode, add(el("li", "fmore"), loadMore(parentKey)));
+    return listNode;
+  }
+  function loadingLine() {
+    if (!p.loading)
+      return null;
+    const line = el("p", "muted fstate", Q.loadingFolders);
+    line.setAttribute("role", "status");
+    return line;
+  }
+  function rootScreen(body) {
+    add(body, el("h1", "", p.title));
+    add(body, el("p", "muted intro", fill(Q.foldersIntro, { source: p.label })));
+    noticeAndError(body);
+    if (!p.loaded) {
+      add(body, loadingLine());
+      return;
     }
-    return box;
+    const account = fill(Q.accountRow, { source: p.label });
+    add(body, twoLine("account", "picker:choice:" + ACCOUNT, account, stateName(p.whole ? "ingest" : ""), p.saving ? null : () => openSheet(ACCOUNT, "picker:choice:" + ACCOUNT), fill(Q.choiceFor, { name: account, state: stateName(p.whole ? "ingest" : "") })));
+    if (p.whole && !p.wholeConfirmed && p.sheet !== ACCOUNT)
+      add(body, wholeConfirm());
+    const rules = exceptions();
+    if (rules.length) {
+      const section = el("section", "fsection");
+      add(section, el("h2", "", fill(Q.exceptions, { n: kit.count(rules.length) })));
+      const listNode = el("ul", "flist");
+      for (const key of rules) {
+        add(listNode, add(el("li", "frow jump"), twoLine("jump-btn", "picker:jump:" + key, shortPath(key), stateName(p.own.get(key)), p.loading || p.saving ? null : () => jump(key))));
+      }
+      add(body, add(section, listNode));
+    }
+    const folders = add(el("section", "fsection"), el("h2", "", Q.foldersHeading));
+    add(folders, loadingLine());
+    add(folders, levelList("", p.roots, !!p.rootCursor));
+    add(body, folders);
   }
-  function meanings() {
-    const box = el("details", "disclosure");
-    const head = el("summary", "", Q.meaningTitle);
-    head.setAttribute("data-key", "picker:meanings");
-    add(box, head);
-    const listNode = el("ul", "plain");
-    for (const line of Q.meanings)
-      add(listNode, el("li", "", line));
-    return add(box, listNode);
+  function pathLine() {
+    const names = [p.label].concat(p.path.map((key) => nameOf(key)));
+    const shown = names.length > 3 ? [Q.pathMore].concat(names.slice(-2)) : names;
+    const head = el("h1", "fpath");
+    shown.forEach((name, index) => {
+      if (index === shown.length - 1)
+        add(head, el("span", "fpath-here", name));
+      else
+        add(head, el("span", "fpath-up", name + " / "));
+    });
+    return head;
   }
-  function foldersView(page) {
-    add(page, el("h1", "", p.title));
-    add(page, el("p", "muted", fill(Q.foldersIntro, { source: p.label })));
+  function folderScreen(body) {
+    const key = p.path[p.path.length - 1];
+    add(body, pathLine());
+    noticeAndError(body);
+    const node = p.catalog.get(key);
+    const here = el("div", "this-row");
+    const text = statusText(key);
+    add(here, add(el("p", "this-text"), el("span", "this-label", Q.thisFolder + " "), el("span", "", text)));
+    const change = kit.button(Q.change, "picker:this", node && node.selectable === false || p.saving ? null : () => openSheet(key, "picker:this"), "plain");
+    change.setAttribute("aria-haspopup", "dialog");
+    change.setAttribute("aria-label", fill(Q.choiceFor, { name: nameOf(key), state: text }));
+    add(here, change);
+    add(body, here);
+    add(body, loadingLine());
+    add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
+  }
+  function noticeAndError(body) {
     if (p.notice) {
       const notice = el("p", "notice", p.notice);
       notice.setAttribute("role", "status");
-      add(page, notice);
+      add(body, notice);
     }
-    add(page, meanings());
     if (p.error) {
       const error2 = el("div", "banner");
       error2.setAttribute("role", "alert");
       add(error2, add(el("div", "banner-body"), el("p", "", p.error), add(el("div", "actions"), kit.button(Q.tryAgain, "picker:retry", () => p.retry && p.retry(), "plain"))));
-      add(page, error2);
+      add(body, error2);
     }
-    if (!p.loaded) {
-      if (p.loading) {
-        const line = el("p", "muted", Q.loadingFolders);
-        line.setAttribute("role", "status");
-        add(page, line);
-      }
-      return;
-    }
-    const search = el("label", "field");
-    add(search, el("span", "field-label", Q.search));
-    const input = el("input", "text");
-    input.type = "search";
-    input.value = p.search;
-    input.setAttribute("data-key", "picker:search");
-    input.addEventListener("input", () => {
-      p.search = input.value;
-      applySearch();
-      kit.reportHeight();
-    });
-    add(page, add(search, input));
-    const tree = el("ul", "tree root");
-    searchRows = [];
-    for (const node of p.roots) {
-      const built = folderRow(node);
-      searchRows.push(built.row);
-      add(tree, built.li);
-    }
-    if (!p.roots.length)
-      add(tree, el("li", "muted folder-empty", Q.noFolders));
-    if (p.rootCursor)
-      add(tree, add(el("li", "folder-more"), loadMore("")));
-    add(page, tree);
-    searchEmpty = el("p", "muted search-empty", Q.searchEmpty);
-    searchEmpty.hidden = true;
-    add(page, searchEmpty);
-    add(page, wholeControl());
+  }
+  function folderFooter() {
     const footer = el("section", "picker-footer");
     footer.setAttribute("aria-label", Q.summaryTitle);
     const summary = el("div", "summary");
     summary.setAttribute("aria-live", "polite");
     for (const line of folderSummary())
       add(summary, el("p", "", line));
+    if (p.own.size >= MAX_RULES2)
+      add(summary, el("p", "reason strong", fill(Q.capReached, { max: kit.count(MAX_RULES2) })));
     add(footer, summary);
     add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders, p.whole && !p.wholeConfirmed ? Q.needConfirm : !anyChosen() && !p.edited ? Q.needChoice : ""));
-    add(page, footer);
+    return footer;
+  }
+  function sheetOption(value, text, hint, checked, enabled, onPick) {
+    const label = el("label", "sheet-opt" + (enabled ? "" : " off"));
+    const input = el("input");
+    input.type = "radio";
+    input.name = "picker-choice";
+    input.value = value;
+    input.checked = checked;
+    input.disabled = !enabled || p.saving;
+    input.setAttribute("data-key", "picker:sheet:" + (value || "parent"));
+    input.addEventListener("change", () => {
+      if (input.checked)
+        onPick();
+    });
+    const words = add(el("span", "opt-text"), el("span", "sheet-opt-name", text));
+    if (hint)
+      add(words, el("span", "muted opt-hint", hint));
+    return add(label, input, words);
+  }
+  function sheet() {
+    const key = p.sheet;
+    const box = el("section", "sheet");
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-labelledby", "picker-sheet-title");
+    const grip = el("span", "grip");
+    grip.setAttribute("aria-hidden", "true");
+    add(box, grip);
+    const options = el("fieldset", "sheet-opts");
+    if (key === ACCOUNT) {
+      const title = el("h2", "", fill(Q.accountRow, { source: p.label }));
+      title.id = "picker-sheet-title";
+      add(box, title, el("p", "muted", Q.accountHelp));
+      add(options, add(el("legend", "sr"), el("span", "", fill(Q.accountRow, { source: p.label }))));
+      add(options, sheetOption("", Q.notIncluded, Q.consequences.none, !p.whole, true, () => choose(ACCOUNT, "")));
+      add(options, sheetOption("ingest", Q.states.ingest, Q.consequences.wholeIngest, p.whole, true, () => choose(ACCOUNT, "ingest")));
+      add(box, options);
+      if (p.whole && !p.wholeConfirmed)
+        add(box, wholeConfirm());
+    } else {
+      const name = nameOf(key);
+      const title = el("h2", "", name);
+      title.id = "picker-sheet-title";
+      add(box, title);
+      const own = p.own.get(key) || "";
+      const from = inherited(key);
+      if (!own && from.from)
+        add(box, el("p", "muted", fill(Q.inheritedFrom, { parent: sourceName(from.from) })));
+      if (own && effective(key) !== own) {
+        add(box, el("p", "reason strong", fill(Q.overridden, { own: stateName(own), parent: sourceName(from.from), state: stateName(from.state) })));
+      }
+      add(options, add(el("legend", "sr"), el("span", "", fill(Q.choiceFor, { name, state: statusText(key) }))));
+      const top = !(p.ancestors.get(key) || []).length;
+      add(options, sheetOption("", fill(top ? Q.sameAsAccount : Q.sameAsParent, { state: stateName(from.state) }), Q.consequences.parent, !own, true, () => choose(key, "")));
+      const capped = !own && p.own.size >= MAX_RULES2;
+      for (const state of STATES) {
+        const ok = allowed(key, state) && !capped;
+        const hint = !allowed(key, state) ? fill(Q.notPossible, { parent: sourceName(from.from), state: Q.statesLower[from.state] }) : Q.consequences[state];
+        add(options, sheetOption(state, Q.states[state], hint, own === state, ok, () => choose(key, state)));
+      }
+      add(box, options);
+      if (capped || p.capHit) {
+        const cap = el("p", "reason strong", fill(Q.capReached, { max: kit.count(MAX_RULES2) }));
+        cap.setAttribute("role", "alert");
+        add(box, cap);
+      }
+      const inside = descendants(key).length;
+      if (inside)
+        add(box, el("p", "muted", fill(inside === 1 ? Q.keepOwn.one : Q.keepOwn.many, { n: kit.count(inside) })));
+    }
+    add(box, add(el("div", "actions"), kit.button(Q.done, "picker:sheet:done", closeSheet, "plain")));
+    return box;
+  }
+  function foldersView(page) {
+    const body = el("div", "picker-body");
+    if (p.path.length)
+      folderScreen(body);
+    else
+      rootScreen(body);
+    if (p.loaded)
+      add(body, folderFooter());
+    add(page, body);
+    if (p.sheet && p.loaded) {
+      body.setAttribute("inert", "");
+      body.setAttribute("aria-hidden", "true");
+      const scrim = el("div", "scrim");
+      scrim.setAttribute("aria-hidden", "true");
+      scrim.addEventListener("click", closeSheet);
+      add(page, scrim, sheet());
+    }
   }
   function saveRow(enabled, label, onSave, reason) {
     const row = el("div", "actions");
@@ -98726,12 +98962,15 @@ function chatgptPickerProgram(kit) {
   }
   function view() {
     const page = el("main", "page picker");
-    searchRows = [];
-    searchEmpty = null;
     if (!p)
       return page;
     const top = el("div", "picker-top");
-    const backButton = kit.button(Q.back, "picker:back", back, "plain");
+    const deep = p.mode === "folders" && p.path.length > 0;
+    const backButton = deep ? kit.button(Q.up, "picker:up", escape2, "plain") : kit.button(Q.back, "picker:back", escape2, "plain");
+    if (deep) {
+      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : fill(Q.accountRow, { source: p.label });
+      backButton.setAttribute("aria-label", fill(Q.upTo, { name: above }));
+    }
     backButton.className = "btn back";
     add(top, backButton);
     add(page, top);
@@ -98752,14 +98991,34 @@ function chatgptPickerProgram(kit) {
       foldersView(page);
     return page;
   }
+  function escape2() {
+    if (!p)
+      return;
+    if (p.mode === "folders" && p.sheet)
+      closeSheet();
+    else if (p.discarding) {
+      p.discarding = false;
+      kit.render("picker:back");
+    } else if (p.mode === "folders" && p.path.length)
+      up();
+    else
+      back();
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("keydown", (event) => {
+      if (!p || event.key !== "Escape" || event.defaultPrevented)
+        return;
+      event.preventDefault();
+      escape2();
+    });
+  }
   return {
     handles,
     start,
     active: () => !!p,
     view,
     afterRender: () => {
-      if (p && p.mode === "folders")
-        applySearch();
+      return;
     }
   };
 }
@@ -98929,6 +99188,8 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .source-main{min-width:0}
 .source-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .source-name{font-weight:600}
+.mac-help{margin:0 0 0.25rem}
+.row.source.mac .source-name{font-weight:500}
 .status{color:var(--muted);font-size:0.875rem}
 .source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
@@ -98971,19 +99232,48 @@ summary{cursor:pointer;border-radius:0.375rem}
 .field-label{font-weight:600;font-size:0.875rem}
 .text{font:inherit;font-size:1rem;width:100%;min-height:2.25rem;padding:0.375rem 0.625rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
 textarea.text{resize:vertical;min-height:4.5rem}
-.tree{list-style:none;margin:0;padding:0}
-.tree.root{border-top:1px solid var(--line);margin-top:0.5rem}
-.tree .tree{padding-left:1rem;border-left:1px solid var(--line);margin-left:1.125rem}
-.folder{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem;padding:0.5rem 0;border-bottom:1px solid var(--line)}
-.folder-toggle{flex:none;width:2.25rem;display:inline-flex;justify-content:center}
-.folder-text{flex:1 1 9rem;min-width:0}
-.folder-name{font-weight:500}
-.folder-meta{font-size:0.8125rem}
-.folder-empty,.folder-loading{padding:0.5rem 0 0.5rem 2.75rem}
-.folder-more{padding:0.5rem 0 0.5rem 2.75rem}
-.icon-btn{min-width:2.25rem;padding:0.25rem;border-radius:0.5rem}
-.choice{font:inherit;font-size:0.875rem;min-height:2.25rem;max-width:100%;padding:0.25rem 0.5rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
-.whole{margin-top:1.25rem}
+.picker-body{display:flex;flex-direction:column}
+.picker-body>.intro{margin-bottom:1rem}
+.account{display:flex;align-items:center;gap:0.75rem;width:100%;min-height:3.5rem;padding:0.625rem 0.875rem;margin:0 0 0.75rem;font:inherit;text-align:left;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:0.75rem;cursor:pointer}
+.two-line{flex:1;min-width:0;display:flex;flex-direction:column;gap:0.125rem}
+.two-top{font-weight:600}
+.two-bottom{color:var(--muted);font-size:0.875rem}
+.chev{flex:none;color:var(--muted);font-size:1.25rem;line-height:1}
+.fsection{margin-top:1rem}
+.fsection h2{margin-bottom:0.25rem}
+.flist{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.frow{display:flex;flex-direction:column;min-height:3rem;border-bottom:1px solid var(--line)}
+.fname,.jump-btn{display:flex;align-items:flex-end;gap:0.5rem;width:100%;min-height:2.5rem;padding:0.5rem 0 0.125rem;margin:0;font:inherit;font-weight:500;text-align:left;color:var(--text);background:none;border:0;cursor:pointer}
+.jump-btn{align-items:center;padding:0.5rem 0;min-height:3rem}
+.jump-btn .two-top{font-weight:500}
+.fname.leaf{cursor:default;min-height:0;padding-top:0.625rem}
+.fname-text{flex:1;min-width:0}
+.fname:disabled,.jump-btn:disabled{cursor:default;color:var(--muted)}
+.fstatus{display:flex;flex-direction:column;align-items:flex-start;gap:0.125rem;align-self:flex-start;min-height:2.75rem;margin:0;padding:0.125rem 0.375rem 0.625rem 0;font:inherit;font-size:0.8125rem;text-align:left;color:var(--muted);background:none;border:0;cursor:pointer}
+.fstatus-text{text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:0.2em}
+.fstatus:hover:not(:disabled){color:var(--text)}
+.fstatus:disabled{cursor:not-allowed}
+.fstatus:disabled .fstatus-text{text-decoration:none}
+.fmeta{color:var(--muted);font-size:0.8125rem}
+.fempty,.fstate{padding:0.75rem 0}
+.fmore{padding:0.5rem 0}
+.fpath{font-size:1.125rem;margin-bottom:0.75rem}
+.fpath-up{color:var(--muted);font-weight:400}
+.this-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.5rem 0.75rem;padding:0.625rem 0.875rem;margin-bottom:0.75rem;background:var(--surface);border:1px solid var(--line);border-radius:0.75rem}
+.this-text{flex:1 1 12rem;min-width:0}
+.this-label{font-weight:600}
+.this-row .btn{min-height:2.75rem}
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1}
+.sheet{position:sticky;bottom:0;z-index:2;margin:1rem -1rem -2rem;padding:0.5rem 1rem 1.25rem;background:var(--bg);color:var(--text);border-top:1px solid var(--line);border-radius:1rem 1rem 0 0;box-shadow:0 -0.25rem 1.5rem rgba(0,0,0,0.25);display:flex;flex-direction:column;gap:0.5rem}
+.grip{align-self:center;width:2.25rem;height:0.25rem;border-radius:999px;background:var(--line);margin-bottom:0.25rem}
+.sheet h2{margin:0}
+.sheet-opts{border:0;margin:0;padding:0;min-width:0;display:flex;flex-direction:column}
+.sheet-opt{display:flex;align-items:flex-start;gap:0.75rem;min-height:3rem;padding:0.625rem 0;border-bottom:1px solid var(--line);cursor:pointer}
+.sheet-opt input{flex:none;width:1.25rem;height:1.25rem;margin:0.125rem 0 0;accent-color:var(--accent)}
+.sheet-opt-name{font-weight:500}
+.sheet-opt.off{cursor:not-allowed}
+.sheet-opt.off .sheet-opt-name{color:var(--muted)}
+.sheet .actions{justify-content:flex-end;margin-top:0.25rem}
 .opt{display:flex;align-items:flex-start;gap:0.5rem;padding:0.375rem 0;cursor:pointer}
 .opt input{flex:none;width:1.125rem;height:1.125rem;margin:0.125rem 0 0;accent-color:var(--accent)}
 .opt-text{display:flex;flex-direction:column;min-width:0}
@@ -99000,7 +99290,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .save{display:flex;flex-direction:column;gap:0.375rem}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
-@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu,.menu-panel{align-items:flex-start}}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.sheet{margin:1rem -0.75rem -1.5rem;padding:0.5rem 0.75rem 1rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu,.menu-panel{align-items:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 `;
 });

@@ -116,6 +116,8 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .source-main{min-width:0}
 .source-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .source-name{font-weight:600}
+.mac-help{margin:0 0 0.25rem}
+.row.source.mac .source-name{font-weight:500}
 .status{color:var(--muted);font-size:0.875rem}
 .source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
@@ -158,19 +160,48 @@ summary{cursor:pointer;border-radius:0.375rem}
 .field-label{font-weight:600;font-size:0.875rem}
 .text{font:inherit;font-size:1rem;width:100%;min-height:2.25rem;padding:0.375rem 0.625rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
 textarea.text{resize:vertical;min-height:4.5rem}
-.tree{list-style:none;margin:0;padding:0}
-.tree.root{border-top:1px solid var(--line);margin-top:0.5rem}
-.tree .tree{padding-left:1rem;border-left:1px solid var(--line);margin-left:1.125rem}
-.folder{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem;padding:0.5rem 0;border-bottom:1px solid var(--line)}
-.folder-toggle{flex:none;width:2.25rem;display:inline-flex;justify-content:center}
-.folder-text{flex:1 1 9rem;min-width:0}
-.folder-name{font-weight:500}
-.folder-meta{font-size:0.8125rem}
-.folder-empty,.folder-loading{padding:0.5rem 0 0.5rem 2.75rem}
-.folder-more{padding:0.5rem 0 0.5rem 2.75rem}
-.icon-btn{min-width:2.25rem;padding:0.25rem;border-radius:0.5rem}
-.choice{font:inherit;font-size:0.875rem;min-height:2.25rem;max-width:100%;padding:0.25rem 0.5rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
-.whole{margin-top:1.25rem}
+.picker-body{display:flex;flex-direction:column}
+.picker-body>.intro{margin-bottom:1rem}
+.account{display:flex;align-items:center;gap:0.75rem;width:100%;min-height:3.5rem;padding:0.625rem 0.875rem;margin:0 0 0.75rem;font:inherit;text-align:left;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:0.75rem;cursor:pointer}
+.two-line{flex:1;min-width:0;display:flex;flex-direction:column;gap:0.125rem}
+.two-top{font-weight:600}
+.two-bottom{color:var(--muted);font-size:0.875rem}
+.chev{flex:none;color:var(--muted);font-size:1.25rem;line-height:1}
+.fsection{margin-top:1rem}
+.fsection h2{margin-bottom:0.25rem}
+.flist{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.frow{display:flex;flex-direction:column;min-height:3rem;border-bottom:1px solid var(--line)}
+.fname,.jump-btn{display:flex;align-items:flex-end;gap:0.5rem;width:100%;min-height:2.5rem;padding:0.5rem 0 0.125rem;margin:0;font:inherit;font-weight:500;text-align:left;color:var(--text);background:none;border:0;cursor:pointer}
+.jump-btn{align-items:center;padding:0.5rem 0;min-height:3rem}
+.jump-btn .two-top{font-weight:500}
+.fname.leaf{cursor:default;min-height:0;padding-top:0.625rem}
+.fname-text{flex:1;min-width:0}
+.fname:disabled,.jump-btn:disabled{cursor:default;color:var(--muted)}
+.fstatus{display:flex;flex-direction:column;align-items:flex-start;gap:0.125rem;align-self:flex-start;min-height:2.75rem;margin:0;padding:0.125rem 0.375rem 0.625rem 0;font:inherit;font-size:0.8125rem;text-align:left;color:var(--muted);background:none;border:0;cursor:pointer}
+.fstatus-text{text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:0.2em}
+.fstatus:hover:not(:disabled){color:var(--text)}
+.fstatus:disabled{cursor:not-allowed}
+.fstatus:disabled .fstatus-text{text-decoration:none}
+.fmeta{color:var(--muted);font-size:0.8125rem}
+.fempty,.fstate{padding:0.75rem 0}
+.fmore{padding:0.5rem 0}
+.fpath{font-size:1.125rem;margin-bottom:0.75rem}
+.fpath-up{color:var(--muted);font-weight:400}
+.this-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.5rem 0.75rem;padding:0.625rem 0.875rem;margin-bottom:0.75rem;background:var(--surface);border:1px solid var(--line);border-radius:0.75rem}
+.this-text{flex:1 1 12rem;min-width:0}
+.this-label{font-weight:600}
+.this-row .btn{min-height:2.75rem}
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1}
+.sheet{position:sticky;bottom:0;z-index:2;margin:1rem -1rem -2rem;padding:0.5rem 1rem 1.25rem;background:var(--bg);color:var(--text);border-top:1px solid var(--line);border-radius:1rem 1rem 0 0;box-shadow:0 -0.25rem 1.5rem rgba(0,0,0,0.25);display:flex;flex-direction:column;gap:0.5rem}
+.grip{align-self:center;width:2.25rem;height:0.25rem;border-radius:999px;background:var(--line);margin-bottom:0.25rem}
+.sheet h2{margin:0}
+.sheet-opts{border:0;margin:0;padding:0;min-width:0;display:flex;flex-direction:column}
+.sheet-opt{display:flex;align-items:flex-start;gap:0.75rem;min-height:3rem;padding:0.625rem 0;border-bottom:1px solid var(--line);cursor:pointer}
+.sheet-opt input{flex:none;width:1.25rem;height:1.25rem;margin:0.125rem 0 0;accent-color:var(--accent)}
+.sheet-opt-name{font-weight:500}
+.sheet-opt.off{cursor:not-allowed}
+.sheet-opt.off .sheet-opt-name{color:var(--muted)}
+.sheet .actions{justify-content:flex-end;margin-top:0.25rem}
 .opt{display:flex;align-items:flex-start;gap:0.5rem;padding:0.375rem 0;cursor:pointer}
 .opt input{flex:none;width:1.125rem;height:1.125rem;margin:0.125rem 0 0;accent-color:var(--accent)}
 .opt-text{display:flex;flex-direction:column;min-width:0}
@@ -187,7 +218,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .save{display:flex;flex-direction:column;gap:0.375rem}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
-@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu,.menu-panel{align-items:flex-start}}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.sheet{margin:1rem -0.75rem -1.5rem;padding:0.5rem 0.75rem 1rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu,.menu-panel{align-items:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 `;
 

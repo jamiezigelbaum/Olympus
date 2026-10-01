@@ -101,8 +101,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   let p: Any = null;
   let session = 0;
   let timer: Any = null;
-  let searchRows: Array<{ li: HTMLElement; name: string; children: Any[] }> = [];
-  let searchEmpty: HTMLElement | null = null;
+  /** The whole-account row's key in the sheet and focus keys (never a provider key). */
+  const ACCOUNT = '@account';
+  /** olympus_scope_set accepts at most this many explicit rules (its input schema's maxItems). */
+  const MAX_RULES = 100;
 
   function handles(fix: Any): boolean {
     return !!fix && (fix.tool === T.connectSource || fix.tool === T.scopeList);
@@ -118,7 +120,6 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const key = p ? p.returnKey : '';
     p = null;
     session++;
-    searchRows = [];
     kit.close(notice, refresh, key);
   }
 
@@ -272,8 +273,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       loading: 'root', loaded: false, error: '', retry: null, generation: '', revision: '',
       edited: false, saving: false, saveError: '', discarding: false,
       // folders
-      roots: [], rootCursor: '', branches: new Map(), cursors: new Map(), expanded: new Set(), catalog: new Map(),
-      ancestors: new Map(), own: new Map(), whole: false, wholeConfirmed: false, search: '',
+      roots: [], rootCursor: '', branches: new Map(), cursors: new Map(), catalog: new Map(),
+      ancestors: new Map(), own: new Map(), whole: false, wholeConfirmed: false,
+      path: [], sheet: '', sheetReturn: '', capHit: false,
       // mail
       draft: null, labels: [], categories: [], suggestions: [], sampleSize: 0, estimate: null,
     };
@@ -317,39 +319,45 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   // ---- folders -----------------------------------------------------------
-  function list(parentKey: string, append: boolean): void {
+  // One level per screen: the root (the whole-account row, the exceptions,
+  // the top-level folders) or a folder (its own choice, then its folders).
+  // A choice is changed in one bottom sheet that never stacks. Only explicit
+  // rules are stored; inherited choices and Mixed are derived on every render.
+  function list(parentKey: string, append: boolean, after?: () => void): void {
     const cursor = append ? (parentKey ? p.cursors.get(parentKey) : p.rootCursor) : '';
     const args: Any = { source_id: p.id };
     if (parentKey) args.parent_key = parentKey;
     if (cursor) args.cursor = cursor;
     p.loading = parentKey || 'root';
     p.error = '';
-    const focus = append ? 'picker:more:' + parentKey : parentKey ? 'picker:open:' + parentKey : 'picker:back';
+    // A deeper level keeps focus where it is (the row's control) until it arrives.
+    const focus = append ? 'picker:more:' + parentKey : p.loaded ? '' : 'picker:back';
     kit.render(focus);
     const mine = session;
     kit.call(T.scopeList, args).then((result) => {
       if (mine !== session || !p) return;
       const page = scopeData(result);
       if (!validBrowse(page)) {
-        failLoad(() => list(parentKey, append), 'picker:retry');
+        failLoad(() => list(parentKey, append, after), 'picker:retry');
         return;
       }
       if (p.loaded && (page.account_generation !== p.generation || page.scope_revision !== p.revision)) {
         reload(Q.conflict, parentKey || append ? null : page);
         return;
       }
-      takeFolders(page, parentKey, append, focus);
+      takeFolders(page, parentKey, append, focus, after);
     }, () => {
       if (mine !== session || !p) return;
-      failLoad(() => list(parentKey, append), 'picker:retry');
+      failLoad(() => list(parentKey, append, after), 'picker:retry');
     });
   }
 
-  function takeFolders(page: Any, parentKey: string, append: boolean, focus: string): void {
+  function takeFolders(page: Any, parentKey: string, append: boolean, focus: string, after?: () => void): void {
     if (!p.loaded) {
       p.generation = page.account_generation;
       p.revision = page.scope_revision;
       p.whole = page.whole_account_selected === true;
+      p.wholeConfirmed = p.whole;
       const saved = Array.isArray(page.selections) ? page.selections : [];
       for (const selection of saved) {
         if (!selection || typeof selection.key !== 'string' || STATES.indexOf(selection.state) < 0) continue;
@@ -359,7 +367,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       }
       p.loaded = true;
     }
-    const trail: string[] = parentKey ? (p.ancestors.get(parentKey) || []).concat([parentKey]) : [];
+    const trail: string[] = parentKey ? trailOf(parentKey) : [];
     const previous: Any[] = append ? (parentKey ? p.branches.get(parentKey) || [] : p.roots) : [];
     const seen: Record<string, boolean> = {};
     for (const node of previous) seen[node.key] = true;
@@ -372,7 +380,6 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const next = typeof page.next_cursor === 'string' && page.next_cursor ? page.next_cursor : '';
     if (parentKey) {
       p.branches.set(parentKey, nodes);
-      p.expanded.add(parentKey);
       if (next) p.cursors.set(parentKey, next);
       else p.cursors.delete(parentKey);
     } else {
@@ -380,51 +387,110 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       p.rootCursor = next;
     }
     p.loading = '';
-    kit.render(focus);
+    if (after) after();
+    else kit.render(focus);
   }
 
-  function inherited(key: string): string {
-    let state = p.whole ? 'ingest' : '';
+  function trailOf(key: string): string[] {
+    return (p.ancestors.get(key) || []).concat([key]);
+  }
+
+  function nameOf(key: string): string {
+    const node = p.catalog.get(key);
+    if (node && typeof node.name === 'string' && node.name) return node.name;
+    // Not listed yet: name it by the nearest listed folder above it, when there is one.
+    const above = (p.ancestors.get(key) || []).filter((ancestor: string) => {
+      const known = p.catalog.get(ancestor);
+      return known && typeof known.name === 'string' && known.name;
+    });
+    return above.length ? fill(Q.insideFolder, { name: p.catalog.get(above[above.length - 1]).name }) : Q.unknownFolder;
+  }
+
+  /** An exception's label: its name under its parent's ("Clients / Archive 2019") when both are loaded. */
+  function shortPath(key: string): string {
+    const node = p.catalog.get(key);
+    if (!node || typeof node.name !== 'string' || !node.name) return nameOf(key);
     const ancestors: string[] = p.ancestors.get(key) || [];
-    for (const ancestor of ancestors) {
-      const choice = p.own.get(ancestor);
-      if (choice === 'exclude') return 'exclude';
-      if (choice === 'metadata_only') state = 'metadata_only';
-      else if (choice === 'ingest' && !state) state = 'ingest';
-    }
-    return state;
+    const parent = ancestors.length ? p.catalog.get(ancestors[ancestors.length - 1]) : null;
+    return parent && typeof parent.name === 'string' && parent.name ? parent.name + ' / ' + node.name : node.name;
   }
 
+  /** What a folder gets from above it: the strictest ancestor rule wins, as the engine evaluates it. */
+  function inherited(key: string): { state: string; from: string } {
+    let state = p.whole ? 'ingest' : '';
+    let from = p.whole ? ACCOUNT : '';
+    for (const ancestor of p.ancestors.get(key) || []) {
+      const choice = p.own.get(ancestor);
+      if (choice === 'exclude') {
+        state = 'exclude';
+        from = ancestor;
+      } else if (choice === 'metadata_only' && state !== 'exclude') {
+        state = 'metadata_only';
+        from = ancestor;
+      } else if (choice === 'ingest' && (state === '' || state === 'ingest')) {
+        state = 'ingest';
+        from = ancestor;
+      }
+    }
+    return { state, from };
+  }
+
+  /** '' is Not included: no rule here or above, and the whole account is not chosen. */
   function effective(key: string): string {
-    const from = inherited(key);
-    const own = p.own.get(key);
+    const from = inherited(key).state;
+    const own = p.own.get(key) || '';
     if (from === 'exclude' || own === 'exclude') return 'exclude';
     if (from === 'metadata_only') return 'metadata_only';
-    return own || from || 'exclude';
+    return own || from;
   }
 
   function allowed(key: string, state: string): boolean {
-    const from = inherited(key);
+    const from = inherited(key).state;
     if (!state) return true;
     if (from === 'exclude') return state === 'exclude';
     if (from === 'metadata_only') return state !== 'ingest';
     return true;
   }
 
-  function mixed(key: string): boolean {
-    const mine = effective(key);
-    let differs = false;
+  function descendants(key: string): string[] {
+    const out: string[] = [];
     p.own.forEach((_state: string, other: string) => {
-      if (differs || other === key) return;
-      const ancestors: string[] = p.ancestors.get(other) || [];
-      if (ancestors.indexOf(key) >= 0 && effective(other) !== mine) differs = true;
+      if (other !== key && (p.ancestors.get(other) || []).indexOf(key) >= 0) out.push(other);
     });
-    return differs;
+    return out;
   }
 
-  function hasAncestorChoice(key: string): boolean {
-    const ancestors: string[] = p.ancestors.get(key) || [];
-    return ancestors.some((ancestor) => p.own.has(ancestor));
+  /** Derived from the known rules below a folder, never stored: the first effective choice that differs. */
+  function mixed(key: string): string {
+    const mine = effective(key);
+    for (const other of descendants(key)) {
+      const theirs = effective(other);
+      if (theirs !== mine) return theirs;
+    }
+    return '';
+  }
+
+  function stateName(state: string): string {
+    return state ? (Q.states as Any)[state] : Q.notIncluded;
+  }
+
+  function sourceName(from: string): string {
+    return from === ACCOUNT ? fill(Q.accountRow, { source: p.label }) : nameOf(from);
+  }
+
+  /** The muted line under a folder's name: its effective choice, where it comes from, and Mixed. */
+  function statusText(key: string): string {
+    const own = p.own.get(key) || '';
+    const from = inherited(key);
+    const state = effective(key);
+    let text: string;
+    if (own && state === own) text = stateName(own);
+    else if (from.from === ACCOUNT && state === from.state) text = fill(Q.fromAccount, { state: stateName(state) });
+    else if (from.from) text = fill(Q.fromParent, { state: stateName(state), parent: nameOf(from.from) });
+    else text = stateName(state);
+    const differs = mixed(key);
+    if (differs) text += ' · ' + fill(Q.mixedSome, { state: (Q.statesLower as Any)[differs] });
+    return text;
   }
 
   function size(bytes: number): string {
@@ -449,116 +515,97 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return parts.join(' · ');
   }
 
+  /** Exceptions: folders whose own rule differs from what they would inherit. */
+  function exceptions(): string[] {
+    const out: string[] = [];
+    p.own.forEach((state: string, key: string) => {
+      if (state !== inherited(key).state) out.push(key);
+    });
+    return out;
+  }
+
   function choose(key: string, value: string): void {
-    if (value && STATES.indexOf(value) < 0) return;
-    if (value) p.own.set(key, value);
-    else p.own.delete(key);
-    p.edited = true;
-    p.saveError = '';
-    kit.render('picker:choice:' + key);
-  }
-
-  function folderRow(node: Any): { li: HTMLElement; row: Any } {
-    const key = node.key;
-    const li = el('li', 'folder-item');
-    const row = el('div', 'folder');
-    const toggle = el('span', 'folder-toggle');
-    if (node.has_children) {
-      const open = p.expanded.has(key);
-      const loadingHere = p.loading === key;
-      const control = kit.button(open ? '▾' : '▸', 'picker:open:' + key, loadingHere ? null : () => {
-        if (open) {
-          p.expanded.delete(key);
-          kit.render('picker:open:' + key);
-        } else if (p.branches.has(key)) {
-          p.expanded.add(key);
-          kit.render('picker:open:' + key);
-        } else list(key, false);
-      }, 'plain');
-      control.className = 'btn icon-btn';
-      control.setAttribute('aria-expanded', String(open));
-      control.setAttribute('aria-label', fill(open ? Q.collapse : Q.expand, { name: node.name }));
-      add(toggle, control);
-    }
-    const text = el('div', 'folder-text');
-    const nameLine = add(el('p', 'folder-name'), el('span', '', node.name));
-    const own = p.own.get(key);
-    const from = inherited(key);
-    let status = '';
-    if (mixed(key)) status = Q.mixed + ' — ' + Q.mixedHelp;
-    else if (own || from) {
-      status = (Q.states as Any)[effective(key)];
-      if (!own && from) status += ' · ' + Q.inherited;
-    } else status = Q.notSelected;
-    add(text, nameLine);
-    const metaParts = [status];
-    const meta = nodeMeta(node);
-    if (meta) metaParts.push(meta);
-    add(text, el('p', 'muted folder-meta', metaParts.join(' · ')));
-    const choice = el('select', 'choice') as HTMLSelectElement;
-    choice.setAttribute('data-key', 'picker:choice:' + key);
-    choice.setAttribute('aria-label', fill(Q.choiceFor, { name: node.name }));
-    if (node.selectable === false || p.saving) choice.disabled = true;
-    const none = el('option', '', from
-      ? fill(hasAncestorChoice(key) ? Q.sameAsParent : Q.sameAsAccount, { state: (Q.states as Any)[from] })
-      : Q.notSelected) as HTMLOptionElement;
-    none.value = '';
-    add(choice, none);
-    for (const state of STATES) {
-      const option = el('option', '', (Q.states as Any)[state]) as HTMLOptionElement;
-      option.value = state;
-      if (!allowed(key, state)) option.disabled = true;
-      add(choice, option);
-    }
-    choice.value = own || '';
-    choice.addEventListener('change', () => choose(key, choice.value));
-    add(row, toggle, text, choice);
-    add(li, row);
-    const record: Any = { li, name: String(node.name).toLowerCase(), children: [] };
-    if (node.has_children && p.expanded.has(key)) {
-      const children = p.branches.get(key) || [];
-      const group = el('ul', 'tree');
-      group.setAttribute('role', 'group');
-      for (const child of children) {
-        const built = folderRow(child);
-        record.children.push(built.row);
-        add(group, built.li);
+    if (p.saving) return;
+    if (key === ACCOUNT) {
+      const whole = value === 'ingest';
+      if (whole !== p.whole) {
+        p.whole = whole;
+        p.wholeConfirmed = false;
+        p.edited = true;
       }
-      if (!children.length && p.loading !== key) add(group, el('li', 'muted folder-empty', Q.noFolders));
-      if (p.cursors.has(key)) add(group, add(el('li', 'folder-more'), loadMore(key)));
-      add(li, group);
+    } else {
+      if (value && STATES.indexOf(value) < 0) return;
+      if (value && !allowed(key, value)) return;
+      if (value && !p.own.has(key) && p.own.size >= MAX_RULES) {
+        p.capHit = true;
+        kit.render('picker:sheet:parent');
+        return;
+      }
+      if (value) p.own.set(key, value);
+      else p.own.delete(key);
+      p.edited = true;
     }
-    if (p.loading === key) {
-      const line = el('p', 'muted folder-loading', Q.loadingFolders);
-      line.setAttribute('role', 'status');
-      add(li, line);
-    }
-    return { li, row: record };
+    p.capHit = false;
+    p.saveError = '';
+    kit.render('picker:sheet:' + (value || 'parent'));
   }
 
-  function loadMore(parentKey: string): HTMLElement {
-    const busy = p.loading === (parentKey || 'root');
-    return kit.button(busy ? Q.loadingFolders : Q.loadMore, 'picker:more:' + parentKey, busy ? null : () => list(parentKey, true), 'plain');
+  function openSheet(key: string, returnKey: string): void {
+    if (p.saving) return;
+    p.sheet = key;
+    p.sheetReturn = returnKey;
+    p.capHit = false;
+    const own = key === ACCOUNT ? (p.whole ? 'ingest' : '') : p.own.get(key) || '';
+    kit.render('picker:sheet:' + (own || 'parent'));
   }
 
-  function applySearch(): void {
-    const needle = String(p && p.search || '').trim().toLowerCase();
-    let any = false;
-    const visit = (record: Any): boolean => {
-      let show = !needle || record.name.indexOf(needle) >= 0;
-      for (const child of record.children) if (visit(child)) show = true;
-      record.li.hidden = !show;
-      if (show) any = true;
-      return show;
+  function closeSheet(): void {
+    const focus = p.sheetReturn || 'picker:back';
+    p.sheet = '';
+    p.sheetReturn = '';
+    p.capHit = false;
+    kit.render(focus);
+  }
+
+  function drill(key: string): void {
+    if (p.loading || p.saving) return;
+    const arrive = () => {
+      p.path = trailOf(key);
+      kit.render('picker:up');
     };
-    for (const record of searchRows) visit(record);
-    if (searchEmpty) searchEmpty.hidden = !needle || any || !searchRows.length;
+    if (p.branches.has(key)) arrive();
+    else list(key, false, arrive);
+  }
+
+  /** Open a folder anywhere, loading each level above it with the ancestor keys already held. */
+  function jump(key: string): void {
+    if (p.loading || p.saving) return;
+    const trail = trailOf(key);
+    const mine = session;
+    const step = (index: number): void => {
+      if (mine !== session || !p) return;
+      if (index >= trail.length) {
+        p.path = trail;
+        kit.render('picker:up');
+        return;
+      }
+      if (p.branches.has(trail[index])) step(index + 1);
+      else list(trail[index]!, false, () => step(index + 1));
+    };
+    step(0);
+  }
+
+  function up(): void {
+    const left = p.path.pop();
+    p.sheet = '';
+    kit.render(left ? 'picker:open:' + left : 'picker:back');
   }
 
   function counts(): Any {
     const totals: Any = { ingest: 0, metadata_only: 0, exclude: 0 };
     p.own.forEach((_state: string, key: string) => {
-      totals[effective(key)]++;
+      const state = effective(key);
+      if (state) totals[state]++;
     });
     return totals;
   }
@@ -603,28 +650,29 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       }
       parts.push(part);
     }
-    if (p.whole) lines.push(Q.summaryWhole);
-    if (parts.length) lines.push(parts.join(', ') + '.');
-    else if (!p.whole) lines.push(Q.summaryNone);
-    const bytes = indexedBytes();
-    if (bytes > 0) lines.push(fill(Q.summarySize, { size: size(bytes) }));
-    if (!p.whole) lines.push(Q.summaryRest);
+    if (p.whole) lines.push(fill(Q.summaryWhole, { source: p.label }));
+    if (parts.length) {
+      const bytes = indexedBytes();
+      lines.push(parts.join(', ') + (bytes > 0 ? ' · ' + fill(Q.summarySize, { size: size(bytes) }) : ''));
+    } else if (!p.whole) lines.push(Q.summaryNone);
     return lines;
   }
 
   function anyChosen(): boolean {
     let chosen = false;
     p.own.forEach((_state: string, key: string) => {
-      if (effective(key) !== 'exclude') chosen = true;
+      const state = effective(key);
+      if (state === 'ingest' || state === 'metadata_only') chosen = true;
     });
     return chosen;
   }
 
   function saveFolders(): void {
     if (!canSaveFolders()) return;
+    // Explicit rules only, exactly as chosen: the engine applies the strictest rule above each folder.
     const selections: Any[] = [];
-    p.own.forEach((_state: string, key: string) => {
-      selections.push({ key, state: effective(key), ancestor_keys: (p.ancestors.get(key) || []).slice() });
+    p.own.forEach((state: string, key: string) => {
+      selections.push({ key, state, ancestor_keys: (p.ancestors.get(key) || []).slice() });
     });
     const args: Any = {
       source_id: p.id,
@@ -638,7 +686,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   function canSaveFolders(): boolean {
-    if (!p.loaded || p.saving || !p.generation || !p.revision) return false;
+    if (!p.loaded || p.saving || !p.generation || !p.revision || p.own.size > MAX_RULES) return false;
     if (p.whole) return p.wholeConfirmed;
     return anyChosen() || p.edited;
   }
@@ -646,6 +694,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   function save(args: Any, focus: string): void {
     p.saving = true;
     p.saveError = '';
+    p.sheet = '';
     kit.render(focus);
     const mine = session;
     kit.call(T.scopeSet, args).then((result) => {
@@ -671,109 +720,262 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     });
   }
 
-  function wholeControl(): HTMLElement {
-    const box = el('div', 'whole');
-    const label = el('label', 'opt');
-    const input = el('input') as HTMLInputElement;
-    input.type = 'checkbox';
-    input.checked = p.whole;
-    input.disabled = !p.loaded || p.saving;
-    input.setAttribute('data-key', 'picker:whole');
-    input.addEventListener('change', () => {
-      p.whole = input.checked;
-      p.wholeConfirmed = false;
-      p.edited = true;
-      kit.render(p.whole ? 'picker:whole:no' : 'picker:whole');
-    });
-    add(box, add(label, input, el('span', '', Q.wholeAccount)));
-    if (p.whole && !p.wholeConfirmed) {
-      const confirm = el('div', 'confirm-box');
-      confirm.setAttribute('role', 'alert');
-      add(confirm, el('p', 'strong', fill(Q.wholePrompt, { source: p.label })), add(el('div', 'actions'),
-        kit.button(Q.wholeConfirm, 'picker:whole:yes', () => {
-          p.wholeConfirmed = true;
-          kit.render('picker:whole');
-        }, 'danger'),
-        kit.button(Q.cancel, 'picker:whole:no', () => {
-          p.whole = false;
-          kit.render('picker:whole');
-        }, 'plain')));
-      add(box, confirm);
-    } else if (p.whole) {
-      add(box, el('p', 'muted', Q.wholeConfirmed));
+  function wholeConfirm(): HTMLElement {
+    const confirm = el('div', 'confirm-box');
+    confirm.setAttribute('role', 'alert');
+    add(confirm, el('p', 'strong', fill(Q.wholePrompt, { source: p.label })), add(el('div', 'actions'),
+      kit.button(Q.wholeConfirm, 'picker:whole:yes', p.saving ? null : () => {
+        p.wholeConfirmed = true;
+        kit.render(p.sheet ? 'picker:sheet:done' : 'picker:choice:' + ACCOUNT);
+      }, 'danger'),
+      kit.button(Q.cancel, 'picker:whole:no', p.saving ? null : () => {
+        p.whole = false;
+        p.wholeConfirmed = false;
+        kit.render(p.sheet ? 'picker:sheet:parent' : 'picker:choice:' + ACCOUNT);
+      }, 'plain')));
+    return confirm;
+  }
+
+  /** Two lines on one control: a label and the muted choice under it. */
+  function twoLine(cls: string, key: string, top: string, bottom: string, onClick: (() => void) | null, label?: string): HTMLButtonElement {
+    const control = el('button', cls) as HTMLButtonElement;
+    control.type = 'button';
+    control.setAttribute('data-key', key);
+    add(control, add(el('span', 'two-line'), el('span', 'two-top', top), el('span', 'two-bottom', bottom)));
+    const chevron = el('span', 'chev', '›');
+    chevron.setAttribute('aria-hidden', 'true');
+    add(control, chevron);
+    if (label) control.setAttribute('aria-label', label);
+    if (onClick) control.addEventListener('click', onClick);
+    else control.disabled = true;
+    return control;
+  }
+
+  /** The choice line, with the size and file count on their own muted line under it, in one 44px target. */
+  function statusButton(key: string, name: string, text: string, enabled: boolean, focusKey: string, meta: string): HTMLButtonElement {
+    const control = el('button', 'fstatus') as HTMLButtonElement;
+    control.type = 'button';
+    add(control, el('span', 'fstatus-text', text));
+    if (meta) add(control, el('span', 'fmeta', meta));
+    control.setAttribute('data-key', focusKey);
+    control.setAttribute('aria-haspopup', 'dialog');
+    control.setAttribute('aria-label', fill(Q.choiceFor, { name, state: text }) + (meta ? ' · ' + meta : ''));
+    if (enabled && !p.saving) control.addEventListener('click', () => openSheet(key, focusKey));
+    else control.disabled = true;
+    return control;
+  }
+
+  function folderRow(node: Any): HTMLElement {
+    const key = node.key;
+    const li = el('li', 'frow');
+    if (node.has_children) {
+      const open = el('button', 'fname') as HTMLButtonElement;
+      open.type = 'button';
+      open.setAttribute('data-key', 'picker:open:' + key);
+      add(open, el('span', 'fname-text', node.name));
+      const chevron = el('span', 'chev', '›');
+      chevron.setAttribute('aria-hidden', 'true');
+      add(open, chevron);
+      if (p.loading || p.saving) open.disabled = true;
+      else open.addEventListener('click', () => drill(key));
+      add(li, open);
+    } else add(li, add(el('p', 'fname leaf'), el('span', 'fname-text', node.name)));
+    add(li, statusButton(key, node.name, statusText(key), node.selectable !== false, 'picker:choice:' + key, nodeMeta(node)));
+    return li;
+  }
+
+  function loadMore(parentKey: string): HTMLElement {
+    const busy = p.loading === (parentKey || 'root');
+    return kit.button(busy ? Q.loadingFolders : Q.loadMore, 'picker:more:' + parentKey, busy || p.loading ? null : () => list(parentKey, true), 'plain');
+  }
+
+  function levelList(parentKey: string, nodes: Any[], hasMore: boolean): HTMLElement {
+    const listNode = el('ul', 'flist');
+    for (const node of nodes) add(listNode, folderRow(node));
+    if (!nodes.length) add(listNode, el('li', 'muted fempty', Q.noFolders));
+    if (hasMore) add(listNode, add(el('li', 'fmore'), loadMore(parentKey)));
+    return listNode;
+  }
+
+  function loadingLine(): HTMLElement | null {
+    if (!p.loading) return null;
+    const line = el('p', 'muted fstate', Q.loadingFolders);
+    line.setAttribute('role', 'status');
+    return line;
+  }
+
+  function rootScreen(body: HTMLElement): void {
+    add(body, el('h1', '', p.title));
+    add(body, el('p', 'muted intro', fill(Q.foldersIntro, { source: p.label })));
+    noticeAndError(body);
+    if (!p.loaded) {
+      add(body, loadingLine());
+      return;
     }
-    return box;
+    const account = fill(Q.accountRow, { source: p.label });
+    add(body, twoLine('account', 'picker:choice:' + ACCOUNT, account, stateName(p.whole ? 'ingest' : ''),
+      p.saving ? null : () => openSheet(ACCOUNT, 'picker:choice:' + ACCOUNT),
+      fill(Q.choiceFor, { name: account, state: stateName(p.whole ? 'ingest' : '') })));
+    if (p.whole && !p.wholeConfirmed && p.sheet !== ACCOUNT) add(body, wholeConfirm());
+    const rules = exceptions();
+    if (rules.length) {
+      const section = el('section', 'fsection');
+      add(section, el('h2', '', fill(Q.exceptions, { n: kit.count(rules.length) })));
+      const listNode = el('ul', 'flist');
+      for (const key of rules) {
+        add(listNode, add(el('li', 'frow jump'), twoLine('jump-btn', 'picker:jump:' + key, shortPath(key), stateName(p.own.get(key)),
+          p.loading || p.saving ? null : () => jump(key))));
+      }
+      add(body, add(section, listNode));
+    }
+    const folders = add(el('section', 'fsection'), el('h2', '', Q.foldersHeading));
+    add(folders, loadingLine());
+    add(folders, levelList('', p.roots, !!p.rootCursor));
+    add(body, folders);
   }
 
-  function meanings(): HTMLElement {
-    const box = el('details', 'disclosure');
-    const head = el('summary', '', Q.meaningTitle);
-    head.setAttribute('data-key', 'picker:meanings');
-    add(box, head);
-    const listNode = el('ul', 'plain');
-    for (const line of Q.meanings) add(listNode, el('li', '', line));
-    return add(box, listNode);
+  function pathLine(): HTMLElement {
+    const names = [p.label].concat(p.path.map((key: string) => nameOf(key)));
+    const shown = names.length > 3 ? [Q.pathMore].concat(names.slice(-2)) : names;
+    const head = el('h1', 'fpath');
+    shown.forEach((name: string, index: number) => {
+      if (index === shown.length - 1) add(head, el('span', 'fpath-here', name));
+      else add(head, el('span', 'fpath-up', name + ' / '));
+    });
+    return head;
   }
 
-  function foldersView(page: HTMLElement): void {
-    add(page, el('h1', '', p.title));
-    add(page, el('p', 'muted', fill(Q.foldersIntro, { source: p.label })));
+  function folderScreen(body: HTMLElement): void {
+    const key = p.path[p.path.length - 1];
+    add(body, pathLine());
+    noticeAndError(body);
+    const node = p.catalog.get(key);
+    const here = el('div', 'this-row');
+    const text = statusText(key);
+    add(here, add(el('p', 'this-text'), el('span', 'this-label', Q.thisFolder + ' '), el('span', '', text)));
+    const change = kit.button(Q.change, 'picker:this', node && node.selectable === false || p.saving ? null : () => openSheet(key, 'picker:this'), 'plain');
+    change.setAttribute('aria-haspopup', 'dialog');
+    change.setAttribute('aria-label', fill(Q.choiceFor, { name: nameOf(key), state: text }));
+    add(here, change);
+    add(body, here);
+    add(body, loadingLine());
+    add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
+  }
+
+  function noticeAndError(body: HTMLElement): void {
     if (p.notice) {
       const notice = el('p', 'notice', p.notice);
       notice.setAttribute('role', 'status');
-      add(page, notice);
+      add(body, notice);
     }
-    add(page, meanings());
     if (p.error) {
       const error = el('div', 'banner');
       error.setAttribute('role', 'alert');
       add(error, add(el('div', 'banner-body'), el('p', '', p.error),
         add(el('div', 'actions'), kit.button(Q.tryAgain, 'picker:retry', () => p.retry && p.retry(), 'plain'))));
-      add(page, error);
+      add(body, error);
     }
-    if (!p.loaded) {
-      if (p.loading) {
-        const line = el('p', 'muted', Q.loadingFolders);
-        line.setAttribute('role', 'status');
-        add(page, line);
-      }
-      return;
-    }
-    const search = el('label', 'field');
-    add(search, el('span', 'field-label', Q.search));
-    const input = el('input', 'text') as HTMLInputElement;
-    input.type = 'search';
-    input.value = p.search;
-    input.setAttribute('data-key', 'picker:search');
-    input.addEventListener('input', () => {
-      p.search = input.value;
-      applySearch();
-      kit.reportHeight();
-    });
-    add(page, add(search, input));
-    const tree = el('ul', 'tree root');
-    searchRows = [];
-    for (const node of p.roots) {
-      const built = folderRow(node);
-      searchRows.push(built.row);
-      add(tree, built.li);
-    }
-    if (!p.roots.length) add(tree, el('li', 'muted folder-empty', Q.noFolders));
-    if (p.rootCursor) add(tree, add(el('li', 'folder-more'), loadMore('')));
-    add(page, tree);
-    searchEmpty = el('p', 'muted search-empty', Q.searchEmpty);
-    searchEmpty.hidden = true;
-    add(page, searchEmpty);
-    add(page, wholeControl());
+  }
+
+  function folderFooter(): HTMLElement {
     const footer = el('section', 'picker-footer');
     footer.setAttribute('aria-label', Q.summaryTitle);
     const summary = el('div', 'summary');
     summary.setAttribute('aria-live', 'polite');
     for (const line of folderSummary()) add(summary, el('p', '', line));
+    if (p.own.size >= MAX_RULES) add(summary, el('p', 'reason strong', fill(Q.capReached, { max: kit.count(MAX_RULES) })));
     add(footer, summary);
     add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders,
       p.whole && !p.wholeConfirmed ? Q.needConfirm : !anyChosen() && !p.edited ? Q.needChoice : ''));
-    add(page, footer);
+    return footer;
+  }
+
+  function sheetOption(value: string, text: string, hint: string, checked: boolean, enabled: boolean, onPick: () => void): HTMLElement {
+    const label = el('label', 'sheet-opt' + (enabled ? '' : ' off'));
+    const input = el('input') as HTMLInputElement;
+    input.type = 'radio';
+    input.name = 'picker-choice';
+    input.value = value;
+    input.checked = checked;
+    input.disabled = !enabled || p.saving;
+    input.setAttribute('data-key', 'picker:sheet:' + (value || 'parent'));
+    input.addEventListener('change', () => {
+      if (input.checked) onPick();
+    });
+    const words = add(el('span', 'opt-text'), el('span', 'sheet-opt-name', text));
+    if (hint) add(words, el('span', 'muted opt-hint', hint));
+    return add(label, input, words);
+  }
+
+  function sheet(): HTMLElement {
+    const key = p.sheet;
+    const box = el('section', 'sheet');
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    box.setAttribute('aria-labelledby', 'picker-sheet-title');
+    const grip = el('span', 'grip');
+    grip.setAttribute('aria-hidden', 'true');
+    add(box, grip);
+    const options = el('fieldset', 'sheet-opts');
+    if (key === ACCOUNT) {
+      const title = el('h2', '', fill(Q.accountRow, { source: p.label }));
+      title.id = 'picker-sheet-title';
+      add(box, title, el('p', 'muted', Q.accountHelp));
+      add(options, add(el('legend', 'sr'), el('span', '', fill(Q.accountRow, { source: p.label }))));
+      add(options, sheetOption('', Q.notIncluded, Q.consequences.none, !p.whole, true, () => choose(ACCOUNT, '')));
+      add(options, sheetOption('ingest', Q.states.ingest, Q.consequences.wholeIngest, p.whole, true, () => choose(ACCOUNT, 'ingest')));
+      add(box, options);
+      if (p.whole && !p.wholeConfirmed) add(box, wholeConfirm());
+    } else {
+      const name = nameOf(key);
+      const title = el('h2', '', name);
+      title.id = 'picker-sheet-title';
+      add(box, title);
+      const own = p.own.get(key) || '';
+      const from = inherited(key);
+      if (!own && from.from) add(box, el('p', 'muted', fill(Q.inheritedFrom, { parent: sourceName(from.from) })));
+      if (own && effective(key) !== own) {
+        add(box, el('p', 'reason strong', fill(Q.overridden, { own: stateName(own), parent: sourceName(from.from), state: stateName(from.state) })));
+      }
+      add(options, add(el('legend', 'sr'), el('span', '', fill(Q.choiceFor, { name, state: statusText(key) }))));
+      const top = !(p.ancestors.get(key) || []).length;
+      add(options, sheetOption('', fill(top ? Q.sameAsAccount : Q.sameAsParent, { state: stateName(from.state) }), Q.consequences.parent,
+        !own, true, () => choose(key, '')));
+      const capped = !own && p.own.size >= MAX_RULES;
+      for (const state of STATES) {
+        const ok = allowed(key, state) && !capped;
+        const hint = !allowed(key, state)
+          ? fill(Q.notPossible, { parent: sourceName(from.from), state: (Q.statesLower as Any)[from.state] })
+          : (Q.consequences as Any)[state];
+        add(options, sheetOption(state, (Q.states as Any)[state], hint, own === state, ok, () => choose(key, state)));
+      }
+      add(box, options);
+      if (capped || p.capHit) {
+        const cap = el('p', 'reason strong', fill(Q.capReached, { max: kit.count(MAX_RULES) }));
+        cap.setAttribute('role', 'alert');
+        add(box, cap);
+      }
+      const inside = descendants(key).length;
+      if (inside) add(box, el('p', 'muted', fill(inside === 1 ? Q.keepOwn.one : Q.keepOwn.many, { n: kit.count(inside) })));
+    }
+    add(box, add(el('div', 'actions'), kit.button(Q.done, 'picker:sheet:done', closeSheet, 'plain')));
+    return box;
+  }
+
+  function foldersView(page: HTMLElement): void {
+    const body = el('div', 'picker-body');
+    if (p.path.length) folderScreen(body);
+    else rootScreen(body);
+    if (p.loaded) add(body, folderFooter());
+    add(page, body);
+    if (p.sheet && p.loaded) {
+      body.setAttribute('inert', '');
+      body.setAttribute('aria-hidden', 'true');
+      const scrim = el('div', 'scrim');
+      scrim.setAttribute('aria-hidden', 'true');
+      scrim.addEventListener('click', closeSheet);
+      add(page, scrim, sheet());
+    }
   }
 
   function saveRow(enabled: boolean, label: string, onSave: () => void, reason: string): HTMLElement {
@@ -1073,11 +1275,17 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
 
   function view(): HTMLElement {
     const page = el('main', 'page picker');
-    searchRows = [];
-    searchEmpty = null;
     if (!p) return page;
     const top = el('div', 'picker-top');
-    const backButton = kit.button(Q.back, 'picker:back', back, 'plain');
+    // Inside a folder the top control goes up one level; at the root it leaves the picker.
+    const deep = p.mode === 'folders' && p.path.length > 0;
+    const backButton = deep
+      ? kit.button(Q.up, 'picker:up', escape, 'plain')
+      : kit.button(Q.back, 'picker:back', escape, 'plain');
+    if (deep) {
+      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : fill(Q.accountRow, { source: p.label });
+      backButton.setAttribute('aria-label', fill(Q.upTo, { name: above }));
+    }
     backButton.className = 'btn back';
     add(top, backButton);
     add(page, top);
@@ -1098,13 +1306,30 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return page;
   }
 
+  /** Back and Escape: close the sheet, then the discard prompt, then go up a level, then leave. */
+  function escape(): void {
+    if (!p) return;
+    if (p.mode === 'folders' && p.sheet) closeSheet();
+    else if (p.discarding) {
+      p.discarding = false;
+      kit.render('picker:back');
+    } else if (p.mode === 'folders' && p.path.length) up();
+    else back();
+  }
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('keydown', (event: KeyboardEvent) => {
+      if (!p || event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      escape();
+    });
+  }
+
   return {
     handles,
     start,
     active: () => !!p,
     view,
-    afterRender: () => {
-      if (p && p.mode === 'folders') applySearch();
-    },
+    afterRender: () => undefined,
   };
 }
