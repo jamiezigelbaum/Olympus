@@ -175,11 +175,12 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .fname.leaf{cursor:default;min-height:0;padding-top:0.625rem}
 .fname-text{flex:1;min-width:0}
 .fname:disabled,.jump-btn:disabled{cursor:default;color:var(--muted)}
-.fline{display:flex;flex-wrap:wrap;align-items:center;gap:0 0.75rem}
-.fstatus{display:inline-flex;align-items:flex-start;min-height:2.75rem;margin:0;padding:0.125rem 0.375rem 0.5rem 0;font:inherit;font-size:0.8125rem;text-align:left;color:var(--muted);background:none;border:0;cursor:pointer;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:0.2em}
+.fstatus{display:flex;flex-direction:column;align-items:flex-start;gap:0.125rem;align-self:flex-start;min-height:2.75rem;margin:0;padding:0.125rem 0.375rem 0.625rem 0;font:inherit;font-size:0.8125rem;text-align:left;color:var(--muted);background:none;border:0;cursor:pointer}
+.fstatus-text{text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:0.2em}
 .fstatus:hover:not(:disabled){color:var(--text)}
-.fstatus:disabled{cursor:not-allowed;text-decoration:none}
-.fmeta{color:var(--muted);font-size:0.8125rem;padding:0.125rem 0 0.5rem;align-self:flex-start}
+.fstatus:disabled{cursor:not-allowed}
+.fstatus:disabled .fstatus-text{text-decoration:none}
+.fmeta{color:var(--muted);font-size:0.8125rem}
 .fempty,.fstate{padding:0.75rem 0}
 .fmore{padding:0.5rem 0}
 .fpath{font-size:1.125rem;margin-bottom:0.75rem}

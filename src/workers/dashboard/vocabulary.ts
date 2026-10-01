@@ -1061,7 +1061,7 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
   summaryWhole: 'Everything else in {source}: fully indexed, including folders added later.',
   summaryFolder: { one: 'folder', many: 'folders' },
   summaryIngest: '{n} fully indexed',
-  summaryMetadata: '{n} names only',
+  summaryMetadata: '{n} with names only',
   summaryExclude: '{n} skipped',
   summarySize: 'about {size}',
   needChoice: 'Choose at least one folder first.',

@@ -45336,7 +45336,7 @@ var init_vocabulary = __esm(() => {
     summaryWhole: "Everything else in {source}: fully indexed, including folders added later.",
     summaryFolder: { one: "folder", many: "folders" },
     summaryIngest: "{n} fully indexed",
-    summaryMetadata: "{n} names only",
+    summaryMetadata: "{n} with names only",
     summaryExclude: "{n} skipped",
     summarySize: "about {size}",
     needChoice: "Choose at least one folder first.",
@@ -98058,6 +98058,14 @@ function chatgptPickerProgram(kit) {
     });
     return above.length ? fill(Q.insideFolder, { name: p.catalog.get(above[above.length - 1]).name }) : Q.unknownFolder;
   }
+  function shortPath(key) {
+    const node = p.catalog.get(key);
+    if (!node || typeof node.name !== "string" || !node.name)
+      return nameOf(key);
+    const ancestors = p.ancestors.get(key) || [];
+    const parent = ancestors.length ? p.catalog.get(ancestors[ancestors.length - 1]) : null;
+    return parent && typeof parent.name === "string" && parent.name ? parent.name + " / " + node.name : node.name;
+  }
   function inherited(key) {
     let state = p.whole ? "ingest" : "";
     let from = p.whole ? ACCOUNT : "";
@@ -98404,12 +98412,15 @@ function chatgptPickerProgram(kit) {
       control.disabled = true;
     return control;
   }
-  function statusButton(key, name, text, enabled, focusKey) {
-    const control = el("button", "fstatus", text);
+  function statusButton(key, name, text, enabled, focusKey, meta2) {
+    const control = el("button", "fstatus");
     control.type = "button";
+    add(control, el("span", "fstatus-text", text));
+    if (meta2)
+      add(control, el("span", "fmeta", meta2));
     control.setAttribute("data-key", focusKey);
     control.setAttribute("aria-haspopup", "dialog");
-    control.setAttribute("aria-label", fill(Q.choiceFor, { name, state: text }));
+    control.setAttribute("aria-label", fill(Q.choiceFor, { name, state: text }) + (meta2 ? " · " + meta2 : ""));
     if (enabled && !p.saving)
       control.addEventListener("click", () => openSheet(key, focusKey));
     else
@@ -98434,12 +98445,7 @@ function chatgptPickerProgram(kit) {
       add(li, open6);
     } else
       add(li, add(el("p", "fname leaf"), el("span", "fname-text", node.name)));
-    const line = el("div", "fline");
-    add(line, statusButton(key, node.name, statusText(key), node.selectable !== false, "picker:choice:" + key));
-    const meta2 = nodeMeta(node);
-    if (meta2)
-      add(line, el("span", "fmeta", meta2));
-    add(li, line);
+    add(li, statusButton(key, node.name, statusText(key), node.selectable !== false, "picker:choice:" + key, nodeMeta(node)));
     return li;
   }
   function loadMore(parentKey) {
@@ -98481,7 +98487,7 @@ function chatgptPickerProgram(kit) {
       add(section, el("h2", "", fill(Q.exceptions, { n: kit.count(rules.length) })));
       const listNode = el("ul", "flist");
       for (const key of rules) {
-        add(listNode, add(el("li", "frow jump"), twoLine("jump-btn", "picker:jump:" + key, nameOf(key), stateName(p.own.get(key)), p.loading || p.saving ? null : () => jump(key))));
+        add(listNode, add(el("li", "frow jump"), twoLine("jump-btn", "picker:jump:" + key, shortPath(key), stateName(p.own.get(key)), p.loading || p.saving ? null : () => jump(key))));
       }
       add(body, add(section, listNode));
     }
@@ -99199,11 +99205,12 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .fname.leaf{cursor:default;min-height:0;padding-top:0.625rem}
 .fname-text{flex:1;min-width:0}
 .fname:disabled,.jump-btn:disabled{cursor:default;color:var(--muted)}
-.fline{display:flex;flex-wrap:wrap;align-items:center;gap:0 0.75rem}
-.fstatus{display:inline-flex;align-items:flex-start;min-height:2.75rem;margin:0;padding:0.125rem 0.375rem 0.5rem 0;font:inherit;font-size:0.8125rem;text-align:left;color:var(--muted);background:none;border:0;cursor:pointer;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:0.2em}
+.fstatus{display:flex;flex-direction:column;align-items:flex-start;gap:0.125rem;align-self:flex-start;min-height:2.75rem;margin:0;padding:0.125rem 0.375rem 0.625rem 0;font:inherit;font-size:0.8125rem;text-align:left;color:var(--muted);background:none;border:0;cursor:pointer}
+.fstatus-text{text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:0.2em}
 .fstatus:hover:not(:disabled){color:var(--text)}
-.fstatus:disabled{cursor:not-allowed;text-decoration:none}
-.fmeta{color:var(--muted);font-size:0.8125rem;padding:0.125rem 0 0.5rem;align-self:flex-start}
+.fstatus:disabled{cursor:not-allowed}
+.fstatus:disabled .fstatus-text{text-decoration:none}
+.fmeta{color:var(--muted);font-size:0.8125rem}
 .fempty,.fstate{padding:0.75rem 0}
 .fmore{padding:0.5rem 0}
 .fpath{font-size:1.125rem;margin-bottom:0.75rem}

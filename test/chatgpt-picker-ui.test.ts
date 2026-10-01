@@ -269,7 +269,7 @@ describe('folder picker', () => {
     if (!found) throw new Error(`no status for ${name}`);
     return found as unknown as HTMLButtonElement;
   };
-  const statusText = (host: Host, name: string) => status(host, name).textContent;
+  const statusText = (host: Host, name: string) => status(host, name).querySelector('.fstatus-text')!.textContent;
   const openFolder = (host: Host, name: string) => {
     const found = Array.from(doc(host).querySelectorAll('button.fname')).find((node) => node.querySelector('.fname-text')!.textContent === name);
     if (!found) throw new Error(`no folder button for ${name}`);
@@ -310,6 +310,8 @@ describe('folder picker', () => {
     // Each status is a real button, a separate target from the name.
     expect(status(host, 'Medical Records').tagName).toBe('BUTTON');
     expect(status(host, 'Medical Records').getAttribute('aria-haspopup')).toBe('dialog');
+    // The size sits on its own line inside the same target, under the choice.
+    expect(status(host, 'Medical Records').querySelector('.fmeta')!.textContent).toBe('500 MB · 1 file');
     expectNoJargon(host);
   });
 
@@ -381,6 +383,9 @@ describe('folder picker', () => {
     expect(exceptions).toContain('Exceptions (2)');
     expect(exceptions).toContain('Therapy Notes');
     expect(footer(host)).toContain('1 folder fully indexed, 1 skipped · about 1 GB');
+    choose(host, 'Medical Records', 'metadata_only');
+    expect(footer(host)).toContain('1 folder fully indexed, 1 with names only, 1 skipped');
+    choose(host, 'Medical Records', '');
     const notifications = host.calls.filter(([name]) => name === 'notifyIntrinsicHeight').length;
     expect(notifications).toBeGreaterThan(5);
     expectNoJargon(host);
@@ -478,6 +483,10 @@ describe('folder picker', () => {
     host.button(Q.up).click();
     expect(statusText(host, 'Old Letters')).toBe('Names only');
     host.button(Q.up).click();
+    host.button(Q.up).click();
+    // Now loaded, the exception shows its name under its parent's.
+    expect(doc(host).querySelector('button[data-key="picker:jump:k-deep"]')!.textContent).toBe('Divorce / Old LettersNames only›');
+    openFolder(host, 'Tax Returns 2024');
     expect(statusText(host, 'Therapy Notes')).toBe('Fully indexed · from Tax Returns 2024');
     expectNamesOnlyInPicker(host);
   });

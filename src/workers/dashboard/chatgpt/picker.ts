@@ -406,6 +406,15 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return above.length ? fill(Q.insideFolder, { name: p.catalog.get(above[above.length - 1]).name }) : Q.unknownFolder;
   }
 
+  /** An exception's label: its name under its parent's ("Clients / Archive 2019") when both are loaded. */
+  function shortPath(key: string): string {
+    const node = p.catalog.get(key);
+    if (!node || typeof node.name !== 'string' || !node.name) return nameOf(key);
+    const ancestors: string[] = p.ancestors.get(key) || [];
+    const parent = ancestors.length ? p.catalog.get(ancestors[ancestors.length - 1]) : null;
+    return parent && typeof parent.name === 'string' && parent.name ? parent.name + ' / ' + node.name : node.name;
+  }
+
   /** What a folder gets from above it: the strictest ancestor rule wins, as the engine evaluates it. */
   function inherited(key: string): { state: string; from: string } {
     let state = p.whole ? 'ingest' : '';
@@ -742,12 +751,15 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return control;
   }
 
-  function statusButton(key: string, name: string, text: string, enabled: boolean, focusKey: string): HTMLButtonElement {
-    const control = el('button', 'fstatus', text) as HTMLButtonElement;
+  /** The choice line, with the size and file count on their own muted line under it, in one 44px target. */
+  function statusButton(key: string, name: string, text: string, enabled: boolean, focusKey: string, meta: string): HTMLButtonElement {
+    const control = el('button', 'fstatus') as HTMLButtonElement;
     control.type = 'button';
+    add(control, el('span', 'fstatus-text', text));
+    if (meta) add(control, el('span', 'fmeta', meta));
     control.setAttribute('data-key', focusKey);
     control.setAttribute('aria-haspopup', 'dialog');
-    control.setAttribute('aria-label', fill(Q.choiceFor, { name, state: text }));
+    control.setAttribute('aria-label', fill(Q.choiceFor, { name, state: text }) + (meta ? ' · ' + meta : ''));
     if (enabled && !p.saving) control.addEventListener('click', () => openSheet(key, focusKey));
     else control.disabled = true;
     return control;
@@ -768,11 +780,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       else open.addEventListener('click', () => drill(key));
       add(li, open);
     } else add(li, add(el('p', 'fname leaf'), el('span', 'fname-text', node.name)));
-    const line = el('div', 'fline');
-    add(line, statusButton(key, node.name, statusText(key), node.selectable !== false, 'picker:choice:' + key));
-    const meta = nodeMeta(node);
-    if (meta) add(line, el('span', 'fmeta', meta));
-    add(li, line);
+    add(li, statusButton(key, node.name, statusText(key), node.selectable !== false, 'picker:choice:' + key, nodeMeta(node)));
     return li;
   }
 
@@ -815,7 +823,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       add(section, el('h2', '', fill(Q.exceptions, { n: kit.count(rules.length) })));
       const listNode = el('ul', 'flist');
       for (const key of rules) {
-        add(listNode, add(el('li', 'frow jump'), twoLine('jump-btn', 'picker:jump:' + key, nameOf(key), stateName(p.own.get(key)),
+        add(listNode, add(el('li', 'frow jump'), twoLine('jump-btn', 'picker:jump:' + key, shortPath(key), stateName(p.own.get(key)),
           p.loading || p.saving ? null : () => jump(key))));
       }
       add(body, add(section, listNode));
