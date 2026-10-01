@@ -1005,8 +1005,6 @@ function createDefaultSecretStore(options = {}) {
     return new MacOSKeychainSecretStore({ runner });
   if (backend === "libsecret")
     return new LinuxLibsecretSecretStore({ runner });
-  if (backend === "1password")
-    return new OnePasswordSecretStore({ env, runner });
   if (backend !== "auto")
     throw new Error("Unsupported Olympus secret store backend.");
   const currentPlatform = options.platform ?? platform();
@@ -1222,39 +1220,6 @@ class LinuxLibsecretSecretStore {
     return [];
   }
 }
-
-class OnePasswordSecretStore {
-  label = "1password";
-  env;
-  runner;
-  constructor(options = {}) {
-    this.env = options.env ?? process.env;
-    this.runner = options.runner ?? runCommand;
-  }
-  async get(key) {
-    return this.getSync(key);
-  }
-  getSync(key) {
-    assertSafeKey(key);
-    const ref = this.env[`OLYMPUS_SECRET_REF_${envKeyFromSecretKey(key)}`]?.trim();
-    if (!ref)
-      return;
-    const brokerRead = this.env.OLYMPUS_OP_BROKER_READ_BIN?.trim() || "op-cached-read";
-    const result = this.runner(brokerRead, [ref]);
-    if (result.status !== 0)
-      throw new Error("1Password broker secret read failed.");
-    return result.stdout.trim() || undefined;
-  }
-  async set() {
-    throw new Error("1Password backend is read-only; create the item in 1Password and map it with OLYMPUS_SECRET_REF_<KEY>.");
-  }
-  async delete() {
-    throw new Error("1Password backend is read-only from Olympus.");
-  }
-  async list() {
-    return Object.keys(this.env).filter((name) => name.startsWith("OLYMPUS_SECRET_REF_")).map((name) => name.slice("OLYMPUS_SECRET_REF_".length).toLowerCase().replaceAll("__", ":").replaceAll("_", ".")).sort();
-  }
-}
 async function resolveSecretRefValue(secretRef, options = {}) {
   if (!secretRef)
     return;
@@ -1286,9 +1251,6 @@ function resolveSecretRefValueSync(secretRef, options = {}) {
 function assertSafeKey(key) {
   if (!isSafeSecretKey(key))
     throw new Error("Secret key must contain only safe label characters.");
-}
-function envKeyFromSecretKey(key) {
-  return key.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
 function commandExists(command, runner) {
   return runner(command, ["--version"]).status === 0;
@@ -102524,8 +102486,8 @@ function runSetupDependencyCheck(input = {}) {
       label: "1Password CLI",
       required: false,
       ok: commandExists2("op"),
-      detail: "Optional 1Password-backed secret-store integration.",
-      repairHint: "Install the 1Password CLI from https://developer.1password.com/docs/cli/get-started/ when using that backend."
+      detail: "Optional 1Password CLI for an approved named-item key fetch into a connect flow.",
+      repairHint: "Install the 1Password CLI from https://developer.1password.com/docs/cli/get-started/ when fetching keys through it."
     }),
     dependencyFinding({
       id: "python-telethon",

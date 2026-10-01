@@ -72,7 +72,6 @@ export function createDefaultSecretStore(options: {
   if (backend === 'file') return createFileSecretStore({ env, ...(options.paths ? { paths: options.paths } : {}) });
   if (backend === 'keychain') return new MacOSKeychainSecretStore({ runner });
   if (backend === 'libsecret') return new LinuxLibsecretSecretStore({ runner });
-  if (backend === '1password') return new OnePasswordSecretStore({ env, runner });
   if (backend !== 'auto') throw new Error('Unsupported Olympus secret store backend.');
 
   const currentPlatform = options.platform ?? platform();
@@ -313,46 +312,6 @@ export class LinuxLibsecretSecretStore implements SecretStore {
   }
 }
 
-export class OnePasswordSecretStore implements SecretStore {
-  readonly label = '1password';
-  private readonly env: Record<string, string | undefined>;
-  private readonly runner: CommandRunner;
-
-  constructor(options: { env?: Record<string, string | undefined>; runner?: CommandRunner } = {}) {
-    this.env = options.env ?? process.env;
-    this.runner = options.runner ?? runCommand;
-  }
-
-  async get(key: string): Promise<string | undefined> {
-    return this.getSync(key);
-  }
-
-  getSync(key: string): string | undefined {
-    assertSafeKey(key);
-    const ref = this.env[`OLYMPUS_SECRET_REF_${envKeyFromSecretKey(key)}`]?.trim();
-    if (!ref) return undefined;
-    const brokerRead = this.env.OLYMPUS_OP_BROKER_READ_BIN?.trim() || 'op-cached-read';
-    const result = this.runner(brokerRead, [ref]);
-    if (result.status !== 0) throw new Error('1Password broker secret read failed.');
-    return result.stdout.trim() || undefined;
-  }
-
-  async set(): Promise<void> {
-    throw new Error('1Password backend is read-only; create the item in 1Password and map it with OLYMPUS_SECRET_REF_<KEY>.');
-  }
-
-  async delete(): Promise<void> {
-    throw new Error('1Password backend is read-only from Olympus.');
-  }
-
-  async list(): Promise<string[]> {
-    return Object.keys(this.env)
-      .filter((name) => name.startsWith('OLYMPUS_SECRET_REF_'))
-      .map((name) => name.slice('OLYMPUS_SECRET_REF_'.length).toLowerCase().replaceAll('__', ':').replaceAll('_', '.'))
-      .sort();
-  }
-}
-
 export async function resolveSecretRefValue(
   secretRef: string | undefined,
   options: {
@@ -390,10 +349,6 @@ export function resolveSecretRefValueSync(
 
 function assertSafeKey(key: string): void {
   if (!isSafeSecretKey(key)) throw new Error('Secret key must contain only safe label characters.');
-}
-
-function envKeyFromSecretKey(key: string): string {
-  return key.toUpperCase().replace(/[^A-Z0-9]/g, '_');
 }
 
 function commandExists(command: string, runner: CommandRunner): boolean {
