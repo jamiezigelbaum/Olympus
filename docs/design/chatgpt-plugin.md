@@ -126,6 +126,39 @@ ChatGPT ──HTTPS──> mcp.olympusplugin.ai (Caddy: TLS, Let's Encrypt HTTP-
 | Standalone engine | `bin/olympus`, `src/core/worker-service.ts` | Run and supervise the worker without OpenClaw (launchd LaunchAgent). |
 | Plugin package | new `chatgpt-plugin/` | `plugin.json`, `mcp.json` (`https://mcp.olympusplugin.ai/mcp`), skills (setup/install, how to ask), assets. |
 
+## Directory distribution (added 2026-10-01)
+
+End users never use developer mode: they add Olympus from ChatGPT's plugin
+directory. Developer mode, Plugin Creator, local marketplaces and workspace
+sharing are only for testing before approval. Publisher: OCU Inc.
+(platform.openai.com organization, verified identity required).
+
+Three things the directory requires that the design above did not cover:
+
+1. **Add before install (mixed auth).** A user adds the plugin before the
+   engine exists. The relay serves a no-auth MCP surface for callers without a
+   token: `initialize`, `tools/list`, the dashboard resource, and
+   `olympus_dashboard` returning `connection.state = "not_installed"` with the
+   install action. Tools that need the engine declare an OAuth security scheme
+   (`securitySchemes: [{type:"oauth2", scopes:[...]}]`; `olympus_dashboard`
+   also declares `noauth`), so ChatGPT starts the OAuth linking only when the
+   user connects, after the engine is installed. Unlinked callers never
+   reach an engine.
+2. **Reviewer path.** OpenAI's reviewers need a test login that works
+   immediately with no MFA, magic link or private-network step, and they
+   have no Mac. A demo engine runs on the relay host (or its own small host)
+   with synthetic sample data only, linked to the relay like any install.
+   Its consent page is the one place consent may be granted by a
+   username/password form over the relay; the flag that allows it
+   (`remote.demoConsent`) is refused unless the install's data directory is
+   marked demo-only, and is never on by default. Credentials go in the
+   submission form, stored in 1Password.
+3. **Submission package.** Domain verification
+   (`/.well-known/openai-apps-challenge` served by the relay from config),
+   `_meta.ui.domain`, support/privacy/terms pages on olympusplugin.ai, a demo
+   video, 5 positive and 3 negative test cases, and the ZIP upload at
+   platform.openai.com/plugins under OCU Inc.
+
 ## Dashboard view-model contract (v1)
 
 Returned as `structuredContent` by the `olympus_dashboard` tool and rendered by
@@ -155,8 +188,10 @@ failed `tools/call`.
    developer mode, approves on the Mac, asks a question, opens the sidebar
    dashboard. Record the negotiated MCP protocol version.
 
-Later: signed .pkg + installer skill (journey below), anonymous not-linked
-tools, MCP Events, directory submission.
+7. **Directory submission** under OCU Inc.: no-auth surface, reviewer demo
+   engine, domain verification, listing pages, ZIP upload.
+
+Later: signed .pkg + installer skill (journey below), MCP Events.
 
 ## Target user journey
 
