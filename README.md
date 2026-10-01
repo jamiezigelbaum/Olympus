@@ -163,7 +163,7 @@ starting with the automatic download and existing-install checks. Its install
 command for a clean machine is:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.10.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.11.tgz --force --accept-capabilities
 # On OpenClaw 2026.7.1, omit both flags for a clean install.
 # On newer hosts, --force also overwrites an existing plugin: check first.
 openclaw plugins enable olympus
