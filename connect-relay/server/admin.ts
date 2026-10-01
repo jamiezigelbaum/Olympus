@@ -1,34 +1,64 @@
 /**
  * Operator commands for a running relay, over a local Unix socket.
  *
- *   bun server/admin.ts status
- *   bun server/admin.ts revoke <install-id>
- *   bun server/admin.ts restore <install-id>
+ *   olympus-relay admin status
+ *   olympus-relay admin revoke <install-id>
+ *   olympus-relay admin restore <install-id>
  *
- * Run it on the relay host as the service user (or root), for example
- * `sudo -u olympus-relay /usr/local/bin/bun server/admin.ts status`. The socket
- * lives in the relay's 0700 state directory and is itself 0600, so only that
- * user and root can reach it; nothing here listens on the network, and the
- * relay's public listener has no HTTP surface at all.
+ * (`bun server/admin.ts ...` from a source checkout.) Run it on the relay host
+ * as the service user, for example `sudo -u relay olympus-relay admin status`.
+ * The socket lives in the relay's 0700 state directory and is itself 0600, so
+ * only that user and root can reach it; nothing here listens on the network.
  *
- * `status` prints counts only and names no install. `revoke` removes the
- * install, ends its session, removes its DNS address record within the relay's
- * DNS budget, and refuses the id from then on (an install otherwise
- * re-registers by itself). No restart. If the relay is not running, `revoke`
- * records the revocation in the registry log instead and the relay applies it
- * on its next start; `status` then reads the log.
+ * `status` prints counts only and names no install. `revoke` records the
+ * revocation durably (fsync) before it answers, ends the install's session,
+ * and refuses the id from then on (an install otherwise re-registers by
+ * itself). No restart. If the relay is not running, `revoke` records the
+ * revocation in the registry log instead and the relay applies it on its next
+ * start; `status` then reads the log.
  *
  * Paths: RELAY_ADMIN_SOCKET (default `<registry dir>/admin.sock`) and
- * RELAY_REGISTRY_PATH (default `/var/lib/olympus-connect-relay/registry.jsonl`).
+ * RELAY_REGISTRY_PATH (default `/var/lib/olympus-relay/registry.jsonl`).
  */
 import { chmodSync, existsSync, lstatSync, mkdirSync, statSync, unlinkSync } from 'node:fs';
 import net from 'node:net';
 import { dirname, join } from 'node:path';
-import { INSTALL_ID_PATTERN, readLines, encodeLine } from '../shared/protocol.ts';
+import { INSTALL_ID_PATTERN } from '../shared/protocol.ts';
 import { appendOfflineRevocation, readRegistrySnapshot } from './registry.ts';
 import type { RelayHandle, RelayStatus, RevokeResult } from './relay.ts';
 
-export const DEFAULT_REGISTRY_PATH = '/var/lib/olympus-connect-relay/registry.jsonl';
+const MAX_ADMIN_LINE_BYTES = 4096;
+
+function encodeLine(message: object): string {
+  return `${JSON.stringify(message)}\n`;
+}
+
+/** Reads the first JSON-object line from `socket` (the admin protocol is one line each way). */
+function readLine(socket: net.Socket, onLine: (message: Record<string, unknown>) => void, onError: (reason: string) => void): void {
+  let buffered = '';
+  const onData = (chunk: Buffer) => {
+    buffered += chunk.toString('utf8');
+    const newline = buffered.indexOf('\n');
+    if (newline === -1) {
+      if (buffered.length > MAX_ADMIN_LINE_BYTES) {
+        socket.removeListener('data', onData);
+        onError('line too long');
+      }
+      return;
+    }
+    socket.removeListener('data', onData);
+    try {
+      const parsed: unknown = JSON.parse(buffered.slice(0, newline));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) onLine(parsed as Record<string, unknown>);
+      else onError('not an object');
+    } catch {
+      onError('not JSON');
+    }
+  };
+  socket.on('data', onData);
+}
+
+export const DEFAULT_REGISTRY_PATH = '/var/lib/olympus-relay/registry.jsonl';
 
 export type AdminRequest =
   | { op: 'status' }
@@ -68,11 +98,10 @@ export async function startAdminSocket(path: string, relay: AdminTarget | (() =>
     socket.once('close', () => sockets.delete(socket));
     socket.on('error', () => socket.destroy());
     socket.setTimeout(10_000, () => socket.destroy());
-    readLines(
+    readLine(
       socket,
       (message) => {
         void handle(message).then((response) => socket.end(encodeLine(response)));
-        return 'stop';
       },
       () => socket.end(encodeLine({ ok: false, error: 'malformed request' } satisfies AdminResponse)),
     );
@@ -85,7 +114,7 @@ export async function startAdminSocket(path: string, relay: AdminTarget | (() =>
       const installId = typeof message.installId === 'string' ? message.installId : '';
       if (!INSTALL_ID_PATTERN.test(installId)) return { ok: false, error: 'installId must be a 32-character install id' };
       if (message.op === 'revoke') return { ok: true, op: 'revoke', result: await relay.revoke(installId) };
-      if (message.op === 'restore') return { ok: true, op: 'restore', restored: relay.restore(installId) };
+      if (message.op === 'restore') return { ok: true, op: 'restore', restored: await relay.restore(installId) };
       return { ok: false, error: 'op must be status, revoke or restore' };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -118,13 +147,12 @@ export function adminRequest(path: string, request: AdminRequest, timeoutMs = 15
       reject(error);
     });
     socket.once('connect', () => socket.write(encodeLine(request)));
-    readLines(
+    readLine(
       socket,
       (message) => {
         clearTimeout(timer);
         resolve(message as unknown as AdminResponse);
         socket.end();
-        return 'stop';
       },
       (why) => {
         clearTimeout(timer);
@@ -137,37 +165,26 @@ export function adminRequest(path: string, request: AdminRequest, timeoutMs = 15
 export function formatStatus(status: RelayStatus, running = true): string {
   const lines = [
     running ? `Relay running since ${status.startedAt}` : 'Relay not running (counts read from the registry log)',
-    `Registered installs:        ${status.registered} (${status.activated} have requested a certificate)`,
+    `Registered installs:        ${status.registered}`,
   ];
   if (running) {
-    lines.push(
-      `Online now:                 ${status.online}`,
-      `Public connections:         ${status.publicConnections} open, ${status.pendingPublicConnections} waiting for an install`,
-    );
+    lines.push(`Online now:                 ${status.online}`, `Requests in flight:         ${status.inFlight}`);
   }
-  lines.push(
-    `Address records:            ${status.addressRecords} (${status.pendingAddressRemovals} queued for removal)`,
-    `Revoked installs:           ${status.revoked}`,
-  );
+  lines.push(`Revoked installs:           ${status.revoked}`);
   return `${lines.join('\n')}\n`;
 }
 
 export function formatRevoke(result: RevokeResult): string {
   if (!result.revoked) return `${result.installId} was already revoked.\n`;
   const parts = [
-    `Revoked ${result.installId}.`,
+    `Revoked ${result.installId} (recorded durably).`,
     result.wasRegistered ? 'Its registration was removed.' : 'It was not registered; it cannot register now.',
     result.wasOnline ? 'Its session was ended.' : 'It was offline.',
-    {
-      removed: 'Its DNS address record was removed.',
-      pending: 'Its DNS address record is queued; the hourly sweep removes it within the DNS budget.',
-      none: 'It had no DNS address record.',
-    }[result.addressRecord],
   ];
   return `${parts.join(' ')}\n`;
 }
 
-const USAGE = 'Usage: bun server/admin.ts status | revoke <install-id> | restore <install-id>\n';
+const USAGE = 'Usage: olympus-relay admin status | revoke <install-id> | restore <install-id>\n';
 
 export async function runAdmin(
   argv: readonly string[],
@@ -180,7 +197,7 @@ export async function runAdmin(
     return { code: 2, out: USAGE };
   }
   if (installId !== undefined && !INSTALL_ID_PATTERN.test(installId)) {
-    return { code: 2, out: 'An install id is 32 characters of a-z and 2-7 (the first label of its hostname).\n' };
+    return { code: 2, out: 'An install id is 32 characters of a-z and 2-7.\n' };
   }
   const socketPath = adminSocketPath(env);
   const registryPath = env.RELAY_REGISTRY_PATH ?? DEFAULT_REGISTRY_PATH;
@@ -196,7 +213,7 @@ export async function runAdmin(
     // Nothing is listening: the relay is stopped, so the log has no other writer.
     if (request.op === 'status') {
       const counts = readRegistrySnapshot(registryPath).counts();
-      return { code: 0, out: formatStatus({ ...counts, online: 0, publicConnections: 0, pendingPublicConnections: 0, startedAt: '' }, false) };
+      return { code: 0, out: formatStatus({ ...counts, online: 0, inFlight: 0, startedAt: '' }, false) };
     }
     if (request.op === 'revoke') {
       // Only the service user writes the log: an append by root (or anyone
@@ -208,7 +225,7 @@ export async function runAdmin(
           out: owner === undefined
             ? `The relay is not running and ${dirname(registryPath)} does not exist; nothing was recorded.\n`
             : `The relay is not running. Recording a revocation writes ${registryPath}; run this as the relay's service user `
-              + `(uid ${owner}, for example sudo -u olympus-relay), not uid ${uid}. Nothing was recorded.\n`,
+              + `(uid ${owner}, for example sudo -u relay), not uid ${uid}. Nothing was recorded.\n`,
         };
       }
       if (readRegistrySnapshot(registryPath).isRevoked(request.installId)) return { code: 0, out: `${request.installId} was already revoked.\n` };
@@ -216,7 +233,7 @@ export async function runAdmin(
       return {
         code: 0,
         out: `The relay is not running. Recorded the revocation of ${request.installId} in ${registryPath}; `
-          + 'it applies when the relay starts, and the first hourly sweep removes the DNS address record.\n',
+          + 'it applies when the relay starts.\n',
       };
     }
     return { code: 1, out: 'The relay is not running; start it, then restore.\n' };

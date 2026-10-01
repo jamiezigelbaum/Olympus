@@ -1,104 +1,96 @@
 /**
- * The install side of the relay: keeps one authenticated outbound session to
- * the relay, attaches a data connection for each public connection the relay
- * announces, and pipes it into the local TLS endpoint.
+ * The install side of the relay: keeps one authenticated WebSocket session to
+ * the relay and serves the requests the relay multiplexes over it by calling
+ * the loopback Olympus worker with fetch(), streaming each response back.
  *
- * Nothing the hosted agent sends is visible before the local endpoint: the data
- * connection carries the agent's TLS records, which only the install's
- * certificate key can open.
+ * The client trusts the relay with nothing it does not have to: it forwards
+ * only the remote surface (forward.ts), strips inbound relay and forwarding
+ * headers, marks every forwarded request with the per-boot relay secret, and
+ * bounds request bodies and concurrency itself.
  */
-import net from 'node:net';
-import tls, { type TLSSocket } from 'node:tls';
 import {
+  CONNECT_PATH,
   PROTOCOL_VERSION,
-  encodeLine,
-  readLines,
+  chunks,
+  decodeBodyFrame,
+  encodeBodyFrame,
+  parseHeaderList,
+  parseTextFrame,
   signInstallMessage,
-  type ClientSessionMessage,
+  streamId,
+  type ClientToRelayMessage,
 } from '../shared/protocol.ts';
-import { propagateClose } from '../shared/bridge.ts';
-import type { AcmeDnsPublisher } from './acme.ts';
+import { FORWARDED_METHODS, forwardPath, forwardRequestHeaders, forwardResponseHeaders } from './forward.ts';
 import type { InstallIdentity } from './identity.ts';
-import { startLocalEndpoint, type LocalEndpoint } from './local-endpoint.ts';
 
 export type RelayClientStatus =
   | { state: 'connecting' }
-  | { state: 'online'; hostname: string }
+  | { state: 'online'; installId: string; connectedAt: number }
   | { state: 'offline'; reason: string; retryInMs: number }
-  | { state: 'replaced' }
+  | { state: 'replaced'; retryInMs: number }
   | { state: 'stopped' };
 
 export interface RelayClientOptions {
+  /** e.g. `mcp.olympusplugin.ai`; the client dials `wss://<relayHost>/v2/connect`. */
   readonly relayHost: string;
-  readonly relayPort?: number;
-  /** The relay's control hostname (SNI and certificate name), e.g. `relay.connect.olympusplugin.ai`. */
-  readonly controlServerName: string;
-  /** The relay's data hostname; defaults to `data.<controlServerName>`. */
-  readonly dataServerName?: string;
-  /** The zone install hostnames live in. `ready` must name `<installId>.<zone>` exactly. */
-  readonly zone: string;
-  /** Concurrent data connections the relay may make this install open (default 64). */
-  readonly maxDataConnections?: number;
-  /**
-   * A data connection whose agent has not completed TLS and sent a first
-   * request within this time is closed (default 10 s), so stalled handshakes
-   * cannot hold install slots.
-   */
-  readonly firstRequestTimeoutMs?: number;
-  /**
-   * A data connection with no request in flight for this long is closed
-   * (default 30 s). Keep-alive idleness is enforced here because Bun's HTTP
-   * server does not close idle keep-alive connections; a response still
-   * streaming (e.g. an SSE stream) counts as in flight and is never cut.
-   */
-  readonly idleTimeoutMs?: number;
+  /** Test seam: the full session URL (e.g. `ws://127.0.0.1:<port>/v2/connect`). */
+  readonly relayUrl?: string;
   readonly identity: InstallIdentity;
-  /** Loopback Olympus worker; defaults to `http://127.0.0.1:28090`. */
-  readonly target?: string;
-  readonly allowedPaths?: readonly string[];
-  /** Per-install secret the local endpoint forwards as `x-olympus-relay-auth`. */
-  readonly relayAuth?: string;
-  /** Extra trust anchors for the relay control plane (tests and private relays). */
-  readonly ca?: string | Buffer;
+  /** Loopback Olympus worker origin, e.g. `http://127.0.0.1:8010`. */
+  readonly target: string;
+  /** Per-boot secret sent as `x-olympus-relay` on every forwarded request. */
+  readonly relaySecret: string;
   readonly onStatus?: (status: RelayClientStatus) => void;
   readonly heartbeatMs?: number;
   readonly backoff?: { readonly minMs: number; readonly maxMs: number };
-  /** After another process takes over this install's session. */
+  /** After another process takes over this install's session (default 5 minutes). */
   readonly replacedBackoffMs?: number;
   /** After the relay operator revoked this install (default 6 hours; the operator may restore it). */
   readonly revokedBackoffMs?: number;
+  /** Requests served at once; more are answered 503 locally (default 32). */
+  readonly maxConcurrent?: number;
+  /** Request body cap (default 1 MiB, the relay's own). */
+  readonly maxRequestBodyBytes?: number;
+  readonly fetch?: typeof fetch;
 }
 
-export class RelayClient implements AcmeDnsPublisher {
-  private session: TLSSocket | undefined;
-  private endpoint: LocalEndpoint | undefined;
+interface Inbound {
+  readonly method: string;
+  readonly path: string | undefined;
+  readonly headers: Array<[string, string]>;
+  readonly body: Uint8Array[];
+  bytes: number;
+  readonly abort: AbortController;
+  started: boolean;
+}
+
+/** Above this much unsent data, response streaming waits for the socket to drain. */
+const SEND_HIGH_WATER_BYTES = 4 * 1024 * 1024;
+
+export class RelayClient {
+  private socket: WebSocket | undefined;
   private stopped = true;
   private register = false;
   private failures = 0;
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-  private readonly dnsWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
-  private readonly peers = new Map<number, string>();
-  private readonly connectionTimers = new Map<number, { inFlight: number; timer?: ReturnType<typeof setTimeout>; expire: () => void }>();
-  private readonly dataSockets = new Set<net.Socket>();
-  private sequence = 0;
-  private dataConnections = 0;
-  private hostnameValue: string | undefined;
-  private readyWaiters: Array<(hostname: string) => void> = [];
+  private readonly inbound = new Map<number, Inbound>();
+  private lastPongAt = 0;
 
-  constructor(private readonly options: RelayClientOptions) {}
+  constructor(private readonly options: RelayClientOptions) {
+    const target = new URL(options.target);
+    if (target.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname)) {
+      throw new Error('the relay client only forwards to a loopback http:// worker');
+    }
+  }
 
   get installId(): string {
     return this.options.identity.installId;
   }
 
-  /** Data connections currently open to the relay. */
-  get activeDataConnections(): number {
-    return this.dataConnections;
-  }
-
-  get hostname(): string | undefined {
-    return this.hostnameValue;
+  /** Requests being served right now. */
+  get activeRequests(): number {
+    return this.inbound.size;
   }
 
   start(): void {
@@ -107,182 +99,107 @@ export class RelayClient implements AcmeDnsPublisher {
     this.connect();
   }
 
-  /** Resolves with the public hostname once the relay session is ready. */
-  ready(): Promise<string> {
-    if (this.hostnameValue && this.session && !this.session.destroyed) return Promise.resolve(this.hostnameValue);
-    return new Promise((resolve) => this.readyWaiters.push(resolve));
-  }
-
-  /** Serve with this certificate from now on (first issuance and renewals). */
-  async setCertificate(material: { key: string | Buffer; cert: string | Buffer }): Promise<void> {
-    const next = await startLocalEndpoint({
-      key: material.key,
-      cert: material.cert,
-      target: this.options.target ?? 'http://127.0.0.1:28090',
-      ...(this.options.allowedPaths ? { allowedPaths: this.options.allowedPaths } : {}),
-      ...(this.options.relayAuth ? { relayAuth: this.options.relayAuth } : {}),
-      peerAddress: (port) => (port === undefined ? undefined : this.peers.get(port)),
-      onRequest: (port) => {
-        const state = port === undefined ? undefined : this.connectionTimers.get(port);
-        if (!state) return;
-        state.inFlight += 1;
-        if (state.timer) clearTimeout(state.timer);
-        delete state.timer;
-      },
-      onResponseDone: (port) => {
-        const state = port === undefined ? undefined : this.connectionTimers.get(port);
-        if (!state) return;
-        state.inFlight = Math.max(0, state.inFlight - 1);
-        if (state.inFlight === 0) state.timer = setTimeout(state.expire, this.options.idleTimeoutMs ?? 30_000);
-      },
-      handshakeTimeoutMs: this.options.firstRequestTimeoutMs ?? 10_000,
-    });
-    const previous = this.endpoint;
-    this.endpoint = next;
-    await previous?.close();
-  }
-
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);
-    this.session?.destroy();
-    for (const socket of this.dataSockets) socket.destroy();
-    for (const waiter of this.dnsWaiters.values()) waiter.reject(new Error('relay client stopped'));
-    this.dnsWaiters.clear();
-    await this.endpoint?.close();
-    this.endpoint = undefined;
+    this.abortAll();
+    this.socket?.close(1000, 'stopping');
+    this.socket = undefined;
     this.options.onStatus?.({ state: 'stopped' });
   }
 
-  publish(value: string): Promise<void> {
-    return this.dnsRequest('acme-dns-set', value);
-  }
-
-  clear(value: string): Promise<void> {
-    return this.dnsRequest('acme-dns-clear', value);
-  }
-
-  private dnsRequest(type: 'acme-dns-set' | 'acme-dns-clear', value: string): Promise<void> {
-    const session = this.session;
-    if (!session || session.destroyed || !this.hostnameValue) return Promise.reject(new Error('relay session is not online'));
-    const id = `dns-${++this.sequence}`;
-    return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.dnsWaiters.delete(id);
-        reject(new Error('relay did not answer the DNS request'));
-      }, 30_000);
-      this.dnsWaiters.set(id, {
-        resolve: () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        reject: (error) => {
-          clearTimeout(timer);
-          reject(error);
-        },
-      });
-      this.send(session, { type, id, value });
-    });
-  }
-
-  private send(socket: TLSSocket, message: ClientSessionMessage): void {
-    socket.write(encodeLine(message));
-  }
-
-  private dial(servername: string): TLSSocket {
-    return tls.connect({
-      host: this.options.relayHost,
-      port: this.options.relayPort ?? 443,
-      servername,
-      minVersion: 'TLSv1.2',
-      ...(this.options.ca ? { ca: this.options.ca } : {}),
-    });
+  private sessionUrl(): string {
+    return this.options.relayUrl ?? `wss://${this.options.relayHost}${CONNECT_PATH}`;
   }
 
   private connect(): void {
     if (this.stopped) return;
     this.options.onStatus?.({ state: 'connecting' });
-    const socket = this.dial(this.options.controlServerName);
-    this.session = socket;
+    const socket = new WebSocket(this.sessionUrl());
+    socket.binaryType = 'arraybuffer';
+    this.socket = socket;
     let reason = 'connection closed';
     let replaced = false;
     let revoked = false;
+    let ready = false;
     const { identity } = this.options;
-    readLines(
-      socket,
-      (message) => {
-        switch (message.type) {
-          case 'challenge': {
-            const nonce = String(message.nonce);
-            const kind = this.register ? 'register' : 'hello';
-            const sig = signInstallMessage(identity.privateKey, kind, nonce, identity.installId);
-            socket.write(
-              encodeLine(
-                kind === 'register'
-                  ? { type: 'register', v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig }
-                  : { type: 'hello', v: PROTOCOL_VERSION, installId: identity.installId, sig },
-              ),
-            );
-            return 'continue';
-          }
-          case 'ready': {
-            // The hostname feeds ACME and the URL the user hands to agents:
-            // accept only the one this install's key and zone determine.
-            const expected = `${identity.installId}.${this.options.zone.toLowerCase()}`;
-            if (message.hostname !== expected || message.installId !== identity.installId) {
-              reason = 'relay announced an unexpected hostname';
-              socket.destroy();
-              return 'stop';
-            }
-            this.failures = 0;
-            this.register = false;
-            this.hostnameValue = expected;
-            this.options.onStatus?.({ state: 'online', hostname: this.hostnameValue });
-            if (this.heartbeat) clearInterval(this.heartbeat);
-            this.heartbeat = setInterval(() => this.send(socket, { type: 'ping' }), this.options.heartbeatMs ?? 30_000);
-            for (const waiter of this.readyWaiters.splice(0)) waiter(this.hostnameValue);
-            return 'continue';
-          }
-          case 'open':
-            this.attach(String(message.connId), typeof message.remoteAddress === 'string' ? message.remoteAddress : undefined);
-            return 'continue';
-          case 'acme-dns-result': {
-            const waiter = this.dnsWaiters.get(String(message.id));
-            this.dnsWaiters.delete(String(message.id));
-            if (message.ok === true) waiter?.resolve();
-            else waiter?.reject(new Error(`relay refused the DNS request: ${String(message.error ?? 'unknown')}`));
-            return 'continue';
-          }
-          case 'pong':
-            return 'continue';
-          case 'error':
-            reason = String(message.message ?? message.code);
-            if (message.code === 'unregistered') this.register = true;
-            if (message.code === 'replaced') replaced = true;
-            if (message.code === 'revoked') revoked = true;
-            return 'stop';
-          default:
-            return 'continue';
+
+    socket.addEventListener('message', (event) => {
+      if (this.socket !== socket) return;
+      if (typeof event.data !== 'string') {
+        const frame = decodeBodyFrame(new Uint8Array(event.data as ArrayBuffer));
+        if (!ready || !frame) return socket.close(4002, 'protocol_error');
+        this.onRequestBody(frame.id, frame.payload);
+        return;
+      }
+      const message = parseTextFrame(event.data);
+      if (!message) return socket.close(4002, 'protocol_error');
+      switch (message.type) {
+        case 'challenge': {
+          const nonce = String(message.nonce);
+          const kind = this.register ? 'register' : 'hello';
+          const sig = signInstallMessage(identity.privateKey, kind, nonce, identity.installId);
+          this.send(
+            kind === 'register'
+              ? { type: 'register', v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig }
+              : { type: 'hello', v: PROTOCOL_VERSION, installId: identity.installId, sig },
+          );
+          return;
         }
-      },
-      (why) => {
-        reason = why;
-        socket.destroy();
-      },
-    );
-    socket.on('error', (error) => {
-      reason = error.message;
+        case 'ready':
+          if (message.installId !== identity.installId) {
+            reason = 'relay answered for another install';
+            socket.close(4002, 'protocol_error');
+            return;
+          }
+          ready = true;
+          this.failures = 0;
+          this.register = false;
+          this.startHeartbeat(socket);
+          this.options.onStatus?.({ state: 'online', installId: identity.installId, connectedAt: Date.now() });
+          return;
+        case 'pong':
+          this.lastPongAt = Date.now();
+          return;
+        case 'request':
+          if (ready) this.onRequest(message);
+          return;
+        case 'end': {
+          const id = streamId(message.id);
+          if (ready && id !== undefined) this.onRequestEnd(id);
+          return;
+        }
+        case 'cancel': {
+          const id = streamId(message.id);
+          const request = id === undefined ? undefined : this.inbound.get(id);
+          request?.abort.abort();
+          // Not yet started: nothing else will clean it up.
+          if (request && !request.started) this.inbound.delete(id!);
+          return;
+        }
+        case 'error':
+          reason = String(message.message ?? message.code);
+          if (message.code === 'unregistered') this.register = true;
+          if (message.code === 'replaced') replaced = true;
+          if (message.code === 'revoked') revoked = true;
+          return;
+        default:
+          return;
+      }
     });
-    socket.on('close', () => {
-      if (this.session === socket) this.session = undefined;
+    socket.addEventListener('error', () => {
+      reason = 'could not reach the relay';
+    });
+    socket.addEventListener('close', () => {
+      if (this.socket === socket) this.socket = undefined;
       if (this.heartbeat) clearInterval(this.heartbeat);
-      for (const waiter of this.dnsWaiters.values()) waiter.reject(new Error('relay session closed'));
-      this.dnsWaiters.clear();
+      this.abortAll();
       if (this.stopped) return;
       if (replaced) {
-        this.options.onStatus?.({ state: 'replaced' });
-        this.schedule(this.options.replacedBackoffMs ?? 5 * 60_000);
+        const retryInMs = this.options.replacedBackoffMs ?? 5 * 60_000;
+        this.options.onStatus?.({ state: 'replaced', retryInMs });
+        this.schedule(retryInMs);
         return;
       }
       if (revoked) {
@@ -293,6 +210,7 @@ export class RelayClient implements AcmeDnsPublisher {
         return;
       }
       if (this.register && this.failures === 0) {
+        // First contact with this relay: register right away.
         this.failures = 1;
         this.schedule(0);
         return;
@@ -306,82 +224,148 @@ export class RelayClient implements AcmeDnsPublisher {
     });
   }
 
+  /** Pings on an interval; a session that has not answered two pings in a row is dead. */
+  private startHeartbeat(socket: WebSocket): void {
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    const interval = this.options.heartbeatMs ?? 30_000;
+    this.lastPongAt = Date.now();
+    this.heartbeat = setInterval(() => {
+      if (Date.now() - this.lastPongAt > interval * 2 + 1_000) {
+        socket.close(4004, 'heartbeat_timeout');
+        return;
+      }
+      this.send({ type: 'ping' });
+    }, interval);
+  }
+
   private schedule(delayMs: number): void {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => this.connect(), delayMs);
   }
 
-  private attach(connId: string, remoteAddress: string | undefined): void {
-    const endpoint = this.endpoint;
-    // No certificate yet, or already at the cap: let the relay's attach
-    // timeout answer the agent rather than open unbounded connections.
-    if (!endpoint || this.dataConnections >= (this.options.maxDataConnections ?? 64)) return;
-    const { identity } = this.options;
-    const data = this.dial(this.options.dataServerName ?? `data.${this.options.controlServerName}`);
-    this.dataConnections += 1;
-    this.dataSockets.add(data);
-    data.on('close', () => {
-      this.dataConnections -= 1;
-      this.dataSockets.delete(data);
-    });
-    data.on('error', () => data.destroy());
-    let sentAttach = false;
-    readLines(
-      data,
-      (message) => {
-        if (message.type !== 'challenge') {
-          data.destroy();
-          return 'stop';
-        }
-        sentAttach = true;
-        const sig = signInstallMessage(identity.privateKey, 'attach', String(message.nonce), identity.installId, connId);
-        data.write(encodeLine({ type: 'attach', v: PROTOCOL_VERSION, installId: identity.installId, connId, sig }));
-        return 'stop';
-      },
-      () => data.destroy(),
-      (rest) => {
-        if (!sentAttach) return;
-        data.pause();
-        const local = net.connect(endpoint.port, '127.0.0.1');
-        this.dataSockets.add(local);
-        local.on('close', () => this.dataSockets.delete(local));
-        const destroyBoth = () => {
-          data.destroy();
-          local.destroy();
-        };
-        propagateClose(data, local);
-        local.once('connect', () => {
-          const port = local.localPort;
-          if (port !== undefined) {
-            if (remoteAddress) this.peers.set(port, remoteAddress);
-            this.connectionTimers.set(port, {
-              inFlight: 0,
-              timer: setTimeout(destroyBoth, this.options.firstRequestTimeoutMs ?? 10_000),
-              expire: destroyBoth,
-            });
-            local.once('close', () => {
-              this.peers.delete(port);
-              const state = this.connectionTimers.get(port);
-              if (state?.timer) clearTimeout(state.timer);
-              this.connectionTimers.delete(port);
-            });
-          }
-          // A relay-side rejection arrives as one JSON error line; the agent's
-          // TLS stream always starts with a handshake record (0x16).
-          const first = (chunk: Buffer) => {
-            if (chunk[0] === 0x7b) {
-              destroyBoth();
-              return;
-            }
-            local.write(chunk);
-            data.pipe(local);
-          };
-          if (rest.length > 0) first(rest);
-          else data.once('data', first);
-          local.pipe(data);
-          data.resume();
-        });
-      },
-    );
+  private send(message: ClientToRelayMessage): void {
+    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
   }
+
+  private sendBody(id: number, payload: Uint8Array): void {
+    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(encodeBodyFrame(id, payload));
+  }
+
+  private abortAll(): void {
+    for (const request of this.inbound.values()) request.abort.abort();
+    this.inbound.clear();
+  }
+
+  private onRequest(message: Record<string, unknown>): void {
+    const id = streamId(message.id);
+    const headers = parseHeaderList(message.headers);
+    const method = typeof message.method === 'string' ? message.method.toUpperCase() : '';
+    if (id === undefined || !headers || this.inbound.has(id)) return;
+    this.inbound.set(id, {
+      method,
+      path: FORWARDED_METHODS.has(method) && typeof message.path === 'string' ? forwardPath(message.path) : undefined,
+      headers,
+      body: [],
+      bytes: 0,
+      abort: new AbortController(),
+      started: false,
+    });
+  }
+
+  private onRequestBody(id: number, payload: Uint8Array): void {
+    const request = this.inbound.get(id);
+    if (!request || request.started) return;
+    request.bytes += payload.byteLength;
+    if (request.bytes > (this.options.maxRequestBodyBytes ?? 1024 * 1024)) {
+      request.started = true;
+      this.respondLocally(id, 413, { error: 'payload_too_large' });
+      return;
+    }
+    request.body.push(payload.slice());
+  }
+
+  private onRequestEnd(id: number): void {
+    const request = this.inbound.get(id);
+    if (!request || request.started) return;
+    request.started = true;
+    if (!request.path) {
+      this.respondLocally(id, 404, { error: 'not_found', message: 'This Olympus address only serves its remote agent endpoints.' });
+      return;
+    }
+    if (this.inbound.size > (this.options.maxConcurrent ?? 32)) {
+      this.respondLocally(id, 503, { error: 'busy', message: 'Olympus is busy. Try again shortly.' });
+      return;
+    }
+    void this.serve(id, request, request.path);
+  }
+
+  private respondLocally(id: number, status: number, body: unknown): void {
+    this.send({ type: 'response-head', id, status, headers: [['content-type', 'application/json'], ['cache-control', 'no-store']] });
+    this.sendBody(id, new TextEncoder().encode(JSON.stringify(body)));
+    this.send({ type: 'end', id });
+    this.inbound.delete(id);
+  }
+
+  private async serve(id: number, request: Inbound, path: string): Promise<void> {
+    const fetchImpl = this.options.fetch ?? fetch;
+    const body = request.method === 'GET' ? undefined : concat(request.body, request.bytes);
+    let response: Response;
+    try {
+      response = await fetchImpl(`${this.options.target}${path}`, {
+        method: request.method,
+        headers: forwardRequestHeaders(request.headers, this.options.relaySecret),
+        ...(body ? { body } : {}),
+        signal: request.abort.signal,
+        redirect: 'manual',
+      });
+    } catch {
+      if (!request.abort.signal.aborted) {
+        this.respondLocally(id, 502, { error: 'worker_unavailable', message: 'Olympus is running but its local worker did not answer.' });
+      }
+      this.inbound.delete(id);
+      return;
+    }
+    if (request.abort.signal.aborted) {
+      void response.body?.cancel().catch(() => {});
+      this.inbound.delete(id);
+      return;
+    }
+    this.send({ type: 'response-head', id, status: response.status, headers: forwardResponseHeaders(response.headers) });
+    try {
+      if (response.body) {
+        const reader = response.body.getReader();
+        const onAbort = () => void reader.cancel().catch(() => {});
+        request.abort.signal.addEventListener('abort', onAbort, { once: true });
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done || request.abort.signal.aborted) break;
+          for (const chunk of chunks(value)) this.sendBody(id, chunk);
+          await this.drained();
+        }
+        request.abort.signal.removeEventListener('abort', onAbort);
+      }
+      if (!request.abort.signal.aborted) this.send({ type: 'end', id });
+    } catch {
+      if (!request.abort.signal.aborted) this.send({ type: 'abort', id });
+    } finally {
+      this.inbound.delete(id);
+    }
+  }
+
+  /** Waits while the socket holds more unsent data than the high-water mark. */
+  private async drained(): Promise<void> {
+    while (this.socket && this.socket.readyState === WebSocket.OPEN && this.socket.bufferedAmount > SEND_HIGH_WATER_BYTES) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+}
+
+function concat(parts: Uint8Array[], total: number): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(new ArrayBuffer(total));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
 }

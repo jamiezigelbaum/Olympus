@@ -1,45 +1,60 @@
 /**
- * Olympus connect-relay wire protocol, version 1.
+ * Olympus connect-relay wire protocol, version 2.
  *
- * Two kinds of connection reach the relay's control host (TLS terminated by the
- * relay with its own certificate):
+ * Each install keeps one WebSocket session to the relay (`wss://<relay>/v2/connect`).
+ * The relay opens with a `challenge`; the install answers `hello` (or
+ * `register` the first time), signed with its Ed25519 install key over the
+ * relay's fresh nonce, so a captured signature cannot be replayed on another
+ * session. The relay answers `ready`, or `error` and closes.
  *
- * - a **session**: the install's long-lived outbound link. The relay sends a
- *   `challenge`; the install answers `hello` (or `register` the first time),
- *   signed with its install key. Afterwards the relay sends `open` for each
- *   public connection and answers `ping` and ACME DNS-01 publish requests.
- * - a **data connection**: opened by the install in answer to `open`. After the
- *   `challenge` the install sends one `attach` line; from then on the stream is
- *   raw bytes of the hosted agent's end-to-end TLS session, which the relay
- *   splices without reading.
+ * After `ready`, the session multiplexes HTTP requests from the public
+ * internet to the install's loopback worker:
  *
- * Messages are single-line JSON. Every signed message covers the relay's fresh
- * nonce, so a captured signature cannot be replayed on another connection.
+ *   relay -> install   request {id, method, path, headers}   (text)
+ *                      body chunk for id                     (binary)
+ *                      end {id}                              (text)
+ *                      cancel {id}                           (text: the caller went away)
+ *   install -> relay   response-head {id, status, headers}   (text)
+ *                      body chunk for id                     (binary)
+ *                      end {id}                              (text)
+ *                      abort {id}                            (text: the worker failed mid-response)
+ *
+ * Binary frames are `[u32 big-endian stream id][payload]`. Streams interleave,
+ * so a long Server-Sent Events response never blocks another request.
+ * Text frames are single JSON objects. Both sides send `ping`/`pong`.
  */
 import { createHash, createPublicKey, randomBytes, sign, verify, type KeyObject } from 'node:crypto';
-import type { Readable } from 'node:stream';
 
-export const PROTOCOL_VERSION = 1;
-export const MAX_CONTROL_LINE_BYTES = 4096;
-const SIGNATURE_DOMAIN = 'olympus-connect-relay/v1';
+export const PROTOCOL_VERSION = 2;
+export const CONNECT_PATH = '/v2/connect';
+/** Text frames are small control messages; anything larger is refused. */
+export const MAX_TEXT_FRAME_BYTES = 16 * 1024;
+/** Body chunks are at most this large (the sender splits larger ones). */
+export const MAX_BODY_CHUNK_BYTES = 64 * 1024;
+const SIGNATURE_DOMAIN = 'olympus-connect-relay/v2';
 
 /** Install ids are 32 lowercase base32 characters: the first 160 bits of SHA-256 over the install's SPKI. */
 export const INSTALL_ID_PATTERN = /^[a-z2-7]{32}$/;
-/** An ACME DNS-01 TXT value is base64url(SHA-256(key authorization)): exactly 43 characters. */
-export const ACME_TXT_VALUE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-export const CONN_ID_PATTERN = /^[A-Za-z0-9_-]{22}$/;
 
 export type ChallengeMessage = { type: 'challenge'; v: number; nonce: string };
 export type HelloMessage = { type: 'hello'; v: number; installId: string; sig: string };
 export type RegisterMessage = { type: 'register'; v: number; installId: string; publicKey: string; sig: string };
-export type AttachMessage = { type: 'attach'; v: number; installId: string; connId: string; sig: string };
-export type ReadyMessage = { type: 'ready'; installId: string; hostname: string };
-export type OpenMessage = { type: 'open'; connId: string; remoteAddress?: string };
+export type ReadyMessage = { type: 'ready'; installId: string };
 export type PingMessage = { type: 'ping' };
 export type PongMessage = { type: 'pong' };
-export type AcmeDnsMessage = { type: 'acme-dns-set' | 'acme-dns-clear'; id: string; value: string };
-export type AcmeDnsResultMessage = { type: 'acme-dns-result'; id: string; ok: boolean; error?: string };
 export type ErrorMessage = { type: 'error'; code: RelayErrorCode; message: string };
+export type RequestMessage = {
+  type: 'request';
+  id: number;
+  method: string;
+  /** Path and query, as received by the relay. */
+  path: string;
+  headers: Array<[string, string]>;
+};
+export type ResponseHeadMessage = { type: 'response-head'; id: number; status: number; headers: Array<[string, string]> };
+export type EndMessage = { type: 'end'; id: number };
+export type CancelMessage = { type: 'cancel'; id: number };
+export type AbortMessage = { type: 'abort'; id: number };
 
 export type RelayErrorCode =
   | 'bad_request'
@@ -49,13 +64,12 @@ export type RelayErrorCode =
   | 'unregistered'
   | 'rate_limited'
   | 'capacity'
-  | 'unknown_connection'
   | 'replaced'
   | 'revoked';
 
-export type ClientFirstMessage = HelloMessage | RegisterMessage | AttachMessage;
-export type ClientSessionMessage = PingMessage | AcmeDnsMessage;
-export type RelaySessionMessage = ReadyMessage | OpenMessage | PongMessage | AcmeDnsResultMessage | ErrorMessage;
+export type ClientAuthMessage = HelloMessage | RegisterMessage;
+export type RelayToClientMessage = ChallengeMessage | ReadyMessage | PongMessage | ErrorMessage | RequestMessage | EndMessage | CancelMessage;
+export type ClientToRelayMessage = ClientAuthMessage | PingMessage | ResponseHeadMessage | EndMessage | AbortMessage;
 
 export function base64url(data: Uint8Array): string {
   return Buffer.from(data).toString('base64url');
@@ -94,31 +108,24 @@ export function spkiOf(key: KeyObject): Buffer {
   return key.export({ format: 'der', type: 'spki' }) as Buffer;
 }
 
-function signedPayload(kind: 'hello' | 'register' | 'attach', nonce: string, installId: string, extra = ''): Buffer {
-  return Buffer.from([SIGNATURE_DOMAIN, kind, nonce, installId, extra].join('\n'), 'utf8');
+function signedPayload(kind: 'hello' | 'register', nonce: string, installId: string): Buffer {
+  return Buffer.from([SIGNATURE_DOMAIN, kind, nonce, installId].join('\n'), 'utf8');
 }
 
-export function signInstallMessage(
-  privateKey: KeyObject,
-  kind: 'hello' | 'register' | 'attach',
-  nonce: string,
-  installId: string,
-  extra = '',
-): string {
-  return base64url(sign(null, signedPayload(kind, nonce, installId, extra), privateKey));
+export function signInstallMessage(privateKey: KeyObject, kind: 'hello' | 'register', nonce: string, installId: string): string {
+  return base64url(sign(null, signedPayload(kind, nonce, installId), privateKey));
 }
 
 export function verifyInstallMessage(
   publicKey: KeyObject,
-  kind: 'hello' | 'register' | 'attach',
+  kind: 'hello' | 'register',
   nonce: string,
   installId: string,
   sig: string,
-  extra = '',
 ): boolean {
   if (typeof sig !== 'string' || sig.length > 128) return false;
   try {
-    return verify(null, signedPayload(kind, nonce, installId, extra), publicKey, Buffer.from(sig, 'base64url'));
+    return verify(null, signedPayload(kind, nonce, installId), publicKey, Buffer.from(sig, 'base64url'));
   } catch {
     return false;
   }
@@ -128,71 +135,51 @@ export function newNonce(): string {
   return base64url(randomBytes(24));
 }
 
-export function newConnId(): string {
-  return base64url(randomBytes(16));
+/** A text frame, parsed: a JSON object or undefined (oversized, not JSON, not an object). */
+export function parseTextFrame(data: string): Record<string, unknown> | undefined {
+  if (data.length > MAX_TEXT_FRAME_BYTES) return undefined;
+  try {
+    const value: unknown = JSON.parse(data);
+    return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
-export function encodeLine(message: object): string {
-  return `${JSON.stringify(message)}\n`;
+export function encodeBodyFrame(id: number, payload: Uint8Array): Uint8Array {
+  const frame = new Uint8Array(4 + payload.byteLength);
+  new DataView(frame.buffer).setUint32(0, id >>> 0, false);
+  frame.set(payload, 4);
+  return frame;
 }
 
-/**
- * Splits a byte stream into bounded JSON lines. `onLine` returning `'stop'`
- * detaches the reader and hands any bytes after that line to `onRest`, so a
- * data connection can switch from the line protocol to raw bytes.
- */
-export function readLines(
-  stream: Readable,
-  onLine: (message: Record<string, unknown>) => 'continue' | 'stop',
-  onError: (reason: string) => void,
-  onRest?: (rest: Buffer) => void,
-): void {
-  let buffered = Buffer.alloc(0);
-  const onData = (chunk: Buffer | string) => {
-    buffered = Buffer.concat([buffered, typeof chunk === 'string' ? Buffer.from(chunk) : chunk]);
-    for (;;) {
-      const newline = buffered.indexOf(0x0a);
-      if (newline === -1) {
-        if (buffered.length > MAX_CONTROL_LINE_BYTES) {
-          stream.removeListener('data', onData);
-          onError('control line too long');
-        }
-        return;
-      }
-      const line = buffered.subarray(0, newline).toString('utf8');
-      buffered = buffered.subarray(newline + 1);
-      if (newline > MAX_CONTROL_LINE_BYTES) {
-        stream.removeListener('data', onData);
-        onError('control line too long');
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        stream.removeListener('data', onData);
-        onError('control line is not JSON');
-        return;
-      }
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        stream.removeListener('data', onData);
-        onError('control line is not an object');
-        return;
-      }
-      if (onLine(parsed as Record<string, unknown>) === 'stop') {
-        stream.removeListener('data', onData);
-        onRest?.(buffered);
-        return;
-      }
-    }
-  };
-  stream.on('data', onData);
+export function decodeBodyFrame(frame: Uint8Array): { id: number; payload: Uint8Array } | undefined {
+  if (frame.byteLength < 4 || frame.byteLength > 4 + MAX_BODY_CHUNK_BYTES) return undefined;
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  return { id: view.getUint32(0, false), payload: frame.subarray(4) };
 }
 
-export function hostnameFor(installId: string, zone: string): string {
-  return `${installId}.${zone}`;
+/** Splits `data` into protocol-sized chunks. */
+export function* chunks(data: Uint8Array): Generator<Uint8Array> {
+  for (let offset = 0; offset < data.byteLength; offset += MAX_BODY_CHUNK_BYTES) {
+    yield data.subarray(offset, Math.min(data.byteLength, offset + MAX_BODY_CHUNK_BYTES));
+  }
 }
 
-export function acmeChallengeName(installId: string, zone: string): string {
-  return `_acme-challenge.${installId}.${zone}`;
+/** A header list from the wire: pairs of short strings, bounded, names lowercased. */
+export function parseHeaderList(value: unknown, maxEntries = 64): Array<[string, string]> | undefined {
+  if (!Array.isArray(value) || value.length > maxEntries) return undefined;
+  const out: Array<[string, string]> = [];
+  for (const entry of value) {
+    if (!Array.isArray(entry) || entry.length !== 2) return undefined;
+    const [name, headerValue] = entry as unknown[];
+    if (typeof name !== 'string' || typeof headerValue !== 'string' || name.length > 128 || headerValue.length > 8192) return undefined;
+    out.push([name.toLowerCase(), headerValue]);
+  }
+  return out;
+}
+
+/** A stream id from a text frame: a positive 32-bit integer. */
+export function streamId(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 0xffffffff ? value : undefined;
 }

@@ -1,77 +1,78 @@
 /**
- * Olympus connect relay.
+ * Olympus connect relay, version 2.
  *
- * One public TCP listener (443 in production) routes by TLS SNI:
- * - `<install-id>.<zone>` is spliced, still encrypted, onto that install's data
- *   connection (see public-path.ts);
- * - `<controlHost>` is the relay's own control plane. It is piped to a
- *   loopback TLS server holding the relay's certificate, where installs
- *   authenticate with their install key, keep a session open, attach data
- *   connections, and ask the relay to publish ACME DNS-01 TXT values.
+ * One Bun HTTP server on loopback behind Caddy, which terminates TLS for the
+ * relay's single public name (e.g. `mcp.olympusplugin.ai`). It serves:
  *
- * The control-plane TLS server listens on loopback rather than wrapping the
- * accepted socket because Bun cannot wrap an existing socket as a server-side
- * TLS socket; the loopback hop works identically on Node and Bun.
+ * - `GET /v2/connect`: install sessions (WebSocket), authenticated with the
+ *   install's Ed25519 key (shared/protocol.ts);
+ * - the install-independent OAuth documents and `/healthz` (oauth-metadata.ts);
+ * - `GET /connect/authorize`: the bridge page to the owner's own Mac
+ *   (authorize-bridge.ts);
+ * - `POST /connect/token`, `POST /connect/revoke` and `/mcp`: routed per
+ *   request to the install their credential names (shared/tokens.ts). ChatGPT
+ *   may reuse one connection for many users, so routing never sticks to a
+ *   connection.
+ *
+ * The relay mints, validates and stores no token: the install does. An
+ * authorized request for an install that is registered but offline gets the
+ * relay's own small MCP answers (offline.ts).
+ *
+ * Logging follows log.ts: no bodies, tokens, query strings or addresses.
  */
-import net, { type AddressInfo, type Socket } from 'node:net';
-import tls, { type TLSSocket } from 'node:tls';
+import type { Server, ServerWebSocket } from 'bun';
 import {
-  ACME_TXT_VALUE_PATTERN,
-  CONN_ID_PATTERN,
+  CONNECT_PATH,
   INSTALL_ID_PATTERN,
   PROTOCOL_VERSION,
-  acmeChallengeName,
-  encodeLine,
-  hostnameFor,
+  decodeBodyFrame,
   installIdForPublicKey,
   newNonce,
+  parseTextFrame,
   publicKeyFromSpki,
-  readLines,
   spkiOf,
+  streamId,
   verifyInstallMessage,
   type ErrorMessage,
   type RelayErrorCode,
-  type RelaySessionMessage,
 } from '../shared/protocol.ts';
 import { KeyedCounter, KeyedTokenBuckets, addressKey } from '../shared/rate-limit.ts';
-import { propagateClose } from '../shared/bridge.ts';
-import { TLS_ALERT } from '../shared/sni.ts';
-import type { DnsProvider } from './dns.ts';
+import { credentialInstallId } from '../shared/tokens.ts';
+import { authorizeBridge } from './authorize-bridge.ts';
+import { DEFAULT_LIMITS, createInstallAdmission, type RelayLimits } from './limits.ts';
+import { installTag, type RelayLog } from './log.ts';
 import {
-  DEFAULT_LIMITS,
-  handlePublicConnection,
-  reject,
-  splice,
-  type ForwardTap,
-  type LiveSession,
-  type PendingConnection,
-  type RelayEvent,
-  type RelayLimits,
-} from './public-path.ts';
-import { publicKeyOf, type InstallRegistry, type RegistryCounts } from './registry.ts';
+  OAUTH_PATHS,
+  authorizationServerMetadata,
+  metadataPreflight,
+  metadataResponse,
+  protectedResourceMetadata,
+  relayOrigin,
+  unauthorized,
+} from './oauth-metadata.ts';
+import { isDashboardCall, offlineMcpResponse } from './offline.ts';
+import { publicKeyOf, type MemoryInstallRegistry, type RegistryCounts } from './registry.ts';
+import { InstallSession } from './session.ts';
 
 export interface RelayConfig {
-  /** e.g. `connect.olympusplugin.ai`. Install hostnames are `<install-id>.<zone>`. */
-  readonly zone: string;
-  /** e.g. `relay.connect.olympusplugin.ai`; served with `controlTls`. */
-  readonly controlHost: string;
-  /**
-   * Host installs dial for data connections; defaults to `data.<controlHost>`.
-   * `controlTls` must cover it too. Kept apart from `controlHost` so that
-   * public traffic, which drives data connections, cannot spend the budget an
-   * install needs to keep its session.
-   */
-  readonly dataHost?: string;
-  readonly controlTls: { readonly key: string | Buffer; readonly cert: string | Buffer };
-  readonly registry: InstallRegistry;
-  readonly dns: DnsProvider;
+  /** The relay's one public name, e.g. `mcp.olympusplugin.ai`. Issuer and resource derive from it. */
+  readonly publicHost: string;
+  readonly registry: MemoryInstallRegistry;
   readonly listen?: { readonly host?: string; readonly port?: number };
+  /** The engine worker's loopback port, for the authorize bridge (Olympus default 8010). */
+  readonly enginePort?: number;
+  /** Where the bridge's "Install Olympus" leads. */
+  readonly installUrl?: string;
+  /**
+   * Believe the last `X-Forwarded-For` entry when the peer is loopback (Caddy
+   * in front). Off for tests that talk to the relay directly.
+   */
+  readonly trustProxy?: boolean;
   readonly limits?: Partial<RelayLimits>;
-  /** Observes every byte the relay forwards on the public path (metrics, tests). */
-  readonly tap?: ForwardTap;
-  readonly log?: (event: RelayEvent, fields?: Record<string, unknown>) => void;
-  /** How often expired registrations are swept (default hourly). */
+  readonly log?: RelayLog;
+  /** How often unused registrations are swept (default hourly). */
   readonly sweepIntervalMs?: number;
+  readonly now?: () => number;
 }
 
 /** What the operator's `revoke` did. */
@@ -81,458 +82,447 @@ export interface RevokeResult {
   readonly revoked: boolean;
   readonly wasRegistered: boolean;
   readonly wasOnline: boolean;
-  /** `removed` now; `pending` retried by the hourly sweep (DNS budget or provider error); `none` there was none. */
-  readonly addressRecord: 'removed' | 'pending' | 'none';
 }
 
 /** Counts only: the relay's status names no install. */
 export interface RelayStatus extends RegistryCounts {
   readonly online: number;
-  readonly publicConnections: number;
-  readonly pendingPublicConnections: number;
+  readonly inFlight: number;
   readonly startedAt: string;
 }
 
 export interface RelayHandle {
   readonly port: number;
-  readonly host: string;
+  readonly url: string;
   onlineInstalls(): string[];
-  /**
-   * Operator revocation: removes the install, ends its session and waiting
-   * connections, removes its address record within the DNS budget, and
-   * refuses the id at registration from now on. No restart.
-   */
+  /** Durable revocation: resolves after the registry fsync, then ends the session. */
   revoke(installId: string): Promise<RevokeResult>;
-  /** Lets a revoked id register again. */
-  restore(installId: string): boolean;
+  restore(installId: string): Promise<boolean>;
   status(): RelayStatus;
-  /** Expires unused registrations now (also runs on a timer). */
-  sweep(now?: number): Promise<string[]>;
+  sweep(now?: number): string[];
   close(): Promise<void>;
 }
 
-interface Session extends LiveSession {
-  readonly socket: TLSSocket;
-  readonly publishedTxt: Set<string>;
-  closed: boolean;
+interface SocketData {
+  readonly ip: string;
+  readonly nonce: string;
+  readonly releaseIp: () => void;
+  authTimer?: ReturnType<typeof setTimeout>;
+  /** Counted in `pendingSockets` until it authenticates or closes. */
+  pending: boolean;
+  session?: InstallSession;
 }
 
+const DEFAULT_ENGINE_PORT = 8010;
+const DEFAULT_INSTALL_URL = 'https://olympusplugin.ai/';
+const MAX_FORM_BYTES = 16 * 1024;
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+/** Request headers forwarded to an install; everything else stays at the relay. */
+const REQUEST_HEADER_ALLOWLIST = new Set([
+  'accept',
+  'authorization',
+  'content-type',
+  'last-event-id',
+  'mcp-protocol-version',
+  'mcp-session-id',
+  'user-agent',
+]);
+
 export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
-  const zone = config.zone.toLowerCase();
-  const controlHost = config.controlHost.toLowerCase();
-  const dataHost = (config.dataHost ?? `data.${controlHost}`).toLowerCase();
-  if (controlHost.endsWith(`.${zone}`) && INSTALL_ID_PATTERN.test(controlHost.slice(0, -zone.length - 1))) {
-    throw new Error('controlHost must not have the shape of an install hostname');
-  }
-  if (dataHost === controlHost) throw new Error('dataHost must differ from controlHost');
   const limits: RelayLimits = { ...DEFAULT_LIMITS, ...config.limits };
-  const log = config.log ?? (() => {});
-  const sessions = new Map<string, Session>();
-  const pending = new Map<string, PendingConnection>();
-  const active = new Map<string, number>();
-  const loopbackPeers = new Map<number, { peer: string; plane: 'control' | 'data' }>();
-  const newConnectionBuckets = new KeyedTokenBuckets(limits.newConnectionsPerInstall);
-  const controlBuckets = new KeyedTokenBuckets(limits.controlConnectionsPerIp);
-  const registrationBuckets = new KeyedTokenBuckets(limits.registrationsPerIp);
-  const globalRegistrations = new KeyedTokenBuckets(limits.registrationsGlobal);
-  const globalDnsCalls = new KeyedTokenBuckets(limits.dnsCallsGlobal);
-  const preHello = new KeyedCounter();
-  const dataConnections = new KeyedCounter();
-  const perInstallAddress = new KeyedCounter();
-  const dataHandshakeBuckets = new KeyedTokenBuckets(limits.dataHandshakesPerAddress);
-  const acmeBuckets = new KeyedTokenBuckets(limits.acmeDnsPerInstall);
-  const openSockets = new Set<Socket>();
-  const track = (socket: Socket) => {
-    openSockets.add(socket);
-    socket.once('close', () => openSockets.delete(socket));
-  };
+  const now = config.now ?? Date.now;
+  const log: RelayLog = config.log ?? (() => {});
+  const registry = config.registry;
+  const origin = relayOrigin(config.publicHost);
+  const bridge = { enginePort: config.enginePort ?? DEFAULT_ENGINE_PORT, installUrl: config.installUrl ?? DEFAULT_INSTALL_URL };
+  const sessions = new Map<string, InstallSession>();
+  const admission = createInstallAdmission(limits, now);
+  const registrationsPerIp = new KeyedTokenBuckets(limits.registrationsPerIp, now);
+  const registrationsGlobal = new KeyedTokenBuckets(limits.registrationsGlobal, now);
+  const sessionAttempts = new KeyedTokenBuckets(limits.sessionAttemptsPerIp, now);
+  const publicRequests = new KeyedTokenBuckets(limits.publicRequestsPerIp, now);
+  const sessionsPerIp = new KeyedCounter();
+  let pendingSockets = 0;
 
-  const controlServer = tls.createServer({ key: config.controlTls.key, cert: config.controlTls.cert, minVersion: 'TLSv1.2' });
-  controlServer.on('secureConnection', (socket) => {
-    track(socket);
-    const origin = loopbackPeers.get(socket.remotePort ?? -1);
-    if (!origin) {
-      socket.destroy();
-      return;
+  const clientIp = (request: Request, server: Server<SocketData>): string => {
+    const peer = server.requestIP(request)?.address;
+    if (config.trustProxy && peer && LOOPBACK.has(peer)) {
+      const forwarded = request.headers.get('x-forwarded-for')?.split(',').pop()?.trim();
+      if (forwarded) return addressKey(forwarded.slice(0, 64));
     }
-    handleControlConnection(socket, origin.peer, origin.plane);
-  });
-  controlServer.on('tlsClientError', () => {});
-  await new Promise<void>((resolve) => controlServer.listen(0, '127.0.0.1', resolve));
-  const controlPort = (controlServer.address() as AddressInfo).port;
-
-  const toControlPlane = (socket: Socket, buffered: Buffer, plane: 'control' | 'data') => {
-    const upstream = net.connect(controlPort, '127.0.0.1');
-    track(upstream);
-    const peer = addressKey(socket.remoteAddress);
-    upstream.once('connect', () => {
-      const localPort = upstream.localPort;
-      if (localPort !== undefined) {
-        loopbackPeers.set(localPort, { peer, plane });
-        upstream.once('close', () => loopbackPeers.delete(localPort));
-      }
-      upstream.write(buffered);
-      socket.pipe(upstream);
-      upstream.pipe(socket);
-      socket.resume();
-    });
-    propagateClose(socket, upstream);
+    return addressKey(peer);
   };
 
-  const publicServer = net.createServer((socket) => {
-    track(socket);
-    handlePublicConnection(socket, {
-      zone,
-      controlHost,
-      dataHost,
-      limits,
-      pending,
-      active,
-      newConnectionBuckets,
-      controlBuckets,
-      preHello,
-      dataConnections,
-      perInstallAddress,
-      dataHandshakeBuckets,
-      isRegistered: (installId) => config.registry.get(installId) !== undefined,
-      session: (installId) => sessions.get(installId),
-      toControlPlane,
-      log,
+  const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers } });
+
+  const tooMany = () => json(429, { error: 'rate_limited', message: 'Too many requests. Try again shortly.' }, { 'Retry-After': '10' });
+
+  /** Reads a capped body; undefined when it is larger than `max`. */
+  const readBody = async (request: Request, max: number): Promise<Uint8Array | undefined> => {
+    const declared = Number(request.headers.get('content-length') ?? '0');
+    if (Number.isFinite(declared) && declared > max) return undefined;
+    if (!request.body) return new Uint8Array();
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    const reader = request.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > max) {
+        await reader.cancel().catch(() => {});
+        return undefined;
+      }
+      parts.push(value);
+    }
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      out.set(part, offset);
+      offset += part.byteLength;
+    }
+    return out;
+  };
+
+  const forwardHeaders = (request: Request): Array<[string, string]> => {
+    const out: Array<[string, string]> = [];
+    request.headers.forEach((value, name) => {
+      if (REQUEST_HEADER_ALLOWLIST.has(name.toLowerCase())) out.push([name.toLowerCase(), value]);
     });
-  });
-  publicServer.maxConnections = limits.maxConnections;
-  const listenHost = config.listen?.host ?? '0.0.0.0';
-  await new Promise<void>((resolve, reject) => {
-    publicServer.once('error', reject);
-    publicServer.listen(config.listen?.port ?? 443, listenHost, () => resolve());
-  });
+    return out;
+  };
 
-  function handleControlConnection(socket: TLSSocket, peer: string, plane: 'control' | 'data'): void {
-    const nonce = newNonce();
-    let session: Session | undefined;
-    let attached: PendingConnection | undefined;
-    const fail = (code: RelayErrorCode, message: string) => {
-      const error: ErrorMessage = { type: 'error', code, message };
-      socket.end(encodeLine(error));
-      setTimeout(() => socket.destroy(), 1_000).unref();
-    };
-    socket.on('error', () => socket.destroy());
-    const firstTimer = setTimeout(() => socket.destroy(), limits.firstMessageTimeoutMs);
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
-    const touch = () => {
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => socket.destroy(), limits.sessionIdleTimeoutMs);
-    };
-    socket.once('close', () => {
-      clearTimeout(firstTimer);
-      if (idleTimer) clearTimeout(idleTimer);
-      if (session) closeSession(session);
+  /**
+   * Sends one request to the install its credential names. `offline` answers
+   * when the install is registered but has no session.
+   */
+  const toInstall = async (input: {
+    installId: string;
+    request: Request;
+    path: string;
+    body: Uint8Array;
+    dashboard: boolean;
+    offline: () => Response;
+    unknown: () => Response;
+  }): Promise<Response> => {
+    const { installId } = input;
+    if (registry.isRevoked(installId) || !registry.get(installId)) {
+      log('request_refused', { install: installTag(installId), reason: 'unknown_install' });
+      return input.unknown();
+    }
+    const admitted = admission.admit(installId, input.dashboard);
+    if (!admitted.ok) {
+      log('request_refused', { install: installTag(installId), reason: admitted.reason });
+      return admitted.reason === 'busy'
+        ? json(503, { error: 'busy', message: 'Olympus on your Mac is busy. Try again shortly.' }, { 'Retry-After': '5' })
+        : tooMany();
+    }
+    const session = sessions.get(installId);
+    if (!session?.open) {
+      admitted.release();
+      return input.offline();
+    }
+    let response: Response;
+    try {
+      response = await session.forward({
+        method: input.request.method,
+        path: input.path,
+        headers: forwardHeaders(input.request),
+        body: input.body,
+        signal: input.request.signal,
+      });
+    } catch {
+      admitted.release();
+      log('request_failed', { install: installTag(installId) });
+      return json(502, { error: 'bad_gateway' });
+    }
+    if (!response.body) {
+      admitted.release();
+      return response;
+    }
+    // The concurrency slot is held until the streamed body ends or is cut off.
+    const release = admitted.release;
+    const reader = response.body.getReader();
+    const relayed = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            release();
+            controller.close();
+          } else {
+            controller.enqueue(value);
+          }
+        } catch (error) {
+          release();
+          controller.error(error);
+        }
+      },
+      cancel(reason) {
+        release();
+        return reader.cancel(reason);
+      },
     });
-    socket.write(encodeLine({ type: 'challenge', v: PROTOCOL_VERSION, nonce }));
+    return new Response(relayed, { status: response.status, headers: response.headers });
+  };
 
-    readLines(
-      socket,
-      (message) => {
-        if (session) {
-          touch();
-          handleSessionMessage(session, message);
-          return 'continue';
-        }
-        clearTimeout(firstTimer);
-        if (message.v !== PROTOCOL_VERSION) {
-          fail('unsupported_version', `relay speaks protocol ${PROTOCOL_VERSION}`);
-          return 'stop';
-        }
-        const installId = typeof message.installId === 'string' ? message.installId : '';
-        const sig = typeof message.sig === 'string' ? message.sig : '';
-        if (!INSTALL_ID_PATTERN.test(installId)) {
-          fail('bad_request', 'installId is malformed');
-          return 'stop';
-        }
-        if ((message.type === 'attach') !== (plane === 'data')) {
-          fail('bad_request', plane === 'data' ? 'the data host only accepts attach' : 'attach must use the data host');
-          return 'stop';
-        }
-        if (config.registry.isRevoked(installId)) {
-          log('auth_rejected', { reason: 'revoked' });
-          fail('revoked', 'this install was revoked by the relay operator');
-          return 'stop';
-        }
-        if (message.type === 'attach') {
-          const connId = typeof message.connId === 'string' ? message.connId : '';
-          const record = config.registry.get(installId);
-          const waiting = pending.get(connId);
-          if (!record || !CONN_ID_PATTERN.test(connId) || !verifyInstallMessage(publicKeyOf(record), 'attach', nonce, installId, sig, connId)) {
-            log('attach_rejected', { reason: 'signature' });
-            fail('bad_signature', 'attach signature rejected');
-            return 'stop';
-          }
-          if (!waiting || waiting.installId !== installId) {
-            log('attach_rejected', { reason: 'unknown connection' });
-            fail('unknown_connection', 'no pending connection with that id');
-            return 'stop';
-          }
-          pending.delete(connId);
-          attached = waiting;
-          return 'stop';
-        }
-        if (message.type === 'register') {
-          const publicKey = typeof message.publicKey === 'string' ? message.publicKey : '';
-          let key;
-          try {
-            key = publicKeyFromSpki(publicKey);
-          } catch {
-            fail('bad_request', 'publicKey must be an Ed25519 SPKI');
-            return 'stop';
-          }
-          if (installIdForPublicKey(spkiOf(key)) !== installId) {
-            log('register_rejected', { reason: 'id mismatch' });
-            fail('id_mismatch', 'installId is not derived from publicKey');
-            return 'stop';
-          }
-          if (!verifyInstallMessage(key, 'register', nonce, installId, sig)) {
-            log('register_rejected', { reason: 'signature' });
-            fail('bad_signature', 'register signature rejected');
-            return 'stop';
-          }
-          if (!config.registry.get(installId)) {
-            if (!registrationBuckets.take(peer) || !globalRegistrations.take('relay')) {
-              log('register_rejected', { reason: 'rate limited' });
-              fail('rate_limited', 'too many registrations; try again later');
-              return 'stop';
-            }
-            if (!config.registry.register(installId, publicKey)) {
-              fail('capacity', 'relay registry is full');
-              return 'stop';
-            }
-            log('register', { installId });
-          }
-        } else if (message.type === 'hello') {
-          const record = config.registry.get(installId);
-          if (!record) {
-            log('auth_rejected', { reason: 'unregistered' });
-            fail('unregistered', 'install is not registered');
-            return 'stop';
-          }
-          if (!verifyInstallMessage(publicKeyOf(record), 'hello', nonce, installId, sig)) {
-            log('auth_rejected', { reason: 'signature' });
-            fail('bad_signature', 'hello signature rejected');
-            return 'stop';
-          }
-        } else {
-          fail('bad_request', 'expected hello, register, or attach');
-          return 'stop';
-        }
-        if (!sessions.has(installId) && sessions.size >= limits.maxSessions) {
-          fail('capacity', 'relay is at session capacity');
-          return 'stop';
-        }
-        session = openSession(installId, socket);
-        touch();
-        return 'continue';
-      },
-      (reason) => fail('bad_request', reason),
-      (rest) => {
-        if (!attached) return;
-        // From here on this connection carries the agent's end-to-end TLS
-        // bytes; the relay only splices them.
-        socket.pause();
-        log('public_spliced', { installId: attached.installId });
-        splice(attached, socket, rest, limits, config.tap);
-      },
-    );
-  }
-
-  function openSession(installId: string, socket: TLSSocket): Session {
-    const previous = sessions.get(installId);
-    const session: Session = {
+  const mcp = async (request: Request, path: string): Promise<Response> => {
+    const authorization = request.headers.get('authorization') ?? '';
+    const token = /^Bearer\s+(\S+)$/i.exec(authorization.trim())?.[1];
+    const installId = credentialInstallId('access', token);
+    if (!installId) return unauthorized(origin, token ? 'invalid_token' : undefined);
+    const body = await readBody(request, limits.maxRequestBodyBytes);
+    if (!body) return json(413, { error: 'payload_too_large' });
+    const text = new TextDecoder().decode(body);
+    return toInstall({
       installId,
-      socket,
-      publishedTxt: new Set(),
-      closed: false,
-      send: (message) => sendSession(session, message),
-    };
+      request,
+      path,
+      body,
+      dashboard: isDashboardCall(text),
+      offline: () => offlineMcpResponse({ method: request.method, body: text, lastSeenAt: registry.get(installId)?.lastSeenAt, now: now() }),
+      unknown: () => unauthorized(origin, 'invalid_token'),
+    });
+  };
+
+  /** `/connect/token` and `/connect/revoke`: routed by the credential in the form. */
+  const oauthForm = async (request: Request, path: string, kind: 'token' | 'revoke'): Promise<Response> => {
+    if (request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
+    const body = await readBody(request, MAX_FORM_BYTES);
+    if (!body) return json(413, { error: 'invalid_request', error_description: 'The form is too large.' });
+    const form = new URLSearchParams(new TextDecoder().decode(body));
+    let installId: string | undefined;
+    if (kind === 'token') {
+      const grant = form.get('grant_type');
+      installId = grant === 'authorization_code'
+        ? credentialInstallId('code', form.get('code'))
+        : grant === 'refresh_token' ? credentialInstallId('refresh', form.get('refresh_token')) : undefined;
+    } else {
+      const token = form.get('token');
+      installId = credentialInstallId('refresh', token) ?? credentialInstallId('access', token);
+    }
+    const invalidGrant = () => json(400, { error: 'invalid_grant', error_description: 'The grant is invalid, expired, or revoked.' });
+    // RFC 7009: revoking an unknown token succeeds.
+    const unknown = kind === 'token' ? invalidGrant : () => new Response(null, { status: 200, headers: { 'Cache-Control': 'no-store' } });
+    if (!installId) return unknown();
+    return toInstall({
+      installId,
+      request,
+      path,
+      body,
+      dashboard: false,
+      offline: () => json(503, { error: 'temporarily_unavailable', error_description: 'Olympus on your Mac is offline. Try again when your Mac is awake.' }, { 'Retry-After': '30' }),
+      unknown,
+    });
+  };
+
+  // -------------------------------------------------------------------------
+  // Install sessions
+
+  const fail = (ws: ServerWebSocket<SocketData>, code: RelayErrorCode, message: string, reason: string) => {
+    log('session_rejected', { reason });
+    ws.send(JSON.stringify({ type: 'error', code, message } satisfies ErrorMessage));
+    ws.close(4000, code);
+  };
+
+  const authenticate = (ws: ServerWebSocket<SocketData>, message: Record<string, unknown>): void => {
+    clearTimeout(ws.data.authTimer);
+    if (message.v !== PROTOCOL_VERSION) return fail(ws, 'unsupported_version', `relay speaks protocol ${PROTOCOL_VERSION}`, 'version');
+    const installId = typeof message.installId === 'string' ? message.installId : '';
+    const sig = typeof message.sig === 'string' ? message.sig : '';
+    if (!INSTALL_ID_PATTERN.test(installId)) return fail(ws, 'bad_request', 'installId is malformed', 'malformed');
+    if (registry.isRevoked(installId)) return fail(ws, 'revoked', 'this install was revoked by the relay operator', 'revoked');
+    if (message.type === 'register') {
+      const publicKey = typeof message.publicKey === 'string' ? message.publicKey : '';
+      let key;
+      try {
+        key = publicKeyFromSpki(publicKey);
+      } catch {
+        return fail(ws, 'bad_request', 'publicKey must be an Ed25519 SPKI', 'malformed');
+      }
+      if (installIdForPublicKey(spkiOf(key)) !== installId) return fail(ws, 'id_mismatch', 'installId is not derived from publicKey', 'id_mismatch');
+      if (!verifyInstallMessage(key, 'register', ws.data.nonce, installId, sig)) return fail(ws, 'bad_signature', 'register signature rejected', 'signature');
+      if (!registry.get(installId)) {
+        if (!registrationsPerIp.take(ws.data.ip) || !registrationsGlobal.take('relay')) {
+          return fail(ws, 'rate_limited', 'too many registrations; try again later', 'register_rate');
+        }
+        if (!registry.register(installId, publicKey)) return fail(ws, 'capacity', 'relay registry is full', 'registry_full');
+        log('register', { install: installTag(installId) });
+      }
+    } else if (message.type === 'hello') {
+      const record = registry.get(installId);
+      if (!record) return fail(ws, 'unregistered', 'install is not registered', 'unregistered');
+      if (!verifyInstallMessage(publicKeyOf(record), 'hello', ws.data.nonce, installId, sig)) {
+        return fail(ws, 'bad_signature', 'hello signature rejected', 'signature');
+      }
+    } else {
+      return fail(ws, 'bad_request', 'expected hello or register', 'malformed');
+    }
+    if (!sessions.has(installId) && sessions.size >= limits.maxSessions) return fail(ws, 'capacity', 'relay is at session capacity', 'capacity');
+    const previous = sessions.get(installId);
     if (previous) {
-      log('session_replaced', { installId });
-      previous.closed = true;
-      previous.socket.end(encodeLine({ type: 'error', code: 'replaced', message: 'a newer session replaced this one' }));
+      log('session_replaced', { install: installTag(installId) });
+      previous.send({ type: 'error', code: 'replaced', message: 'a newer session replaced this one' });
+      previous.close(4001, 'replaced');
     }
+    const session = new InstallSession(installId, ws, limits);
+    ws.data.session = session;
     sessions.set(installId, session);
-    config.registry.seen(installId);
-    sendSession(session, { type: 'ready', installId, hostname: hostnameFor(installId, zone) });
-    log('session_ready', { installId });
-    return session;
-  }
+    registry.seen(installId);
+    session.send({ type: 'ready', installId });
+    log('session_ready', { install: installTag(installId) });
+  };
 
-  function closeSession(session: Session): void {
-    for (const value of session.publishedTxt) void config.dns.clearTxt(acmeChallengeName(session.installId, zone), value).catch(() => {});
-    session.publishedTxt.clear();
-    if (sessions.get(session.installId) === session) {
-      sessions.delete(session.installId);
-      // Agents waiting on this install get the offline answer now, not after the attach timeout.
-      for (const [connId, waiting] of pending) {
-        if (waiting.installId !== session.installId) continue;
-        clearTimeout(waiting.timer);
-        pending.delete(connId);
-        reject(waiting.socket, TLS_ALERT.internalError);
+  const server = Bun.serve<SocketData, never>({
+    hostname: config.listen?.host ?? '127.0.0.1',
+    port: config.listen?.port ?? 8787,
+    // Streaming responses (SSE) may be quiet for long stretches; the relay's
+    // own per-stream timers bound them instead (session.ts).
+    idleTimeout: 0,
+    maxRequestBodySize: limits.maxRequestBodyBytes + 1024,
+    async fetch(request, server) {
+      const url = new URL(request.url);
+      const path = url.pathname;
+      const ip = clientIp(request, server);
+
+      if (path === CONNECT_PATH) {
+        if (!sessionAttempts.take(ip)) return tooMany();
+        if (sessions.size + pendingSockets >= limits.maxSessions) return json(503, { error: 'capacity' });
+        const releaseIp = sessionsPerIp.tryAcquire(ip, limits.sessionsPerIp);
+        if (!releaseIp) return tooMany();
+        const upgraded = server.upgrade(request, { data: { ip, nonce: newNonce(), releaseIp, pending: false } });
+        if (!upgraded) {
+          releaseIp();
+          return json(400, { error: 'websocket_required' });
+        }
+        return undefined;
       }
-      log('session_closed', { installId: session.installId });
-    }
-    session.closed = true;
-  }
+      if (path === '/healthz') return json(200, { ok: true });
 
-  function sendSession(session: Session, message: RelaySessionMessage): void {
-    if (!session.closed && !session.socket.destroyed) session.socket.write(encodeLine(message));
-  }
+      // The authorized MCP path is limited per install (toInstall); everything
+      // reachable without a routable credential is limited per address.
+      const authorizedMcp = path === OAUTH_PATHS.mcp && credentialInstallId('access', /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')?.trim() ?? '')?.[1]);
+      if (!authorizedMcp && !publicRequests.take(ip)) return tooMany();
 
-  function handleSessionMessage(session: Session, message: Record<string, unknown>): void {
-    if (message.type === 'ping') {
-      config.registry.seen(session.installId);
-      sendSession(session, { type: 'pong' });
-      return;
-    }
-    if (message.type === 'acme-dns-set' || message.type === 'acme-dns-clear') {
-      const id = typeof message.id === 'string' ? message.id.slice(0, 64) : '';
-      const value = typeof message.value === 'string' ? message.value : '';
-      const respond = (ok: boolean, error?: string) =>
-        sendSession(session, { type: 'acme-dns-result', id, ok, ...(error ? { error } : {}) });
-      if (!ACME_TXT_VALUE_PATTERN.test(value)) return respond(false, 'value must be a 43-character base64url digest');
-      // The relay derives the record name itself: an install can only ever
-      // publish under its own `_acme-challenge.<install-id>` name.
-      const name = acmeChallengeName(session.installId, zone);
-      if (message.type === 'acme-dns-clear') {
-        // Only values this session published, so clears cannot drive provider calls on their own.
-        if (!session.publishedTxt.has(value)) return respond(false, 'value was not published by this session');
-        if (!acmeBuckets.take(session.installId) || !globalDnsCalls.take('relay')) return respond(false, 'rate_limited');
-        session.publishedTxt.delete(value);
-        void config.dns.clearTxt(name, value).then(() => respond(true), () => respond(false, 'dns provider error'));
-        return;
+      switch (path) {
+        case OAUTH_PATHS.protectedResource:
+        case OAUTH_PATHS.protectedResourceMcp:
+          if (request.method === 'OPTIONS') return metadataPreflight();
+          if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, OPTIONS' });
+          return metadataResponse(protectedResourceMetadata(origin));
+        case OAUTH_PATHS.authorizationServer:
+          if (request.method === 'OPTIONS') return metadataPreflight();
+          if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, OPTIONS' });
+          return metadataResponse(authorizationServerMetadata(origin));
+        case OAUTH_PATHS.authorize:
+          if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
+          return authorizeBridge(url, bridge);
+        case OAUTH_PATHS.token:
+          return oauthForm(request, OAUTH_PATHS.token, 'token');
+        case OAUTH_PATHS.revoke:
+          return oauthForm(request, OAUTH_PATHS.revoke, 'revoke');
+        case OAUTH_PATHS.mcp:
+          return mcp(request, OAUTH_PATHS.mcp);
+        default:
+          return json(404, { error: 'not_found' });
       }
-      if (session.publishedTxt.size >= 4) return respond(false, 'too many outstanding challenge values');
-      const record = config.registry.get(session.installId);
-      if (!record) return respond(false, 'install is not registered');
-      const needsAddress = !record.hasAddressRecord;
-      if (needsAddress && config.registry.addressRecordCount() >= limits.maxAddressRecords) return respond(false, 'capacity');
-      if (!acmeBuckets.take(session.installId)) return respond(false, 'rate_limited');
-      if (!globalDnsCalls.take('relay') || (needsAddress && !globalDnsCalls.take('relay'))) return respond(false, 'rate_limited');
-      session.publishedTxt.add(value);
-      config.registry.activate(session.installId);
-      log('acme_dns', { installId: session.installId });
-      const hostname = hostnameFor(session.installId, zone);
-      void (needsAddress ? config.dns.ensureAddress(hostname).then(() => config.registry.markAddressRecord(session.installId)) : Promise.resolve())
-        .then(() => config.dns.setTxt(name, value))
-        .then(
-          () => respond(true),
-          () => {
-            session.publishedTxt.delete(value);
-            respond(false, 'dns provider error');
-          },
-        );
-      return;
-    }
-    sendSession(session, { type: 'error', code: 'bad_request', message: 'unknown message type' });
-  }
+    },
+    websocket: {
+      maxPayloadLength: 128 * 1024,
+      idleTimeout: 120,
+      backpressureLimit: 16 * 1024 * 1024,
+      closeOnBackpressureLimit: true,
+      open(ws) {
+        pendingSockets += 1;
+        ws.data.pending = true;
+        ws.data.authTimer = setTimeout(() => ws.close(4000, 'auth_timeout'), limits.authTimeoutMs);
+        ws.send(JSON.stringify({ type: 'challenge', v: PROTOCOL_VERSION, nonce: ws.data.nonce }));
+      },
+      message(ws, data) {
+        const session = ws.data.session;
+        if (typeof data !== 'string') {
+          const frame = decodeBodyFrame(data);
+          if (!session || !frame || session.onBody(frame.id, frame.payload) === 'protocol_error') ws.close(4002, 'protocol_error');
+          return;
+        }
+        const message = parseTextFrame(data);
+        if (!message) {
+          ws.close(4002, 'protocol_error');
+          return;
+        }
+        if (!session) {
+          // One authentication attempt per socket: a failure closes it.
+          if (!ws.data.pending) return;
+          ws.data.pending = false;
+          pendingSockets -= 1;
+          authenticate(ws, message);
+          return;
+        }
+        if (message.type === 'ping') registry.seen(session.installId);
+        if (session.onMessage(message, streamId(message.id)) === 'protocol_error') ws.close(4002, 'protocol_error');
+      },
+      close(ws) {
+        clearTimeout(ws.data.authTimer);
+        if (ws.data.pending) {
+          ws.data.pending = false;
+          pendingSockets -= 1;
+        }
+        ws.data.releaseIp();
+        const session = ws.data.session;
+        if (!session) return;
+        session.socketClosed();
+        if (sessions.get(session.installId) === session) {
+          sessions.delete(session.installId);
+          log('session_closed', { install: installTag(session.installId) });
+        }
+      },
+    },
+  });
 
-  /** Removes one queued address record, within the DNS budget. */
-  const removeAddressRecord = async (installId: string): Promise<'removed' | 'failed' | 'no-budget'> => {
-    if (!globalDnsCalls.take('relay')) return 'no-budget';
-    const hostname = hostnameFor(installId, zone);
-    try {
-      await config.dns.removeAddress(hostname);
-    } catch {
-      return 'failed'; // Retried next sweep.
-    }
-    if (config.registry.pendingAddressRemovals().includes(installId)) {
-      config.registry.addressRemoved(installId);
-      return 'removed';
-    }
-    // The install re-registered while the removal was in flight and
-    // reclaimed the record we just deleted: put it back, or record that it
-    // is gone so the next publish re-creates it.
-    if (!config.registry.get(installId)?.hasAddressRecord) return 'removed';
-    try {
-      if (!globalDnsCalls.take('relay')) throw new Error('no DNS budget');
-      await config.dns.ensureAddress(hostname);
-    } catch {
-      config.registry.addressLost(installId);
-    }
-    return 'removed';
+  const startedAt = new Date(now()).toISOString();
+  const sweep = (at = now()): string[] => {
+    const expired = registry.expire(at, limits.inactiveRegistrationTtlMs, (installId) => sessions.has(installId));
+    for (const installId of expired) log('registration_expired', { install: installTag(installId) });
+    return expired;
   };
-
-  const revoke = async (installId: string): Promise<RevokeResult> => {
-    if (!INSTALL_ID_PATTERN.test(installId)) throw new Error('not an install id');
-    const wasRegistered = config.registry.get(installId) !== undefined;
-    const live = sessions.get(installId);
-    const revoked = config.registry.revoke(installId);
-    if (revoked) log('install_revoked', { installId });
-    // Ending the session also clears its ACME TXT values and answers any
-    // waiting agent connection with the offline alert (closeSession).
-    if (live) {
-      live.socket.end(encodeLine({ type: 'error', code: 'revoked', message: 'this install was revoked by the relay operator' }));
-      setTimeout(() => live.socket.destroy(), 1_000).unref();
-    }
-    let addressRecord: RevokeResult['addressRecord'] = 'none';
-    if (config.registry.pendingAddressRemovals().includes(installId)) {
-      addressRecord = (await removeAddressRecord(installId)) === 'removed' ? 'removed' : 'pending';
-    }
-    return { installId, revoked, wasRegistered, wasOnline: live !== undefined, addressRecord };
-  };
-
-  const startedAt = new Date().toISOString();
-  const status = (): RelayStatus => {
-    let publicConnections = 0;
-    for (const count of active.values()) publicConnections += count;
-    return {
-      ...config.registry.counts(),
-      online: sessions.size,
-      publicConnections,
-      pendingPublicConnections: pending.size,
-      startedAt,
-    };
-  };
-
-  const sweep = async (now = Date.now()): Promise<string[]> => {
-    const expired = config.registry.expire(
-      now,
-      { unactivatedMs: limits.unactivatedRegistrationTtlMs, inactiveMs: limits.inactiveRegistrationTtlMs },
-      (installId) => sessions.has(installId),
-    );
-    for (const record of expired) {
-      log('registration_expired', { installId: record.installId });
-      const live = sessions.get(record.installId);
-      if (live) live.socket.end(encodeLine({ type: 'error', code: 'unregistered', message: 'registration expired' }));
-    }
-    // Address records are removed within the DNS budget; a failed or deferred
-    // removal stays counted and is retried on the next sweep.
-    for (const installId of config.registry.pendingAddressRemovals()) {
-      if ((await removeAddressRecord(installId)) === 'no-budget') break;
-    }
-    return expired.map((record) => record.installId);
-  };
-  const sweepTimer = setInterval(() => void sweep(), config.sweepIntervalMs ?? 60 * 60_000);
+  const sweepTimer = setInterval(() => sweep(), config.sweepIntervalMs ?? 60 * 60_000);
   sweepTimer.unref?.();
 
   return {
-    port: (publicServer.address() as AddressInfo).port,
-    host: listenHost,
+    port: server.port!,
+    url: `http://${server.hostname}:${server.port}`,
     onlineInstalls: () => [...sessions.keys()],
-    revoke,
-    restore: (installId) => {
-      const restored = config.registry.restore(installId);
-      if (restored) log('install_restored', { installId });
+    async revoke(installId) {
+      if (!INSTALL_ID_PATTERN.test(installId)) throw new Error('not an install id');
+      const wasRegistered = registry.get(installId) !== undefined;
+      const revoked = await registry.revoke(installId);
+      const live = sessions.get(installId);
+      if (revoked) log('install_revoked', { install: installTag(installId) });
+      if (live) {
+        live.send({ type: 'error', code: 'revoked', message: 'this install was revoked by the relay operator' });
+        live.close(4003, 'revoked');
+        sessions.delete(installId);
+      }
+      return { installId, revoked, wasRegistered, wasOnline: live !== undefined };
+    },
+    async restore(installId) {
+      const restored = await registry.restore(installId);
+      if (restored) log('install_restored', { install: installTag(installId) });
       return restored;
     },
-    status,
+    status: () => {
+      let inFlight = 0;
+      for (const session of sessions.values()) inFlight += session.activeStreams;
+      return { ...registry.counts(), online: sessions.size, inFlight, startedAt };
+    },
     sweep,
-    close: async () => {
+    async close() {
       clearInterval(sweepTimer);
-      for (const socket of openSockets) socket.destroy();
-      for (const waiting of pending.values()) clearTimeout(waiting.timer);
-      await Promise.all([
-        new Promise<void>((resolve) => publicServer.close(() => resolve())),
-        new Promise<void>((resolve) => controlServer.close(() => resolve())),
-      ]);
-      await config.registry.flush();
+      for (const session of sessions.values()) session.close(1001, 'relay shutting down');
+      sessions.clear();
+      server.stop(true);
+      await registry.flush();
     },
   };
 }
