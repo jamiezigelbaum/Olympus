@@ -17,7 +17,12 @@ export interface RelayDashboardViewModel {
     | { state: 'not_installed'; action: { id: 'install'; href: string } };
   needsYou: [];
   sources: [];
-  models: { embedding: { kind: 'built_in'; ready: false } };
+  /**
+   * The relay cannot see the Mac's model, and the contract has no "unknown"
+   * state: `downloading` with no percent is the least wrong claim (never
+   * `ready`, never `failed`). The UI leads with the connection state anyway.
+   */
+  models: { embedding: { kind: 'built_in'; state: 'downloading' } };
   generatedAt: string;
 }
 
@@ -31,7 +36,7 @@ export function offlineDashboard(lastSeenAt: number | undefined, now: number): R
     },
     needsYou: [],
     sources: [],
-    models: { embedding: { kind: 'built_in', ready: false } },
+    models: { embedding: { kind: 'built_in', state: 'downloading' } },
     generatedAt: new Date(now).toISOString(),
   };
 }
@@ -42,7 +47,7 @@ export function notInstalledDashboard(installUrl: string, now: number): RelayDas
     connection: { state: 'not_installed', action: { id: 'install', href: installUrl } },
     needsYou: [],
     sources: [],
-    models: { embedding: { kind: 'built_in', ready: false } },
+    models: { embedding: { kind: 'built_in', state: 'downloading' } },
     generatedAt: new Date(now).toISOString(),
   };
 }

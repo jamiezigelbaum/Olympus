@@ -392,7 +392,7 @@ describe('offline fallback', () => {
       connection: { state: 'mac_offline' },
       needsYou: [],
       sources: [],
-      models: { embedding: { kind: 'built_in', ready: false } },
+      models: { embedding: { kind: 'built_in', state: 'downloading' } },
     });
     expect(typeof dashboard.result.structuredContent.connection.lastSeenAt).toBe('string');
     const other = await (await mcpPost(relay, token, rpc('tools/call', { name: 'source_answer', arguments: {} }))).json();

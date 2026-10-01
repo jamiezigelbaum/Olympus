@@ -40,7 +40,7 @@ describe('the relay dashboard copy follows the contract', () => {
       connection: { state: 'mac_offline', lastSeenAt: '2026-10-01T11:58:00.000Z' },
       needsYou: [],
       sources: [],
-      models: { embedding: { kind: 'built_in', ready: false } },
+      models: { embedding: { kind: 'built_in', state: 'downloading' } },
       generatedAt: '2026-10-01T12:00:00.000Z',
     });
     const notInstalled = assignable(notInstalledDashboard('https://olympusplugin.ai/', now));
