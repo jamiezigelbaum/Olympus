@@ -16,8 +16,9 @@ use a remembered summary of this guide as the user-facing copy.
 
 Choose the privacy posture with the operator, run setup (which registers and
 starts the base worker), ask for the privacy classifier approval, verify the
-worker, run the required gateway restart, and open the dashboard's Setup page. Its **Models** section comes first: Gemini
-and Venice keys are entered there, and existing local models have an
+worker, run the required gateway restart, and open the dashboard's Setup page. Search indexing needs no setup: the
+embedding model is built into Olympus and downloads itself once on first use. Its **Models** section comes first: Venice
+and any opt-in Gemini keys are entered there, and existing local models have an
 agent-assisted configuration starting point plus **Check readiness**. Missing
 model keys are expected at this stage; do not block the dashboard handoff or
 send browser users to terminal key commands. Source connections unlock only
@@ -748,24 +749,23 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >    machine first; Venice is the approved second step when the local lane
 >    cannot answer. Requires: a local runtime with lots of fast memory —
 >    MLX, llama.cpp, Ollama, LM Studio and similar expose the local endpoint
->    Olympus uses — plus a Venice API key (pay-as-you-go) and a Gemini API
->    key (free tier available) for Public and Personal search indexing.
+>    Olympus uses — plus a Venice API key (pay-as-you-go). Search indexing
+>    uses the model built into Olympus: no key, nothing leaves the machine.
 >    Trade-off: strongest owner-controlled first step, with private-cloud escalation available;
 >    speed and first-pass quality depend on your machine.
 >
 > 2. **Local models** (`local-only`) — Private questions are answered
 >    only on your own machine. Venice is not used. Requires: the same local
->    runtime with lots of fast memory, plus a Gemini API key (free tier
->    available) for Public and Personal search indexing. Trade-off: no
+>    runtime with lots of fast memory. Search indexing uses the model built
+>    into Olympus. Trade-off: no
 >    Private-tier cloud escalation; if the local lane cannot answer, Olympus reports the gap.
 >
 > 3. **Venice** (`private-cloud-only`) — recommended if you do
 >    not run local models. Private content goes only to Venice, on its
->    Private model path — `kimi-k3` for answers and a separately approved
->    Private embedding model for Private search. Requires: a
->    Venice API key (pay-as-you-go) and a Gemini API key (free tier
->    available). Venice protects your Private tier while Gemini indexes only
->    your Public and Personal data; Private content never goes to Gemini.
+>    Private model path — `kimi-k3` for answers. Search indexing for every
+>    tier uses the model built into Olympus, on this machine. Requires: a
+>    Venice API key (pay-as-you-go). Private content never goes to Gemini;
+>    a separately approved Venice Private embedding model stays an opt-in.
 >    Trade-off: no local-model requirement
 >    or local fallback; you are choosing a privacy-focused cloud provider
 >    for Private answers and embeddings, on that provider's word rather than on
@@ -776,8 +776,8 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >    indexed, and no model — local, private cloud, or ordinary cloud —
 >    sees it. When a question touches health, finances, or legal matters,
 >    you get an honest "that's not indexed" instead of an answer. Requires:
->    a Gemini API key (free tier available) for Public and Personal
->    source indexing.
+>    nothing; Public and Personal content is indexed by the model built
+>    into Olympus.
 >    Trade-off: a real hole in what your assistant can do, in exchange for
 >    maximum caution.
 >
@@ -957,7 +957,8 @@ normal browser flow a missing Gemini or Venice key there is expected: report
 it as "finished in the dashboard's Models section" and continue. Follow the
 key remedies below only in the headless fallback. Typical items:
 
-- Gemini API key (source embeddings, all presets; headless fallback only):
+- Gemini API key (only when the operator opted into Gemini embeddings instead
+  of the built-in model; headless fallback only):
   ask the operator to obtain a key from https://aistudio.google.com and provide it (or
   source it per the credential-sourcing rule above). Connect it via
   stdin, exactly like the Venice key, so it never reaches shell history,

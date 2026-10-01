@@ -244,6 +244,11 @@ import {
 } from '../source-index/embeddings.ts';
 import { canonicalEmbeddingDimension } from '../source-index/embedding-identity.ts';
 import {
+  BuiltInSourceEmbeddingProvider,
+  sharedBuiltInSourceEmbeddingProvider,
+} from '../source-index/built-in-embedding/provider.ts';
+import { BUILT_IN_EMBEDDING_MODEL } from '../source-index/built-in-embedding/manifest.ts';
+import {
   createGmailConnectorStoreSchedulerSource,
   createGoogleDriveConnectorStoreSchedulerSource,
   createCanonicalDropboxSchedulerSource,
@@ -499,8 +504,14 @@ export function createSourceIndexEmbeddingProviderFromEnv(
 ): SourceEmbeddingProvider | undefined {
   const provider = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER;
   if (provider === undefined || provider.trim().length === 0) return undefined;
-  if (provider !== 'google-gemini' && provider !== 'local-openai-compatible' && provider !== 'venice') {
-    throw new Error('OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER must be google-gemini, local-openai-compatible, or venice.');
+  if (provider !== 'google-gemini' && provider !== 'local-openai-compatible' && provider !== 'venice' && provider !== 'built-in') {
+    throw new Error('OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER must be google-gemini, local-openai-compatible, venice, or built-in.');
+  }
+  if (provider === 'built-in') {
+    return sharedBuiltInSourceEmbeddingProvider({
+      modelId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_MODEL.modelId,
+      env,
+    });
   }
   const timeoutMs = parseOptionalTimeoutSeconds(
     env.OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS,
@@ -597,6 +608,11 @@ export function createSourceIndexEmbeddingProviderFromSovereignty(
   const resolved = engine.resolveEmbeddingProfile(trustDomain);
   if (!resolved) return undefined;
   const profile = resolved.profile;
+  if (profile.provider === 'built-in') {
+    // In-process: no endpoint, no credential, no timeout knob, and no epoch
+    // override (the shared epoch variables belong to the HTTP lanes).
+    return sharedBuiltInSourceEmbeddingProvider({ modelId: profile.model, env });
+  }
   const timeoutMs = parseOptionalTimeoutSeconds(
     env.OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS,
     'OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS',
@@ -1676,6 +1692,14 @@ export async function main(): Promise<void> {
   );
   const sourceIndexEmbeddingProvider = internalPolicyEmbeddingProvider
     ?? (envPolicyFallback ? createSourceIndexEmbeddingProviderFromEnv() : undefined);
+  // The built-in model downloads once, on first use. Start that at boot so a
+  // new install shows "installing" right away instead of at its first index.
+  // Never under the test runner: a test must not fetch model weights.
+  if (process.env.NODE_ENV !== 'test') {
+    for (const provider of new Set([internalPolicyEmbeddingProvider, secureLocalPolicyEmbeddingProvider])) {
+      if (provider instanceof BuiltInSourceEmbeddingProvider) void provider.prepare().catch(() => undefined);
+    }
+  }
   const readwiseEmbeddingProvider = envPolicyFallback
     ? createCloudSourceIndexEmbeddingProviderFromEnv(
       process.env,

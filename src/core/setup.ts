@@ -118,7 +118,7 @@ export interface SetupWizardResult {
 export const VENICE_PITCH_TEXT = [
   `Private source answers follow your choice: ${PRIVACY_PRESET_LABELS['local-first']} tries your local lane first; ${PRIVACY_PRESET_LABELS['private-cloud-only']} has no local-model requirement.`,
   'In v0.4, Venice uses its ordinary API with a live-catalog Private or plain TEE model. Olympus does not provide or qualify E2EE out of the box; custom integrations are user-owned.',
-  'Private semantic search uses local embeddings or an approved Venice Private embedding model. Gemini indexes Public and Personal content; Private content never goes to ordinary cloud embedding providers.',
+  'Semantic search uses a small model built into Olympus: it downloads once, runs on this computer, and needs no account or key. Gemini, a local embedding server, or a Venice Private embedding model are opt-in; Private content never goes to ordinary cloud embedding providers.',
   `Choosing ${PRIVACY_PRESET_LABELS['no-sensitive']} is a deliberate choice after this screen.`,
 ] as const;
 
