@@ -33,6 +33,7 @@ import {
   type RemoteConnectionRecord,
   type RemoteConnectionStore,
 } from '../core/remote-connections.ts';
+import { isRelayedRequest } from '../core/remote-access.ts';
 import { isWellFormedOAuthAccessToken } from '../core/remote-oauth-store.ts';
 import { currentRemotePublicUrls, type RemotePublicUrls, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
 import { sourceAnswerJobOwner, type SourceAnswerJobRegistry } from '../core/source-answer-jobs.ts';
@@ -86,7 +87,9 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
   return async (request: Request): Promise<Response> => {
     const verification = authenticateRemoteRequest(request, options);
     if (!verification.ok) return verification.response;
-    return markAuthenticated(await serveAuthenticated(request, verification));
+    const response = await serveAuthenticated(request, verification);
+    // Only the relay reads the mark; a direct caller never sees it.
+    return isRelayedRequest(request) ? markAuthenticated(response) : response;
   };
 
   async function serveAuthenticated(
@@ -134,8 +137,8 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
  * Marks a response to a request whose credential was verified. The connect
  * relay uses the mark only to keep that credential's later requests in the
  * owner's admission lane, so forged secrets cannot spend the owner's budget
- * (connect-relay/server/limits.ts); it grants nothing and never reaches the
- * public caller.
+ * (connect-relay/server/limits.ts); it grants nothing. Only relayed requests
+ * get it, and the relay drops it before its public response.
  */
 function markAuthenticated(response: Response): Response {
   const headers = new Headers(response.headers);
