@@ -1209,3 +1209,9 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
     many: '{n} items waiting to be checked',
   },
 } as const;
+
+/** The dashboard's prompt to set up privacy, until the person has said what's private for them. */
+export const DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
+  sentence: 'Tell Olympus what\'s private for you',
+  label: 'Set up privacy',
+} as const;

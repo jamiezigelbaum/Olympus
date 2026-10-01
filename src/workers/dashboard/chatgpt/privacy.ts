@@ -19,22 +19,13 @@
  */
 import type { DASHBOARD_CHATGPT_PRIVACY_COPY } from '../vocabulary.ts';
 import type { ChatGptPicker } from './picker.ts';
+import { PRIVACY_GET_TOOL_NAME, PRIVACY_META_KEY, PRIVACY_SET_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
 
-/*
- * The backend half of this contract lands on another branch. Every name it
- * shares with the page lives here, so adopting it is a one-line change each:
- * when `src/workers/chatgpt/dashboard-contract.ts` exports these, import them.
- */
 /** The privacy tools: get {} and set {description?, rules?}; both answer with the settings in `_meta`. */
-export const CHATGPT_PRIVACY_TOOLS = {
-  /** {} → structuredContent counts only; `_meta[privacyMetaKey]` = {description, rules, pendingCount}. */
-  get: 'olympus_privacy_get',
-  /** {description?, rules?: [{kind, source_id, key?, value?}]} → the same as get. */
-  set: 'olympus_privacy_set',
-} as const;
+export const CHATGPT_PRIVACY_TOOLS = { get: PRIVACY_GET_TOOL_NAME, set: PRIVACY_SET_TOOL_NAME } as const;
 
 /** The result `_meta` key that carries the description and rule names to the widget only. */
-export const CHATGPT_PRIVACY_META_KEY = 'olympus/privacy';
+export const CHATGPT_PRIVACY_META_KEY = PRIVACY_META_KEY;
 
 /** Folder sources a private folder can come from, with a fallback name when the dashboard has none. */
 export const CHATGPT_PRIVACY_FOLDER_SOURCES = {

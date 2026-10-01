@@ -45192,7 +45192,7 @@ function lowerFirst(value) {
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY;
+var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -45546,6 +45546,10 @@ var init_vocabulary = __esm(() => {
       one: "{n} item waiting to be checked",
       many: "{n} items waiting to be checked"
     }
+  };
+  DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
+    sentence: "Tell Olympus what's private for you",
+    label: "Set up privacy"
   };
 });
 
@@ -101127,12 +101131,10 @@ function chatgptPrivacyProgram(kit) {
     view
   };
 }
-var CHATGPT_PRIVACY_TOOLS, CHATGPT_PRIVACY_META_KEY = "olympus/privacy", CHATGPT_PRIVACY_FOLDER_SOURCES;
+var CHATGPT_PRIVACY_TOOLS, CHATGPT_PRIVACY_META_KEY, CHATGPT_PRIVACY_FOLDER_SOURCES;
 var init_privacy = __esm(() => {
-  CHATGPT_PRIVACY_TOOLS = {
-    get: "olympus_privacy_get",
-    set: "olympus_privacy_set"
-  };
+  CHATGPT_PRIVACY_TOOLS = { get: PRIVACY_GET_TOOL_NAME, set: PRIVACY_SET_TOOL_NAME };
+  CHATGPT_PRIVACY_META_KEY = PRIVACY_META_KEY;
   CHATGPT_PRIVACY_FOLDER_SOURCES = {
     "dropbox.files": "Dropbox",
     "google_drive.docs": "Google Drive"
@@ -101485,8 +101487,8 @@ function buildChatGptDashboardViewModel(view, options = {}) {
   if (options.privacy && !options.privacy.configured) {
     needsYou.push({
       id: "privacy:setup",
-      sentence: CHATGPT_PRIVACY_SETUP_COPY.sentence,
-      fix: { label: CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} }
+      sentence: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.sentence,
+      fix: { label: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} }
     });
   }
   const progress = overallProgress(rows);
@@ -101906,7 +101908,7 @@ function isoOrUndefined(value) {
 function isoOrNow(value, now) {
   return isoOrUndefined(value) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, FIXABLE_STALLS, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS, CHATGPT_PRIVACY_SETUP_COPY, STAGE_FOR_PHASE;
+var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, FIXABLE_STALLS, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE;
 var init_dashboard_view_model = __esm(() => {
   init_phases();
   init_source_dashboard();
@@ -101950,10 +101952,6 @@ var init_dashboard_view_model = __esm(() => {
     "Waiting for the first sync"
   ]);
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
-  CHATGPT_PRIVACY_SETUP_COPY = {
-    sentence: "Tell Olympus what's private for you",
-    label: "Tell Olympus"
-  };
   STAGE_FOR_PHASE = {
     metadata_sync: "listing",
     extraction: "reading",
