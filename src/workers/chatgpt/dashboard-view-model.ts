@@ -81,7 +81,7 @@ const KNOWN_CONNECTION_LABELS = new Set([
   'Unpair incomplete — manual cleanup required',
   'synced',
 ]);
-const SYNCED_RELATIVE = /^synced (just now|\d+ (second|minute|hour|day|week|month|year)s? ago)$/;
+const SYNCED_RELATIVE = /^synced (just now|less than 1 hour ago|\d+ (minute|hour|day|week|month|year)s? ago)$/;
 
 const KNOWN_READINESS_LABELS = new Set([
   'Connect this source',

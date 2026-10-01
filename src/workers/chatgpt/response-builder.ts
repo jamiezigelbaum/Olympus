@@ -171,7 +171,7 @@ function dashboardSummary(view: DashboardViewModelV1): string {
     parts.push(`Sources: ${connected.map((source) => `${source.label} (${source.status})`).join(', ')}.`);
   }
   if (view.progress) parts.push(`Indexing ${view.progress.percent}% done, ${view.progress.itemsLeft} ${view.progress.unit} left.`);
-  if (view.needsYou.length > 0) parts.push(`Needs attention: ${view.needsYou.map((item) => item.sentence).join('; ')}.`);
+  if (view.needsYou.length > 0) parts.push(`Needs attention: ${view.needsYou.map((item) => item.sentence.replace(/\.$/, '')).join('; ')}.`);
   return parts.join(' ');
 }
 
