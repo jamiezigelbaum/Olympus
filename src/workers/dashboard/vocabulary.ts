@@ -863,3 +863,115 @@ function lowerFirst(value: string): string {
 function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;
 }
+
+/**
+ * Sentences the ChatGPT dashboard's producer composes into the view model
+ * (src/workers/chatgpt/dashboard-view-model.ts). Same keys the producer used
+ * while they were pending there; every value is a fixed string.
+ */
+export const DASHBOARD_CHATGPT_VOCABULARY = {
+  installingNoSource: 'Connect a source to begin',
+  installingModel: 'Getting search ready on your Mac',
+  installingFirstIndex: 'Indexing your sources for the first time',
+  connectOnMac: 'Connect sources in Olympus on your Mac.',
+  reconnect: 'Reconnect',
+  checkAgain: 'Check again',
+  openOnMac: 'Open Olympus on your Mac',
+  stageReading: 'Reading',
+  stageSearchable: 'Indexing',
+  embeddingNeedsAttention: 'Search has stopped working on your Mac.',
+  answerModelNeedsAttention: 'Answers have stopped working on your Mac.',
+  fixOnMac: 'Open Olympus on your Mac to fix this.',
+  privateMatches: 'Some matching items are private and stay on your Mac.',
+} as const;
+
+/**
+ * The ChatGPT dashboard's own copy for the five connection states. The view
+ * model carries only the state; the page owns these words (the relay renders
+ * two of the states without reading this file). `disabledReason` is printed
+ * beside every other control while the state holds.
+ */
+export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
+  not_installed: {
+    title: 'Olympus isn\'t on your Mac yet',
+    disabledReason: 'Install Olympus first',
+  },
+  installing: {
+    title: 'Installing Olympus on your Mac…',
+    disabledReason: 'Available once Olympus is set up',
+  },
+  mac_offline: {
+    title: 'Your Mac is offline or asleep, so answers are paused',
+    lastSeen: 'Last seen {when}',
+    disabledReason: 'Your Mac is offline',
+  },
+  relay_unavailable: {
+    title: 'Olympus can\'t reach your Mac right now; retrying',
+    disabledReason: 'Can\'t reach your Mac',
+  },
+  /** Labels for `connection.action.id`; `help` is shown as text when the action has no link. */
+  actions: {
+    install: { label: 'Install on your Mac', help: 'In ChatGPT on your Mac, ask: Install Olympus on my Mac.' },
+    open_olympus: { label: 'Open Olympus on your Mac', help: 'Open Olympus on your Mac, then check again here.' },
+    wake_mac: {
+      label: 'How to keep it available',
+      help: 'Keep your Mac on, awake and online with Olympus running. Answers resume on their own when it is back.',
+    },
+    retry: { label: 'Try again', help: '' },
+  },
+} as const;
+
+/** Every other word the ChatGPT dashboard page prints. */
+export const DASHBOARD_CHATGPT_PAGE_COPY = {
+  title: 'Olympus',
+  loading: 'Checking your Mac…',
+  upToDate: 'Olympus is up to date.',
+  needsYou: 'Needs you',
+  sources: 'Sources',
+  sourcesLocal: 'On your Mac',
+  sourcesCloud: 'Accounts',
+  noSources: 'No sources yet.',
+  progress: 'Progress',
+  progressInitial: 'First index',
+  progressRefresh: 'Catching up',
+  percentDone: '{percent}% done',
+  left: '{count} {unit} left',
+  eta: 'about {duration}',
+  stalled: 'stalled',
+  details: 'Details',
+  stageLine: '{stage}: {done} of {total} {unit}',
+  models: 'Models',
+  modelSearch: 'Search',
+  modelAnswers: 'Answers',
+  modelBuiltIn: 'Built-in',
+  modelCustom: 'Custom',
+  modelReady: 'Ready',
+  modelDownloading: 'Downloading {percent}%',
+  modelNotWorking: 'Not working',
+  modelNotReady: 'Not ready',
+  synced: 'Synced {when}',
+  updated: 'Updated {when}',
+  checkAgain: 'Check again',
+  tryAgain: 'Try again',
+  openOlympus: 'Open Olympus',
+  moreActions: 'More actions for {source}',
+  confirmPrompt: 'Are you sure?',
+  confirm: 'Yes, {label}',
+  cancel: 'Cancel',
+  working: 'Working…',
+  justNow: 'just now',
+  minutesAgo: '{n} min ago',
+  hoursAgo: '{n} hr ago',
+  daysAgo: '{n} days ago',
+  dayAgo: '1 day ago',
+  durationMinutes: '{n} min',
+  durationHours: '{n} hr',
+  durationHoursMinutes: '{h} hr {m} min',
+  durationDays: '{n} days',
+  durationLessThanMinute: 'less than a minute',
+  units: {
+    files: { one: 'file', many: 'files' },
+    messages: { one: 'message', many: 'messages' },
+    items: { one: 'item', many: 'items' },
+  },
+} as const;

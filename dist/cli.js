@@ -44983,7 +44983,7 @@ function lowerFirst(value) {
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy";
+var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -44996,6 +44996,14 @@ var init_vocabulary = __esm(() => {
     "Fresh",
     "Off"
   ];
+  DASHBOARD_STATUS_PRESENTATION = {
+    Fresh: { label: "Fresh", colorToken: "good", glyphKind: "dot" },
+    Working: { label: "Working", colorToken: "run", glyphKind: "donut" },
+    Waiting: { label: "Waiting", colorToken: "off", glyphKind: "ring" },
+    "Needs you": { label: "Needs you", colorToken: "warn", glyphKind: "dot" },
+    Failing: { label: "Failing", colorToken: "bad", glyphKind: "dot" },
+    Off: { label: "Off", colorToken: "line", glyphKind: "dot" }
+  };
   DASHBOARD_CONNECTION_STATE_STATUS = {
     not_connected: "Off",
     needs_setup: "Off",
@@ -45023,6 +45031,87 @@ var init_vocabulary = __esm(() => {
     "not_connected",
     "needs_setup"
   ]);
+  DASHBOARD_CHATGPT_CONNECTION_COPY = {
+    not_installed: {
+      title: "Olympus isn't on your Mac yet",
+      disabledReason: "Install Olympus first"
+    },
+    installing: {
+      title: "Installing Olympus on your Mac…",
+      disabledReason: "Available once Olympus is set up"
+    },
+    mac_offline: {
+      title: "Your Mac is offline or asleep, so answers are paused",
+      lastSeen: "Last seen {when}",
+      disabledReason: "Your Mac is offline"
+    },
+    relay_unavailable: {
+      title: "Olympus can't reach your Mac right now; retrying",
+      disabledReason: "Can't reach your Mac"
+    },
+    actions: {
+      install: { label: "Install on your Mac", help: "In ChatGPT on your Mac, ask: Install Olympus on my Mac." },
+      open_olympus: { label: "Open Olympus on your Mac", help: "Open Olympus on your Mac, then check again here." },
+      wake_mac: {
+        label: "How to keep it available",
+        help: "Keep your Mac on, awake and online with Olympus running. Answers resume on their own when it is back."
+      },
+      retry: { label: "Try again", help: "" }
+    }
+  };
+  DASHBOARD_CHATGPT_PAGE_COPY = {
+    title: "Olympus",
+    loading: "Checking your Mac…",
+    upToDate: "Olympus is up to date.",
+    needsYou: "Needs you",
+    sources: "Sources",
+    sourcesLocal: "On your Mac",
+    sourcesCloud: "Accounts",
+    noSources: "No sources yet.",
+    progress: "Progress",
+    progressInitial: "First index",
+    progressRefresh: "Catching up",
+    percentDone: "{percent}% done",
+    left: "{count} {unit} left",
+    eta: "about {duration}",
+    stalled: "stalled",
+    details: "Details",
+    stageLine: "{stage}: {done} of {total} {unit}",
+    models: "Models",
+    modelSearch: "Search",
+    modelAnswers: "Answers",
+    modelBuiltIn: "Built-in",
+    modelCustom: "Custom",
+    modelReady: "Ready",
+    modelDownloading: "Downloading {percent}%",
+    modelNotWorking: "Not working",
+    modelNotReady: "Not ready",
+    synced: "Synced {when}",
+    updated: "Updated {when}",
+    checkAgain: "Check again",
+    tryAgain: "Try again",
+    openOlympus: "Open Olympus",
+    moreActions: "More actions for {source}",
+    confirmPrompt: "Are you sure?",
+    confirm: "Yes, {label}",
+    cancel: "Cancel",
+    working: "Working…",
+    justNow: "just now",
+    minutesAgo: "{n} min ago",
+    hoursAgo: "{n} hr ago",
+    daysAgo: "{n} days ago",
+    dayAgo: "1 day ago",
+    durationMinutes: "{n} min",
+    durationHours: "{n} hr",
+    durationHoursMinutes: "{h} hr {m} min",
+    durationDays: "{n} days",
+    durationLessThanMinute: "less than a minute",
+    units: {
+      files: { one: "file", many: "files" },
+      messages: { one: "message", many: "messages" },
+      items: { one: "item", many: "items" }
+    }
+  };
 });
 
 // src/workers/dashboard/phases.ts
@@ -96611,6 +96700,778 @@ var init_webStandardStreamableHttp = __esm(() => {
 // src/workers/chatgpt/dashboard-contract.ts
 var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard";
 
+// src/workers/dashboard/chatgpt/client.ts
+function chatgptDashboardClient(config2) {
+  const doc2 = document;
+  const root = doc2.getElementById("app");
+  const P = config2.page;
+  const C = config2.connection;
+  const GLOBAL_STATES = ["not_installed", "installing", "mac_offline", "relay_unavailable"];
+  const state = {
+    data: null,
+    relayDown: false,
+    busy: "",
+    confirming: "",
+    helpOpen: false,
+    theme: "",
+    displayMode: "",
+    canFullscreen: true,
+    open: {}
+  };
+  let nextId = 1;
+  const pending = {};
+  function post(message) {
+    if (window.parent && window.parent !== window)
+      window.parent.postMessage(message, "*");
+  }
+  function request(method, params, timeoutMs) {
+    const id = nextId++;
+    post({ jsonrpc: "2.0", id, method, params: params || {} });
+    return new Promise((resolve10, reject) => {
+      const timer = timeoutMs ? setTimeout(() => {
+        delete pending[id];
+        reject(new Error("timeout"));
+      }, timeoutMs) : null;
+      pending[id] = { resolve: resolve10, reject, timer };
+    });
+  }
+  function notify(method, params) {
+    post({ jsonrpc: "2.0", method, params: params || {} });
+  }
+  function openai() {
+    return window.openai || null;
+  }
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent)
+      return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== "2.0")
+      return;
+    if (message.id !== undefined && pending[message.id]) {
+      const entry = pending[message.id];
+      delete pending[message.id];
+      if (entry.timer)
+        clearTimeout(entry.timer);
+      if (message.error)
+        entry.reject(message.error);
+      else
+        entry.resolve(message.result);
+      return;
+    }
+    if (message.method === "ui/notifications/tool-result")
+      acceptResult(message.params, true);
+    else if (message.method === "ui/notifications/host-context-changed")
+      applyHostContext(message.params);
+  });
+  function applyHostContext(context) {
+    if (!context || typeof context !== "object")
+      return;
+    if (context.theme === "light" || context.theme === "dark")
+      state.theme = context.theme;
+    if (typeof context.displayMode === "string")
+      state.displayMode = context.displayMode;
+    if (Array.isArray(context.availableDisplayModes)) {
+      state.canFullscreen = context.availableDisplayModes.indexOf("fullscreen") >= 0;
+    }
+    render();
+  }
+  function readOpenAiGlobals() {
+    const host = openai();
+    if (!host)
+      return;
+    if (host.theme === "light" || host.theme === "dark")
+      state.theme = host.theme;
+    if (typeof host.displayMode === "string")
+      state.displayMode = host.displayMode;
+    if (host.toolOutput && isDashboard(host.toolOutput) && host.toolOutput !== state.data) {
+      state.data = host.toolOutput;
+      state.relayDown = false;
+    }
+  }
+  window.addEventListener("openai:set_globals", () => {
+    readOpenAiGlobals();
+    render();
+  });
+  let resultTimer = null;
+  function waitForResult() {
+    if (resultTimer)
+      clearTimeout(resultTimer);
+    resultTimer = setTimeout(() => {
+      resultTimer = null;
+      if (!state.data) {
+        state.relayDown = true;
+        render();
+      }
+    }, config2.resultTimeoutMs);
+  }
+  function isDashboard(value) {
+    return !!value && typeof value === "object" && value.v === 1 && !!value.connection && typeof value.connection.state === "string";
+  }
+  function acceptResult(result, fromHost) {
+    if (resultTimer) {
+      clearTimeout(resultTimer);
+      resultTimer = null;
+    }
+    if (!result || result.isError) {
+      state.relayDown = true;
+      render();
+      return false;
+    }
+    const content = result.structuredContent;
+    if (isDashboard(content)) {
+      state.data = content;
+      state.relayDown = false;
+      render();
+      return true;
+    }
+    if (fromHost) {
+      state.relayDown = true;
+      render();
+    }
+    return false;
+  }
+  function callTool(name, args, key) {
+    state.busy = key;
+    state.confirming = "";
+    render();
+    request("tools/call", { name, arguments: args || {} }, config2.resultTimeoutMs).then((result) => {
+      state.busy = "";
+      if (acceptResult(result, false))
+        return;
+      if (!state.relayDown && name !== config2.toolName)
+        refresh();
+    }, () => {
+      state.busy = "";
+      state.relayDown = true;
+      render();
+    });
+  }
+  function refresh() {
+    callTool(config2.toolName, {}, "refresh");
+  }
+  function openLink(href) {
+    if (typeof href !== "string" || href.slice(0, 6) !== "https:")
+      return;
+    const host = openai();
+    if (host && typeof host.openExternal === "function")
+      host.openExternal({ href });
+    else
+      request("ui/open-link", { url: href }).then(() => {
+        return;
+      }, () => {
+        return;
+      });
+  }
+  function goFullscreen() {
+    const host = openai();
+    if (host && typeof host.requestDisplayMode === "function")
+      host.requestDisplayMode({ mode: "fullscreen" });
+    else
+      request("ui/request-display-mode", { mode: "fullscreen" }).then(() => {
+        return;
+      }, () => {
+        return;
+      });
+  }
+  function fill(template, values) {
+    let out = template;
+    for (const key of Object.keys(values))
+      out = out.split("{" + key + "}").join(String(values[key]));
+    return out;
+  }
+  function count(value) {
+    return Math.max(0, Math.round(value)).toLocaleString("en-US");
+  }
+  function unitWord(unit, n) {
+    const words = P.units[unit] || P.units.items;
+    return n === 1 ? words.one : words.many;
+  }
+  function ago(iso) {
+    const at = Date.parse(iso);
+    if (!isFinite(at))
+      return "";
+    const minutes = Math.floor(Math.max(0, Date.now() - at) / 60000);
+    if (minutes < 1)
+      return P.justNow;
+    if (minutes < 60)
+      return fill(P.minutesAgo, { n: minutes });
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24)
+      return fill(P.hoursAgo, { n: hours });
+    const days = Math.floor(hours / 24);
+    return days === 1 ? P.dayAgo : fill(P.daysAgo, { n: days });
+  }
+  function duration3(seconds) {
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 1)
+      return P.durationLessThanMinute;
+    if (minutes < 60)
+      return fill(P.durationMinutes, { n: minutes });
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) {
+      const rest = minutes % 60;
+      return rest ? fill(P.durationHoursMinutes, { h: hours, m: rest }) : fill(P.durationHours, { n: hours });
+    }
+    return fill(P.durationDays, { n: Math.round(hours / 24) });
+  }
+  function percent(value) {
+    const n = Math.max(0, Math.min(100, Number(value) || 0));
+    return String(Math.floor(n));
+  }
+  function icon(glyph) {
+    const node = el("span", "icon", glyph);
+    node.setAttribute("aria-hidden", "true");
+    return node;
+  }
+  function el(tag, cls, text) {
+    const node = doc2.createElement(tag);
+    if (cls)
+      node.className = cls;
+    if (text !== undefined)
+      node.textContent = text;
+    return node;
+  }
+  function add(parent, ...children2) {
+    for (const child of children2)
+      if (child)
+        parent.appendChild(child);
+    return parent;
+  }
+  let accentUsed = false;
+  function button(label, key, onClick, style) {
+    const node = el("button", "btn", label);
+    node.type = "button";
+    node.setAttribute("data-key", key);
+    if (style === "danger")
+      node.className = "btn danger";
+    else if (style === "main" && onClick && !accentUsed) {
+      node.className = "btn primary";
+      accentUsed = true;
+    }
+    if (onClick)
+      node.addEventListener("click", onClick);
+    else
+      node.disabled = true;
+    return node;
+  }
+  function progressBar2(value, label) {
+    const bar = el("div", "bar");
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-valuemin", "0");
+    bar.setAttribute("aria-valuemax", "100");
+    bar.setAttribute("aria-valuenow", percent(value));
+    bar.setAttribute("aria-label", label);
+    const fillNode = el("div", "bar-fill");
+    fillNode.style.width = percent(value) + "%";
+    return add(bar, fillNode);
+  }
+  function details(key, summary, cls) {
+    const node = el("details", cls);
+    node.setAttribute("data-open-key", key);
+    if (state.open[key])
+      node.open = true;
+    node.addEventListener("toggle", () => {
+      state.open[key] = node.open;
+      reportHeight();
+    });
+    const head = el("summary");
+    head.setAttribute("data-key", "summary:" + key);
+    add(head, summary);
+    return add(node, head);
+  }
+  function connectionState() {
+    if (state.relayDown)
+      return "relay_unavailable";
+    return state.data ? String(state.data.connection.state) : "";
+  }
+  function globalReason() {
+    const current = connectionState();
+    if (GLOBAL_STATES.indexOf(current) < 0)
+      return "";
+    return (C[current] || C.relay_unavailable).disabledReason;
+  }
+  function compact() {
+    return state.displayMode !== "" && state.displayMode !== "fullscreen";
+  }
+  function fixControl(fix, key, style, allowConfirm) {
+    const wrap = el("span", "fix");
+    if (!fix || typeof fix.label !== "string")
+      return wrap;
+    const blocked = globalReason();
+    if (blocked || fix.disabledReason) {
+      add(wrap, button(fix.label, key, null, style), el("span", "reason", blocked || String(fix.disabledReason)));
+      return wrap;
+    }
+    if (state.busy === key) {
+      const busy = button(P.working, key, null, style);
+      busy.setAttribute("aria-busy", "true");
+      return add(wrap, busy);
+    }
+    let action = null;
+    if (typeof fix.tool === "string" && fix.tool)
+      action = () => callTool(fix.tool, fix.args || {}, key);
+    else if (typeof fix.href === "string" && fix.href)
+      action = () => openLink(fix.href);
+    if (fix.destructive && action) {
+      if (!allowConfirm)
+        return wrap;
+      if (state.confirming === key) {
+        const run = action;
+        wrap.className = "fix confirm";
+        add(wrap, el("span", "reason strong", P.confirmPrompt), button(fill(P.confirm, { label: String(fix.label).toLowerCase() }), key + ":yes", run, "danger"), button(P.cancel, key + ":no", () => {
+          state.confirming = "";
+          render(key);
+        }, "plain"));
+        return wrap;
+      }
+      return add(wrap, button(fix.label, key, () => {
+        state.confirming = key;
+        render(key + ":no");
+      }, "plain"));
+    }
+    return add(wrap, button(fix.label, key, action, style));
+  }
+  function connectionBanner() {
+    const current = connectionState();
+    if (!current || current === "ready")
+      return null;
+    const copy = C[current] || C.relay_unavailable;
+    const tone = current === "installing" ? "info" : "warn";
+    const banner = el("section", "banner " + tone);
+    banner.setAttribute("role", current === "installing" ? "status" : "alert");
+    add(banner, icon(current === "installing" ? "…" : "!"));
+    const body = add(el("div", "banner-body"), el("p", "banner-title", copy.title));
+    const conn = state.data ? state.data.connection : {};
+    if (current === "installing" && conn.progress) {
+      const pct = percent(conn.progress.percent);
+      const label = typeof conn.progress.label === "string" ? conn.progress.label : "";
+      add(body, el("p", "muted", label + " · " + pct + "%"), progressBar2(conn.progress.percent, label));
+    }
+    if (current === "mac_offline" && typeof conn.lastSeenAt === "string" && ago(conn.lastSeenAt)) {
+      add(body, el("p", "muted", fill(C.mac_offline.lastSeen, { when: ago(conn.lastSeenAt) })));
+    }
+    const actions = el("div", "actions");
+    if (current === "relay_unavailable") {
+      add(actions, state.busy === "refresh" ? button(P.working, "refresh", null, "main") : button(C.actions.retry.label, "refresh", refresh, "main"));
+    } else if (current !== "installing" && conn.action && C.actions[conn.action.id]) {
+      const words = C.actions[conn.action.id];
+      const href = conn.action.href;
+      let onClick;
+      if (conn.action.id === "retry")
+        onClick = refresh;
+      else if (typeof href === "string" && href)
+        onClick = () => openLink(href);
+      else
+        onClick = () => {
+          state.helpOpen = !state.helpOpen;
+          render("connection-action");
+        };
+      const control = button(words.label, "connection-action", onClick, "main");
+      if (!href && conn.action.id !== "retry")
+        control.setAttribute("aria-expanded", String(state.helpOpen));
+      add(actions, control);
+      if (state.helpOpen && !href && words.help)
+        add(body, el("p", "help", words.help));
+    }
+    if (actions.childNodes.length)
+      add(body, actions);
+    return add(banner, body);
+  }
+  function itemBanner(item, key, allowConfirm) {
+    const banner = el("section", "banner warn");
+    banner.setAttribute("role", "alert");
+    add(banner, icon("!"));
+    const body = add(el("div", "banner-body"), el("p", "banner-title", String(item.sentence || "")));
+    add(body, add(el("div", "actions"), fixControl(item.fix, key, "main", allowConfirm)));
+    return add(banner, body);
+  }
+  function staleLine() {
+    const data = state.data;
+    if (!data || state.relayDown)
+      return null;
+    const at = Date.parse(data.generatedAt);
+    if (!isFinite(at) || Date.now() - at < config2.staleAfterMs)
+      return null;
+    const line = add(el("p", "stale"), el("span", "muted", fill(P.updated, { when: ago(data.generatedAt) })));
+    return add(line, state.busy === "refresh" ? button(P.working, "refresh", null, "plain") : button(P.checkAgain, "refresh", refresh, "plain"));
+  }
+  function needsYouSection(items) {
+    if (!items.length)
+      return null;
+    const section = add(el("section", "section"), el("h2", "", P.needsYou));
+    const list = el("ul", "rows");
+    items.forEach((item, index) => {
+      const key = "need:" + String(item.id || index);
+      const row = add(el("li", "row need"), el("span", "dot tone-warn"), el("p", "row-text", String(item.sentence || "")));
+      add(list, add(row, fixControl(item.fix, key, "main", true)));
+    });
+    return add(section, list);
+  }
+  function sourceRow(source) {
+    const id = String(source.id || source.label);
+    const status = String(source.status || "");
+    const tone = config2.statusTone[status] || "off";
+    const row = el("li", "row source");
+    const main = el("div", "source-main");
+    const head = add(el("p", "source-head"), el("span", "dot tone-" + tone), el("span", "source-name", String(source.label || "")));
+    add(head, el("span", "status", status));
+    add(main, head);
+    const meta2 = [];
+    if (typeof source.detail === "string" && source.detail)
+      meta2.push(source.detail);
+    if (typeof source.lastSyncAt === "string" && ago(source.lastSyncAt))
+      meta2.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
+    if (meta2.length)
+      add(main, el("p", "muted", meta2.join(" · ")));
+    add(row, main);
+    const controls = el("div", "source-actions");
+    if (source.primary)
+      add(controls, fixControl(source.primary, "primary:" + id, "main", true));
+    const menu = Array.isArray(source.menu) ? source.menu : [];
+    if (menu.length) {
+      const glyph = el("span", "", "⋯");
+      glyph.setAttribute("aria-hidden", "true");
+      const hidden = el("span", "sr", fill(P.moreActions, { source: String(source.label || "") }));
+      const box = details("menu:" + id, add(el("span"), glyph, hidden), "menu");
+      const panel = el("div", "menu-panel");
+      menu.forEach((fix, index) => add(panel, fixControl(fix, "menu:" + id + ":" + index, "plain", true)));
+      add(controls, add(box, panel));
+    }
+    if (controls.childNodes.length)
+      add(row, controls);
+    return row;
+  }
+  function sourcesSection(sources) {
+    const section = add(el("section", "section"), el("h2", "", P.sources));
+    if (!sources.length)
+      return add(section, el("p", "muted", P.noSources));
+    const ordered = sources.filter((source) => source.group === "local").concat(sources.filter((source) => source.group !== "local"));
+    let group = "";
+    let list = null;
+    for (const source of ordered) {
+      if (source.group !== group || !list) {
+        group = source.group;
+        add(section, el("h3", "", group === "local" ? P.sourcesLocal : P.sourcesCloud));
+        list = add(section, el("ul", "rows")).lastChild;
+      }
+      add(list, sourceRow(source));
+    }
+    return section;
+  }
+  function progressText(progress) {
+    const parts = [fill(P.percentDone, { percent: percent(progress.percent) })];
+    const left = Number(progress.itemsLeft) || 0;
+    parts.push(fill(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
+    if (typeof progress.etaSeconds === "number" && progress.etaSeconds > 0 && !progress.stalled) {
+      parts.push(fill(P.eta, { duration: duration3(progress.etaSeconds) }));
+    }
+    if (progress.stalled)
+      parts.push(P.stalled);
+    return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
+  }
+  function progressSection(progress, withDetails) {
+    if (!progress)
+      return null;
+    const section = add(el("section", "section"), el("h2", "", P.progress));
+    const line = el("p", progress.stalled ? "progress-line stalled" : "progress-line", progressText(progress));
+    add(section, line, progressBar2(progress.percent, P.progress));
+    const stages = Array.isArray(progress.details) ? progress.details : [];
+    if (withDetails && stages.length) {
+      const box = details("progress-details", doc2.createTextNode(P.details), "disclosure");
+      const list = el("ul", "plain");
+      stages.forEach((stage) => add(list, el("li", "", fill(P.stageLine, {
+        stage: String(stage.stage || ""),
+        done: count(stage.done),
+        total: count(stage.total),
+        unit: unitWord(stage.unit, Number(stage.total) || 0)
+      }))));
+      add(section, add(box, list));
+    }
+    return section;
+  }
+  function modelWords(models) {
+    const embedding = models.embedding || {};
+    const kind = embedding.kind === "built_in" ? P.modelBuiltIn : P.modelCustom;
+    let ready = P.modelReady;
+    if (embedding.state === "downloading")
+      ready = fill(P.modelDownloading, { percent: percent(embedding.percent) });
+    else if (embedding.state === "failed")
+      ready = P.modelNotWorking;
+    const answers = models.answers;
+    const answersWords = answers ? String(answers.label || "") + " · " + (answers.ready ? P.modelReady : P.modelNotReady) : "";
+    let overall = ready;
+    if (embedding.state === "ready" && answers && !answers.ready)
+      overall = P.modelNotReady;
+    return { summary: P.models + " — " + kind + " · " + overall, search: kind + " · " + ready, answers: answersWords };
+  }
+  function modelsSection(models) {
+    if (!models || !models.embedding)
+      return null;
+    const words = modelWords(models);
+    const box = details("models", doc2.createTextNode(words.summary), "section models");
+    const list = add(el("ul", "plain"), el("li", "", P.modelSearch + ": " + words.search));
+    if (words.answers)
+      add(list, el("li", "", P.modelAnswers + ": " + words.answers));
+    add(box, list);
+    if (models.change)
+      add(box, add(el("div", "actions"), fixControl(models.change, "models:change", "plain", true)));
+    return box;
+  }
+  function renderCompact() {
+    const card = el("div", "card compact");
+    const data = state.data;
+    const top = connectionBanner() || (data && data.blocker ? itemBanner(data.blocker, "blocker", false) : null) || (data && data.needsYou && data.needsYou[0] ? itemBanner(data.needsYou[0], "need:" + String(data.needsYou[0].id || 0), false) : null);
+    add(card, top);
+    if (!top && !data)
+      add(card, el("p", "muted", P.loading));
+    if (data && data.progress && !state.relayDown)
+      add(card, el("p", "progress-line", progressText(data.progress)));
+    else if (!top && data)
+      add(card, el("p", "", P.upToDate));
+    if (state.canFullscreen) {
+      const buttons = card.querySelectorAll("button").length;
+      if (buttons < 2)
+        add(card, add(el("div", "actions"), button(P.openOlympus, "open", goFullscreen, "plain")));
+    }
+    return card;
+  }
+  function renderFull() {
+    const page = el("main", "page");
+    add(page, el("h1", "", P.title));
+    const data = state.data;
+    add(page, connectionBanner());
+    if (!data) {
+      if (!state.relayDown)
+        add(page, el("p", "muted", P.loading));
+      return page;
+    }
+    add(page, data.blocker ? itemBanner(data.blocker, "blocker", true) : null);
+    add(page, staleLine());
+    add(page, needsYouSection(Array.isArray(data.needsYou) ? data.needsYou : []));
+    add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
+    add(page, progressSection(data.progress, true));
+    add(page, modelsSection(data.models));
+    return page;
+  }
+  function render(focusKey) {
+    const active = doc2.activeElement;
+    const keepFocus = focusKey || (active && active.getAttribute ? active.getAttribute("data-key") : "") || "";
+    const theme = state.theme;
+    if (theme)
+      doc2.documentElement.setAttribute("data-theme", theme);
+    else
+      doc2.documentElement.removeAttribute("data-theme");
+    doc2.documentElement.setAttribute("data-mode", compact() ? "inline" : "fullscreen");
+    accentUsed = false;
+    const view = compact() ? renderCompact() : renderFull();
+    root.textContent = "";
+    root.appendChild(view);
+    if (keepFocus) {
+      const nodes = root.querySelectorAll("[data-key]");
+      for (let i = 0;i < nodes.length; i++) {
+        const node = nodes[i];
+        if (node.getAttribute("data-key") === keepFocus) {
+          node.focus();
+          break;
+        }
+      }
+    }
+    reportHeight();
+  }
+  function reportHeight() {
+    const height = Math.ceil(doc2.documentElement.scrollHeight || doc2.body.scrollHeight || 0);
+    const host = openai();
+    if (host && typeof host.notifyIntrinsicHeight === "function")
+      host.notifyIntrinsicHeight(height);
+    notify("ui/notifications/size-changed", { height });
+  }
+  readOpenAiGlobals();
+  render();
+  request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    appInfo: { name: "olympus-dashboard", version: "1" },
+    appCapabilities: {}
+  }, config2.resultTimeoutMs).then((result) => {
+    if (result && result.hostContext)
+      applyHostContext(result.hostContext);
+    notify("ui/notifications/initialized");
+  }, () => {
+    return;
+  });
+  if (!state.data)
+    waitForResult();
+}
+
+// src/workers/dashboard/chatgpt/page.ts
+function vars(palette) {
+  return [
+    `--bg:${palette.bg}`,
+    `--text:${palette.text}`,
+    `--muted:${palette.muted}`,
+    `--line:${palette.line}`,
+    `--surface:${palette.surface}`,
+    `--accent:${palette.accent}`,
+    `--on-accent:${palette.onAccent}`,
+    `--focus:${palette.focus}`,
+    `--warn-bg:${palette.warnBg}`,
+    `--warn-line:${palette.warnLine}`,
+    `--info-bg:${palette.infoBg}`,
+    `--info-line:${palette.infoLine}`,
+    `--danger:${palette.danger}`,
+    `--good:${palette.good}`,
+    `--run:${palette.run}`,
+    `--warn:${palette.warn}`,
+    `--bad:${palette.bad}`,
+    `--off:${palette.off}`,
+    `--idle:${palette.idle}`
+  ].join(";");
+}
+function chatgptDashboardPageHtml(options = {}) {
+  const config2 = {
+    toolName: DASHBOARD_TOOL_NAME,
+    connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
+    page: DASHBOARD_CHATGPT_PAGE_COPY,
+    statusTone: STATUS_TONE,
+    resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
+    staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS
+  };
+  return [
+    "<!doctype html>",
+    '<html lang="en">',
+    "<head>",
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>${DASHBOARD_CHATGPT_PAGE_COPY.title}</title>`,
+    `<style>${CHATGPT_DASHBOARD_CSS}</style>`,
+    "</head>",
+    "<body>",
+    '<div id="app"></div>',
+    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config2)});</script>`,
+    "</body>",
+    "</html>",
+    ""
+  ].join(`
+`);
+}
+function scriptJson(value) {
+  return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
+}
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_DASHBOARD_STALE_AFTER_MS, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
+var init_page = __esm(() => {
+  init_vocabulary();
+  CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60000;
+  STATUS_TONE = Object.fromEntries(Object.keys(DASHBOARD_STATUS_PRESENTATION).map((status) => [status, DASHBOARD_STATUS_PRESENTATION[status].colorToken]));
+  CHATGPT_DASHBOARD_LIGHT = {
+    bg: "#ffffff",
+    text: "#0d0d0d",
+    muted: "#5d5d5d",
+    line: "#d9d9d9",
+    surface: "#f7f7f8",
+    accent: "#5b45c2",
+    onAccent: "#ffffff",
+    focus: "#2f5bd6",
+    warnBg: "#fff6e0",
+    warnLine: "#8a5a00",
+    infoBg: "#f2f0fc",
+    infoLine: "#6d5bd0",
+    danger: "#b42318",
+    good: "#2e7d4f",
+    run: "#6d5bd0",
+    warn: "#a86a00",
+    bad: "#c0362c",
+    off: "#6b6e76",
+    idle: "#8e8e93"
+  };
+  CHATGPT_DASHBOARD_DARK = {
+    bg: "#212121",
+    text: "#ececec",
+    muted: "#b4b4b4",
+    line: "#4a4a4a",
+    surface: "#2a2a2a",
+    accent: "#a594f0",
+    onAccent: "#14121f",
+    focus: "#8fb0ff",
+    warnBg: "#2e2614",
+    warnLine: "#c99a3e",
+    infoBg: "#24213a",
+    infoLine: "#a594f0",
+    danger: "#f07468",
+    good: "#5fb582",
+    run: "#a594f0",
+    warn: "#d9a441",
+    bad: "#f07468",
+    off: "#9a9ca3",
+    idle: "#8e8e93"
+  };
+  CHATGPT_DASHBOARD_CSS = `
+:root{${vars(CHATGPT_DASHBOARD_LIGHT)};color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){${vars(CHATGPT_DASHBOARD_DARK)}}}
+:root[data-theme=dark]{${vars(CHATGPT_DASHBOARD_DARK)}}
+:root[data-theme=light]{color-scheme:light}
+:root[data-theme=dark]{color-scheme:dark}
+*{box-sizing:border-box}
+html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
+body{margin:0;background:var(--bg);color:var(--text);font-size:0.9375rem;overflow-wrap:anywhere}
+p{margin:0}
+h1{font-size:1.25rem;font-weight:600;margin:0 0 1rem}
+h2{font-size:1rem;font-weight:600;margin:0 0 0.5rem}
+h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25rem}
+.page{max-width:48rem;margin:0 auto;padding:1.25rem 1rem 2rem}
+.card{padding:0.75rem}
+.section{margin-top:1.5rem}
+.muted{color:var(--muted);font-size:0.875rem}
+.banner{display:flex;gap:0.75rem;align-items:flex-start;padding:0.875rem 1rem;border:1px solid var(--warn-line);border-left-width:4px;border-radius:0.75rem;background:var(--warn-bg);margin-bottom:0.75rem}
+.banner.info{border-color:var(--info-line);background:var(--info-bg)}
+.banner-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:0.5rem}
+.banner-title{font-weight:600}
+.icon{flex:none;width:1.5rem;height:1.5rem;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-weight:700;background:var(--warn-line);color:var(--bg)}
+.banner.info .icon{background:var(--info-line)}
+.help{user-select:text;-webkit-user-select:text;padding:0.5rem 0.75rem;border:1px solid var(--line);border-radius:0.5rem;background:var(--bg)}
+.stale{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem;margin:0.25rem 0 0.5rem}
+.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 1rem;padding:0.75rem 0;border-bottom:1px solid var(--line)}
+.row-text{flex:1 1 14rem;min-width:0}
+.need .dot{margin-top:0}
+.source-main{flex:1 1 16rem;min-width:0}
+.source-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
+.source-name{font-weight:600}
+.status{color:var(--muted);font-size:0.875rem}
+.source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
+.dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
+.tone-good{background:var(--good)}.tone-run{background:var(--run)}.tone-warn{background:var(--warn)}
+.tone-bad{background:var(--bad)}.tone-off{background:var(--off)}.tone-line{background:transparent;border:2px solid var(--idle)}
+.fix{display:inline-flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
+.reason{color:var(--muted);font-size:0.875rem}
+.reason.strong{color:var(--text);font-weight:600}
+.actions{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center}
+.btn{font:inherit;font-size:0.875rem;font-weight:500;min-height:2.25rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
+.btn:hover:not(:disabled){background:var(--surface)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.08)}
+.btn.danger{border-color:var(--danger);color:var(--danger)}
+.btn:disabled{cursor:not-allowed;color:var(--muted);background:var(--surface);border-style:dashed}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+summary{cursor:pointer;border-radius:0.375rem}
+.menu summary{list-style:none;font-size:1.25rem;line-height:1;min-width:2.25rem;min-height:2.25rem;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:999px}
+.menu summary::-webkit-details-marker{display:none}
+.menu{display:flex;flex-direction:column;align-items:flex-end;gap:0.5rem}
+.menu-panel{display:flex;flex-direction:column;align-items:flex-end;gap:0.5rem;padding-top:0.25rem}
+.progress-line{margin-bottom:0.5rem}
+.progress-line.stalled{font-weight:600}
+.bar{height:0.5rem;border-radius:999px;background:var(--surface);border:1px solid var(--line)}
+.bar-fill{height:100%;border-radius:999px;background:var(--run);min-width:0}
+.disclosure{margin-top:0.75rem}
+.disclosure summary,.models summary{color:var(--muted);font-size:0.875rem;padding:0.25rem 0}
+.models summary{font-size:1rem;color:var(--text);font-weight:600}
+.models{padding-top:0.75rem;border-top:1px solid var(--line)}
+.plain{margin:0.5rem 0;padding-left:1.25rem}
+.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+[data-mode=inline] .banner{margin-bottom:0.5rem}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.source-actions{justify-content:flex-start;width:100%}.menu,.menu-panel{align-items:flex-start}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+`;
+});
+
 // src/workers/chatgpt/dashboard-resource.ts
 function dashboardResourceMeta() {
   return {
@@ -96619,86 +97480,11 @@ function dashboardResourceMeta() {
   };
 }
 function dashboardResourceHtml() {
-  return PLACEHOLDER_HTML;
+  return chatgptDashboardPageHtml();
 }
-var MCP_APP_MIME_TYPE = "text/html;profile=mcp-app", DASHBOARD_RESOURCE, DASHBOARD_UI_DOMAIN = "https://mcp.olympusplugin.ai", PLACEHOLDER_HTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Olympus</title>
-<style>
-  :root { color-scheme: light dark; font: 14px/1.45 system-ui, sans-serif; }
-  body { margin: 16px; }
-  .note { padding: 8px 10px; border: 1px dashed currentColor; opacity: .7; margin-bottom: 12px; }
-  pre { white-space: pre-wrap; word-break: break-word; }
-  button { margin: 4px 6px 4px 0; }
-</style>
-</head>
-<body>
-<div class="note">Placeholder dashboard. The real Olympus dashboard replaces this page.</div>
-<div id="fixes"></div>
-<pre id="out">Waiting for Olympus…</pre>
-<script>
-(function () {
-  var nextId = 1;
-  var pending = {};
-  function send(method, params) {
-    var id = nextId++;
-    window.parent.postMessage({ jsonrpc: '2.0', id: id, method: method, params: params || {} }, '*');
-    return new Promise(function (resolve, reject) { pending[id] = { resolve: resolve, reject: reject }; });
-  }
-  function notify(method, params) {
-    window.parent.postMessage({ jsonrpc: '2.0', method: method, params: params || {} }, '*');
-  }
-  function render(result) {
-    var data = result && result.structuredContent;
-    document.getElementById('out').textContent = data ? JSON.stringify(data, null, 2) : 'No dashboard data.';
-    var fixes = document.getElementById('fixes');
-    fixes.textContent = '';
-    var items = [];
-    if (data) {
-      if (data.blocker) items.push(data.blocker.fix);
-      (data.needsYou || []).forEach(function (item) { items.push(item.fix); });
-      (data.sources || []).forEach(function (source) { if (source.primary) items.push(source.primary); });
-    }
-    items.forEach(function (fix) {
-      if (!fix) return;
-      var button = document.createElement('button');
-      button.textContent = fix.label;
-      if (!fix.tool) { button.disabled = true; button.title = fix.disabledReason || ''; }
-      else button.onclick = function () {
-        send('tools/call', { name: fix.tool, arguments: fix.args || {} }).then(render, function () {
-          document.getElementById('out').textContent = 'Could not reach Olympus.';
-        });
-      };
-      fixes.appendChild(button);
-    });
-  }
-  window.addEventListener('message', function (event) {
-    if (event.source !== window.parent) return;
-    var message = event.data;
-    if (!message || message.jsonrpc !== '2.0') return;
-    if (message.id !== undefined && pending[message.id]) {
-      var entry = pending[message.id];
-      delete pending[message.id];
-      if (message.error) entry.reject(message.error); else entry.resolve(message.result);
-      return;
-    }
-    if (message.method === 'ui/notifications/tool-result') render(message.params);
-  });
-  send('ui/initialize', {
-    protocolVersion: '2026-01-26',
-    appInfo: { name: 'olympus-dashboard-placeholder', version: '0' },
-    appCapabilities: {}
-  }).then(function () { notify('ui/notifications/initialized'); }, function () {});
-  if (window.openai && window.openai.toolOutput) render({ structuredContent: window.openai.toolOutput });
-})();
-</script>
-</body>
-</html>
-`;
+var MCP_APP_MIME_TYPE = "text/html;profile=mcp-app", DASHBOARD_RESOURCE, DASHBOARD_UI_DOMAIN = "https://mcp.olympusplugin.ai";
 var init_dashboard_resource = __esm(() => {
+  init_page();
   DASHBOARD_RESOURCE = {
     uri: DASHBOARD_RESOURCE_URI,
     name: "Olympus dashboard",
