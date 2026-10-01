@@ -2,20 +2,17 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RELAY_AUTH_HEADER as CLIENT_RELAY_AUTH_HEADER } from '../connect-relay/client/local-endpoint.ts';
-import { runConnectionsCommand, runConnectionsTermsCommand } from '../src/cli.ts';
+import { RELAY_HEADER as CLIENT_RELAY_HEADER } from '../connect-relay/client/forward.ts';
+import { runConnectionsCommand } from '../src/cli.ts';
 import { configFromPluginConfig } from '../src/core/config.ts';
 import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
 import {
-  createRelayRequestVerifier,
   DEFAULT_RELAY_HOST,
   createRemotePublicUrlSource,
   emptyRemoteAccessStatus,
-  loadOrCreateRelayAuthSecret,
-  readTermsAcceptance,
-  RELAY_AUTH_HEADER,
+  isRelayedRequest,
+  RELAYED_REQUEST_HEADER,
   relayProcessRunning,
-  termsAccepted,
   remoteAccessDir,
   resolveRemoteAccessMode,
   writeRemoteAccessStatus,
@@ -45,19 +42,20 @@ function home(workerEnv = ''): { env: Record<string, string>; dir: string; root:
   return { env, dir: remoteAccessDir({ HOME: homeDir }), root };
 }
 
+const INSTALL_ID = 'abcdefghijklmnopqrstuvwxyz234567';
+const RELAY = 'https://mcp.olympusplugin.ai';
+
 function relayStatus(overrides: Partial<RemoteAccessStatusFile> = {}): RemoteAccessStatusFile {
   return {
     ...emptyRemoteAccessStatus('relay'),
-    relay_host: 'connect.olympusplugin.ai',
+    relay_host: 'mcp.olympusplugin.ai',
     local_url: 'http://127.0.0.1:28190',
-    public_base_url: 'https://abc123.connect.olympusplugin.ai',
+    public_base_url: RELAY,
     instance_id: 'instance-1',
     pid: process.pid,
-    install_id: 'abc123',
-    hostname: 'abc123.connect.olympusplugin.ai',
+    install_id: INSTALL_ID,
     relay: { state: 'online', reason: null, retry_in_ms: null },
-    certificate: { state: 'serving', not_after: '2026-12-23T00:00:00.000Z', reason: null, retry_in_ms: null },
-    terms_url: 'https://letsencrypt.org/documents/LE-SA-v1.5.pdf',
+    last_connected_at: '2026-10-01T09:00:00.000Z',
     ...overrides,
   };
 }
@@ -67,15 +65,15 @@ describe('remote access mode', () => {
 
   test('is off unless enabled, and uses exactly one public address', () => {
     expect(mode(undefined)).toEqual({ mode: 'off' });
-    expect(mode({ relayHost: 'connect.olympusplugin.ai' })).toEqual({ mode: 'off' });
-    expect(mode({ enabled: true, relayHost: 'Connect.OlympusPlugin.ai' })).toEqual({ mode: 'relay', relayHost: 'connect.olympusplugin.ai' });
+    expect(mode({ relayHost: 'mcp.olympusplugin.ai' })).toEqual({ mode: 'off' });
+    expect(mode({ enabled: true, relayHost: 'MCP.OlympusPlugin.ai' })).toEqual({ mode: 'relay', relayHost: 'mcp.olympusplugin.ai' });
     expect(mode({ enabled: true, publicBaseUrl: 'https://tunnel.trycloudflare.com/' })).toEqual({ mode: 'manual', publicBaseUrl: 'https://tunnel.trycloudflare.com' });
   });
 
   test('the relay host defaults to the Olympus relay, and never beside a tunnel of your own', () => {
-    expect(DEFAULT_RELAY_HOST).toBe('connect.olympusplugin.ai');
+    expect(DEFAULT_RELAY_HOST).toBe('mcp.olympusplugin.ai');
     // What the dashboard's Turn on remote access writes: only remote.enabled.
-    expect(mode({ enabled: true })).toEqual({ mode: 'relay', relayHost: 'connect.olympusplugin.ai' });
+    expect(mode({ enabled: true })).toEqual({ mode: 'relay', relayHost: 'mcp.olympusplugin.ai' });
     // The default is not materialized as config, so a publicBaseUrl owner is not in conflict.
     expect(mode({ enabled: true, publicBaseUrl: 'https://tunnel.example' })).toEqual({ mode: 'manual', publicBaseUrl: 'https://tunnel.example' });
     expect(configFromPluginConfig({ remote: { enabled: true } }).remote).toEqual({ enabled: true });
@@ -83,17 +81,17 @@ describe('remote access mode', () => {
       configSchema: { properties: { remote: { properties: { relayHost: Record<string, unknown> } } } };
     };
     expect(manifest.configSchema.properties.remote.properties.relayHost.default).toBeUndefined();
-    expect(manifest.configSchema.properties.remote.properties.relayHost.description).toContain('connect.olympusplugin.ai');
+    expect(manifest.configSchema.properties.remote.properties.relayHost.description).toContain('mcp.olympusplugin.ai');
   });
 
   test('refuses the relay and a manual public URL together, with a clear error', () => {
-    const conflict = mode({ enabled: true, relayHost: 'connect.olympusplugin.ai', publicBaseUrl: 'https://tunnel.example' });
+    const conflict = mode({ enabled: true, relayHost: 'mcp.olympusplugin.ai', publicBaseUrl: 'https://tunnel.example' });
     expect(conflict.mode).toBe('error');
     expect(conflict).toMatchObject({ error: expect.stringContaining('remote.relayHost and remote.publicBaseUrl are mutually exclusive') });
   });
 
   test('rejects malformed values by name', () => {
-    expect(mode({ enabled: true, relayHost: 'https://connect.olympusplugin.ai' })).toMatchObject({ error: expect.stringContaining('remote.relayHost') });
+    expect(mode({ enabled: true, relayHost: 'https://mcp.olympusplugin.ai' })).toMatchObject({ error: expect.stringContaining('remote.relayHost') });
     expect(mode({ enabled: true, publicBaseUrl: 'http://tunnel.example' })).toMatchObject({ error: expect.stringContaining('remote.publicBaseUrl is invalid') });
     expect(mode({ enabled: true, publicBaseUrl: 'https://tunnel.example/mcp' })).toMatchObject({ error: expect.stringContaining('no path') });
   });
@@ -122,20 +120,25 @@ describe('public base URL propagation to the worker', () => {
     expect((await metadata('127.0.0.1:1')).status).toBe(404);
     expect(await servers()).toEqual([{ url: '/' }]);
 
+    // Relay mode needs the install id: codes and tokens must name it.
+    writeRemoteAccessStatus(statusDir, relayStatus({ install_id: null }));
+    expect(source.current()).toBeUndefined();
+
     writeRemoteAccessStatus(statusDir, relayStatus());
-    const live = await metadata('abc123.connect.olympusplugin.ai');
+    expect(source.current()?.installId).toBe(INSTALL_ID);
+    const live = await metadata('mcp.olympusplugin.ai');
     expect(live.status).toBe(200);
     expect(await live.json()).toMatchObject({
-      resource: 'https://abc123.connect.olympusplugin.ai/mcp',
-      authorization_servers: ['https://abc123.connect.olympusplugin.ai'],
+      resource: `${RELAY}/mcp`,
+      authorization_servers: [RELAY],
     });
-    expect(await servers()).toEqual([{ url: 'https://abc123.connect.olympusplugin.ai' }]);
+    expect(await servers()).toEqual([{ url: RELAY }]);
     // Issuer and resource never come from Host: another host is refused, not reflected.
     expect((await metadata('evil.example')).status).toBe(421);
 
     // The relay stops: the address disappears without a restart.
     writeRemoteAccessStatus(statusDir, relayStatus({ public_base_url: null, relay: { state: 'stopped', reason: null, retry_in_ms: null } }));
-    expect((await metadata('abc123.connect.olympusplugin.ai')).status).toBe(404);
+    expect((await metadata('mcp.olympusplugin.ai')).status).toBe(404);
     expect(await servers()).toEqual([{ url: '/' }]);
 
     // A reported conflict is never served.
@@ -151,33 +154,18 @@ describe('public base URL propagation to the worker', () => {
     const source = createRemotePublicUrlSource({ ...dataEnv, OLYMPUS_PUBLIC_BASE_URL: 'https://mine.example' });
     expect(source.origin).toBe('env');
     expect(source.current()?.issuer).toBe('https://mine.example');
+    // A tunnel of the owner's own is not relay mode.
+    expect(source.current()?.installId).toBeUndefined();
   });
 });
 
-describe('relay header trust', () => {
-  test('the worker believes relay forwarding headers only with the per-install secret', () => {
-    const { root } = home();
-    const dataEnv = { XDG_DATA_HOME: join(root, 'data') };
-    const verify = createRelayRequestVerifier(dataEnv, { minIntervalMs: 0 });
+describe('relayed requests', () => {
+  test('a request carrying the relay marker, whatever its value, counts as relayed', () => {
     const request = (headers: Record<string, string>) => new Request('http://127.0.0.1:8010/connect/authorize', { headers });
-    // No secret on disk yet (relay never ran): nothing is trusted.
-    expect(verify(request({ 'x-olympus-relay': '1', 'x-forwarded-for': '203.0.113.9' }))).toBe(false);
-    const secret = loadOrCreateRelayAuthSecret(remoteAccessDir(dataEnv));
-    expect(loadOrCreateRelayAuthSecret(remoteAccessDir(dataEnv))).toBe(secret);
-    // A direct loopback caller forging the headers.
-    expect(verify(request({ 'x-olympus-relay': '1', 'x-forwarded-for': '203.0.113.9' }))).toBe(false);
-    // Flip the last character to one guaranteed to differ: a fixed 'A' left the
-    // secret unchanged whenever it already ended in 'A' (1 run in 64).
-    const forged = `${secret.slice(0, -1)}${secret.at(-1) === 'A' ? 'B' : 'A'}`;
-    expect(forged).not.toBe(secret);
-    expect(verify(request({ 'x-olympus-relay': '1', [RELAY_AUTH_HEADER]: forged }))).toBe(false);
-    expect(verify(request({ 'x-olympus-relay': '1', [RELAY_AUTH_HEADER]: 'short' }))).toBe(false);
-    expect(verify(request({ [RELAY_AUTH_HEADER]: secret }))).toBe(false);
-    // The relay's local endpoint.
-    expect(verify(request({ 'x-olympus-relay': '1', [RELAY_AUTH_HEADER]: secret }))).toBe(true);
-    expect(RELAY_AUTH_HEADER).toBe(CLIENT_RELAY_AUTH_HEADER);
-    // Written through the exclusive, randomly named temporary: nothing left behind.
-    expect(readdirSync(remoteAccessDir(dataEnv)).filter((name) => name.includes('.tmp.'))).toEqual([]);
+    expect(isRelayedRequest(request({}))).toBe(false);
+    expect(isRelayedRequest(request({ 'x-olympus-relay': 'anything' }))).toBe(true);
+    expect(isRelayedRequest(request({ 'X-Olympus-Relay': '' }))).toBe(true);
+    expect(RELAYED_REQUEST_HEADER).toBe(CLIENT_RELAY_HEADER);
   });
 });
 
@@ -210,50 +198,44 @@ describe('olympus connections URLs', () => {
     writeRemoteAccessStatus(dir, relayStatus());
     for (const command of [['add', 'Grok'], ['list']]) {
       expect(runConnectionsCommand(command, env)).toMatchObject({
-        url: 'https://abc123.connect.olympusplugin.ai/mcp',
-        openapi_url: 'https://abc123.connect.olympusplugin.ai/openapi.json',
-        oauth_issuer: 'https://abc123.connect.olympusplugin.ai',
+        url: `${RELAY}/mcp`,
+        openapi_url: `${RELAY}/openapi.json`,
+        oauth_issuer: RELAY,
       });
     }
-    expect(runConnectionsCommand(['pair'], env)).toMatchObject({ oauth_enabled: true, url: 'https://abc123.connect.olympusplugin.ai/mcp' });
+    expect(runConnectionsCommand(['pair'], env)).toMatchObject({ oauth_enabled: true, url: `${RELAY}/mcp` });
   });
 });
 
 describe('olympus connections status', () => {
-  test('reports mode, relay connection, public URLs and certificate expiry', () => {
+  test('reports mode, relay connection and public URLs', () => {
     const { env, dir } = home();
     writeRemoteAccessStatus(dir, relayStatus());
     expect(runConnectionsCommand(['status'], env)).toEqual({
       kind: 'remote_access_status',
-      schema: 'olympus.remote-access.status.v1',
+      schema: 'olympus.remote-access.status.v2',
       remote_enabled: true,
       mode: 'relay',
       error: null,
-      public_base_url: 'https://abc123.connect.olympusplugin.ai',
+      public_base_url: RELAY,
       public_base_url_source: 'relay',
-      urls: {
-        mcp: 'https://abc123.connect.olympusplugin.ai/mcp',
-        openapi: 'https://abc123.connect.olympusplugin.ai/openapi.json',
-        oauth_issuer: 'https://abc123.connect.olympusplugin.ai',
-      },
+      urls: { mcp: `${RELAY}/mcp`, openapi: `${RELAY}/openapi.json`, oauth_issuer: RELAY },
       local_url: 'http://127.0.0.1:28190',
       relay: {
-        host: 'connect.olympusplugin.ai',
+        host: 'mcp.olympusplugin.ai',
         state: 'online',
         connected: true,
         reason: null,
         retry_in_ms: null,
-        install_id: 'abc123',
-        hostname: 'abc123.connect.olympusplugin.ai',
+        install_id: INSTALL_ID,
+        last_connected_at: '2026-10-01T09:00:00.000Z',
       },
-      certificate: { state: 'serving', not_after: '2026-12-23T00:00:00.000Z', reason: null },
-      terms: { url: 'https://letsencrypt.org/documents/LE-SA-v1.5.pdf', accepted: false, accepted_at: null, accepted_url: null },
       updated_at: expect.any(String),
       next_step: null,
     });
   });
 
-  test('says what to do next: off, awaiting the agreement, a dead relay process, a conflict', () => {
+  test('says what to do next: off, an unreachable relay, a dead relay process, a conflict', () => {
     const { env, dir } = home();
     expect(runConnectionsCommand(['status'], env)).toMatchObject({
       mode: 'off',
@@ -262,79 +244,22 @@ describe('olympus connections status', () => {
       relay: { connected: false, state: null },
       next_step: expect.stringContaining('Turn on remote access in the Agents section'),
     });
+    // The relay is unreachable: a steady, named status. The issuer stays put.
     writeRemoteAccessStatus(dir, relayStatus({
-      public_base_url: null,
-      certificate: { state: 'awaiting_terms', not_after: null, reason: null, retry_in_ms: null },
-    }));
-    expect(runConnectionsCommand(['status'], env)).toMatchObject({
-      public_base_url: null,
-      certificate: { state: 'awaiting_terms' },
-      next_step: expect.stringContaining('olympus connections terms --accept'),
-    });
-    // The relay is unreachable (not deployed yet, or down): a steady, named status.
-    writeRemoteAccessStatus(dir, relayStatus({
-      public_base_url: null,
-      relay: { state: 'offline', reason: 'getaddrinfo ENOTFOUND relay.connect.olympusplugin.ai', retry_in_ms: 8_000 },
-      certificate: { state: 'none', not_after: null, reason: null, retry_in_ms: null },
+      relay: { state: 'offline', reason: 'could not reach the relay', retry_in_ms: 8_000 },
     }));
     expect(runConnectionsCommand(['status'], env)).toMatchObject({
       remote_enabled: true,
+      public_base_url: RELAY,
       relay: { state: 'offline', connected: false, retry_in_ms: 8_000 },
-      next_step: expect.stringContaining('Olympus relay unavailable (getaddrinfo ENOTFOUND relay.connect.olympusplugin.ai)'),
+      next_step: expect.stringContaining('Olympus relay unavailable (could not reach the relay)'),
     });
+    writeRemoteAccessStatus(dir, relayStatus({ relay: { state: 'connecting', reason: null, retry_in_ms: null } }));
+    expect(runConnectionsCommand(['status'], env)).toMatchObject({ next_step: 'Olympus is connecting to the relay.' });
     writeRemoteAccessStatus(dir, relayStatus({ pid: 2 ** 22 + 12345 }));
     expect(runConnectionsCommand(['status'], env)).toMatchObject({ relay: { state: 'not_running', connected: false } });
     writeRemoteAccessStatus(dir, { ...emptyRemoteAccessStatus('off'), error: 'remote.relayHost and remote.publicBaseUrl are mutually exclusive' });
     expect(runConnectionsCommand(['status'], env)).toMatchObject({ remote_enabled: false, error: expect.stringContaining('mutually exclusive'), next_step: expect.stringContaining('mutually exclusive') });
-  });
-});
-
-describe('olympus connections terms', () => {
-  test('shows the agreement the relay saw, and records acceptance only on --accept', async () => {
-    const { env, dir } = home();
-    writeRemoteAccessStatus(dir, relayStatus({ certificate: { state: 'awaiting_terms', not_after: null, reason: null, retry_in_ms: null } }));
-    const fetchTerms = async () => { throw new Error('must use the URL the relay reported'); };
-    const shown = await runConnectionsTermsCommand([], env, { fetchTerms });
-    expect(shown).toMatchObject({ kind: 'remote_access_terms', url: 'https://letsencrypt.org/documents/LE-SA-v1.5.pdf', accepted: false });
-    expect(readTermsAcceptance(dir)).toBeUndefined();
-
-    const accepted = await runConnectionsTermsCommand(['--accept'], env, { fetchTerms, now: () => new Date('2026-09-24T12:00:00.000Z') });
-    expect(accepted).toMatchObject({ accepted: true, accepted_at: '2026-09-24T12:00:00.000Z' });
-    expect(readTermsAcceptance(dir)).toEqual({ terms_url: 'https://letsencrypt.org/documents/LE-SA-v1.5.pdf', accepted_at: '2026-09-24T12:00:00.000Z' });
-    expect(runConnectionsCommand(['status'], env)).toMatchObject({ terms: { accepted: true } });
-
-    // A new agreement from the CA needs a new acceptance.
-    writeRemoteAccessStatus(dir, relayStatus({ terms_url: 'https://letsencrypt.org/documents/LE-SA-v1.6.pdf' }));
-    expect(await runConnectionsTermsCommand([], env, { fetchTerms })).toMatchObject({ accepted: false, url: 'https://letsencrypt.org/documents/LE-SA-v1.6.pdf' });
-    await expect(runConnectionsTermsCommand(['--yes'], env)).rejects.toThrow('Usage: olympus connections terms [--accept]');
-  });
-
-  test('a CA that publishes no agreement URL is not a dead end', async () => {
-    const { env, dir } = home();
-    // The relay child asked its CA and got no agreement URL.
-    writeRemoteAccessStatus(dir, relayStatus({
-      terms_url: null,
-      public_base_url: null,
-      certificate: { state: 'awaiting_terms', not_after: null, reason: null, retry_in_ms: null },
-    }));
-    const fetchTerms = async () => { throw new Error('must not substitute another CA\'s agreement'); };
-    expect(await runConnectionsTermsCommand([], env, { fetchTerms })).toMatchObject({
-      url: null,
-      accepted: false,
-      notice: expect.stringContaining('olympus connections terms --accept'),
-    });
-    expect(termsAccepted(dir, undefined)).toBe(false);
-    expect(await runConnectionsTermsCommand(['--accept'], env, { fetchTerms })).toMatchObject({ url: null, accepted: true });
-    // What the relay child asks before ordering: now yes, but a later real
-    // agreement from the CA still needs its own acceptance.
-    expect(termsAccepted(dir, undefined)).toBe(true);
-    expect(termsAccepted(dir, 'https://ca.example/agreement-v1.pdf')).toBe(false);
-  });
-
-  test('asks the CA directory when the relay has not reported an agreement yet', async () => {
-    const { env } = home();
-    const shown = await runConnectionsTermsCommand([], env, { fetchTerms: async () => 'https://letsencrypt.org/documents/LE-SA-v1.5.pdf' });
-    expect(shown).toMatchObject({ url: 'https://letsencrypt.org/documents/LE-SA-v1.5.pdf', accepted: false });
   });
 });
 

@@ -177,6 +177,14 @@ export interface OlympusConfig {
     enabled: boolean;
     relayHost?: string;
     publicBaseUrl?: string;
+    /**
+     * Directory reviewers' sign-in on a demo install only (synthetic sample
+     * data): approval by username and password through the relay. Inert
+     * unless the install's data directory also carries the demo marker
+     * (workers/remote-oauth/demo-consent.ts). `passwordHash` is an Argon2id
+     * hash (`Bun.password.hash`); the password itself is never stored.
+     */
+    demoConsent?: { enabled: boolean; username?: string; passwordHash?: string };
   };
   sourceIndex: {
     enabled: boolean;
@@ -532,6 +540,14 @@ export function configFromPluginConfig(
     for (const key of ['relayHost', 'publicBaseUrl'] as const) {
       const value = remote[key];
       if (typeof value === 'string' && value.trim()) config.remote[key] = value.trim();
+    }
+    const demo = asRecord(remote.demoConsent);
+    if (demo) {
+      config.remote.demoConsent = { enabled: demo.enabled === true };
+      for (const key of ['username', 'passwordHash'] as const) {
+        const value = demo[key];
+        if (typeof value === 'string' && value.trim()) config.remote.demoConsent[key] = value.trim();
+      }
     }
   }
 

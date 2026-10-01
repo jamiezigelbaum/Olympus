@@ -1,0 +1,60 @@
+# Olympus relay v2. Installed by deploy/deploy.sh.
+# Binary:  /usr/local/bin/olympus-relay -> /opt/olympus-relay/olympus-relay-<sha> (bun build --compile)
+# State:   /var/lib/olympus-relay (registry.jsonl, admin.sock)
+# Front:   Caddy terminates TLS for mcp.olympusplugin.ai and proxies to 127.0.0.1:8787.
+# Operator: sudo -u relay olympus-relay admin status | revoke <install-id> | restore <install-id>
+
+[Unit]
+Description=Olympus relay (mcp.olympusplugin.ai)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=relay
+Group=relay
+Environment=RELAY_PUBLIC_HOST=mcp.olympusplugin.ai
+Environment=RELAY_LISTEN_HOST=127.0.0.1
+Environment=RELAY_LISTEN_PORT=8787
+Environment=RELAY_ENGINE_PORT=8010
+Environment=RELAY_REGISTRY_PATH=/var/lib/olympus-relay/registry.jsonl
+# OpenAI's domain verification token (one line, readable by user relay); absent answers 404.
+Environment=RELAY_OPENAI_APPS_CHALLENGE_FILE=/etc/olympus-relay/openai-apps-challenge
+StateDirectory=olympus-relay
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/olympus-relay
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+# Hardening. Loopback only: no privileged port, no capabilities.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# AF_UNIX: the operator socket at /var/lib/olympus-relay/admin.sock.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# MemoryDenyWriteExecute is left off: Bun's JIT needs writable executable memory.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ProtectProc=invisible
+ProcSubset=pid
+MemoryMax=1G
+TasksMax=512
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

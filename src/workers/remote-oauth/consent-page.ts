@@ -1,8 +1,13 @@
 /**
- * The approval page a hosted agent's OAuth flow opens, often on a phone and
- * always through the public address. It shows who is asking (the client's
- * name, the host that vouches for it, and where approval sends the browser)
- * and asks for a pairing code from `olympus connections pair`.
+ * The approval pages a hosted agent's OAuth flow opens. Both show who is
+ * asking (the client's name, the host that vouches for it, and where approval
+ * sends the browser).
+ *
+ * - Relay mode (`renderLoopbackConsentPage`): served only on this Mac's
+ *   loopback address, never through the relay, so being at the Mac is the
+ *   proof of ownership and approval is one click.
+ * - A tunnel the owner runs (`renderConsentPage`): served through the public
+ *   address, so it asks for a pairing code from `olympus connections pair`.
  *
  * Everything the client supplied is HTML-escaped. The page loads nothing from
  * anywhere: one inline style block allowed by a per-response nonce, no
@@ -85,6 +90,8 @@ label { display: block; font-weight: 600; margin-bottom: .35rem; }
 input[type=text] { width: 100%; font: 600 1.35rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em;
   padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg);
   text-transform: uppercase; }
+input.plain { width: 100%; font: 1rem/1.3 system-ui, sans-serif; letter-spacing: normal; text-transform: none;
+  padding: .6rem .7rem; margin-bottom: .9rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg); }
 .hint { color: var(--muted); font-size: .88rem; margin: .4rem 0 1.25rem; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 .actions { display: flex; gap: .75rem; }
@@ -144,6 +151,114 @@ ${error}
 </div>
 </form>
 <p class="small">Olympus runs on your own computer. This page was served by it.</p>
+</main>
+</body>
+</html>`;
+  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
+}
+
+export interface LoopbackConsentPageInput {
+  requestId: string;
+  csrf: string;
+  clientName: string;
+  /** Host of a pinned client's metadata URL; undefined for a self-registered local client. */
+  verifiedHost: string | undefined;
+  redirectHost: string;
+  redirectOrigin: string;
+}
+
+/**
+ * Relay mode's approval: one click on the owner's own Mac. The wording says
+ * exactly what the client gets, and what it never gets.
+ */
+export function renderLoopbackConsentPage(input: LoopbackConsentPageInput): { body: string; headers: Record<string, string> } {
+  const nonce = randomBytes(16).toString('base64');
+  const name = escapeHtml(input.clientName);
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Connect to Olympus</title>
+<style nonce="${nonce}">${STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Connect ${name} to Olympus?</h1>
+<div class="card">
+<div class="name">${name}</div>
+${input.verifiedHost
+    ? `<div class="host">${escapeHtml(input.verifiedHost)}</div>`
+    : '<div class="host unverified">Not verified</div><p class="meta">A program on this computer named itself</p>'}
+<p class="meta">After you approve, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
+</div>
+<p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
+<p><strong>${name} never sees the text of your Private items or any Secret.</strong> For Private items it gets only answers that Venice or a model on this Mac reasoned out, with each item's title and source.</p>
+<p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
+<form method="post" action="/connect/authorize">
+<input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
+<div class="actions">
+<button class="approve" type="submit" name="action" value="approve">Connect</button>
+<button class="deny" type="submit" name="action" value="deny">Cancel</button>
+</div>
+</form>
+<p class="small">This page is served by Olympus on this Mac, and only here.</p>
+</main>
+</body>
+</html>`;
+  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
+}
+
+export interface DemoSignInPageInput {
+  requestId: string;
+  csrf: string;
+  clientName: string;
+  redirectHost: string;
+  redirectOrigin: string;
+  error?: string;
+}
+
+/**
+ * A demo install's reviewer sign-in (workers/remote-oauth/demo-consent.ts),
+ * served through the relay. It says plainly that this is a demo with sample
+ * data, so no one mistakes it for signing in to a real Olympus.
+ */
+export function renderDemoSignInPage(input: DemoSignInPageInput): { body: string; headers: Record<string, string> } {
+  const nonce = randomBytes(16).toString('base64');
+  const name = escapeHtml(input.clientName);
+  const error = input.error ? `<p class="err" role="alert">${escapeHtml(input.error)}</p>` : '';
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Olympus demo sign-in</title>
+<style nonce="${nonce}">${STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Sign in to the Olympus demo</h1>
+<div class="warn">This is a demo of Olympus with made-up sample data, for reviewers. A real Olympus is approved only on the owner's own Mac, never with a password.</div>
+<div class="card">
+<div class="name">${name}</div>
+<p class="meta">After you sign in, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
+</div>
+<form method="post" action="/connect/demo/authorize">
+<input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
+${error}
+<label for="username">Username</label>
+<input class="plain" type="text" id="username" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="128" required>
+<label for="password">Password</label>
+<input class="plain" type="password" id="password" name="password" autocomplete="current-password" maxlength="1024" required>
+<div class="actions">
+<button class="approve" type="submit" name="action" value="approve">Sign in and connect</button>
+<button class="deny" type="submit" name="action" value="deny" formnovalidate>Cancel</button>
+</div>
+</form>
 </main>
 </body>
 </html>`;

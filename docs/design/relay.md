@@ -1,5 +1,11 @@
 # Olympus connect relay
 
+> **Superseded (2026-10-01).** This describes relay v1 (per-install hostnames,
+> SNI pass-through, DNS-01), which was deleted. Relay v2 (one host,
+> `mcp.olympusplugin.ai`, TLS at Caddy, WebSocket install sessions, per-request
+> routing) is specified in [chatgpt-plugin.md](chatgpt-plugin.md); its runbook
+> is `connect-relay/deploy/`. Kept for the history of the design decisions.
+
 Status: slice 5 of
 [hosted-agent compatibility](hosted-agent-compatibility.md). Code: [`connect-relay/`](../../connect-relay). Nothing here is
 deployed yet.

@@ -2351,6 +2351,15 @@ function configFromPluginConfig(pluginConfig, options = {}) {
       if (typeof value === "string" && value.trim())
         config.remote[key] = value.trim();
     }
+    const demo = asRecord4(remote.demoConsent);
+    if (demo) {
+      config.remote.demoConsent = { enabled: demo.enabled === true };
+      for (const key of ["username", "passwordHash"]) {
+        const value = demo[key];
+        if (typeof value === "string" && value.trim())
+          config.remote.demoConsent[key] = value.trim();
+      }
+    }
   }
   if (sovereignty) {
     config.sovereignty = {};
@@ -13480,7 +13489,7 @@ import { isAbsolute as relayIsAbsolute } from "node:path";
 import { fileURLToPath as relayFileURLToPath } from "node:url";
 
 // src/core/remote-access.ts
-import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
+import { randomBytes as raRandomBytes } from "node:crypto";
 import {
   chmodSync as raChmodSync,
   lstatSync as raLstatSync,
@@ -13497,7 +13506,7 @@ import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
 var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL";
 var REMOTE_MCP_RESOURCE_PATH = "/mcp";
 var LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
-function parseRemotePublicBaseUrl(value) {
+function parseRemotePublicBaseUrl(value, installId) {
   const raw = value?.trim();
   if (!raw)
     return { enabled: false, reason: "not_configured" };
@@ -13529,18 +13538,19 @@ function parseRemotePublicBaseUrl(value) {
       issuer: origin,
       resource: `${origin}${REMOTE_MCP_RESOURCE_PATH}`,
       protectedResourceMetadataUrl: `${origin}/.well-known/oauth-protected-resource${REMOTE_MCP_RESOURCE_PATH}`,
-      secure
+      secure,
+      ...installId ? { installId } : {}
     }
   };
 }
 
 // src/core/remote-access.ts
-var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v1";
+var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v2";
 var REMOTE_ACCESS_DIR_NAME = "connect-relay";
 var STATUS_FILE = "status.json";
 var DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 var LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
-var DEFAULT_RELAY_HOST = "connect.olympusplugin.ai";
+var DEFAULT_RELAY_HOST = "mcp.olympusplugin.ai";
 function resolveRemoteAccessMode(remote) {
   if (!remote?.enabled)
     return { mode: "off" };
@@ -13560,7 +13570,7 @@ function resolveRemoteAccessMode(remote) {
   }
   const host = (relayHost ?? DEFAULT_RELAY_HOST).toLowerCase();
   if (!DNS_NAME.test(host)) {
-    return { mode: "error", error: "remote.relayHost must be a DNS name such as connect.olympusplugin.ai, with no scheme, port or path." };
+    return { mode: "error", error: "remote.relayHost must be a DNS name such as mcp.olympusplugin.ai, with no scheme, port or path." };
   }
   return { mode: "relay", relayHost: host };
 }
@@ -13589,10 +13599,6 @@ function writePrivateText(path, text) {
   raChmodSync(temporary, 384);
   raRenameSync(temporary, path);
 }
-function writePrivateJson(path, value) {
-  writePrivateText(path, `${JSON.stringify(value, null, 2)}
-`);
-}
 function readPrivateFile(path) {
   try {
     const stat2 = raLstatSync(path);
@@ -13615,15 +13621,14 @@ function emptyRemoteAccessStatus(mode, now = new Date) {
     instance_id: null,
     pid: null,
     install_id: null,
-    hostname: null,
     relay: null,
-    certificate: null,
-    terms_url: null
+    last_connected_at: null
   };
 }
 function writeRemoteAccessStatus(dir, status) {
   ensureRemoteAccessDir(dir);
-  writePrivateJson(raJoin(dir, STATUS_FILE), status);
+  writePrivateText(raJoin(dir, STATUS_FILE), `${JSON.stringify(status, null, 2)}
+`);
 }
 function parseStatus(text) {
   try {

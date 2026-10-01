@@ -1,0 +1,16 @@
+# Olympus relay front. Installed to /etc/caddy/Caddyfile by deploy/deploy.sh.
+# Caddy obtains and renews the certificate for this one name (HTTP-01) and
+# proxies everything to the relay on loopback. No access log: request lines
+# carry OAuth query strings, which the relay never records either.
+{
+	admin localhost:2019
+}
+
+mcp.olympusplugin.ai {
+	reverse_proxy 127.0.0.1:8787 {
+		# Stream responses (Server-Sent Events) as they arrive.
+		# The http transport sets no read or write timeout by default, so a
+		# long-lived stream is bounded by the relay's own timers instead.
+		flush_interval -1
+	}
+}

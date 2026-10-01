@@ -19732,20 +19732,6 @@ var init_credential_degradation = __esm(() => {
   DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
 });
 
-// src/core/remote-public-url.ts
-var LOOPBACK_HOSTNAMES;
-var init_remote_public_url = __esm(() => {
-  LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
-});
-
-// src/core/remote-access.ts
-var LOOPBACK_HOSTNAMES2;
-var init_remote_access = __esm(() => {
-  init_remote_public_url();
-  init_worker_auth();
-  LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
-});
-
 // scripts/source-embedding-drain.ts
 init_file_lease();
 init_atomic_file();
@@ -24796,9 +24782,6 @@ var TIER_MIGRATION_REPLAN_STOP_REASONS = new Set([
   "chunk_cap",
   "cost_cap"
 ]);
-
-// src/workers/remote-access-control.ts
-init_remote_access();
 
 // src/workers/email-source/server.ts
 function requireSourceEmbeddingDimension(options) {
