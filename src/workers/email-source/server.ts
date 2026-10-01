@@ -322,6 +322,7 @@ import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
+import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter } from '../remote-access-control.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
@@ -3850,10 +3851,12 @@ export async function main(): Promise<void> {
   // page's agent panel reads the very store handle `/mcp` and OAuth use.
   let dashboardAgentStore: DashboardAgentConnectionsBackend['store'] | undefined;
   let dashboardRemoteAccess: DashboardAgentConnectionsBackend['remoteAccess'] = () => ({ state: 'off' });
+  let dashboardRemoteAccessControl: DashboardAgentConnectionsBackend['remoteAccessControl'];
   const worker = createEmailSourceWorker({
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
       remoteAccess: () => dashboardRemoteAccess(),
+      get remoteAccessControl() { return dashboardRemoteAccessControl; },
     },
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
@@ -3997,8 +4000,18 @@ export async function main(): Promise<void> {
     } catch {
       status = undefined;
     }
-    return remoteAccessFromStatus({ live: remotePublicUrls(), status });
+    return remoteAccessFromStatus({ live: remotePublicUrls(), status, liveOrigin: remotePublicSource.origin });
   };
+  // Turn on / Turn off remote access: the agreement as the CLI records it,
+  // and the config change through the Gateway's own config write.
+  if (authToken) {
+    const { fetchLetsEncryptTermsUrl } = await import('../../core/remote-access-terms.ts');
+    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
+      dir: () => remoteAccessDir(process.env),
+      fetchTerms: fetchLetsEncryptTermsUrl,
+      setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
+    });
+  }
   // Slow source_answer calls from remote agents hand off to in-memory jobs
   // bound to the connection; see core/source-answer-jobs.ts.
   const { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv } = await import('../../core/source-answer-jobs.ts');

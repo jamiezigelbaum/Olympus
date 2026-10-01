@@ -1,6 +1,6 @@
 /**
- * Setup's Agents section: remote access, "Connect an agent", and the agents
- * already connected.
+ * Setup's Agents section: remote access (with Turn on and Turn off),
+ * "Connect an agent", and the agents already connected.
  *
  * Written for the owner, not a developer (owner ruling, 2026-09-03): the owner
  * picks the agent they use and gets that agent's own steps, with every address
@@ -17,10 +17,12 @@
  * Done. The picker is a list of disclosures, so it needs no script of its own
  * and a poll keeps whichever agent the owner opened.
  */
-import type {
-  DashboardAgentConnection,
-  DashboardAgentsView,
-  DashboardRemoteAccess,
+import {
+  LETS_ENCRYPT_REPOSITORY_URL,
+  WORKER_ENV_ADDRESS_MESSAGE,
+  type DashboardAgentConnection,
+  type DashboardAgentsView,
+  type DashboardRemoteAccess,
 } from '../agent-connections.ts';
 import { AGENT_INSTRUCTION_TEXT, AGENT_SKILL_PATH } from '../../core/agent-instructions.ts';
 import { escapeHtml, setupRow } from './components.ts';
@@ -155,13 +157,56 @@ function remoteAccessRow(access: DashboardRemoteAccess): string {
     : access.state === 'off'
       ? 'Off. Only agents on this computer can ask Olympus.'
       : access.state === 'not_connected'
-        ? 'On, but not connected yet. Agents in the cloud cannot reach Olympus until it is.'
+        ? 'On, but not connected. Agents in the cloud cannot reach Olympus until it is.'
         : `Not set up correctly. ${access.detail}`;
   const next = access.state === 'not_connected' && access.detail
     ? `<span class="hint" data-remote-next-step> ${escapeHtml(access.detail)}</span>`
-    : '';
+    : access.state === 'on' && access.setBy === 'worker_env'
+      ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml(WORKER_ENV_ADDRESS_MESSAGE)}</span>`
+      : '';
   return `<div class="attncard plain" data-remote-access="${access.state}">`
     + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span>${next}</div>`
+    + remoteAccessControls(access)
+    + `</div>`
+    + (access.state === 'off' || (access.state === 'not_connected' && access.needsTerms) ? termsPanel() : '');
+}
+
+/**
+ * Turn on and Turn off remote access. Turning on shows Let's Encrypt's
+ * subscriber agreement first (the terms panel below the row) and needs the
+ * owner's explicit acceptance; the route says when that is needed.
+ */
+function remoteAccessControls(access: DashboardRemoteAccess): string {
+  const status = `<span class="actmsg" data-action-message role="status"></span>`;
+  // Set outside plugin config: a Turn off here would change nothing.
+  if (access.state === 'on' && access.setBy === 'worker_env') return '';
+  if (access.state === 'off') {
+    return `<form class="rowform" data-agent-kind="remote-on">`
+      + `<button class="btn primary" type="submit">Turn on remote access</button>${status}`
+      + `</form>`;
+  }
+  const review = access.state === 'not_connected' && access.needsTerms
+    ? `<form class="rowform" data-agent-kind="remote-on"><button class="btn primary" type="submit">Review agreement</button>${status}</form>`
+    : '';
+  const confirmation = 'Turn off remote access? Agents in the cloud will no longer reach Olympus until you turn it on again. Agents on this computer are unaffected.';
+  return review
+    + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml(confirmation)}">`
+    + `<button class="btn quiet" type="submit">Turn off remote access</button>${status}`
+    + `</form>`;
+}
+
+/** Shown by the controller when the route asks for the agreement; its link is set to the agreement's own URL. */
+function termsPanel(): string {
+  return `<div class="remoteterms" data-remote-terms hidden>`
+    + `<p><b>Before remote access turns on</b></p>`
+    + `<p>So that agents in the cloud reach this computer over an encrypted connection only this computer can open, Olympus gets a free certificate from Let's Encrypt. Getting one means agreeing to Let's Encrypt's Subscriber Agreement.</p>`
+    + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You don't sign up for anything or share an email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>`
+    + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>`
+    + `<form class="rowform" data-agent-kind="remote-accept">`
+    + `<button class="btn primary" type="submit">I accept, turn on remote access</button>`
+    + `<button class="btn quiet" type="button" data-remote-terms-cancel>Not now</button>`
+    + `<span class="actmsg" data-action-message role="status"></span>`
+    + `</form>`
     + `</div>`;
 }
 
@@ -225,10 +270,10 @@ function localBody(agent: AgentChoice): string {
 
 function remoteUnavailable(access: DashboardRemoteAccess): string {
   const text = access.state === 'not_connected'
-    ? 'Remote access is on but not connected yet, so this agent cannot reach Olympus. The Remote access line above says what it is waiting for.'
+    ? 'Remote access is on but not connected, so this agent cannot reach Olympus right now. The Remote access line above says why.'
     : access.state === 'invalid'
       ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}`
-      : 'This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Claude Code and Codex on this computer work now.';
+      : 'This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Turn on remote access above first. Claude Code and Codex on this computer work now.';
   return `<p class="why" data-remote-unavailable>${escapeHtml(text)}</p>`;
 }
 

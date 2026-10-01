@@ -63,12 +63,18 @@ export type RemoteAccessMode =
   | { mode: 'relay'; relayHost: string }
   | { mode: 'error'; error: string };
 
+/** The Olympus connect relay, used whenever remote access is on without a tunnel of the owner's own. */
+export const DEFAULT_RELAY_HOST = 'connect.olympusplugin.ai';
+
 /**
  * Remote access is opt-in (`remote.enabled`), with exactly one public address:
- * the Olympus relay (`remote.relayHost`) or a tunnel the owner runs
- * (`remote.publicBaseUrl`). Both at once is a conflict, reported by name; it
- * turns remote access off rather than failing the plugin, so local tools keep
- * working while the owner fixes it.
+ * the Olympus relay (`remote.relayHost`, default `connect.olympusplugin.ai`)
+ * or a tunnel the owner runs (`remote.publicBaseUrl`). Both set explicitly is
+ * a conflict, reported by name; it turns remote access off rather than failing
+ * the plugin, so local tools keep working while the owner fixes it.
+ *
+ * The default lives here, not as a JSON-schema `default` in the manifest, so
+ * a `publicBaseUrl` owner never has a relay host materialized beside it.
  */
 export function resolveRemoteAccessMode(remote: OlympusConfig['remote']): RemoteAccessMode {
   if (!remote?.enabled) return { mode: 'off' };
@@ -87,17 +93,11 @@ export function resolveRemoteAccessMode(remote: OlympusConfig['remote']): Remote
     }
     return { mode: 'manual', publicBaseUrl: parsed.urls.origin };
   }
-  if (relayHost) {
-    const host = relayHost.toLowerCase();
-    if (!DNS_NAME.test(host)) {
-      return { mode: 'error', error: 'remote.relayHost must be a DNS name such as connect.olympusplugin.ai, with no scheme, port or path.' };
-    }
-    return { mode: 'relay', relayHost: host };
+  const host = (relayHost ?? DEFAULT_RELAY_HOST).toLowerCase();
+  if (!DNS_NAME.test(host)) {
+    return { mode: 'error', error: 'remote.relayHost must be a DNS name such as connect.olympusplugin.ai, with no scheme, port or path.' };
   }
-  return {
-    mode: 'error',
-    error: 'remote.enabled is on, but neither remote.relayHost (the Olympus relay) nor remote.publicBaseUrl (your own tunnel) is set.',
-  };
+  return { mode: 'relay', relayHost: host };
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +374,24 @@ export function recordTermsAcceptance(dir: string, termsUrl: string | undefined,
   return acceptance;
 }
 
+/**
+ * The CA's current subscriber agreement, as `olympus connections terms` and
+ * the dashboard's Turn on remote access both resolve it: the URL the relay
+ * child last saw; else, when the child asked and the CA named none, no URL
+ * (`none: true`); else the CA directory's `meta.termsOfService`, read now.
+ * Both surfaces then record acceptance with `recordTermsAcceptance` against
+ * exactly this value, so a new agreement needs a new acceptance.
+ */
+export async function resolveCurrentTermsUrl(
+  status: RemoteAccessStatusFile | undefined,
+  fetchTerms: () => Promise<string | undefined>,
+): Promise<string | undefined> {
+  const reported = status?.terms_url ?? undefined;
+  if (reported) return reported;
+  if (status?.certificate?.state === 'awaiting_terms') return undefined;
+  return fetchTerms();
+}
+
 /** Accepted, and for the CA's current agreement: a new agreement needs a new acceptance. */
 export function termsAccepted(dir: string, currentTermsUrl: string | undefined): boolean {
   const acceptance = readTermsAcceptance(dir);
@@ -569,13 +587,18 @@ function nextStep(view: RemoteAccessStatusView): string | null {
   if (view.error) return view.error;
   if (view.mode === 'off' && !view.public_base_url) {
     return 'Remote access is off, so hosted agents cannot reach this Olympus (local agents are unaffected). '
-      + 'To turn it on: openclaw config set plugins.entries.olympus.config.remote.enabled true, plus remote.relayHost (the Olympus relay) or remote.publicBaseUrl (your own tunnel).';
+      + 'To turn it on, use Turn on remote access in the Agents section of the Olympus dashboard, '
+      + 'or run: openclaw config set plugins.entries.olympus.config.remote.enabled true';
   }
   if (view.mode !== 'relay') return null;
   if (view.certificate.state === 'awaiting_terms') {
-    return 'Read the Let\'s Encrypt subscriber agreement (terms.url), then accept it with olympus connections terms --accept.';
+    return 'Read the Let\'s Encrypt subscriber agreement (terms.url), then accept it with Turn on remote access in the dashboard, or with olympus connections terms --accept.';
   }
   if (view.relay.state === 'not_running') return 'The relay process is not running; check openclaw gateway status.';
+  if (view.relay.state === 'offline') {
+    return `Olympus relay unavailable${view.relay.reason ? ` (${view.relay.reason})` : ''}. `
+      + 'Olympus keeps retrying on its own; local agents are unaffected.';
+  }
   if (view.relay.state !== 'online') return 'Olympus is connecting to the relay.';
   if (view.certificate.state === 'failed') return 'The certificate could not be obtained yet; Olympus retries automatically.';
   if (view.certificate.state !== 'serving') return 'Olympus is obtaining its certificate.';

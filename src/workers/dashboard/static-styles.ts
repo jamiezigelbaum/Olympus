@@ -353,7 +353,8 @@ export const DISPOSITIONS_CSS = `
 
 /* Setup's Agents section: the agent picker is a list of disclosures inside the
    Connect an agent sheet, and a pairing code or key is shown once in a
-   read-only field beside its own Copy and Done. */
+   read-only field beside its own Copy and Done. The remote-access row carries
+   Turn on / Turn off, and the agreement panel opens beneath it. */
 export const AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 4px 0 0; }
 .agentchoice { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 .agentchoice > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 8px; align-items: baseline; font-size: 13px; color: var(--t2); }
@@ -373,6 +374,11 @@ export const AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 
 .agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
 .agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
 #agents { margin-top: 26px; }
+[data-remote-access] > .rowform { flex: 0 0 auto; margin-left: 8px; }
+.remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: 13px; color: var(--t2); }
+.remoteterms[hidden] { display: none; }
+.remoteterms p { margin: 0 0 8px; max-width: 72ch; }
+.remoteterms .rowform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`;
 
 /**

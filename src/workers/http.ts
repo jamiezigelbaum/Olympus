@@ -92,6 +92,7 @@ export function withWorkerBearerAuth(
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
   const agentMintAllowed = agentMintLimiter(now);
+  const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request: Request): Promise<Response> => {
     const presentedAuthorization = request.headers.get('Authorization');
     const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
@@ -197,6 +198,7 @@ export function withWorkerBearerAuth(
       // The Gateway bridge holds the bearer for every operator it serves, so
       // its mints share one budget.
       if (isAgentMintRoute(request) && !agentMintAllowed('bearer')) return agentMintLimitedResponse();
+      if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed('bearer')) return remoteAccessToggleLimitedResponse();
       return fetchHandler(isGatewayPublicOriginContextRoute(request)
         ? withGatewayPublicOriginContext(request, presentedGatewayPublicOrigin)
         : request);
@@ -235,6 +237,9 @@ export function withWorkerBearerAuth(
       if (authorization.status === 'allowed') {
         if (isAgentMintRoute(request) && !agentMintAllowed(`session:${authorization.sessionId}`)) {
           return agentMintLimitedResponse();
+        }
+        if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed(`session:${authorization.sessionId}`)) {
+          return remoteAccessToggleLimitedResponse();
         }
         return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
       }
@@ -403,16 +408,46 @@ function isAgentMintRoute(request: Request): boolean {
 }
 
 /**
+ * Turning remote access on or off writes OpenClaw config and restarts the
+ * relay service: a few toggles are a person changing their mind, dozens are a
+ * script. Its own budget, so minting agent codes never spends it.
+ */
+const REMOTE_ACCESS_TOGGLE_PATH = '/dashboard/agents/remote-access';
+export const REMOTE_ACCESS_TOGGLE_LIMIT = 6;
+export const REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60_000;
+
+function isRemoteAccessToggleRoute(request: Request): boolean {
+  return request.method === 'POST' && new URL(request.url).pathname === REMOTE_ACCESS_TOGGLE_PATH;
+}
+
+function remoteAccessToggleLimitedResponse(): Response {
+  return new Response(JSON.stringify({
+    ok: false,
+    error: {
+      code: 'remote_access_rate_limited',
+      message: 'Remote access was turned on or off too many times in the last few minutes. Wait a few minutes, then try again.',
+    },
+  }), {
+    status: 429,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Retry-After': '600' },
+  });
+}
+
+/**
  * A sliding window per control session (or the Gateway bearer): enough for a
  * person setting up several agents, not for a script minting codes to guess
  * against. In memory, per worker process; a restart forgets it.
  */
-function agentMintLimiter(now: () => number): (key: string) => boolean {
+function agentMintLimiter(
+  now: () => number,
+  limit = AGENT_MINT_LIMIT,
+  windowMs = AGENT_MINT_WINDOW_MS,
+): (key: string) => boolean {
   const recent = new Map<string, number[]>();
   return (key) => {
     const at = now();
-    const kept = (recent.get(key) ?? []).filter((time) => at - time < AGENT_MINT_WINDOW_MS);
-    if (kept.length >= AGENT_MINT_LIMIT) {
+    const kept = (recent.get(key) ?? []).filter((time) => at - time < windowMs);
+    if (kept.length >= limit) {
       recent.set(key, kept);
       return false;
     }
@@ -452,6 +487,7 @@ function isDashboardControlRoute(request: Request): boolean {
     '/dashboard/agents/pairing-code',
     '/dashboard/agents/keys',
     '/dashboard/agents/revoke',
+    '/dashboard/agents/remote-access',
   ]).has(new URL(request.url).pathname);
 }
 

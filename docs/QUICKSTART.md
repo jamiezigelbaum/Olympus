@@ -609,7 +609,11 @@ followed by the underlying connection error.
 
 To let other agents ask Olympus (Claude, ChatGPT, Grok, Muse, or Claude Code
 and Codex on this computer), open the dashboard's Setup page and press
-**Connect an agent** — see the README's "Connect other agents" section.
+**Connect an agent** — see the README's "Connect other agents" section. Agents
+in the cloud also need remote access: press **Turn on remote access** in the
+same Agents section, read and accept the Let's Encrypt subscriber agreement it
+shows, and Olympus connects through the Olympus relay with no account or tunnel
+to set up. (Advanced: a tunnel of your own goes in `remote.publicBaseUrl`.)
 
 ## Anytime
 

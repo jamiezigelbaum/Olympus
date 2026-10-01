@@ -1240,6 +1240,7 @@ export function standaloneDashboardControllerScript(
         if (action === 'mint_agent_pairing_code') return ['/dashboard/agents/pairing-code', {}];
         if (action === 'create_agent_key') return ['/dashboard/agents/keys', withoutAction(params)];
         if (action === 'revoke_agent_connection') return ['/dashboard/agents/revoke', withoutAction(params)];
+        if (action === 'set_remote_access') return ['/dashboard/agents/remote-access', withoutAction(params)];
         return null;
       }
       function withoutAction(params) {

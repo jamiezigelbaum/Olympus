@@ -462,6 +462,40 @@ export function createOpenClawSourceWatchDeliveryTransport(
   };
 }
 
+/**
+ * POST a JSON body to one of Olympus's own Gateway plugin routes with the
+ * worker bearer, over the same loopback connection watch delivery uses
+ * (OpenClaw's resolved `gateway` port and TLS trust, read through its CLI).
+ * Used by the dashboard's remote-access toggle to reach
+ * `/plugins/olympus/remote-access`.
+ */
+export async function postOpenClawGatewayPluginRoute(input: {
+  path: `/plugins/olympus/${string}`;
+  body: unknown;
+  authToken: string;
+  env?: Record<string, string | undefined>;
+  fetchImpl?: TimeoutFetch;
+  timeoutMs?: number;
+  /** Test seam: skip the CLI read of the Gateway's settings. */
+  gatewayConfig?: unknown;
+}): Promise<Response> {
+  const env = input.env ?? process.env;
+  const gatewayConfig = input.gatewayConfig !== undefined ? input.gatewayConfig : await loadOpenClawGatewayConfig(env).catch(() => undefined);
+  const connection = resolveSourceWatchGatewayConnection(gatewayConfig, { env });
+  const init = withWorkerAuthHeader({
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input.body),
+    redirect: 'error',
+  }, input.authToken);
+  const url = `${connection.baseUrl}${input.path}`;
+  const timeoutMs = input.timeoutMs ?? 30_000;
+  if (connection.certificatePath) {
+    return requestVerifiedHttps(url, init, timeoutMs, readFileSync(connection.certificatePath, 'utf8'));
+  }
+  return fetchWithTimeout(input.fetchImpl ?? fetch, url, init, timeoutMs);
+}
+
 export function defaultOpenClawGatewayBaseUrl(
   env: Record<string, string | undefined> = process.env,
   gatewayConfig?: unknown,

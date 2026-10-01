@@ -19641,6 +19641,20 @@ var init_credential_degradation = __esm(() => {
   DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
 });
 
+// src/core/remote-public-url.ts
+var LOOPBACK_HOSTNAMES;
+var init_remote_public_url = __esm(() => {
+  LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
+// src/core/remote-access.ts
+var LOOPBACK_HOSTNAMES2;
+var init_remote_access = __esm(() => {
+  init_remote_public_url();
+  init_worker_auth();
+  LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
 // scripts/source-embedding-drain.ts
 init_file_lease();
 init_atomic_file();
@@ -20868,6 +20882,10 @@ init_phases();
 init_scheduler_markers();
 init_vocabulary();
 
+// src/workers/agent-connections.ts
+init_operation_caller();
+var WORKER_ENV_ADDRESS_MESSAGE = "This address is set by OLYMPUS_PUBLIC_BASE_URL in worker.env, a tunnel you run yourself, " + "so the dashboard cannot turn it off. To turn remote access off, delete that line from ~/.config/olympus/worker.env, " + "then restart OpenClaw (openclaw gateway restart), and stop your tunnel.";
+
 // src/core/agent-instructions.ts
 var AGENT_SKILL_DESCRIPTION = "Ask Olympus, the owner's private search over their own email, files, " + "messages, notes and saved reading, whenever a question may be answered from their own records.";
 var AGENT_INSTRUCTION_TEXT = [
@@ -20875,7 +20893,7 @@ var AGENT_INSTRUCTION_TEXT = [
   "",
   "Ask Olympus whenever my question might be answered from my own records: what someone told me, " + "what a document or contract says, or when something happened. " + "If you are not sure, ask it anyway. You do not need me to mention Olympus.",
   "",
-  "Ask one question at a time, in plain words, and wait for each answer before asking the next. " + "Answers can take a minute.",
+  "Ask one question at a time, in plain words, and wait for each answer before asking the next. " + "Answers can take a few minutes. If Olympus says it is still working and gives you a job_id, " + "call source_answer_result with that job_id, again while it says working, and pass on the answer it returns. " + "Do not ask the same question again.",
   "",
   "Pass on what Olympus answers with its citations, and say plainly what it could not find. " + "Do not guess past it or fill gaps from memory.",
   "",
@@ -21050,6 +21068,7 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
 var DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 var AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
 var AGENT_MINT_WINDOW_MS = 10 * 60000;
+var REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
 
 // src/workers/embedding-ledger.ts
 import { homedir as homedir15 } from "node:os";
@@ -21355,9 +21374,6 @@ class LaneSampleStore {
   }
 }
 var backgroundLaneSampleStore = new LaneSampleStore;
-
-// src/workers/agent-connections.ts
-init_operation_caller();
 
 // src/workers/email-source/index.ts
 init_source_dashboard();
@@ -23730,6 +23746,9 @@ var TIER_MIGRATION_REPLAN_STOP_REASONS = new Set([
   "chunk_cap",
   "cost_cap"
 ]);
+
+// src/workers/remote-access-control.ts
+init_remote_access();
 
 // src/workers/email-source/server.ts
 function requireSourceEmbeddingDimension(options) {
