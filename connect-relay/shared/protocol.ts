@@ -153,8 +153,14 @@ export function encodeBodyFrame(id: number, payload: Uint8Array): Uint8Array {
   return frame;
 }
 
+/**
+ * A binary frame, decoded, or undefined when it is malformed. A frame with an
+ * empty payload is malformed: no sender produces one (`chunks` yields none for
+ * an empty body), and accepting them would let a peer make the receiver hold
+ * objects that its byte budget never counts.
+ */
 export function decodeBodyFrame(frame: Uint8Array): { id: number; payload: Uint8Array } | undefined {
-  if (frame.byteLength < 4 || frame.byteLength > 4 + MAX_BODY_CHUNK_BYTES) return undefined;
+  if (frame.byteLength <= 4 || frame.byteLength > 4 + MAX_BODY_CHUNK_BYTES) return undefined;
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
   return { id: view.getUint32(0, false), payload: frame.subarray(4) };
 }

@@ -39,6 +39,7 @@ import { sourceAnswerJobOwner, type SourceAnswerJobRegistry } from '../core/sour
 import { createOlympusMcpServer } from '../mcp/server.ts';
 import { createChatGptMcpServer, type ChatGptSurfaceOptions } from './chatgpt/mcp-surface.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
+import { AUTHENTICATED_RESPONSE_HEADER } from '../../connect-relay/shared/tokens.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
 const IN_PROCESS_WORKER_BASE_URL = 'http://olympus-worker.internal/v1';
@@ -85,6 +86,13 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
   return async (request: Request): Promise<Response> => {
     const verification = authenticateRemoteRequest(request, options);
     if (!verification.ok) return verification.response;
+    return markAuthenticated(await serveAuthenticated(request, verification));
+  };
+
+  async function serveAuthenticated(
+    request: Request,
+    verification: { connection: Pick<RemoteConnectionRecord, 'id' | 'displayName'> },
+  ): Promise<Response> {
     if (request.method !== 'POST') {
       // Stateless server: no standalone SSE stream (GET) and no session to end
       // (DELETE). A 405 is how Streamable HTTP says so.
@@ -119,7 +127,20 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     } finally {
       await server.close().catch(() => undefined);
     }
-  };
+  }
+}
+
+/**
+ * Marks a response to a request whose credential was verified. The connect
+ * relay uses the mark only to keep that credential's later requests in the
+ * owner's admission lane, so forged secrets cannot spend the owner's budget
+ * (connect-relay/server/limits.ts); it grants nothing and never reaches the
+ * public caller.
+ */
+function markAuthenticated(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set(AUTHENTICATED_RESPONSE_HEADER, '1');
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 /**

@@ -6,7 +6,10 @@
  * The client trusts the relay with nothing it does not have to: it forwards
  * only the remote surface (forward.ts), strips inbound relay and forwarding
  * headers, marks every forwarded request with the per-boot relay secret, and
- * bounds request bodies and concurrency itself.
+ * bounds request bodies and concurrency itself: each request's body is
+ * assembled into one buffer (no per-frame objects, so tiny or empty frames
+ * cost nothing extra), capped in bytes and frames, charged to a budget across
+ * all requests, and given a local deadline that does not depend on the relay.
  */
 import {
   CONNECT_PATH,
@@ -53,6 +56,12 @@ export interface RelayClientOptions {
   readonly forwardedPaths?: readonly string[];
   /** Request body cap (default 1 MiB, the relay's own). */
   readonly maxRequestBodyBytes?: number;
+  /** Body frames one request may arrive in (default 4096; the relay sends 64 KiB frames). */
+  readonly maxRequestFrames?: number;
+  /** Request body bytes held at once across all requests being assembled (default 16 MiB). */
+  readonly maxBufferedRequestBytes?: number;
+  /** Time a request has, from its head, to arrive in full (default 60 s). */
+  readonly requestAssemblyTimeoutMs?: number;
   readonly fetch?: typeof fetch;
 }
 
@@ -60,11 +69,16 @@ interface Inbound {
   readonly method: string;
   readonly path: string | undefined;
   readonly headers: Array<[string, string]>;
-  readonly body: Uint8Array[];
+  /** The body so far, in one buffer that grows by doubling; `bytes` of it are filled. */
+  buffer: Uint8Array<ArrayBuffer>;
   bytes: number;
+  frames: number;
   readonly abort: AbortController;
   started: boolean;
+  assembly: ReturnType<typeof setTimeout> | undefined;
 }
+
+const INITIAL_BODY_BUFFER_BYTES = 16 * 1024;
 
 /** Above this much unsent data, response streaming waits for the socket to drain. */
 const SEND_HIGH_WATER_BYTES = 4 * 1024 * 1024;
@@ -77,6 +91,8 @@ export class RelayClient {
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly inbound = new Map<number, Inbound>();
+  /** Bytes allocated for request bodies across `inbound`. */
+  private bufferedRequestBytes = 0;
   private lastPongAt = 0;
 
   constructor(private readonly options: RelayClientOptions) {
@@ -93,6 +109,11 @@ export class RelayClient {
   /** Requests being served right now. */
   get activeRequests(): number {
     return this.inbound.size;
+  }
+
+  /** Bytes allocated for request bodies being assembled or served. */
+  get bufferedRequestBodyBytes(): number {
+    return this.bufferedRequestBytes;
   }
 
   start(): void {
@@ -131,8 +152,7 @@ export class RelayClient {
       if (this.socket !== socket) return;
       if (typeof event.data !== 'string') {
         const frame = decodeBodyFrame(new Uint8Array(event.data as ArrayBuffer));
-        if (!ready || !frame) return socket.close(4002, 'protocol_error');
-        this.onRequestBody(frame.id, frame.payload);
+        if (!ready || !frame || !this.onRequestBody(frame.id, frame.payload)) return socket.close(4002, 'protocol_error');
         return;
       }
       const message = parseTextFrame(event.data);
@@ -177,7 +197,7 @@ export class RelayClient {
           const request = id === undefined ? undefined : this.inbound.get(id);
           request?.abort.abort();
           // Not yet started: nothing else will clean it up.
-          if (request && !request.started) this.inbound.delete(id!);
+          if (request && !request.started) this.drop(id!);
           return;
         }
         case 'error':
@@ -254,8 +274,19 @@ export class RelayClient {
   }
 
   private abortAll(): void {
-    for (const request of this.inbound.values()) request.abort.abort();
-    this.inbound.clear();
+    for (const id of [...this.inbound.keys()]) {
+      this.inbound.get(id)!.abort.abort();
+      this.drop(id);
+    }
+  }
+
+  /** The one way a request leaves `inbound`: its deadline and its buffered bytes go with it. */
+  private drop(id: number, expected?: Inbound): void {
+    const request = this.inbound.get(id);
+    if (!request || (expected && request !== expected)) return;
+    clearTimeout(request.assembly);
+    this.bufferedRequestBytes -= request.buffer.byteLength;
+    this.inbound.delete(id);
   }
 
   private onRequest(message: Record<string, unknown>): void {
@@ -269,35 +300,69 @@ export class RelayClient {
       this.respondLocally(id, 503, { error: 'busy', message: 'Olympus is busy. Try again shortly.' });
       return;
     }
-    this.inbound.set(id, {
+    const request: Inbound = {
       method,
       path: FORWARDED_METHODS.has(method) && typeof message.path === 'string'
         ? forwardPath(message.path, this.options.forwardedPaths)
         : undefined,
       headers,
-      body: [],
+      buffer: new Uint8Array(new ArrayBuffer(0)),
       bytes: 0,
+      frames: 0,
       abort: new AbortController(),
       started: false,
-    });
+      assembly: undefined,
+    };
+    // A relay that never finishes sending a request does not get to keep it.
+    request.assembly = setTimeout(() => {
+      if (this.inbound.get(id) !== request || request.started) return;
+      request.started = true;
+      this.respondLocally(id, 408, { error: 'request_timeout', message: 'The request did not arrive in time.' });
+    }, this.options.requestAssemblyTimeoutMs ?? 60_000);
+    this.inbound.set(id, request);
   }
 
-  private onRequestBody(id: number, payload: Uint8Array): void {
+  /** A body frame; false only for a frame no correct relay sends (the session is then closed). */
+  private onRequestBody(id: number, payload: Uint8Array): boolean {
+    if (payload.byteLength === 0) return false;
     const request = this.inbound.get(id);
-    if (!request || request.started) return;
-    request.bytes += payload.byteLength;
-    if (request.bytes > (this.options.maxRequestBodyBytes ?? 1024 * 1024)) {
+    if (!request || request.started) return true;
+    request.frames += 1;
+    const needed = request.bytes + payload.byteLength;
+    const maxBytes = this.options.maxRequestBodyBytes ?? 1024 * 1024;
+    if (needed > maxBytes) {
       request.started = true;
       this.respondLocally(id, 413, { error: 'payload_too_large' });
-      return;
+      return true;
     }
-    request.body.push(payload.slice());
+    if (request.frames > (this.options.maxRequestFrames ?? 4096)) {
+      request.started = true;
+      this.respondLocally(id, 400, { error: 'request_too_fragmented' });
+      return true;
+    }
+    if (needed > request.buffer.byteLength) {
+      const size = Math.min(maxBytes, Math.max(request.buffer.byteLength * 2, INITIAL_BODY_BUFFER_BYTES, needed));
+      const growth = size - request.buffer.byteLength;
+      if (this.bufferedRequestBytes + growth > (this.options.maxBufferedRequestBytes ?? 16 * 1024 * 1024)) {
+        request.started = true;
+        this.respondLocally(id, 503, { error: 'busy', message: 'Olympus is busy. Try again shortly.' });
+        return true;
+      }
+      const grown = new Uint8Array(new ArrayBuffer(size));
+      grown.set(request.buffer.subarray(0, request.bytes));
+      request.buffer = grown;
+      this.bufferedRequestBytes += growth;
+    }
+    request.buffer.set(payload, request.bytes);
+    request.bytes = needed;
+    return true;
   }
 
   private onRequestEnd(id: number): void {
     const request = this.inbound.get(id);
     if (!request || request.started) return;
     request.started = true;
+    clearTimeout(request.assembly);
     if (!request.path) {
       this.respondLocally(id, 404, { error: 'not_found', message: 'This Olympus address only serves its remote agent endpoints.' });
       return;
@@ -309,12 +374,12 @@ export class RelayClient {
     this.send({ type: 'response-head', id, status, headers: [['content-type', 'application/json'], ['cache-control', 'no-store']] });
     this.sendBody(id, new TextEncoder().encode(JSON.stringify(body)));
     this.send({ type: 'end', id });
-    this.inbound.delete(id);
+    this.drop(id);
   }
 
   private async serve(id: number, request: Inbound, path: string): Promise<void> {
     const fetchImpl = this.options.fetch ?? fetch;
-    const body = request.method === 'GET' ? undefined : concat(request.body, request.bytes);
+    const body = request.method === 'GET' ? undefined : request.buffer.subarray(0, request.bytes);
     let response: Response;
     try {
       response = await fetchImpl(`${this.options.target}${path}`, {
@@ -328,12 +393,12 @@ export class RelayClient {
       if (!request.abort.signal.aborted) {
         this.respondLocally(id, 502, { error: 'worker_unavailable', message: 'Olympus is running but its local worker did not answer.' });
       }
-      this.inbound.delete(id);
+      this.drop(id, request);
       return;
     }
     if (request.abort.signal.aborted) {
       void response.body?.cancel().catch(() => {});
-      this.inbound.delete(id);
+      this.drop(id, request);
       return;
     }
     this.send({ type: 'response-head', id, status: response.status, headers: forwardResponseHeaders(response.headers) });
@@ -354,7 +419,7 @@ export class RelayClient {
     } catch {
       if (!request.abort.signal.aborted) this.send({ type: 'abort', id });
     } finally {
-      this.inbound.delete(id);
+      this.drop(id, request);
     }
   }
 
@@ -364,14 +429,4 @@ export class RelayClient {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
-}
-
-function concat(parts: Uint8Array[], total: number): Uint8Array<ArrayBuffer> {
-  const out = new Uint8Array(new ArrayBuffer(total));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.byteLength;
-  }
-  return out;
 }

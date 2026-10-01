@@ -6,8 +6,14 @@
  *
  * The operator can revoke an install (`server/admin.ts revoke`): its record
  * goes and its id is refused from then on, since an install otherwise
- * re-registers itself automatically. `restore` lifts that. A revocation is
- * reported only once it is fsync'd to the append-only log.
+ * re-registers itself automatically. `restore` lifts that.
+ *
+ * Revocation and restore are acknowledged only once their log line is
+ * fsync'd. Each id's operator change is pending, failed, or durable:
+ * concurrent callers share the pending write; a call after a failed write
+ * writes again; and while the outcome is uncertain the id stays refused (a
+ * revocation refuses it before its write starts, a restore lifts the refusal
+ * only after its write is durable).
  */
 import { open } from 'node:fs/promises';
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -29,7 +35,12 @@ export interface RegistryCounts {
   readonly revoked: number;
 }
 
-type LogEntry =
+/** Where an id's last operator change stands. */
+export type OperatorChangeState = 'none' | 'pending' | 'failed' | 'durable';
+
+type OperatorOp = 'revoke' | 'restore';
+
+export type LogEntry =
   | { op: 'register'; installId: string; publicKey: string; at: number }
   | { op: 'seen' | 'remove' | 'revoke' | 'restore'; installId: string; at: number };
 
@@ -39,6 +50,10 @@ const SEEN_RESOLUTION_MS = 24 * 60 * 60_000;
 export class MemoryInstallRegistry {
   protected readonly records = new Map<string, InstallRecord>();
   protected readonly revoked = new Set<string>();
+  /** Operator changes whose write has not finished. */
+  private readonly pendingChanges = new Map<string, { op: OperatorOp; promise: Promise<boolean> }>();
+  /** Operator changes whose write failed and was not retried successfully since. */
+  private readonly failedChanges = new Map<string, OperatorOp>();
 
   constructor(
     private readonly maxInstalls = 100_000,
@@ -84,24 +99,62 @@ export class MemoryInstallRegistry {
   }
 
   /**
-   * Removes the install (if registered) and refuses its id from now on.
-   * Resolves once durable; false if it was already revoked.
+   * Removes the install (if registered) and refuses its id from now on; the
+   * refusal takes effect before this returns. Resolves true once the
+   * revocation is durable, false if it already was; rejects if the write
+   * failed (the id stays refused, and the next call writes again).
    */
-  async revoke(installId: string): Promise<boolean> {
-    if (this.revoked.has(installId)) return false;
+  revoke(installId: string): Promise<boolean> {
+    const pending = this.pendingChanges.get(installId);
+    if (pending?.op === 'revoke') return pending.promise;
+    if (pending) {
+      // A restore is being written; until it is durable the id is still
+      // refused. Revoke once it settles, whichever way.
+      return pending.promise.then(() => this.revoke(installId), () => this.revoke(installId));
+    }
+    if (this.revoked.has(installId) && !this.failedChanges.has(installId)) return Promise.resolve(false);
     const entry: LogEntry = { op: 'revoke', installId, at: this.now() };
     this.apply(entry);
-    await this.append(entry);
-    return true;
+    return this.write(installId, 'revoke', entry, () => {});
   }
 
-  /** Lets a revoked id register again. False if it was not revoked. */
-  async restore(installId: string): Promise<boolean> {
-    if (!this.revoked.has(installId)) return false;
+  /**
+   * Lets a revoked id register again. Resolves true once the restore is
+   * durable (the id is refused until then), false if it was not revoked;
+   * rejects if the write failed (still refused; the next call writes again).
+   */
+  restore(installId: string): Promise<boolean> {
+    const pending = this.pendingChanges.get(installId);
+    if (pending?.op === 'restore') return pending.promise;
+    if (pending) return pending.promise.then(() => this.restore(installId), () => this.restore(installId));
+    if (!this.revoked.has(installId)) return Promise.resolve(false);
     const entry: LogEntry = { op: 'restore', installId, at: this.now() };
-    this.apply(entry);
-    await this.append(entry);
-    return true;
+    return this.write(installId, 'restore', entry, () => this.apply(entry));
+  }
+
+  /** Where `installId`'s last operator change stands. */
+  operatorChangeState(installId: string): OperatorChangeState {
+    if (this.pendingChanges.has(installId)) return 'pending';
+    if (this.failedChanges.has(installId)) return 'failed';
+    return this.revoked.has(installId) ? 'durable' : 'none';
+  }
+
+  private write(installId: string, op: OperatorOp, entry: LogEntry, onDurable: () => void): Promise<boolean> {
+    this.failedChanges.delete(installId);
+    const promise = this.append(entry).then(
+      () => {
+        this.pendingChanges.delete(installId);
+        onDurable();
+        return true;
+      },
+      (error: unknown) => {
+        this.pendingChanges.delete(installId);
+        this.failedChanges.set(installId, op);
+        throw error;
+      },
+    );
+    this.pendingChanges.set(installId, { op, promise });
+    return promise;
   }
 
   isRevoked(installId: string): boolean {
@@ -157,6 +210,8 @@ export class MemoryInstallRegistry {
 export class FileInstallRegistry extends MemoryInstallRegistry {
   private writes: Promise<void> = Promise.resolve();
   private failed: Error | undefined;
+  /** A write failed and may have left a partial line: the next one starts on a fresh line. */
+  private torn = false;
 
   constructor(
     private readonly path: string,
@@ -194,15 +249,17 @@ export class FileInstallRegistry extends MemoryInstallRegistry {
     const write = this.writes.then(async () => {
       const handle = await open(this.path, 'a', 0o600);
       try {
-        await handle.write(`${JSON.stringify(entry)}\n`);
+        await handle.write(`${this.torn ? '\n' : ''}${JSON.stringify(entry)}\n`);
         await handle.sync();
       } finally {
         await handle.close();
       }
+      this.torn = false;
     });
     // A failed append is remembered (flush rethrows it) and does not stall later ones.
     this.writes = write.catch((error: Error) => {
       this.failed = error;
+      this.torn = true;
     });
     return write;
   }

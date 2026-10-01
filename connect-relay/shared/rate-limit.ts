@@ -29,6 +29,12 @@ export class KeyedTokenBuckets {
     return true;
   }
 
+  /** Gives back one token taken by `take` (never above capacity). */
+  refund(key: string): void {
+    const bucket = this.buckets.get(key);
+    if (bucket) bucket.tokens = Math.min(this.spec.capacity, bucket.tokens + 1);
+  }
+
   private sweep(now: number): void {
     for (const [key, bucket] of this.buckets) {
       const tokens = bucket.tokens + ((now - bucket.at) / 1000) * this.spec.refillPerSecond;
