@@ -4,7 +4,8 @@
 # carry OAuth query strings, which the relay never records either.
 #
 # Written for Caddy 2.6.2 (the Ubuntu package); every directive below exists
-# in that version.
+# in that version (caddyconfig/httpcaddyfile/serveroptions.go and
+# modules/caddyhttp/requestbody at tag v2.6.2). A newer Caddy needs no change.
 {
 	admin localhost:2019
 	servers {
@@ -13,13 +14,31 @@
 			read_header 10s
 			# Idle keep-alive connections between requests.
 			idle 2m
-			# No read_body and no write: in Go (and so in Caddy) read_body is a
-			# deadline on the whole request, which also ends long Server-Sent
-			# Events responses, and Caddy 2.6 leaves it set on upgraded
-			# WebSocket connections, so it would cut install sessions too.
-			# Request bodies are bounded by the relay instead: an upload
-			# ticket per address and relay-wide, a byte budget, and absolute
-			# and idle upload deadlines (server/relay.ts readBody).
+			# The public bound on how long any request may take to arrive,
+			# body included: the edge closes a trickled or never-finished
+			# upload, whatever the relay behind it did. Checked against the
+			# Go and Caddy source (Caddy 2.6.2 and current master alike):
+			# - read_body is Go's http.Server.ReadTimeout, a deadline on the
+			#   whole request. Caddy has no body-only read timeout in any
+			#   release (request_body has only max_size), so upgrading Caddy
+			#   would not give a tighter, stream-safe bound.
+			# - WebSocket (WSS install sessions): Go clears every deadline
+			#   when the connection is hijacked for the upgrade, so sessions
+			#   are not cut.
+			# - HTTP/2 (TLS clients): the deadline covers only the request
+			#   body stream; responses and SSE stream on.
+			# - HTTP/1.1: Go's background read after the body also hits the
+			#   deadline and cancels the request, so a whole HTTP/1.1
+			#   exchange is capped at this value. 36m is above the longest
+			#   exchange the relay allows (responseHeadTimeoutMs 5 min +
+			#   responseTotalTimeoutMs 30 min, server/limits.ts), so no
+			#   answer or stream the relay would deliver is cut; keep it
+			#   above their sum if those change.
+			# Inside this bound the relay itself refuses and times uploads
+			# (upload tickets, byte budget, 30 s absolute and 10 s idle
+			# deadlines) and closes the transport behind every refusal
+			# (connectionIdleTimeoutSeconds, server/limits.ts).
+			read_body 36m
 		}
 	}
 }

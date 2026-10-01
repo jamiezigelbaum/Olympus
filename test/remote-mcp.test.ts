@@ -139,13 +139,14 @@ async function connectClient(token: string): Promise<Client> {
   return client;
 }
 
-function mcpInitialize(authorization?: string): Promise<Response> {
+function mcpInitialize(authorization?: string, extraHeaders: Record<string, string> = {}): Promise<Response> {
   return fetch(`${base}/mcp`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream',
       ...(authorization ? { Authorization: authorization } : {}),
+      ...extraHeaders,
     },
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -207,11 +208,15 @@ describe('remote MCP over loopback with a connection token', () => {
 
     // Only a verified credential's response carries the relay's admission mark.
     expect(missing.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
-    const accepted = await mcpInitialize(`Bearer ${token}`);
-    expect(accepted.status).toBe(200);
-    expect(accepted.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBe('1');
+    // Direct callers never see it; relayed requests (the relay child's marker) do.
+    const direct = await mcpInitialize(`Bearer ${token}`);
+    expect(direct.status).toBe(200);
+    expect(direct.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
+    const relayed = await mcpInitialize(`Bearer ${token}`, { 'x-olympus-relay': 'per-boot-secret' });
+    expect(relayed.status).toBe(200);
+    expect(relayed.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBe('1');
     store.revoke(connection.id);
-    const revoked = await mcpInitialize(`Bearer ${token}`);
+    const revoked = await mcpInitialize(`Bearer ${token}`, { 'x-olympus-relay': 'per-boot-secret' });
     expect(revoked.status).toBe(401);
     expect(revoked.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
     expect(revoked.headers.get('WWW-Authenticate')).toContain('error="invalid_token"');

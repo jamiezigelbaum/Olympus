@@ -27,11 +27,29 @@ export interface RelayLimits {
   /** Owner-lane requests in flight per install; the last slot is reserved for the dashboard tool. */
   readonly concurrentPerInstall: number;
   /**
-   * Requests in flight per install whose credential is not yet confirmed (a
-   * fresh token, token and revocation calls, and any forged secret). A pool
-   * of its own: it can never take an owner-lane slot.
+   * `/mcp` requests in flight per install whose credential is not yet
+   * confirmed (a fresh or rotated token, or a forged secret). A pool of its
+   * own: it can never take an owner-lane slot. Shared fairly by address
+   * (`unverifiedPerAddress` each, the rest waiting round-robin), so one
+   * address cannot hold it.
    */
   readonly unverifiedConcurrentPerInstall: number;
+  /** OAuth control requests (`/connect/token`, `/connect/revoke`) in flight per install: their own fair pool. */
+  readonly controlConcurrentPerInstall: number;
+  /** Slots one address may hold at once in an install's unverified or control pool. */
+  readonly unverifiedPerAddress: number;
+  /** Requests one address may have waiting for an install's unverified or control pool. */
+  readonly unverifiedQueuePerAddress: number;
+  /** Longest wait for a slot in an unverified or control pool before a 503. */
+  readonly unverifiedQueueWaitMs: number;
+  /**
+   * Seconds an HTTP connection may sit with nothing written to it (Bun's
+   * idleTimeout). Closes the transport behind every refusal and timed-out
+   * upload; a request forwarded to an install lifts it, so its own timers
+   * (head, idle, total) govern long answers and streams instead. WebSocket
+   * sessions have their own idle limit and heartbeat.
+   */
+  readonly connectionIdleTimeoutSeconds: number;
   /** Unauthenticated-route requests (token, metadata, bridge, 401s, unconfirmed credentials) per address. */
   readonly publicRequestsPerIp: BucketSpec;
   readonly maxRequestBodyBytes: number;
@@ -72,6 +90,11 @@ export const DEFAULT_LIMITS: RelayLimits = {
   requestsPerInstall: { capacity: 60, refillPerSecond: 10 },
   concurrentPerInstall: 8,
   unverifiedConcurrentPerInstall: 4,
+  controlConcurrentPerInstall: 2,
+  unverifiedPerAddress: 1,
+  unverifiedQueuePerAddress: 2,
+  unverifiedQueueWaitMs: 10_000,
+  connectionIdleTimeoutSeconds: 15,
   publicRequestsPerIp: { capacity: 120, refillPerSecond: 20 },
   maxRequestBodyBytes: 1024 * 1024,
   maxResponseBodyBytes: 8 * 1024 * 1024,
@@ -89,8 +112,11 @@ export const DEFAULT_LIMITS: RelayLimits = {
   inactiveRegistrationTtlMs: 90 * 24 * 60 * 60_000,
 };
 
-/** `owner`: a confirmed credential; `unverified`: anything the engine has not confirmed yet. */
-export type AdmissionLane = 'owner' | 'unverified';
+/**
+ * `owner`: a confirmed credential. `unverified`: an `/mcp` credential the
+ * engine has not confirmed yet. `control`: OAuth token and revocation calls.
+ */
+export type AdmissionLane = 'owner' | 'unverified' | 'control';
 
 export type Admission =
   | {
@@ -103,27 +129,141 @@ export type Admission =
   | { ok: false; reason: 'rate_limited' | 'busy' };
 
 /**
- * Per-install request admission, in two independent lanes.
+ * A concurrency pool shared fairly between keys (caller addresses): each key
+ * may hold `perKey` slots; requests beyond that, or beyond capacity, wait in a
+ * short per-key queue and are granted round-robin across keys as slots free.
+ * So a flood from one address holds at most `perKey` slots, and a flood from
+ * many addresses delays another address by at most one turn per active key.
+ */
+export class FairPool {
+  private inFlight = 0;
+  private readonly held = new Map<string, number>();
+  /** Keys with waiters, in rotation order (re-inserted at the end after each grant). */
+  private readonly waiting = new Map<string, Array<(release: (() => void) | undefined) => void>>();
+  private queued = 0;
+
+  constructor(
+    private readonly capacity: number,
+    private readonly perKey: number,
+    private readonly queuePerKey: number,
+    private readonly maxQueued = 256,
+  ) {}
+
+  get idle(): boolean {
+    return this.inFlight === 0 && this.queued === 0;
+  }
+
+  get active(): number {
+    return this.inFlight;
+  }
+
+  /** A release function once a slot is granted, or undefined (queue full, wait expired, caller gone). */
+  acquire(key: string, waitMs: number, signal?: AbortSignal): Promise<(() => void) | undefined> {
+    if (!this.waiting.has(key) && this.canRun(key)) return Promise.resolve(this.start(key));
+    const list = this.waiting.get(key) ?? [];
+    if (list.length >= this.queuePerKey || this.queued >= this.maxQueued || signal?.aborted) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (release: (() => void) | undefined) => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', giveUp);
+        resolve(release);
+      };
+      const giveUp = () => {
+        const current = this.waiting.get(key);
+        const index = current?.indexOf(settle) ?? -1;
+        if (index < 0) return;
+        current!.splice(index, 1);
+        this.queued -= 1;
+        if (current!.length === 0) this.waiting.delete(key);
+        settle(undefined);
+      };
+      timer = setTimeout(giveUp, waitMs);
+      signal?.addEventListener('abort', giveUp, { once: true });
+      list.push(settle);
+      this.waiting.set(key, list);
+      this.queued += 1;
+    });
+  }
+
+  private canRun(key: string): boolean {
+    return this.inFlight < this.capacity && (this.held.get(key) ?? 0) < this.perKey;
+  }
+
+  private start(key: string): () => void {
+    this.inFlight += 1;
+    this.held.set(key, (this.held.get(key) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.inFlight -= 1;
+      const remaining = (this.held.get(key) ?? 1) - 1;
+      if (remaining > 0) this.held.set(key, remaining);
+      else this.held.delete(key);
+      this.dispatch();
+    };
+  }
+
+  private dispatch(): void {
+    for (const [key, list] of this.waiting) {
+      if (this.inFlight >= this.capacity) return;
+      if (!this.canRun(key)) continue;
+      const grant = list.shift()!;
+      this.queued -= 1;
+      // To the back of the rotation (Map iteration then skips it: it is at its per-key cap or out of waiters).
+      this.waiting.delete(key);
+      if (list.length > 0) this.waiting.set(key, list);
+      grant(this.start(key));
+    }
+  }
+}
+
+/**
+ * Per-install request admission, in three independent lanes.
  *
  * The owner lane is for credentials the install's engine has already
  * confirmed: a token bucket for rate, and a concurrency cap whose last slot
- * only a dashboard call may take. The unverified lane has its own small
- * concurrency pool and spends no per-install rate at all (the caller's address
- * pays, server/relay.ts), so traffic with a forged secret for a known install
- * id can neither drain the owner's rate nor take the owner's slots.
+ * only a dashboard call may take. The unverified and control lanes are small
+ * fair pools of their own (FairPool, keyed by caller address) and spend no
+ * per-install rate (the caller's address pays, server/relay.ts). Traffic with
+ * a forged secret for a known install id therefore cannot drain the owner's
+ * rate, take the owner's slots, or hold the way in for a fresh token, a
+ * refresh or a revocation from another address.
  */
 export function createInstallAdmission(limits: RelayLimits, now?: () => number): {
-  admit(installId: string, lane: AdmissionLane, dashboard: boolean): Admission;
+  admit(installId: string, lane: AdmissionLane, dashboard: boolean, address?: string, signal?: AbortSignal): Promise<Admission>;
   inFlight(installId: string): number;
 } {
   const rate = new KeyedTokenBuckets(limits.requestsPerInstall, now);
   const owner = new KeyedCounter();
-  const unverified = new KeyedCounter();
+  const pools = { unverified: new Map<string, FairPool>(), control: new Map<string, FairPool>() };
+  const poolFor = (lane: 'unverified' | 'control', installId: string): FairPool => {
+    let pool = pools[lane].get(installId);
+    if (!pool) {
+      const capacity = lane === 'unverified' ? limits.unverifiedConcurrentPerInstall : limits.controlConcurrentPerInstall;
+      pool = new FairPool(Math.max(1, capacity), Math.max(1, limits.unverifiedPerAddress), Math.max(0, limits.unverifiedQueuePerAddress));
+      pools[lane].set(installId, pool);
+    }
+    return pool;
+  };
   return {
-    admit(installId, lane, dashboard) {
-      if (lane === 'unverified') {
-        const release = unverified.tryAcquire(installId, Math.max(1, limits.unverifiedConcurrentPerInstall));
-        return release ? { ok: true, release, refund: () => {} } : { ok: false, reason: 'busy' };
+    async admit(installId, lane, dashboard, address = 'unknown', signal) {
+      if (lane !== 'owner') {
+        const pool = poolFor(lane, installId);
+        const release = await pool.acquire(address, limits.unverifiedQueueWaitMs, signal);
+        if (!release) {
+          if (pool.idle) pools[lane].delete(installId);
+          return { ok: false, reason: 'busy' };
+        }
+        return {
+          ok: true,
+          release: () => {
+            release();
+            if (pool.idle && pools[lane].get(installId) === pool) pools[lane].delete(installId);
+          },
+          refund: () => {},
+        };
       }
       const max = dashboard ? limits.concurrentPerInstall : Math.max(1, limits.concurrentPerInstall - 1);
       // Concurrency first: a refused request should not also spend a rate token.
@@ -142,7 +282,7 @@ export function createInstallAdmission(limits: RelayLimits, now?: () => number):
         },
       };
     },
-    inFlight: (installId) => owner.get(installId) + unverified.get(installId),
+    inFlight: (installId) => owner.get(installId) + (pools.unverified.get(installId)?.active ?? 0) + (pools.control.get(installId)?.active ?? 0),
   };
 }
 

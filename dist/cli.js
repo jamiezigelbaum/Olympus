@@ -98535,7 +98535,8 @@ function createRemoteMcpHandler(options) {
     const verification = authenticateRemoteRequest(request, options);
     if (!verification.ok)
       return verification.response;
-    return markAuthenticated(await serveAuthenticated(request, verification));
+    const response = await serveAuthenticated(request, verification);
+    return isRelayedRequest(request) ? markAuthenticated(response) : response;
   };
   async function serveAuthenticated(request, verification) {
     if (request.method !== "POST") {
@@ -98686,6 +98687,7 @@ var init_remote_mcp = __esm(() => {
   init_email();
   init_operation_caller();
   init_remote_connections();
+  init_remote_access();
   init_remote_oauth_store();
   init_remote_public_url();
   init_source_answer_jobs();

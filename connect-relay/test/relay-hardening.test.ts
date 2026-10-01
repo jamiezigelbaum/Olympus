@@ -7,7 +7,8 @@
  * small limits, never by exhausting memory.
  */
 import { afterAll, afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RelayClient, type RelayClientStatus } from '../client/relay-client.ts';
@@ -47,8 +48,12 @@ async function until(condition: () => boolean, timeoutMs = 5_000): Promise<void>
   }
 }
 
-async function makeRelay(limits: Partial<RelayLimits> = {}, registry: MemoryInstallRegistry = new MemoryInstallRegistry()): Promise<RelayHandle> {
-  const relay = await startRelay({ publicHost: PUBLIC_HOST, registry, listen: { host: '127.0.0.1', port: 0 }, limits });
+async function makeRelay(
+  limits: Partial<RelayLimits> = {},
+  registry: MemoryInstallRegistry = new MemoryInstallRegistry(),
+  extra: { trustProxy?: boolean } = {},
+): Promise<RelayHandle> {
+  const relay = await startRelay({ publicHost: PUBLIC_HOST, registry, listen: { host: '127.0.0.1', port: 0 }, limits, ...extra });
   cleanups.push(() => relay.close());
   return relay;
 }
@@ -557,5 +562,222 @@ describe('F5: revocation and restore are acknowledged only once durable', () => 
     expect(new FileInstallRegistry(path).isRevoked(identity.installId)).toBe(false);
     expect(await relay.revoke(identity.installId)).toMatchObject({ revoked: true });
     expect(new FileInstallRegistry(path).isRevoked(identity.installId)).toBe(true);
+  });
+});
+
+/**
+ * A raw upload over a Node `net.Socket` that sends its head and part of its
+ * body, then keeps trickling bytes: it watches the transport itself (`end`,
+ * `close`), not just the status line.
+ */
+function heldUpload(port: number, path: string, headers: Record<string, string>, declared: number, sent: number) {
+  const socket = new Socket();
+  const state = { received: '', ended: false, closed: false, closedAfterMs: -1 };
+  const startedAt = Date.now();
+  socket.on('data', (data) => (state.received += data.toString('latin1')));
+  socket.on('end', () => (state.ended = true));
+  socket.on('close', () => {
+    state.closed = true;
+    state.closedAfterMs = Date.now() - startedAt;
+  });
+  socket.on('error', () => {});
+  socket.connect(port, '127.0.0.1', () => {
+    const head = [`POST ${path} HTTP/1.1`, `Host: 127.0.0.1:${port}`, 'Content-Type: application/json', `Content-Length: ${declared}`]
+      .concat(Object.entries(headers).map(([name, value]) => `${name}: ${value}`))
+      .join('\r\n');
+    socket.write(`${head}\r\n\r\n${'x'.repeat(sent)}`);
+  });
+  // Never finishes the body: one byte every 100 ms for as long as the socket lives.
+  const trickle = setInterval(() => {
+    if (!state.closed) socket.write('x');
+  }, 100);
+  cleanups.push(() => {
+    clearInterval(trickle);
+    socket.destroy();
+  });
+  return {
+    state,
+    status: () => Number(/^HTTP\/1\.1 (\d{3})/.exec(state.received)?.[1] ?? 0),
+  };
+}
+
+describe('R1: every refusal and timed-out upload ends its transport', () => {
+  setDefaultTimeout(20_000);
+  test('unknown id, 429, oversized, byte budget and 408 each close the socket while the caller keeps sending', async () => {
+    const common: Partial<RelayLimits> = {
+      connectionIdleTimeoutSeconds: 1,
+      uploadTimeoutMs: 300,
+      uploadIdleTimeoutMs: 250,
+      maxRequestBodyBytes: 64 * 1024,
+      maxUploadBufferedBytes: 16 * 1024,
+    };
+    const relay = await makeRelay({ ...common, publicRequestsPerIp: { capacity: 1000, refillPerSecond: 0 } });
+    const throttled = await makeRelay({ ...common, publicRequestsPerIp: { capacity: 0, refillPerSecond: 0 } });
+    const fabricated = `Bearer ${mintCredential('access', loadOrCreateIdentity(tempDir()).installId)}`;
+    const cases = {
+      unknownId: heldUpload(relay.port, '/mcp', { Authorization: fabricated }, 8_000, 10),
+      rateLimited: heldUpload(throttled.port, '/mcp', {}, 8_000, 10),
+      oversized: heldUpload(relay.port, '/mcp', {}, 1024 * 1024, 10),
+      byteBudget: heldUpload(relay.port, '/mcp', {}, 32 * 1024, 10),
+      uploadTimeout: heldUpload(relay.port, '/mcp', {}, 8_000, 10),
+    };
+    const all = Object.values(cases);
+    await until(() => all.every((c) => c.state.closed), 9_000);
+    expect(Object.fromEntries(Object.entries(cases).map(([name, c]) => [name, c.status()]))).toEqual({
+      unknownId: 401,
+      rateLimited: 429,
+      oversized: 413,
+      byteBudget: 503,
+      uploadTimeout: 408,
+    });
+    // Bounded: gone within the idle limit plus Bun's timer granularity (about 4 s), however long the caller trickles.
+    for (const c of all) expect(c.state.closedAfterMs).toBeLessThan(6_500);
+    expect(relay.status()).toMatchObject({ uploading: 0, inFlight: 0 });
+    expect(throttled.status()).toMatchObject({ uploading: 0, inFlight: 0 });
+  });
+
+  test('long quiet answers, quiet SSE streams and install sessions outlive the connection idle limit', async () => {
+    const relay = await makeRelay({ connectionIdleTimeoutSeconds: 1, publicRequestsPerIp: { capacity: 1000, refillPerSecond: 0 } });
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      idleTimeout: 0,
+      async fetch(request) {
+        if (request.method === 'GET') {
+          // Server-Sent Events with 1.5 s of silence between events.
+          let n = 0;
+          return new Response(new ReadableStream<Uint8Array>({
+            async pull(controller) {
+              if (n > 0) await Bun.sleep(1_500);
+              n += 1;
+              controller.enqueue(new TextEncoder().encode(`data: event-${n}\n\n`));
+              if (n === 3) controller.close();
+            },
+          }), { headers: { 'content-type': 'text/event-stream' } });
+        }
+        await Bun.sleep(2_500); // An answer that takes longer than the idle limit to start.
+        return Response.json({ ok: true });
+      },
+    });
+    cleanups.push(() => server.stop(true));
+    const identity = loadOrCreateIdentity(tempDir());
+    await connectClient(relay, `http://127.0.0.1:${server.port}`, identity);
+    const token = mintCredential('access', identity.installId);
+    const slow = await mcpPost(relay, token, rpc('tools/call', { name: 'slow' }));
+    expect(slow.status).toBe(200);
+    expect(await slow.json()).toEqual({ ok: true });
+    const sse = await fetch(`${relay.url}/mcp`, { headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream' } });
+    expect(sse.status).toBe(200);
+    expect(await sse.text()).toBe('data: event-1\n\ndata: event-2\n\ndata: event-3\n\n');
+    // The install session (WSS) stayed up throughout and still serves.
+    expect(relay.onlineInstalls()).toContain(identity.installId);
+    expect((await mcpPost(relay, token, rpc('tools/call', { name: 'slow' }))).status).toBe(200);
+  });
+});
+
+describe('R2: invalid-token floods cannot starve fresh authentication, refresh or revocation', () => {
+  test('under a running multi-address flood, a never-confirmed token, a refresh and a revocation each complete within a bound', async () => {
+    const relay = await makeRelay(
+      { publicRequestsPerIp: { capacity: 100_000, refillPerSecond: 0 } },
+      new MemoryInstallRegistry(),
+      { trustProxy: true },
+    );
+    const identity = loadOrCreateIdentity(tempDir());
+    const freshToken = mintCredential('access', identity.installId);
+    const refreshToken = mintCredential('refresh', identity.installId);
+    const ownerReached: string[] = [];
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        const body = await request.text();
+        const form = new URLSearchParams(body);
+        const genuine = request.headers.get('authorization') === `Bearer ${freshToken}`
+          || form.get('refresh_token') === refreshToken
+          || form.get('token') === refreshToken;
+        if (!genuine) {
+          // A forged credential: refused, after the time an engine takes to look it up.
+          await Bun.sleep(50);
+          return url.pathname === '/mcp'
+            ? Response.json({ error: 'invalid_token' }, { status: 401 })
+            : url.pathname === '/connect/revoke'
+              ? new Response(null, { status: 200 })
+              : Response.json({ error: 'invalid_grant' }, { status: 400 });
+        }
+        ownerReached.push(url.pathname);
+        if (url.pathname === '/mcp') return Response.json({ ok: true }, { headers: { [AUTHENTICATED_RESPONSE_HEADER]: '1' } });
+        if (url.pathname === '/connect/token') return Response.json({ access_token: 'new', token_type: 'Bearer' });
+        return new Response(null, { status: 200 });
+      },
+    });
+    cleanups.push(() => server.stop(true));
+    await connectClient(relay, `http://127.0.0.1:${server.port}`, identity);
+
+    // The flood: six addresses, four concurrent loops each, on all three routes, until told to stop.
+    let flooding = true;
+    const attackerStatuses: number[] = [];
+    const form = (fields: Record<string, string>) => new URLSearchParams(fields).toString();
+    const attack = async (address: string, n: number) => {
+      while (flooding) {
+        const route = n % 3;
+        n += 1;
+        const headers: Record<string, string> = { 'x-forwarded-for': address };
+        const response = route === 0
+          ? await fetch(`${relay.url}/mcp`, { method: 'POST', headers: { ...headers, authorization: `Bearer ${mintCredential('access', identity.installId)}` }, body: rpc('ping') })
+          : await fetch(`${relay.url}${route === 1 ? '/connect/token' : '/connect/revoke'}`, {
+            method: 'POST',
+            headers: { ...headers, 'content-type': 'application/x-www-form-urlencoded' },
+            body: route === 1
+              ? form({ grant_type: 'refresh_token', refresh_token: mintCredential('refresh', identity.installId), client_id: 'x' })
+              : form({ token: mintCredential('refresh', identity.installId) }),
+          });
+        attackerStatuses.push(response.status);
+        await response.arrayBuffer();
+      }
+    };
+    const loops = [];
+    for (let a = 1; a <= 6; a += 1) for (let l = 0; l < 4; l += 1) loops.push(attack(`203.0.113.${a}`, l));
+    await until(() => attackerStatuses.length > 50);
+
+    const owner = { 'x-forwarded-for': '198.51.100.7' };
+    const timed = async (run: () => Promise<Response>) => {
+      const startedAt = Date.now();
+      const response = await run();
+      await response.arrayBuffer();
+      return { status: response.status, ms: Date.now() - startedAt };
+    };
+    // Never confirmed before: no warm-up call.
+    const fresh = await timed(() => fetch(`${relay.url}/mcp`, { method: 'POST', headers: { ...owner, authorization: `Bearer ${freshToken}` }, body: rpc('tools/list') }));
+    const refresh = await timed(() => fetch(`${relay.url}/connect/token`, {
+      method: 'POST',
+      headers: { ...owner, 'content-type': 'application/x-www-form-urlencoded' },
+      body: form({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: 'x' }),
+    }));
+    const revoke = await timed(() => fetch(`${relay.url}/connect/revoke`, {
+      method: 'POST',
+      headers: { ...owner, 'content-type': 'application/x-www-form-urlencoded' },
+      body: form({ token: refreshToken }),
+    }));
+    const floodedBefore = attackerStatuses.length;
+    await until(() => attackerStatuses.length > floodedBefore + 20); // Still running when the owner was served.
+    flooding = false;
+    await Promise.all(loops);
+
+    expect({ fresh: fresh.status, refresh: refresh.status, revoke: revoke.status }).toEqual({ fresh: 200, refresh: 200, revoke: 200 });
+    expect(ownerReached).toEqual(['/mcp', '/connect/token', '/connect/revoke']);
+    for (const result of [fresh, refresh, revoke]) expect(result.ms).toBeLessThan(2_000);
+    // The flood really contended: its own excess was turned away.
+    expect(attackerStatuses.filter((status) => status === 503).length).toBeGreaterThan(0);
+  });
+});
+
+describe('the public edge', () => {
+  test('Caddy bounds request time above the longest exchange the relay allows, with header and body-size limits', () => {
+    const caddyfile = readFileSync(new URL('../deploy/Caddyfile', import.meta.url), 'utf8');
+    const minutes = Number(/^\s*read_body (\d+)m$/m.exec(caddyfile)?.[1]);
+    expect(minutes * 60_000).toBeGreaterThan(DEFAULT_LIMITS.responseHeadTimeoutMs + DEFAULT_LIMITS.responseTotalTimeoutMs);
+    expect(caddyfile).toMatch(/^\s*read_header 10s$/m);
+    expect(caddyfile).toMatch(/^\s*max_size 2MB$/m);
   });
 });

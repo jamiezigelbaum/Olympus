@@ -312,6 +312,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     body: Uint8Array;
     lane: AdmissionLane;
     dashboard: boolean;
+    /** The caller's address: the key the unverified and control pools share fairly by. */
+    ip: string;
     /** Set for an access token: confirmation is tracked for it. */
     credentialKey?: string;
     offline: () => Response;
@@ -322,7 +324,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       log('request_refused', { install: installTag(installId), reason: 'unknown_install' });
       return input.unknown();
     }
-    const admitted = admission.admit(installId, input.lane, input.dashboard);
+    const admitted = await admission.admit(installId, input.lane, input.dashboard, input.ip, input.request.signal);
     if (!admitted.ok) {
       log('request_refused', { install: installTag(installId), reason: admitted.reason });
       return admitted.reason === 'busy'
@@ -334,6 +336,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       admitted.release();
       return input.offline();
     }
+    // From here the install's answer may take minutes or stream quietly: the
+    // stream's own timers (session.ts) govern it, not the connection idle limit.
+    server.timeout(input.request, 0);
     try {
       return await session.forward({
         method: input.request.method,
@@ -398,6 +403,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       path,
       body,
       lane,
+      ip,
       // Only an owner-lane call may take the reserved dashboard slot.
       dashboard: lane === 'owner' && isDashboardCall(text),
       credentialKey: key,
@@ -442,7 +448,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       request,
       path,
       body,
-      lane: 'unverified',
+      lane: 'control',
+      ip,
       dashboard: false,
       offline: () => json(503, { error: 'temporarily_unavailable', error_description: 'Olympus on your Mac is offline. Try again when your Mac is awake.' }, { 'Retry-After': '30' }),
       unknown,
@@ -461,7 +468,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       status: 503,
       headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '60' },
     });
-    return toInstall({ installId: demoInstallId, request, path, body, lane: 'unverified', dashboard: false, offline: unavailable, unknown: unavailable });
+    return toInstall({ installId: demoInstallId, request, path, body, lane: 'control', ip, dashboard: false, offline: unavailable, unknown: unavailable });
   };
 
   // -------------------------------------------------------------------------
@@ -524,9 +531,12 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const server = Bun.serve<SocketData, never>({
     hostname: config.listen?.host ?? '127.0.0.1',
     port: config.listen?.port ?? 8787,
-    // Streaming responses (SSE) may be quiet for long stretches; the relay's
-    // own per-stream timers bound them instead (session.ts).
-    idleTimeout: 0,
+    // A connection with nothing written to it for this long is closed: that is
+    // what ends the transport behind a refusal or a timed-out upload, whatever
+    // the caller keeps sending. A request forwarded to an install lifts it
+    // (toInstall), so long answers and quiet SSE streams are bounded by their
+    // own per-stream timers instead (session.ts).
+    idleTimeout: limits.connectionIdleTimeoutSeconds,
     maxRequestBodySize: limits.maxRequestBodyBytes + 1024,
     async fetch(request, server) {
       const url = new URL(request.url);
