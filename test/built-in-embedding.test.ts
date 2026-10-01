@@ -393,7 +393,10 @@ describe('built-in embedding provider', () => {
     const attention = builtInEmbeddingAttention(provider.status());
     expect(attention?.reason).toBe('download_failed');
     expect(readBuiltInEmbeddingStatus(env, served.model).state).toBe('failed');
-    expect(builtInEmbeddingDashboardState(provider.status())).toEqual({ kind: 'built_in', state: 'failed' });
+    expect(builtInEmbeddingDashboardState(provider.status())).toEqual({ kind: 'built_in', state: 'failed', failedReason: 'network' });
+    // The owner's retry skips the back-off and tries again at once.
+    await provider.retry().catch(() => undefined);
+    expect(served.requests.length).toBeGreaterThan(attempts);
   });
 
   test('batches stay inside the padded-token budget', async () => {

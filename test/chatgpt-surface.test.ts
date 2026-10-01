@@ -191,6 +191,26 @@ describe('dashboard view-model producer', () => {
     expect(copyDashboardViewModel(vm)).toEqual(vm);
   });
 
+  test('a source working normally offers no action: no "Check again" while a stage runs', () => {
+    // Owner fresh-install test, 2026-10-01: a row listing/reading showed a
+    // "Check again" button. Something the vocabulary flags mid-run (here, a
+    // few items needing attention) is not an action while nothing is stalled.
+    const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
+      family: 'file',
+      connection: { state: 'synced', label: 'synced less than 1 hour ago' },
+      coverage: { indexed_items: 300, not_read_by_policy_items: 100, content_ready_items: 150, embedded_items: 0, embedded_files: 120 },
+      queue_health: { label: 'Needs attention', waiting: 10, active: 1, needs_attention: 3 },
+      answer_readiness: { state: 'syncing', label: 'Syncing now' },
+      last_sync_at: NOW.toISOString(),
+      movement: { extraction_at: NOW.toISOString() } as never,
+    })]), { now: NOW });
+    const dropbox = vm.sources[0]!;
+    expect(dropbox.progress).toMatchObject({ stage: 'reading', stalled: false });
+    expect(dropbox.status).toBe('Working');
+    expect(dropbox.primary).toBeUndefined();
+    expect(vm.needsYou.filter((item) => item.id === 'source:dropbox.files')).toEqual([]);
+  });
+
   test('a finished source is done and may read Fresh; no overall progress remains', () => {
     const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
       family: 'file',
@@ -590,6 +610,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         'olympus_scope_set',
         'olympus_disconnect_source',
         'olympus_model_set',
+        'olympus_model_retry',
         'olympus_privacy_get',
         'olympus_privacy_set',
       ]);

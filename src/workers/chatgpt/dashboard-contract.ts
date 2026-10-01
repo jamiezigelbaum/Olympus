@@ -136,11 +136,23 @@ export interface DashboardViewModelV1 {
   models: {
     embedding: {
       kind: 'built_in' | 'custom';
-      state: 'downloading' | 'ready' | 'failed';
-      /** `downloading` only. */
+      /** `verifying`: the downloaded files are being checked against their pinned checksums. */
+      state: ModelInstallState;
+      /** `downloading` and `verifying` only. */
       percent?: number;
+      /** `downloading` and `verifying` (built-in) only, when known. */
+      bytesDone?: number;
+      bytesTotal?: number;
+      /** `failed` (built-in) only; its fix is a `model:embedding` needsYou item (`olympus_model_retry`). */
+      failedReason?: ModelInstallFailedReason;
     };
-    answers?: { kind: 'built_in' | 'venice' | 'local'; label: string; ready: boolean };
+    answers?: {
+      kind: 'built_in' | 'venice' | 'local';
+      label: string;
+      ready: boolean;
+      /** Built-in only, while it is not ready. A failed install's fix is a `model:answers` needsYou item. */
+      install?: ModelInstall;
+    };
     /** Status only in ChatGPT: carries `disabledReason` (models change on the Mac). */
     change?: DashboardFix;
   };
@@ -153,6 +165,20 @@ export interface DashboardViewModelV1 {
    */
   privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
   generatedAt: string;
+}
+
+/** A built-in model's install (contract v1 addition, 2026-10-01). */
+export type ModelInstallState = 'downloading' | 'verifying' | 'ready' | 'failed';
+/** Fixed codes only, never the installer's message. */
+export type ModelInstallFailedReason = 'disk_full' | 'network' | 'checksum' | 'unknown';
+export interface ModelInstall {
+  state: ModelInstallState;
+  /** 0-100. */
+  percent?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  /** `failed` only. */
+  failedReason?: ModelInstallFailedReason;
 }
 
 export const DASHBOARD_TOOL_NAME = 'olympus_dashboard';
@@ -187,6 +213,8 @@ export const SCOPE_LIST_TOOL_NAME = 'olympus_scope_list';
 export const SCOPE_SET_TOOL_NAME = 'olympus_scope_set';
 export const DISCONNECT_SOURCE_TOOL_NAME = 'olympus_disconnect_source';
 export const MODEL_SET_TOOL_NAME = 'olympus_model_set';
+/** App-only: restarts a built-in model's install (`{model: 'embedding' | 'answers'}`). */
+export const MODEL_RETRY_TOOL_NAME = 'olympus_model_retry';
 
 /** The `_meta` key carrying the picker's names to the widget only. */
 export const SCOPE_UI_META_KEY = 'olympus/scope';
@@ -343,6 +371,17 @@ export interface ModelSetResult {
   answers?: 'local' | 'venice';
   /** The worker restarts to apply the change; the dashboard reads `installing` briefly. */
   restarting: boolean;
+}
+
+/**
+ * `olympus_model_retry {model: 'embedding' | 'answers'}` (app-only): starts
+ * the built-in model's install again after it failed (it resumes a partial
+ * download). Answers at once; the dashboard shows the install's progress.
+ * `model_not_configured` when that model is not the built-in one here.
+ */
+export interface ModelRetryResult {
+  status: 'retrying';
+  model: 'embedding' | 'answers';
 }
 
 /* ------------------------------------------------------------------ */

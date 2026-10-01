@@ -3,6 +3,7 @@
 // sends nothing anywhere. The model and its runtime download once, on first
 // use, into the Olympus data directory (see assets.ts).
 
+import { modelInstallFailedReason, type ModelInstallFailedReason } from '../../../core/model-install-failure.ts';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
@@ -131,6 +132,12 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
 
   /** Downloads and loads the model now instead of on first use. */
   async prepare(): Promise<void> {
+    await this.load();
+  }
+
+  /** The owner asked to try a failed install again: no back-off wait. */
+  async retry(): Promise<void> {
+    if (!this.loading) this.lastFailure = undefined;
     await this.load();
   }
 
@@ -423,8 +430,22 @@ export function sharedBuiltInSourceEmbeddingProvider(options: {
  */
 export function builtInEmbeddingDashboardState(
   status: BuiltInEmbeddingStatus,
-): { kind: 'built_in'; state: 'downloading' | 'ready' | 'failed'; percent?: number } {
+): {
+  kind: 'built_in';
+  state: 'downloading' | 'verifying' | 'ready' | 'failed';
+  percent?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  failedReason?: ModelInstallFailedReason;
+} {
   if (status.state === 'ready') return { kind: 'built_in', state: 'ready' };
-  if (status.state === 'failed') return { kind: 'built_in', state: 'failed' };
-  return { kind: 'built_in', state: 'downloading', percent: status.percent };
+  if (status.state === 'failed') return { kind: 'built_in', state: 'failed', failedReason: modelInstallFailedReason(status.failure) };
+  // Loading the verified model into memory is the last step of checking it.
+  const state = status.state === 'verifying' || status.state === 'loading' ? 'verifying' : 'downloading';
+  return {
+    kind: 'built_in',
+    state,
+    percent: status.percent,
+    ...(status.bytesTotal > 0 ? { bytesDone: status.bytesDone, bytesTotal: status.bytesTotal } : {}),
+  };
 }

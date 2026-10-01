@@ -5,7 +5,7 @@
 // replaced. Connect → browse → save must succeed the first time, and the
 // approval must not wait for the sync it starts.
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startApprovedSourceRun } from '../src/workers/email-source/server.ts';
@@ -60,6 +60,47 @@ test('connect → browse → save succeeds the first time, and a stale retry is 
     wholeAccount: false,
     explicitWholeAccountConfirmation: false,
   })).toThrow('The source scope changed');
+});
+
+test('the same save delivered twice answers with the approval it made; a different stale save is still a conflict', () => {
+  // Owner fresh-install test, 2026-10-01 (second report): connect → browse →
+  // save still failed "the first time" although the approval was on disk.
+  // Nothing but a save writes this state, so the revision a browse returned
+  // moves only when a save lands; the failing request was the second delivery
+  // of the save that had just landed.
+  const authority = connectDropbox();
+  const browsed = authority.snapshot('dropbox.files');
+  const request = {
+    sourceId: 'dropbox.files' as const,
+    accountGeneration: browsed.accountGeneration!,
+    expectedRevision: browsed.revision,
+    selections: [
+      { key: '/projects', state: 'ingest' as const, ancestorKeys: [] },
+      { key: '/projects/old', state: 'exclude' as const, ancestorKeys: ['/projects'] },
+    ],
+    wholeAccount: false,
+    explicitWholeAccountConfirmation: false,
+  };
+  const first = authority.approve(request);
+  expect(first.replayed).toBeUndefined();
+  const onDisk = readFileSync(authority.statePath, 'utf8');
+  const again = authority.approve(request);
+  expect(again).toMatchObject({ status: 'approved', revision: first.revision, replayed: true });
+  // Nothing was written by the replay.
+  expect(readFileSync(authority.statePath, 'utf8')).toBe(onDisk);
+  // A different decision on the old revision is a real conflict.
+  expect(() => authority.approve({ ...request, selections: [{ key: '/projects', state: 'metadata_only', ancestorKeys: [] }] }))
+    .toThrow('The source scope changed');
+  expect(() => authority.approve({ ...request, wholeAccount: true, explicitWholeAccountConfirmation: true, selections: [] }))
+    .toThrow('The source scope changed');
+  // A save on the current revision still works, and the first request replayed
+  // after it is now stale.
+  const next = authority.approve({ ...request, expectedRevision: first.revision, selections: [{ key: '/archive', state: 'ingest', ancestorKeys: [] }] });
+  expect(next.revision).not.toBe(first.revision);
+  expect(() => authority.approve(request)).toThrow('The source scope changed');
+  // A reconnect (new grant generation) never inherits a replay.
+  expect(() => authority.approve({ ...request, expectedRevision: first.revision, accountGeneration: 'f'.repeat(64) }))
+    .toThrow('The connected account changed');
 });
 
 test('the first sync after a scope approval runs in the background, not inside the save', async () => {

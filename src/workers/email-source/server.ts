@@ -1,3 +1,4 @@
+import { modelInstallFailedReason } from '../../core/model-install-failure.ts';
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
 import {
@@ -1134,7 +1135,13 @@ function createWorkerSharedBuiltInModel(
       prepared = installedOnDisk();
     },
   };
-  if (installedOnDisk()) void model.prepare();
+  // Any install this computer has started is re-checked at boot, whatever
+  // its status file says: a status file is one process's last word, not a
+  // fact about the disk. "verifying" or "downloading" left behind by a
+  // process that is gone (or a models directory copied mid-install) used to
+  // be trusted and stay there forever. prepare() re-verifies the pinned
+  // checksums, resumes or restarts a download, and ends ready or failed.
+  if (base.status().state !== 'not_started') void model.prepare();
   return { model, available: () => prepared && installedOnDisk() };
 }
 
@@ -3974,7 +3981,9 @@ export async function main(): Promise<void> {
         explicitWholeAccountConfirmation: input.explicitWholeAccountConfirmation,
       });
       let invalidatedJobs = 0;
-      if (fileExtractionRuntime) {
+      // A replayed save (the same request delivered twice) changed nothing:
+      // re-invalidating would cancel the jobs its first delivery just queued.
+      if (fileExtractionRuntime && approval.replayed !== true) {
         const corpora = input.sourceId === 'dropbox.files'
           ? [DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID]
           : [GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID];
@@ -3988,7 +3997,7 @@ export async function main(): Promise<void> {
         sourceScheduler.updateSources(schedulerSourcesForHandles(readActiveConnectedHandles(process.env)).sources);
         if (fileSourceScopeMetadataEnabled(approval)
           && sourceScheduler.status().sources.some((source) => source.source_id === input.sourceId)) {
-          startApprovedSourceRun(sourceScheduler, input.sourceId);
+          if (approval.replayed !== true) startApprovedSourceRun(sourceScheduler, input.sourceId);
           started = true;
         }
       }
@@ -4278,6 +4287,17 @@ export async function main(): Promise<void> {
     credentialPresent: (_id, profile) => profile.secretRef === undefined
       || safeModelCredential(profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) }) !== undefined,
     requestReload: () => requestModelReload(),
+    retryModel: (model) => {
+      if (model === 'answers') {
+        if (!workerBuiltInModel) return false;
+        void workerBuiltInModel.model.prepare();
+        return true;
+      }
+      const builtIn = [...new Set([internalPolicyEmbeddingProvider, secureLocalPolicyEmbeddingProvider])]
+        .filter((provider): provider is BuiltInSourceEmbeddingProvider => provider instanceof BuiltInSourceEmbeddingProvider);
+      for (const provider of builtIn) void provider.retry().catch(() => undefined);
+      return builtIn.length > 0;
+    },
   });
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === '1';
   // source_answer needs an Analyst the Mac can actually run; without one,
@@ -4366,7 +4386,14 @@ export async function main(): Promise<void> {
             privateModel: () => {
               if (!workerBuiltInModel) return undefined;
               const status = builtInPrivateModelStatus(process.env);
-              return status.enabled ? { state: status.state, percent: status.percent } : undefined;
+              if (!status.enabled) return undefined;
+              return {
+                state: status.state,
+                percent: status.percent,
+                bytesDone: status.bytesDone,
+                bytesTotal: status.bytesTotal,
+                ...(status.state === 'failed' ? { failedReason: modelInstallFailedReason(status.failure) } : {}),
+              };
             },
             privacy: () => {
               const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());

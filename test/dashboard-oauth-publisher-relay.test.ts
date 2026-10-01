@@ -50,6 +50,8 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import type { ModelSetupView } from '../src/core/model-setup.ts';
 import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
+import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { createChatGptSetupBackend } from '../src/workers/chatgpt/setup-backend.ts';
 import { SetupBackendError } from '../src/workers/chatgpt/setup-tools.ts';
 import {
@@ -238,6 +240,36 @@ describe('publisher-client relay flow', () => {
     expect((second as SetupBackendError).code).toBe('source_not_connected');
   });
 
+  test('ChatGPT sign-in: start → relay handback success → the dashboard has no connecting row, and the page says what to do next', async () => {
+    // Owner fresh-install test, 2026-10-01: the browser said "Connected
+    // dropbox" but the ChatGPT dashboard still showed the row connecting.
+    const RELAY = 'https://mcp.olympusplugin.ai';
+    const instance = fixture({}, { handback: { origin: RELAY, installId: 'install-fixture' } });
+    const chatgptView = async () => {
+      const response = await instance.fetch(new Request(`${DASHBOARD_ORIGIN}/dashboard.json`, {
+        headers: { Authorization: 'Bearer dashboard-secret' },
+      }));
+      expect(response.status).toBe(200);
+      const view = buildChatGptDashboardViewModel(await response.json() as SourceDashboardViewModel);
+      return view.sources.find((source) => source.id === 'dropbox.files')!;
+    };
+    const started = await authorizationUrl(await startConnect(instance, { handback: 'relay' }));
+    expect((await chatgptView()).connecting).toBeDefined();
+    const state = started.searchParams.get('state')!;
+    const page = await instance.fetch(new Request(`${RELAY}/oauth/callback/dropbox?code=relay-code-1&state=${encodeURIComponent(state)}`));
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('Dropbox connected');
+    expect(html).toContain('Go back to ChatGPT; your Olympus dashboard updates on its own.');
+    expect(html).not.toContain('Connected dropbox');
+    expect(html).toContain('<style>');
+    const after = await chatgptView();
+    expect(after.connecting).toBeUndefined();
+    expect(after.status).not.toBe('Off');
+    // Never "Open sign-in again" over a finished sign-in.
+    expect(after.primary?.tool).not.toBe('olympus_connect_source');
+  });
+
   test('a ChatGPT (relay) sign-in starts while answer models are not set up; the Mac dashboard path stays gated', async () => {
     // Owner live test, 2026-10-01: a Venice analyst named without its key
     // refused Connect from ChatGPT with model_setup_required.
@@ -306,7 +338,7 @@ describe('publisher-client relay flow', () => {
     expect(done.status).toBe(200);
     expect(done.headers.get('Referrer-Policy')).toBe('no-referrer');
     const donePage = await done.text();
-    expect(donePage).toContain('Connected dropbox');
+    expect(donePage).toContain('Dropbox connected');
     expect(donePage).not.toContain('relay-code-1');
     expect(donePage).not.toContain(state);
 
@@ -1433,7 +1465,7 @@ describe('sign-in started from ChatGPT (relay hand-back)', () => {
     ));
     expect(callback.status).toBe(200);
     const page = await callback.text();
-    expect(page).toContain('Connected dropbox');
+    expect(page).toContain('Dropbox connected');
     expect(page).toContain('https://chatgpt.com/');
     expect(instance.exchanges).toHaveLength(1);
     expect(instance.exchanges[0]!.get('code')).toBe('handback-code');

@@ -234,6 +234,9 @@ interface FakeBackendState {
   /** Where the real privacy profile and tier rules live for this test. */
   privacyEnv?: Record<string, string>;
   pendingCount?: number;
+  /** Built-in models this fake Mac has (retried by olympus_model_retry). */
+  builtInModels?: Array<'embedding' | 'answers'>;
+  retried?: string[];
 }
 
 function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
@@ -320,6 +323,11 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
     savePrivacy(update) {
       writePrivacyProfile(update as Parameters<typeof writePrivacyProfile>[0], { env: state.privacyEnv ?? {} });
       return readChatGptPrivacySettings(state.privacyEnv ?? {}, state.pendingCount ?? 0);
+    },
+    retryModel(model) {
+      if (!(state.builtInModels ?? []).includes(model)) return false;
+      (state.retried ??= []).push(model);
+      return true;
     },
   };
 }
@@ -468,6 +476,27 @@ describe('setup tools over the remote handler', () => {
         texts.add(result.content[0]!.text);
       }
       expect(texts.size).toBe(cases.length);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('olympus_model_retry restarts a built-in install, is panel-only, and refuses a model that is not built in', async () => {
+    const client = await connectClient();
+    try {
+      const { tools } = await client.listTools();
+      const tool = tools.find((entry) => entry.name === 'olympus_model_retry')!;
+      expect(tool._meta).toMatchObject({ 'openai/visibility': 'private', ui: { visibility: ['app'] } });
+      backendState.builtInModels = ['answers'];
+      const retried = await call(client, 'olympus_model_retry', { model: 'answers' });
+      expect(retried.isError).toBeFalsy();
+      expect(retried.structuredContent).toEqual({ status: 'retrying', model: 'answers' });
+      expect(backendState.retried).toEqual(['answers']);
+      const refused = await call(client, 'olympus_model_retry', { model: 'embedding' });
+      expect(refused.isError).toBe(true);
+      expect(refused.content[0]!.text).toBe('That model is not set up on the Mac. Set it up in Olympus on the Mac first.');
+      expect((await call(client, 'olympus_model_retry', { model: 'venice' })).isError).toBe(true);
+      expect(backendState.retried).toEqual(['answers']);
     } finally {
       await client.close();
     }

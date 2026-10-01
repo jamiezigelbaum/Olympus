@@ -69,7 +69,8 @@ export function consentSecurityHeaders(nonce: string, redirectOrigin?: string): 
   };
 }
 
-const STYLE = `
+/** The consent page's one style block; the engine's OAuth callback pages share it. */
+export const CONSENT_PAGE_STYLE = `
 :root { color-scheme: light dark; --fg: #1a1a1a; --muted: #5c5c5c; --bg: #fafaf8; --card: #ffffff;
   --line: #deded8; --accent: #1f4fd1; --warn-bg: #fff4d6; --warn-fg: #6b4a00; --err: #b3261e; }
 @media (prefers-color-scheme: dark) { :root { --fg: #ededea; --muted: #a8a8a2; --bg: #141413; --card: #1d1d1b;
@@ -126,7 +127,7 @@ export function renderConsentPage(input: ConsentPageInput): { body: string; head
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Connect to Olympus</title>
-<style nonce="${nonce}">${STYLE}</style>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
 </head>
 <body>
 <main>
@@ -181,7 +182,7 @@ export function renderLoopbackConsentPage(input: LoopbackConsentPageInput): { bo
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Connect to Olympus</title>
-<style nonce="${nonce}">${STYLE}</style>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
 </head>
 <body>
 <main>
@@ -237,7 +238,7 @@ export function renderDemoSignInPage(input: DemoSignInPageInput): { body: string
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Olympus demo sign-in</title>
-<style nonce="${nonce}">${STYLE}</style>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
 </head>
 <body>
 <main>
@@ -276,7 +277,7 @@ export function renderConsentErrorPage(message: string): { body: string; headers
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Olympus could not connect this app</title>
-<style nonce="${nonce}">${STYLE}</style>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
 </head>
 <body>
 <main>

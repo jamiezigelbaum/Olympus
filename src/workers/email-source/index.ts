@@ -1,3 +1,4 @@
+import { CONSENT_PAGE_STYLE } from '../remote-oauth/consent-page.ts';
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import { runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import type { SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
@@ -6184,7 +6185,19 @@ function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSo
   // The code inside the shape is re-checked against the allowlist: the shape
   // alone would admit arbitrary lowercase content from a crafted message.
   if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined)) return message;
-  return `Connecting ${source} failed partway through. Start connect again from the dashboard.`;
+  return `Connecting ${dashboardOAuthSourceLabel(source)} failed partway through. Start connect again from the dashboard.`;
+}
+
+/** The product name a callback page uses for a source, never its id. */
+function dashboardOAuthSourceLabel(source: DashboardOAuthSource): string {
+  const labels: Record<DashboardOAuthSource, string> = {
+    google: 'Google',
+    gmail: 'Gmail',
+    'google-drive': 'Google Drive',
+    dropbox: 'Dropbox',
+    x: 'X',
+  };
+  return labels[source] ?? source;
 }
 
 /**
@@ -6206,14 +6219,19 @@ function dashboardOAuthFailureHtml(options: {
   returnTo: string;
   status: number;
 }): Response {
+  const label = dashboardOAuthSourceLabel(options.source);
+  const chatgpt = options.returnTo === CHATGPT_RETURN_TO;
   return dashboardOAuthLandingHtml({
     title: 'Olympus connect failed',
-    heading: `Could not connect ${options.source}`,
+    heading: `Could not connect ${label}`,
     paragraphs: [
-      `Could not connect ${options.source}: ${options.reason}`,
-      'You can close this tab and go back to the Olympus dashboard tab you started from.',
+      `Could not connect ${label}: ${options.reason}`,
+      chatgpt
+        ? 'Go back to ChatGPT and try again from your Olympus dashboard.'
+        : 'You can close this tab and go back to the Olympus dashboard tab you started from.',
     ],
     returnTo: options.returnTo,
+    returnLabel: chatgpt ? 'Back to ChatGPT' : 'Back to the dashboard tab',
     status: options.status,
   });
 }
@@ -6233,13 +6251,17 @@ function dashboardOAuthCompleteHtml(options: {
   source: DashboardOAuthSource;
   returnTo: string;
 }): Response {
+  const chatgpt = options.returnTo === CHATGPT_RETURN_TO;
   return dashboardOAuthLandingHtml({
     title: 'Olympus connected',
-    heading: `Connected ${options.source}`,
+    heading: `${dashboardOAuthSourceLabel(options.source)} connected`,
     // The more specific of the two sentences: it also says what happens next,
-    // and where. The dashboard tab that opened this one never navigated away.
-    paragraphs: ['You can close this tab. The Olympus dashboard tab you started from is still open. It picks the new connection up on its own.'],
+    // and where. The dashboard that started this sign-in never navigated away.
+    paragraphs: [chatgpt
+      ? 'Go back to ChatGPT; your Olympus dashboard updates on its own.'
+      : 'You can close this tab. The Olympus dashboard tab you started from is still open. It picks the new connection up on its own.'],
     returnTo: options.returnTo,
+    returnLabel: chatgpt ? 'Back to ChatGPT' : 'Back to the dashboard tab',
     status: 200,
   });
 }
@@ -6259,23 +6281,29 @@ function dashboardOAuthLandingHtml(options: {
   heading: string;
   paragraphs: readonly string[];
   returnTo: string;
+  returnLabel: string;
   status: number;
 }): Response {
   const paragraphs = options.paragraphs
     .map((paragraph) => `      <p>${escapeHtml(paragraph)}</p>`)
     .join('\n');
+  // The consent page's look (light and dark), plus a link styled as its
+  // secondary button. Inline: these pages load nothing.
   return html(`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${escapeHtml(options.title)}</title>
+    <style>${CONSENT_PAGE_STYLE}
+a.back { display: inline-block; margin-top: .5rem; padding: .7rem 1rem; border: 1px solid var(--line); border-radius: 10px;
+  color: var(--fg); text-decoration: none; font-weight: 600; }</style>
   </head>
   <body>
     <main>
       <h1>${escapeHtml(options.heading)}</h1>
 ${paragraphs}
-      <p><a href="${escapeHtml(options.returnTo)}">Back to the dashboard tab</a></p>
+      <p><a class="back" href="${escapeHtml(options.returnTo)}">${escapeHtml(options.returnLabel)}</a></p>
     </main>
   </body>
 </html>`, options.status, {

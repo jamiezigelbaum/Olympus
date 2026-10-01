@@ -422,7 +422,8 @@ describe('installer', () => {
     expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
     expect(installed.serverPath).toBe(join(dir, 'llama.cpp-b0-darwin-arm64', 'llama-b0', 'llama-server'));
     expect(installed.gpu).toBe(true);
-    expect(readBuiltInReasoningStatus(model, env)).toMatchObject({ modelId: 'test-model', state: 'verifying', bytesTotal: runtimeBytes.length + modelBytes.length });
+    // A finished install says so: "verifying" left behind read as not ready forever.
+    expect(readBuiltInReasoningStatus(model, env)).toMatchObject({ modelId: 'test-model', state: 'ready', percent: 100 });
     await installBuiltInReasoning({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive });
     expect(requests).toHaveLength(2);
   });
@@ -453,6 +454,93 @@ describe('installer', () => {
     expect(requests.at(-1)!.range).toBe('bytes=1000-');
   });
 
+  test('a stale "verifying" status over files already on disk is re-checked and ends ready, with real byte progress', async () => {
+    const dir = tempDir();
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    const { model, runtime } = specs();
+    // A models directory copied from another install while it was mid-verify.
+    await installBuiltInReasoning({ model, runtime, env, platform: 'darwin-arm64', fetchImpl: server().fetchImpl, extractArchive, log: () => undefined });
+    writeFileSync(join(dir, 'status.json'), JSON.stringify({
+      state: 'verifying', modelId: 'test-model', percent: 99, label: 'Checking the built-in private model',
+      bytesDone: 0, bytesTotal: 0, updatedAt: '2026-10-01T15:47:39.072Z',
+    }));
+    expect(readBuiltInReasoningStatus(model, env).state).toBe('verifying');
+    const { fetchImpl, requests } = server();
+    const seen: Array<{ state: string; bytesDone: number; bytesTotal: number }> = [];
+    const lines: string[] = [];
+    await installBuiltInReasoning({
+      model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive,
+      onProgress: (status) => seen.push({ state: status.state, bytesDone: status.bytesDone, bytesTotal: status.bytesTotal }),
+      log: (line) => lines.push(line),
+    });
+    // Nothing downloads; the install is re-checked and the status ends terminal.
+    expect(requests).toHaveLength(0);
+    expect(readBuiltInReasoningStatus(model, env)).toMatchObject({ state: 'ready', percent: 100 });
+    expect(lines.some((line) => line.includes('stage=verify') && line.includes('done'))).toBe(true);
+    expect(seen.at(-1)!.state).toBe('ready');
+  });
+
+  test('verifying reports bytes read against the file size', async () => {
+    const dir = tempDir();
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    // A digest no other test verifies, so this process has not memoised it.
+    const bytes = new Uint8Array(Array.from({ length: 8_192 }, (_, index) => (index * 7) % 253));
+    const { runtime } = specs();
+    const model: BuiltInReasoningModelSpec = {
+      ...QWEN35_4B,
+      modelId: 'verify-model',
+      file: { name: 'verify.gguf', url: 'https://models.test/verify.gguf', bytes: bytes.length, sha256: sha256(bytes) },
+    };
+    const fetchImpl = (async (input: RequestInfo | URL) => new Response(String(input).endsWith('llama.tar.gz') ? runtimeBytes : bytes)) as typeof fetch;
+    const seen: Array<{ state: string; bytesDone: number; bytesTotal: number }> = [];
+    await installBuiltInReasoning({
+      model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, log: () => undefined,
+      onProgress: (status) => seen.push({ state: status.state, bytesDone: status.bytesDone, bytesTotal: status.bytesTotal }),
+    });
+    const verifying = seen.filter((entry) => entry.state === 'verifying' && entry.bytesTotal === bytes.length);
+    expect(verifying.length).toBeGreaterThan(0);
+    expect(verifying.at(-1)!.bytesDone).toBe(bytes.length);
+    expect(seen.at(-1)!.state).toBe('ready');
+  });
+
+  test('a download that stops sending fails within the stall limit, and the retry resumes', async () => {
+    const dir = tempDir();
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    const { model, runtime } = specs();
+    let first = true;
+    const requests: Array<string | null> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('llama.tar.gz')) return new Response(runtimeBytes);
+      const range = new Headers(init?.headers).get('range');
+      requests.push(range);
+      if (first) {
+        first = false;
+        // 1,000 bytes, then silence: the connection never closes.
+        let sent = false;
+        return new Response(new ReadableStream({
+          pull(controller) {
+            if (sent) return new Promise<void>(() => undefined);
+            sent = true;
+            controller.enqueue(modelBytes.slice(0, 1_000));
+          },
+        }));
+      }
+      const start = range ? Number(/bytes=(\d+)-/.exec(range)![1]) : 0;
+      return new Response(modelBytes.slice(start), { status: range ? 206 : 200 });
+    }) as typeof fetch;
+    const lines: string[] = [];
+    const options = { model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, downloadStallMs: 50, log: (line: string) => lines.push(line) };
+    const failure = await installBuiltInReasoning(options).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ reason: 'download_failed' });
+    expect(readBuiltInReasoningStatus(model, env)).toMatchObject({ state: 'failed', failure: { reason: 'download_failed' } });
+    expect(lines.some((line) => line.includes('stage=download failed reason=download_failed'))).toBe(true);
+    const installed = await installBuiltInReasoning(options);
+    expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
+    expect(requests.at(-1)).toBe('bytes=1000-');
+    expect(readBuiltInReasoningStatus(model, env).state).toBe('ready');
+  });
+
   test('an unsupported platform fails with a reason the dashboard can show', async () => {
     const { model, runtime } = specs();
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: tempDir() };
@@ -478,4 +566,16 @@ describe('real model (opt-in)', () => {
       await model.stop();
     }
   }, 30 * 60_000);
+});
+
+describe('install failure codes', () => {
+  test('only fixed codes, never the message', async () => {
+    const { modelInstallFailedReason } = await import('../src/core/model-install-failure.ts');
+    expect(modelInstallFailedReason({ reason: 'download_failed', message: 'x' })).toBe('network');
+    expect(modelInstallFailedReason({ reason: 'checksum_mismatch' })).toBe('checksum');
+    expect(modelInstallFailedReason({ reason: 'disk_write_failed', message: 'ENOSPC: no space left on device, write' })).toBe('disk_full');
+    expect(modelInstallFailedReason({ reason: 'disk_write_failed', message: 'EACCES /Users/me' })).toBe('unknown');
+    expect(modelInstallFailedReason({ reason: 'runtime_load_failed' })).toBe('unknown');
+    expect(modelInstallFailedReason(undefined)).toBe('unknown');
+  });
 });
