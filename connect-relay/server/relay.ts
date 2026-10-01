@@ -254,9 +254,12 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           } else {
             controller.enqueue(value);
           }
-        } catch (error) {
+        } catch {
+          // Cut off (size or time cap, or the install went away). Bun ends an
+          // errored response body the same way as a closed one, so close it
+          // without logging a stack per cut-off stream.
           release();
-          controller.error(error);
+          controller.close();
         }
       },
       cancel(reason) {
