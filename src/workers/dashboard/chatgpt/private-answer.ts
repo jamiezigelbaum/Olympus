@@ -559,6 +559,9 @@ function vars(palette: typeof CHATGPT_DASHBOARD_LIGHT, card: typeof CARD_LIGHT):
   ].join(';');
 }
 
+// The ChatGPT desktop host stretched the card to the frame's initial height
+// (live 2026-10-01: a one-line card drawn about 440px tall), so the sizing
+// rules below win over anything the host injects.
 // The page is transparent and exactly as tall as the card: no min-height,
 // no viewport units, no margins outside the card.
 export const CHATGPT_PRIVATE_ANSWER_CSS = `
@@ -568,10 +571,12 @@ export const CHATGPT_PRIVATE_ANSWER_CSS = `
 :root[data-theme=light]{color-scheme:light}
 *{box-sizing:border-box}
 html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
-html,body{margin:0;padding:0;height:auto;min-height:0;background:transparent;color:var(--text);overflow:hidden}
+html:root,html:root>body{margin:0!important;padding:0!important;height:auto!important;min-height:0!important;display:block!important;background:transparent;color:var(--text);overflow:hidden}
 body{font-size:0.9375rem;overflow-wrap:anywhere}
 p,h2{margin:0}
-#panel:empty{display:none}
+html:root>body #panel{display:block!important;height:auto!important;min-height:0!important}
+#panel:empty{display:none!important}
+html:root>body #panel>.card{display:block!important;height:auto!important;min-height:0!important;max-height:none!important;flex:none!important;align-self:flex-start!important}
 .card{margin:0;padding:0.75rem 0.875rem;border-radius:14px;background:var(--tint)}
 .row{display:flex;align-items:center;gap:0.75rem}
 .icon{flex:none;display:flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:50%;background:var(--raise);border:1px solid var(--hair)}

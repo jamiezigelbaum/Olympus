@@ -257,7 +257,7 @@ describe('the reported height is the card, not the frame', () => {
 
   test('the page has no margin, min-height, viewport height or background of its own', () => {
     const html = privateAnswerResourceHtml();
-    expect(html).toContain('html,body{margin:0;padding:0;height:auto;min-height:0;background:transparent');
+    expect(html).toContain('html:root,html:root>body{margin:0!important;padding:0!important;height:auto!important;min-height:0!important;display:block!important;background:transparent');
     // Only the download bar fills its own 4px track.
     expect(html).not.toMatch(/100vh|(?<!bar-fill\{)height:100%/);
   });
@@ -435,5 +435,16 @@ describe('privacy', () => {
       expect(html).not.toContain(forbidden);
     }
     expect(html).not.toMatch(/<script[^>]+src=|<link[^>]+href=|@import|[^A-Za-z0-9]url\(/);
+  });
+});
+
+describe('the card never fills the host frame', () => {
+  // Live 2026-10-01: ChatGPT desktop drew a one-line card about 440px tall,
+  // the grey surface stretched to the frame's starting height.
+  test('sizing rules beat host styles that stretch the page', () => {
+    const html = privateAnswerResourceHtml();
+    expect(html).toContain('html:root,html:root>body{margin:0!important;padding:0!important;height:auto!important;min-height:0!important;display:block!important');
+    expect(html).toContain('html:root>body #panel{display:block!important;height:auto!important;min-height:0!important}');
+    expect(html).toContain('html:root>body #panel>.card{display:block!important;height:auto!important;min-height:0!important;max-height:none!important;flex:none!important;align-self:flex-start!important}');
   });
 });
