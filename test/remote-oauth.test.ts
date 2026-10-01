@@ -382,6 +382,14 @@ describe('end to end with the MCP SDK OAuth client', () => {
     expect((await exchange(clientId, redirectUri, code, verifier)).status).toBe(200);
   });
 
+  test("the ChatGPT desktop app's Codex client returns to its loopback callback on any port, and nowhere else", async () => {
+    const clientId = 'https://chatgpt.com/oauth/codex/client.json';
+    const redirectUri = 'http://127.0.0.1:61234/callback';
+    const { code, verifier } = await authorizeManually({ clientId, redirectUri });
+    expect((await exchange(clientId, redirectUri, code, verifier)).status).toBe(200);
+    await expect(authorizeManually({ clientId, redirectUri: 'https://chatgpt.com/connector/oauth/codex' })).rejects.toThrow();
+  });
+
   test('an arbitrary metadata-document client is refused without any fetch', async () => {
     const url = new URL(`${base}/connect/authorize`);
     url.search = new URLSearchParams({

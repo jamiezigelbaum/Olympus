@@ -16,7 +16,10 @@
  */
 export const CHATGPT_CLIENT_ID = 'https://chatgpt.com/oauth/client.json';
 export const CHATGPT_REDIRECT_URI = 'https://chatgpt.com/connector_platform_oauth_redirect';
-const CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
+/** https://chatgpt.com/oauth/codex/client.json, read 2026-10-01. */
+export const CHATGPT_CODEX_CLIENT_ID = 'https://chatgpt.com/oauth/codex/client.json';
+const CHATGPT_CODEX_REDIRECT_URIS: readonly string[] = ['http://127.0.0.1/callback', 'http://localhost/callback'];
+const CHATGPT_CALLBACK_CLIENT_ID =/^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
 
 export interface PinnedClient {
   clientId: string;
@@ -32,6 +35,13 @@ export function isClientIdMetadataUrl(clientId: string): boolean {
 }
 
 export function pinnedClient(clientId: string): PinnedClient | undefined {
+  // Plugins installed in the ChatGPT desktop app sign in as its Codex native
+  // client, whose published document registers loopback callbacks (any port,
+  // RFC 8252) rather than a chatgpt.com redirect. Checked before the callback
+  // pattern, which would otherwise read `codex` as a callback id.
+  if (clientId === CHATGPT_CODEX_CLIENT_ID) {
+    return { clientId, clientName: 'ChatGPT (desktop)', redirectUris: CHATGPT_CODEX_REDIRECT_URIS, verifiedHost: 'chatgpt.com' };
+  }
   if (clientId === CHATGPT_CLIENT_ID) {
     return { clientId, clientName: 'ChatGPT', redirectUris: [CHATGPT_REDIRECT_URI], verifiedHost: 'chatgpt.com' };
   }

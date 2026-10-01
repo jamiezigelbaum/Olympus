@@ -98700,6 +98700,9 @@ function isClientIdMetadataUrl(clientId) {
   return clientId.startsWith("https://");
 }
 function pinnedClient(clientId) {
+  if (clientId === CHATGPT_CODEX_CLIENT_ID) {
+    return { clientId, clientName: "ChatGPT (desktop)", redirectUris: CHATGPT_CODEX_REDIRECT_URIS, verifiedHost: "chatgpt.com" };
+  }
   if (clientId === CHATGPT_CLIENT_ID) {
     return { clientId, clientName: "ChatGPT", redirectUris: [CHATGPT_REDIRECT_URI], verifiedHost: "chatgpt.com" };
   }
@@ -98714,8 +98717,9 @@ function pinnedClient(clientId) {
   }
   return;
 }
-var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CALLBACK_CLIENT_ID;
+var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID;
 var init_pinned_clients = __esm(() => {
+  CHATGPT_CODEX_REDIRECT_URIS = ["http://127.0.0.1/callback", "http://localhost/callback"];
   CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
 });
 
