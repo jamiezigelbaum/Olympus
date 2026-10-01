@@ -297,7 +297,13 @@ export class ModelSetupService {
 
   private async runLocalChecks(targets: LocalTarget[]): Promise<boolean> {
     for (const target of targets) {
-      if (!await this.modelIsListed(target.baseUrl, target.model, target.apiKey)) return false;
+      // A served alias may be missing from /models (Delphi lists
+      // delphi/embedding but serves secure-local-qwen3-embed). An unlisted ID
+      // is refused before inference, except for an embedding-only target
+      // whose probe below must return exactly the expected dimension.
+      const listed = await this.modelIsListed(target.baseUrl, target.model, target.apiKey);
+      const embeddingOnly = target.embedding && !target.analyst && target.expectedEmbeddingDimension !== undefined;
+      if (!listed && !embeddingOnly) return false;
       if (target.analyst && !await this.chatCompletes(target.baseUrl, target.model, target.apiKey)) return false;
       if (target.embedding && !await this.embeddingCompletes(
         target.baseUrl,
