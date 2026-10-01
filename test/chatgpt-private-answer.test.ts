@@ -286,7 +286,7 @@ describe('one-time jobs', () => {
     expect(unlinked.size).toBe(0);
   });
 
-  test('claims are rate limited, and one job answers a bounded number of polls', async () => {
+  test('claims are rate limited; pending polls by the claiming key are rate limited per job but never destroy it', async () => {
     const limited = makeJobs(readyModel(), { now: 0 }, { claimRate: { capacity: 2, refillPerSecond: 0 } });
     const panel = await generatePanelKeyPair();
     const id = mintCredential('private', INSTALL);
@@ -294,10 +294,71 @@ describe('one-time jobs', () => {
     await limited.claim(id, panel.publicKey);
     expect(await limited.claim(id, panel.publicKey)).toMatchObject({ status: 429, body: { status: 'rate_limited' } });
 
-    const polled = makeJobs(readyModel({ answerPrivately: () => new Promise(() => {}) }), { now: 0 }, { maxClaimsPerJob: 3 });
+    // A replay of the claiming key hammering a pending job: 429s, never a deletion.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const clock = { now: 0 };
+    const polled = makeJobs(readyModel({
+      answerPrivately: async () => { await gate; return { answer: 'survived', citations: [] }; },
+    }), clock, { pollRate: { capacity: 3, refillPerSecond: 1 } });
     const { jobId } = polled.begin({ question: 'q', count: 1, evidence: EVIDENCE });
     for (let i = 0; i < 3; i += 1) expect((await polled.claim(jobId!, panel.publicKey)).status).toBe(202);
+    for (let i = 0; i < 50; i += 1) {
+      expect(await polled.claim(jobId!, panel.publicKey)).toEqual({ status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: 2 });
+    }
+    expect(polled.size).toBe(1);
+    clock.now += 1_000;
+    expect((await polled.claim(jobId!, panel.publicKey)).status).toBe(202);
+    release();
+    await settled(polled);
+    const ready = await polled.claim(jobId!, panel.publicKey);
+    expect(ready.status).toBe(200);
+    expect(JSON.parse(await openPrivateAnswer(jobId!, panel.privateKey, ready.body as unknown as SealedPrivateAnswer)).answer).toBe('survived');
+    // Expiry alone ends it.
+    clock.now += 10 * 60_000;
     expect((await polled.claim(jobId!, panel.publicKey)).status).toBe(410);
+  });
+
+  test('a reset that never resolves does not hold the slot', async () => {
+    let resets = 0;
+    const model = readyModel({
+      answerPrivately: (question) => (question === 'stuck'
+        ? new Promise(() => {})
+        : Promise.resolve({ answer: 'next answer', citations: [] })),
+      reset: () => { resets += 1; return new Promise<void>(() => {}); },
+    });
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 30, resetTimeoutMs: 60_000, audit: () => {} });
+    const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE }).jobId!;
+    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
+    const panel = await generatePanelKeyPair();
+    await jobs.claim(stuck, panel.publicKey);
+    await jobs.claim(next, panel.publicKey);
+    await Bun.sleep(100);
+    expect(await jobs.claim(stuck, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
+    const ready = await jobs.claim(next, panel.publicKey);
+    expect(ready.body.status).toBe('ready');
+    expect(JSON.parse(await openPrivateAnswer(next, panel.privateKey, ready.body as unknown as SealedPrivateAnswer)).answer).toBe('next answer');
+    expect(resets).toBe(1);
+  });
+
+  test('a refresh that finishes after the deadline never starts inference', async () => {
+    let inferences = 0;
+    const model = readyModel({
+      answerPrivately: async () => { inferences += 1; return { answer: 'too late', citations: [] }; },
+    });
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 20, audit: () => {} });
+    const { jobId } = jobs.begin({
+      question: 'q',
+      count: 1,
+      evidence: EVIDENCE,
+      // Ignores its signal and returns well after the deadline.
+      refresh: () => new Promise((resolve) => setTimeout(() => resolve(EVIDENCE), 80)),
+    });
+    const panel = await generatePanelKeyPair();
+    await jobs.claim(jobId!, panel.publicKey);
+    await Bun.sleep(150);
+    expect(inferences).toBe(0);
+    expect(await jobs.claim(jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
   });
 });
 

@@ -100104,7 +100104,8 @@ class PrivateAnswerJobs {
   now;
   ttlMs;
   maxJobs;
-  maxClaimsPerJob;
+  pollRate;
+  resetTimeoutMs;
   claimRate;
   analysisTimeoutMs;
   audit;
@@ -100119,7 +100120,8 @@ class PrivateAnswerJobs {
     this.now = options.now ?? Date.now;
     this.ttlMs = options.ttlMs ?? PRIVATE_ANSWER_JOB_TTL_MS;
     this.maxJobs = options.maxJobs ?? 200;
-    this.maxClaimsPerJob = options.maxClaimsPerJob ?? 400;
+    this.pollRate = options.pollRate ?? { capacity: 10, refillPerSecond: 1 };
+    this.resetTimeoutMs = options.resetTimeoutMs ?? 30000;
     this.claimRate = options.claimRate ?? { capacity: 60, refillPerSecond: 10 };
     this.analysisTimeoutMs = options.analysisTimeoutMs ?? 5 * 60000;
     this.audit = options.audit ?? defaultAudit;
@@ -100158,7 +100160,8 @@ class PrivateAnswerJobs {
       question: input.question.slice(0, MAX_QUESTION_CHARS),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
       refresh: input.refresh,
-      claims: 0
+      pollTokens: this.pollRate.capacity,
+      pollRefilledAt: this.now()
     });
     return { count: count2, panelState: "ready", jobId: id };
   }
@@ -100184,11 +100187,8 @@ class PrivateAnswerJobs {
     }
     const outcome = job.outcome;
     if (!outcome) {
-      job.claims += 1;
-      if (job.claims > this.maxClaimsPerJob) {
-        this.drop(jobId);
-        return gone();
-      }
+      if (!this.takePoll(job))
+        return { status: 429, body: { status: "rate_limited" }, retryAfterSeconds: PENDING_RETRY_SECONDS };
       return { status: 202, body: { status: "pending" }, retryAfterSeconds: PENDING_RETRY_SECONDS };
     }
     if (outcome.kind === "failed")
@@ -100230,6 +100230,8 @@ class PrivateAnswerJobs {
       });
       const work = (async () => {
         const evidence = (refresh ? await refresh(abort.signal) : cached2).filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
+        if (abort.signal.aborted)
+          throw new Error("aborted");
         if (evidence.length === 0)
           throw new Error("no private evidence");
         const model = this.options.model();
@@ -100244,9 +100246,7 @@ class PrivateAnswerJobs {
         if (settled === "deadline") {
           abort.abort();
           this.audit("analysis_deadline");
-          try {
-            await this.options.model().reset?.();
-          } catch {}
+          this.resetInBackground();
           throw new Error("deadline");
         }
         if (abort.signal.aborted)
@@ -100259,6 +100259,31 @@ class PrivateAnswerJobs {
         clearTimeout(timer);
       }
     });
+  }
+  resetInBackground() {
+    let reset;
+    try {
+      reset = Promise.resolve(this.options.model().reset?.());
+    } catch {
+      return;
+    }
+    let timer;
+    const timeout = new Promise((resolve10) => {
+      timer = setTimeout(resolve10, this.resetTimeoutMs);
+      timer.unref?.();
+    });
+    Promise.race([reset.catch(() => {
+      return;
+    }), timeout]).finally(() => clearTimeout(timer));
+  }
+  takePoll(job) {
+    const at = this.now();
+    job.pollTokens = Math.min(this.pollRate.capacity, job.pollTokens + (at - job.pollRefilledAt) / 1000 * this.pollRate.refillPerSecond);
+    job.pollRefilledAt = at;
+    if (job.pollTokens < 1)
+      return false;
+    job.pollTokens -= 1;
+    return true;
   }
   takeToken() {
     const at = this.now();

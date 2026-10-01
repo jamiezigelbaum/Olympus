@@ -231,10 +231,12 @@ percent when known; counts only, no job).
      is dropped, and the search-time hits are not trusted. No eligible item
      left means `failed`.
    - **Hard deadline.** One analysis (refresh plus model) has a deadline
-     enforced outside the model call (default 5 minutes): the engine frees
-     the slot, marks the job `failed`, and calls the model's `reset()` to
-     kill or reset its runtime, so a model that ignores abort cannot block
-     the queue.
+     enforced outside the model call (default 5 minutes): the engine marks
+     the job `failed` and frees the slot first, then runs the model's
+     `reset()` in the background with its own timeout to kill or reset its
+     runtime, so neither a model that ignores abort nor a hung reset can
+     block the queue. Inference never starts after the deadline, even when
+     the evidence refresh returns late.
 5. **Poll.** While the model works, the same key gets **202 `pending`** with
    `Retry-After: 2`; the panel polls with the same key.
 6. **Collect.** When done, the engine generates its own ephemeral P-256 pair,
@@ -248,8 +250,10 @@ percent when known; counts only, no job).
    panel's private key opens, so a replay cannot consume or destroy the
    answer. A model failure answers `200 failed`, also idempotently.
 7. **Expiry.** Ten minutes after creation the job is deleted; then, as for
-   unknown, wrong-install and over-polled ids, every request gets **410
-   `gone`** (one answer for all, so the endpoint is no oracle).
+   unknown and wrong-install ids, every request gets **410 `gone`** (one
+   answer for all, so the endpoint is no oracle). Pending polls by the
+   claiming key are rate limited per job (429 with Retry-After) and never
+   delete the job: expiry alone ends it.
 
 Wire statuses (`connect-relay/shared/private-answer.ts`): `ready`, `failed`,
 `pending` (202), `claimed` (409), `gone` (410), `invalid` (400/405/413),

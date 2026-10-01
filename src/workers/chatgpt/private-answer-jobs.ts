@@ -21,10 +21,13 @@
  *    the answer: only the holder of the panel's private key can open it.
  *
  * A hard deadline outside the model call frees the analysis slot even when a
- * model ignores its abort signal; the model's `reset` (when it has one) is
- * then called to kill or reset its runtime.
+ * model ignores its abort signal: the job fails and the slot is freed first,
+ * then the model's `reset` (when it has one) runs in the background, with its
+ * own timeout, to kill or reset its runtime. Inference never starts after the
+ * deadline, even when the evidence refresh finishes late.
  *
- * Unknown, expired (ten minutes from creation), wrong-install and over-polled
+ * Pending polls by the claiming key are rate limited per job (429), never
+ * destructive. Unknown, expired (ten minutes from creation) and wrong-install
  * jobs answer 410 `gone`: the endpoint is no oracle for which ids existed.
  * Analyses run one at a time; claims are rate limited. Nothing here is
  * persisted: an engine restart forgets every job.
@@ -60,8 +63,14 @@ export interface PrivateAnswerJobsOptions {
   ttlMs?: number;
   /** Live jobs at once; the oldest is dropped beyond this. */
   maxJobs?: number;
-  /** Polls one job answers while pending before it is dropped. */
-  maxClaimsPerJob?: number;
+  /**
+   * Pending polls per job (burst, refill per second). Over it a poll gets
+   * 429 with Retry-After; the job is never dropped for polling, so a replay
+   * of the claiming key cannot destroy a pending answer. Expiry alone ends it.
+   */
+  pollRate?: { capacity: number; refillPerSecond: number };
+  /** Longest the background `reset()` of a model that passed its deadline may take before it is abandoned. */
+  resetTimeoutMs?: number;
   /** Claims across all jobs: burst and refill per second. */
   claimRate?: { capacity: number; refillPerSecond: number };
   /** Hard deadline for one analysis (evidence refresh plus model), enforced outside the model. */
@@ -80,7 +89,8 @@ interface Job {
   evidence: readonly PrivateEvidenceItem[] | undefined;
   refresh: PrivateEvidenceRefresh | undefined;
   claimKey?: string;
-  claims: number;
+  pollTokens: number;
+  pollRefilledAt: number;
   outcome?: { kind: 'sealed'; sealed: SealedPrivateAnswer } | { kind: 'failed' } | undefined;
   abort?: AbortController;
 }
@@ -127,7 +137,8 @@ export class PrivateAnswerJobs {
   private readonly now: () => number;
   private readonly ttlMs: number;
   private readonly maxJobs: number;
-  private readonly maxClaimsPerJob: number;
+  private readonly pollRate: { capacity: number; refillPerSecond: number };
+  private readonly resetTimeoutMs: number;
   private readonly claimRate: { capacity: number; refillPerSecond: number };
   private readonly analysisTimeoutMs: number;
   private readonly audit: (event: PrivateAnswerAuditEvent) => void;
@@ -143,7 +154,8 @@ export class PrivateAnswerJobs {
     this.now = options.now ?? Date.now;
     this.ttlMs = options.ttlMs ?? PRIVATE_ANSWER_JOB_TTL_MS;
     this.maxJobs = options.maxJobs ?? 200;
-    this.maxClaimsPerJob = options.maxClaimsPerJob ?? 400;
+    this.pollRate = options.pollRate ?? { capacity: 10, refillPerSecond: 1 };
+    this.resetTimeoutMs = options.resetTimeoutMs ?? 30_000;
     this.claimRate = options.claimRate ?? { capacity: 60, refillPerSecond: 10 };
     this.analysisTimeoutMs = options.analysisTimeoutMs ?? 5 * 60_000;
     this.audit = options.audit ?? defaultAudit;
@@ -196,7 +208,8 @@ export class PrivateAnswerJobs {
       question: input.question.slice(0, MAX_QUESTION_CHARS),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
       refresh: input.refresh,
-      claims: 0,
+      pollTokens: this.pollRate.capacity,
+      pollRefilledAt: this.now(),
     });
     return { count, panelState: 'ready', jobId: id };
   }
@@ -222,11 +235,7 @@ export class PrivateAnswerJobs {
     }
     const outcome = job.outcome;
     if (!outcome) {
-      job.claims += 1;
-      if (job.claims > this.maxClaimsPerJob) {
-        this.drop(jobId);
-        return gone();
-      }
+      if (!this.takePoll(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
       return { status: 202, body: { status: 'pending' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
     }
     if (outcome.kind === 'failed') return { status: 200, body: { status: 'failed' } };
@@ -267,6 +276,9 @@ export class PrivateAnswerJobs {
       });
       const work = (async () => {
         const evidence = (refresh ? await refresh(abort.signal) : cached).filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
+        // A refresh that finished after the deadline (or after the job was
+        // dropped) must not start inference.
+        if (abort.signal.aborted) throw new Error('aborted');
         if (evidence.length === 0) throw new Error('no private evidence');
         const model = this.options.model();
         const result = await model.answerPrivately(question, evidence, abort.signal);
@@ -278,11 +290,9 @@ export class PrivateAnswerJobs {
         if (settled === 'deadline') {
           abort.abort();
           this.audit('analysis_deadline');
-          try {
-            await this.options.model().reset?.();
-          } catch {
-            // The slot is freed either way.
-          }
+          // Fail the job and free the slot first; the reset runs in the
+          // background with its own timeout, so a hung reset blocks nothing.
+          this.resetInBackground();
           throw new Error('deadline');
         }
         if (abort.signal.aborted) throw new Error('aborted');
@@ -293,6 +303,30 @@ export class PrivateAnswerJobs {
         clearTimeout(timer);
       }
     });
+  }
+
+  private resetInBackground(): void {
+    let reset: Promise<unknown>;
+    try {
+      reset = Promise.resolve(this.options.model().reset?.());
+    } catch {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.resetTimeoutMs);
+      (timer as { unref?: () => void }).unref?.();
+    });
+    void Promise.race([reset.catch(() => undefined), timeout]).finally(() => clearTimeout(timer));
+  }
+
+  private takePoll(job: Job): boolean {
+    const at = this.now();
+    job.pollTokens = Math.min(this.pollRate.capacity, job.pollTokens + ((at - job.pollRefilledAt) / 1000) * this.pollRate.refillPerSecond);
+    job.pollRefilledAt = at;
+    if (job.pollTokens < 1) return false;
+    job.pollTokens -= 1;
+    return true;
   }
 
   private takeToken(): boolean {
