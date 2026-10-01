@@ -10131,7 +10131,7 @@ function credentialInstallId(kind, value) {
     return;
   return PATTERN[kind].exec(value)?.[1];
 }
-var PREFIX, SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var AUTHENTICATED_RESPONSE_HEADER = "x-olympus-authenticated", PREFIX, SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
 var init_tokens = __esm(() => {
   PREFIX = { access: "oly2", refresh: "oly2r", code: "oly2c" };
   PATTERN = {
@@ -71762,7 +71762,7 @@ function encodeBodyFrame(id, payload) {
   return frame;
 }
 function decodeBodyFrame(frame) {
-  if (frame.byteLength < 4 || frame.byteLength > 4 + MAX_BODY_CHUNK_BYTES)
+  if (frame.byteLength <= 4 || frame.byteLength > 4 + MAX_BODY_CHUNK_BYTES)
     return;
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
   return { id: view.getUint32(0, false), payload: frame.subarray(4) };
@@ -71905,6 +71905,7 @@ class RelayClient {
   heartbeat;
   reconnectTimer;
   inbound = new Map;
+  bufferedRequestBytes = 0;
   lastPongAt = 0;
   constructor(options) {
     this.options = options;
@@ -71918,6 +71919,9 @@ class RelayClient {
   }
   get activeRequests() {
     return this.inbound.size;
+  }
+  get bufferedRequestBodyBytes() {
+    return this.bufferedRequestBytes;
   }
   start() {
     if (!this.stopped)
@@ -71956,9 +71960,8 @@ class RelayClient {
         return;
       if (typeof event.data !== "string") {
         const frame = decodeBodyFrame(new Uint8Array(event.data));
-        if (!ready || !frame)
+        if (!ready || !frame || !this.onRequestBody(frame.id, frame.payload))
           return socket.close(4002, "protocol_error");
-        this.onRequestBody(frame.id, frame.payload);
         return;
       }
       const message = parseTextFrame(event.data);
@@ -72002,7 +72005,7 @@ class RelayClient {
           const request = id === undefined ? undefined : this.inbound.get(id);
           request?.abort.abort();
           if (request && !request.started)
-            this.inbound.delete(id);
+            this.drop(id);
           return;
         }
         case "error":
@@ -72081,9 +72084,18 @@ class RelayClient {
       this.socket.send(encodeBodyFrame(id, payload));
   }
   abortAll() {
-    for (const request of this.inbound.values())
-      request.abort.abort();
-    this.inbound.clear();
+    for (const id of [...this.inbound.keys()]) {
+      this.inbound.get(id).abort.abort();
+      this.drop(id);
+    }
+  }
+  drop(id, expected) {
+    const request = this.inbound.get(id);
+    if (!request || expected && request !== expected)
+      return;
+    clearTimeout(request.assembly);
+    this.bufferedRequestBytes -= request.buffer.byteLength;
+    this.inbound.delete(id);
   }
   onRequest(message) {
     const id = streamId(message.id);
@@ -72095,33 +72107,67 @@ class RelayClient {
       this.respondLocally(id, 503, { error: "busy", message: "Olympus is busy. Try again shortly." });
       return;
     }
-    this.inbound.set(id, {
+    const request = {
       method,
       path: FORWARDED_METHODS.has(method) && typeof message.path === "string" ? forwardPath(message.path, this.options.forwardedPaths) : undefined,
       headers,
-      body: [],
+      buffer: new Uint8Array(new ArrayBuffer(0)),
       bytes: 0,
+      frames: 0,
       abort: new AbortController,
-      started: false
-    });
+      started: false,
+      assembly: undefined
+    };
+    request.assembly = setTimeout(() => {
+      if (this.inbound.get(id) !== request || request.started)
+        return;
+      request.started = true;
+      this.respondLocally(id, 408, { error: "request_timeout", message: "The request did not arrive in time." });
+    }, this.options.requestAssemblyTimeoutMs ?? 60000);
+    this.inbound.set(id, request);
   }
   onRequestBody(id, payload) {
+    if (payload.byteLength === 0)
+      return false;
     const request = this.inbound.get(id);
     if (!request || request.started)
-      return;
-    request.bytes += payload.byteLength;
-    if (request.bytes > (this.options.maxRequestBodyBytes ?? 1024 * 1024)) {
+      return true;
+    request.frames += 1;
+    const needed = request.bytes + payload.byteLength;
+    const maxBytes = this.options.maxRequestBodyBytes ?? 1024 * 1024;
+    if (needed > maxBytes) {
       request.started = true;
       this.respondLocally(id, 413, { error: "payload_too_large" });
-      return;
+      return true;
     }
-    request.body.push(payload.slice());
+    if (request.frames > (this.options.maxRequestFrames ?? 4096)) {
+      request.started = true;
+      this.respondLocally(id, 400, { error: "request_too_fragmented" });
+      return true;
+    }
+    if (needed > request.buffer.byteLength) {
+      const size = Math.min(maxBytes, Math.max(request.buffer.byteLength * 2, INITIAL_BODY_BUFFER_BYTES, needed));
+      const growth = size - request.buffer.byteLength;
+      if (this.bufferedRequestBytes + growth > (this.options.maxBufferedRequestBytes ?? 16 * 1024 * 1024)) {
+        request.started = true;
+        this.respondLocally(id, 503, { error: "busy", message: "Olympus is busy. Try again shortly." });
+        return true;
+      }
+      const grown = new Uint8Array(new ArrayBuffer(size));
+      grown.set(request.buffer.subarray(0, request.bytes));
+      request.buffer = grown;
+      this.bufferedRequestBytes += growth;
+    }
+    request.buffer.set(payload, request.bytes);
+    request.bytes = needed;
+    return true;
   }
   onRequestEnd(id) {
     const request = this.inbound.get(id);
     if (!request || request.started)
       return;
     request.started = true;
+    clearTimeout(request.assembly);
     if (!request.path) {
       this.respondLocally(id, 404, { error: "not_found", message: "This Olympus address only serves its remote agent endpoints." });
       return;
@@ -72132,11 +72178,11 @@ class RelayClient {
     this.send({ type: "response-head", id, status, headers: [["content-type", "application/json"], ["cache-control", "no-store"]] });
     this.sendBody(id, new TextEncoder().encode(JSON.stringify(body)));
     this.send({ type: "end", id });
-    this.inbound.delete(id);
+    this.drop(id);
   }
   async serve(id, request, path) {
     const fetchImpl = this.options.fetch ?? fetch;
-    const body = request.method === "GET" ? undefined : concat(request.body, request.bytes);
+    const body = request.method === "GET" ? undefined : request.buffer.subarray(0, request.bytes);
     let response;
     try {
       response = await fetchImpl(`${this.options.target}${path}`, {
@@ -72150,12 +72196,12 @@ class RelayClient {
       if (!request.abort.signal.aborted) {
         this.respondLocally(id, 502, { error: "worker_unavailable", message: "Olympus is running but its local worker did not answer." });
       }
-      this.inbound.delete(id);
+      this.drop(id, request);
       return;
     }
     if (request.abort.signal.aborted) {
       response.body?.cancel().catch(() => {});
-      this.inbound.delete(id);
+      this.drop(id, request);
       return;
     }
     this.send({ type: "response-head", id, status: response.status, headers: forwardResponseHeaders(response.headers) });
@@ -72180,7 +72226,7 @@ class RelayClient {
       if (!request.abort.signal.aborted)
         this.send({ type: "abort", id });
     } finally {
-      this.inbound.delete(id);
+      this.drop(id, request);
     }
   }
   async drained() {
@@ -72189,19 +72235,11 @@ class RelayClient {
     }
   }
 }
-function concat(parts, total) {
-  const out = new Uint8Array(new ArrayBuffer(total));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.byteLength;
-  }
-  return out;
-}
-var SEND_HIGH_WATER_BYTES;
+var INITIAL_BODY_BUFFER_BYTES, SEND_HIGH_WATER_BYTES;
 var init_relay_client = __esm(() => {
   init_protocol2();
   init_forward();
+  INITIAL_BODY_BUFFER_BYTES = 16 * 1024;
   SEND_HIGH_WATER_BYTES = 4 * 1024 * 1024;
 });
 
@@ -98470,6 +98508,9 @@ function createRemoteMcpHandler(options) {
     const verification = authenticateRemoteRequest(request, options);
     if (!verification.ok)
       return verification.response;
+    return markAuthenticated(await serveAuthenticated(request, verification));
+  };
+  async function serveAuthenticated(request, verification) {
     if (request.method !== "POST") {
       return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "POST" });
     }
@@ -98496,7 +98537,12 @@ function createRemoteMcpHandler(options) {
         return;
       });
     }
-  };
+  }
+}
+function markAuthenticated(response) {
+  const headers = new Headers(response.headers);
+  headers.set(AUTHENTICATED_RESPONSE_HEADER, "1");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 function authenticateRemoteRequest(request, options) {
   const urls = currentRemotePublicUrls(options.publicUrls);
@@ -98619,6 +98665,7 @@ var init_remote_mcp = __esm(() => {
   init_server3();
   init_mcp_surface();
   init_remote_request_body();
+  init_tokens();
 });
 
 // src/workers/remote-oauth/pinned-clients.ts
@@ -98740,6 +98787,7 @@ function renderLoopbackConsentPage(input) {
 ${input.verifiedHost ? `<div class="host">${escapeHtml4(input.verifiedHost)}</div>` : '<div class="host unverified">Not verified</div><p class="meta">A program on this computer named itself</p>'}
 <p class="meta">After you approve, you return to <strong>${escapeHtml4(input.redirectHost)}</strong></p>
 </div>
+<p><strong>Connecting links Olympus on this Mac to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
 <p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
 <p><strong>${name} never sees the text of your Private items or any Secret.</strong> For Private items it gets only answers that Venice or a model on this Mac reasoned out, with each item's title and source.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
