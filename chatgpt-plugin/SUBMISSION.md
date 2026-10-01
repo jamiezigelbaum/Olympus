@@ -15,7 +15,7 @@ out of the uploaded ZIP (see the checklist).
 |---|---|---|
 | Name (`displayName`) | Olympus | ≤30 |
 | Short description | Ask your own mail and files | ≤30 (27) |
-| Developer name | Open Coordination Unlimited, Inc. (see checklist: `plugin.json` still says the owner's personal name) | ≤80 |
+| Developer name | OCU Inc. (`author.name`: OCU Inc. (Open Coordination Unlimited, Inc.)) | ≤80 |
 | Category | Productivity | fixed list |
 | Website | https://olympusplugin.ai | HTTPS |
 | Support | https://olympusplugin.ai/support | HTTPS |
@@ -200,17 +200,17 @@ Upload unlisted; paste the URL as `demo_recording_url` in the form.
 ## 5. Pre-submission checklist
 
 Identity and listing
-- [ ] Developer name matches the verified organization exactly: Open
-      Coordination Unlimited, Inc. `plugin.json` still has the owner's personal
-      name in `author.name` and `interface.developerName`
-      (`test/chatgpt-plugin-package.test.ts` pins `author.name`). Owner to
-      decide; unverified names are rejected.
+- [ ] Developer name "OCU Inc." is accepted against the verified
+      organization "Open Coordination Unlimited, Inc." (unverified names are
+      rejected; if the portal wants an exact match, use the full name in
+      `interface.developerName`). Both fields are pinned in
+      `test/chatgpt-plugin-package.test.ts`.
 - [ ] Submitter has org owner or Apps Management Write (`api.apps.write`).
 - [ ] Website, support, privacy and terms URLs are live over HTTPS
       (`site/`, deployed with `site/deploy/deploy.sh`).
-- [ ] Privacy policy and terms have passed legal review: remove the "Draft"
-      banners and resolve every `[CONFIRM]` in `site/privacy/` and
-      `site/terms/`. The policy must cover categories, purposes, recipients,
+- [ ] Privacy policy and terms have passed legal review, including the
+      defaults listed in the HTML comment at the top of each page; then
+      remove the "Draft" banners. The policy must cover categories, purposes, recipients,
       retention and controls.
 
 Package
@@ -220,8 +220,9 @@ Package
 - [ ] ZIP contains only `plugin.json`, `mcp.json`, `skills/`, `assets/`. Not
       `SUBMISSION.md`, not `demo-data/`, no `.app.json`, no hooks.
 - [ ] Icons: square, ≥48 px, PNG/JPEG/WebP/SVG, ≤5 MiB (test enforced).
-      Confirm we own the artwork: `assets/icon.png` looks like a platform
-      emoji; replace it with original art if so. Consider `composerIconDark`
+      **`assets/icon.png` is to be replaced** with the owner's new original
+      icon (the current one looks like a platform emoji). Keep the path, so
+      `composerIcon` and `logo` need no change. Consider `composerIconDark`
       / `logoDark`.
 - [ ] Skills pass the automated scan (no instructions to run unreviewed
       commands; the setup skill's `install.sh` placeholder must be replaced by

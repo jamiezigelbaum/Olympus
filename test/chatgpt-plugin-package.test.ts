@@ -44,7 +44,8 @@ describe('chatgpt-plugin/plugin.json', () => {
 
   test('carries the package version, author and license', () => {
     expect(plugin.version).toBe(readJson(join(repo, 'package.json')).version);
-    expect(plugin.author.name).toBe('Jamie Zigelbaum');
+    expect(plugin.author.name).toBe('OCU Inc. (Open Coordination Unlimited, Inc.)');
+    expect(plugin.extensions['com.openai'].interface.developerName).toBe('OCU Inc.');
     expect(plugin.homepage).toBe('https://olympusplugin.ai');
     expect(plugin.license).toBe('MIT');
     expect(readFileSync(join(repo, 'LICENSE'), 'utf8').startsWith('MIT License')).toBe(true);
