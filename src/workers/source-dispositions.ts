@@ -482,9 +482,9 @@ const STATE_ORDER: readonly SourceDispositionState[] = ['ingest', 'metadata_only
 const NOT_EDITABLE_BY_PATH_REASON = 'This source names folders by identity rather than by path, '
   + 'so the folder tree cannot edit its rules.';
 const PICKER_STATE_LABELS: Readonly<Record<SourceDispositionState, string>> = {
-  ingest: 'Full ingestion',
-  metadata_only: 'Metadata only',
-  exclude: 'No ingestion',
+  ingest: 'Fully indexed',
+  metadata_only: 'Names only',
+  exclude: 'Skipped',
 };
 
 /**
@@ -566,9 +566,9 @@ export function renderSourceDispositionsFragment(view: SourceDispositionsView, s
         <p class="eyebrow">Olympus / Sources</p>
         <h1>Choose folders</h1>
         <p>Connecting an account does not start indexing. Choose what Olympus may use,
-        then press <strong>Save scope and start</strong>. Unselected folders stay out. Choose <strong>Metadata only</strong>
+        then press <strong>Save scope and start</strong>. Unselected folders stay out. Choose <strong>Names only</strong>
         for large photo or video folders — or anything you want searchable by name and date without
-        processing its contents. Choose <strong>No ingestion</strong> to keep a folder out of Olympus
+        reading its contents. Choose <strong>Skipped</strong> to keep a folder out of Olympus
         entirely. New files inherit the nearest folder choice.</p>
       </header>
       ${sources}
@@ -643,7 +643,7 @@ function renderMailScopeSource(source: SourceFolderScopeSummary, locations: read
             ? `<p class="scope-browser-note">${escapeHtml(source.error)}</p>`
             : source.connected
               ? ''
-              : `<p class="scope-browser-note">Connect Gmail first, then return here to choose which mail Olympus may use. Connecting will not start ingestion.</p>
+              : `<p class="scope-browser-note">Connect Gmail first, then return here to choose which mail Olympus may use. Connecting will not start indexing.</p>
           <a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml(source.label)} →</a>`}
           <fieldset class="mail-scope-group">
             <legend>Store the body of mail from</legend>
@@ -729,7 +729,7 @@ function renderFolderScopeSource(source: SourceFolderScopeSummary, locations: re
             <span data-scope-loading role="status" aria-live="polite" hidden>Loading folders…</span></div>
           <p class="scope-browser-note">${source.error ? escapeHtml(source.error) : source.connected
             ? 'Opening this page loads folder names only. No file contents are read or indexed until you confirm your scope.'
-            : 'Connect this account first, then return here to choose folders. Connecting will not start ingestion.'}</p>
+            : 'Connect this account first, then return here to choose folders. Connecting will not start indexing.'}</p>
           ${source.connected ? '' : `<a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml(source.label)} →</a>`}
           <div class="tree-viewport scope-browser-list" data-scope-nodes role="list" aria-label="Folders"></div>
           <button type="button" data-scope-more hidden>Show more folders</button>
@@ -741,10 +741,10 @@ function renderFolderScopeSource(source: SourceFolderScopeSummary, locations: re
           <div data-scope-inspector-empty><div class="inspector-folder">▱</div><p>Select a folder</p></div>
           <div data-scope-inspector-content hidden><div class="inspector-folder">▰</div>
           <h3 data-scope-selected-name></h3><p class="inspector-path" data-scope-selected-path></p>
-          <div class="choice-stack" aria-label="Ingestion choice">
-            <button type="button" data-scope-state="ingest" disabled>Full ingestion<span>Read and index contents</span></button>
-            <button type="button" data-scope-state="metadata_only" disabled>Metadata only<span>Index names and dates; never contents</span></button>
-            <button type="button" data-scope-state="exclude" disabled>No ingestion<span>Keep this folder out</span></button>
+          <div class="choice-stack" aria-label="Indexing choice">
+            <button type="button" data-scope-state="ingest" disabled>Fully indexed<span>Read and index contents</span></button>
+            <button type="button" data-scope-state="metadata_only" disabled>Names only<span>Searchable by name and date</span></button>
+            <button type="button" data-scope-state="exclude" disabled>Skipped<span>Keep this folder out</span></button>
           </div><p class="inspector-note" data-scope-selected-note></p></div>
         </aside>
         <footer class="finder-footer"><span data-scope-summary>No folders selected.</span>
@@ -836,7 +836,7 @@ function renderDispositionSource(source: SourceDispositionsSourceView): string {
   const counts = source.tree.counts;
   const fullItems = Math.max(0, counts.items - counts.excluded_items - counts.metadata_only_items);
   const summary = source.store_present
-    ? `${fullItems} full ingestion · ${counts.metadata_only_items} metadata only · ${counts.excluded_items} no ingestion`
+    ? `${fullItems} ${fullItems === 1 ? 'item' : 'items'} fully indexed, ${counts.metadata_only_items} names only, ${counts.excluded_items} skipped`
     : 'No folders discovered yet';
   const nodes = source.tree.roots.length > 0
     ? source.tree.roots.map((node) => renderDispositionNode(node, 'ingest', source.editable_by_path)).join('')
@@ -908,10 +908,10 @@ function renderDispositionSource(source: SourceDispositionsSourceView): string {
                 <h3 data-inspector-name></h3>
                 <p class="inspector-path" data-inspector-path></p>
                 <p class="inspector-count" data-inspector-count></p>
-                <div class="choice-stack" aria-label="Ingestion choice">
-                  <button type="button" data-picker-state="ingest">Full ingestion<span>Read and index contents</span></button>
-                  <button type="button" data-picker-state="metadata_only">Metadata only<span>Index names and dates</span></button>
-                  <button type="button" data-picker-state="exclude">No ingestion<span>Keep out of Olympus</span></button>
+                <div class="choice-stack" aria-label="Indexing choice">
+                  <button type="button" data-picker-state="ingest">Fully indexed<span>Read and index contents</span></button>
+                  <button type="button" data-picker-state="metadata_only">Names only<span>Searchable by name and date</span></button>
+                  <button type="button" data-picker-state="exclude">Skipped<span>Keep out of Olympus</span></button>
                 </div>
                 <p class="inspector-note" data-inspector-note></p>
               </div>
@@ -945,8 +945,8 @@ function renderDispositionNode(
   // falls back to it.
   const locked = selectable.length > 0 || !editable ? '' : lockedReason(node, ancestorState);
   const countLine = `${node.counts.items} ${node.counts.items === 1 ? 'item' : 'items'}`
-    + (node.counts.excluded_items > 0 ? ` · ${node.counts.excluded_items} no ingestion` : '')
-    + (node.counts.metadata_only_items > 0 ? ` · ${node.counts.metadata_only_items} metadata only` : '');
+    + (node.counts.excluded_items > 0 ? ` · ${node.counts.excluded_items} skipped` : '')
+    + (node.counts.metadata_only_items > 0 ? ` · ${node.counts.metadata_only_items} names only` : '');
   const control = `<div class="stored-controls" aria-hidden="true">${
     STATE_ORDER.map((state) => renderStateRadio(node, state, selectable.includes(state))).join('')
   }</div>`;
@@ -956,7 +956,7 @@ function renderDispositionNode(
   const status = node.mixed_below ? 'Mixed' : PICKER_STATE_LABELS[node.state];
   const row = `<span class="folder-icon" aria-hidden="true">▰</span><span class="node-name">${escapeHtml(node.name)}</span>`
     + `<span class="node-counts">${escapeHtml(`${node.counts.items}`)}</span>`
-    + `<span class="node-state" data-folder-status>${escapeHtml(status)}</span>`;
+    + `<span class="node-state${node.mixed_below ? ' mixed' : ''}" data-folder-status>${escapeHtml(status)}</span>`;
   const data = `data-path="${escapeHtml(node.path)}" data-name="${escapeHtml(node.name)}"`
     + ` data-counts="${escapeHtml(countLine)}" data-search="${escapeHtml(`${node.display_path} ${node.name}`.toLowerCase())}"`
     + ` data-state="${node.state}" data-origin="${node.origin}" data-selectable="${escapeHtml(selectable.join(','))}"`
@@ -1018,7 +1018,7 @@ function lockedReason(node: SourceDispositionNode, ancestorState: SourceDisposit
       + 'folder can be brought back on its own — change the choice on that folder instead.';
   }
   if (ancestorState === 'metadata_only') {
-    return `Follows ${node.inherited_from ?? 'the folder above'}, which is metadata only. It can only be made `
+    return `Follows ${node.inherited_from ?? 'the folder above'}, which is set to names only. It can only be made `
       + 'stricter here.';
   }
   return 'Decided by a rule that does not name a folder path. It is listed read-only beside the tree.';

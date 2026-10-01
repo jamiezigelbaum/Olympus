@@ -61,6 +61,16 @@ describe('owner-facing dashboard pages carry no implementation jargon outside De
     });
   }
 
+  for (const params of [{ view: 'dispositions', source_id: 'dropbox.files' }, { view: 'dispositions' }] as const) {
+    test(`native folder picker (${'source_id' in params ? params.source_id : 'all sources'})`, () => {
+      const page = readResult(params, true);
+      expect(jargonIn(page.body)).toEqual([]);
+      // The picker's choices name what happens to a folder, in the review's words.
+      expect(page.body).toContain('Names only<span>Searchable by name and date</span>');
+      expect(page.body).not.toContain('Metadata only');
+    });
+  }
+
   test('the check itself catches jargon outside Details and ignores it inside', () => {
     expect(jargonIn('<p>Embeddings 98% done</p>')).toEqual(['Embeddings 98% done']);
     expect(jargonIn('<button aria-label="Lane progress"></button>')).toEqual(['Lane progress']);

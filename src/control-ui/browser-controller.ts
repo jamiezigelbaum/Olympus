@@ -835,6 +835,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function onClick(event: Event): void {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target)) return;
+    // A row's ⋯ menu closes when anything else is clicked, and after one of
+    // its own items is chosen.
+    const menu = target.closest('details.rowmenu');
+    queryAll<HTMLDetailsElement>('details.rowmenu[open]').forEach((open) => {
+      if (open !== menu || target.closest('[data-sheet-toggle],a[href]')) open.open = false;
+    });
     const toggle = target.closest<HTMLElement>('[data-sheet-toggle]');
     if (toggle) {
       const selector = toggle.dataset.sheetToggle;
@@ -926,7 +932,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (!anchor) {
       const row = target.closest<HTMLElement>('[data-dashboard-href]');
       const modified = event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
-      if (row && !modified && !target.closest('button,input,select,textarea,label,form')) {
+      if (row && !modified && !target.closest('button,input,select,textarea,label,form,summary,details')) {
         event.preventDefault(); options.navigate(row.dataset.dashboardHref!);
       }
       return;
@@ -1016,9 +1022,9 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
   let appliedCanWrite: boolean | undefined;
   const root = options.root;
   const labels: Record<string, string> = {
-    ingest: 'Full ingestion',
-    metadata_only: 'Metadata only',
-    exclude: 'No ingestion',
+    ingest: 'Fully indexed',
+    metadata_only: 'Names only',
+    exclude: 'Skipped',
   };
 
   type ScopeTrail = Array<{ key: string; name: string }>;
@@ -1111,17 +1117,53 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     const submit = form.querySelector<HTMLButtonElement>('[data-scope-start]');
     if (submit) submit.disabled = !allowed || !draft.loaded || !draft.generation || !draft.revision
       || (!draft.whole && !hasSelection && !draft.edited) || (draft.whole && confirmation?.checked !== true);
-    if (submit) submit.textContent = draft.whole || hasSelection ? 'Save scope and start' : 'Save scope (no ingestion)';
+    if (submit) submit.textContent = draft.whole || hasSelection ? 'Save scope and start' : 'Save scope (nothing indexed)';
     const cancel = form.querySelector<HTMLButtonElement>('[data-scope-cancel]'); if (cancel) cancel.disabled = draft.busy;
     const confirmationLabel = form.querySelector<HTMLElement>('.scope-whole-confirm');
     if (confirmationLabel) confirmationLabel.hidden = !draft.whole;
   }
 
+  /**
+   * A parent reads Mixed when a folder chosen inside it ends up with a
+   * different choice than the parent's own, so "Fully indexed" never sits on
+   * a folder whose subfolders are partly kept out.
+   */
+  function scopeMixed(draft: ScopeDraft, key: string): boolean {
+    const own = effectiveScopeState(draft, key);
+    for (const other of draft.selections.keys()) {
+      if (other !== key && (draft.ancestors.get(other) || []).includes(key) && effectiveScopeState(draft, other) !== own) return true;
+    }
+    return false;
+  }
+
+  function scopeStatusText(draft: ScopeDraft, key: string): string {
+    if (scopeMixed(draft, key)) return 'Mixed';
+    const inherited = inheritedScopeState(draft, key);
+    const chosen = draft.selections.has(key);
+    return chosen || inherited
+      ? `${labels[effectiveScopeState(draft, key)]}${inherited && !chosen ? ' · inherited' : ''}` : 'Not selected';
+  }
+
+  /** What the current choices will do, counted from the choices themselves. */
+  function scopeConsequence(draft: ScopeDraft): string {
+    const counts = { ingest: 0, metadata_only: 0, exclude: 0 };
+    for (const key of draft.selections.keys()) counts[effectiveScopeState(draft, key)] += 1;
+    const folders = (count: number): string => `${count} ${count === 1 ? 'folder' : 'folders'}`;
+    const entries: Array<[string, number]> = [['fully indexed', counts.ingest], ['names only', counts.metadata_only], ['skipped', counts.exclude]];
+    const phrase = (list: Array<[string, number]>): string[] => list.filter(([, count]) => count > 0)
+      .map(([what, count], index) => `${index === 0 ? folders(count) : count} ${what}`);
+    if (draft.whole) {
+      const exceptions = phrase(entries.slice(1));
+      return `Entire account, including future folders, fully indexed${exceptions.length > 0 ? `; ${exceptions.join(', ')}` : ''}.`;
+    }
+    const parts = phrase(entries);
+    if (counts.ingest + counts.metadata_only === 0) return 'No folders selected. Nothing will be indexed.';
+    return `${parts.join(', ')}. All other folders stay out.`;
+  }
+
   function renderScopeReview(form: HTMLFormElement, draft: ScopeDraft): void {
     const summary = form.querySelector('[data-scope-summary]');
-    if (summary) summary.textContent = draft.whole
-      ? 'Entire account, including future folders, except the choices below.'
-      : `${Array.from(draft.selections.keys()).filter((key) => effectiveScopeState(draft, key) !== 'exclude').length} folder(s) selected. All other folders stay out.`;
+    if (summary) summary.textContent = scopeConsequence(draft);
     const list = form.querySelector('[data-scope-selections]');
     if (list) {
       list.replaceChildren();
@@ -1140,9 +1182,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
       if (!key) return;
       row.classList.toggle('selected', draft.selected?.key === key);
       const status = row.querySelector('.scope-folder-status');
-      const inherited = inheritedScopeState(draft, key);
-      if (status) status.textContent = draft.selections.has(key) || inherited
-        ? `${labels[effectiveScopeState(draft, key)]}${inherited ? ' · inherited' : ''}` : 'Not selected';
+      if (status) { status.textContent = scopeStatusText(draft, key); status.classList.toggle('mixed', status.textContent === 'Mixed'); }
     });
     renderScopeReview(form, draft);
   }
@@ -1175,8 +1215,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
         const select = root.ownerDocument.createElement('button');
         select.type = 'button'; select.dataset.scopeSelect = node.key; select.textContent = node.name;
         const status = root.ownerDocument.createElement('span'); status.className = 'scope-folder-status';
-        const inherited = inheritedScopeState(draft, node.key);
-        status.textContent = draft.selections.has(node.key) || inherited ? `${labels[effectiveScopeState(draft, node.key)]}${inherited ? ' · inherited' : ''}` : 'Not selected';
+        status.textContent = scopeStatusText(draft, node.key); status.classList.toggle('mixed', status.textContent === 'Mixed');
         const icon = root.ownerDocument.createElement('span'); icon.className = 'folder-icon'; icon.textContent = '▰';
         row.append(disclosure, icon, select, status); wrapper.appendChild(row);
         if (draft.expanded.has(node.key)) {
@@ -1618,7 +1657,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     if (note) {
       note.textContent = row.dataset.locked || form.dataset.locked
         || (row.dataset.origin === 'default'
-          ? 'Uses the Full ingestion default until you choose otherwise.'
+          ? 'Fully indexed by default until you choose otherwise.'
           : row.dataset.origin === 'inherited'
             ? 'Inherited from the nearest folder choice above.'
             : 'This folder has its own choice.');

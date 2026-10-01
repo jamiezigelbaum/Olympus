@@ -878,7 +878,7 @@ function renderProgress(
   const line = dashboardIndexingLine(progress);
   const bar = progress.percent === undefined
     ? ''
-    : `<div class="lbar">${miniBar({ percent: progress.percent, label: `${DASHBOARD_INDEXING_NAME} ${Math.floor(progress.percent)} percent done` })}</div>`;
+    : `<div class="lbar">${miniBar({ percent: progress.percent, label: `${DASHBOARD_INDEXING_NAME} ${Math.floor(progress.percent)} percent done`, showPercent: true })}</div>`;
   const control = options?.embeddingRuntime === undefined ? '' : renderEmbeddingToggle(options.embeddingRuntime, options);
   return `
         <div class="lane indexing" data-indexing-progress><div class="lfacts">${escapeHtml(line)}</div>${bar}${control}</div>`;

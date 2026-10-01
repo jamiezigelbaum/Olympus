@@ -586,6 +586,26 @@ export function dashboardConnectedSummary(connected: number, ready: number): str
 /** Why a connect control is greyed out while models are not ready. */
 export const DASHBOARD_MODELS_BLOCKED_REASON = 'Locked until models are ready';
 
+/**
+ * The one line a setup row shows before "How to set this up": what the source
+ * needs and, first, the caveat a reader must accept before starting. The view
+ * model carries only the full instructions paragraph, so the short lines live
+ * here until it carries its own summary and caveat fields; any other source
+ * shows the paragraph's first sentence.
+ */
+const SETUP_LEADS: Readonly<Record<string, { summary: string; caveat?: string }>> = {
+  'x.bookmarks': { caveat: 'Needs paid X API access', summary: 'Create an X app once, then add its Client ID and secret.' },
+  'dropbox.files': { summary: 'Needs the app key from your Dropbox developer account.' },
+  'readwise.library': { summary: 'Needs your Readwise access token.' },
+};
+
+export function dashboardSetupLead(sourceId: string, instructions: string): { summary: string; caveat?: string } {
+  const known = SETUP_LEADS[sourceId];
+  if (known !== undefined) return known;
+  const first = /^.*?[.!?](?=\s|$)/.exec(instructions.trim())?.[0] ?? instructions.trim();
+  return { summary: first };
+}
+
 /** The control that speeds indexing up, and what it costs. */
 export const DASHBOARD_INDEX_FASTER = {
   on: 'Index faster',
