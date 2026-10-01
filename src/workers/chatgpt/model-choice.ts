@@ -86,8 +86,11 @@ export function embeddingIsBuiltIn(config: SovereigntyConfig): boolean {
 export function currentAnswerChoice(config: SovereigntyConfig): ChatGptAnswerChoice | undefined {
   for (const choice of ['venice', 'local'] as const) {
     const { id } = ANSWER_PROFILES[choice];
-    const routes = (['public_safe', 'internal'] as const).map((domain) => config.routes[domain]?.pool?.members ?? config.routes[domain]?.analyst ?? []);
-    if (routes.every((members) => members.length === 1 && members[0] === id)) return choice;
+    // A tier the policy does not define (no Public tier) has no say.
+    const routes = (['public_safe', 'internal'] as const)
+      .filter((domain) => config.routes[domain] !== undefined)
+      .map((domain) => config.routes[domain]?.pool?.members ?? config.routes[domain]?.analyst ?? []);
+    if (routes.length > 0 && routes.every((members) => members.length === 1 && members[0] === id)) return choice;
   }
   return undefined;
 }
@@ -113,6 +116,8 @@ export function applyModelChoice(
   for (const domain of DOMAINS) {
     const route = next.routes[domain];
     if (domain === 'secure_local' && route?.mode === 'disabled') continue;
+    // A tier the policy does not define (no Public tier on a fresh install) stays undefined.
+    if (!route && !next.retrieval.trustDomains[domain]) continue;
     next.routes[domain] = { pool: { members: [id], order: [id] } };
   }
   return { config: validateSovereigntyConfig(next), changed: true };

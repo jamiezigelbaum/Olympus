@@ -3657,7 +3657,10 @@ function validateSovereigntyConfig(rawConfig) {
   for (const [id, profile] of Object.entries(config.modelProfiles)) {
     validateProfile(id, profile);
   }
+  const publicRetired = isPublicTierRetired(config);
   for (const domain of BUILTIN_DOMAINS) {
+    if (domain === "public_safe" && publicRetired)
+      continue;
     const route = config.routes[domain];
     if (!route) {
       throw new OperationError("config_error", `sovereignty.routes.${domain} is required.`);
@@ -3690,6 +3693,9 @@ function validateSovereigntyConfig(rawConfig) {
     validateRetrievalPolicy(config, domain, retrieval);
   }
   return config;
+}
+function isPublicTierRetired(config) {
+  return config.routes.public_safe === undefined && config.retrieval.trustDomains.public_safe === undefined;
 }
 function buildEnvBridgeSovereigntyConfig(env = process.env) {
   const localProfile = {
@@ -9141,7 +9147,10 @@ var init_dropbox = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/command-runner.ts
-var init_command_runner = () => {};
+var resolvedCommands;
+var init_command_runner = __esm(() => {
+  resolvedCommands = new Map;
+});
 
 // src/workers/file-extraction/extractors/pdf-render.ts
 var init_pdf_render = __esm(() => {

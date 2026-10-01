@@ -54,6 +54,8 @@ export interface ChatGptSurfaceOptions {
   privateMatchProbe?: (question: string, ctx: OperationContext) => Promise<boolean>;
   /** The built-in embedding model's state, when the embeddings lane reports one. */
   embedding?: () => ChatGptDashboardOptions['embedding'];
+  /** The owner's privacy settings, counts only, for the dashboard. */
+  privacy?: () => ChatGptDashboardOptions['privacy'];
   /** Setup from ChatGPT (setup-tools.ts). Absent: the setup tools answer "unavailable". */
   setup?: ChatGptSetupBackend;
   /**
@@ -356,7 +358,14 @@ async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?: Abort
     throw new ChatGptSurfaceError('unavailable');
   }
   const embedding = options.embedding?.();
-  return buildChatGptDashboardViewModel(view, embedding ? { embedding } : {});
+  let privacy: ChatGptDashboardOptions['privacy'];
+  try {
+    privacy = options.privacy?.();
+  } catch {
+    // An unreadable profile is not reported rather than reported as unset.
+    privacy = undefined;
+  }
+  return buildChatGptDashboardViewModel(view, { ...(embedding ? { embedding } : {}), ...(privacy ? { privacy } : {}) });
 }
 
 export function readChatGptResource(uri: string): { contents: Array<Record<string, unknown>> } {

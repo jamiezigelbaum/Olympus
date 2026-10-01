@@ -37,6 +37,9 @@ import type {
   MailScopeList,
   MailWindow,
   ModelSetResult,
+  PrivacyRuleView,
+  PrivacySettings,
+  PrivacySummary,
   ScopeList,
   ScopeSelection,
   ScopeSummary,
@@ -51,6 +54,8 @@ import {
   DASHBOARD_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
   MODEL_SET_TOOL_NAME,
+  PRIVACY_GET_TOOL_NAME,
+  PRIVACY_META_KEY,
   SCOPE_LIST_TOOL_NAME,
   SCOPE_UI_META_KEY,
 } from './dashboard-contract.ts';
@@ -86,6 +91,7 @@ const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
   [SCOPE_LIST_TOOL_NAME]: { source_id: SCOPE_SOURCE_IDS },
   [DISCONNECT_SOURCE_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
   [MODEL_SET_TOOL_NAME]: { embedding: new Set(['built_in']), answers: new Set(['local', 'venice']) },
+  [PRIVACY_GET_TOOL_NAME]: {},
 };
 const FIX_HREF_HOST = 'olympusplugin.ai';
 /** Every hand-off link: the relay's own host, the plugin's one redirect domain. */
@@ -149,6 +155,13 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     out.models.answers = { kind: answers.kind, label: text(answers.label), ready: answers.ready === true };
   }
   if (view.models?.change) out.models.change = copyFix(view.models.change);
+  if (view.privacy) {
+    out.privacy = {
+      configured: view.privacy.configured === true,
+      pendingCount: whole(view.privacy.pendingCount),
+      ruleCount: whole(view.privacy.ruleCount),
+    };
+  }
   const progress = view.progress;
   if (progress) {
     out.progress = {
@@ -530,6 +543,55 @@ export function modelSetToolResult(result: ModelSetResult): ChatGptToolResult {
   const parts = [structured.status === 'applied' ? 'Olympus updated its models.' : 'Olympus already uses these models.'];
   if (structured.restarting) parts.push('It restarts on the Mac to apply them, which takes a few seconds.');
   return { content: [{ type: 'text', text: parts.join(' ') }], structuredContent: structured as unknown as Record<string, unknown> };
+}
+
+/**
+ * `olympus_privacy_get` / `olympus_privacy_set`. Rules (folder and label
+ * names, keys, senders) go only to `_meta`, like the picker; the model sees
+ * the owner's description (owner-approved) and counts.
+ */
+export function privacyToolResult(settings: PrivacySettings, status: PrivacySummary['status']): ChatGptToolResult {
+  const copy = copyPrivacySettings(settings);
+  const summary: PrivacySummary = {
+    status: status === 'saved' ? 'saved' : 'current',
+    configured: copy.configured,
+    description: copy.description,
+    ruleCount: copy.rules.length,
+    pendingCount: copy.pendingCount,
+  };
+  const parts = [
+    summary.status === 'saved' ? 'Saved what is private for the owner.' : (summary.configured ? 'The owner has set what is private for them.' : 'The owner has not said yet what is private for them.'),
+  ];
+  if (summary.ruleCount > 0) parts.push(`${summary.ruleCount} folder, label or sender rule${summary.ruleCount === 1 ? '' : 's'} keep items Private; they are shown to the owner in the Olympus panel.`);
+  if (summary.pendingCount > 0) parts.push(`${summary.pendingCount} item${summary.pendingCount === 1 ? ' waits' : 's wait'} for the privacy check on the Mac.`);
+  return {
+    content: [{ type: 'text', text: parts.join(' ') }],
+    structuredContent: summary as unknown as Record<string, unknown>,
+    _meta: { [PRIVACY_META_KEY]: copy },
+  };
+}
+
+const PRIVACY_RULE_KINDS = new Set(['folder', 'label', 'sender']);
+const MAX_PRIVACY_RULES = 100;
+const MAX_PRIVACY_DESCRIPTION = 2_000;
+
+function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
+  return {
+    configured: settings.configured === true,
+    description: typeof settings.description === 'string'
+      ? settings.description.replace(UNSAFE_CHARS, ' ').trim().slice(0, MAX_PRIVACY_DESCRIPTION)
+      : '',
+    rules: (settings.rules ?? []).slice(0, MAX_PRIVACY_RULES).flatMap((rule): PrivacyRuleView[] => {
+      if (!PRIVACY_RULE_KINDS.has(rule.kind) || !SCOPE_SOURCE_IDS.has(rule.source_id)) return [];
+      if (rule.kind === 'sender') return [{ kind: 'sender', source_id: 'gmail.email', value: text(rule.value) }];
+      if (rule.kind === 'label') return [{ kind: 'label', source_id: 'gmail.email', key: opaque(rule.key), value: text(rule.value) }];
+      const sourceId = rule.source_id === 'dropbox.files' ? 'dropbox.files' : rule.source_id === 'google_drive.docs' ? 'google_drive.docs' : undefined;
+      if (!sourceId) return [];
+      const display = text(rule.display);
+      return [{ kind: 'folder', source_id: sourceId, key: opaque(rule.key), ...(display ? { display } : {}) }];
+    }),
+    pendingCount: whole(settings.pendingCount),
+  };
 }
 
 function scopeSummary(list: ScopeList): ScopeSummary {

@@ -19,8 +19,7 @@
       "pool": { "members": [] },
       "disabledReason": "no-sensitive keeps secure-classified items metadata-only and reports an honest gap until a local or encrypted-cloud secure lane is configured."
     },
-    "internal": { "analyst": ["cloud-openclaw-infer"] },
-    "public_safe": { "analyst": ["cloud-openclaw-infer"] }
+    "internal": { "analyst": ["cloud-openclaw-infer"] }
   },
   "retrieval": {
     "trustDomains": {
@@ -33,13 +32,6 @@
         "secureHandling": "metadata_only_gap"
       },
       "internal": {
-        "minimumExecutionTrust": "standard_cloud",
-        "allowedEmbeddingTrust": ["local", "standard_cloud"],
-        "embeddingProfile": "built-in-embedding",
-        "allowCloudQuery": true,
-        "activationMode": "hybrid_shadow"
-      },
-      "public_safe": {
         "minimumExecutionTrust": "standard_cloud",
         "allowedEmbeddingTrust": ["local", "standard_cloud"],
         "embeddingProfile": "built-in-embedding",

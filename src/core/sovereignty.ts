@@ -269,7 +269,12 @@ export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): Soverei
   for (const [id, profile] of Object.entries(config.modelProfiles)) {
     validateProfile(id, profile);
   }
+  const publicRetired = isPublicTierRetired(config);
   for (const domain of BUILTIN_DOMAINS) {
+    // An install without a Public tier (fresh installs, owner ruling
+    // 2026-10-01) leaves public_safe out of BOTH routes and retrieval;
+    // leaving out only one half is still an error.
+    if (domain === 'public_safe' && publicRetired) continue;
     const route = config.routes[domain];
     if (!route) {
       throw new OperationError('config_error', `sovereignty.routes.${domain} is required.`);
@@ -313,6 +318,17 @@ export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): Soverei
     validateRetrievalPolicy(config, domain, retrieval);
   }
   return config;
+}
+
+/**
+ * Whether this policy has no Public tier: it defines neither a public_safe
+ * route nor a public_safe retrieval policy. Fresh installs are written this
+ * way (owner ruling 2026-10-01: Personal, Private and Secret only; anything
+ * that would be Public is Personal). Every earlier policy defines both and
+ * keeps its Public tier unchanged.
+ */
+export function isPublicTierRetired(config: Pick<SovereigntyConfig, 'routes' | 'retrieval'>): boolean {
+  return config.routes.public_safe === undefined && config.retrieval.trustDomains.public_safe === undefined;
 }
 
 export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | undefined> = process.env): SovereigntyConfig {

@@ -21,13 +21,16 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { configFromPluginConfig, defaultConfig, loadConfig } from '../src/core/config.ts';
 import { seedEngineSovereignty, STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
-import { loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
+import { isPublicTierRetired, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import type { OlympusFolderScopeBrowseResult, OlympusMailScopeDraft } from '../src/control-ui-contract.ts';
-import { SCOPE_UI_META_KEY } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { PRIVACY_META_KEY, SCOPE_UI_META_KEY } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
 import { createChatGptHandoffHandler, createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
 import { applyModelChoice, embeddingIsBuiltIn, ModelChoiceRefusal } from '../src/workers/chatgpt/model-choice.ts';
 import { secretLocationsFromRules, type SecretLocations } from '../src/workers/chatgpt/scope-privacy.ts';
-import { createChatGptSetupBackend } from '../src/workers/chatgpt/setup-backend.ts';
+import { createChatGptSetupBackend, readChatGptPrivacySettings } from '../src/workers/chatgpt/setup-backend.ts';
+import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
 import { SetupBackendError, type ChatGptSetupBackend } from '../src/workers/chatgpt/setup-tools.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
@@ -95,7 +98,8 @@ describe('model choice', () => {
     expect(() => applyModelChoice(seed(), { answers: 'venice' }, { venice: false, local: false })).toThrow('model_not_configured');
     const next = applyModelChoice(seed(), { answers: 'venice' }, { venice: true, local: false });
     expect(next.changed).toBe(true);
-    expect(next.config.routes.public_safe).toEqual({ pool: { members: ['venice-private'], order: ['venice-private'] } });
+    // A fresh install has no Public tier: the switch never adds one.
+    expect(next.config.routes.public_safe).toBeUndefined();
     expect(next.config.routes.internal).toEqual({ pool: { members: ['venice-private'], order: ['venice-private'] } });
     expect(next.config.routes.secure_local?.mode).toBe('disabled');
     expect(next.config.modelProfiles['venice-private']?.secretRef).toBe('store:venice.api_key');
@@ -117,6 +121,11 @@ describe('standalone engine config', () => {
     expect(seedEngineSovereignty(path)).toBe('no-sensitive');
     const written = JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig;
     expect(embeddingIsBuiltIn(written)).toBe(true);
+    // Personal, Private and Secret only: a fresh install has no Public tier.
+    expect(isPublicTierRetired(written)).toBe(true);
+    expect(written.routes.public_safe).toBeUndefined();
+    expect(written.retrieval.trustDomains.public_safe).toBeUndefined();
+    expect(written.retrieval.trustDomains.internal?.allowCloudQuery).toBe(true);
     writeFileSync(path, '{"owner":"kept"}');
     expect(seedEngineSovereignty(path)).toBeUndefined();
     expect(readFileSync(path, 'utf8')).toBe('{"owner":"kept"}');
@@ -222,6 +231,9 @@ interface FakeBackendState {
   /** A worker code startOAuth / disconnect fail with. */
   startError?: string;
   disconnectError?: string;
+  /** Where the real privacy profile and tier rules live for this test. */
+  privacyEnv?: Record<string, string>;
+  pendingCount?: number;
 }
 
 function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
@@ -302,6 +314,13 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
       return { changed: false, embedding: 'built_in', restarting: false };
     },
     secretLocations() { return SECRET_RULES; },
+    privacySettings() {
+      return readChatGptPrivacySettings(state.privacyEnv ?? {}, state.pendingCount ?? 0);
+    },
+    savePrivacy(update) {
+      writePrivacyProfile(update as Parameters<typeof writePrivacyProfile>[0], { env: state.privacyEnv ?? {} });
+      return readChatGptPrivacySettings(state.privacyEnv ?? {}, state.pendingCount ?? 0);
+    },
   };
 }
 
@@ -340,7 +359,15 @@ let searchCalls: Array<{ question: string; limit?: number }>;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'olympus-chatgpt-setup-'));
   store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
-  backendState = { folderApprovals: [], mailApprovals: [], revision: 'rev-1' };
+  backendState = {
+    folderApprovals: [],
+    mailApprovals: [],
+    revision: 'rev-1',
+    privacyEnv: {
+      OLYMPUS_PRIVACY_PROFILE_PATH: join(dir, 'olympus', 'privacy.json'),
+      OLYMPUS_TIER_RULES_PATH: join(dir, 'olympus', 'tier-rules.json'),
+    },
+  };
   answerModel = false;
   searchCalls = [];
   const worker = createEmailSourceWorker({});
@@ -666,6 +693,15 @@ describe('the privacy boundary across every tool', () => {
     const otherResults: unknown[] = [];
     const settle = async <T>(promise: Promise<T>) => { try { return await promise; } catch (error) { return { thrown: String(error) }; } };
     try {
+      // Privacy rules name folders, labels and senders: widget data only, like the picker.
+      pickerResults.push(await settle(call(client, 'olympus_privacy_set', {
+        description: 'my health and my money',
+        rules: [
+          { kind: 'folder', source_id: 'google_drive.docs', key: S('PRIVACY_FOLDER_KEY'), display: S('PRIVACY_FOLDER') },
+          { kind: 'label', source_id: 'gmail.email', key: 'Label_9', value: S('PRIVACY_LABEL') },
+        ],
+      })));
+      pickerResults.push(await settle(call(client, 'olympus_privacy_get', {})));
       otherResults.push(await settle(client.listTools()));
       otherResults.push(await settle(call(client, 'olympus_dashboard', {})));
       otherResults.push(await settle(call(client, 'olympus_search', { question: 'budget' })));
@@ -688,6 +724,8 @@ describe('the privacy boundary across every tool', () => {
     const picker = pickerResults as ToolResult[];
     expect(JSON.stringify(picker)).toContain(S('FOLDER_NAME'));
     expect(JSON.stringify(picker)).toContain(S('LABEL_NAME'));
+    expect(JSON.stringify(picker)).toContain(S('PRIVACY_FOLDER'));
+    expect(JSON.stringify(picker)).toContain(S('PRIVACY_LABEL'));
     // ...in _meta only: never in what the model reads.
     expect(JSON.stringify(picker.map((result) => [result.content, result.structuredContent]))).not.toMatch(SENTINEL_PATTERN);
     // Every other tool and channel carries none of them, nor anything Private or Secret.
@@ -696,5 +734,149 @@ describe('the privacy boundary across every tool', () => {
     for (const secret of ['SECRET_FOLDER', 'SECRET_LABEL', 'vault@bank.example', 'PRIVATE_TITLE', 'PRIVATE_EXCERPT', 'FOLDER_IN_EVIDENCE', 'CORPUS_ID', 'ITEM_ID', 'CHUNK', 'WORKER_MESSAGE']) {
       expect(everything).not.toContain(secret);
     }
+  });
+});
+
+describe('privacy settings (olympus_privacy_get / olympus_privacy_set)', () => {
+  const privacyMeta = (result: ToolResult) => result._meta?.[PRIVACY_META_KEY] as Record<string, unknown>;
+
+  test('unset at first; a save keeps names in _meta only and writes always-Private owner rules', async () => {
+    const client = await connectClient();
+    try {
+      const first = await call(client, 'olympus_privacy_get', {});
+      expect(first.isError).toBeFalsy();
+      expect(first.structuredContent).toEqual({ status: 'current', configured: false, description: '', ruleCount: 0, pendingCount: 0 });
+      expect(first.content[0]!.text).toContain('has not said yet');
+
+      backendState.pendingCount = 2;
+      const sender = `${S('PRIVACY_SENDER').toLowerCase()}@clinic.example`;
+      const saved = await call(client, 'olympus_privacy_set', {
+        description: 'Anything about my health, therapy or my kids.',
+        rules: [
+          { kind: 'folder', source_id: 'dropbox.files', key: '/health', display: S('FOLDER_DISPLAY') },
+          { kind: 'label', source_id: 'gmail.email', key: 'Label_7', value: S('LABEL_DISPLAY') },
+          { kind: 'sender', source_id: 'gmail.email', value: sender },
+        ],
+      });
+      expect(saved.isError).toBeFalsy();
+      expect(saved.structuredContent).toEqual({
+        status: 'saved', configured: true, description: 'Anything about my health, therapy or my kids.', ruleCount: 3, pendingCount: 2,
+      });
+      // The model reads the description and counts; names and keys only reach the widget.
+      const modelChannels = JSON.stringify([saved.content, saved.structuredContent]);
+      expect(modelChannels).not.toMatch(SENTINEL_PATTERN);
+      expect(modelChannels).not.toContain(sender);
+      expect(modelChannels).not.toContain('/health');
+      expect(privacyMeta(saved)).toEqual({
+        configured: true,
+        description: 'Anything about my health, therapy or my kids.',
+        rules: [
+          { kind: 'folder', source_id: 'dropbox.files', key: '/health', display: S('FOLDER_DISPLAY') },
+          { kind: 'label', source_id: 'gmail.email', key: 'Label_7', value: S('LABEL_DISPLAY') },
+          { kind: 'sender', source_id: 'gmail.email', value: sender },
+        ],
+        pendingCount: 2,
+      });
+
+      // The rules become always-Private owner tier rules; names stay out of that file.
+      const rulesFile = readFileSync(backendState.privacyEnv!.OLYMPUS_TIER_RULES_PATH!, 'utf8');
+      expect(rulesFile).not.toMatch(SENTINEL_PATTERN);
+      const rules = (JSON.parse(rulesFile) as { rules: Array<Record<string, unknown>> }).rules;
+      expect(rules.map((rule) => [rule.source, rule.match, rule.tier, rule.strength])).toEqual([
+        ['dropbox', { pathPrefix: '/health/' }, 'secure', 'prior'],
+        ['gmail', { label: 'Label_7' }, 'secure', 'prior'],
+        ['gmail', { sender }, 'secure', 'prior'],
+      ]);
+
+      // A description-only save keeps the rules.
+      const described = await call(client, 'olympus_privacy_set', { description: 'Health and money.' });
+      expect((described.structuredContent as Record<string, unknown>).ruleCount).toBe(3);
+      const got = await call(client, 'olympus_privacy_get', {});
+      expect(got.structuredContent).toMatchObject({ status: 'current', configured: true, description: 'Health and money.', ruleCount: 3 });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('owner rules outside the privacy settings are kept; Secrets-location rules are never shown and survive a save', async () => {
+    const env = backendState.privacyEnv!;
+    mkdirSync(join(dir, 'olympus'), { recursive: true, mode: 0o700 });
+    writeFileSync(env.OLYMPUS_TIER_RULES_PATH!, JSON.stringify({
+      schemaVersion: 1,
+      rules: [{ id: 'published', match: { pathPrefix: '/work/published' }, tier: 'private', strength: 'prior' }],
+    }), { mode: 0o600 });
+    // Saved on the Mac: a rule on a Secrets location.
+    writePrivacyProfile({ rules: [{ kind: 'folder', source_id: 'google_drive.docs', key: 'folder-secret', display: S('SECRET_FOLDER') }] }, { env });
+    const client = await connectClient();
+    try {
+      await call(client, 'olympus_privacy_set', {
+        rules: [
+          // Submitted from ChatGPT on a Secrets location: ignored (Secrets already outranks Private).
+          { kind: 'folder', source_id: 'google_drive.docs', key: 'folder-secret', display: S('SECRET_FOLDER') },
+          { kind: 'folder', source_id: 'google_drive.docs', key: 'folder-public', display: 'Kids' },
+        ],
+      });
+      const got = await call(client, 'olympus_privacy_get', {});
+      expect(JSON.stringify(got)).not.toContain(S('SECRET_FOLDER'));
+      expect((privacyMeta(got).rules as unknown[]).length).toBe(1);
+      // The widget saves what it sees; the Secrets-location rule is kept.
+      const saved = await call(client, 'olympus_privacy_set', { rules: [] });
+      expect(JSON.stringify(saved)).not.toContain(S('SECRET_FOLDER'));
+      const rules = (JSON.parse(readFileSync(env.OLYMPUS_TIER_RULES_PATH!, 'utf8')) as { rules: Array<{ id: string; match: Record<string, string> }> }).rules;
+      expect(rules.map((rule) => rule.id)).toContain('published');
+      expect(rules.some((rule) => rule.match.folderKey === 'folder-secret')).toBe(true);
+      expect(rules.some((rule) => rule.match.folderKey === 'folder-public')).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('input is validated and capped', async () => {
+    const client = await connectClient();
+    try {
+      const refused: Array<Record<string, unknown>> = [
+        { description: 'x'.repeat(2_001) },
+        { rules: [{ kind: 'sender', source_id: 'gmail.email', value: 'not an address' }] },
+        { rules: [{ kind: 'sender', source_id: 'gmail.email', key: 'k', value: 'a@b.example' }] },
+        { rules: [{ kind: 'label', source_id: 'gmail.email', key: 'Label_1' }] },
+        { rules: [{ kind: 'folder', source_id: 'gmail.email', key: '/x' }] },
+        { rules: [{ kind: 'folder', source_id: 'dropbox.files', key: 'relative/path' }] },
+        { rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/x', display: 'y'.repeat(201) }] },
+        { rules: Array.from({ length: 101 }, (_, index) => ({ kind: 'sender', source_id: 'gmail.email', value: `a${index}@b.example` })) },
+        { description: 'ok', apiKey: 'sk-live' },
+      ];
+      for (const args of refused) {
+        const result = await call(client, 'olympus_privacy_set', args);
+        expect(result.isError).toBe(true);
+      }
+      // Nothing was saved by any refused call.
+      expect((await call(client, 'olympus_privacy_get', {})).structuredContent).toMatchObject({ configured: false });
+      // A whole domain is a sender too.
+      expect((await call(client, 'olympus_privacy_set', { rules: [{ kind: 'sender', source_id: 'gmail.email', value: '@Bank.Example' }] })).isError).toBeFalsy();
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe('dashboard privacy field', () => {
+  test('privacy counts ride the view model, and an unset profile asks once in needsYou', () => {
+    const unset = copyDashboardViewModel(buildChatGptDashboardViewModel(emptyView(), {
+      now: new Date('2026-10-01T12:00:00.000Z'),
+      privacy: { configured: false, pendingCount: 3, ruleCount: 0 },
+    }));
+    expect(unset.privacy).toEqual({ configured: false, pendingCount: 3, ruleCount: 0 });
+    expect(unset.needsYou.find((item) => item.id === 'privacy:setup')).toEqual({
+      id: 'privacy:setup',
+      sentence: 'Tell Olympus what\'s private for you',
+      fix: { label: 'Tell Olympus', tool: 'olympus_privacy_get', args: {} },
+    });
+    const set = buildChatGptDashboardViewModel(emptyView(), { privacy: { configured: true, pendingCount: 0, ruleCount: 2 } });
+    expect(set.privacy).toEqual({ configured: true, pendingCount: 0, ruleCount: 2 });
+    expect(set.needsYou.some((item) => item.id === 'privacy:setup')).toBe(false);
+    // Not reported: no field and no ask.
+    const none = buildChatGptDashboardViewModel(emptyView(), {});
+    expect(none.privacy).toBeUndefined();
+    expect(none.needsYou.some((item) => item.id === 'privacy:setup')).toBe(false);
   });
 });

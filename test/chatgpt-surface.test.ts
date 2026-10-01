@@ -590,8 +590,10 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         'olympus_scope_set',
         'olympus_disconnect_source',
         'olympus_model_set',
+        'olympus_privacy_get',
+        'olympus_privacy_set',
       ]);
-      const readOnly = new Set([DASHBOARD_TOOL_NAME, 'olympus_search', 'source_index_status', 'source_answer', 'source_answer_result', 'olympus_scope_list']);
+      const readOnly = new Set([DASHBOARD_TOOL_NAME, 'olympus_search', 'source_index_status', 'source_answer', 'source_answer_result', 'olympus_scope_list', 'olympus_privacy_get']);
       for (const tool of tools) {
         if (readOnly.has(tool.name)) {
           expect(tool.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });

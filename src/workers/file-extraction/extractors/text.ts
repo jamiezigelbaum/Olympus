@@ -411,9 +411,13 @@ async function extractPdfText(input: {
     });
     if (viaCommand) return viaCommand;
   }
-  const streamTexts = extractPdfTextStreams(input.context.bytes);
+  const streamText = normalizeExtractedText(extractPdfTextStreams(input.context.bytes).join('\n'));
+  // The inline decoder knows no font encodings: a PDF whose text is drawn in
+  // a composite (CID) font decodes to glyph ids, which read as control
+  // characters. Indexing that would put noise where the document's text
+  // should be, so it counts as no text layer (OCR, or an honest gap).
   const bounded = boundText(
-    normalizeExtractedText(streamTexts.join('\n')),
+    pdfTextLooksUndecoded(streamText) ? '' : streamText,
     input.context.maxBoundedTextChars,
   );
   return pdfTextExtractionResult({
@@ -422,6 +426,24 @@ async function extractPdfText(input: {
     warnings: ['pdf_text_layer_only'],
     ...(input.ocr ? { ocr: input.ocr } : {}),
   });
+}
+
+/**
+ * Whether decoded PDF text is mostly not text: more than one character in
+ * ten is a control character (other than line breaks and tabs) or the
+ * replacement character.
+ */
+export function pdfTextLooksUndecoded(text: string): boolean {
+  if (!text) return false;
+  let unreadable = 0;
+  let total = 0;
+  for (const char of text) {
+    total += 1;
+    const code = char.codePointAt(0) ?? 0;
+    if (code === 0x09 || code === 0x0a || code === 0x0d) continue;
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0xfffd) unreadable += 1;
+  }
+  return total > 0 && unreadable / total > 0.1;
 }
 
 /**

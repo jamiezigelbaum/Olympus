@@ -20,6 +20,7 @@
  *   whose saved choices are kept when the picker saves.
  */
 import { parseMailScopeDraft } from '../../core/mail-source-scope.ts';
+import { parsePrivacyProfileInput } from '../classification/privacy-profile.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import type {
   OlympusFolderScopeBrowseResult,
@@ -30,6 +31,8 @@ import {
   CONNECT_SOURCE_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
   MODEL_SET_TOOL_NAME,
+  PRIVACY_GET_TOOL_NAME,
+  PRIVACY_SET_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
   SCOPE_SET_TOOL_NAME,
   type ChatGptDisconnectSourceId,
@@ -37,6 +40,8 @@ import {
   type ChatGptOAuthSource,
   type FolderScopeList,
   type MailScopeList,
+  type PrivacyRuleView,
+  type PrivacySettings,
   type ScopeList,
 } from './dashboard-contract.ts';
 import type { HandoffTarget } from './handoff.ts';
@@ -46,6 +51,7 @@ import {
   connectSourceToolResult,
   disconnectToolResult,
   modelSetToolResult,
+  privacyToolResult,
   scopeConflictToolResult,
   scopeListToolResult,
   scopeSavedToolResult,
@@ -95,6 +101,10 @@ export interface ChatGptSetupBackend {
   setModels(choice: ChatGptModelChoice): Promise<{ changed: boolean; embedding: 'built_in' | 'custom'; answers?: 'local' | 'venice'; restarting: boolean }>;
   /** The owner's Secrets locations; throws when the rules cannot be read. */
   secretLocations(): SecretLocations;
+  /** The saved privacy settings and the privacy-check backlog; throws when the profile cannot be read. */
+  privacySettings(): PrivacySettings;
+  /** Saves a validated update (each field given replaces the saved one); returns the settings now. */
+  savePrivacy(update: { description?: string; rules?: PrivacyRuleView[] }): PrivacySettings;
 }
 
 interface ToolDefinition {
@@ -240,12 +250,65 @@ export const MODEL_SET_TOOL: ToolDefinition = {
   _meta: WIDGET_ONLY,
 };
 
+/** folder {key, display?}; label {key: id, value: name}; sender {value: address or @domain}. */
+const PRIVACY_RULE_SCHEMA = {
+  type: 'object',
+  properties: {
+    kind: { type: 'string', enum: ['folder', 'label', 'sender'] },
+    source_id: { type: 'string', enum: [...SCOPE_SOURCE_IDS] },
+    key: { type: 'string', maxLength: 1024 },
+    value: { type: 'string', maxLength: 240 },
+    display: { type: 'string', maxLength: 200 },
+  },
+  required: ['kind', 'source_id'],
+  additionalProperties: false,
+};
+
+export const PRIVACY_GET_TOOL: ToolDefinition = {
+  name: PRIVACY_GET_TOOL_NAME,
+  title: 'Olympus privacy settings',
+  description: [
+    'Read what the user told Olympus is private for them: their own description, and how many folders, labels or',
+    'senders they marked as always Private (the panel shows which). Use it during setup, or when the user asks',
+    'about their privacy settings. If nothing is set yet, ask the user in their own words what is private for them',
+    'and save it with olympus_privacy_set. Takes no arguments. Read-only.',
+  ].join(' '),
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  securitySchemes: OAUTH2_REQUIRED,
+  _meta: WIDGET_AND_MODEL,
+};
+
+export const PRIVACY_SET_TOOL: ToolDefinition = {
+  name: PRIVACY_SET_TOOL_NAME,
+  title: 'Save Olympus privacy settings',
+  description: [
+    'Save what is private for the user. `description` is the user\'s answer, in their own words, to',
+    '"What\'s private for you?" (for example health, money, family matters); Olympus\'s private classifier on the Mac',
+    'reads it to keep matching items Private, so they never reach ChatGPT. `rules` is the full list of folders,',
+    'labels and senders that are always Private; the Olympus panel builds it. Each field given replaces the saved one.',
+  ].join(' '),
+  inputSchema: {
+    type: 'object',
+    properties: {
+      description: { type: 'string', maxLength: 2000, description: 'The user\'s own words about what is private for them.' },
+      rules: { type: 'array', items: PRIVACY_RULE_SCHEMA, maxItems: 100 },
+    },
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  securitySchemes: OAUTH2_REQUIRED,
+  _meta: WIDGET_AND_MODEL,
+};
+
 export const SETUP_TOOLS: readonly ToolDefinition[] = [
   CONNECT_SOURCE_TOOL,
   SCOPE_LIST_TOOL,
   SCOPE_SET_TOOL,
   DISCONNECT_SOURCE_TOOL,
   MODEL_SET_TOOL,
+  PRIVACY_GET_TOOL,
+  PRIVACY_SET_TOOL,
 ];
 
 const SETUP_TOOL_NAMES = new Set(SETUP_TOOLS.map((tool) => tool.name));
@@ -296,12 +359,46 @@ export async function callSetupTool(
           restarting: result.restarting,
         });
       }
+      case PRIVACY_GET_TOOL_NAME:
+        return privacyToolResult(visiblePrivacy(backend.privacySettings(), secretLocations(backend)), 'current');
+      case PRIVACY_SET_TOOL_NAME: {
+        let update: ReturnType<typeof parsePrivacyProfileInput>;
+        try {
+          update = parsePrivacyProfileInput(args);
+        } catch {
+          throw new ChatGptSurfaceError('invalid_params');
+        }
+        const secrets = secretLocations(backend);
+        // Rules on Secrets locations are never shown, so a save keeps them as saved.
+        const rules = update.rules
+          ? [
+              ...update.rules.filter((rule) => !isSecretPrivacyRule(secrets, rule)),
+              ...backend.privacySettings().rules.filter((rule) => isSecretPrivacyRule(secrets, rule)),
+            ]
+          : undefined;
+        const saved = backend.savePrivacy({
+          ...(update.description !== undefined ? { description: update.description } : {}),
+          ...(rules ? { rules: rules as PrivacyRuleView[] } : {}),
+        });
+        return privacyToolResult(visiblePrivacy(saved, secrets), 'saved');
+      }
       default:
         throw new ChatGptSurfaceError('unknown_tool');
     }
   } catch (error) {
     throw surfaceError(error);
   }
+}
+
+/** The settings without any rule on a Secrets location (scope-privacy.ts): those never leave the Mac. */
+function visiblePrivacy(settings: PrivacySettings, secrets: SecretLocations): PrivacySettings {
+  return { ...settings, rules: settings.rules.filter((rule) => !isSecretPrivacyRule(secrets, rule)) };
+}
+
+function isSecretPrivacyRule(secrets: SecretLocations, rule: { kind: string; key?: string; value?: string }): boolean {
+  if (rule.kind === 'folder') return isSecretFolder(secrets, rule.key ?? '');
+  if (rule.kind === 'label') return isSecretLabel(secrets, rule.key ?? '');
+  return isSecretSender(secrets, rule.value ?? '');
 }
 
 async function scopeList(backend: ChatGptSetupBackend, args: Record<string, unknown>): Promise<ScopeList> {

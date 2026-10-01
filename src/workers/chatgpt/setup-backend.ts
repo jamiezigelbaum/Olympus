@@ -19,7 +19,8 @@ import type {
   OlympusSourceScopeSelection,
 } from '../../control-ui-contract.ts';
 import { HANDOFF_PATH_PREFIX } from '../../../connect-relay/shared/tokens.ts';
-import type { ChatGptDisconnectSourceId, ChatGptOAuthSource } from './dashboard-contract.ts';
+import type { ChatGptDisconnectSourceId, ChatGptOAuthSource, PrivacyRuleView, PrivacySettings } from './dashboard-contract.ts';
+import { readPrivacyProfile, writePrivacyProfile, type PrivacyRule } from '../classification/privacy-profile.ts';
 import type { ChatGptHandoffs } from './handoff.ts';
 import {
   ANSWER_PROFILE_IDS,
@@ -54,7 +55,33 @@ export interface ChatGptSetupBackendOptions {
   credentialPresent: (id: string, profile: SovereigntyModelProfile) => boolean;
   /** Restarts the worker to apply a policy change; false when it cannot restart itself. */
   requestReload: () => boolean;
+  /** Items held for the privacy check across every tier ledger (counts only). */
+  pendingClassificationCount?: () => number;
   env?: Record<string, string | undefined>;
+}
+
+/** A saved rule in the contract's shape (dashboard-contract.ts PrivacyRuleView). */
+function privacyRuleView(rule: PrivacyRule): PrivacyRuleView[] {
+  if (rule.kind === 'sender' && rule.value) return [{ kind: 'sender', source_id: 'gmail.email', value: rule.value }];
+  if (rule.kind === 'label' && rule.key && rule.value) return [{ kind: 'label', source_id: 'gmail.email', key: rule.key, value: rule.value }];
+  if (rule.kind === 'folder' && rule.key && rule.source_id !== 'gmail.email') {
+    return [{ kind: 'folder', source_id: rule.source_id, key: rule.key, ...(rule.display ? { display: rule.display } : {}) }];
+  }
+  return [];
+}
+
+/** The owner's privacy settings and the privacy-check backlog. Throws when the profile cannot be read. */
+export function readChatGptPrivacySettings(
+  env: Record<string, string | undefined>,
+  pendingCount: number,
+): PrivacySettings {
+  const profile = readPrivacyProfile({ env });
+  return {
+    configured: profile !== undefined,
+    description: profile?.description ?? '',
+    rules: (profile?.rules ?? []).flatMap(privacyRuleView),
+    pendingCount,
+  };
 }
 
 export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): ChatGptSetupBackend {
@@ -205,5 +232,26 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
     secretLocations() {
       return loadSecretLocations(options.env ?? process.env);
     },
+
+    privacySettings() {
+      return readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
+    },
+
+    savePrivacy(update) {
+      writePrivacyProfile({
+        ...(update.description !== undefined ? { description: update.description } : {}),
+        ...(update.rules ? { rules: update.rules as PrivacyRule[] } : {}),
+      }, { env: options.env ?? process.env });
+      return readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
+    },
   };
+}
+
+function safeCount(count: (() => number) | undefined): number {
+  try {
+    const value = count?.() ?? 0;
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  } catch {
+    return 0;
+  }
 }

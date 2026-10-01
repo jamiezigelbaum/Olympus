@@ -39,6 +39,7 @@ import {
 import {
   CONNECT_SOURCE_TOOL_NAME,
   DASHBOARD_TOOL_NAME,
+  PRIVACY_GET_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
   type ChatGptDisconnectSourceId,
@@ -124,7 +125,18 @@ export interface ChatGptDashboardOptions {
    * means it is derived from model setup.
    */
   embedding?: DashboardViewModelV1['models']['embedding'];
+  /** The owner's privacy settings, counts only (olympus_privacy_get). Absent: not reported. */
+  privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
 }
+
+/**
+ * The privacy setup prompt. Kept here, not in vocabulary.ts, until the
+ * dashboard lane adopts it there (it owns that file).
+ */
+export const CHATGPT_PRIVACY_SETUP_COPY = {
+  sentence: 'Tell Olympus what\'s private for you',
+  label: 'Tell Olympus',
+} as const;
 
 export function buildChatGptDashboardViewModel(
   view: SourceDashboardViewModel,
@@ -169,6 +181,16 @@ export function buildChatGptDashboardViewModel(
     needsYou.push({ id: 'model:answers', sentence: DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention, fix: checkAgainFix() });
   }
 
+  // Privacy is set once, in ChatGPT: until then it is one thing the owner
+  // can do, never a blocker (unflagged items are Personal meanwhile).
+  if (options.privacy && !options.privacy.configured) {
+    needsYou.push({
+      id: 'privacy:setup',
+      sentence: CHATGPT_PRIVACY_SETUP_COPY.sentence,
+      fix: { label: CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} },
+    });
+  }
+
   const progress = overallProgress(rows);
   const connected = rows.some(({ card }) => dashboardIsConnectedSource(card));
   const anyAnswerReady = rows.some(({ card }) => card.answer_readiness.state === 'ready');
@@ -190,6 +212,15 @@ export function buildChatGptDashboardViewModel(
         disabledReason: DASHBOARD_CHATGPT_VOCABULARY.changeModelsOnMac,
       },
     },
+    ...(options.privacy
+      ? {
+          privacy: {
+            configured: options.privacy.configured,
+            pendingCount: Math.max(0, Math.floor(options.privacy.pendingCount)),
+            ruleCount: Math.max(0, Math.floor(options.privacy.ruleCount)),
+          },
+        }
+      : {}),
     generatedAt: isoOrNow(view.generated_at, now),
   };
 }
