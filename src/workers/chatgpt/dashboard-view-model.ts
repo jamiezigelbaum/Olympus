@@ -280,20 +280,15 @@ function connectionFor(input: {
   embedding: DashboardViewModelV1['models']['embedding'];
   progress: DashboardViewModelV1['progress'] | undefined;
 }): DashboardViewModelV1['connection'] {
-  const state: ConnectionState = 'installing';
+  // `installing` disables every control on the page, so it covers only the
+  // built-in model download. With no source yet, or a first index running,
+  // Olympus is set up and the owner's next step is a control on the page:
+  // Connect, or choosing folders.
   if (input.embedding.state === 'downloading') {
+    const state: ConnectionState = 'installing';
     return {
       state,
       progress: { percent: clampPercent(input.embedding.percent ?? 0), label: DASHBOARD_CHATGPT_VOCABULARY.installingModel },
-    };
-  }
-  if (!input.connected) {
-    return { state, progress: { percent: 0, label: DASHBOARD_CHATGPT_VOCABULARY.installingNoSource } };
-  }
-  if (!input.anyAnswerReady) {
-    return {
-      state,
-      progress: { percent: clampPercent(input.progress?.percent ?? 0), label: DASHBOARD_CHATGPT_VOCABULARY.installingFirstIndex },
     };
   }
   return { state: 'ready' };

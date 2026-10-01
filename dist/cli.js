@@ -99150,20 +99150,11 @@ function scopeFix(definition, card) {
   };
 }
 function connectionFor(input) {
-  const state = "installing";
   if (input.embedding.state === "downloading") {
+    const state = "installing";
     return {
       state,
       progress: { percent: clampPercent3(input.embedding.percent ?? 0), label: DASHBOARD_CHATGPT_VOCABULARY.installingModel }
-    };
-  }
-  if (!input.connected) {
-    return { state, progress: { percent: 0, label: DASHBOARD_CHATGPT_VOCABULARY.installingNoSource } };
-  }
-  if (!input.anyAnswerReady) {
-    return {
-      state,
-      progress: { percent: clampPercent3(input.progress?.percent ?? 0), label: DASHBOARD_CHATGPT_VOCABULARY.installingFirstIndex }
     };
   }
   return { state: "ready" };

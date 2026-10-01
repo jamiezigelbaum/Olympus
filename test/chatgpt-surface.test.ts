@@ -130,13 +130,13 @@ describe('dashboard view-model producer', () => {
     expect(vm.generatedAt).toBe(NOW.toISOString());
   });
 
-  test('nothing connected is installing with the connect-a-source step', () => {
+  test('nothing connected is ready, so Connect works on the page', () => {
     const vm = buildChatGptDashboardViewModel(view([offCard('gmail.email')]), { now: NOW });
-    expect(vm.connection.state).toBe('installing');
-    expect(vm.connection.progress?.label).toBe('Connect a source to begin');
+    expect(vm.connection.state).toBe('ready');
+    expect(vm.connection.progress).toBeUndefined();
   });
 
-  test('a first index in flight is installing with progress in the source unit', () => {
+  test('a first index in flight is ready, with progress in the source unit', () => {
     const vm = buildChatGptDashboardViewModel(view([card('google_drive.docs', {
       family: 'file',
       freshness: { label: 'Waiting for the first sync', stale: false },
@@ -146,8 +146,8 @@ describe('dashboard view-model producer', () => {
       answer_readiness: { state: 'syncing', label: 'Syncing now' },
       progress: { indexed_items_per_hour: 100, eta_minutes: 90 },
     })]), { now: NOW });
-    expect(vm.connection.state).toBe('installing');
-    expect(vm.connection.progress).toEqual({ percent: 25, label: 'Indexing your sources for the first time' });
+    expect(vm.connection.state).toBe('ready');
+    expect(vm.connection.progress).toBeUndefined();
     expect(vm.progress).toEqual({
       unit: 'files',
       phase: 'initial',
