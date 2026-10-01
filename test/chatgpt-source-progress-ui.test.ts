@@ -175,10 +175,12 @@ describe('each fact once', () => {
 });
 
 describe('per-source progress', () => {
-  test('an indexing source shows a labelled bar with stage, percent and counts, and no ETA', () => {
+  test('an indexing source shows a labelled bar with stage, percent and counts, and no ETA or synced wording', () => {
     const host = mount({});
-    host.push({ structuredContent: model({ sources: [indexingDrive] }) });
+    host.push({ structuredContent: model({ sources: [{ ...indexingDrive, status: 'Fresh', lastSyncAt: new Date().toISOString() }] }) });
     const drive = row(host, 'Google Drive');
+    expect(drive.textContent).not.toContain('Synced');
+    expect(drive.querySelectorAll('.source-main > p.muted').length).toBe(0);
     const block = drive.querySelector('.source-progress')!;
     expect(block.querySelector('p')!.textContent).toBe('Reading — 40%, 120 of 300 files');
     const bar = block.querySelector('[role=progressbar]')!;
@@ -210,7 +212,18 @@ describe('per-source progress', () => {
       expect(dropbox.querySelectorAll('.stall-line').length).toBe(1);
       expect(dropbox.querySelector('.stall-line')!.textContent).toBe(sentence);
       expect(Array.from(dropbox.querySelectorAll('.source-actions button')).map((node) => node.textContent)).toEqual(['Choose folders']);
+      expect(dropbox.querySelectorAll('[role=progressbar]').length).toBe(1);
+      expect(dropbox.textContent).not.toContain('Reading —');
     }
+  });
+
+  test('stalled with nothing counted yet: only the pause sentence, no stage line, no bar', () => {
+    const host = mount({});
+    host.push({ structuredContent: model({ sources: [stalledDropbox] }) });
+    const dropbox = row(host, 'Dropbox');
+    expect(dropbox.querySelector('.source-progress')!.textContent).toBe('Paused until you choose folders');
+    expect(dropbox.querySelector('[role=progressbar]')).toBeNull();
+    expect(dropbox.textContent).not.toContain('Finding items');
     expect(P.stalledReasons).toBeDefined();
   });
 
@@ -222,6 +235,19 @@ describe('per-source progress', () => {
 });
 
 describe('top-level progress', () => {
+  const top = { unit: 'files' as const, phase: 'initial' as const, percent: 40, itemsLeft: 180, stalled: false, details: [{ stage: 'Reading', unit: 'files' as const, done: 120, total: 300 }] };
+  test('with one unfinished source the row\'s bar is the only place it appears', () => {
+    const host = mount({});
+    host.push({ structuredContent: model({ sources: [indexingDrive, stalledDropbox, { ...connectingGmail }], progress: top }) });
+    expect(host.doc.querySelector('.progress-line')).toBeNull();
+    expect(host.text().split('40%').length).toBe(2);
+  });
+  test('with two or more unfinished sources the page-wide line shows', () => {
+    const host = mount({});
+    host.push({ structuredContent: model({ sources: [indexingDrive, { ...stalledDropbox, progress: { ...stalledDropbox.progress!, stalled: false, stage: 'reading', total: 10, done: 2, percent: 20 } }], progress: top }) });
+    expect(host.doc.querySelector('.progress-line')!.textContent).toBe('First index: 40% done, 180 files left');
+  });
+
   const base = { unit: 'files' as const, phase: 'initial' as const, percent: 0, itemsLeft: 0, stalled: false };
   test('Finding items while no total is known', () => {
     const host = mount({});

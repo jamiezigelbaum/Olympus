@@ -97629,7 +97629,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       meta2.push(capitalise(detail || P.notConnected));
     else if (detail)
       meta2.push(detail);
-    if (typeof source.lastSyncAt === "string" && ago(source.lastSyncAt) && !source.connecting)
+    if (typeof source.lastSyncAt === "string" && ago(source.lastSyncAt) && !source.connecting && !progress)
       meta2.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
     const shown = meta2.filter((part) => !!part);
     if (shown.length)
@@ -97692,14 +97692,27 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function sourceProgressBlock(progress, source, stalledWords) {
     const box = el("div", progress.stalled ? "source-progress stalled" : "source-progress");
-    const label = progress.stage === "done" ? "" : sourceProgressLabel(progress);
-    if (label)
-      add(box, el("p", "muted", label));
-    if (progress.stage !== "done")
-      add(box, progressBar2(progress.percent, String(source.label || "") + ": " + label));
-    if (stalledWords)
-      add(box, el("p", "stall-line", stalledWords));
+    const name = String(source.label || "");
+    if (progress.stalled) {
+      const real = (Number(progress.total) || 0) > 0 && (Number(progress.percent) || 0) > 0 && progress.stage !== "done";
+      if (stalledWords)
+        add(box, el("p", "stall-line", stalledWords));
+      if (real)
+        add(box, progressBar2(progress.percent, name + ": " + (stalledWords || sourceProgressLabel(progress))));
+      return box;
+    }
+    const label = sourceProgressLabel(progress);
+    add(box, el("p", "muted", label), progressBar2(progress.percent, name + ": " + label));
     return box;
+  }
+  function progressRepeatsOneRow(sources) {
+    const reporting = sources.filter((source) => source && source.progress && typeof source.progress === "object");
+    if (!reporting.length)
+      return false;
+    return sources.filter((source) => {
+      const progress = sourceProgress(source);
+      return !!progress && !progress.stalled;
+    }).length < 2;
   }
   function linkExpiry(iso) {
     const at = typeof iso === "string" ? Date.parse(iso) : NaN;
@@ -97905,7 +97918,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : []).filter((item) => item && !listed.some((source) => aboutSource(item, source)))));
     add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
     add(page, privacySection(data));
-    add(page, progressSection(data.progress, true));
+    const sourceList = Array.isArray(data.sources) ? data.sources : [];
+    add(page, progressRepeatsOneRow(sourceList) ? null : progressSection(data.progress, true));
     add(page, modelsSection(data.models));
     return page;
   }

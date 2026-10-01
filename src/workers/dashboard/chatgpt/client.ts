@@ -545,7 +545,8 @@ export function chatgptDashboardClient(
     } else if (item) meta.push(capitalise(itemReason(item, source)));
     else if (off) meta.push(capitalise(detail || P.notConnected));
     else if (detail) meta.push(detail);
-    if (typeof source.lastSyncAt === 'string' && ago(source.lastSyncAt) && !source.connecting) meta.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
+    // Never synced or fresh wording while work is unfinished: the stage line is the detail then.
+    if (typeof source.lastSyncAt === 'string' && ago(source.lastSyncAt) && !source.connecting && !progress) meta.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
     const shown = meta.filter((part) => !!part);
     if (shown.length) add(main, el('p', 'muted', shown.join(' · ')));
     if (progress) add(main, sourceProgressBlock(progress, source, stalledWords));
@@ -608,14 +609,34 @@ export function chatgptDashboardClient(
     });
   }
 
-  /** A thin labelled bar under the row's sentence; amber with one plain sentence when stalled. */
+  /**
+   * Under the row's name: the stage line (the row's detail) over a thin bar.
+   * Stalled: only the pause sentence, with an amber bar when there is real
+   * progress to show.
+   */
   function sourceProgressBlock(progress: Any, source: Any, stalledWords: string): HTMLElement {
     const box = el('div', progress.stalled ? 'source-progress stalled' : 'source-progress');
-    const label = progress.stage === 'done' ? '' : sourceProgressLabel(progress);
-    if (label) add(box, el('p', 'muted', label));
-    if (progress.stage !== 'done') add(box, progressBar(progress.percent, String(source.label || '') + ': ' + label));
-    if (stalledWords) add(box, el('p', 'stall-line', stalledWords));
+    const name = String(source.label || '');
+    if (progress.stalled) {
+      const real = (Number(progress.total) || 0) > 0 && (Number(progress.percent) || 0) > 0 && progress.stage !== 'done';
+      if (stalledWords) add(box, el('p', 'stall-line', stalledWords));
+      if (real) add(box, progressBar(progress.percent, name + ': ' + (stalledWords || sourceProgressLabel(progress))));
+      return box;
+    }
+    const label = sourceProgressLabel(progress);
+    add(box, el('p', 'muted', label), progressBar(progress.percent, name + ': ' + label));
     return box;
+  }
+
+  /**
+   * The page-wide line repeats a single source's bar, so it shows only when
+   * two or more sources are working (or no source reports its own progress).
+   */
+  function progressRepeatsOneRow(sources: Any[]): boolean {
+    const reporting = sources.filter((source: Any) => source && source.progress && typeof source.progress === 'object');
+    if (!reporting.length) return false;
+    // A stalled source is waiting, not working: its row's pause sentence covers it.
+    return sources.filter((source: Any) => { const progress = sourceProgress(source); return !!progress && !progress.stalled; }).length < 2;
   }
 
   /** "link expires in N min" from the connect attempt's expiry. */
@@ -837,7 +858,8 @@ export function chatgptDashboardClient(
       .filter((item: Any) => item && !listed.some((source: Any) => aboutSource(item, source)))));
     add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
     add(page, privacySection(data));
-    add(page, progressSection(data.progress, true));
+    const sourceList = Array.isArray(data.sources) ? data.sources : [];
+    add(page, progressRepeatsOneRow(sourceList) ? null : progressSection(data.progress, true));
     add(page, modelsSection(data.models));
     return page;
   }
