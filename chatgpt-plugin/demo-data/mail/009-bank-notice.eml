@@ -1,0 +1,16 @@
+From: Northfield Bank <alerts@bank.example.com>
+To: Robin Vale <robin.vale@example.com>
+Date: Thu, 24 Sep 2026 06:00:00 +0000
+Subject: Your September statement and overdraft notice
+Message-ID: <009-bank-notice@demo.example.com>
+X-Olympus-Demo: synthetic sample data, fictional people
+X-Olympus-Demo-Intended-Tier: Private
+Content-Type: text/plain; charset=utf-8
+
+Dear Robin Vale,
+
+Your September statement is ready. Your current account went overdrawn by $212.40
+on 19 September; an overdraft fee of $25.00 was charged. Your loan balance is
+$8,940.00.
+
+Northfield Bank (fictional). This is sample data.
