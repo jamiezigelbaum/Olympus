@@ -646,7 +646,10 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     const client = await connectClient();
     try {
       const { resources } = await client.listResources();
-      expect(resources).toEqual([{ uri: DASHBOARD_RESOURCE_URI, name: 'Olympus dashboard', mimeType: MCP_APP_MIME_TYPE }]);
+      expect(resources).toEqual([
+        { uri: DASHBOARD_RESOURCE_URI, name: 'Olympus dashboard', mimeType: MCP_APP_MIME_TYPE },
+        { uri: 'ui://olympus/private-answer', name: 'Olympus private answer', mimeType: MCP_APP_MIME_TYPE },
+      ]);
       const read = await client.readResource({ uri: DASHBOARD_RESOURCE_URI });
       const content = read.contents[0] as { uri: string; mimeType: string; text: string; _meta: Record<string, unknown> };
       expect(content.uri).toBe(DASHBOARD_RESOURCE_URI);
@@ -687,6 +690,8 @@ describe('ChatGPT MCP surface over the remote handler', () => {
           { source: 'Google Drive', title: 'Budget plan 2026', url: 'https://docs.google.com/document/d/abc', date: '2026-03-01' },
         ],
         notes: ['Some matching items are private and stay on your Mac.'],
+        // The probe's boolean match counts as one item; no private model here.
+        privateMatch: { count: 1, panelState: 'no_model' },
       });
     } finally {
       await client.close();
@@ -703,6 +708,8 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         answer: 'Olympus can answer this only from private items, which stay on your Mac.',
         citations: [],
         notes: ['Some matching items are private and stay on your Mac.'],
+        // The probe's boolean match counts as one item; no private model here.
+        privateMatch: { count: 1, panelState: 'no_model' },
       });
     } finally {
       await client.close();

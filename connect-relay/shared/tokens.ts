@@ -14,6 +14,16 @@
  * page or redirect it stored for the id (a provider sign-in, the Mac-only key
  * page). Single use and ten minutes, enforced by the engine.
  *
+ *   private-answer job   oly2p.<installId>.<secret>   (`/private/<id>`, see below)
+ *
+ * A private-answer job id names one answer the ChatGPT private-answer panel
+ * may collect, once, directly from `https://<relay>/private/<id>`: the relay
+ * routes it to the install that minted it, and only that engine knows the
+ * job (single use, ten minutes; src/workers/chatgpt/private-answer-jobs.ts).
+ * The answer itself is end-to-end sealed to a key the panel generates, so the
+ * relay forwards ciphertext only (docs/design/chatgpt-plugin.md, "Private
+ * answer panel").
+ *
  * `<secret>` is 32 random bytes, base64url (43 characters). The relay never
  * validates the secret; the engine does, against its own database, so a token
  * minted by install B and presented to install A opens nothing at A.
@@ -28,9 +38,9 @@ import { randomBytes } from 'node:crypto';
  */
 export const AUTHENTICATED_RESPONSE_HEADER = 'x-olympus-authenticated';
 
-export type CredentialKind = 'access' | 'refresh' | 'code' | 'handoff';
+export type CredentialKind = 'access' | 'refresh' | 'code' | 'handoff' | 'private';
 
-const PREFIX: Record<CredentialKind, string> = { access: 'oly2', refresh: 'oly2r', code: 'oly2c', handoff: 'oly2g' };
+const PREFIX: Record<CredentialKind, string> = { access: 'oly2', refresh: 'oly2r', code: 'oly2c', handoff: 'oly2g', private: 'oly2p' };
 const SECRET = '[A-Za-z0-9_-]{43}';
 const INSTALL = '[a-z2-7]{32}';
 const PATTERN: Record<CredentialKind, RegExp> = {
@@ -38,6 +48,7 @@ const PATTERN: Record<CredentialKind, RegExp> = {
   refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
   code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
   handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+  private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`),
 };
 
 /** The relay path prefix of a hand-off link. */
