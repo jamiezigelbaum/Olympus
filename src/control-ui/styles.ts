@@ -36,7 +36,7 @@ export const OLYMPUS_CONTROL_UI_CSS = forShadowRoot([
 ].join('\n')) + `
 :host { display: block; min-width: 0; color-scheme: dark; contain: content; }
 .olympus-control-ui { min-height: 100%; }
-.olympus-control-ui [data-write-capability-note] { margin: 0 auto 12px; max-width: 920px; }
-.olympus-control-ui .native-state { max-width: 920px; margin: 24px auto; padding: 18px 20px;
+.olympus-control-ui [data-write-capability-note] { margin: 0 auto 12px; max-width: 1120px; }
+.olympus-control-ui .native-state { max-width: 1120px; margin: 24px auto; padding: 18px 20px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--t2); }
 `;

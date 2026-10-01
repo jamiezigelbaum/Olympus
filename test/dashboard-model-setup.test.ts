@@ -53,9 +53,10 @@ test('ready models collapse to source-style rows; a model without its key keeps 
     expect(row).toContain(`<span class="name">${label}</span>`);
     expect(row).toContain('Ready · key connected');
     expect(row).not.toContain('modelcard"');
-    // Replace key is quiet and still opens the same key form, now in a sheet
-    // that also carries the "Get a key" link.
-    expect(row).toContain(`class="btn quiet" data-sheet-toggle="#model-key-${id}"`);
+    // Replace key lives in the row's ⋯ menu and still opens the same key
+    // form, in a sheet that also carries the "Get a key" link.
+    expect(row).toContain(`<details class="rowmenu"><summary class="btn" aria-label="More actions for ${label}">⋯</summary>`);
+    expect(row).toContain(`class="btn" data-sheet-toggle="#model-key-${id}"`);
     const sheet = segment(ready, `id="model-key-${id}"`, '</div>');
     expect(sheet).toContain(`data-model-provider="${id}"`);
     expect(sheet).toContain('name="api_key"');
@@ -93,7 +94,7 @@ test('ready models collapse to source-style rows; a model without its key keeps 
   // by side; the two optional controls share one row too (owner, 2026-09-24).
   const action = segment(venice, '<div class="modelaction">', 'Get a Venice API key</a></div>');
   expect(action).toContain('aria-label="Venice API key"');
-  expect(action).toContain('<button class="btn" type="submit">Connect</button>');
+  expect(action).toContain('<button class="btn primary" type="submit">Connect</button>');
   const tools = segment(partial, '<div class="modeltools">', '</form></div>');
   expect(tools).toContain('Connect existing local models');
   expect(tools).toContain('Check readiness');

@@ -208,6 +208,7 @@ function renderAttentionSection(
       // links its name to detail; the row without one becomes the link.
       href: detailHref(source, options?.basePath),
       attention: true,
+      ...(group.status === 'Failing' ? { tone: 'error' as const } : {}),
       ...(resolved === undefined ? {} : { action: resolved.action }),
     });
     // The act happens HERE (owner ruling, 2026-09-01): a setup sheet opens

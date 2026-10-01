@@ -30,6 +30,7 @@ import {
   dashboardConnectedSummary,
   dashboardIsConnectedSource,
   dashboardScopePending,
+  dashboardSetupLead,
   dashboardSetupMeta,
   dashboardStatus,
   dashboardSubLine,
@@ -252,7 +253,8 @@ function renderGroup(
 
 function sectionHeading(heading: string, count: number, attention: boolean): string {
   const marker = attention ? '▲ ' : '';
-  return `<div class="sect${attention ? ' attn' : ''}">${marker}${heading} — ${count}</div>`;
+  // A group inside Sources: a heading one step under the section's own.
+  return `<div class="sect sub${attention ? ' attn' : ''}">${marker}${heading} — ${count}</div>`;
 }
 
 /**
@@ -371,6 +373,7 @@ function renderSetupRow(
       label: source.label,
       href: detailHref(source, basePath),
       blurb: action.instructions.plain_intro,
+      ...dashboardSetupLead(source.source_id, action.instructions.plain_intro),
       action: { label: action.label, kind: 'none', sheet: sheetId, ...gate },
       ...(link === undefined ? {} : { blurbLink: link }),
     });
@@ -401,8 +404,9 @@ function renderSetupRow(
   const link = action.kind === 'api_key' ? keyLocationLink(action.instructions) : undefined;
   return setupRow({
     label: source.label,
-      href: detailHref(source, basePath),
+    href: detailHref(source, basePath),
     blurb: setupBlurb(source),
+    ...(action.kind === 'api_key' ? dashboardSetupLead(source.source_id, action.instructions.plain_intro) : {}),
     action: { ...(connectAction(source, false) ?? { label: actionStateLabel(source), kind: 'none' as const }), ...gate },
     ...(link === undefined ? {} : { blurbLink: link }),
   });
