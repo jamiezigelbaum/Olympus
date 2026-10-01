@@ -30,6 +30,15 @@ export interface ModelSetupServiceOptions {
   expectedEmbeddingDimension?: (profileId: string) => number | undefined;
   fetch?: typeof fetch;
   now?: () => Date;
+  /**
+   * Run the local-model readiness check without a button press: once when the
+   * service starts, and again on a status read (a page open or poll) once the
+   * last result is old. Default true. Without it a worker restart showed every
+   * configured local model as "Not configured" until someone pressed Check
+   * readiness, and every source control stayed locked behind that word
+   * (owner-reported, issue #118).
+   */
+  autoCheck?: boolean;
 }
 
 type RequiredProfile = { id: string; profile: SovereigntyModelProfile };
@@ -39,6 +48,10 @@ type LocalCheckState = Extract<ModelSetupCard['state'], 'not_configured' | 'appl
 
 const DOMAINS = ['public_safe', 'internal', 'secure_local'] as const;
 const LOCAL_REQUEST_TIMEOUT_MS = 5_000;
+/** How old a failed or missing local check may get before a status read re-runs it. */
+const LOCAL_RECHECK_NOT_READY_MS = 60_000;
+/** How old a passing local check may get before a status read re-confirms it. */
+const LOCAL_RECHECK_READY_MS = 10 * 60_000;
 const LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
 const CARD_COPY: Record<ModelSetupCard['id'], {
@@ -110,6 +123,9 @@ export class ModelSetupService {
   private readonly now: () => Date;
   private localCheckState: LocalCheckState = 'not_configured';
   private localCheckPromise: Promise<ModelSetupView> | undefined;
+  /** When the last local check finished; undefined until one has. */
+  private localCheckedAt: number | undefined;
+  private readonly autoCheck: boolean;
 
   constructor(options: ModelSetupServiceOptions) {
     this.config = options.config;
@@ -118,9 +134,38 @@ export class ModelSetupService {
     this.expectedEmbeddingDimension = options.expectedEmbeddingDimension;
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.now ?? (() => new Date());
+    this.autoCheck = options.autoCheck !== false;
+    // Worker start: deferred one tick so the caller finishes wiring the
+    // credential callbacks before the first probe reads them.
+    if (this.autoCheck && this.localUsages().length > 0) {
+      const timer = setTimeout(() => this.refreshLocalCheck(), 0);
+      (timer as { unref?: () => void }).unref?.();
+    }
   }
 
   getStatus(): ModelSetupView {
+    // Page open and every poll: a stale or never-run local check starts here,
+    // and the card reads Checking… instead of a configuration it never tested.
+    if (this.autoCheck) this.refreshLocalCheck();
+    return this.status();
+  }
+
+  /** Start a background local check when none has run or the last is old. */
+  private refreshLocalCheck(): void {
+    if (this.localCheckPromise) return;
+    const checkedAt = this.localCheckedAt;
+    if (checkedAt !== undefined) {
+      const maxAge = this.localCheckState === 'ready' ? LOCAL_RECHECK_READY_MS : LOCAL_RECHECK_NOT_READY_MS;
+      if (this.now().getTime() - checkedAt < maxAge) return;
+    }
+    const local = this.localUsages();
+    if (local.length === 0 || this.aggregateCredentialState(local) !== 'ready') return;
+    // A re-check keeps the last answer on screen while it runs; only a model
+    // that has never been checked reads Checking….
+    void this.checkLocalModels({ keepState: checkedAt !== undefined }).catch(() => undefined);
+  }
+
+  private status(): ModelSetupView {
     const required = requiredModelProfiles(this.config);
     const cards: ModelSetupCard[] = [];
 
@@ -143,35 +188,37 @@ export class ModelSetupService {
     };
   }
 
-  checkLocalModels(): Promise<ModelSetupView> {
+  checkLocalModels(options: { keepState?: boolean } = {}): Promise<ModelSetupView> {
     if (this.localCheckPromise) return this.localCheckPromise;
 
     const local = this.localUsages();
-    if (local.length === 0) return Promise.resolve(this.getStatus());
+    if (local.length === 0) return Promise.resolve(this.status());
 
     const credentials = this.aggregateCredentialState(local);
     if (credentials !== 'ready') {
       this.localCheckState = 'not_configured';
-      return Promise.resolve(this.getStatus());
+      return Promise.resolve(this.status());
     }
 
     const targets = this.localTargets(local);
     if (!targets) {
       this.localCheckState = 'needs_attention';
-      return Promise.resolve(this.getStatus());
+      this.localCheckedAt = this.now().getTime();
+      return Promise.resolve(this.status());
     }
 
-    this.localCheckState = 'applying';
+    if (options.keepState !== true) this.localCheckState = 'applying';
     const check = this.runLocalChecks(targets)
       .then((ready) => {
         this.localCheckState = ready ? 'ready' : 'needs_attention';
-        return this.getStatus();
+        return this.status();
       })
       .catch(() => {
         this.localCheckState = 'needs_attention';
-        return this.getStatus();
+        return this.status();
       })
       .finally(() => {
+        this.localCheckedAt = this.now().getTime();
         this.localCheckPromise = undefined;
       });
     this.localCheckPromise = check;
