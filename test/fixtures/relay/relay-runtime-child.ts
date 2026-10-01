@@ -11,5 +11,6 @@ await runRelayRuntimeProcess(instanceId, {
   relayUrl: `ws://127.0.0.1:${Number(process.env.TEST_RELAY_PORT)}/v2/connect`,
   heartbeatMs: 1_000,
   backoff: { minMs: 50, maxMs: 200 },
+  ...(process.env.TEST_STATUS_REFRESH_MS ? { statusRefreshMs: Number(process.env.TEST_STATUS_REFRESH_MS) } : {}),
 });
 process.exit(0);

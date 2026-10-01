@@ -15,11 +15,13 @@ import { createNativeRelayService } from '../src/core/native-relay-service.ts';
 import type { NativeProcessServiceDefinition } from '../src/core/native-process-service.ts';
 import {
   createRemotePublicUrlSource,
+  emptyRemoteAccessStatus,
   readRemoteAccessStatus,
   remoteAccessDir,
   remoteAccessStatusView,
   resolveRemoteAccessUrls,
   type RemoteAccessStatusFile,
+  writeRemoteAccessStatus,
 } from '../src/core/remote-access.ts';
 import { remoteAccessFromStatus } from '../src/workers/agent-connections.ts';
 import { MemoryInstallRegistry } from '../connect-relay/server/registry.ts';
@@ -322,6 +324,86 @@ describe('native relay service', () => {
       state: 'not_connected',
       detail: expect.stringContaining('Olympus relay unavailable'),
     });
+  });
+
+  test('a relay restart (a redeploy): the same child reconnects, serves a request, and status goes offline then online', async () => {
+    const { workerEnvPath, dir } = fixtureRoot();
+    const registry = new MemoryInstallRegistry();
+    const own = await startRelay({ publicHost: RELAY_HOST, registry, listen: { host: '127.0.0.1', port: 0 } });
+    const port = own.port;
+    let current: RelayHandle = own;
+    try {
+      const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST }, { childEnv: { TEST_RELAY_PORT: String(port) } });
+      await service.start({});
+      const first = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'online');
+
+      await current.close();
+      const down = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'offline');
+      expect(down).toMatchObject({ mode: 'relay', pid: first.pid, instance_id: first.instance_id });
+      await Bun.sleep(600);
+
+      // The registry survives the restart, as the production log does.
+      current = await startRelay({ publicHost: RELAY_HOST, registry, listen: { host: '127.0.0.1', port } });
+      const back = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'online');
+      // The same child, not a supervisor restart: the session itself recovered.
+      expect(back).toMatchObject({ mode: 'relay', pid: first.pid, instance_id: first.instance_id, install_id: first.install_id });
+      expect(Date.parse(back.last_connected_at!)).toBeGreaterThan(Date.parse(first.last_connected_at!));
+
+      const response = await fetch(`${current.url}/mcp`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${mintCredential('access', back.install_id!)}`, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      expect(response.status).toBe(200);
+      expect(workerRequests.at(-1)?.url).toBe('/mcp');
+    } finally {
+      await current.close();
+    }
+  });
+
+  test('a dead relay child is reported to host health, then cleared once its replacement is ready', async () => {
+    const { workerEnvPath, dir } = fixtureRoot();
+    const events: string[] = [];
+    const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST }, { restartDelaysMs: [300] });
+    await service.start({ serviceHealth: healthRecorder(events) });
+    const first = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'online');
+    events.length = 0;
+    process.kill(first.pid!, 'SIGKILL');
+    await until(() => events, (seen) => seen.includes('failure:Olympus remote relay exited unexpectedly.'), 5_000);
+    await until(() => readRemoteAccessStatus(dir), (s) => s.instance_id !== first.instance_id && s.relay?.state === 'online');
+    await until(() => events, (seen) => seen.at(-1) === 'clear', 5_000);
+  });
+
+  test('another supervisor with remote access off never says "off" over a live relay; a clobbered status is re-asserted', async () => {
+    const { workerEnvPath, dir } = fixtureRoot();
+    const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST }, { childEnv: { TEST_STATUS_REFRESH_MS: '100' } });
+    await service.start({});
+    const online = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'online');
+
+    // 2026-10-01: a test run starting every plugin service against the real
+    // data root (remote access off in its config) wrote "off" over the live
+    // engine's relay status, which then read off until an engine restart.
+    const foreign = relayService(workerEnvPath, { enabled: false });
+    await foreign.start({});
+    expect(readRemoteAccessStatus(dir)).toMatchObject({ mode: 'relay', instance_id: online.instance_id, pid: online.pid });
+    await foreign.stop();
+
+    // Whatever overwrites it anyway, the live child puts its own status back.
+    writeRemoteAccessStatus(dir, emptyRemoteAccessStatus('off'));
+    const healed = await until(() => readRemoteAccessStatus(dir), (s) => s.mode === 'relay', 5_000);
+    expect(healed).toMatchObject({
+      instance_id: online.instance_id,
+      pid: online.pid,
+      install_id: online.install_id,
+      public_base_url: `https://${RELAY_HOST}`,
+      relay: { state: 'online' },
+    });
+
+    // Its own supervisor turning remote access off still reads off.
+    await service.stop();
+    const off = relayService(workerEnvPath, { enabled: false });
+    await off.start({});
+    expect(readRemoteAccessStatus(dir)).toMatchObject({ mode: 'off', relay: null, pid: null });
   });
 
   test('remote access that was never turned on writes nothing', async () => {

@@ -23,7 +23,7 @@ import {
 } from './engine-service.ts';
 import { resolveOpenClawExecutable } from './openclaw-executable.ts';
 import { OperationError } from './operation-error.ts';
-import { readRemoteAccessStatus, remoteAccessDirForCli, resolveRemoteAccessMode } from './remote-access.ts';
+import { readRemoteAccessStatus, relayProcessRunning, remoteAccessDirForCli, resolveRemoteAccessMode } from './remote-access.ts';
 
 export const ENGINE_CLI_USAGE = {
   'engine install': 'olympus engine install [--from-checkout <path>] [--bun <path>] [--dry-run]',
@@ -108,7 +108,9 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   const remoteMode = parsed ? resolveRemoteAccessMode(parsed.remote) : { mode: 'off' as const };
   const baseUrl = parsed?.email.baseUrl ?? 'http://127.0.0.1:8010/v1';
   const host = readEngineStatusFile(env);
-  const relayStatus = readRemoteAccessStatus(remoteAccessDirForCli(env));
+  const relayDir = remoteAccessDirForCli(env);
+  const relayStatus = readRemoteAccessStatus(relayDir);
+  const relayRunning = relayProcessRunning(relayDir);
   const openclaw = (deps.openclawPath ?? (() => resolveOpenClawExecutable({ env, homeDir })))();
   const worker = await probeWorker(deps.fetchImpl ?? fetch, baseUrl);
   const missing: string[] = [];
@@ -117,8 +119,13 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   if (!pluginConfig && !configError) missing.push(`${paths.configPath} is missing: run olympus engine install.`);
   if (configError) missing.push(configError);
   if (agent.state === 'running' && !worker.reachable) missing.push('The worker is not answering yet: see olympus engine logs.');
+  // The engine's own service health says only that it started the relay;
+  // the relay's status file and pid say whether it is running now.
+  if (agent.state === 'running' && remoteMode.mode === 'relay' && !relayRunning) {
+    missing.push('Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.');
+  }
   return {
-    ok: agent.state === 'running' && worker.reachable && !configError,
+    ok: agent.state === 'running' && worker.reachable && !configError && (remoteMode.mode !== 'relay' || relayRunning),
     host: openclaw
       ? { mode: 'standalone', openclaw: 'installed (optional; not used by the engine)', openclaw_path: openclaw }
       : { mode: 'standalone', openclaw: 'not installed (not needed)' },
@@ -133,7 +140,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
     },
     worker: { base_url: baseUrl, ...worker },
     relay: relayStatus
-      ? { mode: relayStatus.mode, state: relayStatus.relay?.state ?? null, reason: relayStatus.relay?.reason ?? null, public_base_url: relayStatus.public_base_url ?? null }
+      ? { mode: relayStatus.mode, running: relayRunning, state: relayStatus.relay?.state ?? null, reason: relayStatus.relay?.reason ?? null, public_base_url: relayStatus.public_base_url ?? null }
       : null,
     analyst: {
       public_personal: 'answered in ChatGPT from evidence returned by the Olympus MCP tools',

@@ -45,6 +45,13 @@ export interface RelayClientOptions {
   readonly relaySecret: string;
   readonly onStatus?: (status: RelayClientStatus) => void;
   readonly heartbeatMs?: number;
+  /**
+   * Time a connection has to be authenticated (`ready`) before it is given up
+   * and retried (default 20 s). Without it, a connect or handshake that a
+   * restarting relay or its proxy never answers would hang the client in
+   * `connecting` for good.
+   */
+  readonly handshakeTimeoutMs?: number;
   readonly backoff?: { readonly minMs: number; readonly maxMs: number };
   /** After another process takes over this install's session (default 5 minutes). */
   readonly replacedBackoffMs?: number;
@@ -147,6 +154,67 @@ export class RelayClient {
     let revoked = false;
     let ready = false;
     const { identity } = this.options;
+    let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+
+    /**
+     * The session is over: schedule the next attempt. Runs once per socket,
+     * whether the socket reported its close or the client gave up on it (a
+     * handshake or heartbeat timeout), so a reconnect never waits on a close
+     * event a dead connection may not deliver.
+     */
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(handshakeTimer);
+      if (this.socket === socket) {
+        this.socket = undefined;
+        if (this.heartbeat) clearInterval(this.heartbeat);
+        this.heartbeat = undefined;
+        this.abortAll();
+      }
+      if (this.stopped) return;
+      if (replaced) {
+        const retryInMs = this.options.replacedBackoffMs ?? 5 * 60_000;
+        this.options.onStatus?.({ state: 'replaced', retryInMs });
+        this.schedule(retryInMs);
+        return;
+      }
+      if (revoked) {
+        // Retrying sooner cannot help; ask again rarely in case it was restored.
+        const retryInMs = this.options.revokedBackoffMs ?? 6 * 60 * 60_000;
+        this.options.onStatus?.({ state: 'offline', reason, retryInMs });
+        this.schedule(retryInMs);
+        return;
+      }
+      if (this.register && this.failures === 0) {
+        // First contact with this relay: register right away.
+        this.failures = 1;
+        this.schedule(0);
+        return;
+      }
+      this.failures += 1;
+      const { minMs, maxMs } = this.options.backoff ?? { minMs: 1_000, maxMs: 60_000 };
+      const delay = Math.min(maxMs, minMs * 2 ** Math.min(this.failures - 1, 16));
+      const jittered = Math.round(delay / 2 + Math.random() * (delay / 2));
+      this.options.onStatus?.({ state: 'offline', reason, retryInMs: jittered });
+      this.schedule(jittered);
+    };
+    const abandon = (code: number, why: string, describe: string): void => {
+      reason = describe;
+      try {
+        socket.close(code, why);
+      } catch {
+        // Already closing; finish() below does not depend on it.
+      }
+      finish();
+    };
+    handshakeTimer = setTimeout(
+      () => abandon(4000, 'handshake_timeout', 'the relay did not answer'),
+      this.options.handshakeTimeoutMs ?? 20_000,
+    );
+    // The socket keeps the process alive while it matters; this timer must not.
+    handshakeTimer.unref?.();
 
     socket.addEventListener('message', (event) => {
       if (this.socket !== socket) return;
@@ -176,9 +244,10 @@ export class RelayClient {
             return;
           }
           ready = true;
+          clearTimeout(handshakeTimer);
           this.failures = 0;
           this.register = false;
-          this.startHeartbeat(socket);
+          this.startHeartbeat(() => abandon(4004, 'heartbeat_timeout', 'the relay stopped answering'));
           this.options.onStatus?.({ state: 'online', installId: identity.installId, connectedAt: Date.now() });
           return;
         case 'pong':
@@ -213,47 +282,17 @@ export class RelayClient {
     socket.addEventListener('error', () => {
       reason = 'could not reach the relay';
     });
-    socket.addEventListener('close', () => {
-      if (this.socket === socket) this.socket = undefined;
-      if (this.heartbeat) clearInterval(this.heartbeat);
-      this.abortAll();
-      if (this.stopped) return;
-      if (replaced) {
-        const retryInMs = this.options.replacedBackoffMs ?? 5 * 60_000;
-        this.options.onStatus?.({ state: 'replaced', retryInMs });
-        this.schedule(retryInMs);
-        return;
-      }
-      if (revoked) {
-        // Retrying sooner cannot help; ask again rarely in case it was restored.
-        const retryInMs = this.options.revokedBackoffMs ?? 6 * 60 * 60_000;
-        this.options.onStatus?.({ state: 'offline', reason, retryInMs });
-        this.schedule(retryInMs);
-        return;
-      }
-      if (this.register && this.failures === 0) {
-        // First contact with this relay: register right away.
-        this.failures = 1;
-        this.schedule(0);
-        return;
-      }
-      this.failures += 1;
-      const { minMs, maxMs } = this.options.backoff ?? { minMs: 1_000, maxMs: 60_000 };
-      const delay = Math.min(maxMs, minMs * 2 ** Math.min(this.failures - 1, 16));
-      const jittered = Math.round(delay / 2 + Math.random() * (delay / 2));
-      this.options.onStatus?.({ state: 'offline', reason, retryInMs: jittered });
-      this.schedule(jittered);
-    });
+    socket.addEventListener('close', () => finish());
   }
 
   /** Pings on an interval; a session that has not answered two pings in a row is dead. */
-  private startHeartbeat(socket: WebSocket): void {
+  private startHeartbeat(onTimeout: () => void): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
     const interval = this.options.heartbeatMs ?? 30_000;
     this.lastPongAt = Date.now();
     this.heartbeat = setInterval(() => {
       if (Date.now() - this.lastPongAt > interval * 2 + 1_000) {
-        socket.close(4004, 'heartbeat_timeout');
+        onTimeout();
         return;
       }
       this.send({ type: 'ping' });
