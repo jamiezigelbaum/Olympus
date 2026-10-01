@@ -376,7 +376,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       p.catalog.set(node.key, node);
       p.ancestors.set(node.key, trail);
     }
-    const nodes = previous.concat(fresh);
+    // Alphabetical, numbers in numeric order ("2 Areas" before "10 Notes"),
+    // whatever order the provider lists them in.
+    const nodes = previous.concat(fresh).sort((a: Any, b: Any) =>
+      String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
     const next = typeof page.next_cursor === 'string' && page.next_cursor ? page.next_cursor : '';
     if (parentKey) {
       p.branches.set(parentKey, nodes);

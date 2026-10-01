@@ -98069,7 +98069,7 @@ function chatgptPickerProgram(kit) {
       p.catalog.set(node.key, node);
       p.ancestors.set(node.key, trail);
     }
-    const nodes = previous.concat(fresh2);
+    const nodes = previous.concat(fresh2).sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
     const next = typeof page.next_cursor === "string" && page.next_cursor ? page.next_cursor : "";
     if (parentKey) {
       p.branches.set(parentKey, nodes);
