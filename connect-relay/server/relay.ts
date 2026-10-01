@@ -42,6 +42,7 @@ import {
   type ErrorMessage,
   type RelayErrorCode,
 } from '../shared/protocol.ts';
+import { INSTALL_URL } from '../shared/dashboard-contract.ts';
 import { KeyedCounter, KeyedTokenBuckets, addressKey } from '../shared/rate-limit.ts';
 import { credentialInstallId } from '../shared/tokens.ts';
 import { authorizeBridge } from './authorize-bridge.ts';
@@ -146,7 +147,7 @@ interface SocketData {
 const DEFAULT_ENGINE_PORT = 8010;
 /** OpenAI's domain verification for app submissions. */
 const APPS_CHALLENGE_PATH = '/.well-known/openai-apps-challenge';
-const DEFAULT_INSTALL_URL = 'https://olympusplugin.ai/';
+const DEFAULT_INSTALL_URL = INSTALL_URL;
 const MAX_FORM_BYTES = 16 * 1024;
 /** How long an engine-confirmed credential keeps the owner lane (an access token lives an hour). */
 const CONFIRMED_CREDENTIAL_TTL_MS = 60 * 60_000;

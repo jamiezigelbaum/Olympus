@@ -54,11 +54,22 @@ export interface ChatGptToolDefinition {
   description: string;
   inputSchema: { type: 'object'; properties: Record<string, unknown>; required?: string[]; additionalProperties?: false };
   annotations: { readOnlyHint: boolean; destructiveHint: boolean; openWorldHint: boolean };
+  /**
+   * ChatGPT's per-tool auth (developers.openai.com/plugins/build/auth): the
+   * dashboard works without a token and better with one; every other tool
+   * needs the owner's Olympus connection.
+   */
+  securitySchemes: ReadonlyArray<{ type: 'noauth' } | { type: 'oauth2'; scopes: readonly string[] }>;
   _meta?: Record<string, unknown>;
 }
 
 /** Every tool here reads the owner's own index; none changes anything or reaches the open web. */
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
+
+/** Needs the owner's Olympus connection (an OAuth token issued by their engine). */
+const OAUTH2_REQUIRED = [{ type: 'oauth2', scopes: [] }] as const;
+/** Callable anonymously (the relay answers "not installed"), richer once connected. */
+const OAUTH2_OPTIONAL = [{ type: 'noauth' }, { type: 'oauth2', scopes: [] }] as const;
 
 /** One source_answer handoff budget, as the operation's own description asks callers to pass. */
 const SOURCE_ANSWER_TIMEOUT_MS = 600_000;
@@ -74,6 +85,7 @@ export const DASHBOARD_TOOL: ChatGptToolDefinition = {
   ].join(' '),
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   annotations: READ_ONLY,
+  securitySchemes: OAUTH2_OPTIONAL,
   _meta: dashboardToolMeta(),
 };
 
@@ -100,6 +112,7 @@ export const SOURCE_ANSWER_TOOL: ChatGptToolDefinition = {
     additionalProperties: false,
   },
   annotations: READ_ONLY,
+  securitySchemes: OAUTH2_REQUIRED,
 };
 
 export const SOURCE_ANSWER_RESULT_TOOL: ChatGptToolDefinition = {
@@ -117,6 +130,7 @@ export const SOURCE_ANSWER_RESULT_TOOL: ChatGptToolDefinition = {
     additionalProperties: false,
   },
   annotations: READ_ONLY,
+  securitySchemes: OAUTH2_REQUIRED,
 };
 
 export const SOURCE_STATUS_TOOL: ChatGptToolDefinition = {
@@ -129,9 +143,17 @@ export const SOURCE_STATUS_TOOL: ChatGptToolDefinition = {
   ].join(' '),
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   annotations: READ_ONLY,
+  securitySchemes: OAUTH2_REQUIRED,
 };
 
 const ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL] as const;
+
+/**
+ * Every tool this surface can list, in list order. The relay lists all of them
+ * to a caller with no token (it cannot see the engine's config), from the
+ * manifest scripts/build-chatgpt-relay-assets.ts generates from this array.
+ */
+export const CHATGPT_TOOLS: readonly ChatGptToolDefinition[] = [DASHBOARD_TOOL, SOURCE_STATUS_TOOL, ...ANSWER_TOOLS];
 
 export function listChatGptTools(ctx: OperationContext): ChatGptToolDefinition[] {
   const tools: ChatGptToolDefinition[] = [DASHBOARD_TOOL, SOURCE_STATUS_TOOL];

@@ -11,30 +11,32 @@
  *   check the credential (only the engine can), so nothing here reveals more
  *   than "this install exists and was last seen at about this minute".
  *
- * Both answer `initialize`, `tools/list`, `resources/list` and
- * `resources/read` of the dashboard resource. Tool auth follows ChatGPT's
- * per-tool `securitySchemes` (developers.openai.com/plugins/build/auth): the
- * dashboard tool works without auth and better with it; the engine declares
- * its own tools.
+ * Both list the engine's full ChatGPT tool set and serve the engine's own
+ * dashboard bundle, from files scripts/build-chatgpt-relay-assets.ts generates
+ * out of src/workers/chatgpt (the relay builds separately and imports nothing
+ * from src). Tool auth follows ChatGPT's per-tool `securitySchemes`
+ * (developers.openai.com/plugins/build/auth): listing the protected tools to a
+ * caller with no token is what lets ChatGPT's model pick one, and that tool's
+ * `mcp/www_authenticate` error is the documented trigger for linking.
  */
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, notInstalledDashboard, offlineDashboard } from '../shared/dashboard-contract.ts';
-import { OFFLINE_DASHBOARD_HTML } from './offline-ui.ts';
+import DASHBOARD_RESOURCE_READ from './generated/chatgpt-dashboard.json';
+import CHATGPT_SURFACE from './generated/chatgpt-tools.json';
 
 /** Newest first; an `initialize` asking for one of these gets it back. */
 export const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'] as const;
-export const MCP_APP_MIME_TYPE = 'text/html;profile=mcp-app';
 export const MAC_OFFLINE_MESSAGE = 'Your Mac is offline. Olympus answers again when your Mac is awake and online.';
 export const NOT_CONNECTED_MESSAGE = 'Olympus is not connected yet. Install Olympus on your Mac, then connect it to ChatGPT.';
 
-export const DASHBOARD_TOOL = {
-  name: DASHBOARD_TOOL_NAME,
-  title: 'Olympus dashboard',
-  description: 'Show the Olympus dashboard: whether your Mac is connected, your sources, and anything that needs you.',
-  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  securitySchemes: [{ type: 'noauth' }, { type: 'oauth2', scopes: [] }],
-  _meta: { 'openai/outputTemplate': DASHBOARD_RESOURCE_URI, ui: { resourceUri: DASHBOARD_RESOURCE_URI } },
-};
+/** The engine's ChatGPT tools, exactly as its tools/list declares them. */
+export const CHATGPT_TOOLS = CHATGPT_SURFACE.tools;
+/** The engine's resources/list. */
+export const CHATGPT_RESOURCES = CHATGPT_SURFACE.resources;
+/** The engine's resources/read of ui://olympus/dashboard: the dashboard lane's real bundle. */
+export const DASHBOARD_RESOURCE_CONTENTS = DASHBOARD_RESOURCE_READ.contents;
+
+export const DASHBOARD_TOOL = CHATGPT_TOOLS.find((tool) => tool.name === DASHBOARD_TOOL_NAME)!;
+if (!DASHBOARD_TOOL) throw new Error('generated ChatGPT tool manifest has no dashboard tool');
 
 export type RelayMcpState =
   | { state: 'not_installed'; installUrl: string; protectedResourceMetadataUrl: string }
@@ -88,19 +90,24 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
     case 'ping':
       return rpcResult(id, {});
     case 'tools/list':
-      return rpcResult(id, { tools: [DASHBOARD_TOOL] });
+      return rpcResult(id, { tools: CHATGPT_TOOLS });
     case 'resources/list':
-      return rpcResult(id, { resources: [{ uri: DASHBOARD_RESOURCE_URI, name: 'Olympus dashboard', mimeType: MCP_APP_MIME_TYPE }] });
+      return rpcResult(id, { resources: CHATGPT_RESOURCES });
+    case 'resources/templates/list':
+      return rpcResult(id, { resourceTemplates: [] });
     case 'resources/read':
       if (args.uri !== DASHBOARD_RESOURCE_URI) return rpcError(id, -32002, 'Resource not found');
-      return rpcResult(id, { contents: [{ uri: DASHBOARD_RESOURCE_URI, mimeType: MCP_APP_MIME_TYPE, text: OFFLINE_DASHBOARD_HTML }] });
+      return rpcResult(id, { contents: DASHBOARD_RESOURCE_CONTENTS });
     case 'tools/call':
       if (args.name === DASHBOARD_TOOL_NAME) {
+        // The page renders only from structuredContent, so the dashboard
+        // result always carries it, with the tool's own UI metadata.
         return rpcResult(id, {
           content: [{ type: 'text', text: notice }],
           structuredContent: input.state === 'mac_offline'
             ? offlineDashboard(input.lastSeenAt, input.now)
             : notInstalledDashboard(input.installUrl, input.now),
+          _meta: DASHBOARD_TOOL._meta,
         });
       }
       if (input.state === 'mac_offline') return rpcError(id, -32000, MAC_OFFLINE_MESSAGE);

@@ -1,0 +1,127 @@
+{
+  "tools": [
+    {
+      "name": "olympus_dashboard",
+      "title": "Olympus dashboard",
+      "description": "Show the Olympus dashboard: which of the user's sources are connected, how far indexing has got, what needs the user's attention, and whether the models are ready. Use it when the user asks about Olympus setup, status or progress, or why Olympus could not answer. Takes no arguments. Read-only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "noauth"
+        },
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://olympus/dashboard"
+        },
+        "openai/outputTemplate": "ui://olympus/dashboard",
+        "openai/ui": {
+          "entrypoints": [
+            {
+              "type": "global"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "source_index_status",
+      "title": "Olympus source status",
+      "description": "List each source Olympus indexes with a one-word status (Fresh, Working, Waiting, Needs you, Failing, Off) and a short line about it. Use it to check whether a source is connected and up to date before or after an answer. Takes no arguments. For the visual dashboard use olympus_dashboard.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ]
+    },
+    {
+      "name": "source_answer",
+      "title": "Ask Olympus",
+      "description": "Answer a question from the user's own sources that Olympus indexes privately on their Mac (mail, files, notes, chats and saved reading). Use it whenever the user asks about their own information: what someone wrote, what a document says, when something happened, what they decided. Do not use it for general knowledge. Returns {status: \"answered\", answer, citations[]}: present the answer and cite it with the numbered sources; if the answer says something could not be found, say so rather than guessing. If it returns {status: \"working\", job_id}, the answer is still being prepared: call source_answer_result with that job_id (again while it says working) instead of asking again. Ask one question at a time and wait for each answer.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "The user's question, in their own words, with any names, dates or places they gave."
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ]
+    },
+    {
+      "name": "source_answer_result",
+      "title": "Get an Olympus answer",
+      "description": "Collect the answer to a source_answer call that returned {status: \"working\", job_id}. Returns the finished answer with citations, or {status: \"working\"} again after waiting up to about a minute; then call it again. A job_id expires about 15 minutes after its answer is ready.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "description": "The job_id from source_answer."
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ]
+    }
+  ],
+  "resources": [
+    {
+      "uri": "ui://olympus/dashboard",
+      "name": "Olympus dashboard",
+      "mimeType": "text/html;profile=mcp-app"
+    }
+  ]
+}

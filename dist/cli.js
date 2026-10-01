@@ -98358,7 +98358,7 @@ function createChatGptMcpServer(makeOperationContext, options) {
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
   return server;
 }
-var READ_ONLY, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, ANSWER_TOOLS, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000;
+var READ_ONLY, OAUTH2_REQUIRED, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, ANSWER_TOOLS, CHATGPT_TOOLS, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000;
 var init_mcp_surface = __esm(() => {
   init_server2();
   init_types2();
@@ -98370,6 +98370,8 @@ var init_mcp_surface = __esm(() => {
   init_dashboard_view_model();
   init_response_builder();
   READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+  OAUTH2_REQUIRED = [{ type: "oauth2", scopes: [] }];
+  OAUTH2_OPTIONAL = [{ type: "noauth" }, { type: "oauth2", scopes: [] }];
   DASHBOARD_TOOL = {
     name: DASHBOARD_TOOL_NAME,
     title: "Olympus dashboard",
@@ -98381,6 +98383,7 @@ var init_mcp_surface = __esm(() => {
     ].join(" "),
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: READ_ONLY,
+    securitySchemes: OAUTH2_OPTIONAL,
     _meta: dashboardToolMeta()
   };
   SOURCE_ANSWER_TOOL = {
@@ -98405,7 +98408,8 @@ var init_mcp_surface = __esm(() => {
       required: ["question"],
       additionalProperties: false
     },
-    annotations: READ_ONLY
+    annotations: READ_ONLY,
+    securitySchemes: OAUTH2_REQUIRED
   };
   SOURCE_ANSWER_RESULT_TOOL = {
     name: "source_answer_result",
@@ -98421,7 +98425,8 @@ var init_mcp_surface = __esm(() => {
       required: ["job_id"],
       additionalProperties: false
     },
-    annotations: READ_ONLY
+    annotations: READ_ONLY,
+    securitySchemes: OAUTH2_REQUIRED
   };
   SOURCE_STATUS_TOOL = {
     name: "source_index_status",
@@ -98432,9 +98437,11 @@ var init_mcp_surface = __esm(() => {
       "an answer. Takes no arguments. For the visual dashboard use olympus_dashboard."
     ].join(" "),
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    annotations: READ_ONLY
+    annotations: READ_ONLY,
+    securitySchemes: OAUTH2_REQUIRED
   };
   ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL];
+  CHATGPT_TOOLS = [DASHBOARD_TOOL, SOURCE_STATUS_TOOL, ...ANSWER_TOOLS];
   privateMatchByJob = new Map;
   PRIVATE_MATCH_TTL_MS = 30 * 60000;
 });
