@@ -41,7 +41,9 @@ import {
 import { ownerSenderRuleMatches } from '../../core/sender-rules.ts';
 
 export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
-export const TIER_CLASSIFIER_VERSION = '2026-09-23.p2';
+// 2026-10-01.p2: vocabulary-only detector hits go to the privacy-safe model
+// (borderline) instead of final-deciding Private, when a model can be asked.
+export const TIER_CLASSIFIER_VERSION = '2026-10-01.p2';
 
 export type TierKey = SourceClassificationTier;
 
@@ -651,17 +653,27 @@ function contentPass(args: {
   // [10] Deterministic sensitive detectors on the text. Names travel with the
   // text so the health origin hint and a title's vocabulary still count; the
   // content tier is at least the metadata tier, so this can only raise.
+  //
+  // Structured hits (a Luhn-valid card, an IBAN, a routing or account number,
+  // an SSN, a passport or NIF number) raise to Private at once. Vocabulary
+  // alone ("treatment", "symptoms", "invoice") does not prove an item private
+  // (owner ruling 2026-10-01: a book chapter that mentions treatment is not a
+  // private answer): when a privacy-safe model can be asked, those families
+  // are borderline and step [12] asks it. With no model to ask, vocabulary
+  // still raises to Private, so nothing words flagged reaches Personal
+  // without a model's judgment.
   const detection = detectSensitiveContent({
     text,
     ...(args.matchInput.title ? { title: args.matchInput.title } : {}),
     ...(args.matchInput.sender ? { sender: args.matchInput.sender } : {}),
     ...(args.matchInput.path ? { path: args.matchInput.path } : {}),
   });
-  if (detection.signals.length > 0) {
+  const canAskSniffer = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
+  if (detection.signals.length > 0 || (detection.vocabulary.length > 0 && !canAskSniffer)) {
     decided = maxVerdict(decided, {
       tier: 'secure',
       decidedBy: 'sensitive_detector',
-      reasons: detectorReasons(detection.signals),
+      reasons: detectorReasons([...detection.signals, ...detection.vocabulary]),
     });
   }
 
@@ -684,18 +696,20 @@ function contentPass(args: {
   // Without a privacy-safe model to ask (no private lane), only items whose
   // NAMES were flagged wait (owner ruling 2026-10-01: unflagged items are
   // Personal at once); a borderline word in the text alone is not a flag.
+  // A borderline family from vocabulary is asked about with the passages the
+  // detector matched, not just the document's opening, so a model can see the
+  // medical or financial text that tripped it.
   let pending = false;
-  const askBorderline = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
   const flags = [
     ...metadata.flags,
-    ...(askBorderline ? detection.borderline.map((family) => `content:borderline:${family}`) : []),
+    ...(canAskSniffer ? detection.borderline.map((family) => `content:borderline:${family}`) : []),
   ];
   const reasons = [...decided.reasons];
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({
       pass: 'content',
       flags,
-      material: snifferExcerpt(text),
+      material: snifferExcerpt(text, vocabularyTerms(detection.vocabulary)),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });
@@ -864,9 +878,54 @@ function snifferNames(signals: SourceClassificationSignals): string {
   return joined.slice(0, SNIFFER_NAMES_MAX_CHARS);
 }
 
-/** A short excerpt of the text for pass 2: the start of the document, bounded. */
-function snifferExcerpt(text: string): string {
-  return text.replace(/\s+/g, ' ').trim().slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+/** How much of the document's opening a focused excerpt keeps before the matched passages. */
+const SNIFFER_EXCERPT_HEAD_CHARS = 600;
+/** Most matched passages a focused excerpt carries. */
+const SNIFFER_EXCERPT_MAX_FOCUS = 2;
+const SNIFFER_EXCERPT_GAP = ' … ';
+
+/**
+ * A short excerpt of the text for pass 2, bounded by SNIFFER_EXCERPT_MAX_CHARS.
+ * Without focus terms it is the start of the document. With them (the words a
+ * vocabulary detector matched), it is the opening plus a short passage around
+ * the first match of each term past the opening, so the model reads what the
+ * detector saw. Still an excerpt, never the document.
+ */
+function snifferExcerpt(text: string, focusTerms: readonly string[] = []): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (focusTerms.length === 0 || flat.length <= SNIFFER_EXCERPT_MAX_CHARS) {
+    return flat.slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+  }
+  const head = flat.slice(0, SNIFFER_EXCERPT_HEAD_CHARS);
+  const positions: number[] = [];
+  for (const term of focusTerms) {
+    const pattern = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    const found = pattern.exec(flat.slice(head.length));
+    if (found) positions.push(head.length + found.index);
+  }
+  const focus = [...new Set(positions)].sort((a, b) => a - b).slice(0, SNIFFER_EXCERPT_MAX_FOCUS);
+  if (focus.length === 0) return flat.slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+  const window = Math.floor(
+    (SNIFFER_EXCERPT_MAX_CHARS - head.length - SNIFFER_EXCERPT_GAP.length * focus.length) / focus.length,
+  );
+  const parts = [head];
+  let cursor = head.length;
+  for (const position of focus) {
+    const start = Math.max(cursor, position - Math.floor(window / 2));
+    const end = Math.min(flat.length, start + window);
+    if (end <= start) continue;
+    parts.push(flat.slice(start, end));
+    cursor = end;
+  }
+  return parts.join(SNIFFER_EXCERPT_GAP).slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+}
+
+/** The matched words of vocabulary signals (`health:vocabulary:treatment` → `treatment`). */
+function vocabularyTerms(signals: readonly string[]): string[] {
+  return signals
+    .filter((signal) => signal.split(':')[1] === 'vocabulary')
+    .map((signal) => signal.split(':').slice(2).join(':'))
+    .filter((term) => term.length > 0);
 }
 
 function namesOf(signals: SourceClassificationSignals): string {

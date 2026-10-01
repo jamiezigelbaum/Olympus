@@ -316,6 +316,15 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-01 (no version change): tier classifier `2026-10-01.p2`.
+  Vocabulary-only sensitive detector hits (financial and health words, the
+  health origin hint) no longer final-decide Private when a privacy-safe
+  sniffer can be asked; they make the family borderline and the model judges
+  the item (hard categories stay Private). Structured identifiers and secrets
+  are unchanged, and with no sniffer vocabulary still raises to Private. A
+  classification-semantics change inside the shared classifier: the three
+  contract types and the fingerprint are unchanged; no stored data migrates
+  (design: per-item four-tier classification §2.2).
 - 2026-10-01 (no version change): a new consumer of the EvidencePack. On
   the ChatGPT path (`olympus_search`, `src/workers/chatgpt/`) the engine runs
   the shared EvidencePack build restricted to Public and Personal tiers,

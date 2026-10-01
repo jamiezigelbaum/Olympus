@@ -146,10 +146,15 @@ The owner's rule (2026-09-23): **the default tier is Personal.** Things are rais
 
 ```
   [9]  secret detector on the full extracted text ................... → Secrets
-  [10] deterministic sensitive detectors on text (financial, health, identity) → Private
+  [10] deterministic sensitive detectors on text (financial, health, identity):
+       structured hits (card Luhn, IBAN, routing/account number, SSN, passport, NIF) → Private;
+       vocabulary-only hits (financial/health words, health origin hint) → borderline for [12],
+       or → Private when no privacy-safe model can be asked
   [11] sensitivity map v2 on text
   [12] SNIFFER on a short text excerpt, only when pass 1 flagged the item or [10]/[11] are borderline
 ```
+
+**Vocabulary is a question, not a verdict (owner ruling 2026-10-01).** "It shouldn't give me a private answer if there's nothing actually private in the thing I've asked about." A book chapter that says "treatment" and "symptoms" went straight to Private on two weak health words. Since classifier version `2026-10-01.p2`, vocabulary-only detector hits make their family borderline and the privacy-safe model judges the item: a hard category (health, therapy, financial, legal, identity) is Private whatever tier the model pairs it with, anything else confidently Personal is Personal. For a vocabulary question the excerpt is the document's opening plus the passages around the first matched words, still bounded by `SNIFFER_EXCERPT_MAX_CHARS`, so the model reads what the detector saw. Until it answers, the item is pending (held Private, not embedded). With no private model at all, vocabulary still raises to Private, so nothing words flagged reaches Personal without a model's judgment. Structured identifiers and secrets stay deterministic and immediate, and owner rules and overrides still win. Items already recorded Private by vocabulary are not re-judged automatically: content is classified when text arrives (a sync of a changed item or a re-extraction), and the migration plan covers only unrouted items; an owner `olympus tier set` override settles one item at once.
 
 Content can only **raise** the tier that pass 1 set, never lower it, unless the owner overrides the item. Embedding happens only after pass 2, so each chunk is embedded once, in its final tier's model.
 
@@ -442,7 +447,7 @@ Remaining, each with a recommendation:
 Scope: new, clean installs only. Existing installs keep their policy and stores exactly as they are.
 
 - **Three tiers.** A fresh install's policy (the `no-sensitive` preset that `olympus engine install` seeds) defines Personal, Private and Secret only: no `public_safe` route and no `public_safe` retrieval policy (`isPublicTierRetired`). The classifier then lifts any Public verdict to Personal (`retirePublic`, reason `tier:public_retired`), so no Public store is ever created. Personal is the tier `olympus_search` releases to ChatGPT.
-- **Only flagged items wait.** Items whose names look possibly private are held pending (Private, keyword-searchable, not embedded) until the sniffer judges them. With no private model at all, a borderline word in the text alone does not hold an item: it is Personal at once.
+- **Only flagged items wait.** Items whose names look possibly private, or whose text trips a vocabulary-only detector, are held pending (Private, keyword-searchable, not embedded) until the sniffer judges them. With no private model at all, a single borderline word in the text alone does not hold an item: it is Personal at once; vocabulary that trips a detector makes it Private (§2.2, owner ruling 2026-10-01).
 - **Sniffer model.** A configured private lane wins; otherwise the built-in private model (`built_in`, an AnalystModel the worker registers with `registerBuiltInPrivateModel`), once downloaded and approved by the owner in the classification ledger like any classifier model.
 - **Privacy profile.** Set once in ChatGPT (`olympus_privacy_set`), editable from the dashboard: the owner's own words (quoted into the sniffer prompt as data; the approved prompt version is `SNIFFER_OWNER_CONTEXT_PROMPT_VERSION`) and always-Private folder, label and sender rules, written as `privacy-*` owner tier rules. Stored owner-only in `~/.olympus/privacy.json`.
 - **Diagnosis that led here.** On the owner's fresh install the two PDFs were routed correctly (Personal, content in `internal.dropbox.files`; `secure_local.dropbox.files` was only the extraction job's lane id). Their text was control-character noise: the launchd agent's PATH hid Homebrew's `pdftotext`, and the inline decoder cannot read composite-font PDFs. Extraction commands now resolve from package-manager directories, and undecodable inline text counts as no text layer.

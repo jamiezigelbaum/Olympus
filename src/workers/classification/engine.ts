@@ -236,31 +236,51 @@ export function detectSecretFindingKinds(text: string): string[] {
 }
 
 export interface SensitiveContentDetection {
-  /** Positive financial/health/identity detector hits (each one raises to S4). */
+  /**
+   * Structured detector hits: a Luhn-valid card, an IBAN, a routing or account
+   * number, an SSN, a passport or NIF number. Each one raises to Private at once.
+   */
   signals: string[];
-  /** Families with a single weak vocabulary hit: not enough to raise, worth a second look. */
+  /**
+   * Vocabulary-only hits (`health:vocabulary:treatment`, `financial:vocabulary:invoice`,
+   * `health:origin_hint`). Words alone do not prove an item private: a book
+   * chapter says "treatment" and "symptoms" too. When a privacy-safe model can
+   * be asked, these families are borderline and the model judges the item;
+   * with none, they raise to Private exactly like a structured hit.
+   */
+  vocabulary: string[];
+  /**
+   * Families worth the privacy-safe model's second look: every vocabulary
+   * family above, plus families with a single weak term (not enough to raise).
+   * A family with a structured hit is never borderline (it is already Private).
+   */
   borderline: string[];
 }
 
 /**
- * The S4 detectors (financial, health, identity) without the secret scan, plus
- * which families came close. `input.sender` and `input.path` feed the health
- * origin hint exactly as they do in classifyItemTier.
+ * The S4 detectors (financial, health, identity) without the secret scan,
+ * split into structured hits and vocabulary-only hits, plus which families
+ * came close. `input.sender` and `input.path` feed the health origin hint
+ * exactly as they do in classifyItemTier.
  */
 export function detectSensitiveContent(input: ClassifyItemTierInput): SensitiveContentDetection {
   const haystack = buildHaystack(input);
   const signals = [
-    ...detectFinancialSignals(haystack),
-    ...detectHealthSignals(input, haystack),
+    ...detectFinancialStructuredSignals(haystack),
     ...detectIdentityDocumentSignals(haystack),
   ];
+  const vocabulary = [
+    ...detectFinancialVocabularySignals(haystack),
+    ...detectHealthSignals(input, haystack),
+  ];
+  const structured = (family: string) => signals.some((signal) => signal.startsWith(`${family}:`));
+  const worded = (family: string) => vocabulary.some((signal) => signal.startsWith(`${family}:`));
   const borderline: string[] = [];
-  if (!signals.some((signal) => signal.startsWith('financial:'))
-    && matchTerms(haystack, FINANCIAL_WEAK_TERMS).length === 1) {
+  if (!structured('financial')
+    && (worded('financial') || matchTerms(haystack, FINANCIAL_WEAK_TERMS).length === 1)) {
     borderline.push('financial');
   }
-  if (!signals.some((signal) => signal.startsWith('health:'))
-    && matchTerms(haystack, HEALTH_WEAK_TERMS).length === 1) {
+  if (worded('health') || matchTerms(haystack, HEALTH_WEAK_TERMS).length === 1) {
     borderline.push('health');
   }
   // Therapy, legal, family-law and identity vocabulary in the TEXT has no
@@ -270,10 +290,10 @@ export function detectSensitiveContent(input: ClassifyItemTierInput): SensitiveC
   // Personal-target category can settle them.
   const text = input.text ?? '';
   if (PERSONAL_LIFE_NAME_PATTERN.test(text)) borderline.push('personal_life');
-  if (!signals.some((signal) => signal.startsWith('identity:')) && IDENTITY_NAME_PATTERN.test(text)) {
+  if (!structured('identity') && IDENTITY_NAME_PATTERN.test(text)) {
     borderline.push('identity');
   }
-  return { signals, borderline };
+  return { signals, vocabulary, borderline };
 }
 
 /**
@@ -389,6 +409,11 @@ function detectSensitiveSignals(
 }
 
 function detectFinancialSignals(haystack: string): string[] {
+  return [...detectFinancialStructuredSignals(haystack), ...detectFinancialVocabularySignals(haystack)];
+}
+
+/** Structured financial identifiers: checksummed or labelled numbers, never words alone. */
+function detectFinancialStructuredSignals(haystack: string): string[] {
   const signals: string[] = [];
 
   if (findValidIban(haystack)) signals.push('financial:iban');
@@ -399,13 +424,17 @@ function detectFinancialSignals(haystack: string): string[] {
   if (/\baccount\s*(?:number|no\.?|#)\s*[:#-]?\s*[\dXx*][\dXx* -]{5,}/i.test(haystack)) {
     signals.push('financial:account_number');
   }
+  return signals;
+}
 
+/** Financial vocabulary: one strong term or two weak ones. Words, not proof. */
+function detectFinancialVocabularySignals(haystack: string): string[] {
   const strong = matchTerms(haystack, FINANCIAL_STRONG_TERMS);
   const weak = matchTerms(haystack, FINANCIAL_WEAK_TERMS);
   if (strong.length >= 1 || weak.length >= 2) {
-    for (const term of [...strong, ...weak]) signals.push(`financial:vocabulary:${term}`);
+    return [...strong, ...weak].map((term) => `financial:vocabulary:${term}`);
   }
-  return signals;
+  return [];
 }
 
 function detectHealthSignals(input: ClassifyItemTierInput, haystack: string): string[] {

@@ -14,10 +14,13 @@ import {
   type SensitivityMap,
 } from '../src/core/sensitivity-map.ts';
 import {
+  SNIFFER_EXCERPT_MAX_CHARS,
   classifyItemTiers,
   type OwnerTierRule,
   type TierClassificationOptions,
   type TierSniffer,
+  type TierSnifferRequest,
+  type TierSnifferVerdict,
 } from '../src/workers/classification/tier-classifier.ts';
 
 const AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
@@ -363,5 +366,92 @@ describe('sensitivity map versions', () => {
     const map = mapV2([{ id: 'therapy', tier: 'secure', keywords: ['therapy'] }]);
     expect(classify({ title: 'x' }, BENIGN).mapRevision).toBe('none');
     expect(classify({ title: 'x' }, BENIGN, { sensitivityMap: map }).mapRevision).toMatch(/^v2:[a-f0-9]{16}$/);
+  });
+});
+
+describe('vocabulary-only detector hits are judged by the private model (owner ruling 2026-10-01)', () => {
+  // A book chapter: ordinary prose that happens to say "treatment" and
+  // "symptoms" well past the opening. Words alone are not a private item.
+  const FILLER = 'The integral approach maps quadrants and levels of development across many fields of human inquiry, from art and ethics to ecology. '
+    .repeat(12);
+  const BOOK = `${FILLER}In medicine, a purely physical treatment of symptoms ignores the interior quadrants of meaning and culture. ${FILLER}`;
+  const BOOK_NAMES = { title: 'Introduction to the Integral Approach.pdf', path: '/Books/Introduction to the Integral Approach.pdf' };
+
+  function answering(answer: TierSnifferVerdict, asked: TierSnifferRequest[]): TierSniffer {
+    return { id: 'local:test', judge: (request) => { asked.push(request); return answer; } };
+  }
+
+  test('a book that mentions treatment and symptoms is asked about, and is Personal when the model says so', () => {
+    const asked: TierSnifferRequest[] = [];
+    const decision = classify(BOOK_NAMES, BOOK, {
+      sniffer: answering({ verdict: 'decided', tier: 'private', code: 'other:0.95' }, asked),
+    });
+    expect(decision).toMatchObject({ metadataTier: 'private', contentTier: 'private', state: 'current', contentPending: false });
+    expect(decision.decidedBy).not.toBe('sensitive_detector');
+    expect(decision.reasons.some((reason) => reason.startsWith('content:detector:'))).toBe(false);
+    expect(decision.reasons).toContain('content:sniffer:local:test:other:0.95');
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!.pass).toBe('content');
+    expect(asked[0]!.flags).toContain('content:borderline:health');
+    // The model reads the passage the detector matched, not only the opening, and still only an excerpt.
+    expect(asked[0]!.material).toContain('physical treatment of symptoms');
+    expect(asked[0]!.material!.length).toBeLessThanOrEqual(SNIFFER_EXCERPT_MAX_CHARS);
+  });
+
+  test('real health content the model calls health stays Private', () => {
+    const decision = classify(BOOK_NAMES, BOOK, {
+      sniffer: answering({ verdict: 'decided', tier: 'secure', code: 'health:0.97' }, []),
+    });
+    expect(decision).toMatchObject({ contentTier: 'secure', decidedBy: 'sniffer', state: 'current' });
+  });
+
+  test('until the model answers, the item is pending (held Private)', () => {
+    const decision = classify(BOOK_NAMES, BOOK, { sniffer: answering({ verdict: 'undecided' }, []) });
+    expect(decision).toMatchObject({ state: 'pending', contentPending: true });
+    expect(decision.reasons).toContain('content:borderline:health');
+    expect(decision.reasons).toContain('content:sniffer:local:test:undecided');
+  });
+
+  test('with no private model to ask, vocabulary still makes the item Private', () => {
+    const decision = classify(BOOK_NAMES, BOOK);
+    expect(decision).toMatchObject({ contentTier: 'secure', decidedBy: 'sensitive_detector' });
+    expect(decision.reasons).toContain('content:detector:health:vocabulary');
+  });
+
+  test('financial vocabulary is judged the same way', () => {
+    const essay = 'The essay compares salary norms and tax policy across several countries over a century.';
+    const asked: TierSnifferRequest[] = [];
+    const personal = classify({ title: 'essay.md' }, essay, {
+      sniffer: answering({ verdict: 'decided', tier: 'private', code: 'work:0.93' }, asked),
+    });
+    expect(personal).toMatchObject({ contentTier: 'private', state: 'current' });
+    expect(asked[0]!.flags).toContain('content:borderline:financial');
+    expect(classify({ title: 'essay.md' }, essay)).toMatchObject({ contentTier: 'secure', decidedBy: 'sensitive_detector' });
+  });
+
+  test('structured identifiers stay Private at once, and the model is never asked', () => {
+    for (const [text, reason] of [
+      ['Applicant SSN 123-45-6789 on file.', 'content:detector:identity:ssn'],
+      ['Card 4111 1111 1111 1111 expires soon.', 'content:detector:financial:card_luhn'],
+      [`${BOOK} Routing number 021000021.`, 'content:detector:financial:routing_number'],
+    ] as const) {
+      const asked: TierSnifferRequest[] = [];
+      const decision = classify({ title: 'note.txt' }, text, {
+        sniffer: answering({ verdict: 'decided', tier: 'private', code: 'other:0.99' }, asked),
+      });
+      expect(decision).toMatchObject({ contentTier: 'secure', decidedBy: 'sensitive_detector', state: 'current' });
+      expect(decision.reasons).toContain(reason);
+      expect(asked).toHaveLength(0);
+    }
+  });
+
+  test('an owner Private rule still decides without asking', () => {
+    const asked: TierSnifferRequest[] = [];
+    const decision = classify(BOOK_NAMES, BOOK, {
+      rules: [rule({ match: { kind: 'pathPrefix', value: '/books' }, tier: 'secure', strength: 'prior' })],
+      sniffer: answering({ verdict: 'decided', tier: 'private', code: 'other:0.95' }, asked),
+    });
+    expect(decision).toMatchObject({ metadataTier: 'secure', contentTier: 'secure', decidedBy: 'owner_rule' });
+    expect(asked).toHaveLength(0);
   });
 });
