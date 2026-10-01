@@ -167,7 +167,15 @@ export function buildChatGptDashboardViewModel(
     const progress = measured?.progress;
     // Mid-sign-in reads Needs you whatever else the card says: the owner's
     // next step is finishing the sign-in.
-    const status: DashboardStatus = connecting ? 'Needs you' : honestStatus(vocabularyStatus, progress);
+    let status: DashboardStatus = connecting ? 'Needs you' : honestStatus(vocabularyStatus, progress);
+    // A source working normally (a stage unfinished, nothing stalled) offers
+    // no action: the only fix this page had for it was "Check again", a
+    // button over work that needs nothing (owner fresh-install test,
+    // 2026-10-01). A real fix (reconnect, choose folders) still stands.
+    if (!connecting && (status === 'Needs you' || status === 'Failing') && progress && progress.stage !== 'done'
+      && !progress.stalled && attentionItem(definition, scrubbed, degraded, undefined, progress).fix?.tool === DASHBOARD_TOOL_NAME) {
+      status = 'Working';
+    }
     return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress, counts: measured?.counts };
   });
 
