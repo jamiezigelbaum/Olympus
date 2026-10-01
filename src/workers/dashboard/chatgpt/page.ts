@@ -87,8 +87,18 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
 .row{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 1rem;padding:0.75rem 0;border-bottom:1px solid var(--line)}
 .row-text{flex:1 1 14rem;min-width:0}
-.need .dot{margin-top:0}
-.source-main{flex:1 1 16rem;min-width:0}
+.row.need{display:grid;grid-template-columns:0.625rem minmax(0,1fr);align-items:start;gap:0 0.75rem}
+.need-body{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem 1rem;min-width:0}
+.need .row-text{padding-top:max(0px,calc((2.25rem - 1.45em) / 2))}
+.need .dot{margin-top:calc((2.25rem - 0.625rem) / 2)}
+.row.source{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;position:relative}
+.row.source.has-actions{grid-template-columns:minmax(0,1fr) fit-content(50%)}
+.row.source.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}
+.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) fit-content(50%) 2.25rem}
+.row.source>.menu{grid-column:-2/-1;grid-row:1}
+.row.source>.menu[open]{grid-column:1/-1;grid-row:auto}
+.row.source>.menu[open]>summary{position:absolute;top:0.75rem;right:0}
+.source-main{min-width:0}
 .source-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .source-name{font-weight:600}
 .status{color:var(--muted);font-size:0.875rem}
@@ -123,7 +133,7 @@ summary{cursor:pointer;border-radius:0.375rem}
 .plain{margin:0.5rem 0;padding-left:1.25rem}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
-@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.source-actions{justify-content:flex-start;width:100%}.menu,.menu-panel{align-items:flex-start}}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu,.menu-panel{align-items:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 `;
 

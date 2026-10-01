@@ -423,8 +423,9 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
     const list = el('ul', 'rows');
     items.forEach((item, index) => {
       const key = 'need:' + String(item.id || index);
-      const row = add(el('li', 'row need'), el('span', 'dot tone-warn'), el('p', 'row-text', String(item.sentence || '')));
-      add(list, add(row, fixControl(item.fix, key, 'main', true)));
+      // The dot has its own column so it stays beside the sentence's first line.
+      const body = add(el('div', 'need-body'), el('p', 'row-text', String(item.sentence || '')), fixControl(item.fix, key, 'main', true));
+      add(list, add(el('li', 'row need'), el('span', 'dot tone-warn'), body));
     });
     return add(section, list);
   }
@@ -446,6 +447,7 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
     const controls = el('div', 'source-actions');
     if (source.primary) add(controls, fixControl(source.primary, 'primary:' + id, 'main', true));
     const menu = Array.isArray(source.menu) ? source.menu : [];
+    let menuBox: HTMLElement | null = null;
     if (menu.length) {
       const glyph = el('span', '', '⋯');
       glyph.setAttribute('aria-hidden', 'true');
@@ -453,9 +455,17 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
       const box = details('menu:' + id, add(el('span'), glyph, hidden), 'menu');
       const panel = el('div', 'menu-panel');
       menu.forEach((fix: Any, index: number) => add(panel, fixControl(fix, 'menu:' + id + ':' + index, 'plain', true)));
-      add(controls, add(box, panel));
+      menuBox = add(box, panel);
     }
-    if (controls.childNodes.length) add(row, controls);
+    if (controls.childNodes.length) {
+      row.className += ' has-actions';
+      add(row, controls);
+    }
+    if (menuBox) {
+      // A sibling of the name, so ⋯ stays top-right of the row at every width.
+      row.className += ' has-menu';
+      add(row, menuBox);
+    }
     return row;
   }
 
@@ -478,8 +488,18 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
     return section;
   }
 
+  /** Work cannot move while the Mac is unreachable: no items left, no ETA. */
+  function progressPaused(): boolean {
+    const current = connectionState();
+    return current === 'mac_offline' || current === 'relay_unavailable';
+  }
+
   function progressText(progress: Any): string {
     const parts = [fill(P.percentDone, { percent: percent(progress.percent) })];
+    if (progressPaused()) {
+      parts.push(P.progressPaused);
+      return (progress.phase === 'initial' ? P.progressInitial : P.progressRefresh) + ': ' + parts.join(', ');
+    }
     const left = Number(progress.itemsLeft) || 0;
     parts.push(fill(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
     if (typeof progress.etaSeconds === 'number' && progress.etaSeconds > 0 && !progress.stalled) {
@@ -492,7 +512,8 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
   function progressSection(progress: Any, withDetails: boolean): HTMLElement | null {
     if (!progress) return null;
     const section = add(el('section', 'section'), el('h2', '', P.progress));
-    const line = el('p', progress.stalled ? 'progress-line stalled' : 'progress-line', progressText(progress));
+    const stalled = progress.stalled && !progressPaused();
+    const line = el('p', stalled ? 'progress-line stalled' : progressPaused() ? 'progress-line paused' : 'progress-line', progressText(progress));
     add(section, line, progressBar(progress.percent, P.progress));
     const stages = Array.isArray(progress.details) ? progress.details : [];
     if (withDetails && stages.length) {
