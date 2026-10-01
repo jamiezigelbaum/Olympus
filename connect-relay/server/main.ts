@@ -6,13 +6,16 @@
  *   RELAY_LISTEN_HOST     default 127.0.0.1 (Caddy proxies to it)
  *   RELAY_LISTEN_PORT     default 8787
  *   RELAY_ENGINE_PORT     the engine worker's loopback port for the authorize bridge (default 8010)
- *   RELAY_INSTALL_URL     where the bridge's "Install Olympus" leads
+ *   RELAY_INSTALL_URL     where "Install Olympus" leads (authorize bridge, not-installed dashboard)
+ *   RELAY_OPENAI_APPS_CHALLENGE / RELAY_OPENAI_APPS_CHALLENGE_FILE
+ *                         OpenAI's domain verification token (unset: 404)
  *   RELAY_REGISTRY_PATH   default /var/lib/olympus-relay/registry.jsonl
  *   RELAY_ADMIN_SOCKET    default <registry dir>/admin.sock
  *
  * `main.ts admin <status|revoke|restore> ...` runs the operator command
  * instead of the relay (server/admin.ts), so the compiled binary carries both.
  */
+import { readFileSync } from 'node:fs';
 import { adminSocketPath, DEFAULT_REGISTRY_PATH, runAdmin, startAdminSocket } from './admin.ts';
 import { jsonLineLog } from './log.ts';
 import { FileInstallRegistry } from './registry.ts';
@@ -30,6 +33,18 @@ function port(name: string, fallback: number): number {
   return value;
 }
 
+/** The domain verification token: the variable, else the file (re-read per request), else none. */
+function appsChallenge(): string | undefined {
+  if (process.env.RELAY_OPENAI_APPS_CHALLENGE) return process.env.RELAY_OPENAI_APPS_CHALLENGE;
+  const file = process.env.RELAY_OPENAI_APPS_CHALLENGE_FILE;
+  if (!file) return undefined;
+  try {
+    return readFileSync(file, 'utf8').slice(0, 4096);
+  } catch {
+    return undefined;
+  }
+}
+
 const log = jsonLineLog();
 // Operator commands: a 0600 Unix socket in the state directory, opened BEFORE
 // the registry is read and compacted, so the admin command never mistakes a
@@ -43,6 +58,7 @@ relay = await startRelay({
   listen: { host: process.env.RELAY_LISTEN_HOST ?? '127.0.0.1', port: port('RELAY_LISTEN_PORT', 8787) },
   enginePort: port('RELAY_ENGINE_PORT', 8010),
   ...(process.env.RELAY_INSTALL_URL ? { installUrl: process.env.RELAY_INSTALL_URL } : {}),
+  appsChallenge,
   trustProxy: true,
   log,
 });

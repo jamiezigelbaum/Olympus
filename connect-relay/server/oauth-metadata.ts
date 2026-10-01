@@ -2,8 +2,8 @@
  * The install-independent OAuth documents the relay serves itself. Every
  * install shares one issuer and one protected resource, so these documents are
  * the same for all of them and must equal what an engine in relay mode
- * produces (`src/workers/remote-oauth/handler.ts`; test/relay-oauth-metadata.test.ts
- * holds the two equal).
+ * produces (`src/workers/remote-oauth/handler.ts`; test/remote-oauth.test.ts,
+ * "relay mode", holds the two equal).
  *
  * There is no registration endpoint: a registration request names no install,
  * so the relay could not route it. ChatGPT identifies itself with its client

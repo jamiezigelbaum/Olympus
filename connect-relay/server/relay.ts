@@ -12,11 +12,14 @@
  * - `POST /connect/token`, `POST /connect/revoke` and `/mcp`: routed per
  *   request to the install their credential names (shared/tokens.ts). ChatGPT
  *   may reuse one connection for many users, so routing never sticks to a
- *   connection.
+ *   connection;
+ * - `GET /.well-known/openai-apps-challenge`: the domain verification token,
+ *   when one is configured.
  *
- * The relay mints, validates and stores no token: the install does. An
- * authorized request for an install that is registered but offline gets the
- * relay's own small MCP answers (offline.ts).
+ * The relay mints, validates and stores no token: the install does. A caller
+ * with no token, and an authorized request for an install that is registered
+ * but offline, get the relay's own small MCP answers (relay-mcp.ts); neither
+ * ever reaches an engine.
  *
  * Logging follows log.ts: no bodies, tokens, query strings or addresses.
  */
@@ -50,7 +53,7 @@ import {
   relayOrigin,
   unauthorized,
 } from './oauth-metadata.ts';
-import { isDashboardCall, offlineMcpResponse } from './offline.ts';
+import { isDashboardCall, relayMcpResponse } from './relay-mcp.ts';
 import { publicKeyOf, type MemoryInstallRegistry, type RegistryCounts } from './registry.ts';
 import { InstallSession } from './session.ts';
 
@@ -61,8 +64,10 @@ export interface RelayConfig {
   readonly listen?: { readonly host?: string; readonly port?: number };
   /** The engine worker's loopback port, for the authorize bridge (Olympus default 8010). */
   readonly enginePort?: number;
-  /** Where the bridge's "Install Olympus" leads. */
+  /** Where the bridge's and the not-installed dashboard's "Install Olympus" lead. */
   readonly installUrl?: string;
+  /** OpenAI's domain verification token, read per request; empty or undefined answers 404. */
+  readonly appsChallenge?: () => string | undefined;
   /**
    * Believe the last `X-Forwarded-For` entry when the peer is loopback (Caddy
    * in front). Off for tests that talk to the relay directly.
@@ -114,6 +119,8 @@ interface SocketData {
 }
 
 const DEFAULT_ENGINE_PORT = 8010;
+/** OpenAI's domain verification for app submissions. */
+const APPS_CHALLENGE_PATH = '/.well-known/openai-apps-challenge';
 const DEFAULT_INSTALL_URL = 'https://olympusplugin.ai/';
 const MAX_FORM_BYTES = 16 * 1024;
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -271,10 +278,24 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   };
 
   const mcp = async (request: Request, path: string): Promise<Response> => {
-    const authorization = request.headers.get('authorization') ?? '';
+    const authorization = request.headers.get('authorization');
+    // No credential at all: the relay's own not-installed surface. A caller
+    // without a token never reaches an engine.
+    if (authorization === null) {
+      const anonymous = await readBody(request, limits.maxRequestBodyBytes);
+      if (!anonymous) return json(413, { error: 'payload_too_large' });
+      return relayMcpResponse({
+        method: request.method,
+        body: new TextDecoder().decode(anonymous),
+        now: now(),
+        state: 'not_installed',
+        installUrl: bridge.installUrl,
+        protectedResourceMetadataUrl: origin.protectedResourceMetadataUrl,
+      });
+    }
     const token = /^Bearer\s+(\S+)$/i.exec(authorization.trim())?.[1];
     const installId = credentialInstallId('access', token);
-    if (!installId) return unauthorized(origin, token ? 'invalid_token' : undefined);
+    if (!installId) return unauthorized(origin, 'invalid_token');
     const body = await readBody(request, limits.maxRequestBodyBytes);
     if (!body) return json(413, { error: 'payload_too_large' });
     const text = new TextDecoder().decode(body);
@@ -284,7 +305,13 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       path,
       body,
       dashboard: isDashboardCall(text),
-      offline: () => offlineMcpResponse({ method: request.method, body: text, lastSeenAt: registry.get(installId)?.lastSeenAt, now: now() }),
+      offline: () => relayMcpResponse({
+        method: request.method,
+        body: text,
+        now: now(),
+        state: 'mac_offline',
+        lastSeenAt: registry.get(installId)?.lastSeenAt,
+      }),
       unknown: () => unauthorized(origin, 'invalid_token'),
     });
   };
@@ -427,6 +454,12 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           return oauthForm(request, OAUTH_PATHS.revoke, 'revoke');
         case OAUTH_PATHS.mcp:
           return mcp(request, OAUTH_PATHS.mcp);
+        case APPS_CHALLENGE_PATH: {
+          if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
+          const token = config.appsChallenge?.()?.trim();
+          if (!token) return json(404, { error: 'not_found' });
+          return new Response(token, { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
+        }
         default:
           return json(404, { error: 'not_found' });
       }

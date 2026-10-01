@@ -1,49 +1,62 @@
 /**
- * The relay's own MCP answers for an install whose Mac has no live session.
+ * The MCP answers the relay gives itself, without reaching any engine:
  *
- * A request carrying a routable credential for a registered install arrives
- * while that install is offline: rather than an opaque error, the relay
- * answers the few MCP calls that let ChatGPT show the owner what is going on
- * (`initialize`, `tools/list`, the dashboard resource and the dashboard tool,
- * with `connection.state = "mac_offline"`). Every other tool gets a plain
- * "Your Mac is offline" error. The relay cannot check the credential (only
- * the engine can), so nothing here reveals more than "this install exists
- * and was last seen at about this minute".
+ * - `not_installed`: a caller with no bearer token (ChatGPT before the owner
+ *   connects Olympus, or a directory reviewer). The dashboard tool shows
+ *   "Install Olympus"; any other tool returns an error carrying
+ *   `_meta["mcp/www_authenticate"]`, which starts ChatGPT's account linking.
+ * - `mac_offline`: a routable credential for a registered install whose Mac
+ *   has no live session. The dashboard tool shows when it was last seen; any
+ *   other tool returns a plain "Your Mac is offline" error. The relay cannot
+ *   check the credential (only the engine can), so nothing here reveals more
+ *   than "this install exists and was last seen at about this minute".
+ *
+ * Both answer `initialize`, `tools/list`, `resources/list` and
+ * `resources/read` of the dashboard resource. Tool auth follows ChatGPT's
+ * per-tool `securitySchemes` (developers.openai.com/plugins/build/auth): the
+ * dashboard tool works without auth and better with it; the engine declares
+ * its own tools.
  */
-import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, offlineDashboard } from '../shared/dashboard-contract.ts';
+import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, notInstalledDashboard, offlineDashboard } from '../shared/dashboard-contract.ts';
 import { OFFLINE_DASHBOARD_HTML } from './offline-ui.ts';
 
 /** Newest first; an `initialize` asking for one of these gets it back. */
 export const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'] as const;
 export const MCP_APP_MIME_TYPE = 'text/html;profile=mcp-app';
 export const MAC_OFFLINE_MESSAGE = 'Your Mac is offline. Olympus answers again when your Mac is awake and online.';
+export const NOT_CONNECTED_MESSAGE = 'Olympus is not connected yet. Install Olympus on your Mac, then connect it to ChatGPT.';
 
-const DASHBOARD_TOOL = {
+export const DASHBOARD_TOOL = {
   name: DASHBOARD_TOOL_NAME,
   title: 'Olympus dashboard',
   description: 'Show the Olympus dashboard: whether your Mac is connected, your sources, and anything that needs you.',
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  securitySchemes: [{ type: 'noauth' }, { type: 'oauth2', scopes: [] }],
   _meta: { 'openai/outputTemplate': DASHBOARD_RESOURCE_URI, ui: { resourceUri: DASHBOARD_RESOURCE_URI } },
 };
+
+export type RelayMcpState =
+  | { state: 'not_installed'; installUrl: string; protectedResourceMetadataUrl: string }
+  | { state: 'mac_offline'; lastSeenAt: number | undefined };
 
 type JsonRpcId = string | number;
 
 function rpcResult(id: JsonRpcId, result: unknown): Response {
-  return json(200, { jsonrpc: '2.0', id, result });
+  return json({ jsonrpc: '2.0', id, result });
 }
 
 function rpcError(id: JsonRpcId | null, code: number, message: string): Response {
-  return json(200, { jsonrpc: '2.0', id, error: { code, message } });
+  return json({ jsonrpc: '2.0', id, error: { code, message } });
 }
 
-function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+function json(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
 }
 
-export function offlineMcpResponse(input: { method: string; body: string; lastSeenAt: number | undefined; now: number }): Response {
+export function relayMcpResponse(input: { method: string; body: string; now: number } & RelayMcpState): Response {
   if (input.method !== 'POST') {
-    // No standalone SSE stream or session to end while the Mac is away.
+    // No standalone SSE stream or session to end without an engine.
     return new Response(null, { status: 405, headers: { Allow: 'POST' } });
   }
   let message: unknown;
@@ -59,6 +72,7 @@ export function offlineMcpResponse(input: { method: string; body: string; lastSe
   if (id === undefined) return new Response(null, { status: 202 });
   if (typeof id !== 'string' && typeof id !== 'number') return rpcError(null, -32600, 'Invalid request');
   const args = params && typeof params === 'object' && !Array.isArray(params) ? (params as Record<string, unknown>) : {};
+  const notice = input.state === 'mac_offline' ? MAC_OFFLINE_MESSAGE : NOT_CONNECTED_MESSAGE;
 
   switch (method) {
     case 'initialize': {
@@ -67,8 +81,8 @@ export function offlineMcpResponse(input: { method: string; body: string; lastSe
       return rpcResult(id, {
         protocolVersion,
         capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
-        serverInfo: { name: 'olympus', version: 'relay-offline' },
-        instructions: MAC_OFFLINE_MESSAGE,
+        serverInfo: { name: 'olympus', version: 'relay' },
+        instructions: notice,
       });
     }
     case 'ping':
@@ -81,10 +95,24 @@ export function offlineMcpResponse(input: { method: string; body: string; lastSe
       if (args.uri !== DASHBOARD_RESOURCE_URI) return rpcError(id, -32002, 'Resource not found');
       return rpcResult(id, { contents: [{ uri: DASHBOARD_RESOURCE_URI, mimeType: MCP_APP_MIME_TYPE, text: OFFLINE_DASHBOARD_HTML }] });
     case 'tools/call':
-      if (args.name !== DASHBOARD_TOOL_NAME) return rpcError(id, -32000, MAC_OFFLINE_MESSAGE);
+      if (args.name === DASHBOARD_TOOL_NAME) {
+        return rpcResult(id, {
+          content: [{ type: 'text', text: notice }],
+          structuredContent: input.state === 'mac_offline'
+            ? offlineDashboard(input.lastSeenAt, input.now)
+            : notInstalledDashboard(input.installUrl, input.now),
+        });
+      }
+      if (input.state === 'mac_offline') return rpcError(id, -32000, MAC_OFFLINE_MESSAGE);
+      // Any engine tool without a token: ask ChatGPT to link the account.
       return rpcResult(id, {
-        content: [{ type: 'text', text: MAC_OFFLINE_MESSAGE }],
-        structuredContent: offlineDashboard(input.lastSeenAt, input.now),
+        content: [{ type: 'text', text: NOT_CONNECTED_MESSAGE }],
+        isError: true,
+        _meta: {
+          'mcp/www_authenticate': [
+            `Bearer resource_metadata="${input.protectedResourceMetadataUrl}", error="invalid_token", error_description="Connect Olympus on your Mac to use this tool."`,
+          ],
+        },
       });
     default:
       return rpcError(id, -32601, 'Method not found');

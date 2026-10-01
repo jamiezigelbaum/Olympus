@@ -236,20 +236,71 @@ describe('routing', () => {
     expect(workerB.requests.map((r) => r.path)).toEqual(['/connect/token', '/connect/revoke']);
   });
 
-  test('no credential, or one for an unknown install, gets 401 with the resource metadata pointer', async () => {
+  test('an unroutable or unknown credential gets 401 with the resource metadata pointer', async () => {
     const relay = await makeRelay();
-    const bare = await fetch(`${relay.url}/mcp`, { method: 'POST', body: rpc('initialize') });
-    expect(bare.status).toBe(401);
-    expect(bare.headers.get('www-authenticate')).toBe(
-      `Bearer realm="olympus", resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp"`,
-    );
     const stranger = loadOrCreateIdentity(tempDir());
     const unknown = await mcpPost(relay, mintCredential('access', stranger.installId), rpc('initialize'));
     expect(unknown.status).toBe(401);
-    expect(unknown.headers.get('www-authenticate')).toContain('error="invalid_token"');
+    expect(unknown.headers.get('www-authenticate')).toBe(
+      `Bearer realm="olympus", resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp", `
+        + 'error="invalid_token", error_description="The connection token is not valid or has been revoked."',
+    );
     const garbage = await mcpPost(relay, 'olympus_at_notroutable', rpc('initialize'));
     expect(garbage.status).toBe(401);
+    expect(garbage.headers.get('www-authenticate')).toContain('resource_metadata=');
     expect((await fetch(`${relay.url}/dashboard`)).status).toBe(404);
+  });
+
+  test('a caller with no token gets the relay\'s not-installed surface and never reaches an engine', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    await connectInstall(relay, worker);
+    const anonymous = (body: string) => fetch(`${relay.url}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    const init = await (await anonymous(rpc('initialize', { protocolVersion: '2025-11-25' }))).json();
+    expect(init.result.protocolVersion).toBe('2025-11-25');
+    const list = await (await anonymous(rpc('tools/list'))).json();
+    expect(list.result.tools).toHaveLength(1);
+    expect(list.result.tools[0]).toMatchObject({
+      name: 'olympus_dashboard',
+      securitySchemes: [{ type: 'noauth' }, { type: 'oauth2', scopes: [] }],
+      _meta: { 'openai/outputTemplate': 'ui://olympus/dashboard' },
+    });
+    const resource = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/dashboard' }))).json();
+    expect(resource.result.contents[0].mimeType).toBe('text/html;profile=mcp-app');
+    const dashboard = await (await anonymous(rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }))).json();
+    expect(dashboard.result.structuredContent).toMatchObject({
+      v: 1,
+      connection: { state: 'not_installed', action: { id: 'install', href: 'https://olympusplugin.ai/' } },
+      needsYou: [],
+      sources: [],
+    });
+    const engineTool = await (await anonymous(rpc('tools/call', { name: 'source_answer', arguments: { question: 'x' } }))).json();
+    expect(engineTool.result.isError).toBe(true);
+    expect(engineTool.result._meta['mcp/www_authenticate'][0]).toBe(
+      `Bearer resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp", error="invalid_token", `
+        + 'error_description="Connect Olympus on your Mac to use this tool."',
+    );
+    expect((await fetch(`${relay.url}/mcp`)).status).toBe(405);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  test('the domain verification token is served when configured, else 404', async () => {
+    let token: string | undefined;
+    const relay = await startRelay({
+      publicHost: PUBLIC_HOST,
+      registry: new MemoryInstallRegistry(),
+      listen: { host: '127.0.0.1', port: 0 },
+      appsChallenge: () => token,
+    });
+    cleanups.push(() => relay.close());
+    const path = `${relay.url}/.well-known/openai-apps-challenge`;
+    expect((await fetch(path)).status).toBe(404);
+    token = '  abc123-challenge\n';
+    const served = await fetch(path);
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe('abc123-challenge');
+    expect((await fetch(`${(await makeRelay()).url}/.well-known/openai-apps-challenge`)).status).toBe(404);
   });
 
   test('static OAuth documents, health and the authorize bridge are served by the relay itself', async () => {

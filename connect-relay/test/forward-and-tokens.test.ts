@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { forwardPath, forwardRequestHeaders, forwardResponseHeaders, RELAY_HEADER } from '../client/forward.ts';
 import { credentialInstallId, mintCredential } from '../shared/tokens.ts';
 import { decodeBodyFrame, encodeBodyFrame, MAX_BODY_CHUNK_BYTES } from '../shared/protocol.ts';
-import { isDashboardCall } from '../server/offline.ts';
+import { isDashboardCall } from '../server/relay-mcp.ts';
 import { installTag } from '../server/log.ts';
 import { runAdmin } from '../server/admin.ts';
 import { FileInstallRegistry } from '../server/registry.ts';
