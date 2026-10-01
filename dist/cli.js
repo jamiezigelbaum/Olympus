@@ -97477,19 +97477,28 @@ function chatgptDashboardClient(config2, pickerProgram) {
     });
     return add(section, list);
   }
+  function sourceItem(source) {
+    const items = state.data && Array.isArray(state.data.needsYou) ? state.data.needsYou : [];
+    return items.filter((item) => item && item.id === "source:" + String(source && source.id))[0] || null;
+  }
   function sourceRow(source) {
     const id = String(source.id || source.label);
     const status = String(source.status || "");
-    const tone = config2.statusTone[status] || "off";
-    const row = el("li", "row source");
+    const item = sourceItem(source);
+    const tone = item ? "warn" : config2.statusTone[status] || "off";
+    const row = el("li", item ? "row source need-row" : "row source");
     const main = el("div", "source-main");
-    const head = add(el("p", "source-head"), el("span", "dot tone-" + tone), el("span", "source-name", String(source.label || "")));
-    const off = status === "Off";
+    const dot = el("span", "dot tone-" + tone);
+    dot.setAttribute("aria-hidden", "true");
+    const head = add(el("p", "source-head"), dot, el("span", "source-name", String(source.label || "")));
+    const off = status === "Off" && !item;
     if (!off)
-      add(head, el("span", "status", status));
+      add(head, el("span", "sr", " — " + (item ? P.needsYou : status)));
     add(main, head);
     const meta2 = [];
-    if (off)
+    if (item)
+      meta2.push(capitalise(itemReason(item, source)));
+    else if (off)
       meta2.push(capitalise(typeof source.detail === "string" && source.detail ? source.detail : P.notConnected));
     else if (typeof source.detail === "string" && source.detail)
       meta2.push(source.detail);
@@ -97500,9 +97509,10 @@ function chatgptDashboardClient(config2, pickerProgram) {
     add(row, main);
     const controls = el("div", "source-actions");
     const context = { id, label: String(source.label || id) };
-    if (source.primary)
-      add(controls, fixControl(source.primary, "primary:" + id, "plain", true, context));
-    const menu = Array.isArray(source.menu) ? source.menu : [];
+    const fix = item && item.fix ? item.fix : source.primary;
+    if (fix)
+      add(controls, fixControl(fix, "primary:" + id, "plain", true, context));
+    const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry) => !fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool);
     let menuBox = null;
     if (menu.length) {
       const glyph = el("span", "", "⋯");
@@ -97510,7 +97520,7 @@ function chatgptDashboardClient(config2, pickerProgram) {
       const hidden = el("span", "sr", fill(P.moreActions, { source: String(source.label || "") }));
       const box = details("menu:" + id, add(el("span"), glyph, hidden), "menu");
       const panel = el("div", "menu-panel");
-      menu.forEach((fix, index) => add(panel, fixControl(fix, "menu:" + id + ":" + index, "plain", true, context)));
+      menu.forEach((fix2, index) => add(panel, fixControl(fix2, "menu:" + id + ":" + index, "plain", true, context)));
       menuBox = add(box, panel);
     }
     if (controls.childNodes.length) {
@@ -97523,9 +97533,16 @@ function chatgptDashboardClient(config2, pickerProgram) {
     }
     return row;
   }
+  function itemReason(item, source) {
+    const sentence = String(item.sentence || "");
+    const prefix = String(source.label || "") + " — ";
+    if (sentence.indexOf(prefix) === 0)
+      return sentence.slice(prefix.length);
+    return typeof source.detail === "string" && source.detail ? source.detail : sentence;
+  }
   function macOnly(source) {
     const fix = source && source.primary;
-    return String(source && source.status) === "Off" && !!fix && !!fix.disabledReason && (!fix.tool || fix.tool === config2.toolName);
+    return String(source && source.status) === "Off" && !!fix && !!fix.disabledReason && !sourceItem(source) && (!fix.tool || fix.tool === config2.toolName);
   }
   function capitalise(text) {
     return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
@@ -97536,7 +97553,8 @@ function chatgptDashboardClient(config2, pickerProgram) {
       return add(section, el("p", "muted", P.noSources));
     const onMac = sources.filter(macOnly);
     const here = sources.filter((source) => !macOnly(source));
-    const ordered = here.filter((source) => source.group === "local").concat(here.filter((source) => source.group !== "local"));
+    const first = (group2) => here.filter((source) => group2(source) && sourceItem(source)).concat(here.filter((source) => group2(source) && !sourceItem(source)));
+    const ordered = first((source) => source.group === "local").concat(first((source) => source.group !== "local"));
     let group = "";
     let list = null;
     for (const source of ordered) {
@@ -97659,7 +97677,8 @@ function chatgptDashboardClient(config2, pickerProgram) {
     }
     add(page, data.blocker ? itemBanner(data.blocker, "blocker", true) : null);
     add(page, staleLine());
-    add(page, needsYouSection(Array.isArray(data.needsYou) ? data.needsYou : []));
+    const listed = (Array.isArray(data.sources) ? data.sources : []).map((source) => "source:" + String(source && source.id));
+    add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : []).filter((item) => item && listed.indexOf(item.id) < 0)));
     add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
     add(page, progressSection(data.progress, true));
     add(page, modelsSection(data.models));

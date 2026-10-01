@@ -461,19 +461,30 @@ export function chatgptDashboardClient(
     return add(section, list);
   }
 
+  /** The Needs-you item about this source (`source:<id>`), which then lives in the source's own row. */
+  function sourceItem(source: Any): Any {
+    const items = state.data && Array.isArray(state.data.needsYou) ? state.data.needsYou : [];
+    return items.filter((item: Any) => item && item.id === 'source:' + String(source && source.id))[0] || null;
+  }
+
   function sourceRow(source: Any): HTMLElement {
     const id = String(source.id || source.label);
     const status = String(source.status || '');
-    const tone = (config.statusTone as Any)[status] || 'off';
-    const row = el('li', 'row source');
+    const item = sourceItem(source);
+    // A source that needs the owner gets the amber dot, whatever its status word.
+    const tone = item ? 'warn' : (config.statusTone as Any)[status] || 'off';
+    const row = el('li', item ? 'row source need-row' : 'row source');
     const main = el('div', 'source-main');
-    const head = add(el('p', 'source-head'), el('span', 'dot tone-' + tone), el('span', 'source-name', String(source.label || '')));
-    // Off is said once, under the name ("Not connected"), never twice.
-    const off = status === 'Off';
-    if (!off) add(head, el('span', 'status', status));
+    const dot = el('span', 'dot tone-' + tone);
+    dot.setAttribute('aria-hidden', 'true');
+    const head = add(el('p', 'source-head'), dot, el('span', 'source-name', String(source.label || '')));
+    // The dot and the line under the name carry the state; the word is for screen readers only.
+    const off = status === 'Off' && !item;
+    if (!off) add(head, el('span', 'sr', ' — ' + (item ? P.needsYou : status)));
     add(main, head);
     const meta: string[] = [];
-    if (off) meta.push(capitalise(typeof source.detail === 'string' && source.detail ? source.detail : P.notConnected));
+    if (item) meta.push(capitalise(itemReason(item, source)));
+    else if (off) meta.push(capitalise(typeof source.detail === 'string' && source.detail ? source.detail : P.notConnected));
     else if (typeof source.detail === 'string' && source.detail) meta.push(source.detail);
     if (typeof source.lastSyncAt === 'string' && ago(source.lastSyncAt)) meta.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
     if (meta.length) add(main, el('p', 'muted', meta.join(' · ')));
@@ -481,8 +492,12 @@ export function chatgptDashboardClient(
     const controls = el('div', 'source-actions');
     const context = { id, label: String(source.label || id) };
     // Row buttons are all outlined; the accent belongs to the page's one primary action.
-    if (source.primary) add(controls, fixControl(source.primary, 'primary:' + id, 'plain', true, context));
-    const menu = Array.isArray(source.menu) ? source.menu : [];
+    // One fix per row: the Needs-you fix when there is one, else the source's own.
+    const fix = item && item.fix ? item.fix : source.primary;
+    if (fix) add(controls, fixControl(fix, 'primary:' + id, 'plain', true, context));
+    // The ⋯ menu keeps only secondary actions, never a copy of the row's fix.
+    const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry: Any) =>
+      !fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool);
     let menuBox: HTMLElement | null = null;
     if (menu.length) {
       const glyph = el('span', '', '⋯');
@@ -505,10 +520,18 @@ export function chatgptDashboardClient(
     return row;
   }
 
+  /** The reason half of an item's sentence ("Gmail — reauth required" → "reauth required"), else the source's detail. */
+  function itemReason(item: Any, source: Any): string {
+    const sentence = String(item.sentence || '');
+    const prefix = String(source.label || '') + ' — ';
+    if (sentence.indexOf(prefix) === 0) return sentence.slice(prefix.length);
+    return typeof source.detail === 'string' && source.detail ? source.detail : sentence;
+  }
+
   /** Not connected, and its only fix is set up on the Mac: no button here, just its name in one group. */
   function macOnly(source: Any): boolean {
     const fix = source && source.primary;
-    return String(source && source.status) === 'Off' && !!fix && !!fix.disabledReason
+    return String(source && source.status) === 'Off' && !!fix && !!fix.disabledReason && !sourceItem(source)
       && (!fix.tool || fix.tool === config.toolName);
   }
 
@@ -522,8 +545,10 @@ export function chatgptDashboardClient(
     const onMac = sources.filter(macOnly);
     const here = sources.filter((source) => !macOnly(source));
     // Server order within each group; the local group always comes first.
-    const ordered = here.filter((source) => source.group === 'local')
-      .concat(here.filter((source) => source.group !== 'local'));
+    // Server order within each group, except that sources needing the owner come first.
+    const first = (group: (source: Any) => boolean) => here.filter((source) => group(source) && sourceItem(source))
+      .concat(here.filter((source) => group(source) && !sourceItem(source)));
+    const ordered = first((source) => source.group === 'local').concat(first((source) => source.group !== 'local'));
     let group = '';
     let list: HTMLElement | null = null;
     for (const source of ordered) {
@@ -643,7 +668,9 @@ export function chatgptDashboardClient(
     }
     add(page, data.blocker ? itemBanner(data.blocker, 'blocker', true) : null);
     add(page, staleLine());
-    add(page, needsYouSection(Array.isArray(data.needsYou) ? data.needsYou : []));
+    // Each fact once: an item about a listed source lives in that source's row, not here too.
+    const listed = (Array.isArray(data.sources) ? data.sources : []).map((source: Any) => 'source:' + String(source && source.id));
+    add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : []).filter((item: Any) => item && listed.indexOf(item.id) < 0)));
     add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
     add(page, progressSection(data.progress, true));
     add(page, modelsSection(data.models));

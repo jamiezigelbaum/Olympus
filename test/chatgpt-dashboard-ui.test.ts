@@ -275,7 +275,8 @@ describe('ready page', () => {
         blocker: { id: 'model:embedding', sentence: 'Search has stopped working on your Mac.', fix: { label: 'Open Olympus on your Mac', disabledReason: 'Open Olympus on your Mac to fix this.' } },
         needsYou: [
           { id: 'source:gmail', sentence: 'Gmail — signed out', fix: { label: 'Reconnect', disabledReason: 'Open Olympus on your Mac to fix this.' } },
-          { id: 'source:drive', sentence: 'Google Drive — sync keeps failing', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {} } },
+          { id: 'model:answers', sentence: 'Answers are not working on your Mac', fix: { label: 'Open Olympus on your Mac', disabledReason: 'Open Olympus on your Mac to fix this.' } },
+          { id: 'account', sentence: 'Olympus needs an update', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {} } },
         ],
         sources: SOURCES,
         progress: PROGRESS,
@@ -283,7 +284,7 @@ describe('ready page', () => {
       }),
     });
     const text = host.text();
-    const order = ['Search has stopped working', 'Needs you', 'Gmail — signed out', 'Sources', 'On your Mac', 'Notes', 'Accounts', 'Gmail', 'Progress', 'Models — Built-in · Ready'];
+    const order = ['Search has stopped working', 'Needs you', 'Answers are not working', 'Sources', 'On your Mac', 'Notes', 'Accounts', 'Gmail', 'Signed out', 'Progress', 'Models — Built-in · Ready'];
     let at = -1;
     for (const marker of order) {
       const next = text.indexOf(marker, at + 1);
@@ -294,6 +295,13 @@ describe('ready page', () => {
     // Each needs-you row: one sentence, one control; a disabled one says why beside itself.
     const rows = Array.from(host.win.document.querySelectorAll('.need'));
     expect(rows.map((row) => row.querySelectorAll('button').length)).toEqual([1, 1]);
+    // Gmail's item lives only in its own row, first in its group, with an amber dot and one control.
+    expect(host.win.document.querySelector('.need')!.parentElement!.textContent).not.toContain('Gmail');
+    const gmail = host.win.document.querySelector('.row.source.need-row')!;
+    expect(gmail.querySelector('.source-name')!.textContent).toBe('Gmail');
+    expect(gmail.querySelector('.dot')!.className).toBe('dot tone-warn');
+    expect(gmail.querySelectorAll('.source-actions button').length).toBe(1);
+    expect(text.split('signed out').length + text.split('Signed out').length).toBe(3);
     expect(rows[0]!.textContent).toContain('Open Olympus on your Mac to fix this.');
     expect((rows[0]!.querySelector('button') as unknown as HTMLButtonElement).disabled).toBe(true);
     // Only one accent button on the page.
@@ -314,6 +322,22 @@ describe('ready page', () => {
     expect(menu.querySelector('summary')!.textContent).toContain('More actions for Gmail');
     expect(menu.querySelector('button')!.textContent).toBe('Disconnect');
     expect(rows[2]!.textContent).toBe('Google Drive');
+  });
+
+  test('a connecting source is one row with one button, and Check again appears once on the page', () => {
+    const host = mount();
+    const waiting = 'waiting for you to approve in the Gmail tab · expires in 9m';
+    host.push({ structuredContent: model({
+      needsYou: [{ id: 'source:gmail.email', sentence: `Gmail — ${waiting}`, fix: { label: 'Check again', tool: 'olympus_dashboard', args: {} } }],
+      sources: [{ id: 'gmail.email', label: 'Gmail', group: 'cloud', status: 'Needs you', detail: waiting }],
+    }) });
+    const doc = host.win.document;
+    expect(doc.querySelector('.row.need')).toBeNull();
+    expect(host.text()).not.toContain('Needs you' + 'Gmail');
+    const row = doc.querySelector('.row.source')!;
+    expect(row.querySelectorAll('button').length).toBe(1);
+    expect(Array.from(doc.querySelectorAll('button')).filter((node) => node.textContent === 'Check again').length).toBe(1);
+    expect(host.text().toLowerCase().split(waiting.toLowerCase()).length).toBe(2);
   });
 
   test('Mac-only sources group under one heading and sentence, with no buttons; connectable rows are outlined', () => {
@@ -339,14 +363,14 @@ describe('ready page', () => {
     expect(host.text().split('Connect sources in Olympus on your Mac.').length).toBeLessThanOrEqual(2);
     // A connected source stays in its group even with a disabled fix.
     expect(mac.textContent).not.toContain('connected)');
-    // At most one accent on the page, never on a source row.
-    expect(doc.querySelectorAll('.btn.primary').length).toBe(1);
-    expect(doc.querySelectorAll('.source .btn.primary').length).toBe(0);
-    expect(doc.querySelector('.btn.primary')!.textContent).toBe('Choose mail');
+    // No page-level action here (Gmail's item is in its row), so no accent at all; never on a source row.
+    expect(doc.querySelectorAll('.btn.primary').length).toBe(0);
+    expect(doc.querySelector('.section h2')!.textContent).toBe('Sources');
     // Not connected is said once: no status word beside the name.
     const gmail = Array.from(doc.querySelectorAll('.row.source')).find((row) => row.querySelector('.source-name')!.textContent === 'Gmail')!;
     expect(gmail.querySelector('.status')).toBeNull();
-    expect(gmail.textContent).toBe('GmailNot connectedConnect');
+    expect(gmail.textContent).toBe('Gmail — Needs youChoose mailChoose mail');
+    expect(gmail.querySelectorAll('button').length).toBe(1);
     const dropbox = Array.from(doc.querySelectorAll('.row.source')).find((row) => row.querySelector('.source-name')!.textContent === 'Dropbox')!;
     expect(dropbox.textContent).toContain('Not connected');
     expect(dropbox.textContent!.match(/Off|not connected/g)).toBeNull();
@@ -435,7 +459,10 @@ describe('ready page', () => {
     expect(gmail.className).toBe('row source has-menu');
     expect(Array.from(gmail.children).map((node) => node.className)).toEqual(['source-main', 'menu']);
     // The status sits in the name's line box, the detail under it, never beside ⋯.
-    expect(gmail.querySelector('.source-main .source-head .status')!.textContent).toBe('Fresh');
+    // No visible status word: the dot carries it, labelled for screen readers.
+    expect(gmail.querySelector('.source-main .source-head .status')).toBeNull();
+    expect(gmail.querySelector('.source-head .sr')!.textContent).toBe(' — Fresh');
+    expect(gmail.querySelector('.dot')!.getAttribute('aria-hidden')).toBe('true');
     const dropbox = row('Dropbox');
     expect(dropbox.className).toBe('row source has-actions has-menu');
     expect(Array.from(dropbox.children).map((node) => node.className)).toEqual(['source-main', 'source-actions', 'menu']);
