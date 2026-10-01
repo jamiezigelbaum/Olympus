@@ -28,6 +28,7 @@ import {
 } from './atomic-file.ts';
 import { OperationError } from './operation-error.ts';
 import { olympusPackageRoot } from './package-root.ts';
+import { loadSovereigntyPreset, writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
 import { workerAuthTokenFromSetupEnv } from './worker-auth.ts';
 import { ensureManagedWorkerEnvironment, workerServicePaths } from './worker-service.ts';
 
@@ -52,6 +53,8 @@ export interface EnginePaths {
   logPath: string;
   errorLogPath: string;
   configPath: string;
+  /** The owner's privacy and model policy, seeded on first install. */
+  sovereigntyPath: string;
   appSupportDir: string;
   workerEnvPath: string;
 }
@@ -66,6 +69,7 @@ export function enginePaths(homeDir: string): EnginePaths {
     logPath: join(logDir, 'engine.log'),
     errorLogPath: join(logDir, 'engine.err'),
     configPath: join(home, '.olympus', 'engine.json'),
+    sovereigntyPath: join(home, '.olympus', 'sovereignty.json'),
     appSupportDir: join(home, 'Library', 'Application Support', 'Olympus'),
     workerEnvPath: join(home, '.config', 'olympus', 'worker.env'),
   };
@@ -233,6 +237,8 @@ export interface EngineInstallResult {
   wrote_plist: boolean;
   wrote_config: boolean;
   wrote_worker_env: boolean;
+  /** The preset seeded into a missing sovereignty.json; absent when one existed. */
+  seeded_sovereignty?: SovereigntyPresetName;
   /** `bootstrapped` (was not loaded), `reloaded` (plist changed), `unchanged`, or `dry_run`. */
   action: 'bootstrapped' | 'reloaded' | 'unchanged' | 'dry_run';
   warnings: string[];
@@ -271,6 +277,7 @@ export function installEngine(options: EngineInstallOptions = {}): EngineInstall
   ensurePrivateDirectoryTreeSync(homeDir, paths.logDir);
   ensurePrivateDirectoryTreeSync(homeDir, dirname(paths.configPath));
   const config = reconcileEngineConfig(paths.configPath);
+  const seededSovereignty = seedEngineSovereignty(paths.sovereigntyPath);
   const workerEnv = ensureManagedWorkerEnvironment({
     homeDir,
     envPath: paths.workerEnvPath,
@@ -300,8 +307,24 @@ export function installEngine(options: EngineInstallOptions = {}): EngineInstall
     wrote_plist: wrotePlist,
     wrote_config: config.wrote,
     wrote_worker_env: workerEnv.wrote,
+    ...(seededSovereignty ? { seeded_sovereignty: seededSovereignty } : {}),
     action,
   };
+}
+
+/**
+ * The policy a new standalone install starts with: the shipped preset that
+ * needs nothing from the owner. Every tier embeds with the built-in model
+ * (downloaded on first use, no key), Private items stay metadata-only and
+ * unanswerable, and no answer model is required: ChatGPT answers from
+ * olympus_search. An existing sovereignty.json is never touched.
+ */
+export const STANDALONE_SOVEREIGNTY_PRESET: SovereigntyPresetName = 'no-sensitive';
+
+export function seedEngineSovereignty(path: string): SovereigntyPresetName | undefined {
+  if (existsSync(path)) return undefined;
+  writeSovereigntyConfigFile({ config: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET), path });
+  return STANDALONE_SOVEREIGNTY_PRESET;
 }
 
 export interface EngineUninstallResult {

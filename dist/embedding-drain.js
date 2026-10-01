@@ -1060,6 +1060,42 @@ function parseSourceCorpusRegistryConfig(rawConfig) {
   }
   return { schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION, corpora };
 }
+function parsePublicSourceCorpusRegistryConfig(rawConfig) {
+  const config = parseSourceCorpusRegistryConfig(rawConfig);
+  for (const corpus of config.corpora) {
+    const { violation } = narrowSourceCorpusToPublic(corpus);
+    if (violation)
+      throw new OperationError("config_error", violation);
+  }
+  return config;
+}
+function narrowSourceCorpusToPublic(corpus) {
+  if (!PUBLIC_SOURCE_IDS.has(corpus.sourceId)) {
+    return {
+      violation: `Public sourceIndex corpus ${corpus.corpusId} sourceId must be one of: ${V0_4_PUBLIC_SOURCE_IDS.join(", ")}.`
+    };
+  }
+  const declaration = PUBLIC_CORPUS_DECLARATIONS.get(corpus.corpusId);
+  if (!declaration) {
+    return { violation: `Public sourceIndex corpusId is not declared by v0.4: ${corpus.corpusId}.` };
+  }
+  for (const field of ["sourceId", "provider", "family", "trustDomain"]) {
+    if (corpus[field] !== declaration[field]) {
+      return {
+        violation: `Public sourceIndex corpus ${corpus.corpusId} ${field} must be ${declaration[field]}.`
+      };
+    }
+  }
+  const declaredCapabilities = new Set(declaration.capabilities);
+  const widened = corpus.capabilities.filter((capability) => !declaredCapabilities.has(capability));
+  if (widened.length === 0)
+    return { corpus };
+  const narrowed = corpus.capabilities.filter((capability) => declaredCapabilities.has(capability));
+  return {
+    violation: `Public sourceIndex corpus ${corpus.corpusId} cannot add capabilities: ${widened.join(", ")}.`,
+    ...narrowed.length > 0 ? { corpus: { ...corpus, capabilities: narrowed } } : {}
+  };
+}
 function parseSourceCorpusConfig(value) {
   const record = asRecord(value);
   if (!record) {
@@ -1456,6 +1492,13 @@ function sourceExclusionFileExtension(value) {
     return;
   return last.slice(dot).toLowerCase();
 }
+function normalizeMediaExtension(value) {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed)
+    return;
+  const withDot = trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
+  return withDot.length > 1 ? withDot : undefined;
+}
 function mediaTypeMatches(media, facts) {
   if (media.extensions.length > 0 && facts.extension !== undefined) {
     if (media.extensions.includes(facts.extension))
@@ -1650,7 +1693,184 @@ function createSourceExclusionMatcherFromPrefixes(prefixes, unenforceableRuleIds
     evaluateItem
   };
 }
-var SOURCE_INGESTION_EXCLUSIONS_PATH_ENV = "OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH", SOURCE_INGESTION_DISPOSITION_RANK, SOURCE_INGESTION_RULE_MODES, SOURCE_INGESTION_DISPOSITION_ORDER, SOURCE_EXCLUSION_PATH_METADATA_KEYS, SOURCE_EXCLUSION_ANCESTRY_METADATA_KEYS, SOURCE_EXCLUSION_SIZE_METADATA_KEYS, SOURCE_EXCLUSION_MIME_METADATA_KEYS, SOURCE_EXCLUSION_NAME_METADATA_KEYS, ADMITTED, UNEVALUABLE, ANCESTRY_UNEVALUABLE;
+function parseSourceIngestionExclusions(rawExclusions, label = "source ingestion exclusions") {
+  const root = asRecord3(rawExclusions);
+  if (!root)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  if (root.schemaVersion !== SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION) {
+    throw new OperationError("config_error", `${label}.schemaVersion must be 1.`);
+  }
+  if (root.rules !== undefined && !Array.isArray(root.rules)) {
+    throw new OperationError("config_error", `${label}.rules must be an array.`);
+  }
+  const rawRules = root.rules ?? [];
+  const seenIds = new Set;
+  const rules = rawRules.map((value, index) => {
+    const rule = parseRule2(value, `${label}.rules[${index}]`);
+    if (seenIds.has(rule.id)) {
+      throw new OperationError("config_error", `${label}.rules ids must be unique; ${rule.id} repeats.`);
+    }
+    seenIds.add(rule.id);
+    return rule;
+  });
+  return { schemaVersion: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION, rules };
+}
+function parseRule2(value, label) {
+  const record = asRecord3(value);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const id = requiredToken(record.id, `${label}.id`);
+  const sources = parseSources(record.sources, `${label}.sources`);
+  const path_prefixes = [...new Set(stringList2(record.path_prefixes).map((prefix) => {
+    const normalized = normalizeSourceExclusionPath(prefix);
+    if (normalized === undefined) {
+      throw new OperationError("config_error", `${label}.path_prefixes contains a path that cannot be normalized.`);
+    }
+    return normalized;
+  }))];
+  const folder_ids = parseFolderIds(record.folder_ids, `${label}.folder_ids`);
+  const media = parseMedia(record.media, `${label}.media`);
+  const mode = parseRuleMode(record.mode, `${label}.mode`);
+  if (path_prefixes.length === 0 && folder_ids.length === 0 && media === undefined) {
+    throw new OperationError("config_error", `${label} must name at least one folder, by path_prefixes or by folder_ids, or carry a media criterion.`);
+  }
+  if (media !== undefined && (path_prefixes.length > 0 || folder_ids.length > 0)) {
+    throw new OperationError("config_error", `${label} may not combine a media criterion with path_prefixes or folder_ids. ` + "Write the media rule and the folder rule as two rules, so which items each covers is unambiguous.");
+  }
+  if (folder_ids.length > 0 && !sources.some((entry) => entry !== "*" && !entry.startsWith("!"))) {
+    throw new OperationError("config_error", `${label}.folder_ids requires ${label}.sources: a folder id belongs to one provider and cannot apply to every source.`);
+  }
+  return {
+    id,
+    mode,
+    sources,
+    path_prefixes,
+    folder_ids,
+    ...media !== undefined ? { media } : {},
+    reason: typeof record.reason === "string" && record.reason.trim() ? record.reason.trim() : mode === "metadata_only" ? "metadata_only_by_configuration" : "excluded_by_configuration"
+  };
+}
+function parseRuleMode(value, label) {
+  if (value === undefined || value === null)
+    return "exclude";
+  if (typeof value !== "string") {
+    throw new OperationError("config_error", `${label} must be a string.`);
+  }
+  const mode = value.trim().toLowerCase();
+  const known = SOURCE_INGESTION_RULE_MODES.find((candidate) => candidate === mode);
+  if (!known) {
+    throw new OperationError("config_error", `${label} must be one of ${SOURCE_INGESTION_RULE_MODES.join(", ")}; got ${JSON.stringify(value)}.`);
+  }
+  return known;
+}
+function parseMedia(value, label) {
+  if (value === undefined || value === null)
+    return;
+  const record = asRecord3(value);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const extensions = [...new Set(stringList2(record.extensions).map((entry) => normalizeMediaExtension(entry)).filter((entry) => entry !== undefined))];
+  const mime_prefixes = [...new Set(stringList2(record.mime_prefixes).map((entry) => entry.toLowerCase()))];
+  if (extensions.length === 0 && mime_prefixes.length === 0) {
+    throw new OperationError("config_error", `${label} must name at least one extension or mime prefix. A size-only media rule cannot be ` + "answered for items whose provider publishes no size, so it would exclude them all.");
+  }
+  const min_bytes = parseByteCount(record.min_bytes, `${label}.min_bytes`);
+  const max_bytes = parseByteCount(record.max_bytes, `${label}.max_bytes`);
+  if (min_bytes !== undefined && max_bytes !== undefined && min_bytes > max_bytes) {
+    throw new OperationError("config_error", `${label}.min_bytes must not exceed ${label}.max_bytes.`);
+  }
+  return {
+    extensions,
+    mime_prefixes,
+    ...min_bytes !== undefined ? { min_bytes } : {},
+    ...max_bytes !== undefined ? { max_bytes } : {}
+  };
+}
+function parseByteCount(value, label) {
+  if (value === undefined || value === null)
+    return;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+    throw new OperationError("config_error", `${label} must be a non-negative whole number of bytes.`);
+  }
+  return value;
+}
+function parseFolderIds(value, label) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value))
+    throw new OperationError("config_error", `${label} must be an array.`);
+  const folders = [];
+  const seen = new Set;
+  value.forEach((entry, index) => {
+    const record = asRecord3(entry);
+    if (!record)
+      throw new OperationError("config_error", `${label}[${index}] must be an object with id and name.`);
+    const id = requiredBoundedString(record.id, `${label}[${index}].id`, 256);
+    const name = requiredBoundedString(record.name, `${label}[${index}].name`, 512);
+    if (seen.has(id))
+      return;
+    seen.add(id);
+    folders.push({ id, name });
+  });
+  return folders;
+}
+function asRecord3(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+function requiredToken(value, label) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new OperationError("config_error", `${label} must be a non-empty string.`);
+  }
+  const token = value.trim();
+  if (token.length > 64) {
+    throw new OperationError("config_error", `${label} must be at most 64 characters.`);
+  }
+  for (const character of token) {
+    const safe = character >= "a" && character <= "z" || character >= "A" && character <= "Z" || character >= "0" && character <= "9" || character === "-" || character === "_" || character === ".";
+    if (!safe) {
+      throw new OperationError("config_error", `${label} may only use letters, digits, dot, dash, and underscore.`);
+    }
+  }
+  return token;
+}
+function requiredBoundedString(value, label, maxLength) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new OperationError("config_error", `${label} must be a non-empty string.`);
+  }
+  const text = value.trim();
+  if (text.length > maxLength) {
+    throw new OperationError("config_error", `${label} must be at most ${maxLength} characters.`);
+  }
+  if (text.includes("\x00")) {
+    throw new OperationError("config_error", `${label} must not contain a NUL.`);
+  }
+  return text;
+}
+function stringList2(value) {
+  return Array.isArray(value) ? [...new Set(value.filter((entry) => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean))] : [];
+}
+function parseSources(value, label) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value)) {
+    throw new OperationError("config_error", `${label} must be an array.`);
+  }
+  const sources = [];
+  for (let index = 0;index < value.length; index += 1) {
+    const entry = value[index];
+    if (typeof entry !== "string" || !entry.trim()) {
+      throw new OperationError("config_error", `${label}[${index}] must be a non-empty string.`);
+    }
+    const source = entry.trim().toLowerCase();
+    if (source.length > 256 || source.includes("\x00")) {
+      throw new OperationError("config_error", `${label}[${index}] is not a valid source token.`);
+    }
+    if (!sources.includes(source))
+      sources.push(source);
+  }
+  return sources;
+}
+var SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION = 1, SOURCE_INGESTION_EXCLUSIONS_PATH_ENV = "OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH", SOURCE_INGESTION_DISPOSITION_RANK, SOURCE_INGESTION_RULE_MODES, SOURCE_INGESTION_DISPOSITION_ORDER, SOURCE_EXCLUSION_PATH_METADATA_KEYS, SOURCE_EXCLUSION_ANCESTRY_METADATA_KEYS, SOURCE_EXCLUSION_SIZE_METADATA_KEYS, SOURCE_EXCLUSION_MIME_METADATA_KEYS, SOURCE_EXCLUSION_NAME_METADATA_KEYS, ADMITTED, UNEVALUABLE, ANCESTRY_UNEVALUABLE;
 var init_source_ingestion_exclusions = __esm(() => {
   init_operation_error();
   SOURCE_INGESTION_DISPOSITION_RANK = {
@@ -2062,8 +2282,15 @@ function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
 }
 function loadConfig(env = process.env) {
+  const engineConfig = env.OLYMPUS_CONFIG ? undefined : installedEngineConfig(env);
+  if (engineConfig) {
+    const config2 = configFromPluginConfig(engineConfig, { requireResolvedWorkerSecrets: false });
+    applyEnvironmentOverrides(config2, env);
+    validateConfig(config2);
+    return config2;
+  }
   const config = defaultConfig();
-  const configPath = env.OLYMPUS_CONFIG ?? join2(homedir2(), ".olympus", "config.json");
+  const configPath = env.OLYMPUS_CONFIG ?? join2(env.HOME?.trim() || homedir2(), ".olympus", "config.json");
   if (existsSync3(configPath)) {
     const raw = JSON.parse(readFileSync3(configPath, "utf8"));
     mergeConfig(config, raw);
@@ -2071,6 +2298,25 @@ function loadConfig(env = process.env) {
   applyEnvironmentOverrides(config, env);
   validateConfig(config);
   return config;
+}
+function installedEngineConfig(env) {
+  const home = env.HOME?.trim() || homedir2();
+  const enginePath = join2(home, ".olympus", "engine.json");
+  const agentPath = join2(home, "Library", "LaunchAgents", "ai.olympusplugin.engine.plist");
+  if (env.OLYMPUS_ENGINE_HOST !== "1" && !existsSync3(agentPath))
+    return;
+  if (!existsSync3(enginePath))
+    return;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync3(enginePath, "utf8"));
+  } catch {
+    throw new OperationError("config_error", `${enginePath} is not valid JSON.`, "Fix or remove it, then run olympus engine install again.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new OperationError("config_error", `${enginePath} must hold a JSON object.`);
+  }
+  return parsed;
 }
 function applyEnvironmentOverrides(config, env) {
   if (env.OLYMPUS_ARGUS_DEFAULT_LANE) {
@@ -2175,6 +2421,299 @@ function applyEnvironmentOverrides(config, env) {
       policyPath: env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH.trim()
     };
   }
+}
+function configFromPluginConfig(pluginConfig, options = {}) {
+  const requireResolvedWorkerSecrets = options.requireResolvedWorkerSecrets !== false;
+  const config = defaultConfig();
+  const root = asRecord4(pluginConfig);
+  const sovereignty = asRecord4(root?.sovereignty);
+  const worker = asRecord4(root?.worker);
+  const identity = asRecord4(root?.identity);
+  const argus = asRecord4(root?.argus);
+  const email = asRecord4(root?.email);
+  const sourceIndex = asRecord4(root?.sourceIndex);
+  const remote = asRecord4(root?.remote);
+  if (remote) {
+    config.remote = { enabled: remote.enabled === true };
+    for (const key of ["relayHost", "publicBaseUrl"]) {
+      const value = remote[key];
+      if (typeof value === "string" && value.trim())
+        config.remote[key] = value.trim();
+    }
+    const demo = asRecord4(remote.demoConsent);
+    if (demo) {
+      config.remote.demoConsent = { enabled: demo.enabled === true };
+      for (const key of ["username", "passwordHash"]) {
+        const value = demo[key];
+        if (typeof value === "string" && value.trim())
+          config.remote.demoConsent[key] = value.trim();
+      }
+    }
+  }
+  if (sovereignty) {
+    config.sovereignty = {};
+    if (typeof sovereignty.configPath === "string" && sovereignty.configPath.trim()) {
+      config.sovereignty.configPath = sovereignty.configPath.trim();
+    }
+    if (sovereignty.schemaVersion === 1) {
+      config.sovereignty.policy = sovereignty;
+    } else if (asRecord4(sovereignty.policy)) {
+      config.sovereignty.policy = sovereignty.policy;
+    }
+  }
+  if (typeof worker?.authToken === "string" && worker.authToken.trim()) {
+    config.worker.authToken = worker.authToken.trim();
+  }
+  const service = asRecord4(worker?.service);
+  if (service) {
+    if (typeof service.enabled === "boolean")
+      config.worker.service.enabled = service.enabled;
+    if (typeof service.startupTimeoutSeconds === "number") {
+      config.worker.service.startupTimeoutSeconds = service.startupTimeoutSeconds;
+    }
+    const credentials = asRecord4(service.credentials);
+    if (credentials) {
+      config.worker.service.credentials = parseNativeWorkerCredentials(credentials, requireResolvedWorkerSecrets && config.worker.service.enabled);
+    }
+    if (typeof service.runtimePath === "string" && service.runtimePath.trim()) {
+      config.worker.service.runtimePath = service.runtimePath.trim();
+    }
+    if (typeof service.executablePath === "string" && service.executablePath.trim()) {
+      config.worker.service.executablePath = service.executablePath.trim();
+    }
+  }
+  const creditMonitor = asRecord4(worker?.creditMonitor);
+  if (creditMonitor) {
+    if (typeof creditMonitor.enabled === "boolean")
+      config.worker.creditMonitor.enabled = creditMonitor.enabled;
+    if (creditMonitor.provider !== undefined && creditMonitor.provider !== "venice") {
+      throw new OperationError("config_error", "worker.creditMonitor.provider must be venice.");
+    }
+    if (typeof creditMonitor.intervalSeconds === "number")
+      config.worker.creditMonitor.intervalSeconds = creditMonitor.intervalSeconds;
+    const credentials = asRecord4(creditMonitor.credentials);
+    if (credentials)
+      config.worker.creditMonitor.credentials = parseNativeCreditCredentials(credentials, requireResolvedWorkerSecrets && config.worker.creditMonitor.enabled);
+    for (const key of ["reportPath", "pauseFile"]) {
+      const value = creditMonitor[key];
+      if (typeof value === "string" && value.trim())
+        config.worker.creditMonitor[key] = value.trim();
+    }
+  }
+  const telegramCapture = asRecord4(worker?.telegramCapture);
+  if (telegramCapture) {
+    if (typeof telegramCapture.enabled === "boolean") {
+      config.worker.telegramCapture.enabled = telegramCapture.enabled;
+    }
+    const credentials = asRecord4(telegramCapture.credentials);
+    if (credentials) {
+      config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(credentials, requireResolvedWorkerSecrets && config.worker.telegramCapture.enabled);
+    }
+    for (const key of ["pythonPath", "sessionPath", "stateDir", "spoolDir", "reportPath"]) {
+      const value = telegramCapture[key];
+      if (typeof value === "string" && value.trim())
+        config.worker.telegramCapture[key] = value.trim();
+    }
+  }
+  const whatsappCapture = asRecord4(worker?.whatsappCapture);
+  if (whatsappCapture) {
+    if (typeof whatsappCapture.enabled === "boolean") {
+      config.worker.whatsappCapture.enabled = whatsappCapture.enabled;
+    }
+    for (const key of ["binaryPath", "stateDir"]) {
+      const value = whatsappCapture[key];
+      if (typeof value === "string" && value.trim())
+        config.worker.whatsappCapture[key] = value.trim();
+    }
+  }
+  const embeddingDrain = asRecord4(worker?.embeddingDrain);
+  if (embeddingDrain) {
+    if (typeof embeddingDrain.enabled === "boolean") {
+      config.worker.embeddingDrain.enabled = embeddingDrain.enabled;
+    }
+    const credentials = asRecord4(embeddingDrain.credentials);
+    if (credentials) {
+      config.worker.embeddingDrain.credentials = parseNativeEmbeddingDrainCredentials(credentials, requireResolvedWorkerSecrets && config.worker.embeddingDrain.enabled);
+    }
+    for (const key of ["runtimePath", "reportPath", "environmentPath"]) {
+      const value = embeddingDrain[key];
+      if (typeof value === "string" && value.trim())
+        config.worker.embeddingDrain[key] = value.trim();
+    }
+  }
+  if (worker && Object.prototype.hasOwnProperty.call(worker, "authToken") && typeof worker.authToken !== "string") {
+    config.worker.authTokenSecretRefUnresolved = true;
+    if (requireResolvedWorkerSecrets && config.worker.service.enabled) {
+      throw new OperationError("config_error", "worker.authToken must be resolved to a string before the native worker service starts.");
+    }
+  }
+  const transcriptionCleanup = asRecord4(worker?.transcriptionCleanup);
+  if (transcriptionCleanup) {
+    for (const key of Object.keys(transcriptionCleanup)) {
+      if (!["enabled", "bashPath", "tempRoot", "intervalSeconds", "minAgeMinutes", "maxRuntimeSeconds"].includes(key))
+        throw new OperationError("config_error", "worker.transcriptionCleanup contains an unsupported setting.");
+    }
+    if (transcriptionCleanup.enabled !== undefined && typeof transcriptionCleanup.enabled !== "boolean")
+      throw new OperationError("config_error", "worker.transcriptionCleanup.enabled must be boolean.");
+    if (typeof transcriptionCleanup.enabled === "boolean")
+      config.worker.transcriptionCleanup.enabled = transcriptionCleanup.enabled;
+    for (const key of ["bashPath", "tempRoot"]) {
+      const value = transcriptionCleanup[key];
+      if (value !== undefined && (typeof value !== "string" || !value.trim()))
+        throw new OperationError("config_error", `worker.transcriptionCleanup.${key} must be a nonempty path.`);
+      if (typeof value === "string")
+        config.worker.transcriptionCleanup[key] = value.trim();
+    }
+    for (const key of ["intervalSeconds", "minAgeMinutes", "maxRuntimeSeconds"]) {
+      if (transcriptionCleanup[key] !== undefined && typeof transcriptionCleanup[key] !== "number")
+        throw new OperationError("config_error", `worker.transcriptionCleanup.${key} must be numeric.`);
+      if (typeof transcriptionCleanup[key] === "number")
+        config.worker.transcriptionCleanup[key] = transcriptionCleanup[key];
+    }
+  }
+  const scheduler = asRecord4(worker?.scheduler);
+  if (scheduler) {
+    if (typeof scheduler.enabled === "boolean") {
+      config.worker.scheduler.enabled = scheduler.enabled;
+    }
+    if (Array.isArray(scheduler.sourceIds)) {
+      config.worker.scheduler.sourceIds = parseSchedulerSourceIds(scheduler.sourceIds);
+    }
+    if (typeof scheduler.tickSeconds === "number") {
+      config.worker.scheduler.tickSeconds = scheduler.tickSeconds;
+    }
+    if (typeof scheduler.syncIntervalSeconds === "number") {
+      config.worker.scheduler.syncIntervalSeconds = scheduler.syncIntervalSeconds;
+    }
+    if (typeof scheduler.freshnessThresholdHours === "number") {
+      config.worker.scheduler.freshnessThresholdHours = scheduler.freshnessThresholdHours;
+    }
+    if (typeof scheduler.errorBackoffSeconds === "number") {
+      config.worker.scheduler.errorBackoffSeconds = scheduler.errorBackoffSeconds;
+    }
+    if (typeof scheduler.maxTransientRetries === "number") {
+      config.worker.scheduler.maxTransientRetries = scheduler.maxTransientRetries;
+    }
+  }
+  if (typeof identity?.ownerName === "string" && identity.ownerName.trim()) {
+    config.identity.ownerName = identity.ownerName.trim();
+  }
+  if (typeof identity?.assistantName === "string" && identity.assistantName.trim()) {
+    config.identity.assistantName = identity.assistantName.trim();
+  }
+  if (typeof argus?.defaultLane === "string") {
+    config.argus.defaultLane = parseLane(argus.defaultLane);
+  }
+  if (typeof argus?.defaultProfile === "string") {
+    config.argus.defaultProfile = parseModelProfile(argus.defaultProfile);
+  }
+  if (typeof argus?.transport === "string") {
+    config.argus.transport = parseTransport(argus.transport);
+  }
+  if (typeof argus?.requestTimeoutSeconds === "number") {
+    config.argus.requestTimeoutSeconds = argus.requestTimeoutSeconds;
+  }
+  const lanes = asRecord4(argus?.lanes);
+  applyLaneConfig(config, "fast", asRecord4(lanes?.fast));
+  applyLaneConfig(config, "deep", asRecord4(lanes?.deep));
+  if (asRecord4(lanes?.fast)) {
+    mirrorFastLaneToProfiles(config, ["default_chat", "source_answer"]);
+  }
+  const modelProfiles = asRecord4(argus?.modelProfiles);
+  for (const profile of ARGUS_MODEL_PROFILES) {
+    applyModelProfileConfig(config, profile, asRecord4(modelProfiles?.[profile]));
+  }
+  if (typeof root?.argus_default_lane === "string") {
+    config.argus.defaultLane = parseLane(root.argus_default_lane);
+  }
+  let flatFastLaneChanged = false;
+  if (typeof root?.argus_fast_base_url === "string") {
+    config.argus.lanes.fast.baseUrl = trimTrailingSlash(root.argus_fast_base_url);
+    flatFastLaneChanged = true;
+  }
+  if (typeof root?.argus_deep_base_url === "string") {
+    config.argus.lanes.deep.baseUrl = trimTrailingSlash(root.argus_deep_base_url);
+  }
+  if (typeof root?.argus_fast_model === "string") {
+    config.argus.lanes.fast.model = root.argus_fast_model;
+    flatFastLaneChanged = true;
+  }
+  if (typeof root?.argus_deep_model === "string") {
+    config.argus.lanes.deep.model = root.argus_deep_model;
+  }
+  if (flatFastLaneChanged) {
+    const targets = [];
+    if (!asRecord4(modelProfiles?.default_chat))
+      targets.push("default_chat");
+    if (!asRecord4(modelProfiles?.source_answer))
+      targets.push("source_answer");
+    mirrorFastLaneToProfiles(config, targets);
+  }
+  if (typeof email?.enabled === "boolean") {
+    config.email.enabled = email.enabled;
+  }
+  if (typeof email?.baseUrl === "string" && email.baseUrl.trim()) {
+    config.email.baseUrl = normalizeSourceWorkerBaseUrl(email.baseUrl);
+  }
+  if (typeof email?.requestTimeoutSeconds === "number") {
+    config.email.requestTimeoutSeconds = email.requestTimeoutSeconds;
+  }
+  if (typeof sourceIndex?.enabled === "boolean") {
+    config.sourceIndex.enabled = sourceIndex.enabled;
+  }
+  const corpusRegistry = asRecord4(sourceIndex?.corpusRegistry);
+  if (corpusRegistry) {
+    config.sourceIndex.corpusRegistry = parsePublicSourceCorpusRegistryConfig(corpusRegistry);
+  }
+  const corpora = sourceIndex?.corpora;
+  if (Array.isArray(corpora)) {
+    config.sourceIndex.corpusRegistry = parsePublicSourceCorpusRegistryConfig({
+      schemaVersion: 1,
+      corpora
+    });
+  }
+  const ingestionExclusions = asRecord4(sourceIndex?.ingestionExclusions);
+  if (ingestionExclusions) {
+    config.sourceIndex.ingestionExclusions = parseSourceIngestionExclusions(ingestionExclusions, "sourceIndex.ingestionExclusions");
+  }
+  if (typeof sourceIndex?.ingestionExclusionsPath === "string" && sourceIndex.ingestionExclusionsPath.trim()) {
+    config.sourceIndex.ingestionExclusionsPath = sourceIndex.ingestionExclusionsPath.trim();
+  }
+  const priceEstimates = asRecord4(sourceIndex?.embeddingPriceEstimates);
+  if (priceEstimates) {
+    config.sourceIndex.embeddingPriceEstimates = parseEmbeddingPriceEstimates(priceEstimates);
+  }
+  const ingestionPolicies = asRecord4(sourceIndex?.ingestionPolicies);
+  const dropboxPersonal = asRecord4(ingestionPolicies?.dropboxPersonal);
+  if (dropboxPersonal) {
+    config.sourceIndex.ingestionPolicies.dropboxPersonal = {};
+    if (typeof dropboxPersonal.policyPath === "string" && dropboxPersonal.policyPath.trim()) {
+      config.sourceIndex.ingestionPolicies.dropboxPersonal.policyPath = dropboxPersonal.policyPath.trim();
+    }
+    if (asRecord4(dropboxPersonal.policy)) {
+      config.sourceIndex.ingestionPolicies.dropboxPersonal.policy = parseSourceIngestionPolicy(dropboxPersonal.policy, "sourceIndex.ingestionPolicies.dropboxPersonal.policy");
+    } else if (dropboxPersonal.schemaVersion === 1) {
+      config.sourceIndex.ingestionPolicies.dropboxPersonal.policy = parseSourceIngestionPolicy(dropboxPersonal, "sourceIndex.ingestionPolicies.dropboxPersonal");
+    }
+  }
+  validateConfig(config);
+  return config;
+}
+function parseEmbeddingPriceEstimates(raw) {
+  const parsed = {};
+  for (const [modelId, value] of Object.entries(raw)) {
+    const entry = asRecord4(value);
+    const usd = entry?.usdPerMillionTokens;
+    const perMinute = entry?.chunksPerMinute;
+    if (!modelId.trim() || typeof usd !== "number" || !Number.isFinite(usd) || usd < 0 || perMinute !== undefined && (typeof perMinute !== "number" || !Number.isFinite(perMinute) || perMinute <= 0)) {
+      throw new OperationError("config_error", `sourceIndex.embeddingPriceEstimates.${modelId} must be { usdPerMillionTokens: number >= 0, chunksPerMinute?: number > 0 }.`);
+    }
+    parsed[modelId.trim()] = {
+      usdPerMillionTokens: usd,
+      ...typeof perMinute === "number" ? { chunksPerMinute: perMinute } : {}
+    };
+  }
+  return parsed;
 }
 function parseModelProfile(value) {
   if (ARGUS_MODEL_PROFILES.includes(value)) {
@@ -2290,6 +2829,35 @@ function mirrorFastLaneToProfiles(config, profiles) {
       baseUrl: config.argus.lanes.fast.baseUrl,
       model: config.argus.lanes.fast.model
     };
+  }
+}
+function applyLaneConfig(config, lane, laneConfig) {
+  if (!laneConfig)
+    return;
+  if (typeof laneConfig.baseUrl === "string" && laneConfig.baseUrl.trim()) {
+    config.argus.lanes[lane].baseUrl = trimTrailingSlash(laneConfig.baseUrl.trim());
+  }
+  if (typeof laneConfig.model === "string" && laneConfig.model.trim()) {
+    config.argus.lanes[lane].model = laneConfig.model.trim();
+  }
+  if (typeof laneConfig.secretRef === "string" && laneConfig.secretRef.trim()) {
+    config.argus.lanes[lane].secretRef = laneConfig.secretRef.trim();
+  }
+}
+function applyModelProfileConfig(config, profile, profileConfig) {
+  if (!profileConfig)
+    return;
+  if (typeof profileConfig.baseUrl === "string" && profileConfig.baseUrl.trim()) {
+    config.argus.modelProfiles[profile].baseUrl = trimTrailingSlash(profileConfig.baseUrl.trim());
+  }
+  if (typeof profileConfig.model === "string" && profileConfig.model.trim()) {
+    config.argus.modelProfiles[profile].model = profileConfig.model.trim();
+  }
+  if (typeof profileConfig.secretRef === "string" && profileConfig.secretRef.trim()) {
+    config.argus.modelProfiles[profile].secretRef = profileConfig.secretRef.trim();
+  }
+  if (typeof profileConfig.purpose === "string" && ARGUS_MODEL_PROFILE_PURPOSES.includes(profileConfig.purpose)) {
+    config.argus.modelProfiles[profile].purpose = profileConfig.purpose;
   }
 }
 function applyModelProfileEnv(config, profile, env, prefix) {
@@ -2623,7 +3191,10 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
     throw error;
   }
 }
-var NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
+function asRecord4(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_source_corpus_registry();
@@ -2631,6 +3202,7 @@ var init_config = __esm(() => {
   init_source_ingestion_exclusions();
   init_secret_store();
   init_public_surface();
+  ARGUS_MODEL_PROFILE_PURPOSES = ["chat", "text_reasoning", "classification", "embedding", "vision"];
   NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES = new Set([
     "OLYMPUS_SOURCE_INDEX_READWISE_TOKEN",
     "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
@@ -3200,11 +3772,11 @@ function parseSovereigntyConfig(value, label) {
   }
   const modelProfiles = parseProfiles(record.modelProfiles, label);
   const routes = parseRoutes(record.routes, label);
-  const retrievalRecord = asRecord3(record.retrieval);
-  const trustDomainsRecord = asRecord3(retrievalRecord?.trustDomains);
+  const retrievalRecord = asRecord5(record.retrieval);
+  const trustDomainsRecord = asRecord5(retrievalRecord?.trustDomains);
   const trustDomains = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const policy = asRecord3(trustDomainsRecord?.[domain]);
+    const policy = asRecord5(trustDomainsRecord?.[domain]);
     if (policy)
       trustDomains[domain] = parseTrustDomainPolicy(policy, `${label}.retrieval.trustDomains.${domain}`);
   }
@@ -3216,19 +3788,19 @@ function parseSovereigntyConfig(value, label) {
   };
 }
 function unwrapSovereignty(value) {
-  const record = asRecord3(value);
-  if (record?.sovereignty && asRecord3(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
+  const record = asRecord5(value);
+  if (record?.sovereignty && asRecord5(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
     return record.sovereignty;
   }
   return value;
 }
 function parseProfiles(value, label) {
-  const record = asRecord3(value);
+  const record = asRecord5(value);
   if (!record)
     throw new OperationError("config_error", `${label}.modelProfiles must be an object.`);
   const profiles = {};
   for (const [id, item] of Object.entries(record)) {
-    const profile = asRecord3(item);
+    const profile = asRecord5(item);
     if (!profile)
       throw new OperationError("config_error", `${label}.modelProfiles.${id} must be an object.`);
     if (profile.apiKey !== undefined || profile.secret !== undefined) {
@@ -3258,16 +3830,16 @@ function parseProfiles(value, label) {
   return profiles;
 }
 function parseRoutes(value, label) {
-  const record = asRecord3(value);
+  const record = asRecord5(value);
   if (!record)
     throw new OperationError("config_error", `${label}.routes must be an object.`);
   const routes = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const route = asRecord3(record[domain]);
+    const route = asRecord5(record[domain]);
     if (!route)
       continue;
     const legacyAnalyst = route.analyst;
-    const poolRecord = asRecord3(route.pool);
+    const poolRecord = asRecord5(route.pool);
     if (legacyAnalyst !== undefined && poolRecord) {
       throw new OperationError("config_error", `${label}.routes.${domain} must use either legacy analyst or pool, not both.`);
     }
@@ -3500,7 +4072,7 @@ function firstExistingSecretRef(env, names) {
 function hasAnyEnv(env, names) {
   return names.some((name) => Boolean(env[name]?.trim()));
 }
-function asRecord3(value) {
+function asRecord5(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function stringField(record, field, label) {
@@ -6992,7 +7564,7 @@ function readOwnerSensitivityMap(env = process.env) {
   }
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
-  const root = asRecord4(rawMap);
+  const root = asRecord6(rawMap);
   if (!root)
     throw new OperationError("config_error", `${label} must be an object.`);
   const schemaVersion = root.schemaVersion;
@@ -7115,11 +7687,11 @@ function categoryMatches(category, input) {
   return category.match.keywords.some((keyword) => input.textHaystack.includes(keyword.toLowerCase())) || category.match.senderPatterns.some((pattern) => input.sender.includes(pattern.toLowerCase())) || category.match.pathPatterns.some((pattern) => input.path.includes(pattern.toLowerCase()));
 }
 function assertUserFacingTierMapping(value, label) {
-  const record = asRecord4(value);
+  const record = asRecord6(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   for (const tierName of USER_FACING_TIER_NAMES) {
-    const mapped = asRecord4(record[tierName]);
+    const mapped = asRecord6(record[tierName]);
     const expected = USER_FACING_TIER_MAPPING[tierName];
     if (!mapped || mapped.targetTrustTier !== expected.targetTrustTier || mapped.targetTrustDomain !== expected.targetTrustDomain) {
       throw new OperationError("config_error", `${label}.${tierName} must map to ${expected.targetTrustTier}/${expected.targetTrustDomain}.`);
@@ -7127,7 +7699,7 @@ function assertUserFacingTierMapping(value, label) {
   }
 }
 function parseCategory(value, label, schemaVersion) {
-  const record = asRecord4(value);
+  const record = asRecord6(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const id = boundedString(record.id, `${label}.id`);
@@ -7148,7 +7720,7 @@ function parseCategory(value, label, schemaVersion) {
     min: 1,
     max: MAX_EXAMPLES_PER_CATEGORY
   });
-  const matchRecord = asRecord4(record.match);
+  const matchRecord = asRecord6(record.match);
   if (!matchRecord)
     throw new OperationError("config_error", `${label}.match must be an object.`);
   const match = {
@@ -7170,7 +7742,7 @@ function parseCategory(value, label, schemaVersion) {
     match
   };
 }
-function asRecord4(value) {
+function asRecord6(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function enumString2(value, allowed, label) {
@@ -17856,16 +18428,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord5(json, "Google Drive files list response");
+    const record = asRecord7(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord5(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord7(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord5(json, "Google Drive folder");
+    const record = asRecord7(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -17960,7 +18532,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp(record, "size"),
     ...optionalStringProp(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord5(owner, "Google Drive owner")).map((owner) => optionalStringProp(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord7(owner, "Google Drive owner")).map((owner) => optionalStringProp(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -17988,7 +18560,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord5(value, label) {
+function asRecord7(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -18603,9 +19175,9 @@ class RestGmailApiClient {
     if (request.query)
       params.set("q", request.query);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord6(json, "Gmail messages list response");
+    const record = asRecord8(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord6(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord8(item, "Gmail message list item")).map((item) => ({
         id: stringValue2(item.id),
         threadId: stringValue2(item.threadId)
       })).filter((item) => item.id) : [],
@@ -18623,11 +19195,11 @@ class RestGmailApiClient {
     return json;
   }
   async listLabels() {
-    const record = asRecord6(await this.getJson("users/me/labels"), "Gmail labels list response");
-    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord6(item, "Gmail label"))).filter((label) => label.id) : [];
+    const record = asRecord8(await this.getJson("users/me/labels"), "Gmail labels list response");
+    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord8(item, "Gmail label"))).filter((label) => label.id) : [];
   }
   async getLabel(id) {
-    return gmailLabelFromJson(asRecord6(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
+    return gmailLabelFromJson(asRecord8(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
   }
   async getJson(path) {
     let attempt = 0;
@@ -18817,7 +19389,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord6(value, label) {
+function asRecord8(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -19730,6 +20302,129 @@ function unique(values) {
 var DEFAULT_MAX_ATTEMPTS = 3, DEFAULT_RETRY_DELAYS_MS, CREDENTIAL_HINT = "Unlock or reconnect this credential, then restart the Olympus worker or run the credential re-check route.";
 var init_credential_degradation = __esm(() => {
   DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
+});
+
+// src/workers/classification/tier-rules.ts
+import { homedir as homedir17 } from "node:os";
+import { dirname as dirname15, join as join19 } from "node:path";
+function defaultTierRulesPath() {
+  return join19(homedir17(), ".olympus", "tier-rules.json");
+}
+function resolveTierRulesPath(options = {}) {
+  const env = options.env ?? process.env;
+  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath();
+}
+function loadOwnerTierRules(options = {}) {
+  const path = resolveTierRulesPath(options);
+  const read = readOwnerConfigFile(path);
+  if (read.status === "missing") {
+    if (options.allowMissing)
+      return [];
+    throw new OperationError("config_error", `Tier rules not found at ${path}.`, tierRulesRemedy(path));
+  }
+  if (read.status === "refused") {
+    throw new OperationError("config_error", read.reason === "unsafe_permissions" ? `Tier rules at ${path} are writable by someone other than their owner.` : `Tier rules at ${path} could not be read consistently (${read.reason}).`, read.reason === "unsafe_permissions" ? `chmod 600 ${path}` : tierRulesRemedy(path));
+  }
+  let raw;
+  try {
+    raw = JSON.parse(read.text);
+  } catch {
+    throw new OperationError("config_error", `Tier rules at ${path} are not valid JSON.`, tierRulesRemedy(path));
+  }
+  return parseOwnerTierRules(raw, path);
+}
+function tierRulesFileStamp(options = {}) {
+  return ownerConfigStamp(resolveTierRulesPath(options));
+}
+function parseOwnerTierRules(raw, label = "tier rules") {
+  const root = asRecord9(raw);
+  if (!root)
+    throw new OperationError("config_error", `${label} must be a JSON object.`);
+  if (root.schemaVersion !== TIER_RULES_SCHEMA_VERSION) {
+    throw new OperationError("config_error", `${label}.schemaVersion must be ${TIER_RULES_SCHEMA_VERSION}.`);
+  }
+  if (!Array.isArray(root.rules))
+    throw new OperationError("config_error", `${label}.rules must be an array.`);
+  if (root.rules.length > MAX_RULES) {
+    throw new OperationError("config_error", `${label}.rules may hold at most ${MAX_RULES} rules.`);
+  }
+  const unknownKeys = Object.keys(root).filter((key) => key !== "schemaVersion" && key !== "rules");
+  if (unknownKeys.length > 0) {
+    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
+  }
+  const seen = new Set;
+  return root.rules.map((entry, index) => {
+    const rule = parseOwnerTierRule(entry, `${label}.rules[${index}]`);
+    if (seen.has(rule.id))
+      throw new OperationError("config_error", `${label}: duplicate rule id "${rule.id}".`);
+    seen.add(rule.id);
+    return rule;
+  });
+}
+function parseOwnerTierRule(raw, label = "tier rule") {
+  const record = asRecord9(raw);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const unknownKeys = Object.keys(record).filter((key) => !["id", "source", "match", "tier", "strength"].includes(key));
+  if (unknownKeys.length > 0) {
+    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
+  }
+  const id = typeof record.id === "string" ? record.id.trim() : "";
+  if (!RULE_ID_PATTERN.test(id)) {
+    throw new OperationError("config_error", `${label}.id must be a short lower-case slug (a-z, 0-9, _ . : -).`);
+  }
+  let source;
+  if (record.source !== undefined) {
+    if (typeof record.source !== "string" || !SOURCE_PATTERN.test(record.source.trim())) {
+      throw new OperationError("config_error", `${label}.source must be a provider id (letters, digits, _ . : -).`);
+    }
+    source = record.source.trim();
+  }
+  const match = parseMatch(record.match, `${label}.match`);
+  const tier = record.tier;
+  if (typeof tier !== "string" || !TIER_KEYS.includes(tier)) {
+    throw new OperationError("config_error", `${label}.tier must be one of ${TIER_KEYS.join(", ")} (schema-v1 keys).`);
+  }
+  const strength = record.strength ?? "prior";
+  if (strength !== "prior" && strength !== "force") {
+    throw new OperationError("config_error", `${label}.strength must be prior or force.`);
+  }
+  return { id, ...source ? { source } : {}, match, tier, strength };
+}
+function parseMatch(raw, label) {
+  const record = asRecord9(raw);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const keys = Object.keys(record);
+  if (keys.length !== 1 || !OWNER_TIER_RULE_MATCH_KINDS.includes(keys[0])) {
+    throw new OperationError("config_error", `${label} must hold exactly one of ${OWNER_TIER_RULE_MATCH_KINDS.join(", ")}.`);
+  }
+  const kind = keys[0];
+  const value = record[kind];
+  if (typeof value !== "string" || !value.trim() || value.length > MAX_VALUE_LENGTH) {
+    throw new OperationError("config_error", `${label}.${kind} must be a non-empty string of at most ${MAX_VALUE_LENGTH} characters.`);
+  }
+  if (kind === "sender" && !SENDER_PATTERN.test(value.trim())) {
+    throw new OperationError("config_error", `${label}.sender must be an address (name@example.com) or a whole domain (@example.com).`);
+  }
+  return { kind, value: value.trim() };
+}
+function tierRulesRemedy(path) {
+  return `Write the rules to ${path} (schemaVersion 1), or add them with \`olympus tier rules add\`.`;
+}
+function asRecord9(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+var TIER_RULES_SCHEMA_VERSION = 1, OLYMPUS_TIER_RULES_ENV = "OLYMPUS_TIER_RULES_PATH", OWNER_TIER_RULE_MATCH_KINDS, MAX_RULES = 500, MAX_VALUE_LENGTH = 240, RULE_ID_PATTERN, SOURCE_PATTERN, SENDER_PATTERN;
+var init_tier_rules = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_owner_config_read();
+  init_tier_classifier();
+  OWNER_TIER_RULE_MATCH_KINDS = ["pathPrefix", "folderKey", "label", "sender", "chat"];
+  RULE_ID_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
+  SOURCE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/i;
+  SENDER_PATTERN = /^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
 });
 
 // scripts/source-embedding-drain.ts
@@ -23974,131 +24669,10 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-// src/workers/classification/tier-rules.ts
-init_atomic_file();
-init_operation_error();
-init_owner_config_read();
-init_tier_classifier();
-import { homedir as homedir17 } from "node:os";
-import { dirname as dirname15, join as join19 } from "node:path";
-var TIER_RULES_SCHEMA_VERSION = 1;
-var OLYMPUS_TIER_RULES_ENV = "OLYMPUS_TIER_RULES_PATH";
-var OWNER_TIER_RULE_MATCH_KINDS = ["pathPrefix", "folderKey", "label", "sender", "chat"];
-var MAX_RULES = 500;
-var MAX_VALUE_LENGTH = 240;
-var RULE_ID_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
-var SOURCE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/i;
-var SENDER_PATTERN = /^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
-function defaultTierRulesPath() {
-  return join19(homedir17(), ".olympus", "tier-rules.json");
-}
-function resolveTierRulesPath(options = {}) {
-  const env = options.env ?? process.env;
-  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath();
-}
-function loadOwnerTierRules(options = {}) {
-  const path = resolveTierRulesPath(options);
-  const read = readOwnerConfigFile(path);
-  if (read.status === "missing") {
-    if (options.allowMissing)
-      return [];
-    throw new OperationError("config_error", `Tier rules not found at ${path}.`, tierRulesRemedy(path));
-  }
-  if (read.status === "refused") {
-    throw new OperationError("config_error", read.reason === "unsafe_permissions" ? `Tier rules at ${path} are writable by someone other than their owner.` : `Tier rules at ${path} could not be read consistently (${read.reason}).`, read.reason === "unsafe_permissions" ? `chmod 600 ${path}` : tierRulesRemedy(path));
-  }
-  let raw;
-  try {
-    raw = JSON.parse(read.text);
-  } catch {
-    throw new OperationError("config_error", `Tier rules at ${path} are not valid JSON.`, tierRulesRemedy(path));
-  }
-  return parseOwnerTierRules(raw, path);
-}
-function tierRulesFileStamp(options = {}) {
-  return ownerConfigStamp(resolveTierRulesPath(options));
-}
-function parseOwnerTierRules(raw, label = "tier rules") {
-  const root = asRecord7(raw);
-  if (!root)
-    throw new OperationError("config_error", `${label} must be a JSON object.`);
-  if (root.schemaVersion !== TIER_RULES_SCHEMA_VERSION) {
-    throw new OperationError("config_error", `${label}.schemaVersion must be ${TIER_RULES_SCHEMA_VERSION}.`);
-  }
-  if (!Array.isArray(root.rules))
-    throw new OperationError("config_error", `${label}.rules must be an array.`);
-  if (root.rules.length > MAX_RULES) {
-    throw new OperationError("config_error", `${label}.rules may hold at most ${MAX_RULES} rules.`);
-  }
-  const unknownKeys = Object.keys(root).filter((key) => key !== "schemaVersion" && key !== "rules");
-  if (unknownKeys.length > 0) {
-    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
-  }
-  const seen = new Set;
-  return root.rules.map((entry, index) => {
-    const rule = parseOwnerTierRule(entry, `${label}.rules[${index}]`);
-    if (seen.has(rule.id))
-      throw new OperationError("config_error", `${label}: duplicate rule id "${rule.id}".`);
-    seen.add(rule.id);
-    return rule;
-  });
-}
-function parseOwnerTierRule(raw, label = "tier rule") {
-  const record = asRecord7(raw);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  const unknownKeys = Object.keys(record).filter((key) => !["id", "source", "match", "tier", "strength"].includes(key));
-  if (unknownKeys.length > 0) {
-    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
-  }
-  const id = typeof record.id === "string" ? record.id.trim() : "";
-  if (!RULE_ID_PATTERN.test(id)) {
-    throw new OperationError("config_error", `${label}.id must be a short lower-case slug (a-z, 0-9, _ . : -).`);
-  }
-  let source;
-  if (record.source !== undefined) {
-    if (typeof record.source !== "string" || !SOURCE_PATTERN.test(record.source.trim())) {
-      throw new OperationError("config_error", `${label}.source must be a provider id (letters, digits, _ . : -).`);
-    }
-    source = record.source.trim();
-  }
-  const match = parseMatch(record.match, `${label}.match`);
-  const tier = record.tier;
-  if (typeof tier !== "string" || !TIER_KEYS.includes(tier)) {
-    throw new OperationError("config_error", `${label}.tier must be one of ${TIER_KEYS.join(", ")} (schema-v1 keys).`);
-  }
-  const strength = record.strength ?? "prior";
-  if (strength !== "prior" && strength !== "force") {
-    throw new OperationError("config_error", `${label}.strength must be prior or force.`);
-  }
-  return { id, ...source ? { source } : {}, match, tier, strength };
-}
-function parseMatch(raw, label) {
-  const record = asRecord7(raw);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  const keys = Object.keys(record);
-  if (keys.length !== 1 || !OWNER_TIER_RULE_MATCH_KINDS.includes(keys[0])) {
-    throw new OperationError("config_error", `${label} must hold exactly one of ${OWNER_TIER_RULE_MATCH_KINDS.join(", ")}.`);
-  }
-  const kind = keys[0];
-  const value = record[kind];
-  if (typeof value !== "string" || !value.trim() || value.length > MAX_VALUE_LENGTH) {
-    throw new OperationError("config_error", `${label}.${kind} must be a non-empty string of at most ${MAX_VALUE_LENGTH} characters.`);
-  }
-  if (kind === "sender" && !SENDER_PATTERN.test(value.trim())) {
-    throw new OperationError("config_error", `${label}.sender must be an address (name@example.com) or a whole domain (@example.com).`);
-  }
-  return { kind, value: value.trim() };
-}
-function tierRulesRemedy(path) {
-  return `Write the rules to ${path} (schemaVersion 1), or add them with \`olympus tier rules add\`.`;
-}
-function asRecord7(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
 
 // src/workers/classification/installed-tier-classification.ts
+init_tier_rules();
+
 class InstalledTierClassification {
   lane;
   env;

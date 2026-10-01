@@ -19,6 +19,17 @@ export const RELAY_HEADER = 'x-olympus-relay';
 
 export const FORWARDED_PATHS = ['/mcp', '/connect/token', '/connect/revoke'] as const;
 /**
+ * Browser routes ChatGPT setup needs, GET only: a one-time hand-off link
+ * (`/go/oly2g.<installId>.<secret>`, served by workers/chatgpt/handoff.ts) and
+ * the publisher-app sign-in callback for flows the engine started for ChatGPT
+ * (verified against the signed state the engine minted). Nothing else under
+ * either prefix is forwarded.
+ */
+const BROWSER_GET_PATHS: readonly RegExp[] = [
+  /^\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/,
+  /^\/oauth\/callback\/(gmail|google-drive|dropbox)$/,
+];
+/**
  * Reviewer sign-in, forwarded only by a demo install (its data directory
  * carries the demo marker; src/core/remote-access.ts `demoInstallMarked`).
  */
@@ -49,7 +60,7 @@ const UNTRUSTED = /^(forwarded|x-forwarded-.*|x-real-ip|x-olympus-relay.*|cookie
  * backslashes are refused rather than normalized, so the worker can never
  * resolve a forwarded path differently than this check did.
  */
-export function forwardPath(rawPath: string, allowed: readonly string[] = FORWARDED_PATHS): string | undefined {
+export function forwardPath(rawPath: string, allowed: readonly string[] = FORWARDED_PATHS, method = 'POST'): string | undefined {
   if (typeof rawPath !== 'string' || rawPath.length > 2048 || !rawPath.startsWith('/') || rawPath.startsWith('//')) return undefined;
   const pathOnly = rawPath.split('?', 1)[0]!;
   if (/%2e|%2f|%5c|\\/i.test(pathOnly) || pathOnly.split('/').some((segment) => segment === '.' || segment === '..')) return undefined;
@@ -59,7 +70,9 @@ export function forwardPath(rawPath: string, allowed: readonly string[] = FORWAR
   } catch {
     return undefined;
   }
-  if (url.pathname !== pathOnly || !allowed.includes(url.pathname)) return undefined;
+  if (url.pathname !== pathOnly) return undefined;
+  const browserGet = method === 'GET' && BROWSER_GET_PATHS.some((pattern) => pattern.test(url.pathname));
+  if (!allowed.includes(url.pathname) && !browserGet) return undefined;
   return `${url.pathname}${url.search}`;
 }
 

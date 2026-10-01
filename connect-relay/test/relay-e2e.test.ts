@@ -13,6 +13,7 @@ import { DEMO_AUTHORIZE_PATH, FORWARDED_PATHS } from '../client/forward.ts';
 import { loadOrCreateIdentity, type InstallIdentity } from '../client/identity.ts';
 import { PROTOCOL_VERSION, base64url, installIdForPublicKey, signInstallMessage, spkiOf } from '../shared/protocol.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, mintCredential } from '../shared/tokens.ts';
+import { createOAuthRelayNonce, signOAuthRelayState } from '../../src/core/oauth-relay.ts';
 import type { RelayLimits } from '../server/limits.ts';
 import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
@@ -292,7 +293,18 @@ describe('routing', () => {
     // answer tool and so start linking.
     expect(list.result.tools).toEqual(generatedSurface.tools);
     expect(list.result.tools.map((tool: { name: string }) => tool.name))
-      .toEqual(['olympus_dashboard', 'source_index_status', 'source_answer', 'source_answer_result']);
+      .toEqual([
+        'olympus_dashboard',
+        'olympus_search',
+        'source_index_status',
+        'source_answer',
+        'source_answer_result',
+        'olympus_connect_source',
+        'olympus_scope_list',
+        'olympus_scope_set',
+        'olympus_disconnect_source',
+        'olympus_model_set',
+      ]);
     for (const tool of list.result.tools) {
       expect(tool.securitySchemes).toEqual(tool.name === 'olympus_dashboard'
         ? [{ type: 'noauth' }, { type: 'oauth2', scopes: [] }]
@@ -646,5 +658,70 @@ describe('sessions and revocation', () => {
     await connectInstall(relay, worker, identity);
     await until(() => first.statuses.some((status) => status.state === 'replaced'));
     expect(relay.onlineInstalls()).toEqual([identity.installId]);
+  });
+});
+
+describe('setup hand-offs', () => {
+  test('a one-time /go link reaches only the install it names, GET only', async () => {
+    const relay = await makeRelay();
+    const workerA = fakeWorker('A');
+    const workerB = fakeWorker('B');
+    cleanups.push(workerA.stop, workerB.stop);
+    const a = await connectInstall(relay, workerA);
+    await connectInstall(relay, workerB);
+    const link = `/go/${mintCredential('handoff', a.identity.installId)}`;
+    const response = await fetch(`${relay.url}${link}`, { redirect: 'manual' });
+    expect(await response.json()).toMatchObject({ worker: 'A', path: link });
+    expect(workerB.requests).toHaveLength(0);
+    expect(workerA.requests[0]!.headers['x-olympus-relay']).toBe(a.secret);
+    expect((await fetch(`${relay.url}${link}`, { method: 'POST' })).status).toBe(405);
+  });
+
+  test('an unknown install, a malformed id or an offline Mac gets a plain page, never another engine', async () => {
+    const registry = new MemoryInstallRegistry();
+    const relay = await makeRelay({}, registry);
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const stranger = loadOrCreateIdentity(tempDir());
+    const unknown = await fetch(`${relay.url}/go/${mintCredential('handoff', stranger.installId)}`);
+    expect(unknown.status).toBe(404);
+    expect(await unknown.text()).toContain('expired or was already used');
+    expect((await fetch(`${relay.url}/go/${mintCredential('access', a.identity.installId)}`)).status).toBe(404);
+    expect((await fetch(`${relay.url}/go/not-an-id`)).status).toBe(404);
+    expect(worker.requests).toHaveLength(0);
+    // Registered but no live session: the Mac is offline.
+    const offline = loadOrCreateIdentity(tempDir());
+    registry.register(offline.installId, offline.publicKeySpki);
+    const page = await fetch(`${relay.url}/go/${mintCredential('handoff', offline.installId)}`);
+    expect(page.status).toBe(503);
+    expect(await page.text()).toContain('offline');
+  });
+
+  test('a publisher sign-in callback routes by the install prefix of its state nonce, query intact', async () => {
+    const relay = await makeRelay();
+    const workerA = fakeWorker('A');
+    const workerB = fakeWorker('B');
+    cleanups.push(workerA.stop, workerB.stop);
+    await connectInstall(relay, workerA);
+    const b = await connectInstall(relay, workerB);
+    const state = signOAuthRelayState({
+      origin: `https://${PUBLIC_HOST}`,
+      source: 'gmail',
+      nonce: `${b.identity.installId}_${createOAuthRelayNonce()}`,
+      iat: Math.floor(Date.now() / 1000),
+    }, 'k'.repeat(43));
+    const query = new URLSearchParams({ code: 'provider-code', state }).toString();
+    const response = await fetch(`${relay.url}/oauth/callback/gmail?${query}`);
+    expect(await response.json()).toMatchObject({ worker: 'B', path: '/oauth/callback/gmail' });
+    expect(workerB.requests[0]!.path).toBe(`/oauth/callback/gmail?${query}`);
+    expect(workerA.requests).toHaveLength(0);
+    // A state without an install prefix, or none at all, routes nowhere.
+    const plain = signOAuthRelayState({ origin: 'http://127.0.0.1:8010', source: 'gmail', nonce: createOAuthRelayNonce(), iat: 1 }, 'k'.repeat(43));
+    expect((await fetch(`${relay.url}/oauth/callback/gmail?code=c&state=${plain}`)).status).toBe(404);
+    expect((await fetch(`${relay.url}/oauth/callback/gmail?code=c`)).status).toBe(404);
+    expect((await fetch(`${relay.url}/oauth/callback/x?code=c&state=${state}`)).status).toBe(404);
+    expect(workerA.requests).toHaveLength(0);
+    expect(workerB.requests).toHaveLength(1);
   });
 });

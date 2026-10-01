@@ -34,7 +34,13 @@ import {
   DASHBOARD_CHATGPT_VOCABULARY,
 } from '../dashboard/vocabulary.ts';
 import {
+  CONNECT_SOURCE_TOOL_NAME,
   DASHBOARD_TOOL_NAME,
+  DISCONNECT_SOURCE_TOOL_NAME,
+  SCOPE_LIST_TOOL_NAME,
+  type ChatGptDisconnectSourceId,
+  type ChatGptOAuthSource,
+  type ChatGptScopeSourceId,
   type ConnectionState,
   type DashboardFix,
   type DashboardItem,
@@ -44,6 +50,24 @@ import {
 
 /** Static, product-owned labels for answer models. Never the card's own text. */
 const ANSWER_MODEL_LABELS = { venice: 'Venice', local: 'Local models', built_in: 'Built-in' } as const;
+
+/**
+ * Control labels for setup from ChatGPT. Product-owned, closed set; proposed
+ * for src/workers/dashboard/vocabulary.ts (dashboard lane) as
+ * DASHBOARD_CHATGPT_VOCABULARY entries.
+ */
+export const CHATGPT_SETUP_LABELS = {
+  connect: 'Connect',
+  chooseFolders: 'Choose folders',
+  chooseMail: 'Choose mail',
+  disconnect: 'Disconnect',
+  changeModels: 'Change',
+} as const;
+
+/** Sources ChatGPT can connect: Olympus's own (publisher) OAuth apps, which return through the relay. */
+const CHATGPT_OAUTH_SOURCES = new Set<string>(['gmail', 'google-drive', 'dropbox']);
+const SCOPE_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files']);
+const DISCONNECT_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library']);
 
 /** The only connection labels the engine writes; anything else becomes ''. */
 const KNOWN_CONNECTION_LABELS = new Set([
@@ -110,12 +134,14 @@ export function buildChatGptDashboardViewModel(
     .map(({ definition, card }) => attentionItem(definition, card, degraded));
 
   const embedding = options.embedding ?? embeddingFromModelSetup(view.model_setup);
+  // Models are status only in ChatGPT (owner decision 2026-10-01): the fix is
+  // to check again; a built-in download retries on its own.
   if (embedding.state === 'failed') {
-    needsYou.push({ id: 'model:embedding', sentence: DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention, fix: onMacFix(DASHBOARD_CHATGPT_VOCABULARY.openOnMac) });
+    needsYou.push({ id: 'model:embedding', sentence: DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention, fix: checkAgainFix() });
   }
   const answers = answersFromModelSetup(view.model_setup);
   if (answers && !answers.ready) {
-    needsYou.push({ id: 'model:answers', sentence: DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention, fix: onMacFix(DASHBOARD_CHATGPT_VOCABULARY.openOnMac) });
+    needsYou.push({ id: 'model:answers', sentence: DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention, fix: checkAgainFix() });
   }
 
   const progress = overallProgress(rows.map((row) => row.card), rows.map((row) => row.status));
@@ -132,6 +158,12 @@ export function buildChatGptDashboardViewModel(
     models: {
       embedding,
       ...(answers ? { answers } : {}),
+      change: {
+        label: CHATGPT_SETUP_LABELS.changeModels,
+        tool: DASHBOARD_TOOL_NAME,
+        args: {},
+        disabledReason: DASHBOARD_CHATGPT_VOCABULARY.changeModelsOnMac,
+      },
     },
     generatedAt: isoOrNow(view.generated_at, now),
   };
@@ -174,7 +206,22 @@ function sourceEntry(
 ): DashboardSource {
   const detail = dashboardSubLine(card, degraded ? { degradedCredentials: degraded } : undefined);
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
-  const primary = status === 'Off' ? connectFix(actionKind) : undefined;
+  const primary = status === 'Off'
+    ? (actionKind === 'none' ? undefined : connectFix(definition))
+    : scopePending(card) ? scopeFix(definition, card) : undefined;
+  const menu: DashboardFix[] = [];
+  if (status !== 'Off' && card.scope_selection && !scopePending(card)) {
+    const fix = scopeFix(definition, card);
+    if (fix) menu.push(fix);
+  }
+  if (status !== 'Off' && DISCONNECT_SOURCE_IDS.has(definition.source_id)) {
+    menu.push({
+      label: CHATGPT_SETUP_LABELS.disconnect,
+      tool: DISCONNECT_SOURCE_TOOL_NAME,
+      args: { source_id: definition.source_id as ChatGptDisconnectSourceId },
+      destructive: true,
+    });
+  }
   return {
     id: definition.source_id,
     label: definition.label,
@@ -183,6 +230,7 @@ function sourceEntry(
     ...(detail ? { detail } : {}),
     ...(lastSyncAt ? { lastSyncAt } : {}),
     ...(primary ? { primary } : {}),
+    ...(menu.length > 0 ? { menu } : {}),
   };
 }
 
@@ -195,21 +243,46 @@ function attentionItem(
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
   const reauth = card.connection.state === 'reauth_required'
     || (card.connection.state !== 'connected' && card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card));
-  const fix = reauth
-    ? onMacFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect)
-    : { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {} };
+  const reconnect = reauth ? oauthSource(definition) : undefined;
+  const fix = reconnect
+    ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source: reconnect } }
+    : scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 
-/** Connecting happens on the Mac in v1; the control says so rather than pretending. */
-function connectFix(kind: DashboardSourceAction['kind']): DashboardFix | undefined {
-  if (kind === 'none') return undefined;
-  const label = kind === 'needs_setup' ? 'Set up' : 'Connect';
-  return { label, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac };
+function checkAgainFix(): DashboardFix {
+  return { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {} };
 }
 
-function onMacFix(label: string): DashboardFix {
-  return { label, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.fixOnMac };
+/** The publisher-app OAuth source for a definition, when ChatGPT can connect it. */
+function oauthSource(definition: DashboardSupportedSourceDefinition): ChatGptOAuthSource | undefined {
+  const action = definition.connect_action;
+  return action.kind === 'oauth' && CHATGPT_OAUTH_SOURCES.has(action.source) ? action.source as ChatGptOAuthSource : undefined;
+}
+
+/**
+ * Connect from ChatGPT: Gmail, Drive and Dropbox through Olympus's own apps.
+ * X (bring-your-own app), Readwise (API key) and paired chats are set up on
+ * the Mac; their control says so and checks again.
+ */
+function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
+  const source = oauthSource(definition);
+  return source
+    ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
+    : { label: CHATGPT_SETUP_LABELS.connect, tool: DASHBOARD_TOOL_NAME, args: {}, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac };
+}
+
+function scopePending(card: DashboardSourceCard): boolean {
+  return card.scope_selection?.connected === true && card.scope_selection.status === 'scope_pending';
+}
+
+function scopeFix(definition: DashboardSupportedSourceDefinition, card: DashboardSourceCard): DashboardFix | undefined {
+  if (!card.scope_selection?.connected || !SCOPE_SOURCE_IDS.has(definition.source_id)) return undefined;
+  return {
+    label: card.scope_selection.kind === 'mail' ? CHATGPT_SETUP_LABELS.chooseMail : CHATGPT_SETUP_LABELS.chooseFolders,
+    tool: SCOPE_LIST_TOOL_NAME,
+    args: { source_id: definition.source_id as ChatGptScopeSourceId },
+  };
 }
 
 function connectionFor(input: {

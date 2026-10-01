@@ -452,6 +452,16 @@ async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
       hint: 'Run olympus engine logs to see why, then olympus engine install to load it again.',
     };
   }
+  // The standalone preset (engine install seeds it) names the openclaw infer
+  // analyst but needs no answer model: through ChatGPT, olympus_search
+  // returns evidence and ChatGPT answers, so the absent analyst is not a fault.
+  if (cloudViaOpenClaw === 'policy' && !hasOpenClaw && facts.engine.installed) {
+    return {
+      name: 'host',
+      ok: true,
+      detail: `Hosted by ${hosts.join(', ')}. ${openclaw}. No answer model runs on this Mac: ChatGPT answers from Olympus search.`,
+    };
+  }
   if (cloudViaOpenClaw && !hasOpenClaw) {
     return {
       name: 'host',
@@ -467,14 +477,17 @@ async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   };
 }
 
-function cloudAnalystUsesOpenClaw(deps: DoctorDeps): boolean {
+/** Where an `openclaw infer` analyst comes from: the worker environment, the policy file, or nowhere. */
+function cloudAnalystUsesOpenClaw(deps: DoctorDeps): 'env' | 'policy' | undefined {
   const env = deps.env ?? process.env;
-  if (/^(1|true|yes|on)$/i.test(env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED?.trim() ?? '')) return true;
+  if (/^(1|true|yes|on)$/i.test(env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED?.trim() ?? '')) return 'env';
   try {
     const engine = doctorSovereigntyEngine(deps);
-    return Boolean(engine && Object.values(engine.config.modelProfiles).some((profile) => profile.provider === 'openclaw-infer'));
+    return engine && Object.values(engine.config.modelProfiles).some((profile) => profile.provider === 'openclaw-infer')
+      ? 'policy'
+      : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 

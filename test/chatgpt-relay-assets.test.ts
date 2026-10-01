@@ -19,9 +19,17 @@ describe('relay ChatGPT assets', () => {
     expect(CHATGPT_TOOLS).toEqual(JSON.parse(JSON.stringify(ENGINE_TOOLS)));
     expect(CHATGPT_TOOLS.map((tool) => [tool.name, tool.securitySchemes])).toEqual([
       ['olympus_dashboard', [{ type: 'noauth' }, { type: 'oauth2', scopes: [] }]],
-      ['source_index_status', [{ type: 'oauth2', scopes: [] }]],
-      ['source_answer', [{ type: 'oauth2', scopes: [] }]],
-      ['source_answer_result', [{ type: 'oauth2', scopes: [] }]],
+      ...[
+        'olympus_search',
+        'source_index_status',
+        'source_answer',
+        'source_answer_result',
+        'olympus_connect_source',
+        'olympus_scope_list',
+        'olympus_scope_set',
+        'olympus_disconnect_source',
+        'olympus_model_set',
+      ].map((name) => [name, [{ type: 'oauth2', scopes: [] }]]),
     ]);
   });
 

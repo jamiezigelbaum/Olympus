@@ -23,10 +23,20 @@ export const DASHBOARD_RESOURCE = {
  */
 export const DASHBOARD_UI_DOMAIN = 'https://mcp.olympusplugin.ai';
 
-/** `_meta` on the resource contents: no external origins, fullscreen preferred. */
+/**
+ * Where the dashboard may send the person with `openExternal`: one-time
+ * sign-in links (`https://mcp.olympusplugin.ai/go/<id>`, which redirect to the
+ * provider) and the help and install pages. Provider domains are never listed:
+ * every sign-in starts on the plugin's own domain.
+ */
+export const DASHBOARD_REDIRECT_DOMAINS = [DASHBOARD_UI_DOMAIN, 'https://olympusplugin.ai'] as const;
+
+/** `_meta` on the resource contents: no external fetch origins, fullscreen preferred. */
 export function dashboardResourceMeta(): Record<string, unknown> {
   return {
     ui: { csp: { connectDomains: [], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
+    // ChatGPT's own CSP key: openExternal needs redirect_domains.
+    'openai/widgetCSP': { connect_domains: [], resource_domains: [], redirect_domains: [...DASHBOARD_REDIRECT_DOMAINS] },
     'openai/ui': { preferredDisplayMode: 'fullscreen', availableDisplayModes: ['inline', 'fullscreen'] },
   };
 }

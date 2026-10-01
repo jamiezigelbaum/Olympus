@@ -537,6 +537,14 @@ export interface EmailSourceWorkerOptions {
      * tree that reads as "you have no folders".
      */
     ingestionDispositions?: () => Promise<SourceDispositionsRuntime> | SourceDispositionsRuntime;
+    /**
+     * Where a sign-in started for ChatGPT returns: the relay's public origin
+     * and this install's relay id (docs/design/chatgpt-plugin.md, "Setup from
+     * ChatGPT"). Read only when the start request asks for `handback: 'relay'`;
+     * the origin is never taken from the request. Absent or undefined: no
+     * relay hand-back on this worker.
+     */
+    oauthHandback?: () => { origin: string; installId: string } | undefined;
     fileSourceScopes?: {
       summaries(): SourceFolderScopeSummary[];
       browse(input: {
@@ -1416,7 +1424,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             ? true
             : verifyOAuthRelayState(state, {
               keys: await dashboardRelayStateKeys(dashboardSecretStore(sourceDashboard)),
-              expectedOrigin: dashboardOAuthRedirectOrigin(url, request.headers),
+              expectedOrigin: attempt.relay.handbackOrigin ?? dashboardOAuthRedirectOrigin(url, request.headers),
               expectedSource: source,
               expectedNonce: attempt.relay.nonce,
               now: new Date(),
@@ -1528,6 +1536,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               status: 400,
             });
           }
+          // A ChatGPT hand-back arrived through the relay, which can route this
+          // tab's next request only by its state: say done here.
+          if (attempt.relay?.handbackOrigin) {
+            return dashboardOAuthCompleteHtml({ source, returnTo: CHATGPT_RETURN_TO });
+          }
           // MINOR 2 (Codex round 2): redirect to the query-free `/done` route
           // above rather than rendering the "Connected" page at this URL, which
           // still carries the now-spent `code` and `state` in its own address —
@@ -1563,7 +1576,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           assertDashboardAccountCardinality(registry, source);
           const clientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
           const submittedClientId = asOptionalString(record.client_id);
-          const dashboardOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
+          // A sign-in started for ChatGPT returns through the relay to this
+          // install (the state's nonce carries the install id the relay routes
+          // on). Only the publisher apps' relay callback can do that.
+          const handback = record.handback === 'relay' ? sourceDashboard.oauthHandback?.() : undefined;
+          if (record.handback !== undefined && !handback) {
+            throw new EmailSourceWorkerError(409, 'oauth_handback_unavailable', 'This sign-in cannot return through the relay on this install.');
+          }
+          const dashboardOrigin = handback?.origin ?? dashboardOAuthRedirectOrigin(url, request.headers);
           // Publisher mode: Olympus's own registered app, so the owner presses
           // Connect and nothing else. It is chosen only when this install has
           // no registration of its own for the source — a submitted client id
@@ -1575,6 +1595,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               source,
               dashboardOAuthClientIdForSource(source, clientIdSets.own),
             );
+          if (handback && (submittedClientId || publisher?.relay !== true)) {
+            throw new EmailSourceWorkerError(409, 'oauth_handback_unavailable', 'This source uses your own app registration; connect it in Olympus on your Mac.');
+          }
           const clientId = submittedClientId
             ?? publisher?.clientId
             ?? dashboardOAuthClientIdForSource(source, clientIdSets.all);
@@ -1625,7 +1648,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // so a relay flow's state is signed and carries that origin. Minted
           // here, inside an authenticated control-session route, and never from
           // an inbound callback (OAUTH_RELAY.md, worker check 0).
-          const relayNonce = publisher?.relay === true ? createOAuthRelayNonce() : undefined;
+          const relayNonce = publisher?.relay === true
+            ? (handback ? `${handback.installId}_${createOAuthRelayNonce()}` : createOAuthRelayNonce())
+            : undefined;
           const relayState = relayNonce === undefined
             ? undefined
             : signOAuthRelayState({
@@ -1671,10 +1696,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           dashboardOAuthAttempts.set(source, {
             source,
             pending,
-            returnTo: dashboardReturnTo(),
+            returnTo: handback ? CHATGPT_RETURN_TO : dashboardReturnTo(),
             startedAt: startedAtDate.toISOString(),
             expiresAt,
-            ...(relayNonce ? { relay: { nonce: relayNonce } } : {}),
+            ...(relayNonce ? { relay: { nonce: relayNonce, ...(handback ? { handbackOrigin: handback.origin } : {}) } } : {}),
           });
           return json({
             ok: true,
@@ -5428,7 +5453,15 @@ interface DashboardOAuthAttempt {
    * The nonce is the single-use record the bounced state must match; consuming
    * or replacing the attempt is what makes a replay fail.
    */
-  relay?: { nonce: string };
+  relay?: {
+    nonce: string;
+    /**
+     * Set for a ChatGPT hand-back: the relay origin the state names, fixed at
+     * start. The callback then arrives through the relay at this worker's
+     * loopback address, so the origin cannot be derived from that request.
+     */
+    handbackOrigin?: string;
+  };
   /**
    * The provider's refusal, if its callback carried `error=`.
    *
@@ -5521,6 +5554,9 @@ function dashboardOAuthAttemptExpired(attempt: DashboardOAuthAttempt, now: Date)
 function dashboardReturnTo(): string {
   return '/dashboard';
 }
+
+/** Where a sign-in started from ChatGPT sends the person back to. */
+const CHATGPT_RETURN_TO = 'https://chatgpt.com/';
 
 function parseDashboardControlUiRequest(
   url: URL,

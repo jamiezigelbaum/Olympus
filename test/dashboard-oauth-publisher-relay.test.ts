@@ -93,7 +93,12 @@ interface Fixture {
 
 function fixture(
   initialSecrets: Record<string, string> = {},
-  options: { attemptExpiresInMs?: number; secretReads?: string[]; secretWrites?: string[] } = {},
+  options: {
+    attemptExpiresInMs?: number;
+    secretReads?: string[];
+    secretWrites?: string[];
+    handback?: { origin: string; installId: string };
+  } = {},
 ): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-worker-'));
   dirs.push(dir);
@@ -131,6 +136,7 @@ function fixture(
       registryPath,
       secretStore,
       oauthFetch,
+      ...(options.handback ? { oauthHandback: () => options.handback } : {}),
       // Only used by the 'expired state' scenario below: the real starter,
       // with its honest ~10-minute expiry replaced by a near-immediate one, so
       // the test can wait a few milliseconds instead of ten real minutes to
@@ -1351,3 +1357,58 @@ function memorySecretStore(
     },
   };
 }
+
+describe('sign-in started from ChatGPT (relay hand-back)', () => {
+  const RELAY_ORIGIN = 'https://mcp.olympusplugin.ai';
+  const INSTALL_ID = 'abcdefghijklmnopqrstuvwxyz234567';
+
+  test('the state names the relay origin and a nonce the relay can route by install', async () => {
+    const instance = fixture({}, { handback: { origin: RELAY_ORIGIN, installId: INSTALL_ID } });
+    const url = await authorizationUrl(await startConnect(instance, { handback: 'relay' }));
+    expect(url.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+    const payload = statePayload(url.searchParams.get('state')!);
+    expect(payload.origin).toBe(RELAY_ORIGIN);
+    expect(payload.nonce).toMatch(new RegExp(`^${INSTALL_ID}_[A-Za-z0-9_-]{43}$`));
+  });
+
+  test('the bounced callback, arriving at the loopback worker, completes and says done in place', async () => {
+    const instance = fixture({}, { handback: { origin: RELAY_ORIGIN, installId: INSTALL_ID } });
+    const state = (await authorizationUrl(await startConnect(instance, { handback: 'relay' }))).searchParams.get('state')!;
+    const callback = await instance.fetch(new Request(
+      `http://127.0.0.1:8010/oauth/callback/dropbox?code=handback-code&state=${encodeURIComponent(state)}`,
+      { headers: { 'x-olympus-relay': 'relay-secret' } },
+    ));
+    expect(callback.status).toBe(200);
+    const page = await callback.text();
+    expect(page).toContain('Connected dropbox');
+    expect(page).toContain('https://chatgpt.com/');
+    expect(instance.exchanges).toHaveLength(1);
+    expect(instance.exchanges[0]!.get('code')).toBe('handback-code');
+    // The state is single use.
+    const replay = await instance.fetch(new Request(
+      `http://127.0.0.1:8010/oauth/callback/dropbox?code=again&state=${encodeURIComponent(state)}`,
+    ));
+    expect(replay.status).toBe(410);
+  });
+
+  test('a state naming the relay is refused by an ordinary dashboard flow, and hand-back is refused when unavailable', async () => {
+    const plain = fixture();
+    expect((await startConnect(plain, { handback: 'relay' })).status).toBe(409);
+    const instance = fixture({}, { handback: { origin: RELAY_ORIGIN, installId: INSTALL_ID } });
+    const started = await authorizationUrl(await startConnect(instance));
+    const payload = statePayload(started.searchParams.get('state')!);
+    const forged = rawRelayState({ ...payload, origin: RELAY_ORIGIN }, await currentRelayKey(instance));
+    const callback = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(forged)}`,
+    ));
+    expect(callback.status).toBe(410);
+    expect(instance.exchanges).toHaveLength(0);
+  });
+
+  test('an owner-registered app cannot hand back through the relay', async () => {
+    const instance = fixture({}, { handback: { origin: RELAY_ORIGIN, installId: INSTALL_ID } });
+    const started = await startConnect(instance, { handback: 'relay', client_id: 'my-own-dropbox-app' });
+    expect(started.status).toBe(409);
+    expect((await started.json()).error.code).toBe('oauth_handback_unavailable');
+  });
+});

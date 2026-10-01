@@ -3578,11 +3578,11 @@ var init_manifest = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync, existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync10, writeFileSync as writeFileSync3 } from "node:fs";
-import { homedir as homedir7 } from "node:os";
-import { dirname as dirname9, join as join12 } from "node:path";
+import { chmodSync, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync9, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir as homedir6 } from "node:os";
+import { dirname as dirname7, join as join10 } from "node:path";
 function defaultSovereigntyConfigPath() {
-  return join12(homedir7(), ".olympus", "sovereignty.json");
+  return join10(homedir6(), ".olympus", "sovereignty.json");
 }
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
@@ -3593,8 +3593,8 @@ function loadSovereigntyEngine(options = {}) {
   }
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath();
-  if (existsSync6(configPath)) {
-    const parsed = JSON.parse(readFileSync10(configPath, "utf8"));
+  if (existsSync5(configPath)) {
+    const parsed = JSON.parse(readFileSync9(configPath, "utf8"));
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -14061,12 +14061,13 @@ import { homedir as homedir11 } from "node:os";
 import { spawnSync as spawnSync2 } from "node:child_process";
 init_atomic_file();
 init_operation_error();
-import { existsSync as existsSync5, lstatSync as lstatSync2, readFileSync as readFileSync9, statSync as statSync8 } from "node:fs";
-import { homedir as homedir6, platform as osPlatform } from "node:os";
-import { basename as basename3, dirname as dirname8, isAbsolute as isAbsolute10, join as join11, resolve as resolvePath } from "node:path";
+import { existsSync as existsSync6, lstatSync as lstatSync2, readFileSync as readFileSync10, statSync as statSync8 } from "node:fs";
+import { homedir as homedir7, platform as osPlatform } from "node:os";
+import { basename as basename3, dirname as dirname9, isAbsolute as isAbsolute10, join as join12, resolve as resolvePath } from "node:path";
+init_sovereignty();
 
 // src/core/worker-service.ts
-import { basename as basename2, dirname as dirname7, isAbsolute as isAbsolute9, join as join10, relative as relative2, sep as sep2 } from "node:path";
+import { basename as basename2, dirname as dirname8, isAbsolute as isAbsolute9, join as join11, relative as relative2, sep as sep2 } from "node:path";
 init_atomic_file();
 init_openclaw_executable();
 init_operation_error();
@@ -14074,22 +14075,22 @@ var WORKER_LOG_TAIL_BYTES = 64 * 1024;
 function workerServicePaths(platform2, homeDir) {
   homeDir = validatedAbsolutePath(homeDir, "home directory");
   if (platform2 === "darwin") {
-    const logDir = join10(homeDir, "Library", "Logs", "Olympus");
+    const logDir = join11(homeDir, "Library", "Logs", "Olympus");
     return {
       label: "com.openclaw.olympus.worker",
-      unitPath: join10(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
-      envPath: join10(homeDir, ".config", "olympus", "worker.env"),
-      logPath: join10(logDir, "worker.log"),
-      errorLogPath: join10(logDir, "worker.err")
+      unitPath: join11(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
+      envPath: join11(homeDir, ".config", "olympus", "worker.env"),
+      logPath: join11(logDir, "worker.log"),
+      errorLogPath: join11(logDir, "worker.err")
     };
   }
-  const stateDir = join10(homeDir, ".local", "state", "olympus", "worker");
+  const stateDir = join11(homeDir, ".local", "state", "olympus", "worker");
   return {
     label: "olympus-worker",
-    unitPath: join10(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
-    envPath: join10(homeDir, ".config", "olympus", "worker.env"),
-    logPath: join10(stateDir, "worker.log"),
-    errorLogPath: join10(stateDir, "worker.err")
+    unitPath: join11(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
+    envPath: join11(homeDir, ".config", "olympus", "worker.env"),
+    logPath: join11(stateDir, "worker.log"),
+    errorLogPath: join11(stateDir, "worker.err")
   };
 }
 function validatedAbsolutePath(value, label) {
@@ -14104,28 +14105,29 @@ var ENGINE_LABEL = "ai.olympusplugin.engine";
 var PACKAGE_NAMES = new Set(["olympus", "olympus-source-checkout"]);
 function enginePaths(homeDir) {
   const home = absolute(homeDir, "home directory");
-  const logDir = join11(home, "Library", "Logs", "Olympus");
+  const logDir = join12(home, "Library", "Logs", "Olympus");
   return {
     label: ENGINE_LABEL,
-    plistPath: join11(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
+    plistPath: join12(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
     logDir,
-    logPath: join11(logDir, "engine.log"),
-    errorLogPath: join11(logDir, "engine.err"),
-    configPath: join11(home, ".olympus", "engine.json"),
-    appSupportDir: join11(home, "Library", "Application Support", "Olympus"),
-    workerEnvPath: join11(home, ".config", "olympus", "worker.env")
+    logPath: join12(logDir, "engine.log"),
+    errorLogPath: join12(logDir, "engine.err"),
+    configPath: join12(home, ".olympus", "engine.json"),
+    sovereigntyPath: join12(home, ".olympus", "sovereignty.json"),
+    appSupportDir: join12(home, "Library", "Application Support", "Olympus"),
+    workerEnvPath: join12(home, ".config", "olympus", "worker.env")
   };
 }
 function inspectEngine(options = {}) {
-  const homeDir = absolute(options.homeDir ?? homedir6(), "home directory");
+  const homeDir = absolute(options.homeDir ?? homedir7(), "home directory");
   const paths = enginePaths(homeDir);
-  const installed = existsSync5(paths.plistPath);
+  const installed = existsSync6(paths.plistPath);
   const base = {
     label: paths.label,
     installed,
     plist_path: paths.plistPath,
     config_path: paths.configPath,
-    config_present: existsSync5(paths.configPath),
+    config_present: existsSync6(paths.configPath),
     log_path: paths.logPath,
     error_log_path: paths.errorLogPath
   };
@@ -14838,6 +14840,13 @@ async function hostCheck(deps) {
       hint: "Run olympus engine logs to see why, then olympus engine install to load it again."
     };
   }
+  if (cloudViaOpenClaw === "policy" && !hasOpenClaw && facts.engine.installed) {
+    return {
+      name: "host",
+      ok: true,
+      detail: `Hosted by ${hosts.join(", ")}. ${openclaw}. No answer model runs on this Mac: ChatGPT answers from Olympus search.`
+    };
+  }
   if (cloudViaOpenClaw && !hasOpenClaw) {
     return {
       name: "host",
@@ -14855,12 +14864,12 @@ async function hostCheck(deps) {
 function cloudAnalystUsesOpenClaw(deps) {
   const env = deps.env ?? process.env;
   if (/^(1|true|yes|on)$/i.test(env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED?.trim() ?? ""))
-    return true;
+    return "env";
   try {
     const engine = doctorSovereigntyEngine(deps);
-    return Boolean(engine && Object.values(engine.config.modelProfiles).some((profile) => profile.provider === "openclaw-infer"));
+    return engine && Object.values(engine.config.modelProfiles).some((profile) => profile.provider === "openclaw-infer") ? "policy" : undefined;
   } catch {
-    return false;
+    return;
   }
 }
 async function sovereigntyModelLaneCheck(deps) {
