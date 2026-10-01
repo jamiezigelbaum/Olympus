@@ -162,10 +162,33 @@ describe('page source', () => {
         [palette.bg, palette.warnLine], [palette.bg, palette.infoLine],
       ];
       for (const [fg, bg] of pairs) expect(contrast(fg, bg)).toBeGreaterThanOrEqual(4.5);
-      for (const tone of [palette.good, palette.run, palette.warn, palette.bad, palette.off, palette.focus]) {
+      // In progress (yellow) and needs you (orange) are never the only signal, so they are exempt from 3:1.
+      for (const tone of [palette.good, palette.bad, palette.off, palette.focus]) {
         expect(contrast(tone, palette.bg)).toBeGreaterThanOrEqual(3);
       }
     }
+  });
+
+  test('status tones: in progress is a clear yellow, needs you a warm orange, both distinct from ready and failing', () => {
+    expect([CHATGPT_DASHBOARD_LIGHT.run, CHATGPT_DASHBOARD_DARK.run]).toEqual(['#f5c518', '#facc15']);
+    expect([CHATGPT_DASHBOARD_LIGHT.warn, CHATGPT_DASHBOARD_DARK.warn]).toEqual(['#ea6c0a', '#fb8c3c']);
+    for (const palette of [CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK]) {
+      const run = hue(palette.run);
+      const warn = hue(palette.warn);
+      expect(run).toBeGreaterThanOrEqual(44);
+      expect(run).toBeLessThanOrEqual(56);
+      expect(warn).toBeGreaterThanOrEqual(20);
+      expect(warn).toBeLessThanOrEqual(32);
+      // Bright, not brown: high lightness and saturation.
+      expect(lightness(palette.run)).toBeGreaterThan(0.5);
+      expect(lightness(palette.warn)).toBeGreaterThan(0.45);
+      for (const other of [palette.good, palette.bad]) expect(Math.abs(hue(other) - warn)).toBeGreaterThan(10);
+    }
+    // The in-progress bar fills yellow; a stalled source's bar stays orange.
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.bar-fill{height:100%;border-radius:999px;background:var(--run);min-width:0}');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.source-progress.stalled .bar-fill{background:var(--warn)}');
+    // Off stays a hollow ring.
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.tone-line{background:transparent;border:2px solid var(--idle)}');
   });
 });
 
@@ -492,8 +515,83 @@ describe('ready page', () => {
     host.push({ structuredContent: model({ models: { embedding: { kind: 'built_in', state: 'downloading', percent: 12 }, answers: { kind: 'local', label: 'Local models', ready: false } } }) });
     const box = host.win.document.querySelector('details.models') as unknown as HTMLDetailsElement;
     expect(box.open).toBe(false);
-    expect(box.querySelector('summary')!.textContent).toBe('Models — Built-in · Downloading 12%');
+    expect(box.querySelector('summary')!.textContent).toBe('Models — Built-in · Getting ready');
+    expect(box.textContent).toContain('Search: Built-in · Downloading 12%');
     expect(box.textContent).toContain('Answers: Local models · Not ready');
+    // Without byte counts the install line names the percent only, under the summary, not inside it.
+    const lines = Array.from(host.win.document.querySelectorAll('.model-install')).map((node) => node.textContent);
+    expect(lines).toEqual(['Downloading the search model · 12%']);
+    expect(box.querySelector('.model-install')).toBeNull();
+  });
+
+  describe('model installs', () => {
+    // The install fields arrive with the backend's ModelInstall contract; read here as optional.
+    const withModels = (models: Record<string, unknown>) => model({ models } as any);
+    const summary = (host: Host) => host.win.document.querySelector('details.models summary')!.textContent;
+    const lines = (host: Host) => Array.from(host.win.document.querySelectorAll('.model-install')).map((node) => node.querySelector('p')!.textContent);
+
+    test('downloading: one line per model with percent and bytes, and a thin yellow bar, without expanding', () => {
+      const host = mount();
+      host.push({ structuredContent: withModels({
+        embedding: { kind: 'built_in', state: 'downloading', percent: 40, bytesDone: 1_200_000_000, bytesTotal: 3_000_000_000 },
+        answers: { kind: 'built_in', label: 'Built-in', ready: false, install: { state: 'downloading', percent: 5.6, bytesDone: 230_000_000, bytesTotal: 4_100_000_000 } },
+      }) });
+      expect(summary(host)).toBe('Models — Built-in · Getting ready');
+      expect(lines(host)).toEqual([
+        'Downloading the search model · 40% · 1.2 of 3.0 GB',
+        'Downloading the private model · 5% · 0.2 of 4.1 GB',
+      ]);
+      const bars = Array.from(host.win.document.querySelectorAll('.model-install .bar')) as unknown as HTMLElement[];
+      expect(bars.map((bar) => bar.getAttribute('aria-valuenow'))).toEqual(['40', '5']);
+      expect((bars[0]!.querySelector('.bar-fill') as unknown as HTMLElement).style.width).toBe('40%');
+      expect(CHATGPT_DASHBOARD_CSS).toContain('.model-install .bar{height:0.375rem}');
+      expect((host.win.document.querySelector('details.models') as unknown as HTMLDetailsElement).open).toBe(false);
+      expectNoJargon(host);
+    });
+
+    test('verifying reads Checking, with a bar only when the percent is known', () => {
+      const host = mount();
+      host.push({ structuredContent: withModels({
+        embedding: { kind: 'built_in', state: 'ready' },
+        answers: { kind: 'built_in', label: 'Built-in', ready: false, install: { state: 'verifying' } },
+      }) });
+      expect(summary(host)).toBe('Models — Built-in · Getting ready');
+      expect(lines(host)).toEqual(['Checking the private model…']);
+      expect(host.win.document.querySelector('.model-install .bar')).toBeNull();
+      host.push({ structuredContent: withModels({
+        embedding: { kind: 'built_in', state: 'verifying', percent: 70 },
+      }) });
+      expect(lines(host)).toEqual(['Checking the search model…']);
+      expect(host.win.document.querySelector('.model-install .bar')!.getAttribute('aria-valuenow')).toBe('70');
+    });
+
+    test('a failed install says why, the summary says Needs you, and no second fix button appears', () => {
+      const reasons: Array<[string | undefined, string]> = [
+        ['disk_full', 'the disk is full'], ['network', 'the connection dropped'], ['checksum', 'the download was damaged'],
+        ['unknown', 'something went wrong'], [undefined, 'something went wrong'], ['surprise', 'something went wrong'],
+      ];
+      for (const [reason, words] of reasons) {
+        const host = mount();
+        host.push({ structuredContent: withModels({
+          embedding: { kind: 'built_in', state: 'ready' },
+          answers: { kind: 'built_in', label: 'Built-in', ready: false, install: { state: 'failed', failedReason: reason } },
+        }) });
+        expect(summary(host)).toBe('Models — Built-in · Needs you');
+        expect(lines(host)).toEqual([`Couldn't download the private model: ${words}`]);
+        expect(host.win.document.querySelectorAll('.models-wrap button').length).toBe(0);
+        expect(host.win.document.querySelector('.model-install .bar')).toBeNull();
+      }
+    });
+
+    test('both ready: Ready and no install lines', () => {
+      const host = mount();
+      host.push({ structuredContent: withModels({
+        embedding: { kind: 'built_in', state: 'ready' },
+        answers: { kind: 'built_in', label: 'Built-in', ready: true, install: { state: 'ready' } },
+      }) });
+      expect(summary(host)).toBe('Models — Built-in · Ready');
+      expect(host.win.document.querySelectorAll('.model-install, .models-wrap').length).toBe(0);
+    });
   });
 
   test('stale data offers Check again', () => {
@@ -580,6 +678,24 @@ describe('inline card', () => {
     expect(host.sent.find((message) => message.method === 'ui/request-display-mode')!.params).toEqual({ mode: 'fullscreen' });
   });
 });
+
+function rgb(hex: string): [number, number, number] {
+  return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255) as [number, number, number];
+}
+
+function hue(hex: string): number {
+  const [r, g, b] = rgb(hex);
+  const max = Math.max(r, g, b);
+  const d = max - Math.min(r, g, b);
+  if (!d) return 0;
+  const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return (h * 60 + 360) % 360;
+}
+
+function lightness(hex: string): number {
+  const [r, g, b] = rgb(hex);
+  return (Math.max(r, g, b) + Math.min(r, g, b)) / 2;
+}
 
 function contrast(a: string, b: string): number {
   const [la, lb] = [luminance(a), luminance(b)];

@@ -63,18 +63,20 @@ const STATUS_TONE = Object.fromEntries(
 ) as Record<DashboardStatus, DashboardStatusColorToken>;
 
 // Light values are ChatGPT's neutral greys; every text pair clears WCAG AA
-// (4.5:1) on its background, and the status dots clear 3:1 as UI graphics.
+// (4.5:1) on its background. Status dots are never the only signal (the
+// sentence beside them carries the state): in progress is a clear yellow,
+// needs you a warm orange, ready green, off a hollow grey ring.
 export const CHATGPT_DASHBOARD_LIGHT = {
   bg: '#ffffff', text: '#0d0d0d', muted: '#5d5d5d', line: '#d9d9d9', surface: '#f7f7f8',
   accent: '#5b45c2', onAccent: '#ffffff', focus: '#2f5bd6',
   warnBg: '#fff6e0', warnLine: '#8a5a00', infoBg: '#f2f0fc', infoLine: '#6d5bd0', danger: '#b42318',
-  good: '#2e7d4f', run: '#6d5bd0', warn: '#a86a00', bad: '#c0362c', off: '#6b6e76', idle: '#8e8e93',
+  good: '#2e7d4f', run: '#f5c518', warn: '#ea6c0a', bad: '#c0362c', off: '#6b6e76', idle: '#8e8e93',
 };
 export const CHATGPT_DASHBOARD_DARK = {
   bg: '#212121', text: '#ececec', muted: '#b4b4b4', line: '#4a4a4a', surface: '#2a2a2a',
   accent: '#a594f0', onAccent: '#14121f', focus: '#8fb0ff',
   warnBg: '#2e2614', warnLine: '#c99a3e', infoBg: '#24213a', infoLine: '#a594f0', danger: '#f07468',
-  good: '#5fb582', run: '#a594f0', warn: '#d9a441', bad: '#f07468', off: '#9a9ca3', idle: '#8e8e93',
+  good: '#5fb582', run: '#facc15', warn: '#fb8c3c', bad: '#f07468', off: '#9a9ca3', idle: '#8e8e93',
 };
 
 function vars(palette: typeof CHATGPT_DASHBOARD_LIGHT): string {
@@ -161,6 +163,10 @@ summary{cursor:pointer;border-radius:0.375rem}
 .disclosure summary,.models summary{color:var(--muted);font-size:0.875rem;padding:0.25rem 0}
 .models summary{font-size:1rem;color:var(--text);font-weight:600}
 .models{padding-top:0.75rem}
+.model-installs{display:flex;flex-direction:column;gap:0.5rem;margin-top:0.25rem}
+.model-install{display:flex;flex-direction:column;gap:0.25rem;font-size:0.875rem;color:var(--muted)}
+.model-install .bar{height:0.375rem}
+.model-install.failed{color:var(--text);font-weight:600}
 .plain{margin:0.5rem 0;padding-left:1.25rem}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
 .strong{font-weight:600}

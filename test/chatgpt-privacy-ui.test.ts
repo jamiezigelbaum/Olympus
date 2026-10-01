@@ -406,7 +406,7 @@ describe('the dashboard Privacy row', () => {
     const host = mount({ olympus_dashboard: () => ({ structuredContent: dashboard }), [P.get]: () => privacyResult(DESCRIPTION, SAVED_RULES) });
     host.push({ structuredContent: dashboard });
     const text = host.text();
-    const order = ['Sources', W.section, 'Your description and 3 always-private rules', '4 items waiting to be checked', 'Progress', 'Models'];
+    const order = ['Sources', W.section, 'Your description · 3 always-private rules', '4 items waiting to be checked', 'Progress', 'Models'];
     let at = -1;
     for (const marker of order) {
       const next = text.indexOf(marker, at + 1);
@@ -422,6 +422,14 @@ describe('the dashboard Privacy row', () => {
     expect(host.text()).toContain(W.title);
     host.button(W.back).click();
     expect(host.doc.activeElement!.getAttribute('data-key')).toBe('privacy:edit');
+  });
+
+  test('no rules reads "no always-private rules", never a zero', () => {
+    const dashboard = model({ configured: true, pendingCount: 0, ruleCount: 0 });
+    const host = mount({ olympus_dashboard: () => ({ structuredContent: dashboard }) });
+    host.push({ structuredContent: dashboard });
+    expect(host.doc.querySelector('.privacy-row .row-text')!.textContent).toBe('Your description · no always-private rules');
+    expect(host.text()).not.toContain('0 always-private');
   });
 
   test('not configured: the needs-you item carries the one call to action and the row is not repeated', () => {
@@ -452,7 +460,8 @@ describe('the dashboard Privacy row', () => {
     host.button(W.save).click();
     await host.settle();
     expect(saves.length).toBe(1);
-    expect(host.text()).toContain('Your description and 1 always-private rule');
+    expect(host.text()).toContain('Your description · 1 always-private rule');
+    expect(host.text()).not.toContain('1 always-private rules');
     expectNamesOnlyInPrivacy(host);
   });
 

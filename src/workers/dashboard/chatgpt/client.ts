@@ -722,7 +722,8 @@ export function chatgptDashboardClient(
     const text = el('div', 'row-text');
     if (configured) {
       const rules = typeof info.ruleCount === 'number' && isFinite(info.ruleCount) ? Math.max(0, Math.round(info.ruleCount)) : state.privacyRules;
-      add(text, el('p', '', rules >= 0 ? fill(rules === 1 ? W.row.one : W.row.many, { n: count(rules) }) : W.rowNoCount));
+      const words = rules === 0 ? W.row.none : rules === 1 ? W.row.one : W.row.many;
+      add(text, el('p', '', rules >= 0 ? fill(words, { n: count(rules) }) : W.rowNoCount));
     }
     if (pending > 0) add(text, el('p', 'muted', fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })));
     add(row, text);
@@ -794,17 +795,70 @@ export function chatgptDashboardClient(
     return section;
   }
 
+  /**
+   * One model's install, read defensively (the fields are optional): the
+   * search model's from models.embedding, the private model's from
+   * models.answers.install. Null when it is not installing or failed.
+   */
+  function modelInstall(models: Any, which: 'search' | 'answers'): Any {
+    const source = which === 'search' ? models.embedding : models.answers && models.answers.install;
+    if (!source || typeof source !== 'object') return null;
+    const stateName = String(source.state || '');
+    if (stateName !== 'downloading' && stateName !== 'verifying' && stateName !== 'failed') return null;
+    const number = (value: Any) => (typeof value === 'number' && isFinite(value) && value >= 0 ? value : -1);
+    return {
+      which,
+      state: stateName,
+      percent: number(source.percent),
+      done: number(source.bytesDone),
+      total: number(source.bytesTotal),
+      reason: typeof source.failedReason === 'string' && (P.modelInstallReasons as Any)[source.failedReason] ? source.failedReason : 'unknown',
+    };
+  }
+
+  /** "1.2 of 3.0 GB", in the total's unit. */
+  function installBytes(done: number, total: number): string {
+    const units: Array<[number, string]> = [[1e12, 'TB'], [1e9, 'GB'], [1e6, 'MB'], [1e3, 'KB']];
+    const [scale, unit] = units.filter(([size]) => total >= size)[0] || [1, 'bytes'];
+    const shown = (value: number) => (scale === 1 ? String(Math.round(value)) : (value / scale).toFixed(1));
+    return fill(P.modelInstallBytes, { done: shown(Math.min(done, total)), total: shown(total) + ' ' + unit });
+  }
+
   function modelWords(models: Any): { summary: string; search: string; answers: string } {
     const embedding = models.embedding || {};
     const kind = embedding.kind === 'built_in' ? P.modelBuiltIn : P.modelCustom;
     let ready: string = P.modelReady;
     if (embedding.state === 'downloading') ready = fill(P.modelDownloading, { percent: percent(embedding.percent) });
+    else if (embedding.state === 'verifying') ready = P.modelChecking;
     else if (embedding.state === 'failed') ready = P.modelNotWorking;
     const answers = models.answers;
     const answersWords = answers ? String(answers.label || '') + ' · ' + (answers.ready ? P.modelReady : P.modelNotReady) : '';
+    const installs = [modelInstall(models, 'search'), modelInstall(models, 'answers')].filter((entry) => entry);
     let overall: string = ready;
-    if (embedding.state === 'ready' && answers && !answers.ready) overall = P.modelNotReady;
+    if (installs.some((entry: Any) => entry.state === 'failed')) overall = P.modelNeedsYou;
+    else if (installs.length) overall = P.modelGettingReady;
+    else if (embedding.state === 'ready' && answers && !answers.ready) overall = P.modelNotReady;
     return { summary: P.models + ' — ' + kind + ' · ' + overall, search: kind + ' · ' + ready, answers: answersWords };
+  }
+
+  /** One line per installing model, shown without expanding; the fix lives in Needs you, not here. */
+  function installLine(entry: Any): HTMLElement {
+    const model = (P.modelNames as Any)[entry.which];
+    const line = el('div', 'model-install' + (entry.state === 'failed' ? ' failed' : ''));
+    let text: string;
+    if (entry.state === 'failed') {
+      text = fill(P.modelInstallFailed, { model, reason: (P.modelInstallReasons as Any)[entry.reason] });
+    } else if (entry.state === 'verifying') {
+      text = fill(P.modelInstallVerifying, { model });
+    } else {
+      const parts = [fill(P.modelInstallDownloading, { model })];
+      if (entry.percent >= 0) parts.push(percent(entry.percent) + '%');
+      if (entry.total > 0 && entry.done >= 0) parts.push(installBytes(entry.done, entry.total));
+      text = parts.join(' · ');
+    }
+    add(line, el('p', '', text));
+    if (entry.state !== 'failed' && entry.percent >= 0) add(line, progressBar(entry.percent, text));
+    return line;
   }
 
   function modelsSection(models: Any): HTMLElement | null {
@@ -815,7 +869,12 @@ export function chatgptDashboardClient(
     if (words.answers) add(list, el('li', '', P.modelAnswers + ': ' + words.answers));
     add(box, list);
     if (models.change) add(box, add(el('div', 'actions'), fixControl(models.change, 'models:change', 'plain', true)));
-    return box;
+    const installs = [modelInstall(models, 'search'), modelInstall(models, 'answers')].filter((entry) => entry);
+    if (!installs.length) return box;
+    const wrap = add(el('div', 'models-wrap'), box);
+    const lines = el('div', 'model-installs');
+    for (const entry of installs) add(lines, installLine(entry));
+    return add(wrap, lines);
   }
 
   /** The inline card: the single most important thing, the progress line, and Open Olympus. */
