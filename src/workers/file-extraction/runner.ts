@@ -1231,7 +1231,7 @@ function isScopeApprovalRefusal(error: unknown): boolean {
 export async function drainPdfExtraction(input: {
   runner: FileExtractionRunner;
   lanes: readonly ExtractionLaneKey[];
-  /** False for a lane whose file source has no current scope approval. */
+  // False for a lane whose file source has no current scope approval.
   laneScopeApproved?: (lane: ExtractionLaneKey) => boolean;
   requeue: boolean;
   deadlineMs: number;
