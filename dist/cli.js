@@ -45266,7 +45266,18 @@ var init_vocabulary = __esm(() => {
       files: { one: "file", many: "files" },
       messages: { one: "message", many: "messages" },
       items: { one: "item", many: "items" }
-    }
+    },
+    sourceStages: { listing: "Finding items", reading: "Reading", indexing: "Indexing" },
+    findingItems: "Finding items",
+    sourceProgress: "{stage} — {percent}%, {done} of {total} {unit}",
+    stalledReasons: {
+      waiting_for_credentials: "Paused: Olympus needs you to sign in to {source} again",
+      scope_pending: "Paused until you choose folders",
+      provider_unavailable: "Paused: {source} isn't responding; Olympus will retry",
+      model_downloading: "Waiting for the search model to finish downloading"
+    },
+    linkExpires: "link expires in {n} min",
+    linkExpired: "link expired"
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
@@ -97139,7 +97150,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     canFullscreen: true,
     open: {},
     notice: "",
-    privacyRules: -1
+    privacyRules: -1,
+    actionError: null
   };
   let nextId = 1;
   const pending = {};
@@ -97253,13 +97265,30 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     return false;
   }
+  function inlineError(result) {
+    if (!result || !result.isError)
+      return "";
+    const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
+    if (config2.inlineErrorCodes.indexOf(code) < 0)
+      return "";
+    const parts = Array.isArray(result.content) ? result.content : [];
+    const text = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+    return text ? String(text.text) : "";
+  }
   function callTool(name, args, key) {
     state.busy = key;
     state.confirming = "";
     state.notice = "";
+    state.actionError = null;
     render();
     request("tools/call", { name, arguments: args || {} }, config2.resultTimeoutMs).then((result) => {
       state.busy = "";
+      const failed = inlineError(result);
+      if (failed) {
+        state.actionError = { key, text: failed };
+        render(key);
+        return;
+      }
       if (acceptResult(result, false))
         return;
       if (!state.relayDown && name !== config2.toolName)
@@ -97434,6 +97463,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       busy.setAttribute("aria-busy", "true");
       return add(wrap, busy);
     }
+    const failure = state.actionError && state.actionError.key === key ? state.actionError.text : "";
     let action = null;
     if (privacy && privacy.handles(fix)) {
       action = () => openPrivacy(key);
@@ -97462,9 +97492,16 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return add(wrap, button(fix.label, key, () => {
         state.confirming = key;
         render(key + ":no");
-      }, "plain"));
+      }, "plain"), errorNote(failure));
     }
-    return add(wrap, button(fix.label, key, action, style));
+    return add(wrap, button(fix.label, key, action, style), errorNote(failure));
+  }
+  function errorNote(text) {
+    if (!text)
+      return null;
+    const note = el("span", "reason error", text);
+    note.setAttribute("role", "alert");
+    return note;
   }
   function connectionBanner() {
     const current = connectionState();
@@ -97552,7 +97589,16 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function sourceItem(source) {
     const items = state.data && Array.isArray(state.data.needsYou) ? state.data.needsYou : [];
-    return items.filter((item) => item && item.id === "source:" + String(source && source.id))[0] || null;
+    return items.filter((item) => aboutSource(item, source))[0] || null;
+  }
+  function aboutSource(item, source) {
+    if (!item || !source)
+      return false;
+    const id = String(source.id);
+    if (item.id === "source:" + id || item.source === id || item.sourceId === id)
+      return true;
+    const label = typeof source.label === "string" ? source.label : "";
+    return !!label && typeof item.sentence === "string" && item.sentence.indexOf(label + " — ") === 0;
   }
   function sourceRow(source) {
     const id = String(source.id || source.label);
@@ -97569,16 +97615,27 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(head, el("span", "sr", " — " + (item ? P.needsYou : status)));
     add(main, head);
     const meta2 = [];
-    if (item)
+    const progress = sourceProgress(source);
+    const stalledWords = progress ? stalledSentence(progress, source) : "";
+    const detail = typeof source.detail === "string" && source.detail ? source.detail : "";
+    if (source.connecting) {
+      meta2.push(capitalise(detail || (item ? itemReason(item, source) : "")));
+      const expires = linkExpiry(source.connecting.expiresAt);
+      if (expires)
+        meta2.push(expires);
+    } else if (progress) {} else if (item)
       meta2.push(capitalise(itemReason(item, source)));
     else if (off)
-      meta2.push(capitalise(typeof source.detail === "string" && source.detail ? source.detail : P.notConnected));
-    else if (typeof source.detail === "string" && source.detail)
-      meta2.push(source.detail);
-    if (typeof source.lastSyncAt === "string" && ago(source.lastSyncAt))
+      meta2.push(capitalise(detail || P.notConnected));
+    else if (detail)
+      meta2.push(detail);
+    if (typeof source.lastSyncAt === "string" && ago(source.lastSyncAt) && !source.connecting)
       meta2.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
-    if (meta2.length)
-      add(main, el("p", "muted", meta2.join(" · ")));
+    const shown = meta2.filter((part) => !!part);
+    if (shown.length)
+      add(main, el("p", "muted", shown.join(" · ")));
+    if (progress)
+      add(main, sourceProgressBlock(progress, source, stalledWords));
     add(row, main);
     const controls = el("div", "source-actions");
     const context = { id, label: String(source.label || id) };
@@ -97605,6 +97662,53 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(row, menuBox);
     }
     return row;
+  }
+  function sourceProgress(source) {
+    const progress = source && source.progress;
+    if (!progress || typeof progress !== "object" || source.connecting)
+      return null;
+    if (progress.stage === "done" && !progress.stalled)
+      return null;
+    return progress;
+  }
+  function stalledSentence(progress, source) {
+    if (!progress.stalled || !progress.stalledReason)
+      return "";
+    const words = P.stalledReasons[progress.stalledReason];
+    return typeof words === "string" ? fill(words, { source: String(source.label || "") }) : "";
+  }
+  function sourceProgressLabel(progress) {
+    const total = Number(progress.total) || 0;
+    if (total <= 0)
+      return P.findingItems;
+    const stage = P.sourceStages[progress.stage] || P.findingItems;
+    return fill(P.sourceProgress, {
+      stage,
+      percent: percent(progress.percent),
+      done: count(progress.done),
+      total: count(total),
+      unit: unitWord(progress.unit, total)
+    });
+  }
+  function sourceProgressBlock(progress, source, stalledWords) {
+    const box = el("div", progress.stalled ? "source-progress stalled" : "source-progress");
+    const label = progress.stage === "done" ? "" : sourceProgressLabel(progress);
+    if (label)
+      add(box, el("p", "muted", label));
+    if (progress.stage !== "done")
+      add(box, progressBar2(progress.percent, String(source.label || "") + ": " + label));
+    if (stalledWords)
+      add(box, el("p", "stall-line", stalledWords));
+    return box;
+  }
+  function linkExpiry(iso) {
+    const at = typeof iso === "string" ? Date.parse(iso) : NaN;
+    if (!isFinite(at))
+      return "";
+    const left = at - Date.now();
+    if (left <= 0)
+      return P.linkExpired;
+    return fill(P.linkExpires, { n: Math.max(1, Math.ceil(left / 60000)) });
   }
   function itemReason(item, source) {
     const sentence = String(item.sentence || "");
@@ -97686,7 +97790,19 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const current = connectionState();
     return current === "mac_offline" || current === "relay_unavailable";
   }
+  function totalUnknown(progress) {
+    const stages = Array.isArray(progress.details) ? progress.details : [];
+    return stages.length > 0 && stages.every((stage) => !(Number(stage && stage.total) > 0));
+  }
+  function progressFinished(progress) {
+    return !!progress && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
+  }
   function progressText(progress) {
+    const phase = progress.phase === "initial" ? P.progressInitial : P.progressRefresh;
+    if (totalUnknown(progress)) {
+      const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + P.stalled : "";
+      return phase + ": " + P.findingItems + paused;
+    }
     const parts = [fill(P.percentDone, { percent: percent(progress.percent) })];
     if (progressPaused()) {
       parts.push(P.progressPaused);
@@ -97702,7 +97818,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
   }
   function progressSection(progress, withDetails) {
-    if (!progress)
+    if (!progress || progressFinished(progress))
       return null;
     const section = add(el("section", "section"), el("h2", "", P.progress));
     const stalled = progress.stalled && !progressPaused();
@@ -97757,7 +97873,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(card, top);
     if (!top && !data)
       add(card, el("p", "muted", P.loading));
-    if (data && data.progress && !state.relayDown)
+    if (data && data.progress && !state.relayDown && !progressFinished(data.progress))
       add(card, el("p", "progress-line", progressText(data.progress)));
     else if (!top && data)
       add(card, el("p", "", P.upToDate));
@@ -97785,8 +97901,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     add(page, data.blocker ? itemBanner(data.blocker, "blocker", true) : null);
     add(page, staleLine());
-    const listed = (Array.isArray(data.sources) ? data.sources : []).map((source) => "source:" + String(source && source.id));
-    add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : []).filter((item) => item && listed.indexOf(item.id) < 0)));
+    const listed = Array.isArray(data.sources) ? data.sources : [];
+    add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : []).filter((item) => item && !listed.some((source) => aboutSource(item, source)))));
     add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
     add(page, privacySection(data));
     add(page, progressSection(data.progress, true));
@@ -97844,6 +97960,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     compact,
     fullscreen: goFullscreen,
     isDashboard,
+    errorText: inlineError,
     setDashboard: (value) => {
       if (!isDashboard(value))
         return;
@@ -97982,6 +98099,7 @@ function chatgptPickerProgram(kit) {
       const href = result && !result.isError ? authorizeHref(result.structuredContent) : "";
       if (!href) {
         p.phase = "error";
+        p.errorText = kit.errorText(result);
         kit.render("picker:connect:retry");
         return;
       }
@@ -97995,6 +98113,7 @@ function chatgptPickerProgram(kit) {
       if (mine !== session || !p)
         return;
       p.phase = "error";
+      p.errorText = "";
       kit.render("picker:connect:retry");
     });
   }
@@ -98065,7 +98184,7 @@ function chatgptPickerProgram(kit) {
         schedulePoll();
       }, "main"), kit.button(Q.connectReopen, "picker:connect:reopen", () => kit.openLink(p.href), "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", false), "plain")));
     } else {
-      const line = el("p", "", fill(Q.connectFailed, { source: p.label }));
+      const line = el("p", "", p.errorText || fill(Q.connectFailed, { source: p.label }));
       line.setAttribute("role", "alert");
       add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", () => {
         session++;
@@ -99773,7 +99892,8 @@ function chatgptDashboardPageHtml(options = {}) {
       mailSourceId: CHATGPT_MAIL_SOURCE_ID,
       folderSources: CHATGPT_PRIVACY_FOLDER_SOURCES,
       copy: DASHBOARD_CHATGPT_PRIVACY_COPY
-    }
+    },
+    inlineErrorCodes: CHATGPT_INLINE_ERROR_CODES
   };
   return [
     "<!doctype html>",
@@ -99796,11 +99916,12 @@ function chatgptDashboardPageHtml(options = {}) {
 function scriptJson(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_DASHBOARD_STALE_AFTER_MS, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
 var init_page = __esm(() => {
   init_vocabulary();
   init_picker();
   init_privacy();
+  CHATGPT_INLINE_ERROR_CODES = ["sign_in_failed", "source_not_connected", "source_busy", "disconnect_incomplete"];
   CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60000;
   STATUS_TONE = Object.fromEntries(Object.keys(DASHBOARD_STATUS_PRESENTATION).map((status) => [status, DASHBOARD_STATUS_PRESENTATION[status].colorToken]));
   CHATGPT_DASHBOARD_LIGHT = {
@@ -99995,6 +100116,11 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .add-rules{margin-top:0.75rem}
 .fsection>.reason{margin-top:0.375rem}
 .privacy>.intro{margin-bottom:0.5rem}
+.source-progress{display:flex;flex-direction:column;gap:0.25rem;margin-top:0.375rem}
+.source-progress .bar{height:0.375rem}
+.source-progress.stalled .bar-fill{background:var(--warn)}
+.stall-line{font-size:0.875rem}
+.reason.error{color:var(--danger)}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.sheet{margin:1rem -0.75rem -1.5rem;padding:0.5rem 0.75rem 1rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu,.menu-panel{align-items:flex-start}}

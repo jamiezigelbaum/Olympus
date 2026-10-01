@@ -76,6 +76,8 @@ export interface ChatGptPickerKit {
   compact(): boolean;
   fullscreen(): void;
   isDashboard(value: Any): boolean;
+  /** The fixed sentence of a setup tool error the page shows inline (sign_in_failed, …), or ''. */
+  errorText(result: Any): string;
   setDashboard(value: Any): void;
   /** Leave the picker: optional notice, refresh the dashboard when asked, focus the control that opened it. */
   close(notice: string, refresh: boolean, focusKey: string): void;
@@ -192,6 +194,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       const href = result && !result.isError ? authorizeHref(result.structuredContent) : '';
       if (!href) {
         p.phase = 'error';
+        p.errorText = kit.errorText(result);
         kit.render('picker:connect:retry');
         return;
       }
@@ -204,6 +207,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     }, () => {
       if (mine !== session || !p) return;
       p.phase = 'error';
+      p.errorText = '';
       kit.render('picker:connect:retry');
     });
   }
@@ -280,7 +284,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
         kit.button(Q.connectReopen, 'picker:connect:reopen', () => kit.openLink(p.href), 'plain'),
         kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', false), 'plain')));
     } else {
-      const line = el('p', '', fill(Q.connectFailed, { source: p.label }));
+      const line = el('p', '', p.errorText || fill(Q.connectFailed, { source: p.label }));
       line.setAttribute('role', 'alert');
       add(box, line, add(el('div', 'actions'),
         kit.button(Q.tryAgain, 'picker:connect:retry', () => {

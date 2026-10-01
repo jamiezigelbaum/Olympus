@@ -48,6 +48,13 @@ export interface ChatGptDashboardPageOptions {
 }
 
 export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
+
+/**
+ * Setup tool errors whose fixed sentence (the result's text, from
+ * response-builder.ts) is shown beside the control that ran the tool, instead
+ * of reading as an unreachable Mac.
+ */
+export const CHATGPT_INLINE_ERROR_CODES = ['sign_in_failed', 'source_not_connected', 'source_busy', 'disconnect_incomplete'] as const;
 export const CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60_000;
 
 const STATUS_TONE = Object.fromEntries(
@@ -231,6 +238,11 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .add-rules{margin-top:0.75rem}
 .fsection>.reason{margin-top:0.375rem}
 .privacy>.intro{margin-bottom:0.5rem}
+.source-progress{display:flex;flex-direction:column;gap:0.25rem;margin-top:0.375rem}
+.source-progress .bar{height:0.375rem}
+.source-progress.stalled .bar-fill{background:var(--warn)}
+.stall-line{font-size:0.875rem}
+.reason.error{color:var(--danger)}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.sheet{margin:1rem -0.75rem -1.5rem;padding:0.5rem 0.75rem 1rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu,.menu-panel{align-items:flex-start}}
@@ -265,6 +277,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
       folderSources: CHATGPT_PRIVACY_FOLDER_SOURCES,
       copy: DASHBOARD_CHATGPT_PRIVACY_COPY,
     },
+    inlineErrorCodes: CHATGPT_INLINE_ERROR_CODES,
   };
   return [
     '<!doctype html>',

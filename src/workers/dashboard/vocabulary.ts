@@ -979,6 +979,19 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
     messages: { one: 'message', many: 'messages' },
     items: { one: 'item', many: 'items' },
   },
+  /** A source's progress bar: its first unfinished stage. */
+  sourceStages: { listing: 'Finding items', reading: 'Reading', indexing: 'Indexing' },
+  findingItems: 'Finding items',
+  sourceProgress: '{stage} — {percent}%, {done} of {total} {unit}',
+  /** One plain sentence per stalled reason; {source} is the source's name. */
+  stalledReasons: {
+    waiting_for_credentials: 'Paused: Olympus needs you to sign in to {source} again',
+    scope_pending: 'Paused until you choose folders',
+    provider_unavailable: 'Paused: {source} isn\'t responding; Olympus will retry',
+    model_downloading: 'Waiting for the search model to finish downloading',
+  },
+  linkExpires: 'link expires in {n} min',
+  linkExpired: 'link expired',
 } as const;
 
 /**

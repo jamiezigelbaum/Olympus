@@ -34,6 +34,8 @@ export interface ChatGptDashboardClientConfig {
   picker: ChatGptPickerConfig;
   /** The privacy setup screen and the dashboard's Privacy row (privacy.ts). */
   privacy: ChatGptPrivacyConfig;
+  /** Tool error codes whose fixed sentence is shown beside the control that ran the tool. */
+  inlineErrorCodes: readonly string[];
 }
 
 // Loose shapes: the page validates what it reads instead of trusting a type.
@@ -65,6 +67,8 @@ export function chatgptDashboardClient(
     notice: string;
     /** How many always-private rules the last privacy load or save returned (a count, never names); -1 unknown. */
     privacyRules: number;
+    /** The fixed sentence of the last action's error, beside the control with this key. */
+    actionError: { key: string; text: string } | null;
   } = {
     data: null,
     relayDown: false,
@@ -77,6 +81,7 @@ export function chatgptDashboardClient(
     open: {},
     notice: '',
     privacyRules: -1,
+    actionError: null,
   };
 
   // ---- host bridge -------------------------------------------------------
@@ -188,13 +193,30 @@ export function chatgptDashboardClient(
     return false;
   }
 
+  /** The fixed sentence of a tool error the page shows inline, or ''. */
+  function inlineError(result: Any): string {
+    if (!result || !result.isError) return '';
+    const code = result.structuredContent && typeof result.structuredContent.error === 'string' ? result.structuredContent.error : '';
+    if (config.inlineErrorCodes.indexOf(code) < 0) return '';
+    const parts = Array.isArray(result.content) ? result.content : [];
+    const text = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
+    return text ? String(text.text) : '';
+  }
+
   function callTool(name: string, args: Any, key: string): void {
     state.busy = key;
     state.confirming = '';
     state.notice = '';
+    state.actionError = null;
     render();
     request('tools/call', { name, arguments: args || {} }, config.resultTimeoutMs).then((result) => {
       state.busy = '';
+      const failed = inlineError(result);
+      if (failed) {
+        state.actionError = { key, text: failed };
+        render(key);
+        return;
+      }
       if (acceptResult(result, false)) return;
       if (!state.relayDown && name !== config.toolName) refresh();
     }, () => {
@@ -349,6 +371,7 @@ export function chatgptDashboardClient(
       busy.setAttribute('aria-busy', 'true');
       return add(wrap, busy);
     }
+    const failure = state.actionError && state.actionError.key === key ? state.actionError.text : '';
     let action: (() => void) | null = null;
     if (privacy && privacy.handles(fix)) {
       // Tell Olympus what's private, and the Privacy row's Edit, open the Privacy screen in place.
@@ -381,9 +404,16 @@ export function chatgptDashboardClient(
       return add(wrap, button(fix.label, key, () => {
         state.confirming = key;
         render(key + ':no');
-      }, 'plain'));
+      }, 'plain'), errorNote(failure));
     }
-    return add(wrap, button(fix.label, key, action, style));
+    return add(wrap, button(fix.label, key, action, style), errorNote(failure));
+  }
+
+  function errorNote(text: string): HTMLElement | null {
+    if (!text) return null;
+    const note = el('span', 'reason error', text);
+    note.setAttribute('role', 'alert');
+    return note;
   }
 
   // ---- sections ----------------------------------------------------------
@@ -474,7 +504,16 @@ export function chatgptDashboardClient(
   /** The Needs-you item about this source (`source:<id>`), which then lives in the source's own row. */
   function sourceItem(source: Any): Any {
     const items = state.data && Array.isArray(state.data.needsYou) ? state.data.needsYou : [];
-    return items.filter((item: Any) => item && item.id === 'source:' + String(source && source.id))[0] || null;
+    return items.filter((item: Any) => aboutSource(item, source))[0] || null;
+  }
+
+  /** An item is about a source by its id (`source:<id>`), its `source` field, or a sentence that starts with the source's name. */
+  function aboutSource(item: Any, source: Any): boolean {
+    if (!item || !source) return false;
+    const id = String(source.id);
+    if (item.id === 'source:' + id || item.source === id || item.sourceId === id) return true;
+    const label = typeof source.label === 'string' ? source.label : '';
+    return !!label && typeof item.sentence === 'string' && item.sentence.indexOf(label + ' — ') === 0;
   }
 
   function sourceRow(source: Any): HTMLElement {
@@ -493,11 +532,23 @@ export function chatgptDashboardClient(
     if (!off) add(head, el('span', 'sr', ' — ' + (item ? P.needsYou : status)));
     add(main, head);
     const meta: string[] = [];
-    if (item) meta.push(capitalise(itemReason(item, source)));
-    else if (off) meta.push(capitalise(typeof source.detail === 'string' && source.detail ? source.detail : P.notConnected));
-    else if (typeof source.detail === 'string' && source.detail) meta.push(source.detail);
-    if (typeof source.lastSyncAt === 'string' && ago(source.lastSyncAt)) meta.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
-    if (meta.length) add(main, el('p', 'muted', meta.join(' · ')));
+    const progress = sourceProgress(source);
+    const stalledWords = progress ? stalledSentence(progress, source) : '';
+    const detail = typeof source.detail === 'string' && source.detail ? source.detail : '';
+    if (source.connecting) {
+      // Waiting for sign-in: what is happening, and how long the link stays good.
+      meta.push(capitalise(detail || (item ? itemReason(item, source) : '')));
+      const expires = linkExpiry(source.connecting.expiresAt);
+      if (expires) meta.push(expires);
+    } else if (progress) {
+      // The bar and its sentence say what is happening; the line keeps only the last sync.
+    } else if (item) meta.push(capitalise(itemReason(item, source)));
+    else if (off) meta.push(capitalise(detail || P.notConnected));
+    else if (detail) meta.push(detail);
+    if (typeof source.lastSyncAt === 'string' && ago(source.lastSyncAt) && !source.connecting) meta.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
+    const shown = meta.filter((part) => !!part);
+    if (shown.length) add(main, el('p', 'muted', shown.join(' · ')));
+    if (progress) add(main, sourceProgressBlock(progress, source, stalledWords));
     add(row, main);
     const controls = el('div', 'source-actions');
     const context = { id, label: String(source.label || id) };
@@ -528,6 +579,52 @@ export function chatgptDashboardClient(
       add(row, menuBox);
     }
     return row;
+  }
+
+  /** A source's progress while a stage is unfinished, else null. */
+  function sourceProgress(source: Any): Any {
+    const progress = source && source.progress;
+    if (!progress || typeof progress !== 'object' || source.connecting) return null;
+    if (progress.stage === 'done' && !progress.stalled) return null;
+    return progress;
+  }
+
+  function stalledSentence(progress: Any, source: Any): string {
+    if (!progress.stalled || !progress.stalledReason) return '';
+    const words = (P.stalledReasons as Any)[progress.stalledReason];
+    return typeof words === 'string' ? fill(words, { source: String(source.label || '') }) : '';
+  }
+
+  function sourceProgressLabel(progress: Any): string {
+    const total = Number(progress.total) || 0;
+    if (total <= 0) return P.findingItems;
+    const stage = (P.sourceStages as Any)[progress.stage] || P.findingItems;
+    return fill(P.sourceProgress, {
+      stage,
+      percent: percent(progress.percent),
+      done: count(progress.done),
+      total: count(total),
+      unit: unitWord(progress.unit, total),
+    });
+  }
+
+  /** A thin labelled bar under the row's sentence; amber with one plain sentence when stalled. */
+  function sourceProgressBlock(progress: Any, source: Any, stalledWords: string): HTMLElement {
+    const box = el('div', progress.stalled ? 'source-progress stalled' : 'source-progress');
+    const label = progress.stage === 'done' ? '' : sourceProgressLabel(progress);
+    if (label) add(box, el('p', 'muted', label));
+    if (progress.stage !== 'done') add(box, progressBar(progress.percent, String(source.label || '') + ': ' + label));
+    if (stalledWords) add(box, el('p', 'stall-line', stalledWords));
+    return box;
+  }
+
+  /** "link expires in N min" from the connect attempt's expiry. */
+  function linkExpiry(iso: Any): string {
+    const at = typeof iso === 'string' ? Date.parse(iso) : NaN;
+    if (!isFinite(at)) return '';
+    const left = at - Date.now();
+    if (left <= 0) return P.linkExpired;
+    return fill(P.linkExpires, { n: Math.max(1, Math.ceil(left / 60000)) });
   }
 
   /** The reason half of an item's sentence ("Gmail — reauth required" → "reauth required"), else the source's detail. */
@@ -623,7 +720,24 @@ export function chatgptDashboardClient(
     return current === 'mac_offline' || current === 'relay_unavailable';
   }
 
+  /** No total known yet: every stage still counting from zero. */
+  function totalUnknown(progress: Any): boolean {
+    const stages = Array.isArray(progress.details) ? progress.details : [];
+    return stages.length > 0 && stages.every((stage: Any) => !(Number(stage && stage.total) > 0));
+  }
+
+  /** Nothing left and nothing stuck: the line has nothing to say. */
+  function progressFinished(progress: Any): boolean {
+    return !!progress && !progress.stalled && !totalUnknown(progress)
+      && (Number(progress.itemsLeft) || 0) <= 0;
+  }
+
   function progressText(progress: Any): string {
+    const phase = progress.phase === 'initial' ? P.progressInitial : P.progressRefresh;
+    if (totalUnknown(progress)) {
+      const paused = progressPaused() ? ', ' + P.progressPaused : progress.stalled ? ', ' + P.stalled : '';
+      return phase + ': ' + P.findingItems + paused;
+    }
     const parts = [fill(P.percentDone, { percent: percent(progress.percent) })];
     if (progressPaused()) {
       parts.push(P.progressPaused);
@@ -639,7 +753,7 @@ export function chatgptDashboardClient(
   }
 
   function progressSection(progress: Any, withDetails: boolean): HTMLElement | null {
-    if (!progress) return null;
+    if (!progress || progressFinished(progress)) return null;
     const section = add(el('section', 'section'), el('h2', '', P.progress));
     const stalled = progress.stalled && !progressPaused();
     const line = el('p', stalled ? 'progress-line stalled' : progressPaused() ? 'progress-line paused' : 'progress-line', progressText(progress));
@@ -692,7 +806,7 @@ export function chatgptDashboardClient(
       || (data && data.needsYou && data.needsYou[0] ? itemBanner(data.needsYou[0], 'need:' + String(data.needsYou[0].id || 0), false) : null);
     add(card, top);
     if (!top && !data) add(card, el('p', 'muted', P.loading));
-    if (data && data.progress && !state.relayDown) add(card, el('p', 'progress-line', progressText(data.progress)));
+    if (data && data.progress && !state.relayDown && !progressFinished(data.progress)) add(card, el('p', 'progress-line', progressText(data.progress)));
     else if (!top && data) add(card, el('p', '', P.upToDate));
     if (state.canFullscreen) {
       const buttons = card.querySelectorAll('button').length;
@@ -718,8 +832,9 @@ export function chatgptDashboardClient(
     add(page, data.blocker ? itemBanner(data.blocker, 'blocker', true) : null);
     add(page, staleLine());
     // Each fact once: an item about a listed source lives in that source's row, not here too.
-    const listed = (Array.isArray(data.sources) ? data.sources : []).map((source: Any) => 'source:' + String(source && source.id));
-    add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : []).filter((item: Any) => item && listed.indexOf(item.id) < 0)));
+    const listed = Array.isArray(data.sources) ? data.sources : [];
+    add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : [])
+      .filter((item: Any) => item && !listed.some((source: Any) => aboutSource(item, source)))));
     add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
     add(page, privacySection(data));
     add(page, progressSection(data.progress, true));
@@ -779,6 +894,7 @@ export function chatgptDashboardClient(
     compact,
     fullscreen: goFullscreen,
     isDashboard,
+    errorText: inlineError,
     setDashboard: (value: Any) => {
       if (!isDashboard(value)) return;
       state.data = value;
