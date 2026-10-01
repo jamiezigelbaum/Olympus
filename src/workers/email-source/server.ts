@@ -62,6 +62,13 @@ import {
   workerAuthTokenFromEnv,
 } from '../http.ts';
 import { createAnalyst } from '../../core/analyst.ts';
+import {
+  builtInAnalystEnabled,
+  createBuiltInAnalystModel,
+  resolveBuiltInReasoningModel,
+  withBuiltInFallback,
+  type BuiltInAnalystModel,
+} from '../../core/analyst-built-in.ts';
 import { createDelphiAnalystModel } from '../../core/analyst-delphi.ts';
 import { createAnthropicAnalystModel } from '../../core/analyst-anthropic.ts';
 import { createOpenClawInferAnalystModel } from '../../core/analyst-openclaw-infer.ts';
@@ -986,6 +993,7 @@ async function createSovereigntyAnalystMap(input: {
   veniceAnalystTimeoutMs: number | undefined;
   veniceReasoningHeadroomTokens: number | undefined;
   bootSecretResolver?: WorkerBootSecretResolver;
+  builtInAnalyst?: Analyst;
 }): Promise<Map<string, {
   profile: SovereigntyResolvedProfile;
   backend: AnalystBackend;
@@ -1035,7 +1043,57 @@ async function createSovereigntyAnalystMap(input: {
     if (!analyst) continue;
     map.set(id, { profile: resolved, backend, analyst });
   }
+  applyBuiltInPrivateAnalyst(map, securePoolMemberIds, input.builtInAnalyst);
   return map;
+}
+
+/**
+ * The built-in private model backs the Private lane when no other private
+ * analyst is configured: with no constructible Venice member in the secure
+ * pool, each local secure-pool member falls back to the built-in model when
+ * its own model service is not running. A configured, running local service
+ * is always used first, and a configured Venice member leaves the pool as is.
+ * Returns whether the built-in model was wired in.
+ */
+export function applyBuiltInPrivateAnalyst(
+  map: Map<string, { profile: SovereigntyResolvedProfile; backend: AnalystBackend; analyst: Analyst }>,
+  securePoolMemberIds: ReadonlySet<string>,
+  builtInAnalyst: Analyst | undefined,
+): boolean {
+  if (!builtInAnalyst) return false;
+  const members = [...securePoolMemberIds].flatMap((id) => {
+    const entry = map.get(id);
+    return entry ? [[id, entry] as const] : [];
+  });
+  if (members.some(([, entry]) => entry.backend === 'venice')) return false;
+  let wired = false;
+  for (const [id, entry] of members) {
+    if (entry.backend !== 'local') continue;
+    map.set(id, { ...entry, analyst: withBuiltInFallback(entry.analyst, builtInAnalyst) });
+    wired = true;
+  }
+  return wired;
+}
+
+/** Whether this computer's configured local answer model answers /models within a few seconds. */
+async function probeLocalAnalystService(olympusConfig: ReturnType<typeof loadConfig>): Promise<boolean> {
+  try {
+    await new DelphiClient(olympusConfig).listModelsForProfile('source_answer', AbortSignal.timeout(3_000));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The built-in analyst for this worker, or undefined when it is switched off,
+ * unsupported here, or the machine has too little memory. Under the test
+ * runner it is never created: a test must not fetch model weights.
+ */
+function createWorkerBuiltInAnalystModel(env: Record<string, string | undefined>): BuiltInAnalystModel | undefined {
+  if (env.NODE_ENV === 'test' || !builtInAnalystEnabled(env)) return undefined;
+  if (!resolveBuiltInReasoningModel(env)) return undefined;
+  return createBuiltInAnalystModel({ env });
 }
 
 /**
@@ -2941,6 +2999,7 @@ export async function main(): Promise<void> {
           ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }
           : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
       );
+      const builtInAnalystModel = createWorkerBuiltInAnalystModel(process.env);
       const sovereigntyAnalysts = await createSovereigntyAnalystMap({
         engine: sovereigntyEngine,
         olympusConfig,
@@ -2949,7 +3008,18 @@ export async function main(): Promise<void> {
         veniceAnalystTimeoutMs,
         veniceReasoningHeadroomTokens,
         bootSecretResolver,
+        ...(builtInAnalystModel
+          ? { builtInAnalyst: createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true }) }
+          : {}),
       });
+      if (builtInAnalystModel) {
+        // Start the one-time download at boot when this computer's configured
+        // local model service is not answering, so the dashboard shows the
+        // install right away instead of at the first Private question.
+        void probeLocalAnalystService(olympusConfig).then((up) => {
+          if (!up) void builtInAnalystModel.prepare();
+        });
+      }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
       return createAnalystSourceIndexAnswerHandler({

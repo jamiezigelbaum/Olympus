@@ -92327,6 +92327,921 @@ var init_email_source = __esm(() => {
   ];
 });
 
+// src/workers/source-index/built-in-reasoning/manifest.ts
+function unslothQwen(size, revision, bytes, sha2566) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256: sha2566
+  };
+}
+function pickBuiltInReasoningModel(totalMemoryBytes, choice = "auto", models = BUILT_IN_REASONING_MODELS) {
+  const wanted = choice.trim().toLowerCase() || "auto";
+  const exact = models.find((model) => model.modelId === wanted);
+  if (exact)
+    return totalMemoryBytes >= exact.minimumMemoryBytes ? exact : undefined;
+  if (wanted === "small" || wanted === "standard" || wanted === "large") {
+    const sized = models.find((model) => model.sizeClass === wanted);
+    return sized && totalMemoryBytes >= sized.minimumMemoryBytes ? sized : undefined;
+  }
+  if (wanted !== "auto")
+    return;
+  const standard = models.find((model) => model.sizeClass === "standard");
+  if (standard && totalMemoryBytes >= standard.minimumMemoryBytes)
+    return standard;
+  const small = models.find((model) => model.sizeClass === "small");
+  if (small && totalMemoryBytes >= small.minimumMemoryBytes)
+    return small;
+  return;
+}
+function runtimeArchiveFor(platform2, runtime = LLAMA_SERVER_RUNTIME) {
+  return runtime.archives.find((archive) => archive.platform === platform2);
+}
+var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, BUILT_IN_REASONING_MODELS, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME;
+var init_manifest2 = __esm(() => {
+  GIB = 1024 ** 3;
+  QWEN35_2B = {
+    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+    displayName: "Qwen3.5 2B",
+    sizeClass: "small",
+    baseRepository: "Qwen/Qwen3.5-2B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-2B-GGUF",
+    revision: QWEN35_2B_REVISION,
+    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_4B = {
+    modelId: "qwen3.5-4b-q4_k_m-e87f176",
+    displayName: "Qwen3.5 4B",
+    sizeClass: "standard",
+    baseRepository: "Qwen/Qwen3.5-4B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-4B-GGUF",
+    revision: QWEN35_4B_REVISION,
+    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_9B = {
+    modelId: "qwen3.5-9b-q4_k_m-3885219",
+    displayName: "Qwen3.5 9B",
+    sizeClass: "large",
+    baseRepository: "Qwen/Qwen3.5-9B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-9B-GGUF",
+    revision: QWEN35_9B_REVISION,
+    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  BUILT_IN_REASONING_MODELS = [QWEN35_2B, QWEN35_4B, QWEN35_9B];
+  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+  LLAMA_SERVER_RUNTIME = {
+    release: LLAMA_CPP_RELEASE,
+    license: "MIT",
+    archives: [
+      {
+        platform: "darwin-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        bytes: 11827796,
+        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+        gpu: true
+      },
+      {
+        platform: "linux-x64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        bytes: 17544875,
+        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+        gpu: false
+      },
+      {
+        platform: "linux-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        bytes: 13590823,
+        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+        gpu: false
+      }
+    ]
+  };
+});
+
+// src/workers/source-index/built-in-reasoning/install.ts
+import { spawnSync as spawnSync9 } from "node:child_process";
+import { createHash as createHash49, randomUUID as randomUUID20 } from "node:crypto";
+import {
+  closeSync as closeSync11,
+  createReadStream,
+  existsSync as existsSync42,
+  mkdirSync as mkdirSync35,
+  openSync as openSync11,
+  readFileSync as readFileSync41,
+  readdirSync as readdirSync5,
+  renameSync as renameSync11,
+  rmSync as rmSync11,
+  statSync as statSync15,
+  writeFileSync as writeFileSync13,
+  writeSync as writeSync2
+} from "node:fs";
+import { homedir as homedir50 } from "node:os";
+import { dirname as dirname46, isAbsolute as isAbsolute12, join as join64 } from "node:path";
+function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform()) {
+  const configured = env[BUILT_IN_REASONING_DIR_ENV]?.trim();
+  const dataRoot = env.XDG_DATA_HOME?.trim() || join64(env.HOME?.trim() || homedir50(), ".local", "share");
+  const root = configured || join64(dataRoot, "openclaw", "olympus", "models", "built-in-reasoning");
+  if (!isAbsolute12(root))
+    throw new TypeError("The built-in reasoning directory must be an absolute path.");
+  return {
+    root,
+    modelDir: join64(root, model.modelId),
+    runtimeDir: join64(root, `llama.cpp-${runtime.release}-${platform2}`),
+    statusPath: join64(root, "status.json"),
+    lockPath: join64(root, "install.lock")
+  };
+}
+function currentPlatform() {
+  return `${process.platform}-${process.arch}`;
+}
+function readBuiltInReasoningStatus(model, env = process.env) {
+  const fallback = {
+    state: "not_started",
+    modelId: model.modelId,
+    percent: 0,
+    label: "Built-in private model not downloaded yet",
+    bytesDone: 0,
+    bytesTotal: 0,
+    updatedAt: new Date(0).toISOString()
+  };
+  try {
+    const parsed = JSON.parse(readFileSync41(builtInReasoningPaths(model, env).statusPath, "utf8"));
+    return parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+async function installBuiltInReasoning(options) {
+  const model = options.model;
+  const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
+  const platform2 = options.platform ?? currentPlatform();
+  const paths = builtInReasoningPaths(model, options.env, runtime, platform2);
+  const reporter = new ProgressReporter(paths.statusPath, model.modelId, options.now, options.onProgress);
+  const modelPath = join64(paths.modelDir, model.file.name);
+  try {
+    const archive = runtimeArchiveFor(platform2, runtime);
+    if (!archive) {
+      throw new BuiltInReasoningInstallError("unsupported_platform", `The built-in private model does not run on ${platform2}.`);
+    }
+    ensureDirectory(paths.root);
+    const installed = () => ({
+      modelPath,
+      serverPath: findServerBinary(paths.runtimeDir),
+      gpu: archive.gpu
+    });
+    if (existsSync42(modelPath) && runtimeInstalled(paths.runtimeDir, archive)) {
+      await verifyModelFile(modelPath, model, reporter);
+      return installed();
+    }
+    await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
+      if (existsSync42(modelPath) && runtimeInstalled(paths.runtimeDir, archive))
+        return;
+      const fetchImpl = options.fetchImpl ?? fetch;
+      const needModel = !existsSync42(modelPath);
+      const needRuntime = !runtimeInstalled(paths.runtimeDir, archive);
+      reporter.begin((needModel ? model.file.bytes : 0) + (needRuntime ? archive.bytes : 0));
+      if (needRuntime) {
+        await installRuntime(fetchImpl, paths.runtimeDir, archive, reporter, options.extractArchive ?? extractWithTar);
+      }
+      if (needModel) {
+        ensureDirectory(paths.modelDir);
+        await downloadVerified(fetchImpl, model.file.url, modelPath, model.file.bytes, model.file.sha256, reporter, `Downloading the built-in private model (${model.displayName})`);
+      }
+    });
+    await verifyModelFile(modelPath, model, reporter);
+    if (!runtimeInstalled(paths.runtimeDir, archive)) {
+      throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server did not install completely.");
+    }
+    return installed();
+  } catch (error2) {
+    const failure = error2 instanceof BuiltInReasoningInstallError ? error2 : new BuiltInReasoningInstallError("disk_write_failed", error2 instanceof Error ? error2.message : String(error2));
+    reporter.fail(failure.reason, failure.message);
+    throw failure;
+  }
+}
+function reportBuiltInReasoningState(options, state, failure) {
+  const paths = builtInReasoningPaths(options.model, options.env);
+  const reporter = new ProgressReporter(paths.statusPath, options.model.modelId, options.now, options.onProgress);
+  if (state === "failed" && failure)
+    reporter.fail(failure.reason, failure.message);
+  else
+    reporter.set(state, state === "ready" ? "Built-in private model ready" : "Starting the built-in private model", 100);
+}
+function findServerBinary(runtimeDir) {
+  const marker = readRuntimeMarker(runtimeDir);
+  if (marker?.serverPath)
+    return join64(runtimeDir, marker.serverPath);
+  throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server is not installed.");
+}
+async function verifyModelFile(path, model, reporter) {
+  const key = `${path}:${model.file.sha256}`;
+  verifiedThisProcess ??= new Set;
+  if (verifiedThisProcess.has(key))
+    return;
+  reporter.set("verifying", "Checking the built-in private model", 99);
+  const size = statSync15(path).size;
+  const digest2 = size === model.file.bytes ? await sha256File2(path) : undefined;
+  if (digest2 !== model.file.sha256) {
+    rmSync11(path, { force: true });
+    throw new BuiltInReasoningInstallError("checksum_mismatch", `${model.file.name} did not match its pinned checksum and was removed; it will download again.`);
+  }
+  verifiedThisProcess.add(key);
+}
+function readRuntimeMarker(runtimeDir) {
+  try {
+    return JSON.parse(readFileSync41(join64(runtimeDir, RUNTIME_MARKER), "utf8"));
+  } catch {
+    return;
+  }
+}
+function runtimeInstalled(runtimeDir, archive) {
+  const marker = readRuntimeMarker(runtimeDir);
+  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync42(join64(runtimeDir, marker.serverPath));
+}
+async function installRuntime(fetchImpl, runtimeDir, archive, reporter, extract) {
+  const staging = `${runtimeDir}.staging-${randomUUID20()}`;
+  ensureDirectory(staging);
+  try {
+    const archivePath = join64(staging, archive.name);
+    await downloadVerified(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server");
+    reporter.set("verifying", "Unpacking the built-in model server");
+    try {
+      extract(archivePath, staging);
+    } catch (error2) {
+      throw new BuiltInReasoningInstallError("runtime_load_failed", `The built-in model server could not be unpacked (${error2 instanceof Error ? error2.message : String(error2)}).`);
+    }
+    rmSync11(archivePath, { force: true });
+    const server = locateFile(staging, SERVER_BINARY);
+    if (!server) {
+      throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
+    }
+    const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
+    writeFileSync13(join64(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+`);
+    rmSync11(runtimeDir, { recursive: true, force: true });
+    renameSync11(staging, runtimeDir);
+  } catch (error2) {
+    rmSync11(staging, { recursive: true, force: true });
+    throw error2;
+  }
+}
+function extractWithTar(archivePath, targetDir) {
+  const result = spawnSync9("tar", ["-xzf", archivePath, "-C", targetDir], { stdio: ["ignore", "ignore", "pipe"] });
+  if (result.status !== 0) {
+    throw new Error(result.stderr?.toString().trim() || `tar exited with ${result.status ?? result.signal}`);
+  }
+}
+function locateFile(root, name, depth = 0, prefix = "") {
+  let entries;
+  try {
+    entries = readdirSync5(join64(root, prefix));
+  } catch {
+    return;
+  }
+  if (entries.includes(name)) {
+    const relative7 = prefix ? `${prefix}/${name}` : name;
+    try {
+      if (statSync15(join64(root, relative7)).isFile())
+        return relative7;
+    } catch {}
+  }
+  if (depth >= 2)
+    return;
+  for (const entry of entries) {
+    const child = prefix ? `${prefix}/${entry}` : entry;
+    try {
+      if (!statSync15(join64(root, child)).isDirectory())
+        continue;
+    } catch {
+      continue;
+    }
+    const found = locateFile(root, name, depth + 1, child);
+    if (found)
+      return found;
+  }
+  return;
+}
+async function downloadVerified(fetchImpl, url, target, expectedBytes, expectedSha256, reporter, label) {
+  const partial2 = `${target}.partial`;
+  const hash = createHash49("sha256");
+  let received = 0;
+  if (existsSync42(partial2)) {
+    const size = statSync15(partial2).size;
+    if (size > 0 && size < expectedBytes) {
+      await hashInto(partial2, hash);
+      received = size;
+      reporter.advance(size, label);
+    } else {
+      rmSync11(partial2, { force: true });
+    }
+  }
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      redirect: "follow",
+      ...received > 0 ? { headers: { Range: `bytes=${received}-` } } : {}
+    });
+  } catch (error2) {
+    throw new BuiltInReasoningInstallError("download_failed", `Could not reach the download server for the built-in private model (${error2 instanceof Error ? error2.message : String(error2)}).`);
+  }
+  if (received > 0 && response.status !== 206) {
+    rmSync11(partial2, { force: true });
+    await response.body?.cancel().catch(() => {
+      return;
+    });
+    reporter.advance(-received, label);
+    return downloadVerified(fetchImpl, url, target, expectedBytes, expectedSha256, reporter, label);
+  }
+  if (!response.ok || !response.body) {
+    await response.body?.cancel().catch(() => {
+      return;
+    });
+    throw new BuiltInReasoningInstallError("download_failed", `The built-in private model download failed (HTTP ${response.status}).`);
+  }
+  reporter.set("downloading", label);
+  let fd;
+  try {
+    fd = openSync11(partial2, received > 0 ? "a" : "w", 420);
+  } catch (error2) {
+    throw new BuiltInReasoningInstallError("disk_write_failed", `Could not write ${partial2}: ${String(error2)}`);
+  }
+  try {
+    const reader = response.body.getReader();
+    for (;; ) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      received += value.byteLength;
+      if (received > expectedBytes) {
+        await reader.cancel().catch(() => {
+          return;
+        });
+        closeSync11(fd);
+        rmSync11(partial2, { force: true });
+        throw new BuiltInReasoningInstallError("checksum_mismatch", `${url} is larger than its pinned size.`);
+      }
+      hash.update(value);
+      try {
+        writeSync2(fd, value);
+      } catch (error2) {
+        throw new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error2)}`);
+      }
+      reporter.advance(value.byteLength, label);
+    }
+  } catch (error2) {
+    try {
+      closeSync11(fd);
+    } catch {}
+    if (error2 instanceof BuiltInReasoningInstallError)
+      throw error2;
+    throw new BuiltInReasoningInstallError("download_failed", `The built-in private model download was interrupted (${error2 instanceof Error ? error2.message : String(error2)}).`);
+  }
+  closeSync11(fd);
+  if (received !== expectedBytes || hash.digest("hex") !== expectedSha256) {
+    rmSync11(partial2, { force: true });
+    throw new BuiltInReasoningInstallError("checksum_mismatch", `${url} did not match its pinned checksum; nothing was installed.`);
+  }
+  renameSync11(partial2, target);
+}
+function hashInto(path, hash) {
+  return new Promise((resolve10, reject) => {
+    createReadStream(path).on("data", (chunk) => hash.update(chunk)).on("error", reject).on("end", () => resolve10());
+  });
+}
+async function sha256File2(path) {
+  const hash = createHash49("sha256");
+  await hashInto(path, hash);
+  return hash.digest("hex");
+}
+async function withInstallLock(lockPath, waitMs, run) {
+  const deadline = Date.now() + waitMs;
+  for (;; ) {
+    if (tryAcquireLock(lockPath))
+      break;
+    if (Date.now() > deadline) {
+      throw new BuiltInReasoningInstallError("download_failed", "Another Olympus process is still installing the built-in private model.");
+    }
+    await new Promise((resolve10) => setTimeout(resolve10, LOCK_POLL_MS));
+  }
+  try {
+    await run();
+  } finally {
+    rmSync11(lockPath, { force: true });
+  }
+}
+function tryAcquireLock(lockPath) {
+  try {
+    const fd = openSync11(lockPath, "wx", 384);
+    writeSync2(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    closeSync11(fd);
+    return true;
+  } catch {
+    if (lockIsStale(lockPath)) {
+      rmSync11(lockPath, { force: true });
+      return tryAcquireLock(lockPath);
+    }
+    return false;
+  }
+}
+function lockIsStale(lockPath) {
+  try {
+    const holder = JSON.parse(readFileSync41(lockPath, "utf8"));
+    if (typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS)
+      return true;
+    if (typeof holder.pid === "number" && holder.pid !== process.pid) {
+      try {
+        process.kill(holder.pid, 0);
+        return false;
+      } catch (error2) {
+        return error2.code === "ESRCH";
+      }
+    }
+    return false;
+  } catch {
+    try {
+      return Date.now() - statSync15(lockPath).mtimeMs > STALE_LOCK_MS;
+    } catch {
+      return true;
+    }
+  }
+}
+function ensureDirectory(path) {
+  try {
+    mkdirSync35(path, { recursive: true, mode: 448 });
+  } catch (error2) {
+    throw new BuiltInReasoningInstallError("disk_write_failed", `Could not create ${path}: ${String(error2)}`);
+  }
+}
+
+class ProgressReporter {
+  statusPath;
+  modelId;
+  now;
+  listener;
+  status;
+  lastWriteMs;
+  constructor(statusPath, modelId, now, listener) {
+    this.statusPath = statusPath;
+    this.modelId = modelId;
+    this.now = now ?? (() => new Date);
+    this.listener = listener;
+    this.lastWriteMs = 0;
+    this.status = {
+      state: "not_started",
+      modelId,
+      percent: 0,
+      label: "",
+      bytesDone: 0,
+      bytesTotal: 0,
+      updatedAt: this.now().toISOString()
+    };
+  }
+  begin(bytesTotal) {
+    this.status = { ...this.status, bytesTotal, bytesDone: 0 };
+    this.set("downloading", "Downloading the built-in private model", 0);
+  }
+  advance(bytes, label) {
+    const bytesDone = Math.max(0, this.status.bytesDone + bytes);
+    const percent = this.status.bytesTotal > 0 ? Math.min(99, Math.floor(bytesDone / this.status.bytesTotal * 100)) : 0;
+    this.status = { ...this.status, bytesDone, percent, label, state: "downloading" };
+    this.emit(false);
+  }
+  set(state, label, percent = this.status.percent) {
+    const { failure: _failure, ...rest } = this.status;
+    this.status = { ...rest, state, label, percent };
+    this.emit(true);
+  }
+  fail(reason, message) {
+    this.status = {
+      ...this.status,
+      state: "failed",
+      label: "The built-in private model could not be installed",
+      failure: { reason, message }
+    };
+    this.emit(true);
+  }
+  emit(force) {
+    const nowMs = this.now().getTime();
+    this.status = { ...this.status, modelId: this.modelId, updatedAt: new Date(nowMs).toISOString() };
+    this.listener?.(this.status);
+    if (!force && nowMs - this.lastWriteMs < PROGRESS_WRITE_INTERVAL_MS)
+      return;
+    this.lastWriteMs = nowMs;
+    try {
+      mkdirSync35(dirname46(this.statusPath), { recursive: true, mode: 448 });
+      const temporary = `${this.statusPath}.${process.pid}.tmp`;
+      writeFileSync13(temporary, `${JSON.stringify(this.status)}
+`, { mode: 384 });
+      renameSync11(temporary, this.statusPath);
+    } catch {}
+  }
+}
+var BUILT_IN_REASONING_DIR_ENV = "OLYMPUS_BUILT_IN_REASONING_DIR", STALE_LOCK_MS, LOCK_POLL_MS = 1000, PROGRESS_WRITE_INTERVAL_MS = 500, RUNTIME_MARKER = "olympus-runtime.json", SERVER_BINARY = "llama-server", BuiltInReasoningInstallError, verifiedThisProcess;
+var init_install = __esm(() => {
+  init_manifest2();
+  STALE_LOCK_MS = 60 * 60000;
+  BuiltInReasoningInstallError = class BuiltInReasoningInstallError extends Error {
+    reason;
+    constructor(reason, message) {
+      super(message);
+      this.name = "BuiltInReasoningInstallError";
+      this.reason = reason;
+    }
+  };
+});
+
+// src/workers/source-index/built-in-reasoning/server.ts
+import { spawn as spawn4 } from "node:child_process";
+import { randomBytes as randomBytes14 } from "node:crypto";
+import { mkdtempSync as mkdtempSync2, rmSync as rmSync12, writeFileSync as writeFileSync14 } from "node:fs";
+import { createServer as createServer2 } from "node:net";
+import { availableParallelism, setPriority, tmpdir as tmpdir7 } from "node:os";
+import { join as join65 } from "node:path";
+function builtInReasoningThreads(parallelism = availableParallelism()) {
+  return Math.max(1, Math.min(4, Math.floor(parallelism / 2)));
+}
+function llamaServerArguments(launch, port, tokenFile) {
+  return [
+    "--model",
+    launch.modelPath,
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(port),
+    "--api-key-file",
+    tokenFile,
+    "--ctx-size",
+    String(launch.contextTokens),
+    "--parallel",
+    "1",
+    "--threads",
+    String(launch.threads),
+    "--threads-batch",
+    String(launch.threads),
+    "--n-gpu-layers",
+    launch.gpu ? "999" : "0",
+    "--prio",
+    "-1",
+    "--reasoning",
+    "off",
+    "--no-webui",
+    "--cache-ram",
+    "0",
+    "--no-slots",
+    "--log-disable",
+    ...launch.idleShutdownSeconds > 0 ? ["--sleep-idle-seconds", String(launch.idleShutdownSeconds)] : []
+  ];
+}
+function createLlamaServerHandle(launch, options = {}) {
+  const spawnImpl = options.spawnImpl ?? spawn4;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  let child;
+  let endpoint2;
+  let starting;
+  let idleTimer;
+  let tokenDir;
+  let exitHookInstalled = false;
+  const cleanupTokenDir = () => {
+    if (tokenDir)
+      rmSync12(tokenDir, { recursive: true, force: true });
+    tokenDir = undefined;
+  };
+  const killChild = () => {
+    const current = child;
+    child = undefined;
+    endpoint2 = undefined;
+    if (current && current.exitCode === null && current.signalCode === null) {
+      current.kill("SIGTERM");
+    }
+    cleanupTokenDir();
+  };
+  const armIdle = () => {
+    if (idleTimer)
+      clearTimeout(idleTimer);
+    idleTimer = undefined;
+    if (launch.idleShutdownSeconds <= 0 || !child)
+      return;
+    idleTimer = setTimeout(killChild, launch.idleShutdownSeconds * 1000);
+    idleTimer.unref?.();
+  };
+  const start = async (signal) => {
+    const port = await freeLoopbackPort();
+    const token = randomBytes14(24).toString("base64url");
+    tokenDir = mkdtempSync2(join65(tmpdir7(), "olympus-built-in-model-"));
+    const tokenFile = join65(tokenDir, "token");
+    writeFileSync14(tokenFile, `${token}
+`, { mode: 384 });
+    const spawned = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
+      stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env, LLAMA_ARG_HOST: "127.0.0.1" },
+      detached: false
+    });
+    child = spawned;
+    let stderrTail = "";
+    spawned.stderr?.on("data", (chunk) => {
+      stderrTail = `${stderrTail}${chunk.toString()}`.slice(-2000);
+    });
+    spawned.on("exit", () => {
+      if (child === spawned) {
+        child = undefined;
+        endpoint2 = undefined;
+        cleanupTokenDir();
+      }
+    });
+    if (spawned.pid !== undefined) {
+      try {
+        setPriority(spawned.pid, 10);
+      } catch {}
+    }
+    if (!exitHookInstalled) {
+      exitHookInstalled = true;
+      process.once("exit", killChild);
+    }
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const deadline = Date.now() + launch.startupTimeoutMs;
+    for (;; ) {
+      if (signal?.aborted) {
+        killChild();
+        throw signal.reason instanceof Error ? signal.reason : new LlamaServerStartError("The request was cancelled.");
+      }
+      if (child !== spawned) {
+        throw new LlamaServerStartError(`The built-in model server exited while starting.${stderrTail ? ` ${lastLine(stderrTail)}` : ""}`);
+      }
+      if (await healthy(fetchImpl, baseUrl))
+        break;
+      if (Date.now() > deadline) {
+        killChild();
+        throw new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`);
+      }
+      await new Promise((resolve10) => setTimeout(resolve10, HEALTH_POLL_MS));
+    }
+    endpoint2 = { baseUrl, token };
+    return endpoint2;
+  };
+  return {
+    async ensureRunning(signal) {
+      if (idleTimer)
+        clearTimeout(idleTimer);
+      idleTimer = undefined;
+      if (endpoint2 && child)
+        return endpoint2;
+      starting ??= start(signal).finally(() => {
+        starting = undefined;
+      });
+      return starting;
+    },
+    touch() {
+      armIdle();
+    },
+    async stop() {
+      if (idleTimer)
+        clearTimeout(idleTimer);
+      idleTimer = undefined;
+      killChild();
+    },
+    get pid() {
+      return child?.pid;
+    }
+  };
+}
+async function healthy(fetchImpl, baseUrl) {
+  try {
+    const response = await fetchImpl(`${baseUrl}/health`, { signal: AbortSignal.timeout(2000) });
+    await response.body?.cancel().catch(() => {
+      return;
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+function freeLoopbackPort() {
+  return new Promise((resolve10, reject) => {
+    const server = createServer2();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close(() => port > 0 ? resolve10(port) : reject(new LlamaServerStartError("No free loopback port.")));
+    });
+  });
+}
+function lastLine(text) {
+  const lines = text.trim().split(`
+`);
+  return (lines[lines.length - 1] ?? "").slice(0, 300);
+}
+var LlamaServerStartError, HEALTH_POLL_MS = 250;
+var init_server4 = __esm(() => {
+  LlamaServerStartError = class LlamaServerStartError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "LlamaServerStartError";
+    }
+  };
+});
+
+// src/core/analyst-built-in.ts
+import { totalmem } from "node:os";
+function builtInAnalystEnabled(env = process.env, platform2 = `${process.platform}-${process.arch}`) {
+  const raw = env[BUILT_IN_ANALYST_ENV]?.trim().toLowerCase();
+  if (raw === "off" || raw === "false" || raw === "0" || raw === "no")
+    return false;
+  if (!runtimeArchiveFor(platform2))
+    return false;
+  if (raw === "on" || raw === "true" || raw === "1" || raw === "yes")
+    return true;
+  return platform2 === "darwin-arm64";
+}
+function resolveBuiltInReasoningModel(env = process.env, totalMemoryBytes = totalmem()) {
+  return pickBuiltInReasoningModel(totalMemoryBytes, env[BUILT_IN_ANALYST_MODEL_ENV]?.trim() || "auto");
+}
+function createBuiltInAnalystModel(options = {}) {
+  const env = options.env ?? process.env;
+  const totalMemoryBytes = options.totalMemoryBytes ?? totalmem();
+  const spec = options.model ?? resolveBuiltInReasoningModel(env, totalMemoryBytes);
+  if (!spec) {
+    throw new OperationError("config_error", "This computer does not have enough memory for the built-in private model.", "Use a local model service or Venice Private for Private answers.");
+  }
+  const install = options.install ?? installBuiltInReasoning;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const installerOptions = {
+    model: spec,
+    env,
+    ...options.platform ? { platform: options.platform } : {},
+    ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}
+  };
+  let installed;
+  let installing;
+  let server;
+  const ensureInstalled = () => {
+    if (installed)
+      return Promise.resolve(installed);
+    installing ??= install(installerOptions).then((result) => {
+      installed = result;
+      return result;
+    }).finally(() => {
+      installing = undefined;
+    });
+    return installing;
+  };
+  const ensureServer = (paths) => {
+    server ??= (options.createServer ?? createLlamaServerHandle)({
+      serverPath: paths.serverPath,
+      modelPath: paths.modelPath,
+      contextTokens: spec.contextTokens,
+      gpu: paths.gpu,
+      threads: builtInReasoningThreads(),
+      idleShutdownSeconds: options.idleShutdownSeconds ?? DEFAULT_IDLE_SHUTDOWN_SECONDS,
+      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS3
+    });
+    return server;
+  };
+  const model = {
+    name: BUILT_IN_ANALYST_NAME,
+    spec,
+    async prepare() {
+      try {
+        await ensureInstalled();
+      } catch {}
+    },
+    status() {
+      return readBuiltInReasoningStatus(spec, env);
+    },
+    async stop() {
+      await server?.stop();
+    },
+    async complete(request) {
+      let paths = installed;
+      if (!paths) {
+        const pending = ensureInstalled();
+        if (options.waitForInstall) {
+          paths = await pending.catch((error2) => {
+            throw unavailable(error2);
+          });
+        } else {
+          pending.catch(() => {
+            return;
+          });
+          const status = readBuiltInReasoningStatus(spec, env);
+          throw new OperationError("argus_unreachable", status.state === "failed" ? `The built-in private model could not be installed: ${status.failure?.message ?? "unknown error"}` : `The built-in private model is still downloading (${status.percent}%).`, "Private answers use the built-in model once its download finishes; nothing needs to be done.");
+        }
+      }
+      const handle = ensureServer(paths);
+      let endpoint2;
+      try {
+        if (!handle.pid)
+          reportBuiltInReasoningState({ model: spec, env }, "loading");
+        endpoint2 = await handle.ensureRunning(request.signal);
+        reportBuiltInReasoningState({ model: spec, env }, "ready");
+      } catch (error2) {
+        if (request.signal?.aborted)
+          throw error2;
+        reportBuiltInReasoningState({ model: spec, env }, "failed", {
+          reason: "runtime_load_failed",
+          message: error2 instanceof Error ? error2.message : String(error2)
+        });
+        throw unavailable(error2);
+      }
+      try {
+        return await chatCompletion(fetchImpl, endpoint2, spec, request, requestTimeoutMs);
+      } finally {
+        handle.touch();
+      }
+    }
+  };
+  return model;
+}
+function unavailable(error2) {
+  if (error2 instanceof OperationError)
+    return error2;
+  const message = error2 instanceof Error ? error2.message : String(error2);
+  return new OperationError("argus_unreachable", error2 instanceof BuiltInReasoningInstallError ? `The built-in private model could not be installed: ${message}` : `The built-in private model is not available: ${message}`, "Check the dashboard for the built-in model status.");
+}
+async function chatCompletion(fetchImpl, endpoint2, spec, request, timeoutMs) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const signal = request.signal ? AbortSignal.any([timeout, request.signal]) : timeout;
+  let response;
+  try {
+    response = await fetchImpl(`${endpoint2.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${endpoint2.token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        messages: [
+          { role: "system", content: request.system },
+          { role: "user", content: request.prompt }
+        ],
+        temperature: 0,
+        max_tokens: maxTokensForChars2(request.maxOutputChars),
+        response_format: { type: "json_object" }
+      }),
+      signal
+    });
+  } catch (error2) {
+    if (request.signal?.aborted)
+      throw error2;
+    throw new OperationError("argus_unreachable", `The built-in private model did not answer${error2 instanceof Error && error2.name === "TimeoutError" ? ` within ${Math.round(timeoutMs / 1000)}s` : ""}.`, "It runs on this computer; a busy machine answers slowly.");
+  }
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new OperationError("argus_error", `The built-in private model returned HTTP ${response.status}.`, body.slice(0, 300) || undefined);
+  }
+  const payload = await response.json();
+  const content = payload.choices?.[0]?.message?.content;
+  if (typeof content !== "string") {
+    throw new OperationError("argus_error", "The built-in private model returned no text.");
+  }
+  return { text: content, modelId: `${BUILT_IN_ANALYST_NAME}/${spec.modelId}` };
+}
+function maxTokensForChars2(chars) {
+  if (chars === undefined)
+    return 1024;
+  return Math.max(512, Math.ceil(chars / 2));
+}
+function withBuiltInFallback(primary, builtIn) {
+  return {
+    async analyze(pack, options) {
+      try {
+        return await primary.analyze(pack, options);
+      } catch (error2) {
+        if (!isLocalServiceDown(error2))
+          throw error2;
+        return builtIn.analyze(pack, options);
+      }
+    }
+  };
+}
+function isLocalServiceDown(error2) {
+  return error2 instanceof OperationError && error2.code === "argus_unreachable" && !/timed out/i.test(error2.message);
+}
+var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 300000, DEFAULT_IDLE_SHUTDOWN_SECONDS = 600, DEFAULT_STARTUP_TIMEOUT_MS3 = 120000;
+var init_analyst_built_in = __esm(() => {
+  init_analyst();
+  init_operation_error();
+  init_install();
+  init_manifest2();
+  init_server4();
+});
+
 // src/core/analyst-delphi.ts
 function createDelphiAnalystModel(delphi, options) {
   const preflightTimeoutMs = options.preflightTimeoutMs ?? DEFAULT_PREFLIGHT_TIMEOUT_MS;
@@ -92341,7 +93256,7 @@ function createDelphiAnalystModel(delphi, options) {
         temperature: 0,
         ...options.profile ? { profile: options.profile } : {},
         ...options.lane ? { lane: options.lane } : {},
-        ...request.maxOutputChars !== undefined ? { maxTokens: maxTokensForChars2(request.maxOutputChars) } : {},
+        ...request.maxOutputChars !== undefined ? { maxTokens: maxTokensForChars3(request.maxOutputChars) } : {},
         ...request.signal ? { signal: request.signal } : {}
       };
       const result = await delphi.complete(completeOptions);
@@ -92362,7 +93277,7 @@ async function assertRouteAnswers(delphi, options, timeoutMs, signal) {
     clearTimeout(timer);
   }
 }
-function maxTokensForChars2(chars) {
+function maxTokensForChars3(chars) {
   return Math.max(256, Math.ceil(chars / 3));
 }
 var DEFAULT_PREFLIGHT_TIMEOUT_MS = 5000;
@@ -92397,7 +93312,7 @@ function createAnthropicAnalystModel(options) {
           },
           body: JSON.stringify({
             model,
-            max_tokens: request.maxOutputChars !== undefined ? maxTokensForChars3(request.maxOutputChars) : maxTokens,
+            max_tokens: request.maxOutputChars !== undefined ? maxTokensForChars4(request.maxOutputChars) : maxTokens,
             system: request.system,
             messages: [{ role: "user", content: request.prompt }]
           }),
@@ -92437,7 +93352,7 @@ function parseAnthropicText(data) {
   }).filter(Boolean).join(`
 `).trim();
 }
-function maxTokensForChars3(chars) {
+function maxTokensForChars4(chars) {
   return Math.max(256, Math.ceil(chars / 3));
 }
 async function safeText4(response) {
@@ -92618,37 +93533,37 @@ var BLOCK = 512;
 var init_tar = () => {};
 
 // src/workers/source-index/built-in-embedding/assets.ts
-import { createHash as createHash49, randomUUID as randomUUID20 } from "node:crypto";
+import { createHash as createHash50, randomUUID as randomUUID21 } from "node:crypto";
 import {
-  closeSync as closeSync11,
-  createReadStream,
-  existsSync as existsSync42,
-  mkdirSync as mkdirSync35,
-  openSync as openSync11,
-  readFileSync as readFileSync41,
-  renameSync as renameSync11,
-  rmSync as rmSync11,
-  statSync as statSync15,
-  writeFileSync as writeFileSync13,
-  writeSync as writeSync2
+  closeSync as closeSync12,
+  createReadStream as createReadStream2,
+  existsSync as existsSync43,
+  mkdirSync as mkdirSync36,
+  openSync as openSync12,
+  readFileSync as readFileSync42,
+  renameSync as renameSync12,
+  rmSync as rmSync13,
+  statSync as statSync16,
+  writeFileSync as writeFileSync15,
+  writeSync as writeSync3
 } from "node:fs";
-import { homedir as homedir50 } from "node:os";
-import { dirname as dirname46, isAbsolute as isAbsolute12, join as join64 } from "node:path";
-function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform2 = currentPlatform()) {
+import { homedir as homedir51 } from "node:os";
+import { dirname as dirname47, isAbsolute as isAbsolute13, join as join66 } from "node:path";
+function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform2 = currentPlatform2()) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join64(env.HOME?.trim() || homedir50(), ".local", "share");
-  const root = configured || join64(dataRoot, "openclaw", "olympus", "models", "built-in-embedding");
-  if (!isAbsolute12(root))
+  const dataRoot = env.XDG_DATA_HOME?.trim() || join66(env.HOME?.trim() || homedir51(), ".local", "share");
+  const root = configured || join66(dataRoot, "openclaw", "olympus", "models", "built-in-embedding");
+  if (!isAbsolute13(root))
     throw new TypeError("The built-in embedding directory must be an absolute path.");
   return {
     root,
-    modelDir: join64(root, model.modelId),
-    runtimeDir: join64(root, `onnxruntime-${runtime.version}-${platform2}`),
-    statusPath: join64(root, "status.json"),
-    lockPath: join64(root, "install.lock")
+    modelDir: join66(root, model.modelId),
+    runtimeDir: join66(root, `onnxruntime-${runtime.version}-${platform2}`),
+    statusPath: join66(root, "status.json"),
+    lockPath: join66(root, "install.lock")
   };
 }
-function currentPlatform() {
+function currentPlatform2() {
   return `${process.platform}-${process.arch}`;
 }
 function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDING_MODEL) {
@@ -92662,7 +93577,7 @@ function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDIN
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync41(builtInEmbeddingPaths(env, model).statusPath, "utf8"));
+    const parsed = JSON.parse(readFileSync42(builtInEmbeddingPaths(env, model).statusPath, "utf8"));
     return parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -92671,48 +93586,48 @@ function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDIN
 async function installBuiltInEmbedding(options = {}) {
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
   const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
-  const platform2 = options.platform ?? currentPlatform();
+  const platform2 = options.platform ?? currentPlatform2();
   const paths = builtInEmbeddingPaths(options.env, model, runtime, platform2);
-  const reporter = new ProgressReporter(paths.statusPath, model.modelId, options.now, options.onProgress);
+  const reporter = new ProgressReporter2(paths.statusPath, model.modelId, options.now, options.onProgress);
   const installed = {
-    modelPath: join64(paths.modelDir, model.model.name),
-    vocabularyPath: join64(paths.modelDir, model.vocabulary.name),
+    modelPath: join66(paths.modelDir, model.model.name),
+    vocabularyPath: join66(paths.modelDir, model.vocabulary.name),
     runtimeDir: paths.runtimeDir
   };
   try {
     if (!options.skipRuntime && !runtime.platforms.includes(platform2)) {
       throw new BuiltInEmbeddingInstallError("unsupported_platform", `The built-in search model does not run on ${platform2}.`);
     }
-    ensureDirectory(paths.root);
+    ensureDirectory2(paths.root);
     const modelFiles = [model.model, model.vocabulary];
     const runtimePackages = options.skipRuntime ? [] : [runtime.common, runtime.runtime];
     if (installComplete(paths, modelFiles, runtimePackages)) {
       await verifyModelFiles(paths.modelDir, modelFiles, reporter);
       return installed;
     }
-    await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
+    await withInstallLock2(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS2, async () => {
       if (installComplete(paths, modelFiles, runtimePackages))
         return;
       const fetchImpl = options.fetchImpl ?? fetch;
       const pending = [
-        ...modelFiles.filter((file) => !existsSync42(join64(paths.modelDir, file.name)))
+        ...modelFiles.filter((file) => !existsSync43(join66(paths.modelDir, file.name)))
       ];
-      const pendingPackages = runtimePackages.length > 0 && !runtimeInstalled(paths.runtimeDir, runtimePackages) ? runtimePackages : [];
+      const pendingPackages = runtimePackages.length > 0 && !runtimeInstalled2(paths.runtimeDir, runtimePackages) ? runtimePackages : [];
       const bytesTotal = pending.reduce((sum2, file) => sum2 + file.bytes, 0) + pendingPackages.reduce((sum2, pack) => sum2 + pack.bytes, 0);
       reporter.begin(bytesTotal);
-      ensureDirectory(paths.modelDir);
+      ensureDirectory2(paths.modelDir);
       for (const file of pending) {
-        await downloadVerified(fetchImpl, file.url, join64(paths.modelDir, file.name), file.bytes, {
+        await downloadVerified2(fetchImpl, file.url, join66(paths.modelDir, file.name), file.bytes, {
           kind: "sha256",
           expected: file.sha256
         }, reporter, labelFor(file));
       }
       if (pendingPackages.length > 0) {
-        await installRuntime(fetchImpl, paths.runtimeDir, pendingPackages, platform2, reporter);
+        await installRuntime2(fetchImpl, paths.runtimeDir, pendingPackages, platform2, reporter);
       }
     });
     await verifyModelFiles(paths.modelDir, modelFiles, reporter);
-    if (runtimePackages.length > 0 && !runtimeInstalled(paths.runtimeDir, runtimePackages)) {
+    if (runtimePackages.length > 0 && !runtimeInstalled2(paths.runtimeDir, runtimePackages)) {
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", "The built-in search runtime did not install completely.");
     }
     return installed;
@@ -92725,7 +93640,7 @@ async function installBuiltInEmbedding(options = {}) {
 function reportBuiltInEmbeddingState(options, state, failure) {
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
   const paths = builtInEmbeddingPaths(options.env, model);
-  const reporter = new ProgressReporter(paths.statusPath, model.modelId, options.now, options.onProgress);
+  const reporter = new ProgressReporter2(paths.statusPath, model.modelId, options.now, options.onProgress);
   if (state === "failed" && failure)
     reporter.fail(failure.reason, failure.message);
   else
@@ -92735,65 +93650,65 @@ function labelFor(file) {
   return file.name.endsWith(".onnx") ? "Downloading the built-in search model" : "Downloading the model vocabulary";
 }
 function installComplete(paths, modelFiles, runtimePackages) {
-  return modelFiles.every((file) => existsSync42(join64(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled(paths.runtimeDir, runtimePackages));
+  return modelFiles.every((file) => existsSync43(join66(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled2(paths.runtimeDir, runtimePackages));
 }
 async function verifyModelFiles(dir, files, reporter) {
   for (const file of files) {
-    const path = join64(dir, file.name);
+    const path = join66(dir, file.name);
     const key = `${path}:${file.sha256}`;
-    verifiedThisProcess ??= new Set;
-    if (verifiedThisProcess.has(key))
+    verifiedThisProcess2 ??= new Set;
+    if (verifiedThisProcess2.has(key))
       continue;
-    const size = statSync15(path).size;
-    const digest2 = size === file.bytes ? await sha256File2(path) : undefined;
+    const size = statSync16(path).size;
+    const digest2 = size === file.bytes ? await sha256File3(path) : undefined;
     if (digest2 !== file.sha256) {
-      rmSync11(path, { force: true });
+      rmSync13(path, { force: true });
       throw new BuiltInEmbeddingInstallError("checksum_mismatch", `${file.name} did not match its pinned checksum and was removed; it will download again.`);
     }
-    verifiedThisProcess.add(key);
+    verifiedThisProcess2.add(key);
   }
   reporter.touch();
 }
-function runtimeInstalled(runtimeDir, packages) {
+function runtimeInstalled2(runtimeDir, packages) {
   try {
-    const marker = JSON.parse(readFileSync41(join64(runtimeDir, RUNTIME_MARKER), "utf8"));
+    const marker = JSON.parse(readFileSync42(join66(runtimeDir, RUNTIME_MARKER2), "utf8"));
     return packages.every((pack) => marker.packages.some((entry) => entry.name === pack.name && entry.integrity === pack.integrity));
   } catch {
     return false;
   }
 }
-async function installRuntime(fetchImpl, runtimeDir, packages, platform2, reporter) {
-  const staging = `${runtimeDir}.staging-${randomUUID20()}`;
-  ensureDirectory(staging);
+async function installRuntime2(fetchImpl, runtimeDir, packages, platform2, reporter) {
+  const staging = `${runtimeDir}.staging-${randomUUID21()}`;
+  ensureDirectory2(staging);
   try {
     for (const pack of packages) {
-      const archivePath = join64(staging, `${pack.name}.tgz`);
-      await downloadVerified(fetchImpl, pack.url, archivePath, pack.bytes, {
+      const archivePath = join66(staging, `${pack.name}.tgz`);
+      await downloadVerified2(fetchImpl, pack.url, archivePath, pack.bytes, {
         kind: "integrity",
         expected: pack.integrity
       }, reporter, "Downloading the search runtime");
       reporter.set("verifying", "Unpacking the search runtime");
-      const archive = readFileSync41(archivePath);
+      const archive = readFileSync42(archivePath);
       const files = readTarGz(archive, (path) => runtimeEntryWanted(pack.name, path, platform2));
       if (files.length === 0) {
         throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${pack.name} had no files for ${platform2}.`);
       }
       for (const file of files) {
-        const target = join64(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
-        ensureDirectory(dirname46(target));
-        writeFileSync13(target, file.data, { mode: file.mode & 493 || 420 });
+        const target = join66(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
+        ensureDirectory2(dirname47(target));
+        writeFileSync15(target, file.data, { mode: file.mode & 493 || 420 });
       }
-      rmSync11(archivePath, { force: true });
+      rmSync13(archivePath, { force: true });
     }
     const marker = {
       packages: packages.map((pack) => ({ name: pack.name, integrity: pack.integrity }))
     };
-    writeFileSync13(join64(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync15(join66(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
-    rmSync11(runtimeDir, { recursive: true, force: true });
-    renameSync11(staging, runtimeDir);
+    rmSync13(runtimeDir, { recursive: true, force: true });
+    renameSync12(staging, runtimeDir);
   } catch (error2) {
-    rmSync11(staging, { recursive: true, force: true });
+    rmSync13(staging, { recursive: true, force: true });
     throw error2;
   }
 }
@@ -92807,10 +93722,10 @@ function runtimeEntryWanted(packageName, path, platform2) {
     return false;
   return path === "package/package.json" || path.startsWith("package/dist/") || path.startsWith(`package/bin/napi-v6/${os}/${arch}/`) || path === "package/LICENSE" || path === "package/ThirdPartyNotices.txt";
 }
-async function downloadVerified(fetchImpl, url, target, expectedBytes, expected, reporter, label) {
-  const partial2 = `${target}.partial-${process.pid}-${randomUUID20()}`;
+async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected, reporter, label) {
+  const partial2 = `${target}.partial-${process.pid}-${randomUUID21()}`;
   const algorithm = expected.kind === "sha256" ? "sha256" : integrityAlgorithm(expected.expected);
-  const hash = createHash49(algorithm);
+  const hash = createHash50(algorithm);
   let received = 0;
   let response;
   try {
@@ -92827,7 +93742,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
   reporter.set("downloading", label);
   let fd;
   try {
-    fd = openSync11(partial2, "w", 420);
+    fd = openSync12(partial2, "w", 420);
   } catch (error2) {
     throw new BuiltInEmbeddingInstallError("disk_write_failed", `Could not write ${partial2}: ${String(error2)}`);
   }
@@ -92846,26 +93761,26 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
       }
       hash.update(value);
       try {
-        writeSync2(fd, value);
+        writeSync3(fd, value);
       } catch (error2) {
         throw new BuiltInEmbeddingInstallError("disk_write_failed", `Could not write the download: ${String(error2)}`);
       }
       reporter.advance(value.byteLength, label);
     }
   } catch (error2) {
-    closeSync11(fd);
-    rmSync11(partial2, { force: true });
+    closeSync12(fd);
+    rmSync13(partial2, { force: true });
     if (error2 instanceof BuiltInEmbeddingInstallError)
       throw error2;
     throw new BuiltInEmbeddingInstallError("download_failed", `The built-in search model download was interrupted (${error2 instanceof Error ? error2.message : String(error2)}).`);
   }
-  closeSync11(fd);
+  closeSync12(fd);
   const digest2 = expected.kind === "sha256" ? hash.digest("hex") : `${algorithm}-${hash.digest("base64")}`;
   if (received !== expectedBytes || digest2 !== expected.expected) {
-    rmSync11(partial2, { force: true });
+    rmSync13(partial2, { force: true });
     throw new BuiltInEmbeddingInstallError("checksum_mismatch", `${url} did not match its pinned checksum; nothing was installed.`);
   }
-  renameSync11(partial2, target);
+  renameSync12(partial2, target);
 }
 function integrityAlgorithm(integrity) {
   const algorithm = integrity.split("-", 1)[0];
@@ -92874,46 +93789,46 @@ function integrityAlgorithm(integrity) {
   }
   return algorithm;
 }
-function sha256File2(path) {
+function sha256File3(path) {
   return new Promise((resolve10, reject) => {
-    const hash = createHash49("sha256");
-    createReadStream(path).on("data", (chunk) => hash.update(chunk)).on("error", reject).on("end", () => resolve10(hash.digest("hex")));
+    const hash = createHash50("sha256");
+    createReadStream2(path).on("data", (chunk) => hash.update(chunk)).on("error", reject).on("end", () => resolve10(hash.digest("hex")));
   });
 }
-async function withInstallLock(lockPath, waitMs, run) {
+async function withInstallLock2(lockPath, waitMs, run) {
   const deadline = Date.now() + waitMs;
   for (;; ) {
-    if (tryAcquireLock(lockPath))
+    if (tryAcquireLock2(lockPath))
       break;
     if (Date.now() > deadline) {
       throw new BuiltInEmbeddingInstallError("download_failed", "Another Olympus process is still installing the built-in search model.");
     }
-    await new Promise((resolve10) => setTimeout(resolve10, LOCK_POLL_MS));
+    await new Promise((resolve10) => setTimeout(resolve10, LOCK_POLL_MS2));
   }
   try {
     await run();
   } finally {
-    rmSync11(lockPath, { force: true });
+    rmSync13(lockPath, { force: true });
   }
 }
-function tryAcquireLock(lockPath) {
+function tryAcquireLock2(lockPath) {
   try {
-    const fd = openSync11(lockPath, "wx", 384);
-    writeSync2(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
-    closeSync11(fd);
+    const fd = openSync12(lockPath, "wx", 384);
+    writeSync3(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    closeSync12(fd);
     return true;
   } catch {
-    if (lockIsStale(lockPath)) {
-      rmSync11(lockPath, { force: true });
-      return tryAcquireLock(lockPath);
+    if (lockIsStale2(lockPath)) {
+      rmSync13(lockPath, { force: true });
+      return tryAcquireLock2(lockPath);
     }
     return false;
   }
 }
-function lockIsStale(lockPath) {
+function lockIsStale2(lockPath) {
   try {
-    const holder = JSON.parse(readFileSync41(lockPath, "utf8"));
-    if (typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS)
+    const holder = JSON.parse(readFileSync42(lockPath, "utf8"));
+    if (typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS2)
       return true;
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
       try {
@@ -92926,21 +93841,21 @@ function lockIsStale(lockPath) {
     return false;
   } catch {
     try {
-      return Date.now() - statSync15(lockPath).mtimeMs > STALE_LOCK_MS;
+      return Date.now() - statSync16(lockPath).mtimeMs > STALE_LOCK_MS2;
     } catch {
       return true;
     }
   }
 }
-function ensureDirectory(path) {
+function ensureDirectory2(path) {
   try {
-    mkdirSync35(path, { recursive: true, mode: 448 });
+    mkdirSync36(path, { recursive: true, mode: 448 });
   } catch (error2) {
     throw new BuiltInEmbeddingInstallError("disk_write_failed", `Could not create ${path}: ${String(error2)}`);
   }
 }
 
-class ProgressReporter {
+class ProgressReporter2 {
   statusPath;
   modelId;
   now;
@@ -92995,23 +93910,23 @@ class ProgressReporter {
     const nowMs = this.now().getTime();
     this.status = { ...this.status, modelId: this.modelId, updatedAt: new Date(nowMs).toISOString() };
     this.listener?.(this.status);
-    if (!force && nowMs - this.lastWriteMs < PROGRESS_WRITE_INTERVAL_MS)
+    if (!force && nowMs - this.lastWriteMs < PROGRESS_WRITE_INTERVAL_MS2)
       return;
     this.lastWriteMs = nowMs;
     try {
-      mkdirSync35(dirname46(this.statusPath), { recursive: true, mode: 448 });
+      mkdirSync36(dirname47(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync13(temporary, `${JSON.stringify(this.status)}
+      writeFileSync15(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
-      renameSync11(temporary, this.statusPath);
+      renameSync12(temporary, this.statusPath);
     } catch {}
   }
 }
-var BUILT_IN_EMBEDDING_DIR_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DIR", STALE_LOCK_MS, LOCK_POLL_MS = 1000, PROGRESS_WRITE_INTERVAL_MS = 500, BuiltInEmbeddingInstallError, verifiedThisProcess, RUNTIME_MARKER = "olympus-runtime.json";
+var BUILT_IN_EMBEDDING_DIR_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DIR", STALE_LOCK_MS2, LOCK_POLL_MS2 = 1000, PROGRESS_WRITE_INTERVAL_MS2 = 500, BuiltInEmbeddingInstallError, verifiedThisProcess2, RUNTIME_MARKER2 = "olympus-runtime.json";
 var init_assets = __esm(() => {
   init_manifest();
   init_tar();
-  STALE_LOCK_MS = 30 * 60000;
+  STALE_LOCK_MS2 = 30 * 60000;
   BuiltInEmbeddingInstallError = class BuiltInEmbeddingInstallError extends Error {
     reason;
     constructor(reason, message) {
@@ -93024,11 +93939,11 @@ var init_assets = __esm(() => {
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { createRequire as createRequire3 } from "node:module";
-import { join as join65 } from "node:path";
+import { join as join67 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire3(join65(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire3(join67(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -93210,9 +94125,9 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash50 } from "node:crypto";
-import { readFileSync as readFileSync42 } from "node:fs";
-import { availableParallelism } from "node:os";
+import { createHash as createHash51 } from "node:crypto";
+import { readFileSync as readFileSync43 } from "node:fs";
+import { availableParallelism as availableParallelism2 } from "node:os";
 
 class BuiltInSourceEmbeddingProvider {
   provider;
@@ -93251,7 +94166,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash50("sha256").update(JSON.stringify({
+    this.configHash = createHash51("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -93321,7 +94236,7 @@ class BuiltInSourceEmbeddingProvider {
     }
     try {
       reportBuiltInEmbeddingState(reporterOptions, "loading");
-      const tokenizer = new WordPieceTokenizer(readFileSync42(installed.vocabularyPath, "utf8"));
+      const tokenizer = new WordPieceTokenizer(readFileSync43(installed.vocabularyPath, "utf8"));
       const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
       reportBuiltInEmbeddingState(reporterOptions, "ready");
       return { session, tokenizer };
@@ -93456,7 +94371,7 @@ function resolveThreads(explicit, env) {
     }
     return configured;
   }
-  return Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
+  return Math.max(1, Math.min(4, Math.floor(availableParallelism2() / 2)));
 }
 function sharedBuiltInSourceEmbeddingProvider(options) {
   if (options.modelId !== BUILT_IN_EMBEDDING_MODEL.modelId) {
@@ -93495,7 +94410,7 @@ var init_provider = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash51 } from "node:crypto";
+import { createHash as createHash52 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -94192,7 +95107,7 @@ function fileExtractionSchedulerTask(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash51("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash52("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -94830,7 +95745,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash51("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash52("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -95303,12 +96218,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname47, join as join66 } from "node:path";
+import { dirname as dirname48, join as join68 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join66(dirname47(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join68(dirname48(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -95691,8 +96606,8 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync36, readFileSync as readFileSync43 } from "node:fs";
-import { dirname as dirname48 } from "node:path";
+import { mkdirSync as mkdirSync37, readFileSync as readFileSync44 } from "node:fs";
+import { dirname as dirname49 } from "node:path";
 function defaultSnifferMaxCallsPerPass(kind) {
   return kind === "venice" ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
 }
@@ -95709,7 +96624,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync43(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync44(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -95729,7 +96644,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync36(dirname48(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync37(dirname49(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -95971,7 +96886,7 @@ var init_sniffer_resolver = __esm(() => {
 });
 
 // src/workers/classification/sniffer-service.ts
-import { existsSync as existsSync43 } from "node:fs";
+import { existsSync as existsSync44 } from "node:fs";
 
 class TierSnifferService {
   options;
@@ -96015,7 +96930,7 @@ class TierSnifferService {
     let remainingQuestions = 0;
     for (const ledgerPath of this.ledgerPaths()) {
       const path = tierSnifferPathForLedger(ledgerPath);
-      if (path === ":memory:" || !existsSync43(path))
+      if (path === ":memory:" || !existsSync44(path))
         continue;
       let store;
       try {
@@ -96069,11 +96984,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync43(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync44(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own = tierLedgerPathForStore(store.dbPath);
-      if (existsSync43(own))
+      if (existsSync44(own))
         paths.add(own);
     }
     return [...paths];
@@ -98522,7 +99437,7 @@ __export(exports_remote_mcp, {
   authenticateRemoteRequest: () => authenticateRemoteRequest,
   REMOTE_MCP_PATH: () => REMOTE_MCP_PATH
 });
-import { existsSync as existsSync44 } from "node:fs";
+import { existsSync as existsSync45 } from "node:fs";
 function isRemoteMcpRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_MCP_PATH;
@@ -98601,7 +99516,7 @@ function lazyRemoteConnectionStore(resolvePath3, open6) {
     if (store)
       return store;
     const dbPath = resolvePath3();
-    if (!options.create && !existsSync44(dbPath))
+    if (!options.create && !existsSync45(dbPath))
       return;
     store = open6(dbPath);
     return store;
@@ -98720,7 +99635,7 @@ var init_pinned_clients = __esm(() => {
 });
 
 // src/workers/remote-oauth/consent-page.ts
-import { randomBytes as randomBytes14 } from "node:crypto";
+import { randomBytes as randomBytes15 } from "node:crypto";
 function hostnameOf(host) {
   try {
     return new URL(`https://${host}`).hostname;
@@ -98750,7 +99665,7 @@ function consentSecurityHeaders(nonce, redirectOrigin) {
   };
 }
 function renderConsentPage(input) {
-  const nonce = randomBytes14(16).toString("base64");
+  const nonce = randomBytes15(16).toString("base64");
   const name = escapeHtml4(input.clientName);
   const provenance = input.verifiedHost ? `<div class="host">${escapeHtml4(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
   const redirectHostname = hostnameOf(input.redirectHost);
@@ -98795,7 +99710,7 @@ ${error2}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderLoopbackConsentPage(input) {
-  const nonce = randomBytes14(16).toString("base64");
+  const nonce = randomBytes15(16).toString("base64");
   const name = escapeHtml4(input.clientName);
   const body = `<!doctype html>
 <html lang="en">
@@ -98833,7 +99748,7 @@ ${input.verifiedHost ? `<div class="host">${escapeHtml4(input.verifiedHost)}</di
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderDemoSignInPage(input) {
-  const nonce = randomBytes14(16).toString("base64");
+  const nonce = randomBytes15(16).toString("base64");
   const name = escapeHtml4(input.clientName);
   const error2 = input.error ? `<p class="err" role="alert">${escapeHtml4(input.error)}</p>` : "";
   const body = `<!doctype html>
@@ -98872,7 +99787,7 @@ ${error2}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderConsentErrorPage(message) {
-  const nonce = randomBytes14(16).toString("base64");
+  const nonce = randomBytes15(16).toString("base64");
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -99039,7 +99954,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash52, randomBytes as randomBytes15, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createHash as createHash53, randomBytes as randomBytes16, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -99156,8 +100071,8 @@ function createRemoteOAuthHandler(options) {
     }
     sweep();
     admitPending();
-    const requestId = randomBytes15(16).toString("hex");
-    const csrf = randomBytes15(32).toString("base64url");
+    const requestId = randomBytes16(16).toString("hex");
+    const csrf = randomBytes16(32).toString("base64url");
     const entry = {
       client,
       redirectUri,
@@ -99187,7 +100102,7 @@ function createRemoteOAuthHandler(options) {
   const issueCode = (requestId, entry, u) => {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
-    const code = u.installId ? mintCredential("code", u.installId) : randomBytes15(32).toString("base64url");
+    const code = u.installId ? mintCredential("code", u.installId) : randomBytes16(32).toString("base64url");
     codes.set(sha2566(code), {
       clientId: entry.client.clientId,
       displayName: entry.client.clientName,
@@ -99352,7 +100267,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash52("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash53("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -99602,7 +100517,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual8(a, b);
 }
 function sha2566(value) {
-  return createHash52("sha256").update(value).digest("hex");
+  return createHash53("sha256").update(value).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -99703,7 +100618,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash53 } from "node:crypto";
+import { createHash as createHash54 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -99720,7 +100635,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text2 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text2, etag: `"${createHash53("sha256").update(text2).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text2, etag: `"${createHash54("sha256").update(text2).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -99998,11 +100913,12 @@ __export(exports_server2, {
   connectorStoreLaneHandle: () => connectorStoreLaneHandle,
   connectorStoreAnswerScope: () => connectorStoreAnswerScope,
   commaSeparatedEnv: () => commaSeparatedEnv,
+  applyBuiltInPrivateAnalyst: () => applyBuiltInPrivateAnalyst,
   activeCredentialHandle: () => activeCredentialHandle,
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle
 });
-import { existsSync as existsSync45 } from "node:fs";
-import { dirname as dirname49, isAbsolute as isAbsolute13, join as join67 } from "node:path";
+import { existsSync as existsSync46 } from "node:fs";
+import { dirname as dirname50, isAbsolute as isAbsolute14, join as join69 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -100333,7 +101249,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync45(store.dbPath))
+        if (!existsSync46(store.dbPath))
           continue;
         const handle = new LocalConnectorStore({
           dbPath: store.dbPath,
@@ -100452,7 +101368,41 @@ async function createSovereigntyAnalystMap(input) {
       continue;
     map2.set(id, { profile: resolved, backend, analyst });
   }
+  applyBuiltInPrivateAnalyst(map2, securePoolMemberIds, input.builtInAnalyst);
   return map2;
+}
+function applyBuiltInPrivateAnalyst(map2, securePoolMemberIds, builtInAnalyst) {
+  if (!builtInAnalyst)
+    return false;
+  const members = [...securePoolMemberIds].flatMap((id) => {
+    const entry = map2.get(id);
+    return entry ? [[id, entry]] : [];
+  });
+  if (members.some(([, entry]) => entry.backend === "venice"))
+    return false;
+  let wired = false;
+  for (const [id, entry] of members) {
+    if (entry.backend !== "local")
+      continue;
+    map2.set(id, { ...entry, analyst: withBuiltInFallback(entry.analyst, builtInAnalyst) });
+    wired = true;
+  }
+  return wired;
+}
+async function probeLocalAnalystService(olympusConfig) {
+  try {
+    await new DelphiClient(olympusConfig).listModelsForProfile("source_answer", AbortSignal.timeout(3000));
+    return true;
+  } catch {
+    return false;
+  }
+}
+function createWorkerBuiltInAnalystModel(env) {
+  if (env.NODE_ENV === "test" || !builtInAnalystEnabled(env))
+    return;
+  if (!resolveBuiltInReasoningModel(env))
+    return;
+  return createBuiltInAnalystModel({ env });
 }
 function sovereigntyAnalystRoutePlan(input) {
   const profiles = input.pool.explicitOrder ?? input.pool.members;
@@ -101631,6 +102581,7 @@ async function main() {
       ...veniceAnalystTimeoutMs !== undefined ? { timeoutMs: veniceAnalystTimeoutMs } : {}
     });
     const localSourceAnswerModel = createDelphiAnalystModel(new DelphiClient(olympusConfig), process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs } : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs });
+    const builtInAnalystModel = createWorkerBuiltInAnalystModel(process.env);
     const sovereigntyAnalysts = await createSovereigntyAnalystMap({
       engine: sovereigntyEngine,
       olympusConfig,
@@ -101638,8 +102589,15 @@ async function main() {
       defaultLocal: createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true }),
       veniceAnalystTimeoutMs,
       veniceReasoningHeadroomTokens,
-      bootSecretResolver
+      bootSecretResolver,
+      ...builtInAnalystModel ? { builtInAnalyst: createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true }) } : {}
     });
+    if (builtInAnalystModel) {
+      probeLocalAnalystService(olympusConfig).then((up) => {
+        if (!up)
+          builtInAnalystModel.prepare();
+      });
+    }
     const defaultLocalAnalyst = sovereigntyAnalysts.get("local-source-answer")?.analyst ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
     return createAnalystSourceIndexAnswerHandler({
       analyst: defaultLocalAnalyst,
@@ -102479,7 +103437,7 @@ async function main() {
     model: snifferModel,
     stores: () => connectorStores,
     classificationLedgerPath: resolveClassificationLedgerPath(process.env),
-    budgetStatePath: join67(dirname49(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join69(dirname50(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -102956,7 +103914,7 @@ function validateConnectorStoreMountDeclaration(entry) {
   if (!dbPath || !corpusId || !family || !trustDomain) {
     throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
   }
-  if (!isAbsolute13(dbPath)) {
+  if (!isAbsolute14(dbPath)) {
     throw new Error("Connector store dbPath must be absolute.");
   }
   if (!isDeclarableSourceFamily(family)) {
@@ -103005,7 +103963,7 @@ function mergeConnectorStores(stores) {
   return [...byCorpusId.values()];
 }
 var INGESTION_DISPOSITION_SOURCES, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES;
-var init_server4 = __esm(async () => {
+var init_server5 = __esm(async () => {
   init_classification();
   init_package_root();
   init_messaging_capture();
@@ -103024,6 +103982,7 @@ var init_server4 = __esm(async () => {
   init_status();
   init_http();
   init_analyst();
+  init_analyst_built_in();
   init_analyst_delphi();
   init_analyst_anthropic();
   init_analyst_openclaw_infer();
@@ -103429,8 +104388,8 @@ init_messaging_pairing();
 init_messaging_capture();
 init_config();
 init_dashboard_launch();
-import { randomBytes as randomBytes16 } from "node:crypto";
-import { readFileSync as readFileSync44, openSync as openSync12, closeSync as closeSync12, writeSync as writeSync3 } from "node:fs";
+import { randomBytes as randomBytes17 } from "node:crypto";
+import { readFileSync as readFileSync45, openSync as openSync13, closeSync as closeSync13, writeSync as writeSync4 } from "node:fs";
 import { createInterface as createInterface2 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve10 } from "node:path";
@@ -106876,7 +107835,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync44("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync45("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -107221,7 +108180,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync44(resolve10(input2), "utf8");
+    raw = readFileSync45(resolve10(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -107698,7 +108657,7 @@ async function runWorkerForeground(options = {}) {
       throw new OperationError("config_error", "Native worker service invocation identity does not match its finalized environment.");
     }
   }
-  const startWorker = options.startWorker ?? (await init_server4().then(() => exports_server2)).main;
+  const startWorker = options.startWorker ?? (await init_server5().then(() => exports_server2)).main;
   await startWorker();
 }
 async function readWorkerHttpState() {
@@ -107854,7 +108813,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes16(32).toString("base64url");
+  return randomBytes17(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};
@@ -108192,11 +109151,11 @@ async function runMessagingPairing(source, secretStore, registryPath) {
   }
   let terminal;
   try {
-    terminal = openSync12("/dev/tty", "r+");
+    terminal = openSync13("/dev/tty", "r+");
   } catch {
     throw new OperationError("invalid_params", "Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.");
   }
-  const tell = (text2) => writeSync3(terminal, text2);
+  const tell = (text2) => writeSync4(terminal, text2);
   try {
     tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.
 `);
@@ -108238,7 +109197,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
     const activation = runWorkerLifecycle("restart");
     return { ...paired, captureStarted: false, captureActivation: activation.ok ? "requested" : "needs_attention", next: activation.ok ? "Open this source in the Olympus dashboard to monitor capture and initial indexing." : "Pairing is saved. Ask your agent to repair the managed worker before capture can start." };
   } finally {
-    closeSync12(terminal);
+    closeSync13(terminal);
   }
 }
 function parseConnectOptions(args) {
