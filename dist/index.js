@@ -2351,6 +2351,15 @@ function configFromPluginConfig(pluginConfig, options = {}) {
       if (typeof value === "string" && value.trim())
         config.remote[key] = value.trim();
     }
+    const demo = asRecord4(remote.demoConsent);
+    if (demo) {
+      config.remote.demoConsent = { enabled: demo.enabled === true };
+      for (const key of ["username", "passwordHash"]) {
+        const value = demo[key];
+        if (typeof value === "string" && value.trim())
+          config.remote.demoConsent[key] = value.trim();
+      }
+    }
   }
   if (sovereignty) {
     config.sovereignty = {};

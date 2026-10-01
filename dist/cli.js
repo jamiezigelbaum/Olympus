@@ -54208,10 +54208,13 @@ __export(exports_remote_access, {
   isRelayedRequest: () => isRelayedRequest,
   ensureRemoteAccessDir: () => ensureRemoteAccessDir,
   emptyRemoteAccessStatus: () => emptyRemoteAccessStatus,
+  demoInstallMarked: () => demoInstallMarked,
   createRemotePublicUrlSource: () => createRemotePublicUrlSource,
   REMOTE_ACCESS_STATUS_SCHEMA: () => REMOTE_ACCESS_STATUS_SCHEMA,
   REMOTE_ACCESS_DIR_NAME: () => REMOTE_ACCESS_DIR_NAME,
   RELAYED_REQUEST_HEADER: () => RELAYED_REQUEST_HEADER,
+  DEMO_INSTALL_MARKER_TEXT: () => DEMO_INSTALL_MARKER_TEXT,
+  DEMO_INSTALL_MARKER_FILE: () => DEMO_INSTALL_MARKER_FILE,
   DEFAULT_RELAY_HOST: () => DEFAULT_RELAY_HOST
 });
 import { randomBytes as raRandomBytes } from "node:crypto";
@@ -54367,6 +54370,11 @@ function createRemotePublicUrlSource(env = process.env, options = {}) {
   }, options.minIntervalMs ?? 1000, options.now ?? Date.now);
   return { origin: "status", current: read };
 }
+function demoInstallMarked(dir) {
+  const text = readPrivateFile(raJoin(dir, DEMO_INSTALL_MARKER_FILE));
+  return text !== undefined && text.split(`
+`, 1)[0].trim() === DEMO_INSTALL_MARKER_TEXT;
+}
 function isRelayedRequest(request) {
   return request.headers.has(RELAYED_REQUEST_HEADER);
 }
@@ -54491,7 +54499,7 @@ function processIsAlive(pid) {
     return error.code === "EPERM";
   }
 }
-var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v2", REMOTE_ACCESS_DIR_NAME = "connect-relay", RELAYED_REQUEST_HEADER = "x-olympus-relay", STATUS_FILE = "status.json", DNS_NAME, INSTALL_ID, LOOPBACK_HOSTNAMES2, DEFAULT_RELAY_HOST = "mcp.olympusplugin.ai";
+var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v2", REMOTE_ACCESS_DIR_NAME = "connect-relay", RELAYED_REQUEST_HEADER = "x-olympus-relay", STATUS_FILE = "status.json", DNS_NAME, INSTALL_ID, LOOPBACK_HOSTNAMES2, DEFAULT_RELAY_HOST = "mcp.olympusplugin.ai", DEMO_INSTALL_MARKER_FILE = "demo-install", DEMO_INSTALL_MARKER_TEXT = "olympus demo install: synthetic sample data only";
 var init_remote_access = __esm(() => {
   init_remote_public_url();
   init_worker_auth();
@@ -69346,7 +69354,7 @@ function forwardResponseHeaders(headers) {
   });
   return out;
 }
-var RELAY_HEADER = "x-olympus-relay", FORWARDED_PATHS, FORWARDED_METHODS, HOP_BY_HOP, UNTRUSTED;
+var RELAY_HEADER = "x-olympus-relay", FORWARDED_PATHS, DEMO_AUTHORIZE_PATH = "/connect/demo/authorize", FORWARDED_METHODS, HOP_BY_HOP, UNTRUSTED;
 var init_forward = __esm(() => {
   FORWARDED_PATHS = ["/mcp", "/connect/token", "/connect/revoke"];
   FORWARDED_METHODS = new Set(["GET", "POST", "DELETE"]);
@@ -69564,9 +69572,13 @@ class RelayClient {
     const method = typeof message.method === "string" ? message.method.toUpperCase() : "";
     if (id === undefined || !headers || this.inbound.has(id))
       return;
+    if (this.inbound.size >= (this.options.maxConcurrent ?? 32)) {
+      this.respondLocally(id, 503, { error: "busy", message: "Olympus is busy. Try again shortly." });
+      return;
+    }
     this.inbound.set(id, {
       method,
-      path: FORWARDED_METHODS.has(method) && typeof message.path === "string" ? forwardPath(message.path) : undefined,
+      path: FORWARDED_METHODS.has(method) && typeof message.path === "string" ? forwardPath(message.path, this.options.forwardedPaths) : undefined,
       headers,
       body: [],
       bytes: 0,
@@ -69593,10 +69605,6 @@ class RelayClient {
     request.started = true;
     if (!request.path) {
       this.respondLocally(id, 404, { error: "not_found", message: "This Olympus address only serves its remote agent endpoints." });
-      return;
-    }
-    if (this.inbound.size > (this.options.maxConcurrent ?? 32)) {
-      this.respondLocally(id, 503, { error: "busy", message: "Olympus is busy. Try again shortly." });
       return;
     }
     this.serve(id, request, request.path);
@@ -69734,6 +69742,7 @@ async function startRelayRuntime(options) {
     identity,
     target,
     relaySecret: randomBytes11(32).toString("base64url"),
+    forwardedPaths: demoInstallMarked(dir) ? [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH] : FORWARDED_PATHS,
     onStatus,
     ...options.heartbeatMs ? { heartbeatMs: options.heartbeatMs } : {},
     ...options.backoff ? { backoff: options.backoff } : {}
@@ -69765,6 +69774,7 @@ var RELAY_HOST_ENV = "OLYMPUS_RELAY_HOST", RELAY_TARGET_ENV = "OLYMPUS_RELAY_TAR
 var init_remote_relay_runtime = __esm(() => {
   init_identity();
   init_relay_client();
+  init_forward();
   init_remote_access();
 });
 
@@ -93888,6 +93898,45 @@ ${input.verifiedHost ? `<div class="host">${escapeHtml4(input.verifiedHost)}</di
 </html>`;
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
+function renderDemoSignInPage(input) {
+  const nonce = randomBytes13(16).toString("base64");
+  const name = escapeHtml4(input.clientName);
+  const error2 = input.error ? `<p class="err" role="alert">${escapeHtml4(input.error)}</p>` : "";
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Olympus demo sign-in</title>
+<style nonce="${nonce}">${STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Sign in to the Olympus demo</h1>
+<div class="warn">This is a demo of Olympus with made-up sample data, for reviewers. A real Olympus is approved only on the owner's own Mac, never with a password.</div>
+<div class="card">
+<div class="name">${name}</div>
+<p class="meta">After you sign in, you return to <strong>${escapeHtml4(input.redirectHost)}</strong></p>
+</div>
+<form method="post" action="/connect/demo/authorize">
+<input type="hidden" name="request_id" value="${escapeHtml4(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml4(input.csrf)}">
+${error2}
+<label for="username">Username</label>
+<input class="plain" type="text" id="username" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="128" required>
+<label for="password">Password</label>
+<input class="plain" type="password" id="password" name="password" autocomplete="current-password" maxlength="1024" required>
+<div class="actions">
+<button class="approve" type="submit" name="action" value="approve">Sign in and connect</button>
+<button class="deny" type="submit" name="action" value="deny" formnovalidate>Cancel</button>
+</div>
+</form>
+</main>
+</body>
+</html>`;
+  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
+}
 function renderConsentErrorPage(message) {
   const nonce = randomBytes13(16).toString("base64");
   const body = `<!doctype html>
@@ -93930,6 +93979,8 @@ label { display: block; font-weight: 600; margin-bottom: .35rem; }
 input[type=text] { width: 100%; font: 600 1.35rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em;
   padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg);
   text-transform: uppercase; }
+input.plain { width: 100%; font: 1rem/1.3 system-ui, sans-serif; letter-spacing: normal; text-transform: none;
+  padding: .6rem .7rem; margin-bottom: .9rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg); }
 .hint { color: var(--muted); font-size: .88rem; margin: .4rem 0 1.25rem; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 .actions { display: flex; gap: .75rem; }
@@ -93939,6 +93990,56 @@ button { flex: 1; font: 600 1rem/1 system-ui, sans-serif; padding: .85rem 1rem; 
 p.small { color: var(--muted); font-size: .85rem; margin-top: 1.25rem; }
 `;
 var init_consent_page = () => {};
+
+// src/workers/remote-oauth/demo-consent.ts
+var exports_demo_consent = {};
+__export(exports_demo_consent, {
+  verifyDemoSignIn: () => verifyDemoSignIn,
+  resolveDemoConsent: () => resolveDemoConsent,
+  demoSignInLimiter: () => demoSignInLimiter,
+  DEMO_SIGN_IN_WINDOW_MS: () => DEMO_SIGN_IN_WINDOW_MS,
+  DEMO_SIGN_IN_BURST: () => DEMO_SIGN_IN_BURST
+});
+import { timingSafeEqual as timingSafeEqual7 } from "node:crypto";
+function resolveDemoConsent(remote, markerPresent) {
+  const demo = remote?.demoConsent;
+  if (!demo?.enabled || !demo.username || !demo.passwordHash?.startsWith("$argon2"))
+    return;
+  if (!markerPresent())
+    return;
+  return { username: demo.username, passwordHash: demo.passwordHash };
+}
+async function verifyDemoSignIn(settings, username, password) {
+  const presented = Buffer.from(username);
+  const expected = Buffer.from(settings.username);
+  const userOk = presented.length === expected.length && timingSafeEqual7(presented, expected);
+  let passwordOk = false;
+  try {
+    passwordOk = password.length > 0 && password.length <= 1024 && await Bun.password.verify(password, settings.passwordHash);
+  } catch {
+    passwordOk = false;
+  }
+  return userOk && passwordOk;
+}
+function demoSignInLimiter(now) {
+  let tokens = DEMO_SIGN_IN_BURST;
+  let last = now();
+  return {
+    take() {
+      const at = now();
+      tokens = Math.min(DEMO_SIGN_IN_BURST, tokens + (at - last) / DEMO_SIGN_IN_WINDOW_MS * DEMO_SIGN_IN_BURST);
+      last = at;
+      if (tokens < 1)
+        return false;
+      tokens -= 1;
+      return true;
+    }
+  };
+}
+var DEMO_SIGN_IN_BURST = 10, DEMO_SIGN_IN_WINDOW_MS;
+var init_demo_consent = __esm(() => {
+  DEMO_SIGN_IN_WINDOW_MS = 15 * 60000;
+});
 
 // src/workers/remote-oauth/redirect-uris.ts
 function isAcceptableRedirectUri(value) {
@@ -94004,7 +94105,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash50, randomBytes as randomBytes14, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
+import { createHash as createHash50, randomBytes as randomBytes14, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -94039,6 +94140,8 @@ function authorizationServerMetadata(urls) {
 function createRemoteOAuthHandler(options) {
   const now = options.now ?? Date.now;
   const isRelayed = options.isRelayed ?? isRelayedRequest;
+  const demoAttempts = demoSignInLimiter(now);
+  const demoSettings = (u) => u.installId ? options.demoConsent?.() : undefined;
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3600000, now);
   const pending = new Map;
   const codes = new Map;
@@ -94079,8 +94182,10 @@ function createRemoteOAuthHandler(options) {
   };
   const directLoopback = (request) => !isRelayed(request) && loopbackHost(request);
   const notOnThisMac = () => errorPage(403, "Approve on the Mac where Olympus runs: open the link from ChatGPT on that Mac.");
-  const authorizeGet = async (request, u) => {
-    if (u.installId && !directLoopback(request))
+  const authorizeGet = async (request, u, demo = false) => {
+    if (demo && !demoSettings(u))
+      return jsonResponse2(404, { error: "not_found" });
+    if (!demo && u.installId && !directLoopback(request))
       return notOnThisMac();
     const params = new URL(request.url).searchParams;
     const single = singleParams(params);
@@ -94095,6 +94200,8 @@ function createRemoteOAuthHandler(options) {
     const client = resolveClient(clientId, u);
     if (typeof client === "string")
       return errorPage(400, client);
+    if (demo && !client.verifiedHost)
+      return errorPage(400, "The demo connects ChatGPT only.");
     if (!redirectUriMatches(redirectUri, client.redirectUris)) {
       return errorPage(400, "The return address is not one this app registered.");
     }
@@ -94126,10 +94233,73 @@ function createRemoteOAuthHandler(options) {
       csrf,
       attempts: 0,
       expiresAt: now() + CONSENT_REQUEST_TTL_MS,
-      pinned: false
+      pinned: false,
+      demo
     };
     pending.set(requestId, entry);
-    return consentPage(requestId, entry, u);
+    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u);
+  };
+  const demoPage = (requestId, entry, error2) => {
+    const page = renderDemoSignInPage({
+      requestId,
+      csrf: entry.csrf,
+      clientName: entry.client.clientName,
+      redirectHost: redirectHost(entry.redirectUri),
+      redirectOrigin: new URL(entry.redirectUri).origin,
+      ...error2 ? { error: error2 } : {}
+    });
+    return new Response(page.body, { status: error2 ? 400 : 200, headers: page.headers });
+  };
+  const issueCode = (requestId, entry, u) => {
+    if (codes.size >= MAX_LIVE_CODES)
+      sweep();
+    const code = u.installId ? mintCredential("code", u.installId) : randomBytes14(32).toString("base64url");
+    codes.set(sha2566(code), {
+      clientId: entry.client.clientId,
+      displayName: entry.client.clientName,
+      redirectUri: entry.redirectUri,
+      codeChallenge: entry.codeChallenge,
+      resource: entry.resource,
+      expiresAt: now() + AUTHORIZATION_CODE_TTL_MS
+    });
+    pending.delete(requestId);
+    return redirectWithParams(entry.redirectUri, { code, state: entry.state, iss: u.issuer });
+  };
+  const demoPost = async (request, u) => {
+    const settings = demoSettings(u);
+    if (!settings)
+      return jsonResponse2(404, { error: "not_found" });
+    const origin = request.headers.get("origin");
+    if (origin !== null && origin !== u.origin)
+      return errorPage(403, "This sign-in did not come from the Olympus demo page.");
+    const form = await readForm(request);
+    if (!form)
+      return errorPage(400, "The sign-in form was malformed.");
+    const requestId = form.get("request_id") ?? "";
+    sweep();
+    const entry = /^[a-f0-9]{32}$/.test(requestId) ? pending.get(requestId) : undefined;
+    if (!entry || !entry.demo)
+      return errorPage(400, "This sign-in has expired. Start again from ChatGPT.");
+    if (!constantTimeEqual(form.get("csrf") ?? "", entry.csrf))
+      return errorPage(403, "This sign-in did not come from the Olympus demo page.");
+    const action = form.get("action");
+    if (action === "deny") {
+      pending.delete(requestId);
+      return redirectWithParams(entry.redirectUri, { error: "access_denied", error_description: "The sign-in was cancelled.", state: entry.state, iss: u.issuer });
+    }
+    if (action !== "approve")
+      return errorPage(400, "The sign-in form was malformed.");
+    if (!demoAttempts.take())
+      return demoPage(requestId, entry, "Too many sign-in attempts. Wait a few minutes, then try again.");
+    if (!await verifyDemoSignIn(settings, form.get("username") ?? "", form.get("password") ?? "")) {
+      entry.attempts += 1;
+      if (entry.attempts >= CONSENT_MAX_ATTEMPTS) {
+        pending.delete(requestId);
+        return redirectWithParams(entry.redirectUri, { error: "access_denied", error_description: "Too many wrong sign-ins.", state: entry.state, iss: u.issuer });
+      }
+      return demoPage(requestId, entry, "That username and password do not match.");
+    }
+    return issueCode(requestId, entry, u);
   };
   const consentPage = (requestId, entry, u, error2, showAttempts = true) => {
     const page = u.installId ? renderLoopbackConsentPage({
@@ -94165,7 +94335,7 @@ function createRemoteOAuthHandler(options) {
     const requestId = form.get("request_id") ?? "";
     sweep();
     const entry = /^[a-f0-9]{32}$/.test(requestId) ? pending.get(requestId) : undefined;
-    if (!entry)
+    if (!entry || entry.demo)
       return errorPage(400, "This approval has expired or was replaced by a newer one. Start again from the app.");
     const csrf = form.get("csrf") ?? "";
     const cookie = readCookie(request, consentCookieName(requestId)) ?? "";
@@ -94183,22 +94353,13 @@ function createRemoteOAuthHandler(options) {
       return finish2({ error: "access_denied", error_description: "The owner denied the request." });
     if (action !== "approve")
       return errorPage(400, "The approval form was malformed.");
-    const issueCode = () => {
-      if (codes.size >= MAX_LIVE_CODES)
-        sweep();
-      const code = u.installId ? mintCredential("code", u.installId) : randomBytes14(32).toString("base64url");
-      codes.set(sha2566(code), {
-        clientId: entry.client.clientId,
-        displayName: entry.client.clientName,
-        redirectUri: entry.redirectUri,
-        codeChallenge: entry.codeChallenge,
-        resource: entry.resource,
-        expiresAt: now() + AUTHORIZATION_CODE_TTL_MS
-      });
-      return finish2({ code });
+    const approve = () => {
+      const response = issueCode(requestId, entry, u);
+      response.headers.append("Set-Cookie", consentCookie(requestId, "", cookieSecure(u), 0));
+      return response;
     };
     if (u.installId)
-      return issueCode();
+      return approve();
     const wait = pacer.delay();
     if (wait > PAIRING_MAX_HELD_MS) {
       return consentPage(requestId, entry, u, `Too many wrong codes were tried from here. Wait ${Math.ceil(wait / 1000)} seconds, then try again.`, false);
@@ -94218,7 +94379,7 @@ function createRemoteOAuthHandler(options) {
       }
       return consentPage(requestId, entry, u, "That pairing code is not valid, has expired, or was already used.");
     }
-    return issueCode();
+    return approve();
   };
   const token = async (request, u) => {
     const form = await readForm(request);
@@ -94367,6 +94528,12 @@ function createRemoteOAuthHandler(options) {
           if (method === "POST")
             return await authorizePost(request, urls);
           return methodNotAllowed("GET, POST");
+        case REMOTE_OAUTH_PATHS.demoAuthorize:
+          if (method === "GET")
+            return await authorizeGet(request, urls, true);
+          if (method === "POST")
+            return await demoPost(request, urls);
+          return methodNotAllowed("GET, POST");
         case REMOTE_OAUTH_PATHS.token:
           if (method !== "POST")
             return methodNotAllowed("POST");
@@ -94498,7 +94665,7 @@ function consentCookie(requestId, value, secure, maxAgeSeconds) {
 function constantTimeEqual(left, right) {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
-  return a.length === b.length && a.length > 0 && timingSafeEqual7(a, b);
+  return a.length === b.length && a.length > 0 && timingSafeEqual8(a, b);
 }
 function sha2566(value) {
   return createHash50("sha256").update(value).digest("hex");
@@ -94568,12 +94735,14 @@ var init_handler = __esm(() => {
   init_pinned_clients();
   init_remote_request_body();
   init_consent_page();
+  init_demo_consent();
   init_redirect_uris();
   REMOTE_OAUTH_PATHS = {
     protectedResource: "/.well-known/oauth-protected-resource",
     protectedResourceMcp: "/.well-known/oauth-protected-resource/mcp",
     authorizationServer: "/.well-known/oauth-authorization-server",
     authorize: "/connect/authorize",
+    demoAuthorize: "/connect/demo/authorize",
     token: "/connect/token",
     register: "/connect/register",
     revoke: "/connect/revoke"
@@ -97262,6 +97431,7 @@ async function main() {
   const { resolveRemotePublicUrls: resolveRemotePublicUrls2 } = await Promise.resolve().then(() => (init_remote_public_url(), exports_remote_public_url));
   const { createRemotePublicUrlSource: createRemotePublicUrlSource2, isRelayedRequest: isRelayedRequest2 } = await Promise.resolve().then(() => (init_remote_access(), exports_remote_access));
   const { createRemoteOAuthHandler: createRemoteOAuthHandler2, withRemoteOAuthRoutes: withRemoteOAuthRoutes2 } = await Promise.resolve().then(() => (init_handler(), exports_handler));
+  const { resolveDemoConsent: resolveDemoConsent2 } = await Promise.resolve().then(() => (init_demo_consent(), exports_demo_consent));
   const remotePublic = resolveRemotePublicUrls2(process.env);
   if (!remotePublic.enabled && remotePublic.reason === "invalid") {
     console.warn(`[olympus] remote agent OAuth is off: ${remotePublic.detail ?? "invalid public base URL"}`);
@@ -97270,7 +97440,7 @@ async function main() {
   const remotePublicUrls = () => remotePublicSource.current();
   const remoteConnections = lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2);
   dashboardAgentStore = remoteConnections;
-  const { readRemoteAccessStatus: readRemoteAccessStatus2, remoteAccessDir: remoteAccessDir2, remoteAccessStatusView: remoteAccessStatusView2, resolveRemoteAccessUrls: resolveRemoteAccessUrls2 } = await Promise.resolve().then(() => (init_remote_access(), exports_remote_access));
+  const { demoInstallMarked: demoInstallMarked2, readRemoteAccessStatus: readRemoteAccessStatus2, remoteAccessDir: remoteAccessDir2, remoteAccessStatusView: remoteAccessStatusView2, resolveRemoteAccessUrls: resolveRemoteAccessUrls2 } = await Promise.resolve().then(() => (init_remote_access(), exports_remote_access));
   const remoteAccessHostKind = "openclaw";
   dashboardRemoteAccess = () => {
     let status;
@@ -97329,6 +97499,7 @@ async function main() {
     fetch: withRemoteOAuthRoutes2(createRemoteOAuthHandler2({
       publicUrls: remotePublicUrls,
       isRelayed: isRelayedRequest2,
+      demoConsent: () => resolveDemoConsent2(olympusConfig.remote, () => demoInstallMarked2(remoteAccessDir2(process.env))),
       connections: () => remoteConnections({ create: true })
     }), withRemoteOpenApiRoutes2(remoteOpenApi, withRemoteMcpRoute2(createRemoteMcpHandler2(remoteAgentOptions), withWorkerBearerAuth(worker.fetch, { authToken }))))
   });
