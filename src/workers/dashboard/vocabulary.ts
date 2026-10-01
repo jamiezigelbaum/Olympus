@@ -1442,15 +1442,21 @@ export const DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
 export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   pageTitle: 'Olympus private answer',
   title: 'Private answer from your Mac',
-  badge: 'Not sent to ChatGPT',
+  /** The muted line under the title once the answer is shown. */
+  notSent: 'Not sent to ChatGPT',
+  /** Joined after the count on the collapsed card's muted line. */
+  notSentAfterCount: ' · not sent to ChatGPT',
   count: {
     one: '1 private item matches',
     many: '{n} private items match',
   },
   /** The count text when it reached the cap. */
   capped: '50+',
-  show: 'Show private answer',
+  show: 'Show',
+  /** The Show button's accessible name (its visible text is its start). */
+  showLabel: 'Show private answer',
   hide: 'Hide',
+  hideLabel: 'Hide private answer',
   tryAgain: 'Try again',
   noModel: 'Private answers need the private model on your Mac.',
   downloading: 'The private model is downloading ({percent}%)…',

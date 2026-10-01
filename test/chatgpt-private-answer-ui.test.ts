@@ -171,16 +171,20 @@ describe('nothing to show', () => {
 });
 
 describe('the collapsed card', () => {
-  test('lock, title, badge, the count and one Show button', () => {
+  test('one tinted card: lock circle, title, one muted line and a Show pill', () => {
     const host = mount();
     host.push(ready(3));
     const panel = host.doc.getElementById('panel')!;
-    expect(panel.querySelector('svg.lock')?.getAttribute('aria-hidden')).toBe('true');
+    expect(panel.querySelectorAll('section.card')).toHaveLength(1);
+    expect(panel.querySelector('.card > .row > .icon > svg.lock')?.getAttribute('aria-hidden')).toBe('true');
     expect(panel.querySelector('.title')?.textContent).toBe('Private answer from your Mac');
-    expect(panel.querySelector('.badge')?.textContent).toBe('Not sent to ChatGPT');
-    expect(host.text()).toContain('3 private items match');
-    expect(host.buttons().map((b) => b.textContent)).toEqual(['Show private answer']);
+    expect(panel.querySelector('.sub')?.textContent).toBe('3 private items match · not sent to ChatGPT');
+    expect(panel.querySelector('.badge')).toBeNull();
+    expect(host.buttons().map((b) => b.textContent)).toEqual(['Show']);
+    expect(host.buttons()[0]!.getAttribute('aria-label')).toBe('Show private answer');
     expect(host.buttons()[0]!.className).toBe('btn');
+    // The button sits at the end of the header row, after the text.
+    expect(panel.querySelector('.row')!.lastElementChild).toBe(host.buttons()[0]!);
     expect(host.heights().length).toBeGreaterThan(0);
     expectNoJargon(host);
   });
@@ -188,7 +192,7 @@ describe('the collapsed card', () => {
   test('one item, and the 50 cap', () => {
     const host = mount();
     host.push(ready(1));
-    expect(host.text()).toContain('1 private item matches');
+    expect(host.text()).toContain('1 private item matches · not sent to ChatGPT');
     host.push(ready(50, `oly2p.${'b'.repeat(32)}.${'C'.repeat(43)}`));
     expect(host.text()).toContain('50+ private items match');
   });
@@ -201,8 +205,7 @@ describe('the collapsed card', () => {
   test('no private model: the sentence, no button', () => {
     const host = mount();
     host.push({ content: [], _meta: meta({ v: 1, count: 4, state: 'no_model' }) });
-    expect(host.text()).toContain('4 private items match');
-    expect(host.text()).toContain('Private answers need the private model on your Mac.');
+    expect(host.doc.querySelector('.sub')?.textContent).toBe('Private answers need the private model on your Mac.');
     expect(host.buttons()).toHaveLength(0);
     expectNoJargon(host);
   });
@@ -210,7 +213,7 @@ describe('the collapsed card', () => {
   test('model downloading: the percent, a thin bar, no button', () => {
     const host = mount();
     host.push({ content: [], _meta: meta({ v: 1, count: 2, state: 'model_downloading', percent: 40 }) });
-    expect(host.text()).toContain('The private model is downloading (40%)…');
+    expect(host.doc.querySelector('.sub')?.textContent).toBe('The private model is downloading (40%)…');
     expect(host.doc.querySelector('[role=progressbar]')?.getAttribute('aria-valuenow')).toBe('40');
     expect(host.buttons()).toHaveLength(0);
     host.push({ content: [], _meta: meta({ v: 1, count: 2, state: 'model_downloading' }) });
@@ -231,6 +234,35 @@ describe('the collapsed card', () => {
   });
 });
 
+describe('the reported height is the card, not the frame', () => {
+  test('notifyIntrinsicHeight and size-changed carry the card\'s offsetHeight', async () => {
+    const host = mount();
+    const proto = (host.win as any).HTMLElement.prototype;
+    Object.defineProperty(proto, 'offsetHeight', { configurable: true, get(this: any) { return this.classList?.contains('card') ? 74 : 0; } });
+    Object.defineProperty(proto, 'offsetWidth', { configurable: true, get(this: any) { return this.classList?.contains('card') ? 640 : 0; } });
+    Object.defineProperty(host.win.document.documentElement, 'clientHeight', { configurable: true, value: 150 });
+    Object.defineProperty(host.win.document.documentElement, 'scrollHeight', { configurable: true, value: 224 });
+    Object.defineProperty(host.win, 'innerHeight', { configurable: true, value: 150 });
+    host.push(ready(1));
+    await sleep(40);
+    expect(host.heights().at(-1)).toBe(74);
+    const sizes = host.sent.filter((m) => m.method === 'ui/notifications/size-changed').map((m) => m.params);
+    expect(sizes.at(-1)).toEqual({ width: 640, height: 74 });
+    for (const height of [...host.heights(), ...sizes.map((size) => size.height)]) {
+      expect([0, 74]).toContain(height);
+    }
+    host.push({ content: [], _meta: {} });
+    expect(host.heights().at(-1)).toBe(0);
+  });
+
+  test('the page has no margin, min-height, viewport height or background of its own', () => {
+    const html = privateAnswerResourceHtml();
+    expect(html).toContain('html,body{margin:0;padding:0;height:auto;min-height:0;background:transparent');
+    // Only the download bar fills its own 4px track.
+    expect(html).not.toMatch(/100vh|(?<!bar-fill\{)height:100%/);
+  });
+});
+
 describe('Show private answer', () => {
   test('a job id that is not a private answer id never reaches the network', async () => {
     for (const bad of ['oly2x.abc.def', `oly2p.${'a'.repeat(32)}.${'B'.repeat(43)}/../mcp`, '../../mcp']) {
@@ -247,8 +279,9 @@ describe('Show private answer', () => {
     const host = mount({ replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }, { status: 202, body: { status: 'pending' } }, 'ready'] });
     host.push(ready());
     host.button(W.show).click();
-    expect(host.text()).toContain('Preparing the answer on your Mac…');
-    expect(host.doc.querySelector('.spinner')).not.toBeNull();
+    expect(host.doc.querySelector('.card .sub')?.textContent).toBe('Preparing the answer on your Mac…');
+    expect(host.doc.querySelector('.card .sub .spinner')).not.toBeNull();
+    expect(host.buttons()).toHaveLength(0);
     await host.until(() => host.text().includes('31 March'), 'the answer');
 
     expect(host.fetched).toHaveLength(3);
@@ -270,7 +303,13 @@ describe('Show private answer', () => {
     expect(host.text()).toContain('From: Orchard lease.pdf, Landlord email, Renewal terms and 1 more');
     expect(host.text()).toContain(`Not found in your private items: ${SECRET_GAP}`);
     expect(host.buttons().map((b) => b.textContent)).toEqual([W.hide]);
-    expect(host.doc.querySelector('.badge')?.textContent).toBe(W.badge);
+    expect(host.doc.querySelector('.row')!.lastElementChild!.textContent).toBe(W.hide);
+    expect(host.doc.querySelector('.row .sub')?.textContent).toBe('Not sent to ChatGPT');
+    // Everything stays inside the one card.
+    const card = host.doc.querySelector('section.card')!;
+    expect(host.doc.getElementById('panel')!.children).toHaveLength(1);
+    expect(card.querySelector('.answer')).not.toBeNull();
+    expect(card.querySelectorAll('.foot')).toHaveLength(2);
     expectNoJargon(host);
   });
 
@@ -310,6 +349,7 @@ describe('Show private answer', () => {
       host.push(ready());
       host.button(W.show).click();
       await host.until(() => host.text().includes(sentence), sentence);
+      expect(host.doc.querySelector('.card .sub.warn')?.textContent).toBe(sentence);
       expect(host.buttons().map((b) => b.textContent)).toEqual(retry ? [W.tryAgain] : []);
       expectNoJargon(host);
     });

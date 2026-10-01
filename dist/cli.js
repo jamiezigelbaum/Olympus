@@ -45695,14 +45695,17 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
     pageTitle: "Olympus private answer",
     title: "Private answer from your Mac",
-    badge: "Not sent to ChatGPT",
+    notSent: "Not sent to ChatGPT",
+    notSentAfterCount: " · not sent to ChatGPT",
     count: {
       one: "1 private item matches",
       many: "{n} private items match"
     },
     capped: "50+",
-    show: "Show private answer",
+    show: "Show",
+    showLabel: "Show private answer",
     hide: "Hide",
+    hideLabel: "Hide private answer",
     tryAgain: "Try again",
     noModel: "Private answers need the private model on your Mac.",
     downloading: "The private model is downloading ({percent}%)…",
@@ -104851,10 +104854,12 @@ function chatgptPrivateAnswerProgram(config2) {
   function fill(template, values) {
     return template.replace(/\{(\w+)\}/g, (whole2, key) => (key in values) ? values[key] : whole2);
   }
-  function button(label, key, onClick) {
+  function button(label, key, onClick, name) {
     const node = el("button", "btn", label);
     node.type = "button";
     node.setAttribute("data-key", key);
+    if (name)
+      node.setAttribute("aria-label", name);
     node.addEventListener("click", onClick);
     return node;
   }
@@ -104865,23 +104870,16 @@ function chatgptPrivateAnswerProgram(config2) {
     svg.setAttribute("aria-hidden", "true");
     svg.setAttribute("focusable", "false");
     const body = doc2.createElementNS(SVG_NS, "rect");
-    body.setAttribute("x", "3");
+    body.setAttribute("x", "3.5");
     body.setAttribute("y", "7");
-    body.setAttribute("width", "10");
-    body.setAttribute("height", "7.5");
+    body.setAttribute("width", "9");
+    body.setAttribute("height", "7");
     body.setAttribute("rx", "1.5");
     const shackle = doc2.createElementNS(SVG_NS, "path");
-    shackle.setAttribute("d", "M5.25 7V5a2.75 2.75 0 0 1 5.5 0v2");
+    shackle.setAttribute("d", "M5.5 7V5a2.5 2.5 0 0 1 5 0v2");
     svg.appendChild(body);
     svg.appendChild(shackle);
     return svg;
-  }
-  function head(into) {
-    const row = el("div", "head");
-    row.appendChild(lock());
-    row.appendChild(el("h2", "title", T.title));
-    into.appendChild(row);
-    into.appendChild(el("span", "badge", T.badge));
   }
   function countLine(count2) {
     if (count2 >= config2.countCap)
@@ -104895,25 +104893,35 @@ function chatgptPrivateAnswerProgram(config2) {
       list += " " + fill(T.more, { n: String(sources.length - shown.length) });
     return fill(T.sources, { list });
   }
-  function cardView(current) {
-    const card = el("section", "card");
-    card.setAttribute("aria-label", T.title);
+  function card(open7) {
+    const node = el("section", open7 ? "card open" : "card");
+    node.setAttribute("aria-label", T.title);
+    const row = el("div", "row");
+    const icon = el("div", "icon");
+    icon.appendChild(lock());
+    row.appendChild(icon);
     const text2 = el("div", "text");
-    head(text2);
-    text2.appendChild(el("p", "sub count", countLine(current.count)));
-    card.appendChild(text2);
-    const live = el("div", "live");
-    live.setAttribute("role", "status");
-    live.setAttribute("aria-live", "polite");
-    live.setAttribute("tabindex", "-1");
-    live.setAttribute("data-key", "status");
+    text2.appendChild(el("h2", "title", T.title));
+    const line = el("p", "sub");
+    line.setAttribute("role", "status");
+    line.setAttribute("aria-live", "polite");
+    line.setAttribute("tabindex", "-1");
+    line.setAttribute("data-key", "status");
+    text2.appendChild(line);
+    row.appendChild(text2);
+    node.appendChild(row);
+    return { card: node, text: text2, line, row };
+  }
+  function cardView(current) {
+    const view = card(false);
+    const line = view.line;
     if (current.state === "no_model") {
-      text2.appendChild(el("p", "sub", T.noModel));
-      return card;
+      line.textContent = T.noModel;
+      return view.card;
     }
     if (current.state === "model_downloading") {
       const known = current.percent >= 0;
-      text2.appendChild(el("p", "sub", known ? fill(T.downloading, { percent: String(current.percent) }) : T.downloadingUnknown));
+      line.textContent = known ? fill(T.downloading, { percent: String(current.percent) }) : T.downloadingUnknown;
       if (known) {
         const bar = el("div", "bar");
         bar.setAttribute("role", "progressbar");
@@ -104924,52 +104932,43 @@ function chatgptPrivateAnswerProgram(config2) {
         const fillBar = el("div", "bar-fill");
         fillBar.style.width = current.percent + "%";
         bar.appendChild(fillBar);
-        text2.appendChild(bar);
+        view.text.appendChild(bar);
       }
-      return card;
+      return view.card;
     }
     if (phase === "working") {
-      const line = el("p", "sub working");
+      line.className = "sub working";
       line.appendChild(el("span", "spinner"));
       line.appendChild(doc2.createTextNode(T.preparing));
-      live.appendChild(line);
-      text2.appendChild(live);
-      return card;
+      return view.card;
     }
     if (phase === "error" || phase === "slow") {
-      live.appendChild(el("p", "note", errorText));
-      text2.appendChild(live);
+      line.className = "sub warn";
+      line.textContent = errorText;
       if (canRetry)
-        card.appendChild(button(T.tryAgain, "retry", () => void show()));
-      return card;
+        view.row.appendChild(button(T.tryAgain, "retry", () => void show()));
+      return view.card;
     }
-    text2.appendChild(live);
-    card.appendChild(button(T.show, "show", () => void show()));
-    return card;
+    line.textContent = countLine(current.count) + T.notSentAfterCount;
+    view.row.appendChild(button(T.show, "show", () => void show(), T.showLabel));
+    return view.card;
   }
   function revealedView(shown) {
-    const card = el("section", "card open");
-    card.setAttribute("aria-label", T.title);
-    const text2 = el("div", "text");
-    const top = el("div", "top");
-    head(top);
-    text2.appendChild(top);
+    const view = card(true);
+    view.line.textContent = T.notSent;
+    view.row.appendChild(button(T.hide, "hide", hide, T.hideLabel));
     const body = el("div", "answer");
     body.setAttribute("tabindex", "-1");
     body.setAttribute("data-key", "answer");
     const paragraphs = shown.text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
     for (const part of paragraphs)
       body.appendChild(el("p", "", part));
-    text2.appendChild(body);
+    view.card.appendChild(body);
     if (shown.sources.length)
-      text2.appendChild(el("p", "sub", sourcesLine(shown.sources)));
+      view.card.appendChild(el("p", "sub foot", sourcesLine(shown.sources)));
     if (shown.unanswered.length)
-      text2.appendChild(el("p", "sub", fill(T.unanswered, { list: shown.unanswered.join("; ") })));
-    card.appendChild(text2);
-    const actions = el("div", "actions");
-    actions.appendChild(button(T.hide, "hide", hide));
-    card.appendChild(actions);
-    return card;
+      view.card.appendChild(el("p", "sub foot", fill(T.unanswered, { list: shown.unanswered.join("; ") })));
+    return view.card;
   }
   function render() {
     if (theme)
@@ -104986,22 +104985,58 @@ function chatgptPrivateAnswerProgram(config2) {
       if (target && typeof target.focus === "function")
         target.focus();
     }
+    observeCard();
     reportHeight(true);
+    afterLayout();
+  }
+  function cardHeight() {
+    const node = info ? root.firstChild : null;
+    if (!node)
+      return 0;
+    let margins = 0;
+    if (typeof window.getComputedStyle === "function") {
+      const style = window.getComputedStyle(node);
+      margins = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
+    }
+    return Math.ceil((node.offsetHeight || 0) + margins);
   }
   let lastHeight = -1;
   function reportHeight(force) {
-    const height = info && root.firstChild ? Math.ceil(root.firstChild.getBoundingClientRect().height) : 0;
-    if (!force && height === lastHeight && height !== 0)
+    const height = cardHeight();
+    if (!force && height === lastHeight)
       return;
     lastHeight = height;
     const host = openai();
     if (host && typeof host.notifyIntrinsicHeight === "function")
       host.notifyIntrinsicHeight(height);
-    notify("ui/notifications/size-changed", { height });
+    const width = info && root.firstChild ? Math.ceil(root.firstChild.offsetWidth || 0) : 0;
+    notify("ui/notifications/size-changed", width > 0 ? { width, height } : { height });
   }
-  if (typeof window.ResizeObserver === "function") {
-    new window.ResizeObserver(() => reportHeight()).observe(root);
+  function afterLayout() {
+    const frame = window.requestAnimationFrame;
+    if (typeof frame === "function")
+      frame.call(window, () => reportHeight());
+    else
+      setTimeout(() => reportHeight(), 0);
   }
+  let observer = null;
+  let observed = null;
+  function observeCard() {
+    if (!observer && typeof window.ResizeObserver === "function") {
+      observer = new window.ResizeObserver(() => reportHeight());
+    }
+    const node = info ? root.firstChild : null;
+    if (!observer || node === observed)
+      return;
+    if (observed)
+      observer.unobserve(observed);
+    observed = node;
+    if (node)
+      observer.observe(node);
+  }
+  const fonts = doc2.fonts;
+  if (fonts && fonts.ready && typeof fonts.ready.then === "function")
+    fonts.ready.then(() => reportHeight());
   readGlobals();
   render();
   request("ui/initialize", {
@@ -105014,16 +105049,18 @@ function chatgptPrivateAnswerProgram(config2) {
     notify("ui/notifications/initialized");
   });
 }
-function vars2(palette) {
+function vars2(palette, card) {
   return [
-    `--bg:${palette.bg}`,
     `--text:${palette.text}`,
     `--muted:${palette.muted}`,
     `--line:${palette.line}`,
-    `--surface:${palette.surface}`,
-    `--accent:${palette.accent}`,
     `--focus:${palette.focus}`,
-    `--run:${palette.run}`
+    `--run:${palette.run}`,
+    `--tint:${card.tint}`,
+    `--raise:${card.raise}`,
+    `--hair:${card.hair}`,
+    `--hover:${card.hover}`,
+    `--warning:${card.warning}`
   ].join(";");
 }
 function chatgptPrivateAnswerPageHtml(options) {
@@ -105057,51 +105094,47 @@ function chatgptPrivateAnswerPageHtml(options) {
 function scriptJson2(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_JOB_ID, CHATGPT_PRIVATE_ANSWER_CSS;
+var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
 var init_private_answer2 = __esm(() => {
   init_vocabulary();
   init_private_answer_contract();
   init_page();
   CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS = 2 * 60000;
   CHATGPT_PRIVATE_ANSWER_JOB_ID = /^oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
+  CARD_LIGHT = { tint: "#f7f7f8", raise: "#ffffff", hair: "#e3e3e3", hover: "#ececec", warning: CHATGPT_DASHBOARD_LIGHT.warnLine };
+  CARD_DARK = { tint: "#2f2f2f", raise: "#3a3a3a", hair: "#4a4a4a", hover: "#444444", warning: CHATGPT_DASHBOARD_DARK.warnLine };
   CHATGPT_PRIVATE_ANSWER_CSS = `
-:root{${vars2(CHATGPT_DASHBOARD_LIGHT)};color-scheme:light dark}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){${vars2(CHATGPT_DASHBOARD_DARK)}}}
-:root[data-theme=dark]{${vars2(CHATGPT_DASHBOARD_DARK)};color-scheme:dark}
+:root{${vars2(CHATGPT_DASHBOARD_LIGHT, CARD_LIGHT)};color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){${vars2(CHATGPT_DASHBOARD_DARK, CARD_DARK)}}}
+:root[data-theme=dark]{${vars2(CHATGPT_DASHBOARD_DARK, CARD_DARK)};color-scheme:dark}
 :root[data-theme=light]{color-scheme:light}
 *{box-sizing:border-box}
 html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
-html,body{margin:0;padding:0;background:var(--bg);color:var(--text);overflow:hidden}
+html,body{margin:0;padding:0;height:auto;min-height:0;background:transparent;color:var(--text);overflow:hidden}
 body{font-size:0.9375rem;overflow-wrap:anywhere}
-p{margin:0}
+p,h2{margin:0}
 #panel:empty{display:none}
-.card{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 1rem;padding:0.75rem 1rem}
-.card.open{align-items:flex-start;flex-direction:column;gap:0.75rem}
-.text{flex:1 1 16rem;min-width:0;display:flex;flex-wrap:wrap;align-items:center;gap:0.125rem 0.5rem}
-.text>*{flex:1 1 100%;min-width:0}
-.text>.head,.text>.badge{flex:0 1 auto}
-.card.open .text{flex:none;width:100%;flex-direction:column;align-items:stretch;gap:0.5rem}
-.card.open .text>*{flex:none}
-.top{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
-.head{display:flex;align-items:center;gap:0.5rem}
-@media (max-width:26rem){.text>.count{flex:0 1 auto;order:1}.text>.badge{order:2}.text>:not(.head):not(.count):not(.badge){order:3}}
-.lock{flex:none;width:1rem;height:1rem;fill:none;stroke:var(--text);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
-.title{margin:0;font-size:0.9375rem;font-weight:600;line-height:1.4}
-.badge{flex:none;font-size:0.75rem;font-weight:500;line-height:1.25rem;padding:0 0.5rem;color:var(--accent);border:1px solid var(--accent);border-radius:999px;white-space:nowrap}
-.sub{color:var(--muted);font-size:0.875rem}
-.note{font-size:0.875rem}
-.live:empty{display:none}
-.live:focus{outline:none}
+.card{margin:0;padding:0.75rem 0.875rem;border-radius:14px;background:var(--tint)}
+.row{display:flex;align-items:center;gap:0.75rem}
+.icon{flex:none;display:flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:50%;background:var(--raise);border:1px solid var(--hair)}
+.lock{width:1rem;height:1rem;fill:none;stroke:var(--text);stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
+.text{flex:1 1 auto;min-width:0}
+.title{font-size:0.9375rem;font-weight:600;line-height:1.35}
+.sub{color:var(--muted);font-size:0.8125rem;line-height:1.4;margin-top:0.0625rem}
+.sub:focus{outline:none}
+.sub.warn{color:var(--warning)}
 .working{display:flex;align-items:center;gap:0.5rem}
-.spinner{flex:none;width:0.875rem;height:0.875rem;border-radius:50%;border:2px solid var(--line);border-top-color:var(--text);animation:spin 0.9s linear infinite}
+.spinner{flex:none;width:0.75rem;height:0.75rem;border-radius:50%;border:2px solid var(--hair);border-top-color:var(--muted);animation:spin 0.9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-.bar{height:0.25rem;margin-top:0.375rem;border-radius:999px;background:var(--surface);overflow:hidden}
+.bar{height:0.25rem;margin-top:0.375rem;border-radius:999px;background:var(--hair);overflow:hidden}
 .bar-fill{height:100%;background:var(--run)}
-.answer{display:flex;flex-direction:column;gap:0.5rem;white-space:pre-line}
+.answer{margin-top:0.625rem;display:flex;flex-direction:column;gap:0.625rem;font-size:0.9375rem;line-height:1.6;white-space:pre-line}
 .answer:focus{outline:none}
-.btn{flex:none;font:inherit;font-size:0.875rem;font-weight:500;min-height:2.25rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
-.btn:hover{background:var(--surface)}
-:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.foot{margin-top:0.5rem}
+.btn{flex:none;font:inherit;font-size:0.875rem;font-weight:500;line-height:1.25;min-height:2rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--raise);color:var(--text);cursor:pointer;-webkit-appearance:none;appearance:none;box-shadow:none}
+.btn:hover{background:var(--hover)}
+.btn:focus{outline:none}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 @media (prefers-reduced-motion:reduce){.spinner{animation-duration:3s}}
 `;
 });
