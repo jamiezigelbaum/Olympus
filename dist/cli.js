@@ -69151,7 +69151,12 @@ function listMcpTools(config2, surface = "mcp") {
   return exposedOperations(operations, { config: config2, surface }).map((operation) => ({
     name: operation.name,
     description: operationDescription(operation, { config: config2 }),
-    inputSchema: operationToolSchema(operation, { config: config2 })
+    inputSchema: operationToolSchema(operation, { config: config2 }),
+    annotations: {
+      readOnlyHint: !operation.mutating,
+      destructiveHint: false,
+      openWorldHint: false
+    }
   }));
 }
 var init_tools = __esm(() => {
@@ -94297,6 +94302,914 @@ var init_webStandardStreamableHttp = __esm(() => {
   init_types2();
 });
 
+// src/workers/chatgpt/dashboard-contract.ts
+var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard";
+
+// src/workers/chatgpt/dashboard-resource.ts
+function dashboardResourceMeta() {
+  return {
+    ui: { csp: { connectDomains: [], resourceDomains: [] }, prefersBorder: false },
+    "openai/ui": { preferredDisplayMode: "fullscreen", availableDisplayModes: ["inline", "fullscreen"] }
+  };
+}
+function dashboardResourceHtml() {
+  return PLACEHOLDER_HTML;
+}
+var MCP_APP_MIME_TYPE = "text/html;profile=mcp-app", DASHBOARD_RESOURCE, PLACEHOLDER_HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Olympus</title>
+<style>
+  :root { color-scheme: light dark; font: 14px/1.45 system-ui, sans-serif; }
+  body { margin: 16px; }
+  .note { padding: 8px 10px; border: 1px dashed currentColor; opacity: .7; margin-bottom: 12px; }
+  pre { white-space: pre-wrap; word-break: break-word; }
+  button { margin: 4px 6px 4px 0; }
+</style>
+</head>
+<body>
+<div class="note">Placeholder dashboard. The real Olympus dashboard replaces this page.</div>
+<div id="fixes"></div>
+<pre id="out">Waiting for Olympus…</pre>
+<script>
+(function () {
+  var nextId = 1;
+  var pending = {};
+  function send(method, params) {
+    var id = nextId++;
+    window.parent.postMessage({ jsonrpc: '2.0', id: id, method: method, params: params || {} }, '*');
+    return new Promise(function (resolve, reject) { pending[id] = { resolve: resolve, reject: reject }; });
+  }
+  function notify(method, params) {
+    window.parent.postMessage({ jsonrpc: '2.0', method: method, params: params || {} }, '*');
+  }
+  function render(result) {
+    var data = result && result.structuredContent;
+    document.getElementById('out').textContent = data ? JSON.stringify(data, null, 2) : 'No dashboard data.';
+    var fixes = document.getElementById('fixes');
+    fixes.textContent = '';
+    var items = [];
+    if (data) {
+      if (data.blocker) items.push(data.blocker.fix);
+      (data.needsYou || []).forEach(function (item) { items.push(item.fix); });
+      (data.sources || []).forEach(function (source) { if (source.primary) items.push(source.primary); });
+    }
+    items.forEach(function (fix) {
+      if (!fix) return;
+      var button = document.createElement('button');
+      button.textContent = fix.label;
+      if (!fix.tool) { button.disabled = true; button.title = fix.disabledReason || ''; }
+      else button.onclick = function () {
+        send('tools/call', { name: fix.tool, arguments: fix.args || {} }).then(render, function () {
+          document.getElementById('out').textContent = 'Could not reach Olympus.';
+        });
+      };
+      fixes.appendChild(button);
+    });
+  }
+  window.addEventListener('message', function (event) {
+    if (event.source !== window.parent) return;
+    var message = event.data;
+    if (!message || message.jsonrpc !== '2.0') return;
+    if (message.id !== undefined && pending[message.id]) {
+      var entry = pending[message.id];
+      delete pending[message.id];
+      if (message.error) entry.reject(message.error); else entry.resolve(message.result);
+      return;
+    }
+    if (message.method === 'ui/notifications/tool-result') render(message.params);
+  });
+  send('ui/initialize', {
+    protocolVersion: '2026-01-26',
+    appInfo: { name: 'olympus-dashboard-placeholder', version: '0' },
+    appCapabilities: {}
+  }).then(function () { notify('ui/notifications/initialized'); }, function () {});
+  if (window.openai && window.openai.toolOutput) render({ structuredContent: window.openai.toolOutput });
+})();
+</script>
+</body>
+</html>
+`;
+var init_dashboard_resource = __esm(() => {
+  DASHBOARD_RESOURCE = {
+    uri: DASHBOARD_RESOURCE_URI,
+    name: "Olympus dashboard",
+    mimeType: MCP_APP_MIME_TYPE
+  };
+});
+
+// src/workers/chatgpt/dashboard-view-model.ts
+function buildChatGptDashboardViewModel(view, options = {}) {
+  const now = options.now ?? new Date;
+  const degraded = scrubDegradations(view.degraded_credentials);
+  const rows = publicCards(view.sources).map(({ definition, card }) => {
+    const scrubbed = scrubCard(definition, card);
+    const status = dashboardStatus({ source: scrubbed, ...degraded ? { degradedCredentials: degraded } : {} });
+    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind };
+  });
+  const sources = rows.map(({ definition, card, status, actionKind }, index) => ({
+    entry: sourceEntry(definition, card, status, actionKind, degraded),
+    index
+  })).sort((a, b) => groupRank(a.entry.group) - groupRank(b.entry.group) || a.index - b.index).map(({ entry }) => entry);
+  const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").map(({ definition, card }) => attentionItem(definition, card, degraded));
+  const embedding = options.embedding ?? embeddingFromModelSetup(view.model_setup);
+  if (embedding.state === "failed") {
+    needsYou.push({ id: "model:embedding", sentence: PENDING_VOCABULARY.embeddingNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.checkAgain) });
+  }
+  const answers = answersFromModelSetup(view.model_setup);
+  if (answers && !answers.ready) {
+    needsYou.push({ id: "model:answers", sentence: PENDING_VOCABULARY.answerModelNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.checkAgain) });
+  }
+  const progress = overallProgress(rows.map((row) => row.card), rows.map((row) => row.status));
+  const connected = rows.some(({ card }) => dashboardIsConnectedSource(card));
+  const anyAnswerReady = rows.some(({ card }) => card.answer_readiness.state === "ready");
+  const connection = connectionFor({ connected, anyAnswerReady, embedding, progress });
+  return {
+    v: 1,
+    connection,
+    needsYou,
+    sources,
+    ...progress ? { progress } : {},
+    models: {
+      embedding,
+      ...answers ? { answers } : {}
+    },
+    generatedAt: isoOrNow(view.generated_at, now)
+  };
+}
+function publicCards(cards) {
+  const out = [];
+  for (const definition of DASHBOARD_SUPPORTED_SOURCES) {
+    if (definition.family === "model")
+      continue;
+    const card = cards.find((candidate) => candidate.source_id === definition.source_id);
+    if (card)
+      out.push({ definition, card });
+  }
+  return out;
+}
+function groupRank(group) {
+  return group === "local" ? 0 : 1;
+}
+function sourceGroup(definition) {
+  return definition.connect_kind === "local" ? "local" : "cloud";
+}
+function sourceEntry(definition, card, status, actionKind, degraded) {
+  const detail = dashboardSubLine(card, degraded ? { degradedCredentials: degraded } : undefined);
+  const lastSyncAt = isoOrUndefined(card.last_sync_at);
+  const primary = status === "Off" ? connectFix(actionKind) : undefined;
+  return {
+    id: definition.source_id,
+    label: definition.label,
+    group: sourceGroup(definition),
+    status,
+    ...detail ? { detail } : {},
+    ...lastSyncAt ? { lastSyncAt } : {},
+    ...primary ? { primary } : {}
+  };
+}
+function attentionItem(definition, card, degraded) {
+  const reason = dashboardAttentionLine(card, degraded ? { degradedCredentials: degraded } : undefined);
+  const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
+  const reauth = card.connection.state === "reauth_required" || card.connection.state !== "connected" && card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card);
+  const fix = reauth ? onMacFix(PENDING_VOCABULARY.reconnect) : { label: PENDING_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {} };
+  return { id: `source:${definition.source_id}`, sentence, fix };
+}
+function connectFix(kind) {
+  if (kind === "none")
+    return;
+  const label = kind === "needs_setup" ? "Set up" : "Connect";
+  return { label, disabledReason: PENDING_VOCABULARY.connectOnMac };
+}
+function onMacFix(label) {
+  return { label, disabledReason: PENDING_VOCABULARY.fixOnMac };
+}
+function connectionFor(input) {
+  const state = "installing";
+  if (input.embedding.state === "downloading") {
+    return {
+      state,
+      progress: { percent: clampPercent3(input.embedding.percent ?? 0), label: PENDING_VOCABULARY.installingModel }
+    };
+  }
+  if (!input.connected) {
+    return { state, progress: { percent: 0, label: PENDING_VOCABULARY.installingNoSource } };
+  }
+  if (!input.anyAnswerReady) {
+    return {
+      state,
+      progress: { percent: clampPercent3(input.progress?.percent ?? 0), label: PENDING_VOCABULARY.installingFirstIndex }
+    };
+  }
+  return { state: "ready" };
+}
+function embeddingFromModelSetup(setup) {
+  if (!setup)
+    return { kind: "custom", state: "ready" };
+  const required4 = setup.cards.filter((card) => card.required);
+  const failed = required4.some((card) => card.state === "needs_attention" || card.state === "not_configured");
+  return { kind: "custom", state: failed ? "failed" : "ready" };
+}
+function answersFromModelSetup(setup) {
+  if (!setup)
+    return;
+  const venice = setup.cards.find((card) => card.id === "venice" && card.required);
+  if (venice)
+    return { kind: "venice", label: ANSWER_MODEL_LABELS.venice, ready: venice.state === "ready" };
+  const local = setup.cards.find((card) => card.id === "local" && card.required);
+  if (local)
+    return { kind: "local", label: ANSWER_MODEL_LABELS.local, ready: local.state === "ready" };
+  return;
+}
+function unitFor2(card) {
+  if (card.family === "file")
+    return "files";
+  if (card.family === "email" || card.family === "chat")
+    return "messages";
+  return "items";
+}
+function overallProgress(cards, statuses) {
+  let inScope = 0;
+  let read = 0;
+  let embedded = 0;
+  let embeddedKnown = true;
+  let eta;
+  let stalled = false;
+  let initial = false;
+  let unit;
+  let mixed = false;
+  let anyUnfinished = false;
+  cards.forEach((card, index) => {
+    if (!dashboardIsConnectedSource(card))
+      return;
+    const summary = dashboardWorkingSummary(card);
+    if (!summary)
+      return;
+    inScope += summary.in_scope_items;
+    read += summary.read_items;
+    if (typeof card.coverage.embedded_files === "number") {
+      embedded += Math.min(summary.in_scope_items, Math.max(0, card.coverage.embedded_files));
+    } else {
+      embeddedKnown = false;
+    }
+    if (!summary.fully_working)
+      anyUnfinished = true;
+    const cardUnit = unitFor2(card);
+    if (unit === undefined)
+      unit = cardUnit;
+    else if (unit !== cardUnit)
+      mixed = true;
+    if (card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL)
+      initial = true;
+    const minutes = card.progress?.eta_minutes;
+    if (typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0) {
+      eta = Math.max(eta ?? 0, Math.round(minutes * 60));
+    }
+    if (dashboardSyncKeepsFailing(card) || statuses[index] === "Needs you" && card.queue_health.needs_attention > 0) {
+      stalled = true;
+    }
+  });
+  if (inScope <= 0 || !anyUnfinished)
+    return;
+  const progressUnit = mixed || unit === undefined ? "items" : unit;
+  const details = [
+    { stage: PENDING_VOCABULARY.stageReading, unit: progressUnit, done: read, total: inScope }
+  ];
+  if (embeddedKnown) {
+    details.push({ stage: PENDING_VOCABULARY.stageSearchable, unit: progressUnit, done: embedded, total: inScope });
+  }
+  return {
+    unit: progressUnit,
+    phase: initial ? "initial" : "refresh",
+    percent: clampPercent3(read / inScope * 100),
+    itemsLeft: Math.max(0, inScope - read),
+    ...eta !== undefined ? { etaSeconds: eta } : {},
+    stalled,
+    details
+  };
+}
+function scrubCard(definition, card) {
+  const connectionLabel = KNOWN_CONNECTION_LABELS.has(card.connection.label) || SYNCED_RELATIVE.test(card.connection.label) ? card.connection.label : "";
+  const freshnessLabel2 = card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || card.freshness.label.startsWith("Answer lane:") ? card.freshness.label : "";
+  const pending = card.connection.pending;
+  return {
+    corpus_id: definition.primary_corpus_id,
+    source_id: definition.source_id,
+    label: definition.label,
+    provider: definition.provider,
+    family: definition.family,
+    trust_domain: definition.trust_domain,
+    configured: card.configured === true,
+    ...card.scope_selection ? {
+      scope_selection: {
+        required: true,
+        ...card.scope_selection.kind === "mail" ? { kind: "mail" } : { kind: "folders" },
+        status: card.scope_selection.status === "approved" ? "approved" : "scope_pending",
+        connected: card.scope_selection.connected === true,
+        ...typeof card.scope_selection.ingestion_enabled === "boolean" ? { ingestion_enabled: card.scope_selection.ingestion_enabled } : {}
+      }
+    } : {},
+    freshness: {
+      label: freshnessLabel2,
+      ...finite(card.freshness.hours) ? { hours: card.freshness.hours } : {},
+      stale: card.freshness.stale === true
+    },
+    coverage: {
+      indexed_items: count(card.coverage.indexed_items),
+      content_ready_items: count(card.coverage.content_ready_items),
+      embedded_items: count(card.coverage.embedded_items),
+      ...finite(card.coverage.embedded_files) ? { embedded_files: count(card.coverage.embedded_files) } : {},
+      needs_review_items: count(card.coverage.needs_review_items),
+      ...finite(card.coverage.not_read_by_policy_items) ? { not_read_by_policy_items: count(card.coverage.not_read_by_policy_items) } : {},
+      ...finite(card.coverage.answer_ready_eligible_items) ? { answer_ready_eligible_items: count(card.coverage.answer_ready_eligible_items) } : {}
+    },
+    ingestion_health: {
+      coverage_percent: finite(card.ingestion_health.coverage_percent) ? card.ingestion_health.coverage_percent : 0,
+      stuck_count: count(card.ingestion_health.stuck_count),
+      drain_state: ["enabled", "disabled", "held", "unknown"].includes(card.ingestion_health.drain_state) ? card.ingestion_health.drain_state : "unknown",
+      label: ""
+    },
+    tier_composition: [],
+    queue_health: {
+      label: KNOWN_QUEUE_LABELS.has(card.queue_health.label) ? card.queue_health.label : "",
+      waiting: count(card.queue_health.waiting),
+      active: count(card.queue_health.active),
+      needs_attention: count(card.queue_health.needs_attention),
+      ...finite(card.queue_health.retrying_tasks) ? { retrying_tasks: count(card.queue_health.retrying_tasks) } : {},
+      ...finite(card.queue_health.failing_tasks) ? { failing_tasks: count(card.queue_health.failing_tasks) } : {}
+    },
+    answer_readiness: {
+      state: card.answer_readiness.state,
+      label: KNOWN_READINESS_LABELS.has(card.answer_readiness.label) ? card.answer_readiness.label : ""
+    },
+    connection: {
+      state: card.connection.state,
+      label: connectionLabel,
+      action: { kind: "none" },
+      handles: [],
+      ...pending && finite(pending.expires_in_minutes) ? { pending: { started_at: "", expires_at: "", expires_in_minutes: count(pending.expires_in_minutes) } } : {}
+    },
+    ...card.progress && finite(card.progress.indexed_items_per_hour) ? {
+      progress: {
+        indexed_items_per_hour: card.progress.indexed_items_per_hour,
+        ...finite(card.progress.eta_minutes) ? { eta_minutes: card.progress.eta_minutes } : {}
+      }
+    } : {},
+    ...card.schedule ? {
+      schedule: {
+        running: card.schedule.running === true,
+        consecutive_failures: count(card.schedule.consecutive_failures),
+        ...typeof card.schedule.degraded_reason === "string" ? { degraded_reason: card.schedule.degraded_reason } : {}
+      }
+    } : {},
+    ...card.embedding_backlog ? {
+      embedding_backlog: {
+        chunks: count(card.embedding_backlog.chunks),
+        embedded_chunks: count(card.embedding_backlog.embedded_chunks),
+        missing_chunks: count(card.embedding_backlog.missing_chunks),
+        refresh_needed: card.embedding_backlog.refresh_needed === true
+      }
+    } : {},
+    ...isoOrUndefined(card.last_sync_at) ? { last_sync_at: isoOrUndefined(card.last_sync_at) } : {}
+  };
+}
+function scrubDegradations(input) {
+  if (!input || input.length === 0)
+    return;
+  return input.map((entry) => ({
+    kind: "worker_credential_degraded",
+    display_name: typeof entry.display_name === "string" ? entry.display_name : "",
+    state: entry.state,
+    status_label: "Credential unavailable - needs your attention",
+    hint: "",
+    attempts: count(entry.attempts),
+    max_attempts: count(entry.max_attempts)
+  }));
+}
+function finite(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+function count(value) {
+  return finite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+function clampPercent3(value) {
+  if (!Number.isFinite(value))
+    return 0;
+  return Math.max(0, Math.min(100, Math.round(value * 10) / 10));
+}
+function isoOrUndefined(value) {
+  if (typeof value !== "string")
+    return;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
+}
+function isoOrNow(value, now) {
+  return isoOrUndefined(value) ?? now.toISOString();
+}
+var PENDING_VOCABULARY, ANSWER_MODEL_LABELS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS;
+var init_dashboard_view_model = __esm(() => {
+  init_source_dashboard();
+  init_vocabulary();
+  PENDING_VOCABULARY = {
+    installingNoSource: "Connect a source to begin",
+    installingModel: "Getting the built-in model ready",
+    installingFirstIndex: "Building your first index",
+    connectOnMac: "Connect sources in Olympus on your Mac.",
+    reconnect: "Reconnect",
+    checkAgain: "Check again",
+    stageReading: "Reading",
+    stageSearchable: "Making searchable",
+    embeddingNeedsAttention: "The search model needs attention on your Mac.",
+    answerModelNeedsAttention: "The answer model needs attention on your Mac.",
+    fixOnMac: "Open Olympus on your Mac to fix this."
+  };
+  ANSWER_MODEL_LABELS = { venice: "Venice", local: "Local models", built_in: "Built-in" };
+  KNOWN_CONNECTION_LABELS = new Set([
+    "not connected",
+    "connection state unreadable",
+    "awaiting browser consent",
+    "reauth required",
+    "syncing",
+    "connected",
+    "connected · live session not checked",
+    "connected, waiting for first sync",
+    "connected · waiting for new messages",
+    "connected · choose folders to start",
+    "connected · choose mail to start",
+    "unpaired",
+    "unpair state unreadable",
+    "Unpair incomplete — manual cleanup required",
+    "synced"
+  ]);
+  SYNCED_RELATIVE = /^synced (just now|less than 1 hour ago|\d+ (minute|hour|day|week|month|year)s? ago)$/;
+  KNOWN_READINESS_LABELS = new Set([
+    "Connect this source",
+    "Needs attention before answers",
+    "Ready for questions; sync paused",
+    "Ready for questions",
+    "Syncing now",
+    "Preparing answer-ready text",
+    "Waiting for the first sync"
+  ]);
+  KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
+});
+
+// src/workers/chatgpt/response-builder.ts
+function dashboardToolResult(view) {
+  const structured = copyDashboardViewModel(view);
+  return {
+    content: [{ type: "text", text: dashboardSummary(structured) }],
+    structuredContent: structured
+  };
+}
+function copyDashboardViewModel(view) {
+  const state = CONNECTION_STATES.has(view.connection?.state) ? view.connection.state : "installing";
+  const connection = { state };
+  if (state === "mac_offline" && iso(view.connection.lastSeenAt))
+    connection.lastSeenAt = iso(view.connection.lastSeenAt);
+  if (view.connection.action && CONNECTION_ACTIONS.has(view.connection.action.id)) {
+    const href = safeHref2(view.connection.action.href);
+    connection.action = { id: view.connection.action.id, ...href ? { href } : {} };
+  }
+  if (state === "installing" && view.connection.progress) {
+    connection.progress = {
+      percent: percent(view.connection.progress.percent),
+      label: text(view.connection.progress.label)
+    };
+  }
+  const out = {
+    v: 1,
+    connection,
+    needsYou: (view.needsYou ?? []).map(copyItem),
+    sources: (view.sources ?? []).map(copySource),
+    models: {
+      embedding: {
+        kind: view.models?.embedding?.kind === "built_in" ? "built_in" : "custom",
+        state: EMBEDDING_STATES.has(view.models?.embedding?.state) ? view.models.embedding.state : "failed",
+        ...view.models?.embedding?.state === "downloading" && finite2(view.models.embedding.percent) ? { percent: percent(view.models.embedding.percent) } : {}
+      }
+    },
+    generatedAt: iso(view.generatedAt) ?? new Date().toISOString()
+  };
+  if (view.blocker)
+    out.blocker = copyItem(view.blocker);
+  const answers = view.models?.answers;
+  if (answers && ANSWER_KINDS.has(answers.kind)) {
+    out.models.answers = { kind: answers.kind, label: text(answers.label), ready: answers.ready === true };
+  }
+  if (view.models?.change)
+    out.models.change = copyFix(view.models.change);
+  const progress = view.progress;
+  if (progress) {
+    out.progress = {
+      unit: UNITS.has(progress.unit) ? progress.unit : "items",
+      phase: progress.phase === "initial" ? "initial" : "refresh",
+      percent: percent(progress.percent),
+      itemsLeft: whole(progress.itemsLeft),
+      ...finite2(progress.etaSeconds) ? { etaSeconds: whole(progress.etaSeconds) } : {},
+      stalled: progress.stalled === true,
+      details: (progress.details ?? []).map((detail) => ({
+        stage: text(detail.stage),
+        unit: UNITS.has(detail.unit) ? detail.unit : "items",
+        done: whole(detail.done),
+        total: whole(detail.total)
+      }))
+    };
+  }
+  return out;
+}
+function copyItem(item) {
+  return { id: identifier(item.id), sentence: text(item.sentence), fix: copyFix(item.fix) };
+}
+function copySource(source) {
+  const out = {
+    id: identifier(source.id),
+    label: text(source.label),
+    group: source.group === "local" ? "local" : "cloud",
+    status: STATUSES.has(source.status) ? source.status : "Waiting"
+  };
+  if (source.detail)
+    out.detail = text(source.detail);
+  if (iso(source.lastSyncAt))
+    out.lastSyncAt = iso(source.lastSyncAt);
+  if (source.primary)
+    out.primary = copyFix(source.primary);
+  if (source.menu && source.menu.length > 0)
+    out.menu = source.menu.map(copyFix);
+  return out;
+}
+function copyFix(fix) {
+  const out = { label: text(fix?.label) };
+  if (typeof fix?.tool === "string" && FIX_TOOLS.has(fix.tool)) {
+    out.tool = fix.tool;
+    out.args = {};
+  }
+  const href = safeHref2(fix?.href);
+  if (href)
+    out.href = href;
+  if (fix?.disabledReason)
+    out.disabledReason = text(fix.disabledReason);
+  if (fix?.destructive === true)
+    out.destructive = true;
+  return out;
+}
+function dashboardSummary(view) {
+  const parts = [];
+  parts.push(view.connection.state === "ready" ? "Olympus is ready." : `Olympus is ${view.connection.state.replace(/_/g, " ")}${view.connection.progress ? `: ${view.connection.progress.label}` : ""}.`);
+  const connected = view.sources.filter((source) => source.status !== "Off");
+  if (connected.length > 0) {
+    parts.push(`Sources: ${connected.map((source) => `${source.label} (${source.status})`).join(", ")}.`);
+  }
+  if (view.progress)
+    parts.push(`Indexing ${view.progress.percent}% done, ${view.progress.itemsLeft} ${view.progress.unit} left.`);
+  if (view.needsYou.length > 0)
+    parts.push(`Needs attention: ${view.needsYou.map((item) => item.sentence.replace(/\.$/, "")).join("; ")}.`);
+  return parts.join(" ");
+}
+function sourceStatusToolResult(view) {
+  const copy = copyDashboardViewModel(view);
+  const sources = copy.sources.map((source) => ({
+    label: source.label,
+    status: source.status,
+    ...source.detail ? { detail: source.detail } : {},
+    ...source.lastSyncAt ? { lastSyncAt: source.lastSyncAt } : {}
+  }));
+  const structured = { ready: copy.connection.state === "ready", sources };
+  const lines = sources.map((source) => `${source.label}: ${source.status}${source.detail ? ` (${source.detail})` : ""}`);
+  return {
+    content: [{ type: "text", text: lines.length > 0 ? lines.join(`
+`) : "No sources are set up in Olympus yet." }],
+    structuredContent: structured
+  };
+}
+function answerToolResult(raw) {
+  const record3 = asRecord14(raw);
+  if (record3?.status === "working" && typeof record3.job_id === "string" && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record3.job_id)) {
+    return {
+      content: [{ type: "text", text: PENDING_TEXT }],
+      structuredContent: { status: "working", job_id: record3.job_id, next_tool: "source_answer_result" }
+    };
+  }
+  if (!record3 || typeof record3.answer !== "string") {
+    return errorToolResult(new OperationError("source_index_error", "unexpected answer shape"));
+  }
+  const answer = record3.answer.replace(UNSAFE_CHARS, "").slice(0, MAX_ANSWER);
+  const citations = (Array.isArray(record3.evidence) ? record3.evidence : []).map(citationFrom).filter((citation) => citation !== undefined).slice(0, MAX_CITATIONS);
+  const textParts = [answer];
+  if (citations.length > 0) {
+    textParts.push("", "Sources:", ...citations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));
+  }
+  return {
+    content: [{ type: "text", text: textParts.join(`
+`) }],
+    structuredContent: { status: "answered", answer, citations }
+  };
+}
+function citationFrom(value) {
+  const evidence = asRecord14(value);
+  if (!evidence)
+    return;
+  const source = sourceLabel3(evidence.provider, evidence.family);
+  if (!source)
+    return;
+  const citation = { source };
+  if (typeof evidence.trust_domain === "string" && CITABLE_TRUST_DOMAINS.has(evidence.trust_domain)) {
+    if (typeof evidence.title === "string" && evidence.title.trim())
+      citation.title = text(evidence.title);
+    const url = httpsUrl(evidence.uri);
+    if (url)
+      citation.url = url;
+    const date4 = dateOnly(evidence.authored_at) ?? dateOnly(evidence.updated_at);
+    if (date4)
+      citation.date = date4;
+  }
+  return citation;
+}
+function citationLine(citation) {
+  return [citation.source, citation.title, citation.date, citation.url].filter(Boolean).join(" · ");
+}
+function sourceLabel3(provider, family) {
+  if (typeof provider !== "string")
+    return;
+  const definition = DASHBOARD_SUPPORTED_SOURCES.find((candidate) => candidate.provider === provider) ?? DASHBOARD_SUPPORTED_SOURCES.find((candidate) => candidate.source_id.split(".")[0] === provider);
+  if (definition && definition.family !== "model")
+    return definition.label;
+  if (family === "file")
+    return "Files";
+  if (family === "email")
+    return "Mail";
+  return;
+}
+function errorToolResult(error2) {
+  const code = errorCode(error2);
+  return {
+    content: [{ type: "text", text: ERROR_TEXT[code] }],
+    structuredContent: { error: code },
+    isError: true
+  };
+}
+function errorCode(error2) {
+  if (error2 instanceof OperationError && Object.prototype.hasOwnProperty.call(ERROR_TEXT, error2.code))
+    return error2.code;
+  if (error2 instanceof ChatGptSurfaceError)
+    return error2.code;
+  return "internal";
+}
+function dashboardToolMeta() {
+  return {
+    ui: { resourceUri: DASHBOARD_RESOURCE_URI },
+    "openai/outputTemplate": DASHBOARD_RESOURCE_URI,
+    "openai/ui": { entrypoints: [{ type: "global" }] }
+  };
+}
+function text(value) {
+  if (typeof value !== "string")
+    return "";
+  return value.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, MAX_TEXT);
+}
+function identifier(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? value : "";
+}
+function finite2(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+function whole(value) {
+  return finite2(value) ? Math.max(0, Math.round(value)) : 0;
+}
+function percent(value) {
+  return finite2(value) ? Math.max(0, Math.min(100, Math.round(value * 10) / 10)) : 0;
+}
+function iso(value) {
+  if (typeof value !== "string")
+    return;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
+}
+function dateOnly(value) {
+  return iso(value)?.slice(0, 10);
+}
+function httpsUrl(value) {
+  if (typeof value !== "string" || value.length > 2048)
+    return;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.toString() : undefined;
+  } catch {
+    return;
+  }
+}
+function safeHref2(value) {
+  const url = httpsUrl(value);
+  if (!url)
+    return;
+  const host = new URL(url).hostname;
+  return host === FIX_HREF_HOST || host.endsWith(`.${FIX_HREF_HOST}`) ? url : undefined;
+}
+function asRecord14(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+var MAX_TEXT = 400, MAX_ANSWER, MAX_CITATIONS = 20, UNSAFE_CHARS, FIX_TOOLS, FIX_HREF_HOST = "olympusplugin.ai", CONNECTION_STATES, CONNECTION_ACTIONS, STATUSES, UNITS, EMBEDDING_STATES, ANSWER_KINDS, CITABLE_TRUST_DOMAINS, PENDING_TEXT, ERROR_TEXT, ChatGptSurfaceError;
+var init_response_builder = __esm(() => {
+  init_operation_error();
+  init_source_dashboard();
+  MAX_ANSWER = 64 * 1024;
+  UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
+  FIX_TOOLS = new Set([DASHBOARD_TOOL_NAME]);
+  CONNECTION_STATES = new Set(["not_installed", "installing", "ready", "mac_offline", "relay_unavailable"]);
+  CONNECTION_ACTIONS = new Set(["install", "open_olympus", "wake_mac", "retry"]);
+  STATUSES = new Set(["Fresh", "Working", "Waiting", "Needs you", "Failing", "Off"]);
+  UNITS = new Set(["files", "messages", "items"]);
+  EMBEDDING_STATES = new Set(["downloading", "ready", "failed"]);
+  ANSWER_KINDS = new Set(["built_in", "venice", "local"]);
+  CITABLE_TRUST_DOMAINS = new Set(["public_safe", "internal"]);
+  PENDING_TEXT = "Olympus is still preparing this answer on the Mac. Call source_answer_result with this job_id " + "(repeat while it says working). Do not ask the question again.";
+  ERROR_TEXT = {
+    invalid_params: "The request was not valid. Check the arguments and try again.",
+    invalid_request: "The request was not valid. Check the arguments and try again.",
+    unsupported_filter: "That filter is not supported here.",
+    config_error: "Olympus on the Mac needs setup before it can answer. Open Olympus on the Mac.",
+    argus_unreachable: "The answer model on the Mac is not reachable right now. Try again shortly.",
+    argus_error: "The answer model on the Mac could not answer. Try again shortly.",
+    email_not_configured: "Olympus on the Mac needs setup before it can answer. Open Olympus on the Mac.",
+    email_unreachable: "Olympus on the Mac is not reachable right now. Try again shortly.",
+    email_error: "Olympus could not complete this request. Try again shortly.",
+    email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+    source_index_not_enabled: "Searching sources is not turned on in Olympus on the Mac.",
+    source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+    source_index_error: "Olympus could not complete this request. Try again shortly.",
+    source_answer_busy: "Olympus is busy with another answer. Wait for it to finish, then ask again.",
+    source_answer_job_not_found: "That answer is no longer available. Ask the question again with source_answer.",
+    source_answer_deadline: "Olympus took too long to answer. Ask a narrower question or try again.",
+    source_answer_too_large: "The answer was too large to return. Ask a narrower question.",
+    unavailable: "The Olympus dashboard is not available on the Mac right now. Try again shortly.",
+    unknown_tool: "Olympus does not have that tool.",
+    internal: "Olympus could not complete this request. Try again shortly."
+  };
+  ChatGptSurfaceError = class ChatGptSurfaceError extends Error {
+    code;
+    constructor(code) {
+      super(code);
+      this.code = code;
+      this.name = "ChatGptSurfaceError";
+    }
+  };
+});
+
+// src/workers/chatgpt/mcp-surface.ts
+function listChatGptTools(ctx) {
+  const tools = [DASHBOARD_TOOL, SOURCE_STATUS_TOOL];
+  for (const tool of ANSWER_TOOLS) {
+    const operation = findOperationByName(tool.name);
+    if (operation && shouldExposeOperation(operation, { config: ctx.config, surface: "remote" }))
+      tools.push(tool);
+  }
+  return tools;
+}
+async function callChatGptTool(name, args, ctx, options, signal) {
+  try {
+    switch (name) {
+      case DASHBOARD_TOOL_NAME:
+        return dashboardToolResult(await dashboardViewModel(options, signal));
+      case SOURCE_STATUS_TOOL.name:
+        return sourceStatusToolResult(await dashboardViewModel(options, signal));
+      case SOURCE_ANSWER_TOOL.name: {
+        const question = typeof args.question === "string" ? args.question.trim() : "";
+        if (!question)
+          throw new ChatGptSurfaceError("invalid_params");
+        return answerToolResult(await runOperation(SOURCE_ANSWER_TOOL.name, ctx, { question, timeoutMs: SOURCE_ANSWER_TIMEOUT_MS }));
+      }
+      case SOURCE_ANSWER_RESULT_TOOL.name: {
+        const jobId = typeof args.job_id === "string" ? args.job_id.trim() : "";
+        if (!jobId)
+          throw new ChatGptSurfaceError("invalid_params");
+        return answerToolResult(await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId }));
+      }
+      default:
+        throw new ChatGptSurfaceError("unknown_tool");
+    }
+  } catch (error2) {
+    return errorToolResult(error2);
+  }
+}
+async function runOperation(name, ctx, params) {
+  const operation = findOperationByName(name);
+  if (!operation || !shouldExposeOperation(operation, { config: ctx.config, surface: "remote" })) {
+    throw new ChatGptSurfaceError("unknown_tool");
+  }
+  return operation.handler(ctx, params);
+}
+async function dashboardViewModel(options, signal) {
+  let view;
+  try {
+    view = await options.dashboardView(signal);
+  } catch {
+    throw new ChatGptSurfaceError("unavailable");
+  }
+  const embedding = options.embedding?.();
+  return buildChatGptDashboardViewModel(view, embedding ? { embedding } : {});
+}
+function readChatGptResource(uri) {
+  if (uri !== DASHBOARD_RESOURCE_URI) {
+    throw new McpError(ErrorCode.InvalidParams, "Unknown resource.");
+  }
+  return {
+    contents: [{
+      uri: DASHBOARD_RESOURCE.uri,
+      mimeType: DASHBOARD_RESOURCE.mimeType,
+      text: dashboardResourceHtml(),
+      _meta: dashboardResourceMeta()
+    }]
+  };
+}
+function createChatGptMcpServer(makeOperationContext, options) {
+  const server = new Server({ name: "olympus", version: VERSION }, { capabilities: { tools: {}, resources: {} } });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listChatGptTools(makeOperationContext()) }));
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal));
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [{ ...DASHBOARD_RESOURCE }] }));
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
+  return server;
+}
+var READ_ONLY, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, ANSWER_TOOLS;
+var init_mcp_surface = __esm(() => {
+  init_server2();
+  init_types2();
+  init_operation_exposure();
+  init_operations();
+  init_version();
+  init_dashboard_resource();
+  init_dashboard_view_model();
+  init_response_builder();
+  READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+  DASHBOARD_TOOL = {
+    name: DASHBOARD_TOOL_NAME,
+    title: "Olympus dashboard",
+    description: [
+      "Show the Olympus dashboard: which of the user's sources are connected, how far indexing has got,",
+      "what needs the user's attention, and whether the models are ready.",
+      "Use it when the user asks about Olympus setup, status or progress, or why Olympus could not answer.",
+      "Takes no arguments. Read-only."
+    ].join(" "),
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: READ_ONLY,
+    _meta: dashboardToolMeta()
+  };
+  SOURCE_ANSWER_TOOL = {
+    name: "source_answer",
+    title: "Ask Olympus",
+    description: [
+      "Answer a question from the user's own sources that Olympus indexes privately on their Mac",
+      "(mail, files, notes, chats and saved reading).",
+      "Use it whenever the user asks about their own information: what someone wrote, what a document says,",
+      "when something happened, what they decided. Do not use it for general knowledge.",
+      'Returns {status: "answered", answer, citations[]}: present the answer and cite it with the numbered sources;',
+      "if the answer says something could not be found, say so rather than guessing.",
+      'If it returns {status: "working", job_id}, the answer is still being prepared: call source_answer_result',
+      "with that job_id (again while it says working) instead of asking again.",
+      "Ask one question at a time and wait for each answer."
+    ].join(" "),
+    inputSchema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The user's question, in their own words, with any names, dates or places they gave." }
+      },
+      required: ["question"],
+      additionalProperties: false
+    },
+    annotations: READ_ONLY
+  };
+  SOURCE_ANSWER_RESULT_TOOL = {
+    name: "source_answer_result",
+    title: "Get an Olympus answer",
+    description: [
+      'Collect the answer to a source_answer call that returned {status: "working", job_id}.',
+      'Returns the finished answer with citations, or {status: "working"} again after waiting up to about a minute;',
+      "then call it again. A job_id expires about 15 minutes after its answer is ready."
+    ].join(" "),
+    inputSchema: {
+      type: "object",
+      properties: { job_id: { type: "string", description: "The job_id from source_answer." } },
+      required: ["job_id"],
+      additionalProperties: false
+    },
+    annotations: READ_ONLY
+  };
+  SOURCE_STATUS_TOOL = {
+    name: "source_index_status",
+    title: "Olympus source status",
+    description: [
+      "List each source Olympus indexes with a one-word status (Fresh, Working, Waiting, Needs you, Failing, Off)",
+      "and a short line about it. Use it to check whether a source is connected and up to date before or after",
+      "an answer. Takes no arguments. For the visual dashboard use olympus_dashboard."
+    ].join(" "),
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: READ_ONLY
+  };
+  ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL];
+});
+
 // src/workers/remote-request-body.ts
 async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BODY_BYTES, options = {}) {
   const declared = request.headers.get("Content-Length");
@@ -94406,7 +95319,7 @@ function createRemoteMcpHandler(options) {
     } catch {}
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
-    const server = createOlympusMcpServer("remote", () => ctx);
+    const server = options.chatgpt ? createChatGptMcpServer(() => ctx, options.chatgpt) : createOlympusMcpServer("remote", () => ctx);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);
@@ -94540,6 +95453,7 @@ var init_remote_mcp = __esm(() => {
   init_remote_public_url();
   init_source_answer_jobs();
   init_server3();
+  init_mcp_surface();
   init_remote_request_body();
 });
 
@@ -94952,13 +95866,13 @@ function isPublicIPv4(address) {
   });
 }
 function expandIPv6(address) {
-  let text = address.toLowerCase();
-  const dotted = /(\d+\.\d+\.\d+\.\d+)$/.exec(text);
+  let text2 = address.toLowerCase();
+  const dotted = /(\d+\.\d+\.\d+\.\d+)$/.exec(text2);
   if (dotted) {
     const value = ipv4ToInt(dotted[1]);
-    text = `${text.slice(0, -dotted[1].length)}${(value >>> 16).toString(16)}:${(value & 65535).toString(16)}`;
+    text2 = `${text2.slice(0, -dotted[1].length)}${(value >>> 16).toString(16)}:${(value & 65535).toString(16)}`;
   }
-  const halves = text.split("::");
+  const halves = text2.split("::");
   if (halves.length > 2)
     return;
   const head = halves[0] ? halves[0].split(":") : [];
@@ -95458,12 +96372,12 @@ function createRemoteOAuthHandler(options) {
     if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
       return oauthError(400, "invalid_client_metadata", "Registration must be application/json.");
     }
-    const text = await readBounded(request, MAX_REGISTRATION_BYTES);
-    if (text === undefined)
+    const text2 = await readBounded(request, MAX_REGISTRATION_BYTES);
+    if (text2 === undefined)
       return oauthError(400, "invalid_client_metadata", "Registration is too large.");
     let body;
     try {
-      body = JSON.parse(text);
+      body = JSON.parse(text2);
     } catch {
       return oauthError(400, "invalid_client_metadata", "Registration is not JSON.");
     }
@@ -95663,10 +96577,10 @@ async function readForm(request) {
   if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/x-www-form-urlencoded")) {
     return;
   }
-  const text = await readBounded(request, MAX_FORM_BYTES);
-  if (text === undefined)
+  const text2 = await readBounded(request, MAX_FORM_BYTES);
+  if (text2 === undefined)
     return;
-  return singleParams(new URLSearchParams(text));
+  return singleParams(new URLSearchParams(text2));
 }
 function readCookie(request, name) {
   for (const part of (request.headers.get("cookie") ?? "").split(";")) {
@@ -95813,8 +96727,8 @@ function createRemoteOpenApiHandler(options) {
   const currentSpec = () => {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
-      const text = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text, etag: `"${createHash52("sha256").update(text).digest("base64url").slice(0, 27)}"` };
+      const text2 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
+      spec = { serverUrl, text: text2, etag: `"${createHash52("sha256").update(text2).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -95822,8 +96736,8 @@ function createRemoteOpenApiHandler(options) {
     const { pathname } = new URL(request.url);
     let response;
     if (pathname === REMOTE_OPENAPI_SPEC_PATH) {
-      const { text, etag } = currentSpec();
-      response = serveSpec(request, text, etag);
+      const { text: text2, etag } = currentSpec();
+      response = serveSpec(request, text2, etag);
     } else {
       const name = TOOL_PATH_PATTERN.exec(pathname)?.[1];
       response = name === undefined ? jsonResponse(404, { error: "not_found" }) : await callTool(request, name, options);
@@ -95884,12 +96798,12 @@ async function readParams(request) {
       response: body.reason === "too_large" ? jsonResponse(413, { error: "payload_too_large" }) : invalidRequest("The request body could not be read as UTF-8.")
     };
   }
-  const text = body.text;
-  if (text.trim() === "")
+  const text2 = body.text;
+  if (text2.trim() === "")
     return { ok: true, value: {} };
   let parsed;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(text2);
   } catch {
     return { ok: false, response: invalidRequest("The request body must be a JSON object.") };
   }
@@ -96020,9 +96934,9 @@ function neutralSpecConfig() {
   const neutral = defaultConfig();
   return { ...neutral, sourceIndex: { ...neutral.sourceIndex, enabled: true } };
 }
-function firstSentence(text) {
-  const match = /^(.+?[.!?])(\s|$)/.exec(text);
-  return (match?.[1] ?? text).slice(0, 120);
+function firstSentence(text2) {
+  const match = /^(.+?[.!?])(\s|$)/.exec(text2);
+  return (match?.[1] ?? text2).slice(0, 120);
 }
 var REMOTE_OPENAPI_SPEC_PATH = "/openapi.json", REMOTE_OPENAPI_TOOLS_PREFIX = "/api/v1/tools/", REMOTE_OPENAPI_MAX_BODY_BYTES, REMOTE_OPENAPI_API_VERSION = "1.1.0", TOOL_PATH_PATTERN, CALLER_FACING_ERRORS, INTERNAL_ERROR_MESSAGES;
 var init_remote_openapi = __esm(() => {
@@ -98530,7 +99444,17 @@ async function main() {
       publicUrls: remotePublicUrls,
       trustRelayHeaders,
       connections: () => remoteConnections({ create: true })
-    }), withRemoteOpenApiRoutes2(remoteOpenApi, withRemoteMcpRoute2(createRemoteMcpHandler2(remoteAgentOptions), withWorkerBearerAuth(worker.fetch, { authToken }))))
+    }), withRemoteOpenApiRoutes2(remoteOpenApi, withRemoteMcpRoute2(createRemoteMcpHandler2({
+      ...remoteAgentOptions,
+      chatgpt: {
+        dashboardView: async (signal) => {
+          const response = await worker.fetch(new Request("http://olympus-worker.internal/dashboard.json", signal ? { signal } : {}));
+          if (!response.ok)
+            throw new Error(`dashboard view unavailable (${response.status})`);
+          return await response.json();
+        }
+      }
+    }), withWorkerBearerAuth(worker.fetch, { authToken }))))
   });
   sourceScheduler?.start();
   await reconcileCaptures();
@@ -102997,8 +103921,8 @@ function parseEvalShardExportArgs(args) {
   const scope = values.get("scope")?.trim();
   if (!scope)
     throw new OperationError("invalid_params", "Eval shard export requires an explicit --scope.");
-  const count = Number(values.get("count"));
-  if (!Number.isSafeInteger(count) || count <= 0) {
+  const count2 = Number(values.get("count"));
+  if (!Number.isSafeInteger(count2) || count2 <= 0) {
     throw new OperationError("invalid_params", "Eval shard export requires --count N as a positive integer.");
   }
   const out = values.get("out")?.trim();
@@ -103013,7 +103937,7 @@ function parseEvalShardExportArgs(args) {
   return {
     account,
     approved_scope_key: approvedScopeKey,
-    count,
+    count: count2,
     out_dir: resolve10(out),
     ...docTypes ? { doc_types: docTypes } : {},
     dry_run: !execute
@@ -103583,8 +104507,8 @@ async function readWorkerHttpState() {
   }
 }
 function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
-  const root = asRecord14(workerHttp);
-  const dashboard = asRecord14(root?.source_dashboard);
+  const root = asRecord15(workerHttp);
+  const dashboard = asRecord15(root?.source_dashboard);
   const sources = Array.isArray(dashboard?.sources) ? dashboard.sources : [];
   const capabilities = new Map(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((item) => [item.source_id, item]));
   const signals = [];
@@ -103595,17 +104519,17 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
     }
   };
   for (const raw of sources) {
-    const source = asRecord14(raw);
+    const source = asRecord15(raw);
     if (!source)
       continue;
     const sourceId = typeof source.source_id === "string" && capabilities.has(source.source_id) ? source.source_id : undefined;
     if (!sourceId)
       continue;
     const capability = capabilities.get(sourceId);
-    const connection = asRecord14(source.connection);
+    const connection = asRecord15(source.connection);
     const connectionState = typeof connection?.state === "string" ? connection.state : "";
-    const answerReadiness = asRecord14(source.answer_readiness);
-    const queue = asRecord14(source.queue_health);
+    const answerReadiness = asRecord15(source.answer_readiness);
+    const queue = asRecord15(source.queue_health);
     const needsAttention = typeof queue?.needs_attention === "number" && queue.needs_attention > 0;
     const inFlight = connectionState === "awaiting_consent" || connectionState === "reauth_required";
     if (source.configured !== true && !inFlight)
@@ -103635,7 +104559,7 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
   }
   return signals;
 }
-function asRecord14(value) {
+function asRecord15(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 async function fetchJson(url, init) {
@@ -104033,7 +104957,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
   } catch {
     throw new OperationError("invalid_params", "Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.");
   }
-  const tell = (text) => writeSync2(terminal, text);
+  const tell = (text2) => writeSync2(terminal, text2);
   try {
     tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.
 `);
