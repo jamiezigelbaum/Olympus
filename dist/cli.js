@@ -100843,7 +100843,6 @@ function chatgptPickerProgram(kit) {
       label = el("p", "fname leaf");
     label.title = node.name;
     nameParts(label, node.name, key, node);
-    add(li, label, folderControl(key, node.name, node));
     if (node.has_children) {
       const chevron = el("button", "fopen", "›");
       chevron.type = "button";
@@ -100860,6 +100859,7 @@ function chatgptPickerProgram(kit) {
       spacer.setAttribute("aria-hidden", "true");
       add(li, spacer);
     }
+    add(li, label, folderControl(key, node.name, node));
     return li;
   }
   function loadMore(parentKey) {
@@ -102098,14 +102098,14 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .fmore{padding:0.5rem 0}
 .fpath{font-size:1.125rem;margin-bottom:0.75rem}
 .fpath-up{color:var(--muted);font-weight:400}
-.this-row{display:flex;align-items:center;gap:0.5rem;min-height:3rem;padding:0.25rem 0.25rem 0.25rem 0.75rem;margin-bottom:0.75rem;background:var(--surface);border-radius:0.75rem}
+.this-row{display:flex;align-items:center;gap:0.5rem;min-height:3rem;padding:0.25rem 0 0.25rem 0.75rem;margin-bottom:0.75rem;background:var(--surface);border-radius:0.75rem}
 .this-label{flex:1 1 auto;min-width:0;font-weight:600}
-.this-row>.seg{margin-right:3rem}
+.this-row>.seg{margin-left:auto}
 .this-row.pick{flex-wrap:wrap;justify-content:space-between;gap:0.5rem 0.75rem;padding:0.625rem 0.875rem;border:1px solid var(--line)}
 .this-text{flex:1 1 12rem;min-width:0}
 .this-row .btn{min-height:2.75rem}
 .fnote{margin:0 0 0.75rem}
-.frow.seg-row{flex-direction:row;align-items:center;gap:0.5rem;min-height:3rem}
+.frow.seg-row{flex-direction:row;align-items:center;gap:0.25rem;min-height:3rem}
 .seg-row>.fname{flex:1 1 auto;flex-wrap:wrap;align-items:center;align-content:flex-start;gap:0 0.5rem;width:auto;min-width:0;height:2.75rem;min-height:0;padding:0;overflow:hidden;white-space:nowrap}
 .seg-row>.fname>*{line-height:2.75rem}
 .fname-main{display:flex;align-items:center;gap:0.5rem;flex:0 1 auto;min-width:0;max-width:100%}
@@ -102114,10 +102114,11 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .ftag{flex:none;font-size:0.75rem;font-weight:500;line-height:1.25rem;padding:0 0.4375rem;color:var(--muted);border:1px solid var(--line);border-radius:999px}
 .fmeta{flex:none;color:var(--muted);font-size:0.8125rem;font-weight:400}
 .fmeta.fcount{margin-left:-0.25rem}
-.fopen,.fopen-gap{flex:none;width:2.75rem;height:2.75rem}
-.fopen{display:inline-flex;align-items:center;justify-content:center;margin:0;padding:0 0 0.125rem;font:inherit;font-size:1.375rem;line-height:1;color:var(--muted);background:none;border:0;border-radius:999px;cursor:pointer}
+.fopen,.fopen-gap{flex:none;width:2.75rem;height:2.75rem;margin-left:-0.625rem}
+.fopen{display:inline-flex;align-items:center;justify-content:center;padding:0 0 0.125rem;font:inherit;font-size:1.375rem;line-height:1;color:var(--muted);background:none;border:0;border-radius:999px;cursor:pointer}
 .fopen:hover:not(:disabled){background:var(--surface);color:var(--text)}
 .fopen:disabled{cursor:default;opacity:0.5}
+.seg-row>.seg{margin-left:auto}
 .seg{flex:none;display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;background:var(--bg)}
 .seg-opt{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:2.75rem;height:2rem;margin:0;padding:0 0.75rem;font:inherit;font-size:0.8125rem;font-weight:500;color:var(--text);background:none;border:0;border-radius:999px;cursor:pointer;white-space:nowrap}
 .seg-opt::before{content:"";position:absolute;inset:-0.4375rem 0}
@@ -102129,7 +102130,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .seg-opt:disabled{cursor:not-allowed;color:var(--muted);opacity:0.5}
 .seg-opt:disabled.inherited{opacity:1}
 .seg-short{display:none}
-@container (max-width:26.25rem){.seg-long{display:none}.seg-short{display:inline}.seg-opt{padding:0 0.5rem}.fcount{display:none}.this-row>.seg{margin-right:0}}
+@container (max-width:26.25rem){.seg-long{display:none}.seg-short{display:inline}.seg-opt{padding:0 0.5rem}.fcount{display:none}}
 .jump-btn{width:100%;align-items:center;min-height:3rem;padding:0}
 .jtag{flex:none;margin-left:auto;font-size:0.8125rem;color:var(--muted)}
 .opt{display:flex;align-items:flex-start;gap:0.5rem;padding:0.375rem 0;cursor:pointer}

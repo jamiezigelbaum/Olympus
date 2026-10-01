@@ -310,10 +310,12 @@ describe('folder picker', () => {
     }
     expect(rowOf(host, 'Tax Returns 2024').querySelector('.fname')!.textContent).toBe('Tax Returns 20242 GB· 1,200 files');
     expect(rowOf(host, 'Medical Records').querySelector('.fname')!.textContent).toBe('Medical Records500 MB· 1 file');
-    // Every row: name, one control, then › (or an empty slot so the controls line up).
+    // Every row: ›, the name, then one control.
     for (const row of Array.from(doc(host).querySelectorAll('li.seg-row'))) {
       const opens = !!row.querySelector('.fopen');
-      expect(Array.from(row.children).map((child) => child.className)).toEqual([opens ? 'fname' : 'fname leaf', 'seg', opens ? 'fopen' : 'fopen-gap']);
+      // Chevron (or a same-width spacer for a leaf) first, then the name, and the control last, flush right.
+      expect(Array.from(row.children).map((child) => child.className)).toEqual([opens ? 'fopen' : 'fopen-gap', opens ? 'fname' : 'fname leaf', 'seg']);
+      expect(row.lastElementChild!.getAttribute('role')).toBe('radiogroup');
       expect(Array.from(row.querySelectorAll('.seg-opt .seg-long')).map((node) => node.textContent)).toEqual(['Full', 'Names only', 'Skip']);
       expect(Array.from(row.querySelectorAll('.seg-opt .seg-short')).map((node) => node.textContent)).toEqual(['Full', 'Names', 'Skip']);
     }
@@ -831,10 +833,14 @@ describe('page rules', () => {
     expect(CHATGPT_DASHBOARD_CSS).not.toMatch(/border-(left|right):/);
     expect(CHATGPT_DASHBOARD_CSS).not.toContain('text-decoration:underline');
     // Thin rows: one line, at least 48px, segments at least 44px wide with a 44px tall hit area.
-    expect(CHATGPT_DASHBOARD_CSS).toContain('.frow.seg-row{flex-direction:row;align-items:center;gap:0.5rem;min-height:3rem}');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.frow.seg-row{flex-direction:row;align-items:center;gap:0.25rem;min-height:3rem}');
     expect(CHATGPT_DASHBOARD_CSS).toMatch(/\.seg-opt\{[^}]*min-width:2\.75rem[^}]*height:2rem/);
     expect(CHATGPT_DASHBOARD_CSS).toContain('.seg-opt::before{content:"";position:absolute;inset:-0.4375rem 0}');
-    expect(CHATGPT_DASHBOARD_CSS).toContain('.fopen,.fopen-gap{flex:none;width:2.75rem;height:2.75rem}');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.fopen,.fopen-gap{flex:none;width:2.75rem;height:2.75rem;');
+    // Every control sits flush at the right edge, the level's own row included.
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.seg-row>.seg{margin-left:auto}');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.this-row>.seg{margin-left:auto}');
+    expect(CHATGPT_DASHBOARD_CSS).toMatch(/\.this-row\{[^}]*padding:0\.25rem 0 0\.25rem 0\.75rem/);
     // Short segment labels below a 420px container.
     expect(CHATGPT_DASHBOARD_CSS).toContain('@container (max-width:26.25rem){.seg-long{display:none}.seg-short{display:inline}');
   });
