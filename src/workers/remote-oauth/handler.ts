@@ -679,6 +679,11 @@ function hostAllowed(request: Request, urls: RemotePublicUrls): boolean {
 function sameOriginFormPost(request: Request): boolean {
   const site = request.headers.get('sec-fetch-site');
   if (site !== null && site !== 'same-origin') return false;
+  // The page sends `Referrer-Policy: no-referrer`, under which browsers submit
+  // its own form with `Origin: null`. Sec-Fetch-Site is set by the browser and
+  // cannot be forged by a page, so same-origin there settles it; the CSRF
+  // token and its cookie are still required after this check.
+  if (site === 'same-origin') return true;
   const origin = request.headers.get('origin');
   if (origin === null) return true;
   const host = request.headers.get('host') ?? new URL(request.url).host;

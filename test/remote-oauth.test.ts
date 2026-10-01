@@ -770,8 +770,11 @@ describe('authorization request validation', () => {
     expect((await submitConsent({ ...page, csrf: 'x'.repeat(43) }, fields)).status).toBe(403);
     expect((await submitConsent(page, fields, { Origin: 'https://evil.example' })).status).toBe(403);
     expect((await submitConsent(page, fields, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);
-    // None of those spent the code.
-    const ok = await submitConsent(page, fields);
+    expect((await submitConsent(page, fields, { Origin: 'null', 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);
+    expect((await submitConsent(page, fields, { Origin: 'null' })).status).toBe(403);
+    // None of those spent the code. A real browser submits this no-referrer
+    // page's own form with Origin: null and Sec-Fetch-Site: same-origin.
+    const ok = await submitConsent(page, fields, { Origin: 'null', 'Sec-Fetch-Site': 'same-origin' });
     expect(ok.status).toBe(303);
     expect(new URL(ok.headers.get('location')!).searchParams.get('code')).toBeTruthy();
   });

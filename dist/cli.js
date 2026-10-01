@@ -99541,6 +99541,8 @@ function sameOriginFormPost(request) {
   const site = request.headers.get("sec-fetch-site");
   if (site !== null && site !== "same-origin")
     return false;
+  if (site === "same-origin")
+    return true;
   const origin = request.headers.get("origin");
   if (origin === null)
     return true;
