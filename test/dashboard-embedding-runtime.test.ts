@@ -531,8 +531,8 @@ describe('background page embedding block', () => {
     expect(html).toContain('Embeddings: running now (metadata caught up)');
     expect(html).toContain('No fixed hours');
     expect(html).toContain('secure-local-qwen3-embed · local (Delphi router)');
-    expect(html).toContain('Index faster (pauses syncing)');
-    expect(html).toContain('Index faster; syncing pauses until you turn this off.');
+    expect(html).toContain('>Index faster<');
+    expect(html).toContain('Syncing pauses until you turn this off.');
     expect(html).toContain('takes effect within a minute');
   });
 
@@ -541,7 +541,7 @@ describe('background page embedding block', () => {
 
     expect(on).toContain('Stop indexing faster');
     expect(on).toContain('name="on" value="false"');
-    expect(on).not.toContain('Index faster (pauses syncing)');
+    expect(on).not.toContain('>Index faster<');
 
     const off = renderBackground(facts());
     expect(off).toContain('name="on" value="true"');

@@ -43845,6 +43845,9 @@ function dashboardIsConnectedSource(source) {
     return true;
   return source.coverage.indexed_items > 0;
 }
+function dashboardStatusGroups(view, options) {
+  return groupSourcesByStatus(view.sources, resolveDegraded(view, options));
+}
 function dashboardConnectedStatusGroups(view, options) {
   return groupSourcesByStatus(view.sources.filter((source) => dashboardIsConnectedSource(source)), resolveDegraded(view, options));
 }
@@ -44237,10 +44240,10 @@ var init_vocabulary = __esm(() => {
     "redirect_uri_not_registered"
   ]);
   DASHBOARD_INDEX_FASTER = {
-    on: "Index faster (pauses syncing)",
+    on: "Index faster",
     off: "Stop indexing faster",
-    explainOn: "Index faster; syncing pauses until you turn this off.",
-    explainOff: "Indexing faster now; syncing is paused until you turn this off."
+    explainOn: "Syncing pauses until you turn this off.",
+    explainOff: "Syncing is paused until you turn this off."
   };
 });
 
@@ -82253,9 +82256,11 @@ function syncsLane(view, now, basePath) {
   } else if (failing.length === 0) {
     facts.push("on schedule");
   }
-  const persistentlyFailing = failing.filter((source) => dashboardSyncKeepsFailing(source));
-  const retryingOnly = failing.length - persistentlyFailing.length;
-  const retrying = failing.filter((source) => !dashboardSyncKeepsFailing(source));
+  const shownAbove = new Set(dashboardStatusGroups(view).filter((group) => group.status === "Needs you" || group.status === "Failing").flatMap((group) => group.sources));
+  const unlisted = failing.filter((source) => !shownAbove.has(source));
+  const persistentlyFailing = unlisted.filter((source) => dashboardSyncKeepsFailing(source));
+  const retrying = unlisted.filter((source) => !dashboardSyncKeepsFailing(source));
+  const retryingOnly = retrying.length;
   if (retryingOnly > 0) {
     facts.push(`${listLabels(retrying)} ${retryingOnly === 1 ? "is" : "are"} retrying on ${retryingOnly === 1 ? "its" : "their"} own`);
   }

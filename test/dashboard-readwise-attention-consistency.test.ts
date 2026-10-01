@@ -212,7 +212,8 @@ describe('Readwise attention reads one way on home, the header and the page', ()
     expect(banner?.sentence).toContain('task_failed');
     expect(banner?.action).toMatchObject({ kind: 'sync_now', label: 'Sync now' });
     expect(renderDashboardDetailBody(card, { now: NOW })).toContain('class="attncard banner"');
-    expect(syncsFacts(view)).toContain('Readwise keeps failing');
+    // Said once, under Needs you with its fix; the syncing line does not repeat it.
+    expect(syncsFacts(view)).not.toContain('keeps failing');
   });
 
   test('a credential failure is failing on its first attempt', () => {

@@ -76,6 +76,7 @@ import {
   dashboardDuration,
   dashboardIndexingFacts,
   dashboardRelativeFromMs,
+  dashboardStatusGroups,
   dashboardSyncKeepsFailing,
   type DashboardIndexingProgress,
 } from '../vocabulary.ts';
@@ -1316,11 +1317,19 @@ function syncsLane(
   // which the checks below already call self-healing; calling it failing here
   // too put "1 source failing" beside a source page that said nothing was
   // wrong (owner-reported, 2026-09-24).
-  const persistentlyFailing = failing.filter((source) => dashboardSyncKeepsFailing(source));
-  const retryingOnly = failing.length - persistentlyFailing.length;
+  // A source already under Needs you or Failing is said there, with its fix;
+  // naming it again here put the same fact on home twice (owner, 2026-10-01).
+  const shownAbove = new Set(
+    dashboardStatusGroups(view)
+      .filter((group) => group.status === 'Needs you' || group.status === 'Failing')
+      .flatMap((group) => group.sources),
+  );
+  const unlisted = failing.filter((source) => !shownAbove.has(source));
+  const persistentlyFailing = unlisted.filter((source) => dashboardSyncKeepsFailing(source));
   // Named, not counted: "1 source retrying" read as an alarm that never said
   // which source, or whether anything was asked of the owner.
-  const retrying = failing.filter((source) => !dashboardSyncKeepsFailing(source));
+  const retrying = unlisted.filter((source) => !dashboardSyncKeepsFailing(source));
+  const retryingOnly = retrying.length;
   if (retryingOnly > 0) {
     facts.push(`${listLabels(retrying)} ${retryingOnly === 1 ? 'is' : 'are'} retrying on ${retryingOnly === 1 ? 'its' : 'their'} own`);
   }

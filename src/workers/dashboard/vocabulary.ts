@@ -588,10 +588,10 @@ export const DASHBOARD_MODELS_BLOCKED_REASON = 'Locked until models are ready';
 
 /** The control that speeds indexing up, and what it costs. */
 export const DASHBOARD_INDEX_FASTER = {
-  on: 'Index faster (pauses syncing)',
+  on: 'Index faster',
   off: 'Stop indexing faster',
-  explainOn: 'Index faster; syncing pauses until you turn this off.',
-  explainOff: 'Indexing faster now; syncing is paused until you turn this off.',
+  explainOn: 'Syncing pauses until you turn this off.',
+  explainOff: 'Syncing is paused until you turn this off.',
 } as const;
 
 /**
