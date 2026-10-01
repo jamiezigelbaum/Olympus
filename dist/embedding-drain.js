@@ -18719,6 +18719,9 @@ var init_store_sync = __esm(() => {
 // src/workers/dashboard/answer-ready-coverage.ts
 var init_answer_ready_coverage = () => {};
 
+// src/workers/remote-oauth/consent-page.ts
+var init_consent_page = () => {};
+
 // src/core/email-policy.ts
 var FORBIDDEN_RAW_RESPONSE_KEYS;
 var init_email_policy = __esm(() => {
@@ -21436,6 +21439,7 @@ init_venice_models();
 init_sovereignty();
 
 // src/workers/email-source/index.ts
+init_consent_page();
 init_analyst();
 init_file_lease();
 init_email_policy();
