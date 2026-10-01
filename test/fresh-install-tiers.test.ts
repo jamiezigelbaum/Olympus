@@ -210,6 +210,10 @@ describe('fresh install: Personal by default, flagged items wait, Secrets never 
     const model: AnalystModel = {
       async complete(request) {
         prompts.push(request);
+        // Every read item is judged (p3): the orchard plan is ordinary, the bank letter is not.
+        if (request.prompt.includes('pruning plan')) {
+          return { text: '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","confidence":0.97}]}', modelId: 'built_in' };
+        }
         return { text: '{"verdicts":[{"i":1,"tier":"private","category":"financial","confidence":0.9}]}', modelId: 'built_in' };
       },
     };
@@ -265,9 +269,14 @@ describe('fresh install: Personal by default, flagged items wait, Secrets never 
 
     // Judged Private: no longer pending, and still never in olympus_search.
     expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'current', metadataTier: 'secure', metadataPending: false });
+    // The orchard plan's text was read, so it was held for the model too; judged
+    // Personal, it is queued to move back (no automatic moves configured here)
+    // and its text stays out of olympus_search until it lands.
+    expect(prompts.some((prompt) => prompt.prompt.includes('pruning plan'))).toBe(true);
+    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'moving', targetContentTier: 'private', contentPending: false });
     const { result } = await olympusSearch(install, 'orchard');
     expect(JSON.stringify(result)).not.toContain('loan terms');
-    expect(JSON.stringify(result)).toContain('pruning plan');
+    expect(JSON.stringify(result)).not.toContain('pruning plan');
   });
 
   test('a configured private lane wins; a refused one is never papered over with the built-in model', () => {
@@ -419,11 +428,22 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending' });
     const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true });
     const tick = await service.runOnce();
-    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 1 }, autoMoves: { moved: 1, failed: 0, notEligible: 0 } });
+    // Both read items were held for the model (p3: every read item is judged);
+    // both Personal verdicts move at once.
+    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 2 }, autoMoves: { moved: 2, failed: 0, notEligible: 0 } });
+    // The bank letter's names were judged Personal, but its text question was
+    // still open: the move carried it, so the letter landed held and pending
+    // (never at its names' Personal placement), and its question was kept.
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending', contentPending: true, storedTrustDomain: 'secure_local' });
+    expect(JSON.stringify((await olympusSearch(install, 'lender')).result)).not.toContain('loan terms');
+    // The next pass answers the text question, and that verdict moves it.
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', autoMoves: { moved: 1, failed: 0 } });
     // Moved: current in Personal, and its text now reaches olympus_search.
     expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
     const { result } = await olympusSearch(install, 'lender');
     expect(JSON.stringify(result)).toContain('loan terms');
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
     const ledger = await readEmbeddingLedgerEntries(join(root, 'embedding-ledger.jsonl'));
     expect(ledger.some((entry) => entry.approved_by === 'system-automatic')).toBe(true);
   });
@@ -433,11 +453,66 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
     const service = snifferFor(install, builtIn, { localEmbeddingsOnly: false });
     const tick = await service.runOnce();
-    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 1 } });
+    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 2 } });
     expect((tick as { autoMoves?: unknown }).autoMoves).toBeUndefined();
     expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'moving', targetContentTier: 'private' });
     const { result } = await olympusSearch(install, 'lender');
     expect(JSON.stringify(result)).not.toContain('loan terms');
+  });
+
+  /** The private model arrives after the items were judged without one (or under an older classifier). */
+  function addPrivateModel(install: Install, lane: typeof BUILT_IN_SNIFFER_LANE): Install {
+    const installed = configureInstalledTierClassification({
+      env,
+      lane: { kind: lane.kind, modelId: lane.modelId },
+      retirePublic: true,
+      ownerContext: () => undefined,
+    });
+    return { ...install, installed };
+  }
+
+  test('a routed item judged Personal with no model is re-judged once a model is there: held at once, then Private', async () => {
+    const before = await freshInstall();
+    // Read, no detector fired, Personal at once (no private model yet).
+    expect(before.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({
+      state: 'current', contentTier: 'private', decidedBy: 'default', reasons: ['metadata:default:personal', 'content:no_raise'],
+    });
+    expect(JSON.stringify((await olympusSearch(before, 'orchard')).result)).toContain('pruning plan');
+
+    const { builtIn, runtime, prompts } = registeredBuiltIn(PRIVATE_VERDICT);
+    const install = addPrivateModel(before, runtime.source === 'built_in' ? runtime.lane : BUILT_IN_SNIFFER_LANE);
+    const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true });
+
+    // First pass: re-judged. Personal to held is immediate: the text leaves
+    // olympus_search at once (hide first), and the move lands it held.
+    const first = await service.runOnce();
+    expect(first).toMatchObject({ state: 'ran', rejudged: { movesQueued: 1, held: 1 }, autoMoves: { moved: 1, failed: 0 } });
+    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'pending', contentPending: true });
+    const held = install.lane.ledger.copies(identity('id:garden')).filter((copy) => copy.state === 'current');
+    expect(held.find((copy) => copy.layers !== 'metadata')).toMatchObject({ corpusId: SECURE_CORPUS, embedHold: true });
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
+
+    // Next pass: the model reads the names and the excerpt and says Private.
+    await service.runOnce();
+    const judged = install.lane.ledger.getCurrent(identity('id:garden'))!;
+    expect(judged).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer', engineVersion: '2026-10-01.p3' });
+    expect(judged.reasons.some((reason) => reason.startsWith('content:sniffer:local:'))).toBe(true);
+    expect(prompts.some((prompt) => prompt.prompt.includes('Names: orchard-plan.pdf') && prompt.prompt.includes('pruning plan'))).toBe(true);
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
+
+    // Judged under the current classifier and prompt: never re-judged again.
+    expect(await service.runOnce()).not.toHaveProperty('rejudged');
+  });
+
+  test('an owner override is never re-judged', async () => {
+    const before = await freshInstall();
+    before.lane.ledger.setOverride(identity('id:garden'), { kind: 'tier', tier: 'private' });
+    const { builtIn, runtime } = registeredBuiltIn(PRIVATE_VERDICT);
+    const install = addPrivateModel(before, runtime.source === 'built_in' ? runtime.lane : BUILT_IN_SNIFFER_LANE);
+    const tick = await snifferFor(install, builtIn, { localEmbeddingsOnly: true }).runOnce();
+    expect(tick).not.toHaveProperty('rejudged');
+    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', decidedBy: 'default' });
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
   });
 });
 

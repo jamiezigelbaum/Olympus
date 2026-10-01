@@ -58,7 +58,7 @@ import {
   type TierCopy,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
-import { classifyContentTier, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
+import { classifyContentTier, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -2274,12 +2274,26 @@ export class LocalConnectorStore {
       const existing = ledger.getCurrent(item.identity);
       if (!existing) return false;
       const override = ledger.getOverride(item.identity);
+      // The item's names travel with the text, as they do in the tiered
+      // sink: the detectors' origin hint and the sniffer read them too.
+      const metadataString = (keys: readonly string[]): string | undefined => {
+        for (const key of keys) {
+          const value = item.metadata[key];
+          if (typeof value === 'string' && value.trim()) return value.trim();
+        }
+        return undefined;
+      };
+      const title = metadataString(['title', 'name', 'subject']);
+      const path = metadataString(['locatorUri', 'pathDisplay']);
       const content = classifyContentTier(
         {
           text,
           metadataTier: existing.metadataTier,
           metadataForced: existing.metadataForced,
           metadataFlagged: existing.metadataFlagged,
+          metadataOwnerDecided: namesDecidedByOwner(existing.reasons),
+          ...(title ? { title } : {}),
+          ...(path ? { path } : {}),
           subject: item.identity,
         },
         {

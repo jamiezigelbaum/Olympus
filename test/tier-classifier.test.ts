@@ -395,7 +395,9 @@ describe('vocabulary-only detector hits are judged by the private model (owner r
     expect(asked[0]!.flags).toContain('content:borderline:health');
     // The model reads the passage the detector matched, not only the opening, and still only an excerpt.
     expect(asked[0]!.material).toContain('physical treatment of symptoms');
-    expect(asked[0]!.material!.length).toBeLessThanOrEqual(SNIFFER_EXCERPT_MAX_CHARS);
+    // The names travel with the excerpt (p3); the excerpt itself stays bounded.
+    expect(asked[0]!.material).toStartWith('Names: Introduction to the Integral Approach.pdf');
+    expect(asked[0]!.material!.split('\nExcerpt: ')[1]!.length).toBeLessThanOrEqual(SNIFFER_EXCERPT_MAX_CHARS);
   });
 
   test('real health content the model calls health stays Private', () => {

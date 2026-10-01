@@ -32,7 +32,8 @@ import { TierSnifferStore } from './sniffer-store.ts';
 import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
-import { TierLedger, tierLedgerPathForStore } from './tier-ledger.ts';
+import { DEFAULT_TIER_REJUDGE_PER_PASS, rejudgeRoutedItems, type TierRejudgeReport } from '../connector-store/tier-rejudge.ts';
+import { TierLedger, tierLedgerPathForStore, type TierLedgerIdentity } from './tier-ledger.ts';
 
 export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60_000;
 
@@ -80,6 +81,12 @@ export interface TierSnifferServiceOptions {
    */
   autoApproveBuiltIn?: boolean;
   /**
+   * Routed items re-judged per set per tick after the classifier or the
+   * sniffer's prompt changed (tier-rejudge.ts). 0 turns it off. Default
+   * DEFAULT_TIER_REJUDGE_PER_PASS.
+   */
+  rejudgePerPass?: number;
+  /**
    * Automatic tier moves (owner approval 2026-10-01): queued moves (a held
    * item the sniffer judged Personal after all queues one) are carried out
    * right after the pass, at most `maxPerPass` items, ONLY while `localEmbeddingsOnly()` says
@@ -119,7 +126,7 @@ export type TierSnifferTick =
   | { state: 'skipped_running' }
   | { state: 'awaiting_owner_approval'; modelId: string; promptVersion: string }
   | { state: 'model_unavailable'; modelId: string }
-  | { state: 'ran'; report: SnifferPassReport; autoMoves?: TierAutoMoveReport }
+  | { state: 'ran'; report: SnifferPassReport; rejudged?: TierRejudgeReport; autoMoves?: TierAutoMoveReport }
   | { state: 'failed'; error: string };
 
 export class TierSnifferService {
@@ -131,6 +138,8 @@ export class TierSnifferService {
   private lastTick: TierSnifferTick | undefined;
   private stopped = false;
   private readonly ledgers = new Map<string, TierLedger>();
+  /** Where each set's re-judge page stopped (tier-rejudge.ts). */
+  private readonly rejudgeCursors = new Map<string, TierLedgerIdentity>();
 
   constructor(options: TierSnifferServiceOptions) {
     this.options = options;
@@ -315,6 +324,10 @@ export class TierSnifferService {
       });
       return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: versions.approval };
     }
+    // Items decided under an older classifier or sniffer prompt are judged
+    // again first (tier-rejudge.ts), a bounded page per set per tick: their
+    // questions join the queue this pass answers.
+    const rejudged = this.rejudge();
     const targets: SnifferTarget[] = [];
     for (const ledgerPath of this.ledgerPaths()) {
       const ledger = this.ledgerAt(ledgerPath);
@@ -346,7 +359,34 @@ export class TierSnifferService {
     const autoMoves = this.options.autoMoves && !signal.aborted && this.options.autoMoves.localEmbeddingsOnly()
       ? await this.runAutoMoves(this.options.autoMoves, signal)
       : undefined;
-    return { state: 'ran', report, ...(autoMoves ? { autoMoves } : {}) };
+    return { state: 'ran', report, ...(rejudged.seen > 0 ? { rejudged } : {}), ...(autoMoves ? { autoMoves } : {}) };
+  }
+
+  /** Re-judges a page of each set's routed items decided under older inputs; never throws. */
+  private rejudge(): TierRejudgeReport {
+    const total: TierRejudgeReport = { seen: 0, updated: 0, movesQueued: 0, held: 0, skipped: 0, failed: 0 };
+    const perPass = this.options.rejudgePerPass ?? DEFAULT_TIER_REJUDGE_PER_PASS;
+    if (perPass <= 0) return total;
+    for (const ledgerPath of this.ledgerPaths()) {
+      const set = tierSetForLedger(ledgerPath);
+      if (!set) continue;
+      try {
+        const after = this.rejudgeCursors.get(ledgerPath);
+        const { report, next } = rejudgeRoutedItems({ set, limit: perPass, ...(after ? { after } : {}) });
+        if (next) this.rejudgeCursors.set(ledgerPath, next);
+        else this.rejudgeCursors.delete(ledgerPath);
+        for (const key of Object.keys(total) as Array<keyof TierRejudgeReport>) total[key] += report[key];
+      } catch {
+        // A set that cannot be read keeps its recorded decisions this tick.
+      }
+    }
+    if (total.updated > 0 || total.movesQueued > 0) {
+      this.options.log?.(
+        `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued} item(s) under the current classifier `
+        + `(${total.held} held for the privacy check, ${total.movesQueued} tier move(s) queued).`,
+      );
+    }
+    return total;
   }
 
   /** Carries out queued moves the sniffer's verdicts made, bounded per pass. */
@@ -379,7 +419,10 @@ export class TierSnifferService {
             providerItemId: record.providerItemId,
             ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
           };
-          const source = set.ledger.copies(identity).find((copy) => copy.state === 'current');
+          // A raise (a re-judged item now held) hid its copies first: they
+          // are the move's sources all the same.
+          const source = set.ledger.copies(identity).find((copy) => copy.state === 'current'
+            || (copy.state === 'superseded' && copy.supersededByGeneration === record.generation + 1));
           const exported = source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
           if (!exported) throw new Error('no current copy');
           await moveTieredItem({

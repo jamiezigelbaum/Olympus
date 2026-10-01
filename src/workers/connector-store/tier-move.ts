@@ -125,12 +125,14 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   // Without a decision the move keeps what the ledger knows about the text:
   // a lane whose content arrives later places an item whose text was never
   // read by its names only, so a move must not forget text that was read.
+  // It keeps the open questions too: a queued move records its decision's
+  // flags, so an item held for an unanswered sniffer question lands held.
   const placement = set.placementFor(decision ?? {
     metadataTier: target.metadataTier,
     contentTier: target.contentTier,
-    state: 'current',
-    metadataPending: false,
-    contentPending: false,
+    state: record.metadataPending || record.contentPending ? 'pending' : 'current',
+    metadataPending: record.metadataPending,
+    contentPending: record.contentPending,
     contentRead: record.contentRead,
   });
   const moveGeneration = record.generation + 1;

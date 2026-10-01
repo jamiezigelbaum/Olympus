@@ -604,6 +604,63 @@ export class TierLedger {
     return (rows as TierItemRow[]).map(recordFromRow);
   }
 
+  /**
+   * Routed items whose content decision a newer classifier should make again
+   * (tier-rejudge.ts): text read, settled (`current`), not Secrets, no owner
+   * override, no force rule, no owner rule on the names, and decided by the
+   * automatic content steps (default, detectors, sniffer, or a move that
+   * carried one of those out). Of those, the ones decided under another
+   * classifier version, and, when a sniffer is configured, the ones whose
+   * text is below Private without that sniffer's own content verdict, or
+   * whose content verdict came from another sniffer prompt (an item whose
+   * names an owner map category matched is re-judged on a classifier change
+   * only: the owner's category may have settled it). Paged by identity
+   * after `after`.
+   */
+  listRejudgeCandidates(options: {
+    engineVersion: string;
+    /** The configured sniffer's id; absent: only the classifier version counts. */
+    snifferId?: string;
+    after?: TierLedgerIdentity;
+    limit?: number;
+  }): TierLedgerRecord[] {
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
+    const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
+    const after = options.after
+      ? [options.after.provider, options.after.accountScope, options.after.providerItemId, tierLedgerConversationKey(options.after)]
+      : null;
+    const rows = this.db.query(`
+      SELECT i.* FROM tier_items i
+      WHERE i.routed = 1 AND i.content_read = 1 AND i.state = 'current'
+        AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
+        AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move')
+        AND instr(i.reasons_json, '"override:') = 0
+        AND instr(i.reasons_json, '"metadata:owner_rule:') = 0
+        AND NOT EXISTS (
+          SELECT 1 FROM tier_overrides o
+          WHERE o.provider = i.provider AND o.account_scope = i.account_scope
+            AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+        )
+        AND (
+          i.engine_version != ?
+          OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
+            AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
+            AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
+        )
+        AND (? IS NULL OR (i.provider, i.account_scope, i.provider_item_id, i.conversation_key) > (?, ?, ?, ?))
+      ORDER BY i.provider, i.account_scope, i.provider_item_id, i.conversation_key
+      LIMIT ?
+    `).all(
+      options.engineVersion,
+      snifferMarker,
+      snifferMarker ?? '',
+      after ? 1 : null,
+      ...(after ?? [null, null, null, null]),
+      limit,
+    );
+    return (rows as TierItemRow[]).map(recordFromRow);
+  }
+
   /** Items waiting on an unanswered sniffer question, oldest first. */
   listPending(options: { limit?: number; after?: TierLedgerIdentity } = {}): TierLedgerRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
@@ -981,10 +1038,17 @@ export class TierLedger {
       }
 
       // The decision needs different stores: queue a move, never perform it.
+      // The decision's open questions travel with it: a move to a placement
+      // that HOLDS the item for an unanswered sniffer question must land it
+      // held and pending (`moveTieredItem` places by these flags, and the flip
+      // keeps the row pending), never at its tiers' resting placement. Text
+      // once read is never forgotten.
       raise = placementIsRaise(current, plan.copies);
       this.db.query(`
         UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?,
-          decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?
+          decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?,
+          content_read = MAX(content_read, ?), metadata_pending = ?, content_pending = ?,
+          metadata_forced = ?, metadata_flagged = ?
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(
         decision.metadataTier,
@@ -994,6 +1058,7 @@ export class TierLedger {
         decision.engineVersion,
         decision.mapRevision,
         decidedAt,
+        ...decisionFlags(decision),
         ...idParams(identity),
       );
       this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, 'moving', decidedAt);
@@ -1315,6 +1380,9 @@ export class TierLedger {
         decidedBy: options.decidedBy ?? 'move',
         reasons: options.reasons ?? existing.reasons,
         decidedAt: now,
+        // The queued decision's open questions (recorded with the move) keep
+        // the item pending after the flip.
+        state: existing.metadataPending || existing.contentPending ? 'pending' : 'current',
       });
       if (options.decision) {
         const decision = options.decision;
@@ -1715,13 +1783,16 @@ export class TierLedger {
       decidedBy: string;
       reasons: readonly string[];
       decidedAt: string;
+      /** The row's state after the flip (default `current`). */
+      state?: TierLedgerState;
     },
   ): void {
     const reasonsJson = JSON.stringify(next.reasons);
+    const state = next.state ?? 'current';
     this.db.query(`
       UPDATE tier_items SET
         metadata_tier = ?, content_tier = ?, generation = ?, decided_by = ?, reasons_json = ?,
-        previous_metadata_tier = ?, previous_content_tier = ?, state = 'current',
+        previous_metadata_tier = ?, previous_content_tier = ?, state = ?,
         target_metadata_tier = NULL, target_content_tier = NULL, decided_at = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(
@@ -1732,10 +1803,11 @@ export class TierLedger {
       reasonsJson,
       existing.metadataTier,
       existing.contentTier,
+      state,
       next.decidedAt,
       ...idParams(identity),
     );
-    this.appendHistory(identity, next.generation, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, 'current', next.decidedAt);
+    this.appendHistory(identity, next.generation, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, state, next.decidedAt);
   }
 
   private readRow(identity: TierLedgerIdentity): TierLedgerRecord | undefined {

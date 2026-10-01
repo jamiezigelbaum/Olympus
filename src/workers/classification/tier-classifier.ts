@@ -43,7 +43,10 @@ import { ownerSenderRuleMatches } from '../../core/sender-rules.ts';
 export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // 2026-10-01.p2: vocabulary-only detector hits go to the privacy-safe model
 // (borderline) instead of final-deciding Private, when a model can be asked.
-export const TIER_CLASSIFIER_VERSION = '2026-10-01.p2';
+// 2026-10-01.p3: when a model can be asked, EVERY item whose text was read is
+// judged by it (with the item's names) before it may be Personal; a routed
+// item decided under an older version is judged again (tier-rejudge.ts).
+export const TIER_CLASSIFIER_VERSION = '2026-10-01.p3';
 
 export type TierKey = SourceClassificationTier;
 
@@ -155,6 +158,22 @@ export const UNDECIDED_TIER_SNIFFER: TierSniffer = Object.freeze({
 export const SNIFFER_NAMES_MAX_CHARS = 400;
 /** Longest text excerpt handed to the sniffer (pass 2): a short excerpt, never the document. */
 export const SNIFFER_EXCERPT_MAX_CHARS = 1_200;
+/**
+ * The content-free flag of an excerpt question asked only because the text
+ * was read (no name flag, no borderline family): every read item is judged
+ * when a privacy-safe model can be asked.
+ */
+export const CONTENT_READ_SNIFFER_FLAG = 'content:read';
+
+/**
+ * What the sniffer reads in pass 2: the item's names (title, folder path,
+ * sender), when known, then the excerpt. The names are a signal of their own
+ * (a records folder, a dated test title) that the text alone may not carry.
+ */
+export function snifferContentMaterial(names: string, excerpt: string): string {
+  const trimmed = names.trim();
+  return trimmed ? `Names: ${trimmed}\nExcerpt: ${excerpt}` : excerpt;
+}
 
 // --- Input / output -----------------------------------------------------------
 
@@ -324,6 +343,7 @@ function classifyItemTiersWithPublic(
     signals,
     text,
     matchInput,
+    names: snifferNames(signals),
     metadata,
     options,
     secretsCleared,
@@ -362,6 +382,11 @@ export interface ContentTierInput {
   metadataTier: TierKey;
   metadataForced: boolean;
   metadataFlagged: boolean;
+  /**
+   * An owner rule settled the names' tier: the text is then not sent to the
+   * sniffer just because it was read (`namesDecidedByOwner`).
+   */
+  metadataOwnerDecided?: boolean;
   /**
    * The item's names, when the caller has them: they travel with the text so
    * a detector's origin hint and a title's vocabulary still count, exactly
@@ -413,6 +438,11 @@ export function classifyContentTier(
       ...(input.path?.trim() ? { path: input.path } : {}),
       ...(input.sender?.trim() ? { sender: input.sender } : {}),
     }),
+    names: snifferNames({
+      ...(input.title?.trim() ? { title: input.title } : {}),
+      ...(input.path?.trim() ? { path: input.path } : {}),
+      ...(input.sender?.trim() ? { sender: input.sender } : {}),
+    }),
     metadata: {
       tier: input.metadataTier,
       decidedBy: 'default',
@@ -420,6 +450,7 @@ export function classifyContentTier(
       pending: false,
       forced: input.metadataForced,
       flags: input.metadataFlagged ? ['names:recorded'] : [],
+      ...(input.metadataOwnerDecided || namesInOwnerPersonalCategory(options.sensitivityMap, input) ? { ownerDecided: true } : {}),
     },
     options,
     secretsCleared: options.override?.kind === 'not_secret',
@@ -448,6 +479,33 @@ interface PassResult {
   flags: string[];
   /** The owner rule that set (prior) or fixed (force) the tier, if any. */
   ownerRule?: TierOwnerRuleMatch;
+  /** An owner rule settled the names' tier (no read-only sniffer question). */
+  ownerDecided?: boolean;
+}
+
+/**
+ * Whether recorded reasons show an OWNER RULE settled the names' tier (a
+ * prior rule; a force rule is `metadataForced`). Such an item is not sent to
+ * the sniffer only because its text was read: the owner already said where
+ * it belongs. An owner's Personal-target map category counts too, read from
+ * the map itself (`namesInOwnerPersonalCategory`); a Public-target one never
+ * does (a broad folder category must not silence a person's own record).
+ */
+export function namesDecidedByOwner(reasons: readonly string[]): boolean {
+  return reasons.some((reason) => reason.startsWith('metadata:owner_rule:'));
+}
+
+/** Whether the item's names fall in one of the owner's PERSONAL-target map categories (as in pass 1). */
+function namesInOwnerPersonalCategory(
+  map: SensitivityMap | undefined,
+  names: { title?: string; path?: string; sender?: string },
+): boolean {
+  if (!map) return false;
+  return matchSensitivityMapTiers(map, {
+    ...(names.title?.trim() ? { title: names.title } : {}),
+    ...(names.sender?.trim() ? { sender: names.sender } : {}),
+    ...(names.path?.trim() ? { path: names.path } : {}),
+  }).some((match) => match.tierName === 'private');
 }
 
 function metadataPass(args: {
@@ -600,6 +658,7 @@ function metadataPass(args: {
     pending,
     forced: false,
     flags,
+    ...(priorRule || ownerSaidPersonal ? { ownerDecided: true } : {}),
     ...(priorRule ? { ownerRule: { kind: priorRule.match.kind, tier: priorRule.tier, strength: 'prior' as const } } : {}),
   };
 }
@@ -608,6 +667,8 @@ function contentPass(args: {
   signals: SourceClassificationSignals;
   text: string | undefined;
   matchInput: MapMatchInput;
+  /** The item's names (title, folder path, sender), bounded: they travel with the excerpt. */
+  names: string;
   metadata: PassResult;
   options: TierClassificationOptions;
   secretsCleared: boolean;
@@ -691,11 +752,24 @@ function contentPass(args: {
     });
   }
 
-  // [12] Sniffer on a short excerpt, only when pass 1 flagged the item or a
-  // detector family came close, and only while the content is below Private.
+  // [12] Sniffer on a short excerpt plus the item's names, while the content
+  // is below Private.
+  //
+  // With a privacy-safe model to ask, EVERY item whose text was read is asked
+  // (owner ruling 2026-10-01, p3): a person's own lab report, statement or
+  // filled form often carries none of the detector vocabulary (reference
+  // ranges, mg/dL, another language), so "no detector fired" never proves an
+  // item Personal. Until the model answers, the item is pending (held
+  // Private). Structured detections, owner rules and overrides still decide
+  // at once (above), and the model is never asked about Private content; an
+  // item whose names an owner rule or the owner's Personal-target map
+  // category settled is not asked only because its text was read.
+  //
   // Without a privacy-safe model to ask (no private lane), only items whose
   // NAMES were flagged wait (owner ruling 2026-10-01: unflagged items are
-  // Personal at once); a borderline word in the text alone is not a flag.
+  // Personal at once); a borderline word in the text alone is not a flag, and
+  // vocabulary raised to Private in step [10].
+  //
   // A borderline family from vocabulary is asked about with the passages the
   // detector matched, not just the document's opening, so a model can see the
   // medical or financial text that tripped it.
@@ -704,12 +778,13 @@ function contentPass(args: {
     ...metadata.flags,
     ...(canAskSniffer ? detection.borderline.map((family) => `content:borderline:${family}`) : []),
   ];
+  if (canAskSniffer && flags.length === 0 && metadata.ownerDecided !== true) flags.push(CONTENT_READ_SNIFFER_FLAG);
   const reasons = [...decided.reasons];
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({
       pass: 'content',
       flags,
-      material: snifferExcerpt(text, vocabularyTerms(detection.vocabulary)),
+      material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary))),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });
@@ -864,7 +939,7 @@ function mapMatchInput(signals: SourceClassificationSignals): MapMatchInput {
   };
 }
 
-/** The names the sniffer may read in pass 1, bounded. The sender is metadata too. */
+/** The names the sniffer may read (pass 1, and with the excerpt in pass 2), bounded. The sender is metadata too. */
 function snifferNames(signals: SourceClassificationSignals): string {
   const joined = [
     signals.title,

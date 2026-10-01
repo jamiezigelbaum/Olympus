@@ -273,6 +273,14 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   // STALE: it is re-keyed to the current revision and asked again (never
   // answered with a verdict judged under the old map, and never left to
   // wait forever for a re-sync).
+  // A row mid-move is neither: its move carries the open question with it
+  // (the queued decision's flags), so the question waits, kept, until the
+  // move lands the item held and pending.
+  const midMove = (target: SnifferTarget, question: SnifferQuestion): boolean => {
+    const row = target.ledger.getCurrent(question);
+    return row !== undefined && row.state === 'moving' && row.decidedBy !== 'override'
+      && openPasses(row).includes(question.pass);
+  };
   const stillOpen = (target: SnifferTarget, question: SnifferQuestion): boolean => {
     const row = target.ledger.getCurrent(question);
     const open = row !== undefined && row.state === 'pending' && row.decidedBy !== 'override'
@@ -294,6 +302,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   for (const target of options.targets) {
     for (const question of target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500 })) {
       report.pendingSeen += 1;
+      if (midMove(target, question)) continue;
       // Queued material whose question is no longer open (the item was
       // re-synced, overridden, deleted or re-decided) must not linger.
       if (!stillOpen(target, question)) {
@@ -338,6 +347,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     // never sent.
     const open = work[pass].filter((item) => {
       if (stillOpen(item.target, item.question)) return true;
+      if (midMove(item.target, item.question)) return false;
       item.target.sniffer.deleteQuestion(item.question, pass);
       report.staleDropped += 1;
       return false;
