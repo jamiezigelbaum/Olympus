@@ -28,9 +28,8 @@
           "Use Olympus to find what Sam sent me about the lease.",
           "Show my Olympus dashboard."
         ],
-        "composerIcon": "./assets/composer-icon.png",
-        "logo": "./assets/logo.png",
-        "brandColor": "#757575"
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/icon.png"
       }
     }
   }
