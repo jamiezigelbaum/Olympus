@@ -97436,7 +97436,7 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .card{padding:0.75rem}
 .section{margin-top:1.5rem}
 .muted{color:var(--muted);font-size:0.875rem}
-.banner{display:flex;gap:0.75rem;align-items:flex-start;padding:0.875rem 1rem;border:1px solid var(--warn-line);border-left-width:4px;border-radius:0.75rem;background:var(--warn-bg);margin-bottom:0.75rem}
+.banner{display:flex;gap:0.75rem;align-items:flex-start;padding:0.875rem 1rem;border:1px solid var(--warn-line);border-radius:0.75rem;background:var(--warn-bg);margin-bottom:0.75rem}
 .banner.info{border-color:var(--info-line);background:var(--info-bg)}
 .banner-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:0.5rem}
 .banner-title{font-weight:600}
