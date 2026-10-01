@@ -648,7 +648,7 @@ export function chatgptDashboardClient(
     return fill(P.linkExpires, { n: Math.max(1, Math.ceil(left / 60000)) });
   }
 
-  /** The reason half of an item's sentence ("Gmail — reauth required" → "reauth required"), else the source's detail. */
+  /** The reason half of an item's sentence ("Gmail — signed out" → "signed out"), else the source's detail. */
   function itemReason(item: Any, source: Any): string {
     const sentence = String(item.sentence || '');
     const prefix = String(source.label || '') + ' — ';

@@ -314,7 +314,7 @@ describe('dashboard view-model producer', () => {
     expect(vm.sources[0]!.status).toBe('Needs you');
     expect(vm.needsYou).toEqual([{
       id: 'source:gmail.email',
-      sentence: 'Gmail — reauth required',
+      sentence: 'Gmail — signed out',
       fix: { label: 'Reconnect', tool: 'olympus_connect_source', args: { source: 'gmail' } },
     }]);
   });
