@@ -16,6 +16,8 @@ import { AUTHENTICATED_RESPONSE_HEADER, mintCredential } from '../shared/tokens.
 import type { RelayLimits } from '../server/limits.ts';
 import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
+import generatedDashboard from '../server/generated/chatgpt-dashboard.json';
+import generatedSurface from '../server/generated/chatgpt-tools.json';
 
 setDefaultTimeout(15_000);
 
@@ -286,27 +288,44 @@ describe('routing', () => {
     const init = await (await anonymous(rpc('initialize', { protocolVersion: '2025-11-25' }))).json();
     expect(init.result.protocolVersion).toBe('2025-11-25');
     const list = await (await anonymous(rpc('tools/list'))).json();
-    expect(list.result.tools).toHaveLength(1);
-    expect(list.result.tools[0]).toMatchObject({
-      name: 'olympus_dashboard',
-      securitySchemes: [{ type: 'noauth' }, { type: 'oauth2', scopes: [] }],
-      _meta: { 'openai/outputTemplate': 'ui://olympus/dashboard' },
-    });
+    // The engine's full ChatGPT tool set, so ChatGPT's model can pick an
+    // answer tool and so start linking.
+    expect(list.result.tools).toEqual(generatedSurface.tools);
+    expect(list.result.tools.map((tool: { name: string }) => tool.name))
+      .toEqual(['olympus_dashboard', 'source_index_status', 'source_answer', 'source_answer_result']);
+    for (const tool of list.result.tools) {
+      expect(tool.securitySchemes).toEqual(tool.name === 'olympus_dashboard'
+        ? [{ type: 'noauth' }, { type: 'oauth2', scopes: [] }]
+        : [{ type: 'oauth2', scopes: [] }]);
+    }
+    const resources = await (await anonymous(rpc('resources/list'))).json();
+    expect(resources.result.resources).toEqual([{ uri: 'ui://olympus/dashboard', name: 'Olympus dashboard', mimeType: 'text/html;profile=mcp-app' }]);
     const resource = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/dashboard' }))).json();
+    // The dashboard lane's real bundle, not a placeholder.
+    expect(resource.result.contents).toEqual(generatedDashboard.contents);
     expect(resource.result.contents[0].mimeType).toBe('text/html;profile=mcp-app');
+    expect(resource.result.contents[0].text).toContain('not_installed');
     const dashboard = await (await anonymous(rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }))).json();
     expect(dashboard.result.structuredContent).toMatchObject({
       v: 1,
-      connection: { state: 'not_installed', action: { id: 'install', href: 'https://olympusplugin.ai/' } },
+      connection: { state: 'not_installed', action: { id: 'install', href: 'https://olympusplugin.ai/install/' } },
       needsYou: [],
       sources: [],
     });
-    const engineTool = await (await anonymous(rpc('tools/call', { name: 'source_answer', arguments: { question: 'x' } }))).json();
-    expect(engineTool.result.isError).toBe(true);
-    expect(engineTool.result._meta['mcp/www_authenticate'][0]).toBe(
-      `Bearer resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp", error="invalid_token", `
-        + 'error_description="Connect Olympus on your Mac to use this tool."',
-    );
+    expect(dashboard.result._meta).toEqual(generatedSurface.tools[0]!._meta);
+    expect(dashboard.result.isError).toBeUndefined();
+    // Every oauth2 tool, called without a token: the documented linking
+    // trigger (isError + _meta["mcp/www_authenticate"]) on an HTTP 200.
+    for (const name of ['source_answer', 'source_answer_result', 'source_index_status']) {
+      const call = await anonymous(rpc('tools/call', { name, arguments: { question: 'x', job_id: 'j' } }));
+      expect(call.status).toBe(200);
+      const engineTool = await call.json();
+      expect(engineTool.result.isError).toBe(true);
+      expect(engineTool.result._meta['mcp/www_authenticate']).toEqual([
+        `Bearer resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp", error="invalid_token", `
+          + 'error_description="Connect Olympus on your Mac to use this tool."',
+      ]);
+    }
     expect((await fetch(`${relay.url}/mcp`)).status).toBe(405);
     expect(worker.requests).toHaveLength(0);
   });
@@ -453,18 +472,19 @@ describe('offline fallback', () => {
     const init = await (await mcpPost(relay, token, rpc('initialize', { protocolVersion: '2025-06-18' }))).json();
     expect(init.result.protocolVersion).toBe('2025-06-18');
     const list = await (await mcpPost(relay, token, rpc('tools/list'))).json();
-    expect(list.result.tools.map((tool: { name: string }) => tool.name)).toEqual(['olympus_dashboard']);
+    expect(list.result.tools).toEqual(generatedSurface.tools);
     const resource = await (await mcpPost(relay, token, rpc('resources/read', { uri: 'ui://olympus/dashboard' }))).json();
-    expect(resource.result.contents[0].text).toContain('<html');
+    expect(resource.result.contents).toEqual(generatedDashboard.contents);
     const dashboard = await (await mcpPost(relay, token, rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }))).json();
     expect(dashboard.result.structuredContent).toMatchObject({
       v: 1,
-      connection: { state: 'mac_offline' },
+      connection: { state: 'mac_offline', action: { id: 'wake_mac', href: 'https://olympusplugin.ai/help/mac-offline/' } },
       needsYou: [],
       sources: [],
       models: { embedding: { kind: 'built_in', state: 'downloading' } },
     });
     expect(typeof dashboard.result.structuredContent.connection.lastSeenAt).toBe('string');
+    expect(dashboard.result._meta).toEqual(generatedSurface.tools[0]!._meta);
     const other = await (await mcpPost(relay, token, rpc('tools/call', { name: 'source_answer', arguments: {} }))).json();
     expect(other.error.message).toContain('Your Mac is offline');
     const notification = await mcpPost(relay, token, JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }));

@@ -19,6 +19,7 @@ import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/co
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, type DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { MCP_APP_MIME_TYPE } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
@@ -427,6 +428,33 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     } finally {
       await client.close();
     }
+  });
+
+  test('the wire tool definitions, securitySchemes included, are the ones the relay is generated from', async () => {
+    // Raw JSON-RPC: the SDK client strips fields its schema does not know.
+    const { token } = store.create('ChatGPT');
+    const post = async (body: unknown, sessionId?: string) => {
+      const response = await fetch(`${base}/mcp`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'MCP-Protocol-Version': '2025-06-18',
+          ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      const data = text.trimStart().startsWith('{') ? text : text.split('\n').find((line) => line.startsWith('data:'))!.slice(5);
+      return { sessionId: response.headers.get('mcp-session-id') ?? undefined, message: JSON.parse(data) };
+    };
+    const init = await post({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'raw', version: '1' } },
+    });
+    const list = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, init.sessionId);
+    expect(list.message.result.tools).toEqual(JSON.parse(JSON.stringify(CHATGPT_TOOLS)));
   });
 
   test('serves the dashboard resource with the MCP Apps MIME type', async () => {
