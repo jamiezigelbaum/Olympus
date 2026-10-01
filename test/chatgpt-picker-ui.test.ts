@@ -238,6 +238,47 @@ describe('connect', () => {
     expect(host.toolCalls('olympus_dashboard').length).toBe(before);
   });
 
+  test('a pending sign-in (Needs you with connecting) is not connected; polling continues until connecting clears', async () => {
+    const expiresAt = new Date(Date.now() + 600_000).toISOString();
+    const signingIn = model({ sources: [{ id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Needs you', connecting: { expiresAt }, primary: CONNECT_FIX }] });
+    let polls = 0;
+    const host = mount({
+      openai: { displayMode: 'fullscreen' },
+      serve: {
+        [T.connectSource]: () => (connectResult('https://mcp.olympusplugin.ai/go/abc123')),
+        olympus_dashboard: () => ({ structuredContent: ++polls < 4 ? signingIn : pendingDropbox }),
+        [T.scopeList]: folderServer(),
+      },
+    });
+    host.push({ structuredContent: offDropbox });
+    host.button('Connect').click();
+    for (let i = 0; i < 20 && polls < 2; i++) await sleep(5);
+    expect(host.text()).toContain(Q.connectWaiting);
+    expect(host.toolCalls(T.scopeList)).toEqual([]);
+    for (let i = 0; i < 40 && !host.text().includes('Tax Returns 2024'); i++) await sleep(5);
+    expect(polls).toBe(4);
+    expect(host.toolCalls(T.scopeList)).toEqual([{ source_id: 'dropbox.files' }]);
+  });
+
+  test('leaving the picker re-reads the dashboard: Cancel while waiting, and Back from the folder list', async () => {
+    const host = mount({ openai: {}, pollMs: 10_000, serve: { [T.connectSource]: () => (connectResult('https://mcp.olympusplugin.ai/go/a')), olympus_dashboard: () => ({ structuredContent: pendingDropbox }) } });
+    host.push({ structuredContent: offDropbox });
+    host.button('Connect').click();
+    await host.settle();
+    expect(host.toolCalls('olympus_dashboard').length).toBe(0);
+    host.button('Cancel').click();
+    await host.settle();
+    expect(host.toolCalls('olympus_dashboard').length).toBe(1);
+    // The fresh dashboard replaced the stale Off row.
+    expect(host.hasButton('Choose folders')).toBe(true);
+
+    const folders = await openFolders();
+    const before = folders.toolCalls('olympus_dashboard').length;
+    folders.button(Q.back).click();
+    await folders.settle();
+    expect(folders.toolCalls('olympus_dashboard').length).toBe(before + 1);
+  });
+
   test('waiting is capped; Check again resumes', async () => {
     const host = mount({ openai: {}, pollMs: 2, pollCapMs: 15, serve: { [T.connectSource]: () => (connectResult('https://mcp.olympusplugin.ai/go/a')), olympus_dashboard: () => ({ structuredContent: offDropbox }) } });
     host.push({ structuredContent: offDropbox });

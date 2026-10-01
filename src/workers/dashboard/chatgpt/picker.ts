@@ -140,6 +140,12 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     timer = null;
   }
 
+  /**
+   * Leave the picker. Back, Cancel and Save pass refresh so the dashboard
+   * behind it is re-read (a sign-in or scope may have changed while it was
+   * open); only the connected hand-off, which just set a fresh dashboard,
+   * skips it.
+   */
   function leave(notice: string, refresh: boolean, picked?: ChatGptPickedFolder): void {
     stopTimer();
     if (p && p.pick) {
@@ -225,7 +231,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
           kit.setDashboard(content);
           const sources = Array.isArray(content.sources) ? content.sources : [];
           const source = sources.filter((entry: Any) => entry && String(entry.id) === p.id)[0];
-          if (source && source.status !== 'Off') {
+          if (signedIn(source)) {
             connected(source);
             return;
           }
@@ -236,6 +242,16 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
         continuePolling();
       });
     }, kit.config.pollMs);
+  }
+
+  /**
+   * Connected means sign-in finished: while it is pending the row carries
+   * `connecting` and reads Needs you, which is not Off but is not connected.
+   */
+  function signedIn(source: Any): boolean {
+    if (!source || typeof source !== 'object') return false;
+    if (source.connecting !== undefined && source.connecting !== null) return false;
+    return source.status !== 'Off';
   }
 
   function continuePolling(): void {
@@ -270,7 +286,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       add(box, line, el('p', 'muted', fill(Q.connectWaitingHelp, { source: p.label })));
       add(box, add(el('div', 'actions'),
         kit.button(Q.connectReopen, 'picker:connect:reopen', () => kit.openLink(p.href), 'plain'),
-        kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', false), 'plain')));
+        kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', true), 'plain')));
     } else if (p.phase === 'timeout') {
       const line = el('p', '', fill(Q.connectTimeout, { source: p.label }));
       line.setAttribute('role', 'alert');
@@ -282,7 +298,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
           schedulePoll();
         }, 'main'),
         kit.button(Q.connectReopen, 'picker:connect:reopen', () => kit.openLink(p.href), 'plain'),
-        kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', false), 'plain')));
+        kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', true), 'plain')));
     } else {
       const line = el('p', '', p.errorText || fill(Q.connectFailed, { source: p.label }));
       line.setAttribute('role', 'alert');
@@ -291,7 +307,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
           session++;
           startConnect(p.connectArgs, p.id, p.label, p.returnKey);
         }, 'main'),
-        kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', false), 'plain')));
+        kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', true), 'plain')));
     }
     add(page, box);
   }
@@ -1373,7 +1389,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       kit.render('picker:discard:no');
       return;
     }
-    leave('', false);
+    leave('', true);
   }
 
   function view(): HTMLElement {
@@ -1396,7 +1412,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       const confirm = el('div', 'confirm-box');
       confirm.setAttribute('role', 'alert');
       add(confirm, el('p', 'strong', Q.discardPrompt), add(el('div', 'actions'),
-        kit.button(Q.discard, 'picker:discard:yes', () => leave('', false), 'danger'),
+        kit.button(Q.discard, 'picker:discard:yes', () => leave('', true), 'danger'),
         kit.button(Q.keep, 'picker:discard:no', () => {
           p.discarding = false;
           kit.render('picker:back');
