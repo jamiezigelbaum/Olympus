@@ -2,11 +2,33 @@
 # Caddy obtains and renews the certificate for this one name (HTTP-01) and
 # proxies everything to the relay on loopback. No access log: request lines
 # carry OAuth query strings, which the relay never records either.
+#
+# Written for Caddy 2.6.2 (the Ubuntu package); every directive below exists
+# in that version.
 {
 	admin localhost:2019
+	servers {
+		timeouts {
+			# Slow or never-finished request headers are dropped here.
+			read_header 10s
+			# Idle keep-alive connections between requests.
+			idle 2m
+			# No read_body and no write: in Go (and so in Caddy) read_body is a
+			# deadline on the whole request, which also ends long Server-Sent
+			# Events responses, and Caddy 2.6 leaves it set on upgraded
+			# WebSocket connections, so it would cut install sessions too.
+			# Request bodies are bounded by the relay instead: an upload
+			# ticket per address and relay-wide, a byte budget, and absolute
+			# and idle upload deadlines (server/relay.ts readBody).
+		}
+	}
 }
 
 mcp.olympusplugin.ai {
+	# The relay's own cap is 1 MiB; anything far larger never reaches it.
+	request_body {
+		max_size 2MB
+	}
 	reverse_proxy 127.0.0.1:8787 {
 		# Stream responses (Server-Sent Events) as they arrive.
 		# The http transport sets no read or write timeout by default, so a

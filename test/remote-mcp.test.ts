@@ -4,6 +4,7 @@
 // connection-token handler, every other route to the worker-bearer wrapper.
 // A real MCP SDK client talks Streamable HTTP to it over loopback.
 
+import { AUTHENTICATED_RESPONSE_HEADER } from '../connect-relay/shared/tokens.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
@@ -204,10 +205,15 @@ describe('remote MCP over loopback with a connection token', () => {
       expect(response.headers.get('WWW-Authenticate') ?? '').toStartWith('Bearer realm="olympus"');
     }
 
-    expect((await mcpInitialize(`Bearer ${token}`)).status).toBe(200);
+    // Only a verified credential's response carries the relay's admission mark.
+    expect(missing.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
+    const accepted = await mcpInitialize(`Bearer ${token}`);
+    expect(accepted.status).toBe(200);
+    expect(accepted.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBe('1');
     store.revoke(connection.id);
     const revoked = await mcpInitialize(`Bearer ${token}`);
     expect(revoked.status).toBe(401);
+    expect(revoked.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
     expect(revoked.headers.get('WWW-Authenticate')).toContain('error="invalid_token"');
     expect(answered).toBe(0);
   });

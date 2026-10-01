@@ -26,6 +26,7 @@
  * Logging follows log.ts: no bodies, tokens, query strings or addresses.
  */
 import type { Server, ServerWebSocket } from 'bun';
+import { createHash } from 'node:crypto';
 import {
   CONNECT_PATH,
   INSTALL_ID_PATTERN,
@@ -44,7 +45,15 @@ import {
 import { KeyedCounter, KeyedTokenBuckets, addressKey } from '../shared/rate-limit.ts';
 import { credentialInstallId } from '../shared/tokens.ts';
 import { authorizeBridge } from './authorize-bridge.ts';
-import { DEFAULT_LIMITS, createInstallAdmission, type RelayLimits } from './limits.ts';
+import {
+  ConfirmedCredentials,
+  DEFAULT_LIMITS,
+  QueueBudget,
+  UploadBudget,
+  createInstallAdmission,
+  type AdmissionLane,
+  type RelayLimits,
+} from './limits.ts';
 import { installTag, type RelayLog } from './log.ts';
 import {
   OAUTH_PATHS,
@@ -101,6 +110,10 @@ export interface RevokeResult {
 export interface RelayStatus extends RegistryCounts {
   readonly online: number;
   readonly inFlight: number;
+  /** Request bodies being uploaded right now. */
+  readonly uploading: number;
+  /** Response bytes waiting for slow callers. */
+  readonly queuedBytes: number;
   readonly startedAt: string;
 }
 
@@ -108,7 +121,11 @@ export interface RelayHandle {
   readonly port: number;
   readonly url: string;
   onlineInstalls(): string[];
-  /** Durable revocation: resolves after the registry fsync, then ends the session. */
+  /**
+   * Revocation: refuses the install and ends its live session at once, and
+   * resolves only after the registry write is durable (rejects if it is not;
+   * the install stays refused, and a retry writes again).
+   */
   revoke(installId: string): Promise<RevokeResult>;
   restore(installId: string): Promise<boolean>;
   status(): RelayStatus;
@@ -131,6 +148,11 @@ const DEFAULT_ENGINE_PORT = 8010;
 const APPS_CHALLENGE_PATH = '/.well-known/openai-apps-challenge';
 const DEFAULT_INSTALL_URL = 'https://olympusplugin.ai/';
 const MAX_FORM_BYTES = 16 * 1024;
+/** How long an engine-confirmed credential keeps the owner lane (an access token lives an hour). */
+const CONFIRMED_CREDENTIAL_TTL_MS = 60 * 60_000;
+const MAX_CONFIRMED_CREDENTIALS = 100_000;
+/** First allocation for a body of unknown length; it grows by doubling up to the cap. */
+const INITIAL_BODY_BUFFER_BYTES = 16 * 1024;
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 /** Request headers forwarded to an install; everything else stays at the relay. */
 const REQUEST_HEADER_ALLOWLIST = new Set([
@@ -166,6 +188,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const sessionAttempts = new KeyedTokenBuckets(limits.sessionAttemptsPerIp, now);
   const publicRequests = new KeyedTokenBuckets(limits.publicRequestsPerIp, now);
   const sessionsPerIp = new KeyedCounter();
+  const uploads = new UploadBudget(limits);
+  const queueBudget = new QueueBudget(limits.maxQueuedBytes);
+  const confirmed = new ConfirmedCredentials(CONFIRMED_CREDENTIAL_TTL_MS, MAX_CONFIRMED_CREDENTIALS, now);
   let pendingSockets = 0;
 
   const clientIp = (request: Request, server: Server<SocketData>): string => {
@@ -182,32 +207,84 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
 
   const tooMany = () => json(429, { error: 'rate_limited', message: 'Too many requests. Try again shortly.' }, { 'Retry-After': '10' });
 
-  /** Reads a capped body; undefined when it is larger than `max`. */
-  const readBody = async (request: Request, max: number): Promise<Uint8Array | undefined> => {
+  const tooLarge = () => json(413, { error: 'payload_too_large' });
+
+  /**
+   * Reads a capped request body. Before the first byte is read it takes an
+   * upload ticket (relay-wide and per-address upload counts); bytes are
+   * charged to the relay-wide upload budget as the buffer grows; the upload
+   * has an absolute and an idle deadline. None of this depends on the route
+   * or on what the credential looks like.
+   */
+  const readBody = async (
+    request: Request,
+    max: number,
+    ip: string,
+  ): Promise<{ ok: true; body: Uint8Array } | { ok: false; response: Response }> => {
     const declared = Number(request.headers.get('content-length') ?? '0');
-    if (Number.isFinite(declared) && declared > max) return undefined;
-    if (!request.body) return new Uint8Array();
-    const parts: Uint8Array[] = [];
-    let total = 0;
+    if (Number.isFinite(declared) && declared > max) return { ok: false, response: tooLarge() };
+    if (!request.body) return { ok: true, body: new Uint8Array() };
+    const ticket = uploads.begin(ip);
+    if (!ticket) {
+      log('request_refused', { reason: 'upload_capacity' });
+      return { ok: false, response: tooMany() };
+    }
     const reader = request.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > max) {
-        await reader.cancel().catch(() => {});
-        return undefined;
+    const refuse = (response: Response) => {
+      void reader.cancel().catch(() => {});
+      return { ok: false as const, response };
+    };
+    try {
+      const startedAt = Date.now();
+      let buffer = new Uint8Array(0);
+      let total = 0;
+      const ensure = (needed: number): boolean => {
+        if (needed <= buffer.byteLength) return true;
+        let size = Math.max(buffer.byteLength * 2, Number.isFinite(declared) && declared > 0 ? declared : INITIAL_BODY_BUFFER_BYTES, needed);
+        size = Math.min(size, max);
+        if (!ticket.charge(size - buffer.byteLength)) return false;
+        const grown = new Uint8Array(size);
+        grown.set(buffer.subarray(0, total));
+        buffer = grown;
+        return true;
+      };
+      for (;;) {
+        const wait = Math.min(limits.uploadIdleTimeoutMs, limits.uploadTimeoutMs - (Date.now() - startedAt));
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const result = wait <= 0
+          ? undefined
+          : await Promise.race([
+            reader.read(),
+            new Promise<undefined>((resolve) => {
+              timer = setTimeout(() => resolve(undefined), wait);
+            }),
+          ]);
+        clearTimeout(timer);
+        if (!result) {
+          log('request_refused', { reason: 'upload_timeout' });
+          return refuse(json(408, { error: 'request_timeout', message: 'The request body did not arrive in time.' }, { Connection: 'close' }));
+        }
+        if (result.done) break;
+        const value = result.value;
+        if (total + value.byteLength > max) return refuse(tooLarge());
+        if (!ensure(total + value.byteLength)) {
+          log('request_refused', { reason: 'upload_capacity' });
+          return refuse(json(503, { error: 'busy', message: 'The relay is busy. Try again shortly.' }, { 'Retry-After': '5' }));
+        }
+        buffer.set(value, total);
+        total += value.byteLength;
       }
-      parts.push(value);
+      return { ok: true, body: buffer.subarray(0, total) };
+    } finally {
+      ticket.end();
     }
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (const part of parts) {
-      out.set(part, offset);
-      offset += part.byteLength;
-    }
-    return out;
   };
+
+  /** The admission key of a credential: its install and the digest of the whole credential. */
+  const credentialKey = (installId: string, token: string) => `${installId}:${createHash('sha256').update(token).digest('base64url')}`;
+
+  /** An id that names no install the relay will route to (never registered, expired, or revoked). */
+  const unroutable = (installId: string) => registry.isRevoked(installId) || !registry.get(installId);
 
   const forwardHeaders = (request: Request): Array<[string, string]> => {
     const out: Array<[string, string]> = [];
@@ -220,22 +297,32 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   /**
    * Sends one request to the install its credential names. `offline` answers
    * when the install is registered but has no session.
+   *
+   * Admission is per install, in the lane the caller chose (limits.ts). The
+   * install's engine marks responses to requests it authenticated; an
+   * unmarked response refunds the owner lane's rate token and, for an access
+   * token, drops its confirmation, while a marked one confirms the credential
+   * for its later requests. The concurrency slot is released when the mux
+   * stream finishes (session.ts), not when the response head arrives.
    */
   const toInstall = async (input: {
     installId: string;
     request: Request;
     path: string;
     body: Uint8Array;
+    lane: AdmissionLane;
     dashboard: boolean;
+    /** Set for an access token: confirmation is tracked for it. */
+    credentialKey?: string;
     offline: () => Response;
     unknown: () => Response;
   }): Promise<Response> => {
     const { installId } = input;
-    if (registry.isRevoked(installId) || !registry.get(installId)) {
+    if (unroutable(installId)) {
       log('request_refused', { install: installTag(installId), reason: 'unknown_install' });
       return input.unknown();
     }
-    const admitted = admission.admit(installId, input.dashboard);
+    const admitted = admission.admit(installId, input.lane, input.dashboard);
     if (!admitted.ok) {
       log('request_refused', { install: installTag(installId), reason: admitted.reason });
       return admitted.reason === 'busy'
@@ -247,63 +334,40 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       admitted.release();
       return input.offline();
     }
-    let response: Response;
     try {
-      response = await session.forward({
+      return await session.forward({
         method: input.request.method,
         path: input.path,
         headers: forwardHeaders(input.request),
         body: input.body,
         signal: input.request.signal,
+        onHead: (_status, authenticated) => {
+          if (authenticated) {
+            if (input.credentialKey) confirmed.add(input.credentialKey);
+            return;
+          }
+          admitted.refund();
+          if (input.credentialKey) confirmed.delete(input.credentialKey);
+        },
+        onFinish: admitted.release,
       });
     } catch {
       admitted.release();
       log('request_failed', { install: installTag(installId) });
       return json(502, { error: 'bad_gateway' });
     }
-    if (!response.body) {
-      admitted.release();
-      return response;
-    }
-    // The concurrency slot is held until the streamed body ends or is cut off.
-    const release = admitted.release;
-    const reader = response.body.getReader();
-    const relayed = new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        try {
-          const { done, value } = await reader.read();
-          if (done) {
-            release();
-            controller.close();
-          } else {
-            controller.enqueue(value);
-          }
-        } catch {
-          // Cut off (size or time cap, or the install went away). Bun ends an
-          // errored response body the same way as a closed one, so close it
-          // without logging a stack per cut-off stream.
-          release();
-          controller.close();
-        }
-      },
-      cancel(reason) {
-        release();
-        return reader.cancel(reason);
-      },
-    });
-    return new Response(relayed, { status: response.status, headers: response.headers });
   };
 
-  const mcp = async (request: Request, path: string): Promise<Response> => {
+  const mcp = async (request: Request, path: string, ip: string): Promise<Response> => {
     const authorization = request.headers.get('authorization');
     // No credential at all: the relay's own not-installed surface. A caller
     // without a token never reaches an engine.
     if (authorization === null) {
-      const anonymous = await readBody(request, limits.maxRequestBodyBytes);
-      if (!anonymous) return json(413, { error: 'payload_too_large' });
+      const anonymous = await readBody(request, limits.maxRequestBodyBytes, ip);
+      if (!anonymous.ok) return anonymous.response;
       return relayMcpResponse({
         method: request.method,
-        body: new TextDecoder().decode(anonymous),
+        body: new TextDecoder().decode(anonymous.body),
         now: now(),
         state: 'not_installed',
         installUrl: bridge.installUrl,
@@ -313,15 +377,30 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     const token = /^Bearer\s+(\S+)$/i.exec(authorization.trim())?.[1];
     const installId = credentialInstallId('access', token);
     if (!installId) return unauthorized(origin, 'invalid_token');
-    const body = await readBody(request, limits.maxRequestBodyBytes);
-    if (!body) return json(413, { error: 'payload_too_large' });
+    // Everything decided from the headers, before any body byte is read: an
+    // id that routes nowhere is refused, and a credential the install's engine
+    // has not confirmed is paid for by the caller's address, not the install.
+    if (unroutable(installId)) {
+      if (!publicRequests.take(ip)) return tooMany();
+      log('request_refused', { install: installTag(installId), reason: 'unknown_install' });
+      return unauthorized(origin, 'invalid_token');
+    }
+    const key = credentialKey(installId, token!);
+    const lane: AdmissionLane = confirmed.has(key) ? 'owner' : 'unverified';
+    if (lane === 'unverified' && !publicRequests.take(ip)) return tooMany();
+    const read = await readBody(request, limits.maxRequestBodyBytes, ip);
+    if (!read.ok) return read.response;
+    const body = read.body;
     const text = new TextDecoder().decode(body);
     return toInstall({
       installId,
       request,
       path,
       body,
-      dashboard: isDashboardCall(text),
+      lane,
+      // Only an owner-lane call may take the reserved dashboard slot.
+      dashboard: lane === 'owner' && isDashboardCall(text),
+      credentialKey: key,
       offline: () => relayMcpResponse({
         method: request.method,
         body: text,
@@ -334,10 +413,15 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   };
 
   /** `/connect/token` and `/connect/revoke`: routed by the credential in the form. */
-  const oauthForm = async (request: Request, path: string, kind: 'token' | 'revoke'): Promise<Response> => {
+  const oauthForm = async (request: Request, path: string, kind: 'token' | 'revoke', ip: string): Promise<Response> => {
     if (request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
-    const body = await readBody(request, MAX_FORM_BYTES);
-    if (!body) return json(413, { error: 'invalid_request', error_description: 'The form is too large.' });
+    const read = await readBody(request, MAX_FORM_BYTES, ip);
+    if (!read.ok) {
+      return read.response.status === 413
+        ? json(413, { error: 'invalid_request', error_description: 'The form is too large.' })
+        : read.response;
+    }
+    const body = read.body;
     const form = new URLSearchParams(new TextDecoder().decode(body));
     let installId: string | undefined;
     if (kind === 'token') {
@@ -358,6 +442,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       request,
       path,
       body,
+      lane: 'unverified',
       dashboard: false,
       offline: () => json(503, { error: 'temporarily_unavailable', error_description: 'Olympus on your Mac is offline. Try again when your Mac is awake.' }, { 'Retry-After': '30' }),
       unknown,
@@ -365,17 +450,18 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   };
 
   /** Reviewer sign-in: GET the page, POST the form, both to the demo install only. */
-  const demoSignIn = async (request: Request, path: string): Promise<Response> => {
+  const demoSignIn = async (request: Request, path: string, ip: string): Promise<Response> => {
     const demoInstallId = config.demoInstallId;
     if (!demoInstallId) return json(404, { error: 'not_found' });
     if (request.method !== 'GET' && request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' });
-    const body = request.method === 'POST' ? await readBody(request, MAX_FORM_BYTES) : new Uint8Array();
-    if (!body) return json(413, { error: 'payload_too_large' });
+    const read = request.method === 'POST' ? await readBody(request, MAX_FORM_BYTES, ip) : { ok: true as const, body: new Uint8Array() };
+    if (!read.ok) return read.response;
+    const body = read.body;
     const unavailable = () => new Response('The Olympus demo is not available right now. Try again later.', {
       status: 503,
       headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '60' },
     });
-    return toInstall({ installId: demoInstallId, request, path, body, dashboard: false, offline: unavailable, unknown: unavailable });
+    return toInstall({ installId: demoInstallId, request, path, body, lane: 'unverified', dashboard: false, offline: unavailable, unknown: unavailable });
   };
 
   // -------------------------------------------------------------------------
@@ -427,7 +513,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       previous.send({ type: 'error', code: 'replaced', message: 'a newer session replaced this one' });
       previous.close(4001, 'replaced');
     }
-    const session = new InstallSession(installId, ws, limits);
+    const session = new InstallSession(installId, ws, limits, queueBudget);
     ws.data.session = session;
     sessions.set(installId, session);
     registry.seen(installId);
@@ -461,10 +547,11 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       }
       if (path === '/healthz') return json(200, { ok: true });
 
-      // The authorized MCP path is limited per install (toInstall); everything
-      // reachable without a routable credential is limited per address.
-      const authorizedMcp = path === OAUTH_PATHS.mcp && credentialInstallId('access', /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')?.trim() ?? '')?.[1]);
-      if (!authorizedMcp && !publicRequests.take(ip)) return tooMany();
+      // Everything reachable without a routable credential is limited per
+      // address here; `/mcp` with one decides its own limit (mcp()). Request
+      // bodies on every route are admitted and timed by readBody.
+      const routableMcp = path === OAUTH_PATHS.mcp && credentialInstallId('access', /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')?.trim() ?? '')?.[1]);
+      if (!routableMcp && !publicRequests.take(ip)) return tooMany();
 
       switch (path) {
         case OAUTH_PATHS.protectedResource:
@@ -480,13 +567,13 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
           return authorizeBridge(url, bridge);
         case OAUTH_PATHS.demoAuthorize:
-          return demoSignIn(request, `${OAUTH_PATHS.demoAuthorize}${url.search}`);
+          return demoSignIn(request, `${OAUTH_PATHS.demoAuthorize}${url.search}`, ip);
         case OAUTH_PATHS.token:
-          return oauthForm(request, OAUTH_PATHS.token, 'token');
+          return oauthForm(request, OAUTH_PATHS.token, 'token', ip);
         case OAUTH_PATHS.revoke:
-          return oauthForm(request, OAUTH_PATHS.revoke, 'revoke');
+          return oauthForm(request, OAUTH_PATHS.revoke, 'revoke', ip);
         case OAUTH_PATHS.mcp:
-          return mcp(request, OAUTH_PATHS.mcp);
+          return mcp(request, OAUTH_PATHS.mcp, ip);
         case APPS_CHALLENGE_PATH: {
           if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
           const token = config.appsChallenge?.()?.trim();
@@ -565,14 +652,17 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     async revoke(installId) {
       if (!INSTALL_ID_PATTERN.test(installId)) throw new Error('not an install id');
       const wasRegistered = registry.get(installId) !== undefined;
-      const revoked = await registry.revoke(installId);
+      // The registry refuses the id before this returns; the write may still fail.
+      const durable = registry.revoke(installId);
+      // The live session ends whatever the write's outcome.
       const live = sessions.get(installId);
-      if (revoked) log('install_revoked', { install: installTag(installId) });
       if (live) {
         live.send({ type: 'error', code: 'revoked', message: 'this install was revoked by the relay operator' });
         live.close(4003, 'revoked');
         sessions.delete(installId);
       }
+      const revoked = await durable;
+      if (revoked) log('install_revoked', { install: installTag(installId) });
       return { installId, revoked, wasRegistered, wasOnline: live !== undefined };
     },
     async restore(installId) {
@@ -583,7 +673,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     status: () => {
       let inFlight = 0;
       for (const session of sessions.values()) inFlight += session.activeStreams;
-      return { ...registry.counts(), online: sessions.size, inFlight, startedAt };
+      return { ...registry.counts(), online: sessions.size, inFlight, uploading: uploads.active, queuedBytes: queueBudget.used, startedAt };
     },
     sweep,
     async close() {

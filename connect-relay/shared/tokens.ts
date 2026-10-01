@@ -13,6 +13,14 @@
  */
 import { randomBytes } from 'node:crypto';
 
+/**
+ * Set by the engine on a response to a request whose credential it verified.
+ * The relay uses it only to decide which admission lane a credential's later
+ * requests take (server/relay.ts); it is never an authorization and never
+ * leaves the relay. An install that forges it changes only its own lane.
+ */
+export const AUTHENTICATED_RESPONSE_HEADER = 'x-olympus-authenticated';
+
 export type CredentialKind = 'access' | 'refresh' | 'code';
 
 const PREFIX: Record<CredentialKind, string> = { access: 'oly2', refresh: 'oly2r', code: 'oly2c' };

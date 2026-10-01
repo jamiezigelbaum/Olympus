@@ -12,7 +12,7 @@ import { RelayClient, type RelayClientStatus } from '../client/relay-client.ts';
 import { DEMO_AUTHORIZE_PATH, FORWARDED_PATHS } from '../client/forward.ts';
 import { loadOrCreateIdentity, type InstallIdentity } from '../client/identity.ts';
 import { PROTOCOL_VERSION, base64url, installIdForPublicKey, signInstallMessage, spkiOf } from '../shared/protocol.ts';
-import { mintCredential } from '../shared/tokens.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, mintCredential } from '../shared/tokens.ts';
 import type { RelayLimits } from '../server/limits.ts';
 import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
@@ -45,7 +45,7 @@ function tempDir(): string {
 }
 
 /** A loopback Olympus worker stand-in that records what reached it. */
-function fakeWorker(name: string, options: { bigBodyBytes?: number } = {}): FakeWorker {
+function fakeWorker(name: string, options: { bigBodyBytes?: number; validToken?: string } = {}): FakeWorker {
   const requests: WorkerRecord[] = [];
   const aborted: string[] = [];
   const server = Bun.serve({
@@ -60,32 +60,46 @@ function fakeWorker(name: string, options: { bigBodyBytes?: number } = {}): Fake
         headers[key] = value;
       });
       requests.push({ method: request.method, path: `${url.pathname}${url.search}`, headers, body });
-      if (url.pathname === '/mcp' && request.method === 'GET') {
-        // Server-Sent Events: three events, 150 ms apart.
-        let n = 0;
-        const stream = new ReadableStream<Uint8Array>({
-          async pull(controller) {
-            if (n > 0) await Bun.sleep(150);
-            n += 1;
-            controller.enqueue(new TextEncoder().encode(`data: event-${n}\n\n`));
-            if (n === 3) controller.close();
-          },
-        });
-        return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'set-cookie': 'leak=1' } });
+      if (url.pathname === '/mcp') {
+        // An engine: a 401 for a credential it does not hold, else it marks the response authenticated.
+        if (options.validToken !== undefined && headers.authorization !== `Bearer ${options.validToken}`) {
+          return Response.json({ error: 'invalid_token' }, { status: 401 });
+        }
+        const response = await engineFor(request, url, body);
+        const marked = new Headers(response.headers);
+        marked.set(AUTHENTICATED_RESPONSE_HEADER, '1');
+        return new Response(response.body, { status: response.status, headers: marked });
       }
-      if (url.pathname === '/mcp' && body.includes('"slow"')) {
-        // Holds the request open until the caller goes away.
-        await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => resolve(), { once: true }));
-        aborted.push(body);
-        return new Response('too late');
-      }
-      if (url.pathname === '/mcp' && body.includes('"big"')) {
-        return new Response('x'.repeat(options.bigBodyBytes ?? 1024), { headers: { 'content-type': 'text/plain' } });
-      }
-      return Response.json({ worker: name, path: url.pathname, body }, { headers: { 'mcp-session-id': `session-${name}` } });
+      return engineFor(request, url, body);
     },
   });
   return { url: `http://127.0.0.1:${server.port}`, requests, aborted, stop: () => server.stop(true) };
+
+  async function engineFor(request: Request, url: URL, body: string): Promise<Response> {
+    if (url.pathname === '/mcp' && request.method === 'GET') {
+      // Server-Sent Events: three events, 150 ms apart.
+      let n = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (n > 0) await Bun.sleep(150);
+          n += 1;
+          controller.enqueue(new TextEncoder().encode(`data: event-${n}\n\n`));
+          if (n === 3) controller.close();
+        },
+      });
+      return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'set-cookie': 'leak=1' } });
+    }
+    if (url.pathname === '/mcp' && body.includes('"slow"')) {
+      // Holds the request open until the caller goes away.
+      await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => resolve(), { once: true }));
+      aborted.push(body);
+      return new Response('too late');
+    }
+    if (url.pathname === '/mcp' && body.includes('"big"')) {
+      return new Response('x'.repeat(options.bigBodyBytes ?? 1024), { headers: { 'content-type': 'text/plain' } });
+    }
+    return Response.json({ worker: name, path: url.pathname, body }, { headers: { 'mcp-session-id': `session-${name}` } });
+  }
 }
 
 const logLines: string[] = [];
@@ -488,9 +502,11 @@ describe('limits', () => {
     cleanups.push(worker.stop);
     const a = await connectInstall(relay, worker);
     const token = mintCredential('access', a.identity.installId);
+    // The engine confirms the credential once; from then on it takes the owner lane.
+    expect((await mcpPost(relay, token, rpc('ping'))).status).toBe(200);
     const controller = new AbortController();
     const slow = mcpPost(relay, token, rpc('tools/call', { name: 'slow' }), { signal: controller.signal }).catch(() => undefined);
-    await until(() => worker.requests.length === 1);
+    await until(() => worker.requests.length === 2);
     const busy = await mcpPost(relay, token, rpc('tools/list'));
     expect(busy.status).toBe(503);
     const dashboard = await mcpPost(relay, token, rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }));
@@ -506,6 +522,8 @@ describe('limits', () => {
     cleanups.push(worker.stop);
     const a = await connectInstall(relay, worker);
     const token = mintCredential('access', a.identity.installId);
+    // The first request confirms the credential (unverified lane, paid by the address).
+    expect((await mcpPost(relay, token, rpc('ping'))).status).toBe(200);
     expect((await mcpPost(relay, token, rpc('ping'))).status).toBe(200);
     expect((await mcpPost(relay, token, rpc('ping'))).status).toBe(200);
     expect((await mcpPost(relay, token, rpc('ping'))).status).toBe(429);
