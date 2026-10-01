@@ -142,7 +142,9 @@ describe('a provider refusal is a state the owner can act on, not a stuck handsh
     // A refusal is the owner's homework whatever the registry says: a source
     // that has never connected would otherwise read 'Off' and leave home.
     expect(dashboardStatus({ source: card })).toBe('Needs you');
-    expect(dashboardAttentionLine(card)).toBe(card.connection.provider_refusal!.reason);
+    // The row reads one plain sentence; the provider's own words wait under
+    // How to fix in the sheet.
+    expect(dashboardAttentionLine(card)).toBe('rejected the sign-in address — fix it in your Dropbox app settings');
   });
 
   test('a pending attempt with no refusal still reads as awaiting consent', () => {

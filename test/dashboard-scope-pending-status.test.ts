@@ -26,7 +26,7 @@ test('a connected source waiting for its folder scope reads Waiting, never Fresh
   expect(dropbox.scope_selection).toMatchObject({ status: 'scope_pending', connected: true });
   expect(dropbox.connection.state).toBe('connected');
   expect(dashboardStatus({ source: dropbox })).toBe('Waiting');
-  expect(dashboardSubLine(dropbox)).toBe('waiting for folder selection');
+  expect(dashboardSubLine(dropbox)).toBe('choose which folders to include');
   // The same word Readwise gets before its first sync.
   expect(readwise.connection.state).toBe('waiting_for_first_sync');
   expect(dashboardStatus({ source: readwise })).toBe('Waiting');
@@ -47,7 +47,7 @@ test('home groups a scope-pending source with the first-sync wait, under the wai
   expect(html).toContain('Waiting — 3');
   expect(html).not.toContain('Fresh — ');
   const card = cardFor(html, 'dropbox.files');
-  expect(card).toContain('waiting for folder selection');
+  expect(card).toContain('choose which folders to include');
   expect(card).not.toContain('synced');
   // The same glyph Readwise draws while it waits for its first sync.
   const waitingGlyph = statusGlyph('Waiting');
@@ -64,7 +64,7 @@ test('setup lists a scope-pending source under Waiting, not Fresh', () => {
   const section = html.slice(start, html.indexOf('<div class="sect', start + 1));
   expect(section).toContain('>Dropbox<');
   expect(section).toContain('>Google Drive<');
-  expect(section).toContain('waiting for folder selection');
+  expect(section).toContain('choose which folders to include');
   expect(section).toContain('>Readwise<');
   expect(section).toContain('waiting for the first sync');
 });
@@ -105,9 +105,9 @@ test('Google Drive connected with no approved folders reads Waiting through the 
     const drive = built.sources.find((source) => source.source_id === 'google_drive.docs')!;
     expect(drive.scope_selection).toMatchObject({ required: true, status: 'scope_pending', connected: true });
     expect(dashboardStatus({ source: drive })).toBe('Waiting');
-    expect(dashboardSubLine(drive)).toBe('waiting for folder selection');
+    expect(dashboardSubLine(drive)).toBe('choose which folders to include');
     const home = renderDashboardHomePage(built, { now: DASHBOARD_PREVIEW_NOW });
-    expect(cardFor(home, 'google_drive.docs')).toContain('waiting for folder selection');
+    expect(cardFor(home, 'google_drive.docs')).toContain('choose which folders to include');
     expect(cardFor(home, 'google_drive.docs')).toContain(statusGlyph('Waiting'));
   } finally {
     rmSync(dir, { recursive: true, force: true });

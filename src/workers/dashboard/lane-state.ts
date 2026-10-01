@@ -447,6 +447,8 @@ export interface DashboardLaneBanner {
   /** Where the reader can act, when a page exists that can act on it. */
   href?: string;
   hrefLabel?: string;
+  /** The technical condition behind the words, for a Details disclosure. */
+  detail?: string;
 }
 
 /** A condition that needs a person, already worded by whoever found it. */
@@ -455,6 +457,8 @@ export interface DashboardLaneActionable {
   words: string;
   href?: string;
   hrefLabel?: string;
+  /** The technical condition behind the words, for a Details disclosure. */
+  detail?: string;
 }
 
 /**
@@ -482,6 +486,7 @@ export function armLaneBanners(input: {
       words: item.words,
       ...(item.href === undefined ? {} : { href: item.href }),
       ...(item.hrefLabel === undefined ? {} : { hrefLabel: item.hrefLabel }),
+      ...(item.detail === undefined ? {} : { detail: item.detail }),
     });
   }
   return banners;

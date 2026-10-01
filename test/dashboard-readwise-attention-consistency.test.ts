@@ -172,7 +172,7 @@ function readwiseCard(view: SourceDashboardViewModel): DashboardSourceCard {
 }
 
 function syncsFacts(view: SourceDashboardViewModel): string {
-  return dashboardBackgroundLanes(view, { now: NOW }).find((lane) => lane.name === 'Syncs')?.facts ?? '';
+  return dashboardBackgroundLanes(view, { now: NOW }).find((lane) => lane.name === 'Syncing')?.facts ?? '';
 }
 
 describe('Readwise attention reads one way on home, the header and the page', () => {
@@ -187,7 +187,7 @@ describe('Readwise attention reads one way on home, the header and the page', ()
     expect(dashboardSubLine(card)).not.toContain('needs attention');
     expect(dashboardAttentionBanner(card, { now: NOW, setupPath: SETUP })).toBeUndefined();
     const facts = syncsFacts(view);
-    expect(facts).toContain('1 source retrying');
+    expect(facts).toContain('Readwise is retrying on its own');
     expect(facts).not.toContain('failing');
   });
 
@@ -212,7 +212,8 @@ describe('Readwise attention reads one way on home, the header and the page', ()
     expect(banner?.sentence).toContain('task_failed');
     expect(banner?.action).toMatchObject({ kind: 'sync_now', label: 'Sync now' });
     expect(renderDashboardDetailBody(card, { now: NOW })).toContain('class="attncard banner"');
-    expect(syncsFacts(view)).toContain('1 source failing');
+    // Said once, under Needs you with its fix; the syncing line does not repeat it.
+    expect(syncsFacts(view)).not.toContain('keeps failing');
   });
 
   test('a credential failure is failing on its first attempt', () => {
@@ -237,14 +238,16 @@ describe('Readwise attention reads one way on home, the header and the page', ()
   test('the background page marks a sync that keeps failing as needs-you, booked retry or not', () => {
     const failing = readwiseView({ failures: 3 });
     const failingCheck = dashboardBackgroundLanes(failing, { now: NOW })
-      .find((lane) => lane.name === 'Syncs')?.checks.find((check) => check.name === 'CONSECUTIVE_FAILURES');
+      .find((lane) => lane.name === 'Syncing')?.checks.find((check) => check.name === 'CONSECUTIVE_FAILURES');
     expect(failingCheck?.disposition).toBe('needs_you');
     const html = renderDashboardBackgroundBody(failing, NOW);
-    expect(html).toContain('Readwise&#39;s scheduled sync keeps failing (task_failed)');
+    expect(html).toContain('Readwise keeps failing to sync, so new material is not coming in.');
+    // The raw error kind is technical detail, under the banner's Details.
+    expect(html).toContain('Last error: task_failed');
 
     const retrying = readwiseView({ failures: 1 });
     const retryCheck = dashboardBackgroundLanes(retrying, { now: NOW })
-      .find((lane) => lane.name === 'Syncs')?.checks.find((check) => check.name === 'CONSECUTIVE_FAILURES');
+      .find((lane) => lane.name === 'Syncing')?.checks.find((check) => check.name === 'CONSECUTIVE_FAILURES');
     expect(retryCheck?.disposition).toBe('self_healing');
     expect(renderDashboardBackgroundBody(retrying, NOW)).not.toContain('keeps failing');
   });

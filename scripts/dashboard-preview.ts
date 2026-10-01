@@ -287,7 +287,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
   }
   if (state === 'gmail-scope-pending') {
     // Gmail connected, no mail scope approved yet (design §2.5): the card, the
-    // Setup row and home all read Waiting · waiting for mail selection, and the
+    // Setup row and home all read Waiting · choose which mail to include, and the
     // banner leads to the mail picker (/mail-picker in this harness).
     const view = buildSourceDashboardViewModel({
       sourceIndexStatus: emptyStatus(),

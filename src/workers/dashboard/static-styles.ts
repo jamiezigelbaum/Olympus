@@ -86,11 +86,7 @@ export const DASHBOARD_NAV_CSS = `.top { position: sticky; top: 0; z-index: 12; 
 .dnav .dnavlink.on { color: var(--t1); border-bottom-color: var(--link-line); }
 `;
 
-export const SETUP_JOURNEY_CSS = `.setupsummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 18px; }
-.setupsummary .sumcard { min-width: 0; border: 1px solid var(--line2); border-radius: 8px; padding: 11px 12px; background: var(--panel); }
-.setupsummary b { display: block; color: var(--t4); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
-.setupsummary span { display: block; color: var(--t2); font-size: 13px; line-height: 1.3; }
-@media (max-width: 700px) { .setupsummary { grid-template-columns: 1fr; } }`;
+export const SETUP_JOURNEY_CSS = `.setupsummary { color: var(--t2); font-size: 13px; margin: 0 0 18px; }`;
 
 export const BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
 .lane .lanehd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
@@ -390,7 +386,7 @@ export const AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 
 export const MODEL_SETUP_CSS = `
 .modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{border:1px solid var(--border,#333);border-radius:12px;padding:16px 18px;min-width:0}
 .modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:12.5px}
-.modelcard p{margin:6px 0 0}.source-model-gate{border:0;padding:0;margin:0;min-width:0}.source-model-gate[disabled]{opacity:.5}
+.modelcard p{margin:6px 0 0}
 .modelaction{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:12px}
 .modelaction form{display:flex;flex:1 1 320px;flex-wrap:wrap;align-items:center;gap:8px;margin:0;min-width:0}
 .modelaction input[type=password]{flex:1 1 180px;min-width:0;width:auto}.modelaction a{white-space:nowrap}.modelaction .modelnote{color:var(--t3)}

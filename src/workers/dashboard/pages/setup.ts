@@ -1,4 +1,4 @@
-import { renderModelSetup } from '../model-setup.ts';
+import { renderModelSetup, renderModelSetupBlocker } from '../model-setup.ts';
 import { AGENT_CONNECT_CSS, MODEL_SETUP_CSS, SETUP_JOURNEY_CSS } from '../static-styles.ts';
 import { renderDashboardAgentsSection } from '../agents.ts';
 export { SETUP_JOURNEY_CSS };
@@ -24,7 +24,10 @@ import type {
 import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../../credential-degradation.ts';
 import {
+  DASHBOARD_MODELS_BLOCKED_REASON,
+  DASHBOARD_RECONNECT_LABEL,
   dashboardAttentionLine,
+  dashboardConnectedSummary,
   dashboardIsConnectedSource,
   dashboardScopePending,
   dashboardSetupMeta,
@@ -44,7 +47,7 @@ import {
   setupRow,
   type DashboardActionInput,
 } from '../components.ts';
-import { detailHref, type DashboardPageOptions } from './home.ts';
+import { dashboardRefusalNotice, detailHref, fallbackFix, type DashboardPageOptions } from './home.ts';
 import { DASHBOARD_NAV_CSS, renderDashboardNav } from '../nav.ts';
 
 const CONNECTOR_SHEET_ID = 'connector-sheet';
@@ -105,12 +108,12 @@ export function renderDashboardSetupPage(
 ): string {
   const degraded = options?.degradedCredentials ?? view.degraded_credentials;
   const grouped = groupSources(view.sources, degraded);
+  // The worker refuses every source connection until models are ready, so
+  // every connect control on the page is greyed with the reason beside it, and
+  // the blocker banner at the top names the one thing that clears it.
+  const blocked = view.model_setup !== undefined && !view.model_setup.ready;
   const sections = SETUP_GROUPS
-    .map((group) => {
-      const rendered = renderGroup(group, grouped[group.id], degraded, options?.basePath, view);
-      return group.id === 'not_connected' && view.model_setup && !view.model_setup.ready && rendered
-        ? `<fieldset class="source-model-gate" disabled aria-label="Sources: finish model setup first">${rendered}</fieldset>` : rendered;
-    })
+    .map((group) => renderGroup(group, grouped[group.id], degraded, view, blocked, options))
     .filter((section) => section.length > 0);
   const body = [
     renderDashboardNav('setup', {
@@ -121,6 +124,7 @@ export function renderDashboardSetupPage(
         ? '<div class="attncard plain" data-write-capability-note>Read-only OpenClaw connection — reconnect with operator.write access to change sources.</div>'
         : '')
       : dashboardControlGate({ connected: options?.controlSessionCsrfToken !== undefined }),
+    renderModelSetupBlocker(view.model_setup),
     renderSetupSummary(view),
     renderModelSetup(view.model_setup),
     '<div class="sect">Sources</div>',
@@ -161,16 +165,17 @@ export function renderDashboardSetupPage(
 
 function renderSetupSummary(view: SourceDashboardViewModel): string {
   const ready = view.summary.answer_ready_sources;
-  const connected = view.sources.filter(dashboardIsConnectedSource).length;
+  // A refused first attempt keeps a source on the page, but it is not
+  // connected; only a live connection or data already read counts.
+  const connected = view.sources.filter((source) => dashboardIsConnectedSource(source)
+    && (source.connection.provider_refusal === undefined || source.coverage.indexed_items > 0)
+    && source.connection.state !== 'awaiting_consent').length;
   // Two counts with two names, because they measure different things: a
-  // connected source is syncing; an answer-ready one can already be cited.
-  // "0 sources ready" beside four Fresh cards read as a contradiction
-  // (owner note, 2026-09-01).
-  const line = `${ready} answer-ready · ${connected} connected`;
-  return `<div class="setupsummary" aria-label="Setup summary">`
-    + `<div class="sumcard"><b>Security preset</b><span>Configured</span></div>`
-    + `<div class="sumcard"><b>Sources</b><span>${escapeHtml(line)}</span></div>`
-    + `</div>`;
+  // connected source is syncing; a ready one can already be cited. "0 sources
+  // ready" beside four Fresh cards read as a contradiction (owner note,
+  // 2026-09-01). One plain line; the preset tile said nothing.
+  if (connected === 0) return '';
+  return `<p class="setupsummary" aria-label="Setup summary">${escapeHtml(dashboardConnectedSummary(connected, ready))}</p>`;
 }
 
 function groupSources(
@@ -230,15 +235,17 @@ function renderGroup(
   group: SetupGroupDefinition,
   sources: readonly DashboardSourceCard[],
   degraded: readonly WorkerCredentialDegradation[] | undefined,
-  basePath: string | undefined,
   view: SourceDashboardViewModel,
+  blocked: boolean,
+  options: DashboardPageOptions | undefined,
 ): string {
   if (sources.length === 0) return '';
+  const basePath = options?.basePath;
   const rows = sources
     .map((source) => (
       group.id === 'not_connected'
-        ? renderSetupRow(source, view, basePath)
-        : renderStateRow(group, source, degraded, basePath, view)))
+        ? renderSetupRow(source, view, blocked, basePath)
+        : renderStateRow(group, source, degraded, view, blocked, options)))
     .join('\n');
   return `${sectionHeading(group.heading, sources.length, group.attention)}\n${rows}`;
 }
@@ -257,9 +264,12 @@ function renderStateRow(
   group: SetupGroupDefinition,
   source: DashboardSourceCard,
   degraded: readonly WorkerCredentialDegradation[] | undefined,
-  basePath: string | undefined,
   view: SourceDashboardViewModel,
+  blocked: boolean,
+  options: DashboardPageOptions | undefined,
 ): string {
+  const basePath = options?.basePath;
+  const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
   const why = stateLine(group.id, source, degraded);
   const href = detailHref(source, basePath);
   const action = source.connection.action;
@@ -278,7 +288,7 @@ function renderStateRow(
       ...(why ? { why } : {}),
       // Same verb home uses for a data-bearing source: the owner is repairing
       // a connection they already made, not setting up a new one.
-      action: { label: source.coverage.indexed_items > 0 ? 'Reauthenticate' : action.label, kind: 'none', sheet: sheetId, primary: true },
+      action: { label: source.coverage.indexed_items > 0 ? DASHBOARD_RECONNECT_LABEL : action.label, kind: 'none', sheet: sheetId, primary: true, ...gate },
       ...(disconnect ? { secondaryAction: disconnect } : {}),
     });
     return `${row}\n${sheet}`;
@@ -290,7 +300,7 @@ function renderStateRow(
   // ten-minute record (owner, 2026-09-03).
   if ((group.id === 'needs_you' || group.id === 'connecting') && action.kind === 'oauth') {
     const connect = dashboardOAuthConnectSheet(source, action, {
-      ...(source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}),
+      ...dashboardRefusalNotice(source),
       ...providerNote(view, action),
     });
     if (connect) {
@@ -300,14 +310,17 @@ function renderStateRow(
         attention: group.attention,
         href,
         ...(why ? { why } : {}),
-        action: { label: action.label, kind: 'none', sheet: connect.sheetId, primary: true },
+        action: { label: action.label, kind: 'none', sheet: connect.sheetId, primary: true, ...gate },
         ...(secondary ? { secondaryAction: secondary } : {}),
       });
       return `${row}\n${connect.sheet}`;
     }
   }
+  // A problem row always carries its fix: the connect control, or Sync now,
+  // or the page that explains it.
+  const connect = connectAction(source, true);
   const control = group.id === 'needs_you'
-    ? connectAction(source, true)
+    ? (connect === undefined ? fallbackFix(source, options).action : { ...connect, ...gate })
     : group.id === 'working' || group.id === 'waiting' || group.id === 'fresh'
       ? custodyAction(source)
       : undefined;
@@ -322,8 +335,14 @@ function renderStateRow(
   });
 }
 
-function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewModel, basePath?: string): string {
+function renderSetupRow(
+  source: DashboardSourceCard,
+  view: SourceDashboardViewModel,
+  blocked: boolean,
+  basePath?: string,
+): string {
   const action = source.connection.action;
+  const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
   if (action.kind === 'guided_session') {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
     const row = setupRow({
@@ -352,7 +371,7 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
       label: source.label,
       href: detailHref(source, basePath),
       blurb: action.instructions.plain_intro,
-      action: { label: action.label, kind: 'none', sheet: sheetId },
+      action: { label: action.label, kind: 'none', sheet: sheetId, ...gate },
       ...(link === undefined ? {} : { blurbLink: link }),
     });
     return `${row}\n${sheet}`;
@@ -363,15 +382,15 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
   // a URI the owner was never shown (owner, 2026-09-03).
   if (action.kind === 'oauth') {
     const connect = dashboardOAuthConnectSheet(source, action, {
-      ...(source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}),
+      ...dashboardRefusalNotice(source),
       ...providerNote(view, action),
     });
     if (connect) {
       const row = setupRow({
         label: source.label,
-      href: detailHref(source, basePath),
+        href: detailHref(source, basePath),
         blurb: setupBlurb(source),
-        action: { label: action.label, kind: 'none', sheet: connect.sheetId },
+        action: { label: action.label, kind: 'none', sheet: connect.sheetId, ...gate },
       });
       return `${row}\n${connect.sheet}`;
     }
@@ -384,7 +403,7 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
     label: source.label,
       href: detailHref(source, basePath),
     blurb: setupBlurb(source),
-    action: connectAction(source, false) ?? { label: actionStateLabel(source), kind: 'none' },
+    action: { ...(connectAction(source, false) ?? { label: actionStateLabel(source), kind: 'none' as const }), ...gate },
     ...(link === undefined ? {} : { blurbLink: link }),
   });
 }
@@ -450,7 +469,7 @@ function stateLine(
 
 function workingLine(source: DashboardSourceCard): string {
   const firstIngest = source.freshness.hours === undefined;
-  const parts = [firstIngest ? 'first ingest' : 'syncing'];
+  const parts = [firstIngest ? 'first sync' : 'syncing'];
   if (source.coverage.indexed_items > 0) parts.push(`${formatCount(source.coverage.indexed_items)} indexed so far`);
   const eta = source.progress?.eta_minutes;
   if (eta !== undefined && eta > 0) parts.push(`~${formatDuration(eta)} left`);

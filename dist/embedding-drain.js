@@ -19138,7 +19138,7 @@ var init_scheduler_markers = __esm(() => {
 });
 
 // src/workers/dashboard/vocabulary.ts
-var DASHBOARD_UNCONNECTED_STATES;
+var DASHBOARD_UNCONNECTED_STATES, REDIRECT_REFUSAL_CODES;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -19146,6 +19146,11 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_UNCONNECTED_STATES = new Set([
     "not_connected",
     "needs_setup"
+  ]);
+  REDIRECT_REFUSAL_CODES = new Set([
+    "redirect_uri_mismatch",
+    "invalid_redirect_uri",
+    "redirect_uri_not_registered"
   ]);
 });
 
@@ -19688,6 +19693,7 @@ init_worker_auth();
 // src/core/model-setup.ts
 init_http_timeout();
 init_embedding_identity();
+var LOCAL_RECHECK_READY_MS = 10 * 60000;
 var LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
 // src/workers/email-source/server.ts
@@ -20735,6 +20741,18 @@ a.attncard.rowzone .go { color: var(--t4); font-size: 13px; }
 .btn.primary { background: var(--link-line); color: #E8EDF8; }
 .btn.quiet { border-color: transparent; color: var(--t4); }
 .btn.quiet:hover { border-color: var(--line2); color: var(--t2); }
+/* A blocked control looks blocked and says why beside itself. */
+.btn:disabled, .btn[aria-disabled="true"] { background: none; border-color: var(--line2); color: var(--t4); cursor: not-allowed; }
+.blocked { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.blocked .hint { color: var(--t3); }
+/* The page's one blocker: full width at the top, a real warning colour. */
+.attncard.blocker { border-color: var(--warn); margin-bottom: 20px; }
+.attncard.blocker .name { color: var(--warn); }
+/* Technical detail under a problem, closed by default. */
+details.howto { margin: 6px 0 0; }
+details.howto > summary { color: var(--t3); font-size: 12.5px; cursor: pointer; }
+details.howto > summary:hover { color: var(--link); }
+details.howto[open] > summary { margin-bottom: 6px; }
 .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
 .cards.four { grid-template-columns: repeat(4, 1fr); }
 .card { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; }
@@ -20842,6 +20860,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 `;
 
 // src/workers/dashboard/components.ts
+init_vocabulary();
 var DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
 
 // src/workers/dashboard/index.ts
@@ -20864,9 +20883,6 @@ var PARKED_EMBEDDING_STATES = new Set([
   "guard_paused"
 ]);
 
-// src/workers/dashboard/pages/detail.ts
-init_source_dashboard();
-
 // src/workers/dashboard/attention.ts
 init_source_dashboard();
 init_phases();
@@ -20879,6 +20895,7 @@ var HEALTHY_CONNECTION_STATES = new Set([
 ]);
 
 // src/workers/dashboard/pages/detail.ts
+init_source_dashboard();
 init_phases();
 init_scheduler_markers();
 init_vocabulary();

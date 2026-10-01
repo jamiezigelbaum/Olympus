@@ -32,7 +32,7 @@ describe('background lanes', () => {
 
     const lanes = dashboardBackgroundLanes(view, { now: NOW }).map((lane) => lane.name);
 
-    expect(lanes).toEqual(['Embeddings', 'Vision', 'Syncs']);
+    expect(lanes).toEqual(['Indexing', 'Reading files', 'Syncing']);
   });
 
   test('reports no lane at all when nothing in the background is reporting', () => {
@@ -50,10 +50,12 @@ describe('background lanes', () => {
 
     const lane = dashboardBackgroundLanes(view, { now: NOW })[0];
 
-    expect(lane?.name).toBe('Embeddings');
+    expect(lane?.name).toBe('Indexing');
     expect(lane?.fraction).toBeCloseTo(0.5, 5);
-    expect(lane?.facts).toContain('50% embedded');
-    expect(lane?.facts).toContain('100k of 200k chunks left');
+    expect(lane?.facts).toContain('50% done');
+    // Chunks are never relabelled as items, and no count of them is shown.
+    expect(lane?.facts).not.toContain('chunk');
+    expect(lane?.facts).not.toContain('items left');
     expect(lane?.working).toBe(true);
   });
 
@@ -76,9 +78,9 @@ describe('background lanes', () => {
 
     const lane = dashboardBackgroundLanes(view, { now: NOW })[0];
 
-    expect(lane?.name).toBe('Vision');
+    expect(lane?.name).toBe('Reading files');
     expect(lane?.fraction).toBeUndefined();
-    expect(lane?.facts).toContain('19 jobs queued');
+    expect(lane?.facts).toContain('19 files waiting');
   });
 
   test('states a held extractor drain as the vision lane not working', () => {
@@ -86,7 +88,7 @@ describe('background lanes', () => {
 
     const lane = dashboardBackgroundLanes(view, { now: NOW })[0];
 
-    expect(lane?.facts).toContain('extraction held on 1 source');
+    expect(lane?.facts).toContain('paused on Gmail');
     expect(lane?.working).toBe(false);
     expect(lane?.checks.some((check) => check.name === 'EXTRACTION_DRAIN')).toBe(true);
   });
@@ -99,8 +101,8 @@ describe('background lanes', () => {
 
     const lane = dashboardBackgroundLanes(view, { now: NOW })[0];
 
-    expect(lane?.name).toBe('Syncs');
-    expect(lane?.facts).toContain('all 2 on schedule');
+    expect(lane?.name).toBe('Syncing');
+    expect(lane?.facts).toContain('on schedule');
     expect(lane?.facts).toContain('next: Gmail in 4m');
   });
 
@@ -220,7 +222,7 @@ describe('background page', () => {
 
     // The owner's complaint, in one assertion: the percentage is on the page,
     // and no lane carrying one is allowed to stop there.
-    expect(html).toContain('78% embedded');
+    expect(html).toContain('Indexing — 78% done');
     const laneBlocks = html.split('class="lane"').slice(1);
     expect(laneBlocks.length).toBeGreaterThan(0);
     for (const block of laneBlocks) {
@@ -240,7 +242,7 @@ describe('background page', () => {
 
     const html = renderDashboardBackgroundPage(view, { now: NOW });
 
-    expect(html).not.toContain('Needs a look');
+    expect(html).not.toContain('Needs you');
     expect(html).not.toContain('self-healing');
     expect(html).not.toContain('[CONSECUTIVE_FAILURES]');
     expect(html).not.toContain('class="tip"');
@@ -256,7 +258,7 @@ describe('background page', () => {
 
     const html = renderDashboardBackgroundPage(view, { now: NOW });
 
-    expect(html).not.toContain('Needs a look');
+    expect(html).not.toContain('Needs you');
   });
 
   test('banners the same failure when nothing will run it again', () => {
@@ -274,8 +276,9 @@ describe('background page', () => {
 
     const html = renderDashboardBackgroundPage(view, { now: NOW });
 
-    expect(html).toContain('Needs a look');
-    expect(html).toContain('failed 3 times in a row and nothing is scheduled to try it again');
+    expect(html).toContain('Needs you');
+    expect(html).toContain('Dropbox has failed to sync 3 times in a row and no retry is booked.');
+    expect(html).toContain('>Open Dropbox</a>');
     // A banner is not a dead end: it leads to the one page that can act on it.
     expect(html).toContain('href="/dashboard?source=dropbox.files"');
   });
@@ -298,9 +301,8 @@ describe('background page', () => {
 
     const html = renderDashboardBackgroundPage(view, { now: NOW });
 
-    expect(html).toContain('Needs a look');
-    expect(html).toContain('Extraction is held on Gmail');
-    expect(html).toContain('no new text is being extracted');
+    expect(html).toContain('Needs you');
+    expect(html).toContain('Reading new files is paused on Gmail.');
     expect(html).toContain('href="/dashboard?source=gmail.email"');
     // The mechanical check name never reaches the reader any more.
     expect(html).not.toContain('EXTRACTION_DRAIN');
@@ -324,7 +326,7 @@ describe('background page', () => {
 
     expect(html).toContain('12 stuck items on Gmail');
     expect(html).toContain('2 tasks already retrying them');
-    expect(html).not.toContain('Needs a look');
+    expect(html).not.toContain('Needs you');
   });
 
   test('banners a lane that claims to be running while its heartbeat has stopped', () => {
@@ -342,7 +344,9 @@ describe('background page', () => {
 
     const html = renderDashboardBackgroundPage(view, { now: NOW });
 
-    expect(html).toContain('Needs a look');
+    expect(html).toContain('Needs you');
+    // The row says what the owner sees; the lane's own words wait under Details.
+    expect(html).toContain('Reading files</span><span class="why"> — has stopped moving');
     expect(html).toContain('says it is running, but it has not reported any activity for 24 minutes');
     expect(html).toContain('Not moving');
     expect(html).toContain('last activity 24m ago');
@@ -365,12 +369,13 @@ describe('background page', () => {
     expect(liveHtml).toContain('600 chunks not yet embedded');
     expect(liveHtml).toContain('waiting on');
     // Nothing needs the owner, so nothing reaches the top of the page.
-    expect(liveHtml).not.toContain('Needs a look');
+    expect(liveHtml).not.toContain('Needs you');
     expect(liveHtml).not.toContain('self-healing');
 
     const offHtml = renderDashboardBackgroundPage(off, { now: NOW });
-    expect(offHtml).toContain('Needs a look');
-    expect(offHtml).toContain('The embedding lane is switched off');
+    expect(offHtml).toContain('Needs you');
+    expect(offHtml).toContain('Indexing is switched off, so new material will not become searchable.');
+    expect(offHtml).toContain('Indexing — 40% done, switched off');
     // A switched-off lane is a stated governing condition, not an unknown.
     expect(offHtml).toContain('the embedding lane is switched off for this corpus');
     expect(offHtml).not.toContain('State unknown');
@@ -389,7 +394,7 @@ describe('background page', () => {
     expect(html).not.toContain('OCR');
     expect(html).not.toContain('Transcription');
     expect(dashboardBackgroundLanes(view, { now: NOW }).map((lane) => lane.name))
-      .toEqual(['Embeddings', 'Vision', 'Syncs']);
+      .toEqual(['Indexing', 'Reading files', 'Syncing']);
   });
 
   test('shows no tip at all while every lane is fine', () => {
@@ -428,7 +433,7 @@ describe('background page', () => {
 
     const html = renderDashboardBackgroundPage(view, { now: NOW });
 
-    expect(html).toContain('No background lane is reporting right now.');
+    expect(html).toContain('Nothing is running in the background right now.');
     expect(html).not.toContain('class="lanerow"');
     expect(html).not.toContain('class="kpis"');
   });
@@ -439,7 +444,7 @@ describe('background page', () => {
     const html = renderDashboardBackgroundPage(view, { now: NOW });
 
     expect(html).toContain('Olympus / Background');
-    expect(html).toContain('1 lane working · checked 12s ago');
+    expect(html).toContain('1 job running · checked 12s ago');
   });
 
   test('escapes every value that came off the view model', () => {
@@ -552,7 +557,8 @@ describe('background page with lane reports', () => {
       }]),
     });
 
-    expect(html).toContain('Needs a look');
+    expect(html).toContain('Needs you');
+    expect(html).toContain('Indexing — 35% done, stalled');
     expect(html).toContain('Not moving');
     expect(html).toContain('130,000 chunks left and has moved none of them in the last 12 minutes');
   });
@@ -612,8 +618,8 @@ describe('home background section', () => {
     expect(html).toContain('<div class="sect">Background</div>');
     expect(html).toContain('class="bgrow"');
     expect(html).toContain('href="/dashboard?background"');
-    expect(html).toContain('>Vision<');
-    expect(html).toContain('>Syncs<');
+    expect(html).toContain('>Reading files<');
+    expect(html).toContain('>Syncing<');
     // The old grey background footnote is gone; the one .foot left on home is
     // the always-present way to the setup page.
     expect(html).not.toContain('Background:');

@@ -191,7 +191,7 @@ describe('dashboard detail connection action', () => {
     expect(html).toContain('(reauth required) == connected');
     expect(htmlHasSelector(html, 'form[data-connect-kind="oauth"]')).toBe(true);
     expect(html).toContain('<input type="hidden" name="source" value="google-drive">');
-    expect(html).toContain('>Reauthenticate</button>');
+    expect(html).toContain('>Reconnect</button>');
   });
 
   test('degrades that control to a setup link for a read-only reader', () => {
@@ -206,7 +206,7 @@ describe('dashboard detail connection action', () => {
     });
 
     expect(htmlHasSelector(html, 'form[data-connect-kind="oauth"]')).toBe(false);
-    expect(html).toContain('<a class="btn" href="/dashboard?setup">Reauthenticate</a>');
+    expect(html).toContain('<a class="btn" href="/dashboard?setup">Reconnect</a>');
     expect(html).toContain('needs the worker token');
   });
 

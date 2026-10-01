@@ -254,7 +254,8 @@ describe('dashboard home attention', () => {
 
     const html = renderDashboardHomePage(view, { now: NOW, controlSessionCsrfToken: 'csrf-fixture' });
 
-    expect(html).toContain('Reauthenticate');
+    expect(html).toContain('>Reconnect</button>');
+    expect(html).not.toContain('Reauthenticate');
     // The real control, posting to the route that exists — not a bare word.
     expect(html).toContain('data-connect-kind="oauth"');
     expect(html).toContain('<input type="hidden" name="source" value="dropbox">');
@@ -271,7 +272,7 @@ describe('dashboard home attention', () => {
     // setup page's gate where the token goes (owner ruling, 2026-09-01:
     // "Setup is the only place you need to think about the worker token").
     expect(html).not.toContain('Input token');
-    expect(html).toContain('<a class="btn" href="/dashboard?setup#dashboard-controls">Reauthenticate</a>');
+    expect(html).toContain('<a class="btn" href="/dashboard?setup#dashboard-controls">Reconnect</a>');
     expect(html).toContain('unlock controls in Setup');
     expect(html).not.toContain('unlock dashboard controls there first');
   });
@@ -321,22 +322,38 @@ describe('dashboard home attention', () => {
     expect(html).not.toContain('data-sheet-toggle="#setup-x-bookmarks"');
   });
 
-  test('leads a failing row with no control through to its detail page', () => {
+  test('gives a failing row with no connect control its one fix, and keeps the link to its page', () => {
     const view = fixtureView([failingSource({ source_id: 'gmail.email', label: 'Gmail' })]);
 
-    const html = renderDashboardHomePage(view, { now: NOW });
+    const html = renderDashboardHomePage(view, { now: NOW, controlSessionCsrfToken: 'csrf-fixture' });
 
     expect(html).toContain('Needs you — 1');
-    // No control exists for this state, so the whole row is the link.
-    expect(html).toContain('class="attncard rowzone" href="/dashboard?source=gmail.email"');
+    // Every problem offers one fix: Sync now, the route that exists for it.
+    expect(html).toContain('data-sync-kind="sync_now"');
+    expect(html).toContain('>Sync now</button>');
+    // And the warning still leads to the source's own page.
+    expect(html).toContain('<a class="name" href="/dashboard?source=gmail.email">Gmail</a>');
+    expect(html).toContain('<a class="go" href="/dashboard?source=gmail.email"');
   });
 
-  test('renders no dead button on a row whose action has no route', () => {
+  test('renders no dead button on a row whose fix this reader cannot run', () => {
     const view = fixtureView([failingSource({ source_id: 'gmail.email', label: 'Gmail' })]);
 
     const html = renderDashboardHomePage(view, { now: NOW });
 
-    expect(html).toContain('class="attncard rowzone" href="/dashboard?source=gmail.email"');
+    // A locked reader gets the fix as a link to the gate, never a button that 401s.
+    expect(html).toContain('<a class="btn" href="/dashboard?setup#dashboard-controls">Sync now</a>');
+    expect(html).not.toContain('data-sync-kind="sync_now"');
+    expect(html).toContain('<a class="name" href="/dashboard?source=gmail.email">Gmail</a>');
+  });
+
+  test('falls back to the source page as the fix when no sync route exists', () => {
+    const source = failingSource({ source_id: 'gmail.email', label: 'Gmail' });
+    const view = fixtureView([{ ...source, sync_now_available: false }]);
+
+    const html = renderDashboardHomePage(view, { now: NOW, controlSessionCsrfToken: 'csrf-fixture' });
+
+    expect(html).toContain('<a class="btn" href="/dashboard?source=gmail.email">See what happened</a>');
   });
 });
 

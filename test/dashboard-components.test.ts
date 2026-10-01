@@ -377,7 +377,7 @@ describe('attentionRow', () => {
         hint: 'needs the worker token',
       },
     });
-    expect(html).toContain('<a class="btn" href="/dashboard?setup">Reauthenticate</a>');
+    expect(html).toContain('<a class="btn" href="/dashboard?setup">Reconnect</a>');
     expect(html).toContain('<span class="hint">needs the worker token</span>');
     expect(html).not.toContain('<form');
   });

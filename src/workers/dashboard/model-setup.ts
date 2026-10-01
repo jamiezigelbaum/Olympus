@@ -1,5 +1,5 @@
 import type { ModelSetupCard, ModelSetupView } from '../../core/model-setup.ts';
-import { connectorSheet, escapeHtml } from './components.ts';
+import { blockerBanner, connectorSheet, escapeHtml } from './components.ts';
 
 export const LOCAL_MODELS_SETUP_PROMPT = 'Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer and embedding endpoints and their exact model IDs on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured models and embedding dimensions, run olympus doctor, then send me back to Models in Setup and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.';
 
@@ -14,16 +14,19 @@ export function renderModelSetup(view: ModelSetupView | undefined): string {
     // with its replace form a quiet click away (owner, 2026-09-23). A model
     // still waiting for its key keeps the full card, so first entry is unchanged.
     if (card.state === 'ready') return readyModelRow(card);
-    const state = { not_configured: 'Not configured', applying: 'Applying…', needs_attention: 'Needs attention', ready: 'Ready' }[card.state];
+    const state = modelStateWord(card);
     let action = '';
     if (card.id === 'local') {
-      action = `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`;
+      // Offered only while the local credential is missing: a configured
+      // local model is checked automatically, and the blocker banner carries
+      // Check again when it fails.
+      action = card.state === 'not_configured' ? `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` : '';
     } else {
       action = modelKeyAction(card, card.state === 'applying'
         ? '<span class="modelnote">Key saved. Olympus is applying the configuration or waiting for another required key.</span>'
         : modelKeyForm(card));
     }
-    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml(card.label)}</b><span role="status">${state}</span></header>`
+    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml(card.label)}</b><span role="status">${escapeHtml(state)}</span></header>`
       + `<p>${escapeHtml(card.detail)}</p>${action}</section>`;
   }).join('');
   const localCard = view.cards.some((card) => card.id === 'local');
@@ -35,10 +38,12 @@ export function renderModelSetup(view: ModelSetupView | undefined): string {
       + (localCard ? '' : `<button type="button" class="btn quiet" ${LOCAL_MODELS_TOGGLE}`)
       + `${CHECK_FORM_OPEN}<button class="btn quiet" type="submit">Check readiness</button>${CHECK_FORM_TAIL}`
       + '</div>'
-    : '<div class="modeltools">'
-      + (localCard ? '' : `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`)
-      + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}`
-      + '</div>';
+    : localCard
+      ? ''
+      : '<div class="modeltools">'
+        + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`
+        + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}`
+        + '</div>';
   return '<section aria-label="Models"><div class="sect">Models</div>'
     + (view.ready
       ? '<p class="quiet" role="status">Models are ready. You can connect sources below.</p>'
@@ -46,7 +51,6 @@ export function renderModelSetup(view: ModelSetupView | undefined): string {
     + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : '')
     + `<div class="modelcards">${cards}</div>`
     + extras
-    + (view.ready ? '' : '<p role="status">Finish the required model setup above to unlock new source connections.</p>')
     + '</section>'
     + connectorSheet({ id: 'local-model-setup-sheet', heading: 'Connect existing local models', intro: 'Your agent can help connect models you already run. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.', promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: 'Copy prompt' });
 }
@@ -68,10 +72,59 @@ function readyModelRow(card: ModelSetupCard): string {
     + `<p>${escapeHtml(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
 }
 
+/** A model card's state word. A local model under test reads Checking…, never Not configured. */
+function modelStateWord(card: ModelSetupCard): string {
+  if (card.state === 'applying') return card.id === 'local' ? 'Checking…' : 'Applying…';
+  if (card.state === 'needs_attention') return card.id === 'local' ? 'Not answering' : 'Needs attention';
+  if (card.state === 'ready') return 'Ready';
+  return 'Not configured';
+}
+
+/**
+ * The Setup page's blocker while models are not ready: every source connection
+ * is refused until they are, so this is one banner at the top naming the
+ * first model in the way and the one control that clears it. Empty when
+ * nothing blocks.
+ */
+export function renderModelSetupBlocker(view: ModelSetupView | undefined): string {
+  if (!view || view.ready) return '';
+  const card = view.cards.find((entry) => entry.state !== 'ready');
+  if (!card) {
+    return blockerBanner({ sentence: view.attention ?? 'Model setup is not finished, so sources stay locked.' });
+  }
+  if (card.id === 'local') {
+    if (card.state === 'applying') {
+      return blockerBanner({ sentence: 'Checking your local models… Sources unlock when the check passes.' });
+    }
+    if (card.state === 'needs_attention') {
+      return blockerBanner({
+        sentence: 'Your local model server is not answering, so sources stay locked. Start it, then check again.',
+        controlHtml: `${CHECK_FORM_OPEN}<button class="btn primary" type="submit">Check again</button>${CHECK_FORM_TAIL}`,
+      });
+    }
+    return blockerBanner({
+      sentence: 'Connect your local models to start connecting sources.',
+      controlHtml: `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`,
+    });
+  }
+  if (card.state === 'applying') {
+    return blockerBanner({ sentence: `Applying your ${card.label} key… Sources unlock when it is ready.` });
+  }
+  if (card.state === 'needs_attention') return blockerBanner({ sentence: card.detail });
+  return blockerBanner({
+    sentence: `Add your ${card.label} API key to start connecting sources.`,
+    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${modelKeyFieldId(card)}">Add ${escapeHtml(card.label)} key</button>`,
+  });
+}
+
+function modelKeyFieldId(card: ModelSetupCard): string {
+  return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
+}
+
 function modelKeyForm(card: ModelSetupCard): string {
   return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">`
     + `<input type="hidden" name="source" value="${card.id}">`
-    + `<input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">`
+    + `<input class="keyfield"${card.state === 'ready' ? '' : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">`
     + '<button class="btn" type="submit">Connect</button><span data-action-message role="status"></span></form>';
 }
 

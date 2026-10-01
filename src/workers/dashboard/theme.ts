@@ -131,6 +131,18 @@ a.attncard.rowzone .go { color: var(--t4); font-size: 13px; }
 .btn.primary { background: var(--link-line); color: #E8EDF8; }
 .btn.quiet { border-color: transparent; color: var(--t4); }
 .btn.quiet:hover { border-color: var(--line2); color: var(--t2); }
+/* A blocked control looks blocked and says why beside itself. */
+.btn:disabled, .btn[aria-disabled="true"] { background: none; border-color: var(--line2); color: var(--t4); cursor: not-allowed; }
+.blocked { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.blocked .hint { color: var(--t3); }
+/* The page's one blocker: full width at the top, a real warning colour. */
+.attncard.blocker { border-color: var(--warn); margin-bottom: 20px; }
+.attncard.blocker .name { color: var(--warn); }
+/* Technical detail under a problem, closed by default. */
+details.howto { margin: 6px 0 0; }
+details.howto > summary { color: var(--t3); font-size: 12.5px; cursor: pointer; }
+details.howto > summary:hover { color: var(--link); }
+details.howto[open] > summary { margin-bottom: 6px; }
 .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
 .cards.four { grid-template-columns: repeat(4, 1fr); }
 .card { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; }

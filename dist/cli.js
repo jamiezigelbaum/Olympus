@@ -43845,6 +43845,9 @@ function dashboardIsConnectedSource(source) {
     return true;
   return source.coverage.indexed_items > 0;
 }
+function dashboardStatusGroups(view, options) {
+  return groupSourcesByStatus(view.sources, resolveDegraded(view, options));
+}
 function dashboardConnectedStatusGroups(view, options) {
   return groupSourcesByStatus(view.sources.filter((source) => dashboardIsConnectedSource(source)), resolveDegraded(view, options));
 }
@@ -43880,14 +43883,13 @@ function dashboardAttentionLine(source, options) {
   const degradation = degradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
-    return clause ? `credential unavailable · ${clause}` : "credential unavailable";
+    return clause ? `can't sign in · ${clause}` : `can't sign in`;
   }
-  const refusal = source.connection.provider_refusal;
-  if (refusal)
-    return refusal.reason;
+  if (source.connection.provider_refusal)
+    return dashboardProviderRefusalLine(source);
   switch (source.connection.state) {
     case "reauth_required":
-      return "reauth required";
+      return DASHBOARD_SIGNED_OUT;
     case "awaiting_consent": {
       const base = `waiting for you to approve in the ${source.label} tab`;
       const minutes = source.connection.pending?.expires_in_minutes;
@@ -43895,17 +43897,109 @@ function dashboardAttentionLine(source, options) {
     }
     case "needs_setup":
     case "not_connected":
-      return source.coverage.indexed_items > 0 ? "connection lost · reauthenticate to resume syncing" : source.connection.label;
+      return source.coverage.indexed_items > 0 ? DASHBOARD_SIGNED_OUT : source.connection.label;
     default:
       break;
   }
   if (source.answer_readiness.state === "needs_attention")
-    return lowerFirst(source.answer_readiness.label);
+    return `paused — ${pausedReason(source)}`;
   if (source.queue_health.needs_attention > 0)
-    return "some work is stuck part-way through";
+    return "some items could not be read";
   if ((source.queue_health.retrying_tasks ?? 0) > 0)
-    return "a sync task is retrying itself";
+    return "a sync is retrying on its own";
   return "";
+}
+function dashboardActionLabel(label) {
+  return /^re-?auth/i.test(label.trim()) ? DASHBOARD_RECONNECT_LABEL : label;
+}
+function pausedReason(source) {
+  const label = source.answer_readiness.label.trim();
+  const known = READINESS_REASONS[label];
+  if (known !== undefined)
+    return known;
+  if (label !== "" && label !== GENERIC_READINESS_ATTENTION_LABEL)
+    return lowerFirst(label);
+  if ((source.queue_health.failing_tasks ?? 0) > 0)
+    return "its sync keeps failing";
+  if (source.queue_health.needs_attention > 0)
+    return "some items could not be read";
+  const relative6 = typeof source.freshness.hours === "number" ? dashboardRelativeFromHours(source.freshness.hours) : "";
+  return relative6 ? `last synced ${relative6}, later than expected` : "it has not synced when expected";
+}
+function lowerFirst(value) {
+  return value.length > 0 ? value[0].toLowerCase() + value.slice(1) : value;
+}
+function dashboardProviderRefusalLine(source) {
+  const code = source.connection.provider_refusal?.code ?? "";
+  if (REDIRECT_REFUSAL_CODES.has(code)) {
+    return `rejected the sign-in address — fix it in your ${source.label} app settings`;
+  }
+  if (code === "access_denied")
+    return "sign-in was declined — connect again to retry";
+  return "refused the sign-in — see How to fix";
+}
+function dashboardProviderRefusalSentence(source) {
+  const code = source.connection.provider_refusal?.code ?? "";
+  if (REDIRECT_REFUSAL_CODES.has(code)) {
+    return `${source.label} rejected the sign-in address. Fix it in your ${source.label} app settings, then connect again.`;
+  }
+  if (code === "access_denied")
+    return `${source.label} sign-in was declined. Connect again to retry.`;
+  return `${source.label} refused the sign-in. How to fix has the details.`;
+}
+function dashboardProviderRefusalDetail(source) {
+  return source.connection.provider_refusal?.reason;
+}
+function dashboardIndexingFacts(progress) {
+  if (progress.state === "done")
+    return "up to date";
+  const parts = [];
+  if (progress.percent !== undefined)
+    parts.push(`${Math.floor(progress.percent)}% done`);
+  if (progress.itemsLeft !== undefined && progress.itemsLeft > 0) {
+    parts.push(`${dashboardCount(progress.itemsLeft)} ${plural(progress.itemsLeft, "item")} left`);
+  }
+  switch (progress.state) {
+    case "moving":
+      parts.push(progress.etaMs !== undefined && progress.etaMs > 0 ? dashboardEtaWords(progress.etaMs) : "estimating time left…");
+      break;
+    case "stalled":
+      parts.push("stalled");
+      break;
+    case "paused":
+      parts.push("paused");
+      break;
+    case "off":
+      parts.push("switched off");
+      break;
+    case "unknown":
+      break;
+  }
+  return parts.join(", ");
+}
+function dashboardIndexingLine(progress) {
+  return `${DASHBOARD_INDEXING_NAME} — ${dashboardIndexingFacts(progress)}`;
+}
+function dashboardEtaWords(etaMs) {
+  const minutes = etaMs / 60000;
+  if (minutes < 1.5)
+    return "about a minute";
+  if (minutes < 60)
+    return `about ${Math.round(minutes)} minutes`;
+  const hours = minutes / 60;
+  if (hours < 1.5)
+    return "about an hour";
+  if (hours < 36)
+    return `about ${Math.round(hours)} hours`;
+  const days = Math.round(hours / 24);
+  return `about ${days} ${plural(days, "day")}`;
+}
+function dashboardJobsLine(running, stalled = 0) {
+  const head = running > 0 ? `${dashboardCount(running)} ${plural(running, "job")} running` : "nothing running";
+  return stalled > 0 ? `${head} · ${dashboardCount(stalled)} stalled` : head;
+}
+function dashboardConnectedSummary(connected, ready) {
+  return `${dashboardCount(connected)} ${plural(connected, "source")} connected, ${dashboardCount(ready)} ready to answer`;
 }
 function dashboardWorkFraction(source) {
   if (source.coverage.indexed_items <= 0)
@@ -44022,7 +44116,7 @@ function dashboardSyncKeepsFailing(source) {
 }
 function workingLine(source) {
   const parts = [];
-  const firstIngest = source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? "first ingest" : undefined;
+  const firstIngest = source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? "first sync" : undefined;
   const readyWhileUpdating = source.answer_readiness.state === "ready" && source.coverage.indexed_items > 0 && (source.connection.state === "syncing" || source.queue_health.active > 0 || source.queue_health.waiting > 0);
   const summary = dashboardWorkingSummary(source);
   if (readyWhileUpdating) {
@@ -44047,7 +44141,7 @@ function workingLine(source) {
 }
 function waitingLine(source) {
   if (dashboardScopePending(source)) {
-    return source.scope_selection?.kind === "mail" ? "waiting for mail selection" : "waiting for folder selection";
+    return source.scope_selection?.kind === "mail" ? "choose which mail to include" : "choose which folders to include";
   }
   if (source.connection.state === "waiting_for_first_sync")
     return "waiting for the first sync";
@@ -44063,7 +44157,7 @@ function degradationClause(degradation) {
     case "stopped":
       return "retries stopped";
     case "resolved_restart_required":
-      return "resolved · restart required";
+      return "fixed · restart Olympus to use it";
     default:
       return "";
   }
@@ -44092,13 +44186,10 @@ function degradedInput(degraded) {
 function unknownStatus(value) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value };
 }
-function lowerFirst(value) {
-  return value.length > 0 ? value[0].toLowerCase() + value.slice(1) : value;
-}
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy";
+var DASHBOARD_STATUS_ORDER, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy";
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -44138,6 +44229,22 @@ var init_vocabulary = __esm(() => {
     "not_connected",
     "needs_setup"
   ]);
+  READINESS_REASONS = {
+    "Reauthenticate this source": DASHBOARD_SIGNED_OUT,
+    "Embedding lane needs attention": "indexing has stopped",
+    "Content extraction is stalled": "reading files has stalled"
+  };
+  REDIRECT_REFUSAL_CODES = new Set([
+    "redirect_uri_mismatch",
+    "invalid_redirect_uri",
+    "redirect_uri_not_registered"
+  ]);
+  DASHBOARD_INDEX_FASTER = {
+    on: "Index faster",
+    off: "Stop indexing faster",
+    explainOn: "Syncing pauses until you turn this off.",
+    explainOff: "Syncing is paused until you turn this off."
+  };
 });
 
 // src/workers/dashboard/phases.ts
@@ -70547,6 +70654,8 @@ class ModelSetupService {
   now;
   localCheckState = "not_configured";
   localCheckPromise;
+  localCheckedAt;
+  autoCheck;
   constructor(options) {
     this.config = options.config;
     this.credentialState = options.credentialState;
@@ -70554,8 +70663,34 @@ class ModelSetupService {
     this.expectedEmbeddingDimension = options.expectedEmbeddingDimension;
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.now ?? (() => new Date);
+    this.autoCheck = options.autoCheck !== false;
+    if (this.autoCheck && this.localUsages().length > 0) {
+      const timer = setTimeout(() => this.refreshLocalCheck(), 0);
+      timer.unref?.();
+    }
   }
   getStatus() {
+    if (this.autoCheck)
+      this.refreshLocalCheck();
+    return this.status();
+  }
+  refreshLocalCheck() {
+    if (this.localCheckPromise)
+      return;
+    const checkedAt = this.localCheckedAt;
+    if (checkedAt !== undefined) {
+      const maxAge = this.localCheckState === "ready" ? LOCAL_RECHECK_READY_MS : LOCAL_RECHECK_NOT_READY_MS;
+      if (this.now().getTime() - checkedAt < maxAge)
+        return;
+    }
+    const local = this.localUsages();
+    if (local.length === 0 || this.aggregateCredentialState(local) !== "ready")
+      return;
+    this.checkLocalModels({ keepState: checkedAt !== undefined }).catch(() => {
+      return;
+    });
+  }
+  status() {
     const required4 = requiredModelProfiles(this.config);
     const cards = [];
     const gemini = required4.filter(({ profile }) => profile.provider === "google-gemini");
@@ -70576,30 +70711,33 @@ class ModelSetupService {
       cards
     };
   }
-  checkLocalModels() {
+  checkLocalModels(options = {}) {
     if (this.localCheckPromise)
       return this.localCheckPromise;
     const local = this.localUsages();
     if (local.length === 0)
-      return Promise.resolve(this.getStatus());
+      return Promise.resolve(this.status());
     const credentials = this.aggregateCredentialState(local);
     if (credentials !== "ready") {
       this.localCheckState = "not_configured";
-      return Promise.resolve(this.getStatus());
+      return Promise.resolve(this.status());
     }
     const targets = this.localTargets(local);
     if (!targets) {
       this.localCheckState = "needs_attention";
-      return Promise.resolve(this.getStatus());
+      this.localCheckedAt = this.now().getTime();
+      return Promise.resolve(this.status());
     }
-    this.localCheckState = "applying";
+    if (options.keepState !== true)
+      this.localCheckState = "applying";
     const check = this.runLocalChecks(targets).then((ready) => {
       this.localCheckState = ready ? "ready" : "needs_attention";
-      return this.getStatus();
+      return this.status();
     }).catch(() => {
       this.localCheckState = "needs_attention";
-      return this.getStatus();
+      return this.status();
     }).finally(() => {
+      this.localCheckedAt = this.now().getTime();
       this.localCheckPromise = undefined;
     });
     this.localCheckPromise = check;
@@ -70816,11 +70954,12 @@ function endpoint(baseUrl, suffix) {
 function isRecord2(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
-var DOMAINS, LOCAL_REQUEST_TIMEOUT_MS = 5000, LOCAL_RESPONSE_LIMIT_BYTES, CARD_COPY, LOCAL_UNCHECKED_DETAIL = "Check the configured local models to verify their model IDs and required endpoints.", LOCAL_CHECKING_DETAIL = "Checking the configured local model server.", LOCAL_ATTENTION_DETAIL = "Start the configured loopback model server and verify its model IDs and required endpoints.";
+var DOMAINS, LOCAL_REQUEST_TIMEOUT_MS = 5000, LOCAL_RECHECK_NOT_READY_MS = 60000, LOCAL_RECHECK_READY_MS, LOCAL_RESPONSE_LIMIT_BYTES, CARD_COPY, LOCAL_UNCHECKED_DETAIL = "Check the configured local models to verify their model IDs and required endpoints.", LOCAL_CHECKING_DETAIL = "Checking the configured local model server.", LOCAL_ATTENTION_DETAIL = "Start the configured loopback model server and verify its model IDs and required endpoints.";
 var init_model_setup = __esm(() => {
   init_http_timeout();
   init_embedding_identity();
   DOMAINS = ["public_safe", "internal", "secure_local"];
+  LOCAL_RECHECK_READY_MS = 10 * 60000;
   LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
   CARD_COPY = {
     gemini: {
@@ -78215,11 +78354,7 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 .dnav .dnavlink:hover { color: var(--link); }
 .dnav .dnavlink:focus-visible { outline: 1px solid var(--link); outline-offset: -2px; border-radius: 4px; }
 .dnav .dnavlink.on { color: var(--t1); border-bottom-color: var(--link-line); }
-`, SETUP_JOURNEY_CSS = `.setupsummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 18px; }
-.setupsummary .sumcard { min-width: 0; border: 1px solid var(--line2); border-radius: 8px; padding: 11px 12px; background: var(--panel); }
-.setupsummary b { display: block; color: var(--t4); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
-.setupsummary span { display: block; color: var(--t2); font-size: 13px; line-height: 1.3; }
-@media (max-width: 700px) { .setupsummary { grid-template-columns: 1fr; } }`, BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
+`, SETUP_JOURNEY_CSS = `.setupsummary { color: var(--t2); font-size: 13px; margin: 0 0 18px; }`, BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
 .lane .lanehd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .lane .lnm { font-weight: 600; font-size: 13.5px; color: var(--t2); }
 .lane .lstate { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
@@ -78500,7 +78635,7 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`, MODEL_SETUP_CSS = `
 .modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{border:1px solid var(--border,#333);border-radius:12px;padding:16px 18px;min-width:0}
 .modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:12.5px}
-.modelcard p{margin:6px 0 0}.source-model-gate{border:0;padding:0;margin:0;min-width:0}.source-model-gate[disabled]{opacity:.5}
+.modelcard p{margin:6px 0 0}
 .modelaction{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:12px}
 .modelaction form{display:flex;flex:1 1 320px;flex-wrap:wrap;align-items:center;gap:8px;margin:0;min-width:0}
 .modelaction input[type=password]{flex:1 1 180px;min-width:0;width:auto}.modelaction a{white-space:nowrap}.modelaction .modelnote{color:var(--t3)}
@@ -78625,7 +78760,7 @@ function mountDashboardController(options) {
       case "sync_now":
         return "Sync started. This card updates when it finishes.";
       case "set_embedding_priority":
-        return "Embedding preference saved.";
+        return "Saved.";
       case "disconnect":
         return "Disconnected. This card updates when Olympus confirms it.";
       case "unpair":
@@ -79264,6 +79399,16 @@ function mountDashboardController(options) {
       if (slot)
         clearAgentSecret(slot);
       refreshAgentList();
+      return;
+    }
+    const focusButton = target.closest("[data-focus-target]");
+    if (focusButton) {
+      const selector = focusButton.dataset.focusTarget;
+      const field = selector ? query(selector) : null;
+      if (field) {
+        field.scrollIntoView({ block: "center" });
+        field.focus();
+      }
       return;
     }
     const copy = target.closest("[data-copy-target]");
@@ -80599,6 +80744,18 @@ a.attncard.rowzone .go { color: var(--t4); font-size: 13px; }
 .btn.primary { background: var(--link-line); color: #E8EDF8; }
 .btn.quiet { border-color: transparent; color: var(--t4); }
 .btn.quiet:hover { border-color: var(--line2); color: var(--t2); }
+/* A blocked control looks blocked and says why beside itself. */
+.btn:disabled, .btn[aria-disabled="true"] { background: none; border-color: var(--line2); color: var(--t4); cursor: not-allowed; }
+.blocked { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.blocked .hint { color: var(--t3); }
+/* The page's one blocker: full width at the top, a real warning colour. */
+.attncard.blocker { border-color: var(--warn); margin-bottom: 20px; }
+.attncard.blocker .name { color: var(--warn); }
+/* Technical detail under a problem, closed by default. */
+details.howto { margin: 6px 0 0; }
+details.howto > summary { color: var(--t3); font-size: 12.5px; cursor: pointer; }
+details.howto > summary:hover { color: var(--link); }
+details.howto[open] > summary { margin-bottom: 6px; }
 .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
 .cards.four { grid-template-columns: repeat(4, 1fr); }
 .card { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; }
@@ -80845,7 +81002,11 @@ function sourceCard(input) {
     return `<div class="card">${inner}</div>`;
   return `<a class="card cardlink" href="${escapeHtml(href)}">${inner}</a>`;
 }
-function actionButton(action) {
+function actionButton(input) {
+  const action = input === undefined ? undefined : { ...input, label: dashboardActionLabel(input.label) };
+  if (action?.blockedReason !== undefined && action.kind !== "link" && (action.kind !== "none" || action.sheet !== undefined)) {
+    return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml(action.label)}</button>` + `<span class="hint">${escapeHtml(action.blockedReason)}</span></span>`;
+  }
   if (action === undefined || action.kind === "none") {
     if (action?.sheet === undefined)
       return "";
@@ -80928,6 +81089,14 @@ function phaseBar(input) {
 function attentionBanner(input) {
   return `<div class="attncard banner">` + `<div class="grow"><span class="name">${escapeHtml(input.label)}</span>` + `<span class="why"> — ${escapeHtml(input.sentence)}</span></div>` + `${actionButton(input.action)}${actionButton(input.secondaryAction)}` + `</div>`;
 }
+function blockerBanner(input) {
+  return `<div class="attncard banner blocker" role="status" data-blocker>` + `<div class="grow"><span class="name">▲ ${escapeHtml(input.sentence)}</span></div>` + `${input.controlHtml ?? actionButton(input.action)}` + `</div>`;
+}
+function detailsDisclosure(summary, body) {
+  if (body.trim() === "")
+    return "";
+  return `<details class="howto"><summary>${escapeHtml(summary)}</summary>${body}</details>`;
+}
 function advancedPanel(input) {
   if (input.body.trim() === "")
     return "";
@@ -80975,7 +81144,7 @@ function connectSetupSheet(input) {
     const placeholder = input.placeholders?.[field.name] ?? field.label;
     return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml(field.name)}"` + `${field.required ? " required" : ""}` + `${value === undefined ? "" : ` value="${escapeHtml(value)}"`}` + ` placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(field.label)}">`;
   }).join("");
-  const notice = (input.notice === undefined || input.notice.trim() === "" ? "" : `<p class="why">${escapeHtml(input.notice)}</p>`) + (input.providerNote === undefined || input.providerNote.trim() === "" ? "" : `<p class="providernote">${escapeHtml(input.providerNote)}</p>`);
+  const notice = (input.notice === undefined || input.notice.trim() === "" ? "" : `<p class="why">${escapeHtml(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail === undefined ? "" : `<p class="hint">${escapeHtml(input.noticeDetail)}</p>`)) + (input.providerNote === undefined || input.providerNote.trim() === "" ? "" : `<p class="providernote">${escapeHtml(input.providerNote)}</p>`);
   const registration = callbackRegistrationSteps(id, input.registration);
   const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml(input.redirectUri.guidance)}</p>`}`;
   const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml(input.source)}">` + `<button class="btn quiet" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
@@ -81027,12 +81196,12 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
   const notice = options.notice ?? pendingNote;
   const sheet = connectSetupSheet({
     id: sheetId,
-    heading: `${action.label} ${source.label}`,
+    heading: `${dashboardActionLabel(action.label)} ${source.label}`,
     intro: byo.plain_intro,
     promptText: byo.agent_prompt,
     source: action.source,
     fields,
-    submitLabel: action.label,
+    submitLabel: dashboardActionLabel(action.label),
     ...action.publisher_client ? {
       publisher: {
         intro: instructions.plain_intro,
@@ -81043,6 +81212,7 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
     ...action.known_client_id ? { values: { client_id: action.known_client_id } } : {},
     ...action.pending_attempt ? { cancellable: true } : {},
     ...notice === undefined ? {} : { notice },
+    ...options.noticeDetail === undefined ? {} : { noticeDetail: options.noticeDetail },
     ...options.providerNote === undefined ? {} : { providerNote: options.providerNote },
     ...redirectUriInput(action)
   });
@@ -81169,6 +81339,7 @@ var init_components = __esm(() => {
   init_source_dashboard();
   init_phases();
   init_theme();
+  init_vocabulary();
   HEX_COLOR = /^#[0-9A-Fa-f]{3,8}$/;
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
 });
@@ -81325,7 +81496,8 @@ function armLaneBanners(input) {
       lane: item.lane,
       words: item.words,
       ...item.href === undefined ? {} : { href: item.href },
-      ...item.hrefLabel === undefined ? {} : { hrefLabel: item.hrefLabel }
+      ...item.hrefLabel === undefined ? {} : { hrefLabel: item.hrefLabel },
+      ...item.detail === undefined ? {} : { detail: item.detail }
     });
   }
   return banners;
@@ -81368,7 +81540,50 @@ var init_nav = __esm(() => {
 function dashboardBackgroundLanes(view, options) {
   const now = options?.now ?? new Date;
   const basePath = options?.basePath;
-  return [embeddingsLane(view, options), visionLane(view, basePath), syncsLane(view, now, basePath)].filter((lane) => lane !== undefined);
+  return [embeddingsLane(view, options, now), visionLane(view, basePath), syncsLane(view, now, basePath)].filter((lane) => lane !== undefined);
+}
+function dashboardIndexingProgress(view, options, now) {
+  const lane = embeddingsLaneView(view, options, now);
+  const backlog = view.background_work?.embedding_backlog;
+  if (lane === undefined && backlog === undefined)
+    return;
+  const disabled = view.background_work?.embedding_lane_state === "embedding_lane_disabled";
+  const percent = lane?.fraction === undefined ? undefined : lane.fraction * 100;
+  const itemsLeft = indexItemsLeft(view.sources);
+  const base = {
+    ...percent === undefined ? {} : { percent },
+    ...itemsLeft === undefined ? {} : { itemsLeft }
+  };
+  if (backlog !== undefined && backlog.missing_chunks <= 0)
+    return { ...base, state: "done" };
+  if (disabled)
+    return { ...base, state: "off" };
+  const status = lane?.status;
+  if (status === undefined)
+    return { ...base, state: "unknown" };
+  if (status.stuck !== undefined)
+    return { ...base, state: "stalled" };
+  if (status.kind === "active") {
+    return { ...base, state: "moving", ...status.etaMs === undefined ? {} : { etaMs: status.etaMs } };
+  }
+  if (status.kind === "waiting")
+    return { ...base, state: "paused" };
+  if (status.kind === "done")
+    return { ...base, state: "done" };
+  return { ...base, state: "unknown" };
+}
+function indexItemsLeft(sources) {
+  const indexing = sources.filter((source) => source.embedding_backlog !== undefined);
+  if (indexing.length === 0)
+    return;
+  let left = 0;
+  for (const source of indexing) {
+    const files = source.coverage.embedded_files;
+    if (files === undefined)
+      return;
+    left += Math.max(0, source.coverage.content_ready_items - files);
+  }
+  return left;
 }
 function detailHref(source, basePath) {
   const path = basePath ?? DEFAULT_BASE_PATH2;
@@ -81632,13 +81847,13 @@ function actionableConditions(view, options) {
   if (view.background_work?.embedding_lane_state === "embedding_lane_disabled") {
     actionable.push({
       lane: "Embeddings",
-      words: "The embedding lane is switched off, so nothing will embed the chunks that are left."
+      words: "Indexing is switched off, so new material will not become searchable."
     });
   }
   if (options?.embeddingRuntime?.state === "guard_paused") {
     actionable.push({
       lane: "Embeddings",
-      words: "The overnight guard is paused, so nothing will start or stop the embedding lane " + "until the pause is lifted."
+      words: "Background work is paused, so indexing will not start again until it is resumed."
     });
   }
   for (const source of view.sources) {
@@ -81646,7 +81861,7 @@ function actionableConditions(view, options) {
     if (drain === "held" || drain === "disabled") {
       actionable.push({
         lane: "Vision",
-        words: `Extraction is ${drain === "held" ? "held" : "switched off"} on ${source.label}, so no new text is being extracted from it.`,
+        words: `Reading new files is ${drain === "held" ? "paused" : "switched off"} on ${source.label}.`,
         ...detailLink(source, basePath)
       });
     }
@@ -81658,7 +81873,8 @@ function actionableConditions(view, options) {
     if (dashboardSyncKeepsFailing(source)) {
       actionable.push({
         lane: "Syncs",
-        words: `${source.label}'s scheduled sync keeps failing` + `${schedule.last_error_kind ? ` (${maskSecrets(schedule.last_error_kind)})` : ""}, so new material is not coming in.`,
+        words: `${source.label} keeps failing to sync, so new material is not coming in.`,
+        ...schedule.last_error_kind ? { detail: `Last error: ${schedule.last_error_kind}` } : {},
         ...detailLink(source, basePath)
       });
       continue;
@@ -81669,7 +81885,7 @@ function actionableConditions(view, options) {
       continue;
     actionable.push({
       lane: "Syncs",
-      words: `${source.label} has failed ${dashboardCount(schedule.consecutive_failures)} ` + `${plural2(schedule.consecutive_failures, "time")} in a row and nothing is scheduled to try it again.`,
+      words: `${source.label} has failed to sync ${dashboardCount(schedule.consecutive_failures)} ` + `${plural2(schedule.consecutive_failures, "time")} in a row and no retry is booked.`,
       ...detailLink(source, basePath)
     });
   }
@@ -81679,7 +81895,8 @@ function actionableConditions(view, options) {
       continue;
     actionable.push({
       lane: "Syncs",
-      words: `The scheduler is running ${source.label} degraded — ${maskSecrets(reason)}.`,
+      words: `${source.label} is syncing in a reduced mode.`,
+      detail: `The scheduler is running ${source.label} degraded — ${reason}.`,
       ...detailLink(source, basePath)
     });
   }
@@ -81689,14 +81906,14 @@ function renderDashboardBackgroundPage(view, options) {
   const now = options?.now ?? new Date;
   const lanes = backgroundLaneViews(view, options, now);
   const checked = dashboardCheckedLabel(view.generated_at, now);
-  const head = laneHeadline(lanes);
+  const head = jobsHeadline(lanes);
   return pageShell({
     title: "Olympus",
     crumb: "Background",
     ...options?.basePath === undefined ? {} : { basePath: options.basePath },
     meta: checked ? `${head} · ${checked}` : head,
     body: renderBackgroundBody(view, lanes, now, options),
-    styles: [DASHBOARD_LANE_CSS, DASHBOARD_NAV_CSS, BACKGROUND_CSS],
+    styles: [DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_NAV_CSS, BACKGROUND_CSS],
     controller: { ...options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken } },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
@@ -81711,7 +81928,7 @@ function renderBackgroundBody(view, lanes, now, options) {
   });
   if (lanes.length === 0) {
     return `${nav}
-        <div class="foot">No background lane is reporting right now.</div>${renderInformational(options)}`;
+        <div class="foot">Nothing is running in the background right now.</div>` + advancedPanel({ label: "Details", body: renderInformational(options) });
   }
   const banners = armLaneBanners({
     lanes: lanes.map((lane) => ({ name: lane.name, status: lane.status })),
@@ -81719,36 +81936,63 @@ function renderBackgroundBody(view, lanes, now, options) {
   });
   return [
     nav,
-    renderBanners(banners),
-    renderKpis(backgroundKpis(view, lanes)),
-    renderLanes(lanes),
+    renderBanners(banners, lanes),
+    renderProgress(view, options, now),
     renderRecentRuns(view, now),
-    renderInformational(options)
+    advancedPanel({
+      label: "Details",
+      body: [
+        renderKpis(backgroundKpis(view, lanes)),
+        renderLanes(lanes),
+        renderInformational(options)
+      ].join("")
+    })
   ].filter((section) => section.length > 0).join("");
 }
-function laneHeadline(lanes) {
-  if (lanes.length === 0)
-    return "nothing reporting";
+function jobsHeadline(lanes) {
   const stuck = lanes.filter((lane) => lane.status.stuck !== undefined).length;
-  if (stuck > 0)
-    return `${dashboardCount(stuck)} ${plural2(stuck, "lane")} not moving`;
   const working = lanes.filter((lane) => lane.status.kind === "active").length;
-  return working === 0 ? "no lane working" : `${dashboardCount(working)} ${plural2(working, "lane")} working`;
+  return dashboardJobsLine(working, stuck);
 }
-function renderBanners(banners) {
+function laneOwnerName(lane) {
+  return LANE_OWNER_NAMES[lane] ?? "A background job";
+}
+function renderProgress(view, options, now) {
+  const progress = dashboardIndexingProgress(view, options, now);
+  if (progress === undefined)
+    return "";
+  const line = dashboardIndexingLine(progress);
+  const bar = progress.percent === undefined ? "" : `<div class="lbar">${miniBar({ percent: progress.percent, label: `${DASHBOARD_INDEXING_NAME} ${Math.floor(progress.percent)} percent done` })}</div>`;
+  const control = options?.embeddingRuntime === undefined ? "" : renderEmbeddingToggle(options.embeddingRuntime, options);
+  return `
+        <div class="lane indexing" data-indexing-progress><div class="lfacts">${escapeHtml(line)}</div>${bar}${control}</div>`;
+}
+function renderBanners(banners, lanes) {
   if (banners.length === 0)
     return "";
+  const stuckLanes = new Set(lanes.filter((lane) => lane.status.stuck !== undefined).map((lane) => lane.name));
   const rows = banners.map((banner) => {
-    const why = banner.lastGoverning === undefined ? banner.words : `${banner.words} Last governing condition: ${banner.lastGoverning}.`;
-    return attentionRow({
-      label: banner.lane,
+    const stuck = stuckLanes.has(banner.lane) && banner.href === undefined;
+    const why = stuck ? "has stopped moving" : banner.words;
+    const technical = [
+      stuck ? banner.words : "",
+      banner.detail ?? "",
+      banner.lastGoverning === undefined ? "" : `Last governing condition: ${banner.lastGoverning}.`
+    ].filter((part) => part !== "").join(" ");
+    const href = safeHref(banner.href);
+    const row = attentionRow({
+      label: laneOwnerName(banner.lane),
       why: maskSecrets(why),
       attention: true,
-      ...safeHref(banner.href) === undefined ? {} : { href: banner.href }
+      ...href === undefined ? {} : {
+        href,
+        action: { label: (banner.hrefLabel ?? "Open").replace(/\s*→$/, ""), kind: "link", href }
+      }
     });
+    return technical === "" ? row : `${row}${detailsDisclosure("Details", `<p class="hint">${escapeHtml(maskSecrets(technical))}</p>`)}`;
   }).join("");
   return `
-        <div class="sect attn">Needs a look</div>${rows}`;
+        <div class="sect attn">Needs you</div>${rows}`;
 }
 function laneStateTone(status) {
   if (status.stuck !== undefined)
@@ -81910,22 +82154,18 @@ function renderKpis(kpis) {
         <div class="kpis">${tiles}
         </div>`;
 }
-function embeddingsLane(view, options) {
+function embeddingsLane(view, options, now) {
   const backlog = view.background_work?.embedding_backlog;
   const disabled = view.background_work?.embedding_lane_state === "embedding_lane_disabled";
   const runtime = options?.embeddingRuntime;
   if (!backlog && !disabled && !runtime)
     return;
-  const facts = [];
   const checks4 = [];
   let fraction;
+  const progress = dashboardIndexingProgress(view, options, now);
   if (backlog) {
     fraction = backlog.chunks > 0 ? clampFraction2(backlog.embedded_chunks / backlog.chunks) : undefined;
-    if (fraction !== undefined)
-      facts.push(`${Math.round(fraction * 100)}% embedded`);
-    facts.push(backlog.missing_chunks > 0 ? `${compactCount(backlog.missing_chunks)} of ${compactCount(backlog.chunks)} chunks left` : `all ${compactCount(backlog.chunks)} chunks embedded`);
     if (backlog.refresh_needed) {
-      facts.push("re-embed needed");
       checks4.push({
         name: "EMBEDDING_PARITY",
         observed: `${dashboardCount(backlog.missing_chunks)} of ${dashboardCount(backlog.chunks)} chunks missing`,
@@ -81937,7 +82177,6 @@ function embeddingsLane(view, options) {
     }
   }
   if (disabled) {
-    facts.push("embedding lane disabled");
     checks4.push({
       name: "EMBEDDING_LANE",
       observed: "disabled",
@@ -81947,8 +82186,8 @@ function embeddingsLane(view, options) {
     });
   }
   return {
-    name: "Embeddings",
-    facts: facts.join(" · "),
+    name: DASHBOARD_INDEXING_NAME,
+    facts: progress === undefined ? "" : dashboardIndexingFacts(progress),
     working: runtime === undefined ? !disabled && (backlog?.missing_chunks ?? 0) > 0 : runtime.state === "running" || runtime.state === "operator_priority",
     checks: checks4,
     checksHeading: "Embeddings",
@@ -81963,17 +82202,16 @@ function visionLane(view, basePath) {
   if (queued === undefined && held.length === 0 && stuck.length === 0)
     return;
   const facts = [];
-  if (queued !== undefined)
-    facts.push(`${dashboardCount(queued)} ${plural2(queued, "job")} queued`);
+  if (queued !== undefined && queued > 0)
+    facts.push(`${dashboardCount(queued)} ${plural2(queued, "file")} waiting`);
   const waitingOn = view.sources.filter((source) => (source.vlm_extraction_queued ?? 0) > 0).map((source) => source.label);
   if (waitingOn.length > 0)
-    facts.push(waitingOn.join(", "));
-  if (held.length > 0) {
-    facts.push(`extraction held on ${dashboardCount(held.length)} ${plural2(held.length, "source")}`);
+    facts.push(`from ${waitingOn.join(", ")}`);
+  if (held.length > 0 || off.length > 0) {
+    facts.push(`paused on ${[...held, ...off].map((source) => source.label).join(", ")}`);
   }
-  if (off.length > 0) {
-    facts.push(`extraction off on ${dashboardCount(off.length)} ${plural2(off.length, "source")}`);
-  }
+  if (facts.length === 0)
+    facts.push("nothing waiting");
   const checks4 = [];
   for (const source of [...held, ...off]) {
     checks4.push({
@@ -81999,7 +82237,7 @@ function visionLane(view, basePath) {
     });
   }
   return {
-    name: "Vision",
+    name: DASHBOARD_READING_NAME,
     facts: facts.join(" · "),
     working: (queued ?? 0) > 0 && held.length === 0,
     checks: checks4,
@@ -82016,21 +82254,22 @@ function syncsLane(view, now, basePath) {
   if (running.length > 0) {
     facts.push(`${dashboardCount(running.length)} syncing now`);
   } else if (failing.length === 0) {
-    facts.push(`all ${dashboardCount(scheduled.length)} on schedule`);
-  } else {
-    facts.push(`${dashboardCount(scheduled.length - failing.length)} of ${dashboardCount(scheduled.length)} on schedule`);
+    facts.push("on schedule");
   }
-  const persistentlyFailing = failing.filter((source) => dashboardSyncKeepsFailing(source));
-  const retryingOnly = failing.length - persistentlyFailing.length;
+  const shownAbove = new Set(dashboardStatusGroups(view).filter((group) => group.status === "Needs you" || group.status === "Failing").flatMap((group) => group.sources));
+  const unlisted = failing.filter((source) => !shownAbove.has(source));
+  const persistentlyFailing = unlisted.filter((source) => dashboardSyncKeepsFailing(source));
+  const retrying = unlisted.filter((source) => !dashboardSyncKeepsFailing(source));
+  const retryingOnly = retrying.length;
   if (retryingOnly > 0) {
-    facts.push(`${dashboardCount(retryingOnly)} ${plural2(retryingOnly, "source")} retrying`);
+    facts.push(`${listLabels(retrying)} ${retryingOnly === 1 ? "is" : "are"} retrying on ${retryingOnly === 1 ? "its" : "their"} own`);
   }
   if (persistentlyFailing.length > 0) {
-    facts.push(`${dashboardCount(persistentlyFailing.length)} ${plural2(persistentlyFailing.length, "source")} failing`);
+    facts.push(`${listLabels(persistentlyFailing)} ${persistentlyFailing.length === 1 ? "keeps" : "keep"} failing`);
   }
   const queued = view.sources.reduce((total, source) => total + source.queue_health.waiting + source.queue_health.active, 0);
   if (queued > 0)
-    facts.push(`${dashboardCount(queued)} ${plural2(queued, "item")} queued`);
+    facts.push(`${dashboardCount(queued)} ${plural2(queued, "item")} waiting`);
   const next = nextRunLabel(scheduled, now);
   if (next)
     facts.push(next);
@@ -82041,8 +82280,8 @@ function syncsLane(view, now, basePath) {
       continue;
     const retryAt = schedule.next_run_at ? Date.parse(schedule.next_run_at) : Number.NaN;
     const booked = Number.isFinite(retryAt);
-    const retrying = source.queue_health.retrying_tasks ?? 0;
-    const selfHealing = !dashboardSyncKeepsFailing(source) && (booked || retrying > 0);
+    const retrying2 = source.queue_health.retrying_tasks ?? 0;
+    const selfHealing = !dashboardSyncKeepsFailing(source) && (booked || retrying2 > 0);
     checks4.push({
       name: "CONSECUTIVE_FAILURES",
       observed: `${source.label}: ${dashboardCount(schedule.consecutive_failures)}`,
@@ -82050,12 +82289,12 @@ function syncsLane(view, now, basePath) {
       ...schedule.last_error_kind ? { cause: schedule.last_error_kind } : {},
       ok: false,
       disposition: selfHealing ? "self_healing" : "needs_you",
-      ...selfHealing ? { dispositionNote: booked ? "requeued" : `${dashboardCount(retrying)} ${plural2(retrying, "task")} retrying` } : detailLink(source, basePath)
+      ...selfHealing ? { dispositionNote: booked ? "requeued" : `${dashboardCount(retrying2)} ${plural2(retrying2, "task")} retrying` } : detailLink(source, basePath)
     });
   }
   const strip = runStrip(scheduled);
   return {
-    name: "Syncs",
+    name: DASHBOARD_SYNCING_NAME,
     facts: facts.join(" · "),
     working: running.length > 0,
     checks: checks4,
@@ -82085,19 +82324,20 @@ function renderEmbeddingDetail(runtime, options) {
   if (runtime.override === "unreadable") {
     lines.push(`<div class="embline warn">The operator override file could not be read, so the toggle ` + `below cannot report its current position.</div>`);
   }
-  lines.push(renderEmbeddingToggle(runtime, options));
+  if (options?.readOnly !== true) {
+    lines.push('<div class="embline">The Index faster switch takes effect within a minute — the guard re-reads it on its next tick.</div>');
+  }
   return `
         <div class="embblock">${lines.join("")}
         </div>`;
 }
 function renderEmbeddingToggle(runtime, options) {
-  const takesEffect = '<div class="embline">Takes effect within a minute — the guard re-reads this on its next tick.</div>';
   if (options?.readOnly === true) {
-    return `<div class="embline">Embedding priority is ${runtime.overrideOn ? "on" : "off"}. ` + `Changing it asks for the worker bearer token, which this read-only link does not carry.</div>`;
+    return `<div class="embline">Index faster is ${runtime.overrideOn ? "on" : "off"}. ` + `Changing it needs dashboard controls, which this read-only link does not have.</div>`;
   }
-  const label = runtime.overrideOn ? "Turn off embedding priority" : "Give embedding priority";
-  const explain = runtime.overrideOn ? "Priority is on: the supervisors are parked and this lane keeps running. Turning it off restores normal arbitration." : "Turning this on parks the source-processing supervisors so this lane keeps running until you turn it off.";
-  return `<div class="embline">${escapeHtml(explain)}</div>` + `<form class="rowform" data-embedding-kind="operator_override">` + `<input type="hidden" name="on" value="${runtime.overrideOn ? "false" : "true"}">` + `<button class="btn" type="submit">${escapeHtml(label)}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + takesEffect;
+  const label = runtime.overrideOn ? DASHBOARD_INDEX_FASTER.off : DASHBOARD_INDEX_FASTER.on;
+  const explain = runtime.overrideOn ? DASHBOARD_INDEX_FASTER.explainOff : DASHBOARD_INDEX_FASTER.explainOn;
+  return `<form class="rowform" data-embedding-kind="operator_override">` + `<input type="hidden" name="on" value="${runtime.overrideOn ? "false" : "true"}">` + `<button class="btn" type="submit">${escapeHtml(label)}</button>` + `<span class="hint">${escapeHtml(explain)}</span>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
 }
 function runStrip(sources) {
   return sources.filter((source) => source.last_run !== undefined).sort((left, right) => runOrder(left) - runOrder(right)).map((source) => ({
@@ -82198,10 +82438,16 @@ function compactCount(value) {
   }
   return `${Math.round(value / 1e5) / 10}M`;
 }
+function listLabels(sources) {
+  const labels = sources.map((source) => source.label);
+  if (labels.length <= 1)
+    return labels[0] ?? "";
+  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+}
 function plural2(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var RECENT_RUN_LIMIT = 8, DEFAULT_BASE_PATH2 = "/dashboard", DETAIL_QUERY_PARAM = "source", EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger", SCHEDULER_SELF_PAUSE_SENTENCES, PARKED_EMBEDDING_STATES, LANE_STATE_WORDS, STRIP_TONE_COLORS;
+var RECENT_RUN_LIMIT = 8, DEFAULT_BASE_PATH2 = "/dashboard", DETAIL_QUERY_PARAM = "source", EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger", SCHEDULER_SELF_PAUSE_SENTENCES, PARKED_EMBEDDING_STATES, LANE_OWNER_NAMES, LANE_STATE_WORDS, STRIP_TONE_COLORS, DASHBOARD_READING_NAME = "Reading files", DASHBOARD_SYNCING_NAME = "Syncing";
 var init_background = __esm(() => {
   init_components();
   init_lane_state();
@@ -82224,6 +82470,11 @@ var init_background = __esm(() => {
     "parked",
     "guard_paused"
   ]);
+  LANE_OWNER_NAMES = {
+    Embeddings: DASHBOARD_INDEXING_NAME,
+    Vision: "Reading files",
+    Syncs: "Syncing"
+  };
   LANE_STATE_WORDS = {
     active: "Working now",
     waiting: "Waiting",
@@ -82238,167 +82489,6 @@ var init_background = __esm(() => {
   };
 });
 
-// src/workers/dashboard/pages/home.ts
-function renderDashboardHomePage(view, options) {
-  const groups = dashboardConnectedStatusGroups(view, options);
-  const background = renderBackgroundSection(view, options);
-  const blocks = groups.map((group, index) => renderSection(group, view, options, background === "" && index === groups.length - 1));
-  blocks.push(background);
-  blocks.push(renderSetupLink(options));
-  const nav = renderDashboardNav("home", {
-    ...options?.basePath === undefined ? {} : { basePath: options.basePath }
-  });
-  return pageShell({
-    title: "Olympus",
-    meta: dashboardHomeMeta(view, options),
-    body: [
-      nav,
-      ...blocks.filter((block) => block.length > 0)
-    ].join(`
-`),
-    styles: [DASHBOARD_LANE_CSS, DASHBOARD_NAV_CSS],
-    controller: { ...options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken } },
-    poll: {
-      unlocked: options?.controlSessionCsrfToken !== undefined,
-      ...options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }
-    },
-    ...options?.format === undefined ? {} : { format: options.format }
-  });
-}
-function renderSetupLink(options) {
-  return `<div class="foot"><a href="${escapeHtml(setupHref(options?.basePath))}">Connect more sources →</a></div>`;
-}
-function setupHref(basePath) {
-  const path = basePath ?? DEFAULT_BASE_PATH3;
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}${SETUP_QUERY_PARAM2}`;
-}
-function renderBackgroundSection(view, options) {
-  const lanes = dashboardBackgroundLanes(view, options);
-  if (lanes.length === 0)
-    return "";
-  return [
-    '<div class="sect">Background</div>',
-    backgroundRow({
-      href: backgroundHref(options?.basePath),
-      label: "Background work details",
-      lines: dashboardBackgroundRowLines(lanes)
-    })
-  ].join(`
-`);
-}
-function backgroundHref(basePath) {
-  const path = basePath ?? DEFAULT_BASE_PATH3;
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}${BACKGROUND_QUERY_PARAM2}`;
-}
-function renderSection(group, view, options, last) {
-  return ATTENTION_STATUSES.includes(group.status) ? renderAttentionSection(group, view, options) : renderCardSection(group, options, last);
-}
-function renderAttentionSection(group, view, options) {
-  const rows = group.sources.map((source) => {
-    const resolved = attentionAction(source, view, options);
-    const row = attentionRow({
-      label: source.label,
-      why: dashboardAttentionLine(source, options),
-      href: detailHref2(source, options?.basePath),
-      attention: true,
-      ...resolved === undefined ? {} : { action: resolved.action }
-    });
-    return resolved?.sheet === undefined ? row : `${row}
-${resolved.sheet}`;
-  });
-  return [sectionHeading(group, true), ...rows].join(`
-`);
-}
-function renderCardSection(group, options, last) {
-  const cards = group.sources.map((source) => {
-    const fraction = group.status === "Working" ? dashboardWorkFraction(source) : undefined;
-    return sourceCard({
-      label: source.label,
-      status: group.status,
-      subLine: dashboardSubLine(source, options),
-      href: detailHref2(source, options?.basePath),
-      ...fraction === undefined ? {} : { fraction }
-    });
-  });
-  return [
-    sectionHeading(group, false),
-    `<div class="cards"${gridStyle(group.sources.length, last)}>`,
-    ...cards,
-    "</div>"
-  ].join(`
-`);
-}
-function sectionHeading(group, attention) {
-  const text = escapeHtml(`${group.status} — ${group.sources.length}`);
-  return attention ? `<div class="sect attn">▲ ${text}</div>` : `<div class="sect">${text}</div>`;
-}
-function gridStyle(count, last) {
-  const rules = [];
-  if (count >= 4) {
-    rules.push("grid-template-columns:repeat(4,1fr)");
-  }
-  if (!last) {
-    rules.push("margin-bottom:22px");
-  }
-  return rules.length === 0 ? "" : ` style="${escapeHtml(rules.join("; "))}"`;
-}
-function detailHref2(source, basePath) {
-  const path = basePath ?? DEFAULT_BASE_PATH3;
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}${DETAIL_QUERY_PARAM2}=${encodeURIComponent(source.source_id)}`;
-}
-function attentionAction(source, view, options) {
-  const action = source.connection.action;
-  const reconnecting = source.coverage.indexed_items > 0;
-  if (action.kind === "needs_setup") {
-    if (!dashboardControlsAvailable(options)) {
-      return { action: lockedAction(reconnecting ? "Reauthenticate" : action.label, options?.basePath) };
-    }
-    const note = dashboardGoogleProviderNote(view, action);
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, note === undefined ? {} : { providerNote: note });
-    return {
-      action: { label: reconnecting ? "Reauthenticate" : action.label, kind: "none", sheet: sheetId, primary: true },
-      sheet
-    };
-  }
-  if (action.kind !== "oauth" && action.kind !== "api_key")
-    return;
-  const label = reconnecting && action.label === "Connect" ? "Reauthenticate" : action.label;
-  if (!dashboardControlsAvailable(options)) {
-    return { action: lockedAction(label, options?.basePath) };
-  }
-  if (action.kind === "oauth") {
-    const note = dashboardGoogleProviderNote(view, action);
-    const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
-      ...note === undefined ? {} : { providerNote: note }
-    });
-    if (connect) {
-      return {
-        action: { label, kind: "none", sheet: connect.sheetId, primary: true },
-        sheet: connect.sheet
-      };
-    }
-  }
-  return { action: { label, kind: action.kind, source: action.source, primary: true } };
-}
-function dashboardControlsAvailable(options) {
-  return options?.controlMode === "native" ? options.canWrite === true : options?.controlSessionCsrfToken !== undefined;
-}
-function lockedAction(label, basePath) {
-  return { label, kind: "link", href: `${setupHref(basePath)}#${DASHBOARD_CONTROL_GATE_ID}`, hint: "unlock controls in Setup" };
-}
-var ATTENTION_STATUSES, DEFAULT_BASE_PATH3 = "/dashboard", DETAIL_QUERY_PARAM2 = "source", BACKGROUND_QUERY_PARAM2 = "background", SETUP_QUERY_PARAM2 = "setup";
-var init_home = __esm(() => {
-  init_vocabulary();
-  init_components();
-  init_background();
-  init_nav();
-  ATTENTION_STATUSES = ["Needs you", "Failing"];
-});
-
 // src/workers/dashboard/attention.ts
 function dashboardAttentionBanner(source, options) {
   return credentialBanner(source, options) ?? scopeApprovalBanner(source, options) ?? terminalExtractionBanner(source, options) ?? syncFailingBanner(source, options) ?? laneStuckBanner(source, options.now ?? new Date, options);
@@ -82408,7 +82498,7 @@ function syncFailingBanner(source, options) {
     return;
   const errorKind = source.schedule?.last_error_kind;
   const condition = errorKind ? DASHBOARD_GUARD_CONSEQUENCES[errorKind] ?? errorKind : "nothing has reported a reason";
-  const action = syncNowAction(source, options);
+  const action = dashboardSyncNowAction(source, options);
   return {
     kind: "sync_failing",
     sentence: `${source.label}'s scheduled sync keeps failing, so new material is not coming in. Last condition on` + ` the lane: ${condition}. Olympus keeps retrying on its own.` + `${action === undefined ? " Ask" : " Try a sync now; if it still fails, ask"} your agent to look at the lane.`,
@@ -82416,7 +82506,7 @@ function syncFailingBanner(source, options) {
     agent_prompt: `Olympus says the ${source.label} scheduled sync keeps failing (last condition: ${condition}).` + ` Please check why the ${source.label} sync tasks fail — the worker logs and the scheduler state for this` + " source — and fix it using supported Olympus commands. Do not ask me to edit files, configuration, or code."
   };
 }
-function syncNowAction(source, options) {
+function dashboardSyncNowAction(source, options) {
   const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
   const syncSource = source.sync_now_available === false ? undefined : definition?.connect_action.kind === "oauth" || definition?.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
   if (syncSource === undefined)
@@ -82552,7 +82642,7 @@ function laneStuckBanner(source, now, options) {
   const condition = governingCondition(source, stalledPhases);
   const laneName = stalledPhases.length === 1 ? `${DASHBOARD_PHASE_LABELS[stalledPhases[0]].toLowerCase()} lane` : "lane";
   const stillness = idleHours === undefined ? "has stopped moving" : `has not moved for ${dashboardDuration(idleHours * 3600)}`;
-  const action = syncNowAction(source, options);
+  const action = dashboardSyncNowAction(source, options);
   return {
     kind: "lane_stuck",
     sentence: `${source.label} still has work to do and its ${laneName} ${stillness}. Last condition on the lane:` + ` ${condition}.${action === undefined ? "" : " Try a sync now;"}` + `${action === undefined ? " Ask" : " if it still does not move, ask"} your agent to look at the lane.`,
@@ -82679,6 +82769,185 @@ var init_attention = __esm(() => {
   };
 });
 
+// src/workers/dashboard/pages/home.ts
+function renderDashboardHomePage(view, options) {
+  const groups = dashboardConnectedStatusGroups(view, options);
+  const background = renderBackgroundSection(view, options);
+  const blocks = groups.map((group, index) => renderSection(group, view, options, background === "" && index === groups.length - 1));
+  blocks.push(background);
+  blocks.push(renderSetupLink(options));
+  const nav = renderDashboardNav("home", {
+    ...options?.basePath === undefined ? {} : { basePath: options.basePath }
+  });
+  return pageShell({
+    title: "Olympus",
+    meta: dashboardHomeMeta(view, options),
+    body: [
+      nav,
+      ...blocks.filter((block) => block.length > 0)
+    ].join(`
+`),
+    styles: [DASHBOARD_LANE_CSS, DASHBOARD_NAV_CSS],
+    controller: { ...options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken } },
+    poll: {
+      unlocked: options?.controlSessionCsrfToken !== undefined,
+      ...options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }
+    },
+    ...options?.format === undefined ? {} : { format: options.format }
+  });
+}
+function renderSetupLink(options) {
+  return `<div class="foot"><a href="${escapeHtml(setupHref(options?.basePath))}">Connect more sources →</a></div>`;
+}
+function setupHref(basePath) {
+  const path = basePath ?? DEFAULT_BASE_PATH3;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}${SETUP_QUERY_PARAM2}`;
+}
+function renderBackgroundSection(view, options) {
+  const lanes = dashboardBackgroundLanes(view, options);
+  if (lanes.length === 0)
+    return "";
+  return [
+    '<div class="sect">Background</div>',
+    backgroundRow({
+      href: backgroundHref(options?.basePath),
+      label: "Background work details",
+      lines: dashboardBackgroundRowLines(lanes)
+    })
+  ].join(`
+`);
+}
+function backgroundHref(basePath) {
+  const path = basePath ?? DEFAULT_BASE_PATH3;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}${BACKGROUND_QUERY_PARAM2}`;
+}
+function renderSection(group, view, options, last) {
+  return ATTENTION_STATUSES.includes(group.status) ? renderAttentionSection(group, view, options) : renderCardSection(group, options, last);
+}
+function renderAttentionSection(group, view, options) {
+  const rows = group.sources.map((source) => {
+    const resolved = attentionAction(source, view, options) ?? fallbackFix(source, options);
+    const row = attentionRow({
+      label: source.label,
+      why: dashboardAttentionLine(source, options),
+      href: detailHref2(source, options?.basePath),
+      attention: true,
+      ...resolved === undefined ? {} : { action: resolved.action }
+    });
+    return resolved?.sheet === undefined ? row : `${row}
+${resolved.sheet}`;
+  });
+  return [sectionHeading(group, true), ...rows].join(`
+`);
+}
+function renderCardSection(group, options, last) {
+  const cards = group.sources.map((source) => {
+    const fraction = group.status === "Working" ? dashboardWorkFraction(source) : undefined;
+    return sourceCard({
+      label: source.label,
+      status: group.status,
+      subLine: dashboardSubLine(source, options),
+      href: detailHref2(source, options?.basePath),
+      ...fraction === undefined ? {} : { fraction }
+    });
+  });
+  return [
+    sectionHeading(group, false),
+    `<div class="cards"${gridStyle(group.sources.length, last)}>`,
+    ...cards,
+    "</div>"
+  ].join(`
+`);
+}
+function sectionHeading(group, attention) {
+  const text = escapeHtml(`${group.status} — ${group.sources.length}`);
+  return attention ? `<div class="sect attn">▲ ${text}</div>` : `<div class="sect">${text}</div>`;
+}
+function gridStyle(count, last) {
+  const rules = [];
+  if (count >= 4) {
+    rules.push("grid-template-columns:repeat(4,1fr)");
+  }
+  if (!last) {
+    rules.push("margin-bottom:22px");
+  }
+  return rules.length === 0 ? "" : ` style="${escapeHtml(rules.join("; "))}"`;
+}
+function detailHref2(source, basePath) {
+  const path = basePath ?? DEFAULT_BASE_PATH3;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}${DETAIL_QUERY_PARAM2}=${encodeURIComponent(source.source_id)}`;
+}
+function attentionAction(source, view, options) {
+  const action = source.connection.action;
+  const reconnecting = source.coverage.indexed_items > 0;
+  const blocked = view.model_setup !== undefined && !view.model_setup.ready ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
+  if (action.kind === "needs_setup") {
+    if (!dashboardControlsAvailable(options)) {
+      return { action: lockedAction(reconnecting ? DASHBOARD_RECONNECT_LABEL : action.label, options?.basePath) };
+    }
+    const note = dashboardGoogleProviderNote(view, action);
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, note === undefined ? {} : { providerNote: note });
+    return {
+      action: { label: reconnecting ? DASHBOARD_RECONNECT_LABEL : action.label, kind: "none", sheet: sheetId, primary: true, ...blocked },
+      sheet
+    };
+  }
+  if (action.kind !== "oauth" && action.kind !== "api_key")
+    return;
+  const label = reconnecting && action.label === "Connect" ? DASHBOARD_RECONNECT_LABEL : action.label;
+  if (!dashboardControlsAvailable(options)) {
+    return { action: lockedAction(label, options?.basePath) };
+  }
+  if (action.kind === "oauth") {
+    const note = dashboardGoogleProviderNote(view, action);
+    const connect = dashboardOAuthConnectSheet(source, action, {
+      ...dashboardRefusalNotice(source),
+      ...note === undefined ? {} : { providerNote: note }
+    });
+    if (connect) {
+      return {
+        action: { label, kind: "none", sheet: connect.sheetId, primary: true, ...blocked },
+        sheet: connect.sheet
+      };
+    }
+  }
+  return { action: { label, kind: action.kind, source: action.source, primary: true, ...blocked } };
+}
+function dashboardRefusalNotice(source) {
+  if (!source.connection.provider_refusal)
+    return {};
+  const detail = dashboardProviderRefusalDetail(source);
+  return {
+    notice: dashboardProviderRefusalSentence(source),
+    ...detail === undefined ? {} : { noticeDetail: detail }
+  };
+}
+function fallbackFix(source, options) {
+  const readOnly = !dashboardControlsAvailable(options);
+  const sync = dashboardSyncNowAction(source, { readOnly, setupPath: setupHref(options?.basePath) });
+  if (sync !== undefined)
+    return { action: sync };
+  return { action: { label: "See what happened", kind: "link", href: detailHref2(source, options?.basePath) } };
+}
+function dashboardControlsAvailable(options) {
+  return options?.controlMode === "native" ? options.canWrite === true : options?.controlSessionCsrfToken !== undefined;
+}
+function lockedAction(label, basePath) {
+  return { label, kind: "link", href: `${setupHref(basePath)}#${DASHBOARD_CONTROL_GATE_ID}`, hint: "unlock controls in Setup" };
+}
+var ATTENTION_STATUSES, DEFAULT_BASE_PATH3 = "/dashboard", DETAIL_QUERY_PARAM2 = "source", BACKGROUND_QUERY_PARAM2 = "background", SETUP_QUERY_PARAM2 = "setup";
+var init_home = __esm(() => {
+  init_vocabulary();
+  init_components();
+  init_background();
+  init_attention();
+  init_nav();
+  ATTENTION_STATUSES = ["Needs you", "Failing"];
+});
+
 // src/workers/dashboard/contract.ts
 function dashboardSensitivityCategories(view) {
   return view.sensitivity?.categories ?? [];
@@ -82765,7 +83034,7 @@ function renderDashboardDetailBody(source, options) {
     renderAttention(source, degraded, options),
     renderIngestionSelection(source),
     renderTotals(source),
-    renderProgress(source, progress, now),
+    renderProgress2(source, progress, now),
     renderScope(options?.scope, options?.folderPickerPath, options, source.scope_selection?.kind === "mail"),
     renderAdvanced(source, degraded, options, now),
     renderFoot(source, now)
@@ -82868,7 +83137,7 @@ function setupHref2(basePath) {
   const separator = path.includes("?") ? "&" : "?";
   return `${path}${separator}${SETUP_QUERY_PARAM3}`;
 }
-function renderProgress(source, progress, now) {
+function renderProgress2(source, progress, now) {
   const headingText = progress.delta ? "Current update" : source.connection.state === "syncing" || source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? "Initial ingestion" : "Ingestion";
   const heading = `
         <div class="dsect">${headingText}</div>`;
@@ -83394,18 +83663,18 @@ function renderModelSetup(view) {
   const cards = view.cards.map((card) => {
     if (card.state === "ready")
       return readyModelRow(card);
-    const state = { not_configured: "Not configured", applying: "Applying…", needs_attention: "Needs attention", ready: "Ready" }[card.state];
+    const state = modelStateWord(card);
     let action = "";
     if (card.id === "local") {
-      action = `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`;
+      action = card.state === "not_configured" ? `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` : "";
     } else {
       action = modelKeyAction(card, card.state === "applying" ? '<span class="modelnote">Key saved. Olympus is applying the configuration or waiting for another required key.</span>' : modelKeyForm(card));
     }
-    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml(card.label)}</b><span role="status">${state}</span></header>` + `<p>${escapeHtml(card.detail)}</p>${action}</section>`;
+    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml(card.label)}</b><span role="status">${escapeHtml(state)}</span></header>` + `<p>${escapeHtml(card.detail)}</p>${action}</section>`;
   }).join("");
   const localCard = view.cards.some((card) => card.id === "local");
-  const extras = view.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn quiet" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn quiet" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" : '<div class="modeltools">' + (localCard ? "" : `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>";
-  return '<section aria-label="Models"><div class="sect">Models</div>' + (view.ready ? '<p class="quiet" role="status">Models are ready. You can connect sources below.</p>' : "<p>Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>") + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + (view.ready ? "" : '<p role="status">Finish the required model setup above to unlock new source connections.</p>') + "</section>" + connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Your agent can help connect models you already run. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" });
+  const extras = view.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn quiet" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn quiet" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>";
+  return '<section aria-label="Models"><div class="sect">Models</div>' + (view.ready ? '<p class="quiet" role="status">Models are ready. You can connect sources below.</p>' : "<p>Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>") + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>" + connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Your agent can help connect models you already run. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" });
 }
 function readyModelRow(card) {
   const label = escapeHtml(card.label);
@@ -83416,8 +83685,52 @@ function readyModelRow(card) {
   const sheetId = `model-key-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
   return `${head}<button type="button" class="btn quiet" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button></div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
 }
+function modelStateWord(card) {
+  if (card.state === "applying")
+    return card.id === "local" ? "Checking…" : "Applying…";
+  if (card.state === "needs_attention")
+    return card.id === "local" ? "Not answering" : "Needs attention";
+  if (card.state === "ready")
+    return "Ready";
+  return "Not configured";
+}
+function renderModelSetupBlocker(view) {
+  if (!view || view.ready)
+    return "";
+  const card = view.cards.find((entry) => entry.state !== "ready");
+  if (!card) {
+    return blockerBanner({ sentence: view.attention ?? "Model setup is not finished, so sources stay locked." });
+  }
+  if (card.id === "local") {
+    if (card.state === "applying") {
+      return blockerBanner({ sentence: "Checking your local models… Sources unlock when the check passes." });
+    }
+    if (card.state === "needs_attention") {
+      return blockerBanner({
+        sentence: "Your local model server is not answering, so sources stay locked. Start it, then check again.",
+        controlHtml: `${CHECK_FORM_OPEN}<button class="btn primary" type="submit">Check again</button>${CHECK_FORM_TAIL}`
+      });
+    }
+    return blockerBanner({
+      sentence: "Connect your local models to start connecting sources.",
+      controlHtml: `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`
+    });
+  }
+  if (card.state === "applying") {
+    return blockerBanner({ sentence: `Applying your ${card.label} key… Sources unlock when it is ready.` });
+  }
+  if (card.state === "needs_attention")
+    return blockerBanner({ sentence: card.detail });
+  return blockerBanner({
+    sentence: `Add your ${card.label} API key to start connecting sources.`,
+    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${modelKeyFieldId(card)}">Add ${escapeHtml(card.label)} key</button>`
+  });
+}
+function modelKeyFieldId(card) {
+  return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+}
 function modelKeyForm(card) {
-  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn" type="submit">Connect</button><span data-action-message role="status"></span></form>';
+  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield"${card.state === "ready" ? "" : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn" type="submit">Connect</button><span data-action-message role="status"></span></form>';
 }
 function modelKeyAction(card, lead) {
   const href = card.id === "gemini" ? "https://aistudio.google.com/apikey" : "https://venice.ai";
@@ -83957,15 +84270,14 @@ var init_agents = __esm(() => {
 function renderDashboardSetupPage(view, options) {
   const degraded = options?.degradedCredentials ?? view.degraded_credentials;
   const grouped = groupSources(view.sources, degraded);
-  const sections = SETUP_GROUPS.map((group) => {
-    const rendered = renderGroup(group, grouped[group.id], degraded, options?.basePath, view);
-    return group.id === "not_connected" && view.model_setup && !view.model_setup.ready && rendered ? `<fieldset class="source-model-gate" disabled aria-label="Sources: finish model setup first">${rendered}</fieldset>` : rendered;
-  }).filter((section) => section.length > 0);
+  const blocked = view.model_setup !== undefined && !view.model_setup.ready;
+  const sections = SETUP_GROUPS.map((group) => renderGroup(group, grouped[group.id], degraded, view, blocked, options)).filter((section) => section.length > 0);
   const body = [
     renderDashboardNav("setup", {
       ...options?.basePath === undefined ? {} : { basePath: options.basePath }
     }),
     options?.controlMode === "native" ? options.canWrite === false ? '<div class="attncard plain" data-write-capability-note>Read-only OpenClaw connection — reconnect with operator.write access to change sources.</div>' : "" : dashboardControlGate({ connected: options?.controlSessionCsrfToken !== undefined }),
+    renderModelSetupBlocker(view.model_setup),
     renderSetupSummary(view),
     renderModelSetup(view.model_setup),
     '<div class="sect">Sources</div>',
@@ -83998,9 +84310,10 @@ function renderDashboardSetupPage(view, options) {
 }
 function renderSetupSummary(view) {
   const ready = view.summary.answer_ready_sources;
-  const connected = view.sources.filter(dashboardIsConnectedSource).length;
-  const line = `${ready} answer-ready · ${connected} connected`;
-  return `<div class="setupsummary" aria-label="Setup summary">` + `<div class="sumcard"><b>Security preset</b><span>Configured</span></div>` + `<div class="sumcard"><b>Sources</b><span>${escapeHtml(line)}</span></div>` + `</div>`;
+  const connected = view.sources.filter((source) => dashboardIsConnectedSource(source) && (source.connection.provider_refusal === undefined || source.coverage.indexed_items > 0) && source.connection.state !== "awaiting_consent").length;
+  if (connected === 0)
+    return "";
+  return `<p class="setupsummary" aria-label="Setup summary">${escapeHtml(dashboardConnectedSummary(connected, ready))}</p>`;
 }
 function groupSources(sources, degraded) {
   const grouped = {
@@ -84040,10 +84353,11 @@ function setupGroupOf(source, degraded) {
       return "not_connected";
   }
 }
-function renderGroup(group, sources, degraded, basePath, view) {
+function renderGroup(group, sources, degraded, view, blocked, options) {
   if (sources.length === 0)
     return "";
-  const rows = sources.map((source) => group.id === "not_connected" ? renderSetupRow(source, view, basePath) : renderStateRow(group, source, degraded, basePath, view)).join(`
+  const basePath = options?.basePath;
+  const rows = sources.map((source) => group.id === "not_connected" ? renderSetupRow(source, view, blocked, basePath) : renderStateRow(group, source, degraded, view, blocked, options)).join(`
 `);
   return `${sectionHeading2(group.heading, sources.length, group.attention)}
 ${rows}`;
@@ -84052,7 +84366,9 @@ function sectionHeading2(heading, count, attention) {
   const marker = attention ? "▲ " : "";
   return `<div class="sect${attention ? " attn" : ""}">${marker}${heading} — ${count}</div>`;
 }
-function renderStateRow(group, source, degraded, basePath, view) {
+function renderStateRow(group, source, degraded, view, blocked, options) {
+  const basePath = options?.basePath;
+  const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
   const why = stateLine(group.id, source, degraded);
   const href = detailHref2(source, basePath);
   const action = source.connection.action;
@@ -84064,32 +84380,33 @@ function renderStateRow(group, source, degraded, basePath, view) {
       attention: group.attention,
       href,
       ...why ? { why } : {},
-      action: { label: source.coverage.indexed_items > 0 ? "Reauthenticate" : action.label, kind: "none", sheet: sheetId, primary: true },
+      action: { label: source.coverage.indexed_items > 0 ? DASHBOARD_RECONNECT_LABEL : action.label, kind: "none", sheet: sheetId, primary: true, ...gate },
       ...disconnect2 ? { secondaryAction: disconnect2 } : {}
     });
     return `${row}
 ${sheet}`;
   }
   if ((group.id === "needs_you" || group.id === "connecting") && action.kind === "oauth") {
-    const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
+    const connect2 = dashboardOAuthConnectSheet(source, action, {
+      ...dashboardRefusalNotice(source),
       ...providerNote(view, action)
     });
-    if (connect) {
+    if (connect2) {
       const secondary = group.id === "connecting" ? cancelAction(action) : custodyAction(source);
       const row = attentionRow({
         label: source.label,
         attention: group.attention,
         href,
         ...why ? { why } : {},
-        action: { label: action.label, kind: "none", sheet: connect.sheetId, primary: true },
+        action: { label: action.label, kind: "none", sheet: connect2.sheetId, primary: true, ...gate },
         ...secondary ? { secondaryAction: secondary } : {}
       });
       return `${row}
-${connect.sheet}`;
+${connect2.sheet}`;
     }
   }
-  const control = group.id === "needs_you" ? connectAction(source, true) : group.id === "working" || group.id === "waiting" || group.id === "fresh" ? custodyAction(source) : undefined;
+  const connect = connectAction(source, true);
+  const control = group.id === "needs_you" ? connect === undefined ? fallbackFix(source, options).action : { ...connect, ...gate } : group.id === "working" || group.id === "waiting" || group.id === "fresh" ? custodyAction(source) : undefined;
   const disconnect = group.id === "needs_you" ? custodyAction(source) : undefined;
   return attentionRow({
     label: source.label,
@@ -84100,8 +84417,9 @@ ${connect.sheet}`;
     ...disconnect ? { secondaryAction: disconnect } : {}
   });
 }
-function renderSetupRow(source, view, basePath) {
+function renderSetupRow(source, view, blocked, basePath) {
   const action = source.connection.action;
+  const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
   if (action.kind === "guided_session") {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
     const row = setupRow({
@@ -84127,7 +84445,7 @@ ${sheet}`;
       label: source.label,
       href: detailHref2(source, basePath),
       blurb: action.instructions.plain_intro,
-      action: { label: action.label, kind: "none", sheet: sheetId },
+      action: { label: action.label, kind: "none", sheet: sheetId, ...gate },
       ...link2 === undefined ? {} : { blurbLink: link2 }
     });
     return `${row}
@@ -84135,7 +84453,7 @@ ${sheet}`;
   }
   if (action.kind === "oauth") {
     const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
+      ...dashboardRefusalNotice(source),
       ...providerNote(view, action)
     });
     if (connect) {
@@ -84143,7 +84461,7 @@ ${sheet}`;
         label: source.label,
         href: detailHref2(source, basePath),
         blurb: setupBlurb(source),
-        action: { label: action.label, kind: "none", sheet: connect.sheetId }
+        action: { label: action.label, kind: "none", sheet: connect.sheetId, ...gate }
       });
       return `${row}
 ${connect.sheet}`;
@@ -84154,7 +84472,7 @@ ${connect.sheet}`;
     label: source.label,
     href: detailHref2(source, basePath),
     blurb: setupBlurb(source),
-    action: connectAction(source, false) ?? { label: actionStateLabel(source), kind: "none" },
+    action: { ...connectAction(source, false) ?? { label: actionStateLabel(source), kind: "none" }, ...gate },
     ...link === undefined ? {} : { blurbLink: link }
   });
 }
@@ -84193,7 +84511,7 @@ function stateLine(group, source, degraded) {
 }
 function workingLine2(source) {
   const firstIngest = source.freshness.hours === undefined;
-  const parts = [firstIngest ? "first ingest" : "syncing"];
+  const parts = [firstIngest ? "first sync" : "syncing"];
   if (source.coverage.indexed_items > 0)
     parts.push(`${formatCount(source.coverage.indexed_items)} indexed so far`);
   const eta = source.progress?.eta_minutes;
