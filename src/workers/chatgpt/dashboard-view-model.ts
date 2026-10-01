@@ -197,7 +197,9 @@ export function buildChatGptDashboardViewModel(
   if (embedding.state === 'failed') {
     needsYou.push({
       id: 'model:embedding',
-      sentence: DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention,
+      sentence: embedding.kind === 'built_in'
+        ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.embedding[embedding.failedReason ?? 'unknown']
+        : DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention,
       fix: embedding.kind === 'built_in' ? retryFix('embedding') : checkAgainFix(),
     });
   }
@@ -208,7 +210,9 @@ export function buildChatGptDashboardViewModel(
   if (answersNeedAttention) {
     needsYou.push({
       id: 'model:answers',
-      sentence: DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention,
+      sentence: answers.kind === 'built_in'
+        ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.answers[options.privateModel?.failedReason ?? 'unknown']
+        : DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention,
       fix: answers.kind === 'built_in' ? retryFix('answers') : checkAgainFix(),
     });
   }

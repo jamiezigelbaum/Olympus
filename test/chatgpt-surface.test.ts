@@ -362,6 +362,37 @@ describe('dashboard view-model producer', () => {
     expect(vm.models.embedding).toEqual({ kind: 'built_in', state: 'downloading', percent: 40 });
   });
 
+  test('a failed built-in install says why in install words and retries with olympus_model_retry', () => {
+    const cases = [
+      ['disk_full', 'the disk is full.'],
+      ['network', 'the network dropped.'],
+      ['checksum', 'the download was damaged.'],
+    ] as const;
+    for (const [reason, why] of cases) {
+      const vm = buildChatGptDashboardViewModel(view([card('gmail.email')]), {
+        now: NOW,
+        embedding: { kind: 'built_in', state: 'failed', failedReason: reason },
+        privateModel: { state: 'failed', failedReason: reason },
+      });
+      expect(vm.needsYou.filter((item) => item.id.startsWith('model:'))).toEqual([
+        { id: 'model:embedding', sentence: `Couldn't download the search model: ${why}`, fix: { label: 'Try again', tool: 'olympus_model_retry', args: { model: 'embedding' } } },
+        { id: 'model:answers', sentence: `Couldn't download the private model: ${why}`, fix: { label: 'Try again', tool: 'olympus_model_retry', args: { model: 'answers' } } },
+      ]);
+    }
+    const unknown = buildChatGptDashboardViewModel(view([card('gmail.email')]), {
+      now: NOW,
+      embedding: { kind: 'built_in', state: 'failed' },
+      privateModel: { state: 'failed', failedReason: 'unknown' },
+    });
+    expect(unknown.needsYou.filter((item) => item.id.startsWith('model:')).map((item) => item.sentence)).toEqual([
+      'Couldn\'t download the search model.',
+      'Couldn\'t download the private model.',
+    ]);
+    // A custom model that stopped is not an install: it keeps the generic sentence.
+    const custom = buildChatGptDashboardViewModel(view([card('gmail.email')]), { now: NOW, embedding: { kind: 'custom', state: 'failed' } });
+    expect(custom.needsYou.find((item) => item.id === 'model:embedding')!.sentence).toBe('Search has stopped working on your Mac.');
+  });
+
   test('cards off the product roster and model lanes never appear', () => {
     const vm = buildChatGptDashboardViewModel(view([
       card('gmail.email'),

@@ -17,6 +17,12 @@ import type { DashboardStatus } from '../vocabulary.ts';
 import type { ChatGptPicker, ChatGptPickerConfig, ChatGptPickerKit } from './picker.ts';
 import type { ChatGptPrivacy, ChatGptPrivacyConfig, ChatGptPrivacyKit } from './privacy.ts';
 import type {
+  DashboardViewModelV1,
+  ModelInstall,
+  ModelInstallFailedReason,
+  ModelInstallState,
+} from '../../chatgpt/dashboard-contract.ts';
+import type {
   DASHBOARD_CHATGPT_CONNECTION_COPY,
   DASHBOARD_CHATGPT_PAGE_COPY,
   DashboardStatusColorToken,
@@ -41,6 +47,19 @@ export interface ChatGptDashboardClientConfig {
 // Loose shapes: the page validates what it reads instead of trusting a type.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Any = any;
+
+type DashboardModels = DashboardViewModelV1['models'];
+
+/** One model's install line, read off the view model and validated (the values crossed the wire). */
+interface ModelInstallLine {
+  which: 'search' | 'answers';
+  state: Exclude<ModelInstallState, 'ready'>;
+  /** -1 when unknown. */
+  percent: number;
+  done: number;
+  total: number;
+  reason: ModelInstallFailedReason;
+}
 
 export function chatgptDashboardClient(
   config: ChatGptDashboardClientConfig,
@@ -796,23 +815,25 @@ export function chatgptDashboardClient(
   }
 
   /**
-   * One model's install, read defensively (the fields are optional): the
-   * search model's from models.embedding, the private model's from
-   * models.answers.install. Null when it is not installing or failed.
+   * One model's install: the search model's from models.embedding, the
+   * private model's from models.answers.install. Its fields are optional and
+   * crossed the wire, so each is checked. Null when it is not installing or
+   * failed.
    */
-  function modelInstall(models: Any, which: 'search' | 'answers'): Any {
-    const source = which === 'search' ? models.embedding : models.answers && models.answers.install;
+  function modelInstall(models: DashboardModels, which: 'search' | 'answers'): ModelInstallLine | null {
+    const source: ModelInstall | undefined = which === 'search' ? models.embedding : models.answers ? models.answers.install : undefined;
     if (!source || typeof source !== 'object') return null;
-    const stateName = String(source.state || '');
+    const stateName = source.state;
     if (stateName !== 'downloading' && stateName !== 'verifying' && stateName !== 'failed') return null;
-    const number = (value: Any) => (typeof value === 'number' && isFinite(value) && value >= 0 ? value : -1);
+    const number = (value: unknown) => (typeof value === 'number' && isFinite(value) && value >= 0 ? value : -1);
+    const reason = source.failedReason;
     return {
       which,
       state: stateName,
       percent: number(source.percent),
       done: number(source.bytesDone),
       total: number(source.bytesTotal),
-      reason: typeof source.failedReason === 'string' && (P.modelInstallReasons as Any)[source.failedReason] ? source.failedReason : 'unknown',
+      reason: typeof reason === 'string' && Object.prototype.hasOwnProperty.call(P.modelInstallReasons, reason) ? reason : 'unknown',
     };
   }
 
@@ -824,30 +845,39 @@ export function chatgptDashboardClient(
     return fill(P.modelInstallBytes, { done: shown(Math.min(done, total)), total: shown(total) + ' ' + unit });
   }
 
-  function modelWords(models: Any): { summary: string; search: string; answers: string } {
-    const embedding = models.embedding || {};
+  function modelWords(models: DashboardModels): { summary: string; search: string; answers: string } {
+    const embedding = models.embedding;
     const kind = embedding.kind === 'built_in' ? P.modelBuiltIn : P.modelCustom;
     let ready: string = P.modelReady;
-    if (embedding.state === 'downloading') ready = fill(P.modelDownloading, { percent: percent(embedding.percent) });
+    if (embedding.state === 'downloading') ready = fill(P.modelDownloading, { percent: percent(embedding.percent ?? 0) });
     else if (embedding.state === 'verifying') ready = P.modelChecking;
     else if (embedding.state === 'failed') ready = P.modelNotWorking;
     const answers = models.answers;
     const answersWords = answers ? String(answers.label || '') + ' · ' + (answers.ready ? P.modelReady : P.modelNotReady) : '';
-    const installs = [modelInstall(models, 'search'), modelInstall(models, 'answers')].filter((entry) => entry);
+    const installs = installLines(models);
     let overall: string = ready;
-    if (installs.some((entry: Any) => entry.state === 'failed')) overall = P.modelNeedsYou;
+    if (installs.some((entry) => entry.state === 'failed')) overall = P.modelNeedsYou;
     else if (installs.length) overall = P.modelGettingReady;
     else if (embedding.state === 'ready' && answers && !answers.ready) overall = P.modelNotReady;
     return { summary: P.models + ' — ' + kind + ' · ' + overall, search: kind + ' · ' + ready, answers: answersWords };
   }
 
   /** One line per installing model, shown without expanding; the fix lives in Needs you, not here. */
-  function installLine(entry: Any): HTMLElement {
-    const model = (P.modelNames as Any)[entry.which];
+  function installLines(models: DashboardModels): ModelInstallLine[] {
+    const lines: ModelInstallLine[] = [];
+    for (const which of ['search', 'answers'] as const) {
+      const entry = modelInstall(models, which);
+      if (entry) lines.push(entry);
+    }
+    return lines;
+  }
+
+  function installLine(entry: ModelInstallLine): HTMLElement {
+    const model = P.modelNames[entry.which];
     const line = el('div', 'model-install' + (entry.state === 'failed' ? ' failed' : ''));
     let text: string;
     if (entry.state === 'failed') {
-      text = fill(P.modelInstallFailed, { model, reason: (P.modelInstallReasons as Any)[entry.reason] });
+      text = fill(P.modelInstallFailed, { model, reason: P.modelInstallReasons[entry.reason] });
     } else if (entry.state === 'verifying') {
       text = fill(P.modelInstallVerifying, { model });
     } else {
@@ -861,7 +891,7 @@ export function chatgptDashboardClient(
     return line;
   }
 
-  function modelsSection(models: Any): HTMLElement | null {
+  function modelsSection(models: DashboardModels | undefined): HTMLElement | null {
     if (!models || !models.embedding) return null;
     const words = modelWords(models);
     const box = details('models', doc.createTextNode(words.summary), 'section models');
@@ -869,7 +899,7 @@ export function chatgptDashboardClient(
     if (words.answers) add(list, el('li', '', P.modelAnswers + ': ' + words.answers));
     add(box, list);
     if (models.change) add(box, add(el('div', 'actions'), fixControl(models.change, 'models:change', 'plain', true)));
-    const installs = [modelInstall(models, 'search'), modelInstall(models, 'answers')].filter((entry) => entry);
+    const installs = installLines(models);
     if (!installs.length) return box;
     const wrap = add(el('div', 'models-wrap'), box);
     const lines = el('div', 'model-installs');

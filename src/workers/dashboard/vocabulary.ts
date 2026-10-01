@@ -1075,6 +1075,24 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
   stageSearchable: 'Indexing',
   embeddingNeedsAttention: 'Search has stopped working on your Mac.',
   answerModelNeedsAttention: 'Answers have stopped working on your Mac.',
+  /**
+   * A built-in model whose install failed, by its fixed failure code
+   * (ModelInstallFailedReason); the item's fix starts the install again.
+   */
+  modelInstallFailed: {
+    embedding: {
+      disk_full: 'Couldn\'t download the search model: the disk is full.',
+      network: 'Couldn\'t download the search model: the network dropped.',
+      checksum: 'Couldn\'t download the search model: the download was damaged.',
+      unknown: 'Couldn\'t download the search model.',
+    },
+    answers: {
+      disk_full: 'Couldn\'t download the private model: the disk is full.',
+      network: 'Couldn\'t download the private model: the network dropped.',
+      checksum: 'Couldn\'t download the private model: the download was damaged.',
+      unknown: 'Couldn\'t download the private model.',
+    },
+  },
   fixOnMac: 'Open Olympus on your Mac to fix this.',
   privateMatches: 'Some matching items are private and stay on your Mac.',
   changeModelsOnMac: 'Change models in Olympus on your Mac.',
