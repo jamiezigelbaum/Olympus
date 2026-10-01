@@ -33,7 +33,11 @@ import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, SEARCH_TOOL_NAME } from '.
 import { DASHBOARD_RESOURCE, dashboardResourceHtml, dashboardResourceMeta } from './dashboard-resource.ts';
 import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from './dashboard-view-model.ts';
 import { callSetupTool, isSetupTool, SETUP_TOOLS, type ChatGptSetupBackend } from './setup-tools.ts';
+import { PRIVATE_ANSWER_RESOURCE_URI, type PrivateEvidenceItem, type PrivateMatchSummary } from './private-answer-contract.ts';
+import type { PrivateAnswerJobs, PrivateEvidenceRefresh } from './private-answer-jobs.ts';
+import { PRIVATE_ANSWER_RESOURCE, privateAnswerResourceHtml, privateAnswerResourceMeta } from './private-answer-resource.ts';
 import {
+  answerToolMeta,
   answerToolResult,
   ChatGptSurfaceError,
   dashboardToolMeta,
@@ -48,14 +52,21 @@ export interface ChatGptSurfaceOptions {
   /** The engine's dashboard view (the `/dashboard.json` object). */
   dashboardView: (signal?: AbortSignal) => Promise<SourceDashboardViewModel>;
   /**
-   * Whether any Private item matches the question. Only the boolean leaves
-   * this function; defaults to a one-hit search of each Private corpus.
+   * Which Private items match the question: a count, and the hits the private
+   * answer model reads. Only the count leaves the engine; the hits stay in the
+   * private answer job. Defaults to a bounded search of each Private corpus.
+   * A boolean is accepted (a match of unknown size counts as 1, with no
+   * evidence to answer from).
    */
-  privateMatchProbe?: (question: string, ctx: OperationContext) => Promise<boolean>;
+  privateMatchProbe?: (question: string, ctx: OperationContext) => Promise<boolean | number | PrivateMatchProbeResult>;
+  /** One-time private answer jobs for the private answer panel; without it a match reports `no_model`. */
+  privateAnswers?: PrivateAnswerJobs;
   /** The built-in embedding model's state, when the embeddings lane reports one. */
   embedding?: () => ChatGptDashboardOptions['embedding'];
   /** The owner's privacy settings, counts only, for the dashboard. */
   privacy?: () => ChatGptDashboardOptions['privacy'];
+  /** The built-in private model's install state, when it is on for this machine. */
+  privateModel?: () => ChatGptDashboardOptions['privateModel'];
   /** Setup from ChatGPT (setup-tools.ts). Absent: the setup tools answer "unavailable". */
   setup?: ChatGptSetupBackend;
   /**
@@ -69,6 +80,11 @@ export interface ChatGptSurfaceOptions {
    * Absent counts as yes; false hides source_answer and source_answer_result.
    */
   answerModelAvailable?: () => boolean;
+}
+
+export interface PrivateMatchProbeResult {
+  count: number;
+  evidence: readonly PrivateEvidenceItem[];
 }
 
 export interface ChatGptToolDefinition {
@@ -136,6 +152,7 @@ export const SOURCE_ANSWER_TOOL: ChatGptToolDefinition = {
   },
   annotations: READ_ONLY,
   securitySchemes: OAUTH2_REQUIRED,
+  _meta: answerToolMeta(),
 };
 
 export const SOURCE_ANSWER_RESULT_TOOL: ChatGptToolDefinition = {
@@ -154,6 +171,7 @@ export const SOURCE_ANSWER_RESULT_TOOL: ChatGptToolDefinition = {
   },
   annotations: READ_ONLY,
   securitySchemes: OAUTH2_REQUIRED,
+  _meta: answerToolMeta(),
 };
 
 export const SOURCE_STATUS_TOOL: ChatGptToolDefinition = {
@@ -193,6 +211,9 @@ export const SEARCH_TOOL: ChatGptToolDefinition = {
   },
   annotations: READ_ONLY,
   securitySchemes: OAUTH2_REQUIRED,
+  // The private answer panel renders under every search; it shows nothing
+  // unless the result's `_meta` carries a private match.
+  _meta: answerToolMeta(),
 };
 
 const ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL] as const;
@@ -232,7 +253,13 @@ export async function callChatGptTool(
   ctx: OperationContext,
   options: ChatGptSurfaceOptions,
   signal?: AbortSignal,
+  /**
+   * A context for work that outlives this request (the private answer's
+   * claim-time evidence refresh): same caller, no request signal.
+   */
+  detachedContext?: () => OperationContext,
 ): Promise<ChatGptToolResult> {
+  const later = detachedContext ?? (() => ctx);
   try {
     switch (name) {
       case DASHBOARD_TOOL_NAME:
@@ -248,18 +275,25 @@ export async function callChatGptTool(
         if (args.limit !== undefined && limit === undefined) throw new ChatGptSurfaceError('invalid_params');
         if (!options.evidenceSearch) throw new ChatGptSurfaceError('unavailable');
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
-        const [raw, privateMatched] = await Promise.all([
+        const [raw, probed] = await Promise.all([
           options.evidenceSearch({ question, ...(limit ? { limit } : {}) }, signal),
-          probe(question, ctx).catch(() => false),
+          probe(question, ctx).catch(() => false as const),
         ]);
-        return searchToolResult(raw, { privateMatched });
+        // A private match goes to the private answer panel only (`_meta`):
+        // the job is created as this result is built, so its id is valid
+        // only once ChatGPT can see it.
+        const match = normalizeProbe(probed);
+        const privateMatch = match.count > 0
+          ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later) }, options)
+          : undefined;
+        return searchToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       case SOURCE_ANSWER_TOOL.name: {
         if (!answerToolsListed(ctx, options)) throw new ChatGptSurfaceError('unknown_tool');
         const question = typeof args.question === 'string' ? args.question.trim() : '';
         if (!question) throw new ChatGptSurfaceError('invalid_params');
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
-        const [raw, privateMatched] = await Promise.all([
+        const [raw, probed] = await Promise.all([
           // Public and Personal evidence only: nothing Private, not even a
           // bounded derivative, is answered from on this surface.
           runOperation(SOURCE_ANSWER_TOOL.name, ctx, {
@@ -268,19 +302,32 @@ export async function callChatGptTool(
             include_secure_local_content: false,
             timeoutMs: SOURCE_ANSWER_TIMEOUT_MS,
           }),
-          probe(question, ctx).catch(() => false),
+          probe(question, ctx).catch(() => false as const),
         ]);
+        const match = normalizeProbe(probed);
+        const pending: PendingPrivateMatch | undefined = match.count > 0
+          ? { question, match, refresh: privateRefresh(question, probe, later) }
+          : undefined;
         const jobId = pendingJobId(raw);
-        if (jobId) rememberPrivateMatch(jobId, privateMatched);
-        return answerToolResult(raw, { privateMatched });
+        if (jobId) {
+          // Handed off: the private job is created only when the answered
+          // result is built (source_answer_result), so its id is never valid
+          // before ChatGPT can see it.
+          rememberPrivateMatch(jobId, pending);
+          return answerToolResult(raw);
+        }
+        const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
+        return answerToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
         if (!answerToolsListed(ctx, options)) throw new ChatGptSurfaceError('unknown_tool');
         const jobId = typeof args.job_id === 'string' ? args.job_id.trim() : '';
         if (!jobId) throw new ChatGptSurfaceError('invalid_params');
         const raw = await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId });
-        const privateMatched = privateMatchForJob(jobId, pendingJobId(raw) === undefined);
-        return answerToolResult(raw, { privateMatched });
+        const done = pendingJobId(raw) === undefined;
+        const pending = privateMatchForJob(jobId, done);
+        const privateMatch = done && pending ? beginPrivateAnswer(pending, options) : undefined;
+        return answerToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       default:
         if (isSetupTool(name)) return await callSetupTool(name, args, options.setup);
@@ -291,32 +338,84 @@ export async function callChatGptTool(
   }
 }
 
+function normalizeProbe(value: boolean | number | PrivateMatchProbeResult): PrivateMatchProbeResult {
+  if (value === true) return { count: 1, evidence: [] };
+  if (typeof value === 'number') return { count: Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0, evidence: [] };
+  if (value && typeof value === 'object' && Number.isFinite(value.count)) {
+    return { count: Math.max(0, Math.floor(value.count)), evidence: Array.isArray(value.evidence) ? value.evidence : [] };
+  }
+  return { count: 0, evidence: [] };
+}
+
+interface PendingPrivateMatch {
+  question: string;
+  match: PrivateMatchProbeResult;
+  refresh: PrivateEvidenceRefresh;
+}
+
+/** The same Private search again, at claim time, so evidence is judged at its current tier. */
+function privateRefresh(
+  question: string,
+  probe: NonNullable<ChatGptSurfaceOptions['privateMatchProbe']>,
+  context: () => OperationContext,
+): PrivateEvidenceRefresh {
+  return async () => normalizeProbe(await probe(question, context())).evidence;
+}
+
 /**
- * Whether a Private item matches: one hit from each Private corpus, searched
- * in the engine. Nothing but the boolean is kept; an unsearchable corpus
+ * The panel summary for a match: a one-time job when a private model is
+ * ready, else counts and state. Called as the answered result is built.
+ */
+function beginPrivateAnswer(pending: PendingPrivateMatch, options: ChatGptSurfaceOptions): PrivateMatchSummary & { jobId?: string } {
+  const { question, match, refresh } = pending;
+  if (!options.privateAnswers) return { count: match.count, panelState: 'no_model' };
+  try {
+    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence, refresh });
+  } catch {
+    return { count: match.count, panelState: 'no_model' };
+  }
+}
+
+/**
+ * Which Private items match: up to PROBE_HITS_PER_CORPUS hits from each
+ * Private corpus, searched in the engine with `all_tiers: false` (so no
+ * Secret location, and no other tier, comes back). The count leaves the
+ * engine; the hits go only to the private answer job. An unsearchable corpus
  * counts as no match.
  */
-export async function defaultPrivateMatchProbe(question: string, ctx: OperationContext): Promise<boolean> {
+export async function defaultPrivateMatchProbe(question: string, ctx: OperationContext): Promise<PrivateMatchProbeResult> {
   const query = question.slice(0, PROBE_QUERY_MAX_CHARS);
   const corpora = createPublicSourceCorpusRegistry(ctx.config.sourceIndex.corpusRegistry)
     .list('search')
     .filter((corpus) => corpus.trustDomain === 'secure_local');
-  if (corpora.length === 0) return false;
+  const none: PrivateMatchProbeResult = { count: 0, evidence: [] };
+  if (corpora.length === 0) return none;
   const searches = corpora.map((corpus) => ctx.email
-    .sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: 1, allTiers: false })
-    .then((result) => Array.isArray(result.hits) && result.hits.length > 0, () => false));
-  const timeout = new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => resolve(false), PROBE_TIMEOUT_MS);
+    .sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false })
+    .then(
+      (result) => (Array.isArray(result.hits) ? result.hits : [])
+        .filter((hit): hit is PrivateEvidenceItem => typeof hit === 'object' && hit !== null && !Array.isArray(hit)),
+      () => [] as PrivateEvidenceItem[],
+    ));
+  const timeout = new Promise<PrivateMatchProbeResult>((resolve) => {
+    const timer = setTimeout(() => resolve(none), PROBE_TIMEOUT_MS);
     (timer as { unref?: () => void }).unref?.();
   });
-  return Promise.race([Promise.all(searches).then((hits) => hits.some(Boolean)), timeout]);
+  return Promise.race([
+    Promise.all(searches).then((perCorpus) => {
+      const evidence = perCorpus.flat();
+      return { count: evidence.length, evidence };
+    }),
+    timeout,
+  ]);
 }
 
+const PROBE_HITS_PER_CORPUS = 10;
 const PROBE_QUERY_MAX_CHARS = 500;
 const PROBE_TIMEOUT_MS = 20_000;
 
 /** A handed-off answer's probe result, until its source_answer_result collects it. */
-const privateMatchByJob = new Map<string, { matched: boolean; expiresAt: number }>();
+const privateMatchByJob = new Map<string, { match: PendingPrivateMatch | undefined; expiresAt: number }>();
 const PRIVATE_MATCH_TTL_MS = 30 * 60_000;
 const PRIVATE_MATCH_MAX_JOBS = 1_000;
 
@@ -325,7 +424,7 @@ function pendingJobId(raw: unknown): string | undefined {
   return record?.status === 'working' && typeof record.job_id === 'string' ? record.job_id : undefined;
 }
 
-function rememberPrivateMatch(jobId: string, matched: boolean): void {
+function rememberPrivateMatch(jobId: string, match: PendingPrivateMatch | undefined): void {
   const now = Date.now();
   for (const [id, entry] of privateMatchByJob) if (entry.expiresAt <= now) privateMatchByJob.delete(id);
   while (privateMatchByJob.size >= PRIVATE_MATCH_MAX_JOBS) {
@@ -333,13 +432,13 @@ function rememberPrivateMatch(jobId: string, matched: boolean): void {
     if (oldest === undefined) break;
     privateMatchByJob.delete(oldest);
   }
-  privateMatchByJob.set(jobId, { matched, expiresAt: now + PRIVATE_MATCH_TTL_MS });
+  privateMatchByJob.set(jobId, { match, expiresAt: now + PRIVATE_MATCH_TTL_MS });
 }
 
-function privateMatchForJob(jobId: string, done: boolean): boolean {
+function privateMatchForJob(jobId: string, done: boolean): PendingPrivateMatch | undefined {
   const entry = privateMatchByJob.get(jobId);
   if (done) privateMatchByJob.delete(jobId);
-  return entry !== undefined && entry.expiresAt > Date.now() && entry.matched;
+  return entry !== undefined && entry.expiresAt > Date.now() ? entry.match : undefined;
 }
 
 async function runOperation(name: string, ctx: OperationContext, params: Record<string, unknown>): Promise<unknown> {
@@ -365,10 +464,33 @@ async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?: Abort
     // An unreadable profile is not reported rather than reported as unset.
     privacy = undefined;
   }
-  return buildChatGptDashboardViewModel(view, { ...(embedding ? { embedding } : {}), ...(privacy ? { privacy } : {}) });
+  let privateModel: ChatGptDashboardOptions['privateModel'];
+  try {
+    privateModel = options.privateModel?.();
+  } catch {
+    privateModel = undefined;
+  }
+  return buildChatGptDashboardViewModel(view, {
+    ...(embedding ? { embedding } : {}),
+    ...(privacy ? { privacy } : {}),
+    ...(privateModel ? { privateModel } : {}),
+  });
 }
 
+/** Every MCP Apps resource this surface serves, in list order. */
+export const CHATGPT_RESOURCES = [DASHBOARD_RESOURCE, PRIVATE_ANSWER_RESOURCE] as const;
+
 export function readChatGptResource(uri: string): { contents: Array<Record<string, unknown>> } {
+  if (uri === PRIVATE_ANSWER_RESOURCE_URI) {
+    return {
+      contents: [{
+        uri: PRIVATE_ANSWER_RESOURCE.uri,
+        mimeType: PRIVATE_ANSWER_RESOURCE.mimeType,
+        text: privateAnswerResourceHtml(),
+        _meta: privateAnswerResourceMeta(),
+      }],
+    };
+  }
   if (uri !== DASHBOARD_RESOURCE_URI) {
     throw new McpError(ErrorCode.InvalidParams, 'Unknown resource.');
   }
@@ -389,6 +511,8 @@ export function readChatGptResource(uri: string): { contents: Array<Record<strin
 export function createChatGptMcpServer(
   makeOperationContext: () => OperationContext,
   options: ChatGptSurfaceOptions,
+  /** The same caller's context without the request's signal (see callChatGptTool). */
+  makeDetachedContext?: () => OperationContext,
 ): Server {
   const server = new Server(
     { name: 'olympus', version: VERSION },
@@ -396,8 +520,8 @@ export function createChatGptMcpServer(
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listChatGptTools(makeOperationContext(), options) }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
-    callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal));
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [{ ...DASHBOARD_RESOURCE }] }));
+    callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal, makeDetachedContext));
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: CHATGPT_RESOURCES.map((resource) => ({ ...resource })) }));
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
   return server;

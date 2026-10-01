@@ -19,6 +19,7 @@ import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.t
 import { startRelay, type RelayHandle } from '../server/relay.ts';
 import generatedDashboard from '../server/generated/chatgpt-dashboard.json';
 import generatedSurface from '../server/generated/chatgpt-tools.json';
+import generatedPrivateAnswer from '../server/generated/chatgpt-private-answer.json';
 
 setDefaultTimeout(15_000);
 
@@ -313,7 +314,12 @@ describe('routing', () => {
         : [{ type: 'oauth2', scopes: [] }]);
     }
     const resources = await (await anonymous(rpc('resources/list'))).json();
-    expect(resources.result.resources).toEqual([{ uri: 'ui://olympus/dashboard', name: 'Olympus dashboard', mimeType: 'text/html;profile=mcp-app' }]);
+    expect(resources.result.resources).toEqual([
+      { uri: 'ui://olympus/dashboard', name: 'Olympus dashboard', mimeType: 'text/html;profile=mcp-app' },
+      { uri: 'ui://olympus/private-answer', name: 'Olympus private answer', mimeType: 'text/html;profile=mcp-app' },
+    ]);
+    const panel = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/private-answer' }))).json();
+    expect(panel.result.contents).toEqual(generatedPrivateAnswer.contents);
     const resource = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/dashboard' }))).json();
     // The dashboard lane's real bundle, not a placeholder.
     expect(resource.result.contents).toEqual(generatedDashboard.contents);
@@ -504,6 +510,103 @@ describe('offline fallback', () => {
     const notification = await mcpPost(relay, token, JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }));
     expect(notification.status).toBe(202);
     expect(worker.requests).toHaveLength(0);
+  });
+});
+
+describe('private answer collection', () => {
+  const PANEL = 'https://olympus.web-sandbox.oaiusercontent.com';
+  const collect = (relay: RelayHandle, jobId: string, init: { origin?: string; body?: string; method?: string } = {}) =>
+    fetch(`${relay.url}/private/${jobId}`, {
+      method: init.method ?? 'POST',
+      headers: { 'content-type': 'application/json', ...(init.origin !== undefined ? { origin: init.origin } : { origin: PANEL }) },
+      ...(init.method === 'OPTIONS' || init.method === 'GET' ? {} : { body: init.body ?? JSON.stringify({ v: 1, publicKey: 'k' }) }),
+    });
+
+  test('routes a job id to the install it names, with CORS for ChatGPT widget origins only', async () => {
+    logLines.length = 0;
+    const relay = await makeRelay();
+    const workerA = fakeWorker('A');
+    const workerB = fakeWorker('B');
+    cleanups.push(workerA.stop, workerB.stop);
+    const a = await connectInstall(relay, workerA);
+    await connectInstall(relay, workerB);
+    const jobId = mintCredential('private', a.identity.installId);
+
+    const preflight = await fetch(`${relay.url}/private/${jobId}`, {
+      method: 'OPTIONS',
+      headers: { origin: PANEL, 'access-control-request-method': 'POST', 'access-control-request-headers': 'content-type' },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(preflight.headers.get('access-control-allow-methods')).toContain('POST');
+    expect(preflight.headers.get('access-control-allow-headers')).toBe('content-type');
+    const badPreflight = await fetch(`${relay.url}/private/${jobId}`, { method: 'OPTIONS', headers: { origin: 'https://evil.example' } });
+    expect(badPreflight.status).toBe(403);
+    expect(badPreflight.headers.get('access-control-allow-origin')).toBeNull();
+
+    const response = await collect(relay, jobId);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(response.headers.get('vary')).toBe('Origin');
+    expect(await response.json()).toMatchObject({ worker: 'A', path: `/private/${jobId}` });
+    expect(workerA.requests[0]!.headers['x-olympus-relay']).toBe(a.secret);
+    expect(workerA.requests[0]!.headers.origin).toBe(PANEL);
+    expect(workerB.requests).toHaveLength(0);
+    // The relay's own origin is the panel's dedicated domain.
+    expect((await collect(relay, jobId, { origin: `https://${PUBLIC_HOST}` })).status).toBe(200);
+
+    for (const origin of ['https://evil.example', 'null', '', 'https://x.y.web-sandbox.oaiusercontent.com']) {
+      const refused = await collect(relay, jobId, { origin });
+      expect(refused.status, origin).toBe(403);
+      expect(refused.headers.get('access-control-allow-origin')).toBeNull();
+    }
+    expect((await collect(relay, jobId, { method: 'GET' })).status).toBe(405);
+    expect(workerA.requests).toHaveLength(2);
+
+    // Wrong shapes and unknown installs never reach any engine.
+    expect((await collect(relay, 'nope')).status).toBe(404);
+    expect((await collect(relay, mintCredential('access', a.identity.installId))).status).toBe(404);
+    expect((await fetch(`${relay.url}/private/${jobId}?x=1`, { method: 'POST', headers: { origin: PANEL } })).status).toBe(404);
+    const unknown = await collect(relay, mintCredential('private', 'c'.repeat(32)));
+    expect(unknown.status).toBe(410);
+    expect(await unknown.json()).toEqual({ status: 'gone' });
+    expect(unknown.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect((await collect(relay, jobId, { body: 'x'.repeat(600) })).status).toBe(413);
+    expect(workerA.requests).toHaveLength(2);
+    expect(workerB.requests).toHaveLength(0);
+
+    const logs = logLines.join('\n');
+    expect(logs).not.toContain(jobId.split('.')[2]!);
+    expect(logs).not.toContain(a.identity.installId);
+  });
+
+  test('an offline Mac answers mac_offline, with CORS, so the panel can say so', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    await a.client.stop();
+    await until(() => relay.onlineInstalls().length === 0);
+    const response = await collect(relay, mintCredential('private', a.identity.installId));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ status: 'mac_offline' });
+    expect(response.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  test('collections are rate limited per address', async () => {
+    const relay = await makeRelay({ privateFetchesPerIp: { capacity: 2, refillPerSecond: 0.001 } });
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const jobId = mintCredential('private', a.identity.installId);
+    expect((await collect(relay, jobId)).status).toBe(200);
+    expect((await collect(relay, jobId)).status).toBe(200);
+    const limited = await collect(relay, jobId);
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ status: 'rate_limited' });
+    expect(limited.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(worker.requests).toHaveLength(2);
   });
 });
 

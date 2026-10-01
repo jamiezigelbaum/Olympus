@@ -646,7 +646,10 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     const client = await connectClient();
     try {
       const { resources } = await client.listResources();
-      expect(resources).toEqual([{ uri: DASHBOARD_RESOURCE_URI, name: 'Olympus dashboard', mimeType: MCP_APP_MIME_TYPE }]);
+      expect(resources).toEqual([
+        { uri: DASHBOARD_RESOURCE_URI, name: 'Olympus dashboard', mimeType: MCP_APP_MIME_TYPE },
+        { uri: 'ui://olympus/private-answer', name: 'Olympus private answer', mimeType: MCP_APP_MIME_TYPE },
+      ]);
       const read = await client.readResource({ uri: DASHBOARD_RESOURCE_URI });
       const content = read.contents[0] as { uri: string; mimeType: string; text: string; _meta: Record<string, unknown> };
       expect(content.uri).toBe(DASHBOARD_RESOURCE_URI);
@@ -675,7 +678,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     }
   });
 
-  test('answers use Public and Personal evidence only; a Private match adds one fixed sentence', async () => {
+  test('answers use Public and Personal evidence only; a Private match reaches the panel _meta only', async () => {
     const client = await connectClient();
     try {
       const result = await client.callTool({ name: 'source_answer', arguments: { question: 'When was the budget approved?' } });
@@ -688,6 +691,8 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         ],
         notes: ['Some matching items are private and stay on your Mac.'],
       });
+      // The probe's boolean match counts as one item, for the panel only.
+      expect((result._meta as Record<string, unknown>)['olympus/privateAnswer']).toEqual({ v: 1, count: 1, state: 'no_model' });
     } finally {
       await client.close();
     }
@@ -704,6 +709,8 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         citations: [],
         notes: ['Some matching items are private and stay on your Mac.'],
       });
+      // The probe's boolean match counts as one item, for the panel only.
+      expect((result._meta as Record<string, unknown>)['olympus/privateAnswer']).toEqual({ v: 1, count: 1, state: 'no_model' });
     } finally {
       await client.close();
     }

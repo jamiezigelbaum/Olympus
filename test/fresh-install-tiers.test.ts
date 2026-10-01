@@ -25,9 +25,12 @@ import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import {
   appendClassificationLedgerEntry,
   CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+  readClassificationLedger,
 } from '../src/workers/classification-ledger.ts';
 import {
   BUILT_IN_SNIFFER_LANE,
+  registerBuiltInPrivateModel,
+  registeredBuiltInPrivateModel,
   resolveTierSnifferRuntime,
   type BuiltInPrivateModel,
 } from '../src/workers/classification/built-in-sniffer.ts';
@@ -37,7 +40,7 @@ import {
 } from '../src/workers/classification/installed-tier-classification.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
-import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON, TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { loadSovereigntyEngine } from '../src/core/sovereignty.ts';
 import {
@@ -162,7 +165,7 @@ async function olympusSearch(install: Install, question: string) {
       };
     },
   });
-  return { raw, result: searchToolResult(raw, { privateMatched: false }) };
+  return { raw, result: searchToolResult(raw) };
 }
 
 const identity = (id: string) => ({ provider: 'dropbox', accountScope: 'personal', providerItemId: id });
@@ -300,3 +303,145 @@ describe('Public is retired on a fresh install', () => {
     expect(() => loadSovereigntyEngine({ inlineConfig: halfRemoved })).toThrow(/public_safe/);
   });
 });
+
+describe('owner defaults (2026-10-01): the registered built-in model is approved by default, and Personal verdicts move at once', () => {
+  afterEach(() => registerBuiltInPrivateModel(undefined));
+
+  /** The worker's boot order: register the built-in model, then resolve the sniffer from the registry. */
+  function registeredBuiltIn(verdict: string) {
+    const prompts: AnalystModelRequest[] = [];
+    registerBuiltInPrivateModel({
+      model: {
+        async complete(request) {
+          prompts.push(request);
+          return { text: verdict, modelId: 'built_in' };
+        },
+      },
+      available: () => true,
+    });
+    const builtIn = registeredBuiltInPrivateModel()!;
+    const runtime = resolveTierSnifferRuntime({
+      engine: loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET) }),
+      builtIn,
+    });
+    expect(runtime.source).toBe('built_in');
+    return { prompts, builtIn, runtime };
+  }
+
+  function snifferFor(install: Install, builtIn: BuiltInPrivateModel, options: {
+    ownerWords?: () => string | undefined;
+    autoApproveBuiltIn?: boolean;
+    localEmbeddingsOnly?: boolean;
+    lane?: typeof BUILT_IN_SNIFFER_LANE;
+  } = {}) {
+    const service = new TierSnifferService({
+      installed: install.installed,
+      lane: options.lane ?? BUILT_IN_SNIFFER_LANE,
+      model: builtIn.model,
+      stores: () => [install.secure, ...[install.lane.internal.current()].filter((store): store is LocalConnectorStore => store !== undefined)],
+      classificationLedgerPath: join(root, 'classification-ledger.jsonl'),
+      modelAvailable: () => builtIn.available(),
+      ownerContext: options.ownerWords ?? (() => undefined),
+      autoApproveBuiltIn: options.autoApproveBuiltIn ?? true,
+      autoMoves: {
+        localEmbeddingsOnly: () => options.localEmbeddingsOnly ?? true,
+        embeddingLedgerPath: join(root, 'embedding-ledger.jsonl'),
+        maxPerPass: 5,
+      },
+    });
+    closers.push(() => service.stop());
+    return service;
+  }
+
+  const PRIVATE_VERDICT = '{"verdicts":[{"i":1,"tier":"private","category":"financial","confidence":0.9}]}';
+  const PERSONAL_VERDICT = '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","confidence":0.97}]}';
+
+  test('the built-in model judges at once with a default owner approval, re-approved for new owner words, never past a revocation', async () => {
+    const { prompts, builtIn, runtime } = registeredBuiltIn(PRIVATE_VERDICT);
+    // No owner words yet: the base prompt version.
+    let ownerWords: string | undefined;
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    const service = snifferFor(install, builtIn, { ownerWords: () => ownerWords });
+
+    expect(await service.runOnce()).toMatchObject({ state: 'ran' });
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'current', metadataTier: 'secure' });
+    const ledgerPath = join(root, 'classification-ledger.jsonl');
+    const first = (await readClassificationLedger(ledgerPath)).entries;
+    expect(first[0]).toMatchObject({
+      kind: 'classifier_model_decision',
+      approved_by: 'owner',
+      status: 'complete',
+      lane: 'local',
+      profile_id: 'built_in',
+      model_id: 'built_in',
+      prompt_version: snifferPromptVersions(ownerWords).approval,
+      why: BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON,
+    });
+    expect(first[0]!.recorded_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    // The owner adds their words: a new prompt version, approved again automatically.
+    ownerWords = 'Money matters and my health.';
+    expect(snifferPromptVersions(ownerWords).approval).not.toBe(snifferPromptVersions(undefined).approval);
+    expect(await service.runOnce()).toMatchObject({ state: 'ran' });
+    const second = (await readClassificationLedger(ledgerPath)).entries;
+    expect(second.filter((entry) => entry.approved_by === 'owner' && entry.status === 'complete')).toHaveLength(2);
+    expect(second[0]).toMatchObject({ prompt_version: snifferPromptVersions(ownerWords).approval, why: BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON });
+
+    // The owner revokes this version: the default never re-approves it.
+    await appendClassificationLedgerEntry(ledgerPath, {
+      recorded_at: new Date(Date.now() + 60_000).toISOString(),
+      kind: 'classifier_model_revoked',
+      what: 'Owner revokes the built-in sniffer.',
+      model_id: 'built_in',
+      prompt_version: snifferPromptVersions(ownerWords).approval,
+      lane: 'local',
+      profile_id: 'built_in',
+      approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+      status: 'complete',
+    });
+    expect(await service.runOnce()).toMatchObject({ state: 'awaiting_owner_approval' });
+  });
+
+  test('a remote classifier is never approved by default', async () => {
+    const { builtIn } = registeredBuiltIn(PRIVATE_VERDICT);
+    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
+    const venice = { ...BUILT_IN_SNIFFER_LANE, kind: 'venice', modelId: 'venice-private', profileId: 'venice-private' } as typeof BUILT_IN_SNIFFER_LANE;
+    const service = snifferFor(install, builtIn, { lane: venice });
+    expect(await service.runOnce()).toMatchObject({ state: 'awaiting_owner_approval' });
+    const entries = (await readClassificationLedger(join(root, 'classification-ledger.jsonl'))).entries;
+    expect(entries.some((entry) => entry.approved_by === 'owner')).toBe(false);
+  });
+
+  test('a Personal verdict on a held item moves it at once when every embedding is the built-in local model', async () => {
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending' });
+    const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true });
+    const tick = await service.runOnce();
+    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 1 }, autoMoves: { moved: 1, failed: 0, notEligible: 0 } });
+    // Moved: current in Personal, and its text now reaches olympus_search.
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'current', contentTier: 'private' });
+    const { result } = await olympusSearch(install, 'lender');
+    expect(JSON.stringify(result)).toContain('loan terms');
+    const ledger = await readEmbeddingLedgerEntries(join(root, 'embedding-ledger.jsonl'));
+    expect(ledger.some((entry) => entry.approved_by === 'system-automatic')).toBe(true);
+  });
+
+  test('with a paid or remote embedding configured, the queued move waits for the owner-approved migration', async () => {
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    const service = snifferFor(install, builtIn, { localEmbeddingsOnly: false });
+    const tick = await service.runOnce();
+    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 1 } });
+    expect((tick as { autoMoves?: unknown }).autoMoves).toBeUndefined();
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+    const { result } = await olympusSearch(install, 'lender');
+    expect(JSON.stringify(result)).not.toContain('loan terms');
+  });
+});
+
+async function readEmbeddingLedgerEntries(path: string): Promise<Array<Record<string, unknown>>> {
+  const { readEmbeddingLedger } = await import('../src/workers/embedding-ledger.ts');
+  return (await readEmbeddingLedger(path)).entries as unknown as Array<Record<string, unknown>>;
+}

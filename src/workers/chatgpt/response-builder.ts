@@ -12,8 +12,11 @@
  *   already decided the calling assistant may see.
  * - Only Public and Personal evidence is cited (titles, links, dates). Private
  *   and Secret items are never cited or summarized; a Private match adds one
- *   fixed sentence, no counts. Secret locations, folder names, corpus ids,
- *   internal ids and timings are never copied.
+ *   fixed sentence and, for the private answer panel, a capped count and the
+ *   panel state (`structuredContent.privateMatch`) plus the panel's one-time
+ *   job id in widget-only `_meta` (privateAnswerMeta). No private answer text,
+ *   key or token ever passes through here. Secret locations, folder names,
+ *   corpus ids, internal ids and timings are never copied.
  * - Errors carry a fixed sentence per error code, never the internal message.
  *
  * `_meta` reaches only the UI, never the model, but it still leaves the Mac
@@ -60,6 +63,15 @@ import {
   SCOPE_UI_META_KEY,
 } from './dashboard-contract.ts';
 import { DASHBOARD_CHATGPT_VOCABULARY } from '../dashboard/vocabulary.ts';
+import { credentialInstallId } from '../../../connect-relay/shared/tokens.ts';
+import {
+  PRIVATE_ANSWER_META_KEY,
+  PRIVATE_ANSWER_RESOURCE_URI,
+  PRIVATE_MATCH_COUNT_CAP,
+  type PrivateAnswerMetaV1,
+  type PrivateAnswerPanelState,
+  type PrivateMatchSummary,
+} from './private-answer-contract.ts';
 
 export interface ChatGptTextContent {
   type: 'text';
@@ -293,8 +305,12 @@ export interface ChatGptCitation {
 }
 
 export interface AnswerResultOptions {
-  /** A Private item matched the question (found by the surface's own probe). */
-  privateMatched?: boolean;
+  /**
+   * The private answer panel's summary and job, when Private items matched.
+   * It reaches the panel only, in `_meta`; nothing model-visible changes, so
+   * the model cannot learn whether Private items match.
+   */
+  privateMatch?: PrivateMatchSummary & { jobId?: string };
 }
 
 /**
@@ -318,7 +334,9 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   if (!record || typeof record.answer !== 'string') {
     return errorToolResult(new OperationError('source_index_error', 'unexpected answer shape'));
   }
-  let privateMatched = options.privateMatched === true;
+  // Set only when Private evidence reached this answer despite the request
+  // (a policy breach the answer is withheld for), never by the probe.
+  let privateMatched = false;
   const citations: ChatGptCitation[] = [];
   for (const value of Array.isArray(record.evidence) ? record.evidence : []) {
     const evidence = asRecord(value);
@@ -342,10 +360,28 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
     textParts.push('', 'Sources:', ...shownCitations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));
   }
   if (notes.length > 0) textParts.push('', ...notes);
-  return {
-    content: [{ type: 'text', text: textParts.join('\n') }],
-    structuredContent: { status: 'answered', answer, citations: shownCitations, ...(notes.length > 0 ? { notes } : {}) },
+  const structuredContent: Record<string, unknown> = {
+    status: 'answered',
+    answer,
+    citations: shownCitations,
+    ...(notes.length > 0 ? { notes } : {}),
   };
+  return withPrivateAnswerMeta({ content: [{ type: 'text', text: textParts.join('\n') }], structuredContent }, options.privateMatch);
+}
+
+/**
+ * Adds the private answer panel's `_meta` (count, state, one-time job id) to
+ * a result, and nothing else: `content` and `structuredContent` are left
+ * exactly as they were, with or without a match.
+ */
+export function withPrivateAnswerMeta(
+  result: ChatGptToolResult,
+  match: (PrivateMatchSummary & { jobId?: string }) | undefined,
+): ChatGptToolResult {
+  const panel = copyPrivateMatch(match);
+  if (!panel) return result;
+  const meta = typeof result._meta === 'object' && result._meta !== null ? result._meta as Record<string, unknown> : {};
+  return { ...result, _meta: { ...meta, [PRIVATE_ANSWER_META_KEY]: panel } };
 }
 
 /* ------------------------------------------------------------------ */
@@ -369,7 +405,9 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   if (!record || !Array.isArray(record.evidence)) {
     return errorToolResult(new OperationError('source_index_error', 'unexpected search shape'));
   }
-  let privateMatched = options.privateMatched === true;
+  // Set only when a non-citable item reached the search output (dropped
+  // here); the probe's private match goes to the panel's `_meta` alone.
+  let privateMatched = false;
   let flagged = false;
   const evidence: SearchEvidence[] = [];
   for (const value of record.evidence) {
@@ -422,14 +460,39 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
     }
   }
   if (notes.length > 0) lines.push(...notes);
-  return {
+  return withPrivateAnswerMeta({
     content: [{ type: 'text', text: lines.join('\n').trim() }],
     structuredContent: structured as unknown as Record<string, unknown>,
-  };
+  }, options.privateMatch);
 }
 
 function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+const PANEL_STATES = new Set<PrivateAnswerPanelState>(['ready', 'no_model', 'model_downloading']);
+
+/**
+ * The private answer panel's `_meta` value, field by field: a capped count,
+ * the state, the one-time job id (only when `ready`, only in the routable
+ * private-job shape) and a download percent. Nothing else, ever: no key, no
+ * fetch token, no answer. Undefined when there is no positive count.
+ */
+export function copyPrivateMatch(match: (PrivateMatchSummary & { jobId?: string }) | undefined): PrivateAnswerMetaV1 | undefined {
+  if (!match || !finite(match.count)) return undefined;
+  const count = Math.min(PRIVATE_MATCH_COUNT_CAP, whole(match.count));
+  if (count === 0) return undefined;
+  const state: PrivateAnswerPanelState = PANEL_STATES.has(match.panelState) ? match.panelState : 'no_model';
+  const out: PrivateAnswerMetaV1 = { v: 1, count, state };
+  if (state === 'ready') {
+    if (typeof match.jobId !== 'string' || credentialInstallId('private', match.jobId) === undefined) {
+      out.state = 'no_model';
+    } else {
+      out.jobId = match.jobId;
+    }
+  }
+  if (state === 'model_downloading' && finite(match.percent)) out.percent = Math.max(0, Math.min(100, Math.round(match.percent)));
+  return out;
 }
 
 /** Proposed vocabulary: the whole answer when only Private items could answer. */
@@ -807,6 +870,17 @@ export function dashboardToolMeta(): Record<string, unknown> {
     // Legacy alias some ChatGPT clients still read.
     'openai/outputTemplate': DASHBOARD_RESOURCE_URI,
     'openai/ui': { entrypoints: [{ type: 'global' }] },
+  };
+}
+
+/**
+ * The answer tools' `_meta`: their results render the private answer panel,
+ * which shows nothing unless the result carries a private match.
+ */
+export function answerToolMeta(): Record<string, unknown> {
+  return {
+    ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_URI },
+    'openai/outputTemplate': PRIVATE_ANSWER_RESOURCE_URI,
   };
 }
 

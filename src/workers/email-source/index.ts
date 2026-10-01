@@ -2800,8 +2800,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               corpusId: run.store.corpusId,
               trustDomain: run.store.trustDomain,
             })));
-            // One tier-ledger snapshot judges every tier's hits together.
-            const visible = new Set(tiered && options.sourceIndexVisibilityGate
+            // One tier-ledger snapshot judges every tier's hits together, and
+            // a single pinned corpus (`all_tiers: false`) too: an item whose
+            // copy here is no longer current (re-tiered, Secret) is never
+            // returned, whatever the store's own filter says.
+            const visible = new Set(options.sourceIndexVisibilityGate
               ? options.sourceIndexVisibilityGate(tagged)
               : tagged);
             // Round-robin across tiers, so a full page from one tier cannot
@@ -2814,7 +2817,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 if (hit && merged.length < searchRequest.maxResults) merged.push(hit);
               }
             }
-            const hits = tiered ? merged : tagged;
+            const hits = tiered ? merged : tagged.filter((hit) => visible.has(hit));
             const secretLocations = tiered
               ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? []
               : [];

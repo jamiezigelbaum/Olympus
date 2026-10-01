@@ -52,6 +52,11 @@ export interface RelayLimits {
   readonly connectionIdleTimeoutSeconds: number;
   /** Unauthenticated-route requests (token, metadata, bridge, 401s, unconfirmed credentials) per address. */
   readonly publicRequestsPerIp: BucketSpec;
+  /**
+   * Private-answer panel POSTs (`/private/<id>`) per address. A panel polls
+   * about every two seconds while one answer is prepared.
+   */
+  readonly privateFetchesPerIp: BucketSpec;
   readonly maxRequestBodyBytes: number;
   readonly maxResponseBodyBytes: number;
   /** Request bodies being uploaded at once, across the relay. */
@@ -96,6 +101,7 @@ export const DEFAULT_LIMITS: RelayLimits = {
   unverifiedQueueWaitMs: 10_000,
   connectionIdleTimeoutSeconds: 15,
   publicRequestsPerIp: { capacity: 120, refillPerSecond: 20 },
+  privateFetchesPerIp: { capacity: 30, refillPerSecond: 1 },
   maxRequestBodyBytes: 1024 * 1024,
   maxResponseBodyBytes: 8 * 1024 * 1024,
   maxConcurrentUploads: 512,

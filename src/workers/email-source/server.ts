@@ -63,6 +63,15 @@ import {
   workerAuthTokenFromEnv,
 } from '../http.ts';
 import { createAnalyst } from '../../core/analyst.ts';
+import {
+  answerPrivately,
+  builtInAnalystEnabled,
+  builtInPrivateModelStatus,
+  createBuiltInAnalystModel,
+  resolveBuiltInReasoningModel,
+  withBuiltInFallback,
+  type BuiltInAnalystModel,
+} from '../../core/analyst-built-in.ts';
 import { createDelphiAnalystModel } from '../../core/analyst-delphi.ts';
 import { createAnthropicAnalystModel } from '../../core/analyst-anthropic.ts';
 import { createOpenClawInferAnalystModel } from '../../core/analyst-openclaw-infer.ts';
@@ -326,7 +335,7 @@ import {
 import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-sources.ts';
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
-import { registeredBuiltInPrivateModel, resolveTierSnifferRuntime } from '../classification/built-in-sniffer.ts';
+import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveTierSnifferRuntime } from '../classification/built-in-sniffer.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
@@ -993,6 +1002,7 @@ async function createSovereigntyAnalystMap(input: {
   veniceAnalystTimeoutMs: number | undefined;
   veniceReasoningHeadroomTokens: number | undefined;
   bootSecretResolver?: WorkerBootSecretResolver;
+  builtInAnalyst?: Analyst;
 }): Promise<Map<string, {
   profile: SovereigntyResolvedProfile;
   backend: AnalystBackend;
@@ -1042,7 +1052,90 @@ async function createSovereigntyAnalystMap(input: {
     if (!analyst) continue;
     map.set(id, { profile: resolved, backend, analyst });
   }
+  applyBuiltInPrivateAnalyst(map, securePoolMemberIds, input.builtInAnalyst);
   return map;
+}
+
+/**
+ * The built-in private model backs the Private lane when no other private
+ * analyst is configured: with no constructible Venice member in the secure
+ * pool, each local secure-pool member falls back to the built-in model when
+ * its own model service is not running. A configured, running local service
+ * is always used first, and a configured Venice member leaves the pool as is.
+ * Returns whether the built-in model was wired in.
+ */
+export function applyBuiltInPrivateAnalyst(
+  map: Map<string, { profile: SovereigntyResolvedProfile; backend: AnalystBackend; analyst: Analyst }>,
+  securePoolMemberIds: ReadonlySet<string>,
+  builtInAnalyst: Analyst | undefined,
+): boolean {
+  if (!builtInAnalyst) return false;
+  const members = [...securePoolMemberIds].flatMap((id) => {
+    const entry = map.get(id);
+    return entry ? [[id, entry] as const] : [];
+  });
+  if (members.some(([, entry]) => entry.backend === 'venice')) return false;
+  let wired = false;
+  for (const [id, entry] of members) {
+    if (entry.backend !== 'local') continue;
+    map.set(id, { ...entry, analyst: withBuiltInFallback(entry.analyst, builtInAnalyst) });
+    wired = true;
+  }
+  return wired;
+}
+
+/** Whether this computer's configured local answer model answers /models within a few seconds. */
+async function probeLocalAnalystService(olympusConfig: ReturnType<typeof loadConfig>): Promise<boolean> {
+  try {
+    await new DelphiClient(olympusConfig).listModelsForProfile('source_answer', AbortSignal.timeout(3_000));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The built-in analyst for this worker, or undefined when it is switched off,
+ * unsupported here, or the machine has too little memory. Under the test
+ * runner it is never created: a test must not fetch model weights.
+ */
+function createWorkerBuiltInAnalystModel(env: Record<string, string | undefined>): BuiltInAnalystModel | undefined {
+  if (env.NODE_ENV === 'test' || !builtInAnalystEnabled(env)) return undefined;
+  if (!resolveBuiltInReasoningModel(env)) return undefined;
+  return createBuiltInAnalystModel({ env });
+}
+
+/**
+ * The worker's one built-in private model, with `available()`: downloaded,
+ * verified and prepared in this process, so a caller (the sniffer, the
+ * private answer panel) never asks it while a first-time download runs. A
+ * model already installed on disk is prepared at boot (a checksum pass, no
+ * download); a fresh install is started by the answer pool when the local
+ * model service is down.
+ */
+function createWorkerSharedBuiltInModel(
+  env: Record<string, string | undefined>,
+): { model: BuiltInAnalystModel; available: () => boolean } | undefined {
+  const base = createWorkerBuiltInAnalystModel(env);
+  if (!base) return undefined;
+  let prepared = false;
+  const installedOnDisk = (): boolean => {
+    try {
+      const state = base.status().state;
+      return state === 'loading' || state === 'ready';
+    } catch {
+      return false;
+    }
+  };
+  const model: BuiltInAnalystModel = {
+    ...base,
+    async prepare() {
+      await base.prepare();
+      prepared = installedOnDisk();
+    },
+  };
+  if (installedOnDisk()) void model.prepare();
+  return { model, available: () => prepared && installedOnDisk() };
 }
 
 /**
@@ -1595,6 +1688,14 @@ export async function main(): Promise<void> {
   const bootSecretResolver = new WorkerBootSecretResolver({
     resolveSecretRefValueSync: (secretRef, env) => resolveSecretRefValueSync(secretRef, { env }),
   });
+  // The built-in private model: one instance per worker, shared by the tier
+  // sniffer, the Private answer pool's fallback and ChatGPT's private answer
+  // panel, so at most one local model server runs. Registered for the
+  // sniffer before its runtime is resolved below.
+  const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env);
+  registerBuiltInPrivateModel(workerBuiltInModel
+    ? { model: workerBuiltInModel.model, available: workerBuiltInModel.available }
+    : undefined);
   // Four-tier classification inputs for every lane: the owner's map, tier
   // rules, their own words about privacy, and the privacy-safe sniffer. The
   // sniffer only ever runs on a local model or Venice Private, else on the
@@ -2957,6 +3058,7 @@ export async function main(): Promise<void> {
           ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }
           : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
       );
+      const builtInAnalystModel = workerBuiltInModel?.model;
       const sovereigntyAnalysts = await createSovereigntyAnalystMap({
         engine: sovereigntyEngine,
         olympusConfig,
@@ -2965,7 +3067,18 @@ export async function main(): Promise<void> {
         veniceAnalystTimeoutMs,
         veniceReasoningHeadroomTokens,
         bootSecretResolver,
+        ...(builtInAnalystModel
+          ? { builtInAnalyst: createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true }) }
+          : {}),
       });
+      if (builtInAnalystModel) {
+        // Start the one-time download at boot when this computer's configured
+        // local model service is not answering, so the dashboard shows the
+        // install right away instead of at the first Private question.
+        void probeLocalAnalystService(olympusConfig).then((up) => {
+          if (!up) void builtInAnalystModel.prepare();
+        });
+      }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
       return createAnalystSourceIndexAnswerHandler({
@@ -4078,6 +4191,24 @@ export async function main(): Promise<void> {
   });
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30_000);
   sourceAnswerJobSweep.unref?.();
+  // One-time private answers for ChatGPT's private answer panel
+  // (docs/design/chatgpt-plugin.md, "Private answer panel"), answered by the
+  // built-in private model. Without it on this machine every private match
+  // reports `no_model` with counts only.
+  const { PrivateAnswerJobs, createPrivateAnswerHandler, withPrivateAnswerRoute } = await import('../chatgpt/private-answer-jobs.ts');
+  const { createBuiltInPrivateAnswerModel } = await import('../chatgpt/private-answer-model.ts');
+  const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
+  const privateAnswerModel = createBuiltInPrivateAnswerModel({
+    model: workerBuiltInModel?.model,
+    available: () => workerBuiltInModel?.available() ?? false,
+    answer: answerPrivately,
+  });
+  const privateAnswers = new PrivateAnswerJobs({
+    model: () => privateAnswerModel,
+    installId: () => remotePublicUrls()?.installId,
+  });
+  const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30_000);
+  privateAnswerSweep.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -4181,8 +4312,13 @@ export async function main(): Promise<void> {
     // other route keeps the worker bearer. See workers/remote-mcp.ts,
     // workers/remote-openapi.ts and workers/remote-oauth/handler.ts. One-time
     // `/go/<id>` sign-in links answer their stored redirect once
-    // (workers/chatgpt/handoff.ts).
-    fetch: withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withRemoteOAuthRoutes(
+    // (workers/chatgpt/handoff.ts); `/private/<id>` is the private answer
+    // panel's one-time sealed collection (workers/chatgpt/private-answer-jobs.ts).
+    fetch: withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
+      jobs: privateAnswers,
+      isRelayed: isRelayedRequest,
+      extraOrigins: () => [DASHBOARD_UI_DOMAIN],
+    }), withRemoteOAuthRoutes(
       createRemoteOAuthHandler({
         publicUrls: remotePublicUrls,
         isRelayed: isRelayedRequest,
@@ -4200,6 +4336,7 @@ export async function main(): Promise<void> {
           // dashboard tool reads the view `/dashboard.json` serves, in-process.
           chatgpt: {
             servesRequest: isRelayedRequest,
+            privateAnswers,
             dashboardView: async (signal?: AbortSignal) => {
               const response = await worker.fetch(new Request(
                 'http://olympus-worker.internal/dashboard.json',
@@ -4212,6 +4349,11 @@ export async function main(): Promise<void> {
             ...(chatgptEvidenceSearch ? { evidenceSearch: chatgptEvidenceSearch } : {}),
             answerModelAvailable: chatgptAnswerModelAvailable,
             embedding: chatgptEmbeddingState,
+            privateModel: () => {
+              if (!workerBuiltInModel) return undefined;
+              const status = builtInPrivateModelStatus(process.env);
+              return status.enabled ? { state: status.state, percent: status.percent } : undefined;
+            },
             privacy: () => {
               const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
               return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
@@ -4220,7 +4362,7 @@ export async function main(): Promise<void> {
         }),
         withWorkerBearerAuth(worker.fetch, { authToken }),
       )),
-    )),
+    ))),
   });
   sourceScheduler?.start();
   await reconcileCaptures();
@@ -4250,6 +4392,17 @@ export async function main(): Promise<void> {
         shouldYield: () => sourceAnswersInFlight > 0
           || secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
         log: (line) => console.log(line),
+        // Owner defaults 2026-10-01: the built-in private model is approved
+        // for the sniffer by default, and a Personal verdict's queued move
+        // runs at once while every embedding is the built-in local model.
+        ...(snifferRuntime.source === 'built_in' ? { autoApproveBuiltIn: true } : {}),
+        autoMoves: {
+          localEmbeddingsOnly: () => (['public_safe', 'internal', 'secure_local'] as const).every((domain) => {
+            const resolved = sovereigntyEngine.resolveEmbeddingProfile(domain);
+            return resolved === undefined || resolved.profile.provider === 'built-in';
+          }),
+          embeddingLedgerPath: resolveEmbeddingLedgerPath(process.env),
+        },
       })
     : undefined;
   preemptTierSniffer = tierSniffer ? () => tierSniffer.preempt() : undefined;

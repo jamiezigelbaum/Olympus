@@ -92,6 +92,7 @@ import {
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
+import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { secretsDisposition } from './secrets-disposition.ts';
 
 
@@ -254,6 +255,7 @@ export class TieredStoreSet {
     // The sniffer's background pass settles this set's routed items through
     // this planner, so a verdict queues a move rather than rewriting placement.
     registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
+    registerTierSetForLedger(this.ledger.dbPath, this);
   }
 
   /** The leg's store, opening it when it is open, exists, or `create` is set. */

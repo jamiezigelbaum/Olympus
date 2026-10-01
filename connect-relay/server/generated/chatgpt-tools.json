@@ -70,7 +70,13 @@
           "type": "oauth2",
           "scopes": []
         }
-      ]
+      ],
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://olympus/private-answer"
+        },
+        "openai/outputTemplate": "ui://olympus/private-answer"
+      }
     },
     {
       "name": "source_index_status",
@@ -120,7 +126,13 @@
           "type": "oauth2",
           "scopes": []
         }
-      ]
+      ],
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://olympus/private-answer"
+        },
+        "openai/outputTemplate": "ui://olympus/private-answer"
+      }
     },
     {
       "name": "source_answer_result",
@@ -149,7 +161,13 @@
           "type": "oauth2",
           "scopes": []
         }
-      ]
+      ],
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://olympus/private-answer"
+        },
+        "openai/outputTemplate": "ui://olympus/private-answer"
+      }
     },
     {
       "name": "olympus_connect_source",
@@ -675,6 +693,11 @@
     {
       "uri": "ui://olympus/dashboard",
       "name": "Olympus dashboard",
+      "mimeType": "text/html;profile=mcp-app"
+    },
+    {
+      "uri": "ui://olympus/private-answer",
+      "name": "Olympus private answer",
       "mimeType": "text/html;profile=mcp-app"
     }
   ]

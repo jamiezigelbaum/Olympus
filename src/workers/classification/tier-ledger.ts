@@ -593,6 +593,17 @@ export class TierLedger {
     return flipped!;
   }
 
+  /** Items with a queued move (state `moving`), oldest decision first. */
+  listMoving(options: { limit?: number } = {}): TierLedgerRecord[] {
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
+    const rows = this.db.query(`
+      SELECT * FROM tier_items WHERE state = 'moving'
+      ORDER BY decided_at, provider, account_scope, provider_item_id, conversation_key
+      LIMIT ?
+    `).all(limit);
+    return (rows as TierItemRow[]).map(recordFromRow);
+  }
+
   /** Items waiting on an unanswered sniffer question, oldest first. */
   listPending(options: { limit?: number; after?: TierLedgerIdentity } = {}): TierLedgerRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));

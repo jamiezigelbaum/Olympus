@@ -9162,6 +9162,15 @@ class TierLedger {
     })();
     return flipped;
   }
+  listMoving(options = {}) {
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
+    const rows = this.db.query(`
+      SELECT * FROM tier_items WHERE state = 'moving'
+      ORDER BY decided_at, provider, account_scope, provider_item_id, conversation_key
+      LIMIT ?
+    `).all(limit);
+    return rows.map(recordFromRow);
+  }
   listPending(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
     const rows = options.after ? this.db.query(`
@@ -17100,6 +17109,44 @@ var init_local_index = __esm(() => {
   ];
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
+
+// src/workers/connector-store/tier-set-registry.ts
+function tierSetForLedger(ledgerPath) {
+  return tierSets?.get(ledgerPath);
+}
+var tierSets;
+
+// src/workers/connector-store/secrets-disposition.ts
+function secretsDisposition() {
+  return SECRETS_DISPOSITION;
+}
+function settleSecretsCopies(options) {
+  const disposition = options.disposition ?? secretsDisposition();
+  const chunks = {};
+  const identity = {
+    family: options.identity.family ?? "file",
+    provider: options.identity.provider,
+    accountScope: options.identity.accountScope,
+    providerItemId: options.identity.providerItemId,
+    localItemId: options.identity.localItemId,
+    ...options.identity.providerConversationId ? { providerConversationId: options.identity.providerConversationId } : {}
+  };
+  for (const copy of options.copies) {
+    const store = options.storeFor(copy.corpusId);
+    if (!store)
+      continue;
+    chunks[copy.corpusId] = (chunks[copy.corpusId] ?? 0) + (store.itemStoredContent(identity)?.chunkCount ?? 0);
+    if (disposition === "tombstone_now") {
+      const trustTier = "S5";
+      store.tombstoneCopy(identity, { connectorId: options.connectorId, trustTier });
+    }
+  }
+  if (disposition === "tombstone_now")
+    options.ledger.removeCopies(options.identity);
+  return { disposition, chunks };
+}
+var SECRETS_DISPOSITION = "tombstone_now";
+
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
   init_types();
@@ -22385,6 +22432,96 @@ init_analyst_answer();
 init_status();
 init_analyst();
 
+// src/core/analyst-built-in.ts
+init_analyst();
+init_operation_error();
+
+// src/workers/source-index/built-in-reasoning/manifest.ts
+var GIB = 1024 ** 3;
+function unslothQwen(size, revision, bytes, sha256) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae";
+var QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523";
+var QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5";
+var QWEN35_2B = {
+  modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+  displayName: "Qwen3.5 2B",
+  sizeClass: "small",
+  baseRepository: "Qwen/Qwen3.5-2B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-2B-GGUF",
+  revision: QWEN35_2B_REVISION,
+  file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+  minimumMemoryBytes: 7 * GIB,
+  contextTokens: 12288
+};
+var QWEN35_4B = {
+  modelId: "qwen3.5-4b-q4_k_m-e87f176",
+  displayName: "Qwen3.5 4B",
+  sizeClass: "standard",
+  baseRepository: "Qwen/Qwen3.5-4B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-4B-GGUF",
+  revision: QWEN35_4B_REVISION,
+  file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+  minimumMemoryBytes: 15 * GIB,
+  contextTokens: 12288
+};
+var QWEN35_9B = {
+  modelId: "qwen3.5-9b-q4_k_m-3885219",
+  displayName: "Qwen3.5 9B",
+  sizeClass: "large",
+  baseRepository: "Qwen/Qwen3.5-9B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-9B-GGUF",
+  revision: QWEN35_9B_REVISION,
+  file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+  minimumMemoryBytes: 15 * GIB,
+  contextTokens: 12288
+};
+var LLAMA_CPP_RELEASE = "b11320";
+var LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+var LLAMA_SERVER_RUNTIME = {
+  release: LLAMA_CPP_RELEASE,
+  license: "MIT",
+  archives: [
+    {
+      platform: "darwin-arm64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+      bytes: 11827796,
+      sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+      gpu: true
+    },
+    {
+      platform: "linux-x64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+      bytes: 17544875,
+      sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+      gpu: false
+    },
+    {
+      platform: "linux-arm64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+      bytes: 13590823,
+      sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+      gpu: false
+    }
+  ]
+};
+
+// src/workers/source-index/built-in-reasoning/install.ts
+var STALE_LOCK_MS = 60 * 60000;
+
 // src/core/analyst-delphi.ts
 init_operation_error();
 
@@ -22533,7 +22670,7 @@ function isSafeRelativePath(path) {
 
 // src/workers/source-index/built-in-embedding/assets.ts
 var BUILT_IN_EMBEDDING_DIR_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DIR";
-var STALE_LOCK_MS = 30 * 60000;
+var STALE_LOCK_MS2 = 30 * 60000;
 var LOCK_POLL_MS = 1000;
 var PROGRESS_WRITE_INTERVAL_MS = 500;
 
@@ -22601,7 +22738,7 @@ async function installBuiltInEmbedding(options = {}) {
       await verifyModelFiles(paths.modelDir, modelFiles, reporter);
       return installed;
     }
-    await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
+    await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS2, async () => {
       if (installComplete(paths, modelFiles, runtimePackages))
         return;
       const fetchImpl = options.fetchImpl ?? fetch;
@@ -22826,7 +22963,7 @@ function tryAcquireLock(lockPath) {
 function lockIsStale(lockPath) {
   try {
     const holder = JSON.parse(readFileSync9(lockPath, "utf8"));
-    if (typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS)
+    if (typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS2)
       return true;
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
       try {
@@ -22839,7 +22976,7 @@ function lockIsStale(lockPath) {
     return false;
   } catch {
     try {
-      return Date.now() - statSync5(lockPath).mtimeMs > STALE_LOCK_MS;
+      return Date.now() - statSync5(lockPath).mtimeMs > STALE_LOCK_MS2;
     } catch {
       return true;
     }
@@ -24967,6 +25104,214 @@ function stampOrder2(recordedAt) {
   return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
 }
 
+// src/workers/connector-store/tier-move.ts
+init_engine();
+init_tier_ledger();
+init_tier_placement();
+var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move";
+
+class TierMoveRefusedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "TierMoveRefusedError";
+  }
+}
+async function moveTieredItem(options) {
+  const { set, identity, decision } = options;
+  const target = decision ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier } : options.target;
+  if (!target)
+    throw new Error("A tier move needs target tiers or a decision.");
+  const ledger = set.ledger;
+  const record = ledger.getCurrent(identity);
+  if (!record || !record.routed)
+    throw new Error("Only a routed item can move; adopt a legacy placement first.");
+  if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
+    return moveToSecrets(options, record.generation);
+  }
+  const placement = set.placementFor(decision ?? {
+    metadataTier: target.metadataTier,
+    contentTier: target.contentTier,
+    state: "current",
+    metadataPending: false,
+    contentPending: false,
+    contentRead: record.contentRead
+  });
+  const moveGeneration = record.generation + 1;
+  const sources = ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
+  if (sources.length === 0)
+    throw new Error("The item has no copy to move from.");
+  const raise = placementIsRaise(sources, placement.copies);
+  const kept = ledger.copies(identity);
+  for (const planned of placement.copies) {
+    if (sources.some((source) => source.corpusId === planned.corpusId))
+      continue;
+    if (kept.some((copy) => copy.corpusId === planned.corpusId && copy.state === "superseded")) {
+      throw new TierMoveRefusedError("The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.");
+    }
+  }
+  ledger.stageMove(identity, {
+    expectedGeneration: record.generation,
+    target,
+    destination: placement.copies,
+    hideSource: raise,
+    ...placement.embedHold ? { embedHold: true } : {}
+  });
+  const destinations = [];
+  const exports = new Map;
+  const exportFrom = (copy) => {
+    if (!exports.has(copy.corpusId)) {
+      const domain = set.domainForCorpus(copy.corpusId);
+      exports.set(copy.corpusId, domain ? set.store(domain)?.exportItemCopy(identity) : undefined);
+    }
+    return exports.get(copy.corpusId);
+  };
+  for (const planned of placement.copies) {
+    const kept2 = sources.find((source) => source.corpusId === planned.corpusId);
+    if (kept2 && layersCover(kept2.layers, planned.layers)) {
+      const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept2)?.chunks.length ?? 0;
+      destinations.push({
+        corpusId: planned.corpusId,
+        trustDomain: planned.trustDomain,
+        layers: planned.layers,
+        relayeredOnly: true,
+        chunksWritten: 0,
+        chunksKept: keptChunks,
+        vectorsCopied: 0,
+        chunksToEmbed: 0
+      });
+      continue;
+    }
+    const wantsContent = planned.layers !== "metadata";
+    const from = copyServingLayer(sources, wantsContent ? "content" : "metadata") ?? sources[0];
+    const exported = exportFrom(from);
+    if (!exported)
+      throw new Error("The source store no longer holds an active copy of the item.");
+    const payload = wantsContent ? exported : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
+    const store = set.store(planned.trustDomain, { create: true });
+    store.bindTierSet(ledger);
+    const vectorIdentity = wantsContent ? options.vectorIdentities?.[planned.trustDomain] : undefined;
+    const written = store.importItemCopy(payload, {
+      trustTier: defaultStoreTrustTier(planned.trustDomain),
+      syncConnectorId: TIER_MOVE_CONNECTOR_ID,
+      layers: planned.layers,
+      ...vectorIdentity ? { vectorProvider: vectorIdentity } : {}
+    });
+    destinations.push({
+      corpusId: planned.corpusId,
+      trustDomain: planned.trustDomain,
+      layers: planned.layers,
+      relayeredOnly: false,
+      chunksWritten: written.chunksWritten,
+      chunksKept: written.chunksKept,
+      vectorsCopied: written.vectorsCopied,
+      chunksToEmbed: wantsContent ? Math.max(0, payload.chunks.length - written.vectorsCopied) : 0
+    });
+  }
+  const flipped = ledger.completeMove(identity, {
+    expectedGeneration: record.generation,
+    destination: placement.copies,
+    ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {}
+  });
+  const supersededCorpora = ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId);
+  const chunkCount = destinations.reduce((total, destination) => total + destination.chunksWritten + destination.chunksKept, 0);
+  if (options.embeddingLedger) {
+    const vectorsCopied = destinations.reduce((total, destination) => total + destination.vectorsCopied, 0);
+    const toEmbed = destinations.reduce((total, destination) => total + destination.chunksToEmbed, 0);
+    await appendEmbeddingLedgerEntry(options.embeddingLedger.path, {
+      recorded_at: new Date().toISOString(),
+      kind: "note",
+      what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((destination) => `${destination.corpusId} (${destination.layers})`).join(", ")}: ` + `${chunkCount} chunk(s) at the destination, ${vectorsCopied} vector(s) copied with no provider call, ` + `${toEmbed} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are kept and hidden: ${supersededCorpora.join(", ") || "none"}.`,
+      scope: {
+        corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((destination) => destination.corpusId)])],
+        chunks: Object.fromEntries(destinations.map((destination) => [
+          destination.corpusId,
+          destination.chunksWritten + destination.chunksKept
+        ]))
+      },
+      ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
+      approved_by: options.embeddingLedger.approvedBy,
+      status: "complete"
+    });
+  }
+  return { outcome: "moved", raise, generation: flipped.generation, destinations, supersededCorpora, chunkCount };
+}
+async function moveToSecrets(options, expectedGeneration) {
+  const { set, identity } = options;
+  const ledger = set.ledger;
+  const { record, copies } = ledger.flipToSecrets(identity, { expectedGeneration });
+  let located = false;
+  for (const copy of copies) {
+    if (located)
+      break;
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (!exported)
+      continue;
+    const text = exported.chunks.map((chunk) => chunk.boundedText).join(`
+`);
+    const kinds = detectSecretFindingKinds(text);
+    const locator = exported.columns.locator_uri;
+    const title = exported.columns.title;
+    set.secrets()?.record({
+      identity,
+      namesReleasable: record.previousMetadataTier === "public" || record.previousMetadataTier === "private",
+      ...typeof locator === "string" ? { locator } : {},
+      ...typeof title === "string" ? { title } : {},
+      findingKinds: kinds.length > 0 ? kinds : ["owner_marked_secret"],
+      text
+    });
+    located = true;
+  }
+  const settled = settleSecretsCopies({
+    ledger,
+    identity: fullIdentity(identity),
+    copies,
+    storeFor: (corpusId) => {
+      const domain = set.domainForCorpus(corpusId);
+      return domain ? set.store(domain) : undefined;
+    },
+    connectorId: TIER_MOVE_CONNECTOR_ID,
+    ...options.secretsDisposition ? { disposition: options.secretsDisposition } : {}
+  });
+  const corpora = Object.keys(settled.chunks);
+  const chunkCount = Object.values(settled.chunks).reduce((sum, count) => sum + count, 0);
+  if (options.embeddingLedger) {
+    const deleted = settled.disposition === "tombstone_now";
+    await appendEmbeddingLedgerEntry(options.embeddingLedger.path, {
+      recorded_at: new Date().toISOString(),
+      kind: deleted ? "invalidation" : "note",
+      what: deleted ? `One item became Secrets: its copies in ${corpora.join(", ") || "no store"} were tombstoned and ` + `${chunkCount} chunk(s) and their vectors deleted. Only its location is kept.` : `One item became Secrets: its copies in ${corpora.join(", ") || "no store"} (${chunkCount} chunk(s)) ` + "are hidden and kept until an owner-approved purge. Only its location is served.",
+      scope: { corpora, chunks: settled.chunks },
+      ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
+      approved_by: options.embeddingLedger.approvedBy,
+      status: "complete"
+    });
+  }
+  return {
+    outcome: "secrets",
+    raise: true,
+    generation: record.generation,
+    destinations: [],
+    supersededCorpora: corpora,
+    chunkCount,
+    secretsChunks: settled.chunks,
+    secretsDisposition: settled.disposition
+  };
+}
+function layersCover(held, wanted) {
+  return held === "both" || held === wanted;
+}
+function fullIdentity(identity) {
+  return {
+    family: identity.family,
+    provider: identity.provider,
+    accountScope: identity.accountScope,
+    providerItemId: identity.providerItemId,
+    localItemId: identity.localItemId,
+    ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
+  };
+}
+
 // src/workers/classification/sniffer-resolver.ts
 init_atomic_file();
 import { mkdirSync as mkdirSync11, readFileSync as readFileSync11 } from "node:fs";
@@ -25251,6 +25596,8 @@ function finish(report) {
 import { existsSync as existsSync11 } from "node:fs";
 init_tier_ledger();
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000;
+var DEFAULT_AUTO_MOVES_PER_PASS = 25;
+var BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)";
 
 class TierSnifferService {
   options;
@@ -25382,7 +25729,23 @@ class TierSnifferService {
     const versions = snifferPromptVersions(ownerContext);
     const ledger = await readClassificationLedger(this.options.classificationLedgerPath);
     const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
-    if (!isClassifierApproved(ledger.entries, key)) {
+    if (!isClassifierApproved(ledger.entries, key) && this.options.autoApproveBuiltIn && isBuiltInLane(lane) && !ownerRevoked(ledger.entries, key)) {
+      await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
+        recorded_at: (this.options.now?.() ?? new Date).toISOString(),
+        kind: "classifier_model_decision",
+        what: `The built-in private model is approved for the privacy sniffer with prompt ${versions.approval} by the owner's default for built-in local models.`,
+        why: BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON,
+        model_id: lane.modelId,
+        prompt_version: versions.approval,
+        lane: lane.kind,
+        profile_id: lane.profileId,
+        approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+        status: "complete",
+        entry_id: `sniffer-default-approval:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`
+      });
+    }
+    const approved = this.options.autoApproveBuiltIn && isBuiltInLane(lane) ? isClassifierApproved((await readClassificationLedger(this.options.classificationLedgerPath)).entries, key) : isClassifierApproved(ledger.entries, key);
+    if (!approved) {
       await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
         recorded_at: (this.options.now?.() ?? new Date).toISOString(),
         kind: "classifier_model_decision",
@@ -25421,19 +25784,86 @@ class TierSnifferService {
     if (report.calls > 0 || report.verdictsApplied > 0) {
       this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}.`);
     }
-    return { state: "ran", report };
+    const autoMoves = this.options.autoMoves && !signal.aborted && this.options.autoMoves.localEmbeddingsOnly() ? await this.runAutoMoves(this.options.autoMoves, signal) : undefined;
+    return { state: "ran", report, ...autoMoves ? { autoMoves } : {} };
+  }
+  async runAutoMoves(options, signal) {
+    const report = { moved: 0, failed: 0, notEligible: 0 };
+    let budget = Math.max(0, options.maxPerPass ?? DEFAULT_AUTO_MOVES_PER_PASS);
+    for (const ledgerPath of this.ledgerPaths()) {
+      if (budget === 0 || signal.aborted)
+        break;
+      const set = tierSetForLedger(ledgerPath);
+      if (!set)
+        continue;
+      const queued = set.ledger.listMoving({ limit: budget }).filter((record) => record.routed && record.targetMetadataTier !== null && record.targetContentTier !== null && record.targetMetadataTier !== "secrets" && record.targetContentTier !== "secrets");
+      if (queued.length === 0)
+        continue;
+      if (!setEmbedsWithBuiltInOnly(set)) {
+        report.notEligible += queued.length;
+        continue;
+      }
+      for (const record of queued) {
+        if (budget === 0 || signal.aborted)
+          break;
+        budget -= 1;
+        try {
+          const identity = {
+            provider: record.provider,
+            accountScope: record.accountScope,
+            providerItemId: record.providerItemId,
+            ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+          };
+          const source = set.ledger.copies(identity).find((copy) => copy.state === "current");
+          const exported = source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
+          if (!exported)
+            throw new Error("no current copy");
+          await moveTieredItem({
+            set,
+            identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
+            target: { metadataTier: record.targetMetadataTier, contentTier: record.targetContentTier },
+            embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY }
+          });
+          report.moved += 1;
+        } catch {
+          report.failed += 1;
+        }
+      }
+    }
+    if (report.moved > 0 || report.failed > 0) {
+      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} left queued.`);
+    }
+    return report;
+  }
+}
+var AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+function isBuiltInLane(lane) {
+  return lane.kind === BUILT_IN_SNIFFER_LANE.kind && lane.profileId === BUILT_IN_SNIFFER_LANE.profileId && lane.modelId === BUILT_IN_SNIFFER_LANE.modelId;
+}
+function ownerRevoked(entries, key) {
+  for (const entry of entries) {
+    if (entry.model_id !== key.modelId || entry.prompt_version !== key.promptVersion || entry.lane !== key.lane || entry.profile_id !== key.profileId)
+      continue;
+    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
+      continue;
+    if (entry.kind === "classifier_model_revoked")
+      return true;
+    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
+      return false;
+  }
+  return false;
+}
+function setEmbedsWithBuiltInOnly(set) {
+  try {
+    return set.openStores().every((store) => store.embeddingAuthorities().every((authority) => authority.provider === BUILT_IN_EMBEDDING_PROVIDER));
+  } catch {
+    return false;
   }
 }
 
 // src/workers/classification/tier-migration.ts
 init_embedding_cost_estimates();
 init_operation_error();
-
-// src/workers/connector-store/tier-move.ts
-init_engine();
-init_tier_ledger();
-init_tier_placement();
-// src/workers/classification/tier-migration.ts
 init_engine();
 init_tier_classifier();
 init_tier_ledger();

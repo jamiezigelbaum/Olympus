@@ -14,6 +14,8 @@
  * header, so consent can only ever come from a direct loopback visit.
  */
 
+import { PRIVATE_ANSWER_PATH_PATTERN } from '../shared/private-answer.ts';
+
 /** Must equal RELAYED_REQUEST_HEADER in src/core/remote-access.ts (a test holds them equal). */
 export const RELAY_HEADER = 'x-olympus-relay';
 
@@ -29,6 +31,12 @@ const BROWSER_GET_PATHS: readonly RegExp[] = [
   /^\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/,
   /^\/oauth\/callback\/(gmail|google-drive|dropbox)$/,
 ];
+/**
+ * The private answer panel's one-time collection, POST only and exactly
+ * `/private/oly2p.<installId>.<secret>` with no query
+ * (src/workers/chatgpt/private-answer-jobs.ts). Nothing else under the prefix.
+ */
+const POST_PATH_PATTERNS: readonly RegExp[] = [PRIVATE_ANSWER_PATH_PATTERN];
 /**
  * Reviewer sign-in, forwarded only by a demo install (its data directory
  * carries the demo marker; src/core/remote-access.ts `demoInstallMarked`).
@@ -72,7 +80,8 @@ export function forwardPath(rawPath: string, allowed: readonly string[] = FORWAR
   }
   if (url.pathname !== pathOnly) return undefined;
   const browserGet = method === 'GET' && BROWSER_GET_PATHS.some((pattern) => pattern.test(url.pathname));
-  if (!allowed.includes(url.pathname) && !browserGet) return undefined;
+  const postPattern = method === 'POST' && url.search === '' && POST_PATH_PATTERNS.some((pattern) => pattern.test(url.pathname));
+  if (!allowed.includes(url.pathname) && !browserGet && !postPattern) return undefined;
   return `${url.pathname}${url.search}`;
 }
 
