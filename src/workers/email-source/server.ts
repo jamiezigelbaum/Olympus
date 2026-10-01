@@ -3967,7 +3967,7 @@ export async function main(): Promise<void> {
   } = await import('../remote-mcp.ts');
   const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
   const { resolveRemotePublicUrls } = await import('../../core/remote-public-url.ts');
-  const { createRelayRequestVerifier, createRemotePublicUrlSource } = await import('../../core/remote-access.ts');
+  const { createRemotePublicUrlSource, isRelayedRequest } = await import('../../core/remote-access.ts');
   const { createRemoteOAuthHandler, withRemoteOAuthRoutes } = await import('../remote-oauth/handler.ts');
   // OAuth for hosted agents is on only with a public base URL: a manual
   // OLYMPUS_PUBLIC_BASE_URL (fixed for this process), else what the relay
@@ -3978,7 +3978,6 @@ export async function main(): Promise<void> {
   }
   const remotePublicSource = createRemotePublicUrlSource(process.env);
   const remotePublicUrls = () => remotePublicSource.current();
-  const trustRelayHeaders = createRelayRequestVerifier(process.env);
   const remoteConnections = lazyRemoteConnectionStore(
     () => resolveRemoteConnectionsDbPath(process.env),
     openRemoteConnectionStore,
@@ -3987,14 +3986,17 @@ export async function main(): Promise<void> {
   // The panel's remote-access line: the address this worker serves right now,
   // explained by the relay status `olympus connections status` prints.
   const { readRemoteAccessStatus, remoteAccessDir, remoteAccessStatusView, resolveRemoteAccessUrls } = await import('../../core/remote-access.ts');
+  // Seam for the standalone engine (its host detection lands separately):
+  // which commands the owner is told to run.
+  const remoteAccessHostKind: 'openclaw' | 'standalone' = 'openclaw';
   dashboardRemoteAccess = () => {
     let status: ReturnType<typeof remoteAccessStatusView> | undefined;
     try {
       const dir = remoteAccessDir(process.env);
       const file = readRemoteAccessStatus(dir);
       status = remoteAccessStatusView({
-        dir,
         status: file,
+        hostKind: remoteAccessHostKind,
         urls: resolveRemoteAccessUrls({ layeredEnv: process.env, env: process.env, status: file, configuredWorkerBaseUrl: olympusConfig.email.baseUrl }),
       });
     } catch {
@@ -4002,13 +4004,12 @@ export async function main(): Promise<void> {
     }
     return remoteAccessFromStatus({ live: remotePublicUrls(), status, liveOrigin: remotePublicSource.origin });
   };
-  // Turn on / Turn off remote access: the agreement as the CLI records it,
-  // and the config change through the Gateway's own config write.
+  // Turn on / Turn off remote access: the config change through the host's
+  // own config write.
   if (authToken) {
-    const { fetchLetsEncryptTermsUrl } = await import('../../core/remote-access-terms.ts');
     dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      dir: () => remoteAccessDir(process.env),
-      fetchTerms: fetchLetsEncryptTermsUrl,
+      // The standalone engine's writer (createEngineConfigRemoteAccessWriter)
+      // is wired with engine-host detection; under OpenClaw the Gateway writes.
       setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
     });
   }
@@ -4060,7 +4061,7 @@ export async function main(): Promise<void> {
     fetch: withRemoteOAuthRoutes(
       createRemoteOAuthHandler({
         publicUrls: remotePublicUrls,
-        trustRelayHeaders,
+        isRelayed: isRelayedRequest,
         connections: () => remoteConnections({ create: true })!,
       }),
       withRemoteOpenApiRoutes(remoteOpenApi, withRemoteMcpRoute(

@@ -1,6 +1,25 @@
 /**
- * OAuth 2.1 authorization server for hosted agents (Claude, ChatGPT, Grok),
- * served by the worker next to `/mcp`, with pairing-code approval.
+ * OAuth 2.1 authorization server for hosted agents (ChatGPT), served by the
+ * worker next to `/mcp`.
+ *
+ * Two modes, by where the public address comes from:
+ *
+ * - Relay mode (the Olympus relay; `urls.installId` set). The relay serves the
+ *   metadata documents and bridges `/connect/authorize` to this worker's
+ *   loopback address. Approval is accepted ONLY from a direct loopback visit:
+ *   a request that came through the relay carries `x-olympus-relay` (the relay
+ *   child sets it on everything it forwards and strips inbound copies) and is
+ *   refused, and the Host must be a loopback name. Being at the Mac is the
+ *   proof of ownership, so approval is one click, with no pairing code. Codes
+ *   and tokens name this install (`oly2c.<id>.…`, connect-relay/shared/tokens.ts)
+ *   so the relay can route them. No registration endpoint is advertised: the
+ *   relay could not route a registration, and ChatGPT is a pinned client.
+ * - A tunnel the owner runs (`OLYMPUS_PUBLIC_BASE_URL` / `remote.publicBaseUrl`).
+ *   The approval page is reached through the public address, so it asks for a
+ *   pairing code from `olympus connections pair`.
+ *
+ * Clients: ChatGPT by its pinned client metadata URL (pinned-clients.ts; no
+ * metadata document is ever fetched), or a dynamically registered client.
  *
  * Routes (exact paths; everything else stays behind the worker bearer):
  * - `GET /.well-known/oauth-protected-resource[/mcp]`  RFC 9728 metadata
@@ -25,19 +44,15 @@
  * servers with no Origin or their own.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { addressKey } from '../../../connect-relay/shared/rate-limit.ts';
+import { mintCredential } from '../../../connect-relay/shared/tokens.ts';
 import { sanitizeCallerDisplayName } from '../../core/operation-caller.ts';
+import { isRelayedRequest } from '../../core/remote-access.ts';
 import type { RemoteConnectionStore } from '../../core/remote-connections.ts';
 import { normalizePairingCode } from '../../core/remote-oauth-store.ts';
 import { currentRemotePublicUrls, isConfiguredResource, type RemotePublicUrls, type RemotePublicUrlsSource } from '../../core/remote-public-url.ts';
-import {
-  ClientMetadataError,
-  createClientMetadataResolver,
-  isClientIdMetadataUrl,
-  type ClientMetadata,
-} from './cimd.ts';
+import { isClientIdMetadataUrl, pinnedClient } from './pinned-clients.ts';
 import { readBoundedRequestText } from '../remote-request-body.ts';
-import { renderConsentErrorPage, renderConsentPage } from './consent-page.ts';
+import { renderConsentErrorPage, renderConsentPage, renderLoopbackConsentPage } from './consent-page.ts';
 import { isAcceptableRedirectUri, isLoopbackRedirectUri, redirectHost, redirectUriMatches } from './redirect-uris.ts';
 
 export const REMOTE_OAUTH_PATHS = {
@@ -88,16 +103,10 @@ const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
 export interface RemoteOAuthHandlerOptions {
   /** The configured public URLs (or a live source); undefined when OAuth is off. */
   publicUrls: RemotePublicUrlsSource;
-  /**
-   * Whether a request really came through the relay's local endpoint, so its
-   * `x-olympus-relay`/`x-forwarded-for` headers may name the caller. Without
-   * it every caller is `direct`: loopback is shared by every local process,
-   * so those headers alone are forgeable.
-   */
-  trustRelayHeaders?: (request: Request) => boolean;
+  /** Whether a request came through the relay (default: it carries `x-olympus-relay`). */
+  isRelayed?: (request: Request) => boolean;
   /** The connection store; OAuth may create the database (registration precedes pairing). */
   connections: () => RemoteConnectionStore;
-  resolveClientMetadata?: (clientId: string) => Promise<ClientMetadata>;
   now?: () => number;
   /** Registrations allowed in a burst, refilled over an hour. */
   registrationBurst?: number;
@@ -162,12 +171,16 @@ export function protectedResourceMetadata(urls: RemotePublicUrls): Record<string
   };
 }
 
+/**
+ * RFC 8414 metadata. In relay mode the relay serves this same document
+ * itself (connect-relay/server/oauth-metadata.ts; a test holds them equal).
+ */
 export function authorizationServerMetadata(urls: RemotePublicUrls): Record<string, unknown> {
   return {
     issuer: urls.issuer,
     authorization_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.authorize}`,
     token_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.token}`,
-    registration_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.register}`,
+    ...(urls.installId ? {} : { registration_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.register}` }),
     revocation_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.revoke}`,
     response_types_supported: ['code'],
     response_modes_supported: ['query'],
@@ -182,13 +195,11 @@ export function authorizationServerMetadata(urls: RemotePublicUrls): Record<stri
 
 export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (request: Request) => Promise<Response> {
   const now = options.now ?? Date.now;
-  const trustRelayHeaders = options.trustRelayHeaders ?? (() => false);
-  const callerKey = (request: Request): string => callerKeyFor(request, trustRelayHeaders);
+  const isRelayed = options.isRelayed ?? isRelayedRequest;
+  // Every caller reaches the worker over loopback, directly or through a
+  // tunnel, and no forwarded address is believed: one shared key.
+  const callerKey = (_request: Request): string => 'direct';
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3_600_000, now);
-  // Only a cache miss costs a fetch, so only a miss spends from this bucket.
-  const metadataFetches = tokenBucket(30, 60_000, now);
-  const resolveClientMetadata = options.resolveClientMetadata
-    ?? createClientMetadataResolver({ allowFetch: () => metadataFetches.take() });
   const pending = new Map<string, PendingConsent>();
   const codes = new Map<string, IssuedCode>();
   const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))));
@@ -234,24 +245,16 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     if (pending.size >= MAX_PENDING_CONSENTS) evictFairShare([...pending]);
   };
 
-  const resolveClient = async (clientId: string): Promise<ResolvedClient | string> => {
-    if (isClientIdMetadataUrl(clientId)) {
-      try {
-        const metadata = await resolveClientMetadata(clientId);
-        return {
-          clientId: metadata.clientId,
-          clientName: metadata.clientName,
-          redirectUris: metadata.redirectUris,
-          verifiedHost: metadata.clientIdHost,
-        };
-      } catch (error) {
-        return error instanceof ClientMetadataError
-          ? `This app's identity could not be checked: ${error.message}`
-          : "This app's identity could not be checked.";
-      }
-    }
+  const resolveClient = (clientId: string, u: RemotePublicUrls): ResolvedClient | string => {
+    const pinned = pinnedClient(clientId);
+    if (pinned) return { ...pinned, redirectUris: [...pinned.redirectUris] };
+    // Never fetched: an arbitrary metadata URL would make this Mac contact a
+    // host a stranger chose.
+    if (isClientIdMetadataUrl(clientId)) return 'Olympus connects to ChatGPT. It does not recognize this app.';
     const registered = options.connections().oauth.getRegisteredClient(clientId);
     if (!registered) return 'This app is not registered with Olympus.';
+    // Relay mode: self-registered clients are local development tools only.
+    if (u.installId && !registered.redirectUris.every(isLoopbackRedirectUri)) return 'This app is not registered with Olympus.';
     return {
       clientId: registered.clientId,
       clientName: registered.clientName,
@@ -260,7 +263,16 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     };
   };
 
+  /**
+   * Relay mode accepts approval only from a direct visit on this Mac: not
+   * through the relay, and with a loopback Host.
+   */
+  const directLoopback = (request: Request): boolean => !isRelayed(request) && loopbackHost(request);
+  const notOnThisMac = (): Response =>
+    errorPage(403, 'Approve on the Mac where Olympus runs: open the link from ChatGPT on that Mac.');
+
   const authorizeGet = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
+    if (u.installId && !directLoopback(request)) return notOnThisMac();
     const params = new URL(request.url).searchParams;
     const single = singleParams(params);
     if (!single) return errorPage(400, 'The request repeated a parameter.');
@@ -268,7 +280,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     const redirectUri = single.get('redirect_uri');
     if (!clientId) return errorPage(400, 'The request did not name an app (client_id).');
     if (!redirectUri) return errorPage(400, 'The request did not say where to return (redirect_uri).');
-    const client = await resolveClient(clientId);
+    const client = resolveClient(clientId, u);
     if (typeof client === 'string') return errorPage(400, client);
     // Until the redirect URI is known to belong to the client, errors stay on
     // this page: redirecting them would make Olympus an open redirector.
@@ -318,7 +330,16 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     error?: string,
     showAttempts = true,
   ): Response => {
-    const page = renderConsentPage({
+    const page = u.installId
+      ? renderLoopbackConsentPage({
+        requestId,
+        csrf: entry.csrf,
+        clientName: entry.client.clientName,
+        verifiedHost: entry.client.verifiedHost,
+        redirectHost: redirectHost(entry.redirectUri),
+        redirectOrigin: new URL(entry.redirectUri).origin,
+      })
+      : renderConsentPage({
       requestId,
       csrf: entry.csrf,
       clientName: entry.client.clientName,
@@ -330,11 +351,12 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       ...(error && showAttempts ? { attemptsLeft: CONSENT_MAX_ATTEMPTS - entry.attempts } : {}),
     });
     const headers = new Headers(page.headers);
-    headers.append('Set-Cookie', consentCookie(requestId, entry.csrf, u.secure, CONSENT_REQUEST_TTL_MS / 1000));
+    headers.append('Set-Cookie', consentCookie(requestId, entry.csrf, cookieSecure(u), CONSENT_REQUEST_TTL_MS / 1000));
     return new Response(page.body, { status: error ? 400 : 200, headers });
   };
 
   const authorizePost = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
+    if (u.installId && !directLoopback(request)) return notOnThisMac();
     if (!sameOriginFormPost(request)) return errorPage(403, 'This approval did not come from the Olympus page.');
     const form = await readForm(request);
     if (!form) return errorPage(400, 'The approval form was malformed.');
@@ -350,12 +372,28 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     const finish = (params: Record<string, string | undefined>): Response => {
       pending.delete(requestId);
       const response = redirectWithParams(entry.redirectUri, { ...params, state: entry.state, iss: u.issuer });
-      response.headers.append('Set-Cookie', consentCookie(requestId, '', u.secure, 0));
+      response.headers.append('Set-Cookie', consentCookie(requestId, '', cookieSecure(u), 0));
       return response;
     };
     const action = form.get('action');
     if (action === 'deny') return finish({ error: 'access_denied', error_description: 'The owner denied the request.' });
     if (action !== 'approve') return errorPage(400, 'The approval form was malformed.');
+    const issueCode = (): Response => {
+      if (codes.size >= MAX_LIVE_CODES) sweep();
+      // Relay mode: the code names this install, so the relay can route its exchange.
+      const code = u.installId ? mintCredential('code', u.installId) : randomBytes(32).toString('base64url');
+      codes.set(sha256(code), {
+        clientId: entry.client.clientId,
+        displayName: entry.client.clientName,
+        redirectUri: entry.redirectUri,
+        codeChallenge: entry.codeChallenge,
+        resource: entry.resource,
+        expiresAt: now() + AUTHORIZATION_CODE_TTL_MS,
+      });
+      return finish({ code });
+    };
+    // Relay mode: a direct loopback visit is the proof of ownership.
+    if (u.installId) return issueCode();
     const caller = callerKey(request);
     const wait = pacer.delayFor(caller);
     if (wait > PAIRING_MAX_HELD_MS) {
@@ -379,17 +417,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       }
       return consentPage(requestId, entry, u, 'That pairing code is not valid, has expired, or was already used.');
     }
-    if (codes.size >= MAX_LIVE_CODES) sweep();
-    const code = randomBytes(32).toString('base64url');
-    codes.set(sha256(code), {
-      clientId: entry.client.clientId,
-      displayName: entry.client.clientName,
-      redirectUri: entry.redirectUri,
-      codeChallenge: entry.codeChallenge,
-      resource: entry.resource,
-      expiresAt: now() + AUTHORIZATION_CODE_TTL_MS,
-    });
-    return finish({ code });
+    return issueCode();
   };
 
   const token = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
@@ -432,7 +460,12 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
         codes.delete(hash);
         return oauthError(400, 'invalid_grant', 'The code verifier does not match the challenge.');
       }
-      const granted = store.oauth.createGrant({ clientId, displayName: issued.displayName, resource: issued.resource });
+      const granted = store.oauth.createGrant({
+        clientId,
+        displayName: issued.displayName,
+        resource: issued.resource,
+        ...(u.installId ? { installId: u.installId } : {}),
+      });
       issued.connectionId = granted.connection.id;
       return tokenResponse(granted.tokens);
     }
@@ -446,7 +479,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     return oauthError(400, 'unsupported_grant_type', 'Supported grants: authorization_code, refresh_token.');
   };
 
-  const register = async (request: Request): Promise<Response> => {
+  const register = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
+    // Relay mode: registration is for local development clients, from this Mac.
+    if (u.installId && !directLoopback(request)) return oauthError(403, 'access_denied', 'Registration is available only on this Mac.');
     if (!(request.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) {
       return oauthError(400, 'invalid_client_metadata', 'Registration must be application/json.');
     }
@@ -466,6 +501,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     if (!Array.isArray(redirectUris) || redirectUris.length === 0 || redirectUris.length > 10
       || !redirectUris.every((uri) => typeof uri === 'string' && isAcceptableRedirectUri(uri))) {
       return oauthError(400, 'invalid_redirect_uri', 'redirect_uris must list https or loopback URLs.');
+    }
+    if (u.installId && !(redirectUris as string[]).every(isLoopbackRedirectUri)) {
+      return oauthError(400, 'invalid_redirect_uri', 'Only local development clients register; ChatGPT needs no registration.');
     }
     const grantTypes = metadata.grant_types;
     if (grantTypes !== undefined && (!Array.isArray(grantTypes) || !grantTypes.includes('authorization_code'))) {
@@ -528,7 +566,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
           return await token(request, urls);
         case REMOTE_OAUTH_PATHS.register:
           if (method !== 'POST') return methodNotAllowed('POST');
-          return await register(request);
+          return await register(request, urls);
         case REMOTE_OAUTH_PATHS.revoke:
           if (method !== 'POST') return methodNotAllowed('POST');
           return await revoke(request);
@@ -539,22 +577,6 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       return jsonResponse(500, { error: 'server_error' });
     }
   };
-}
-
-/**
- * Who is asking, for pacing and slot limits: the agent address the relay
- * reports (IPv6 grouped by /64), else one shared key for everything arriving directly (loopback, or
- * a tunnel that does not set the relay's header). The relay's local endpoint
- * drops any inbound copy of these headers before setting its own and proves
- * itself with the per-install relay secret (`trusted`); a loopback caller
- * that forges the headers without it is `direct`, sharing one bucket.
- */
-function callerKeyFor(request: Request, trusted: (request: Request) => boolean): string {
-  if (request.headers.get('x-olympus-relay') !== '1' || !trusted(request)) return 'direct';
-  const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  // IPv6 by /64, like the relay's own limits: one host commonly holds a whole
-  // /64, so per-address keys would hand it unlimited callers.
-  return forwarded ? `relay:${addressKey(forwarded.slice(0, 64))}` : 'direct';
 }
 
 /**
@@ -608,6 +630,24 @@ function pairingPacer(now: () => number, sleep: (ms: number) => Promise<void>): 
       entry.nextAt = at + delay;
     },
   };
+}
+
+/** The request's Host is a loopback name (what a direct visit on this Mac carries). */
+function loopbackHost(request: Request): boolean {
+  const host = (request.headers.get('host') ?? new URL(request.url).host).toLowerCase();
+  try {
+    return LOOPBACK_HOSTNAMES.has(new URL(`http://${host}`).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Relay mode's approval page is plain http on loopback, where a Secure cookie
+ * would not be stored; a tunnel's page is served over https.
+ */
+function cookieSecure(urls: RemotePublicUrls): boolean {
+  return urls.installId ? false : urls.secure;
 }
 
 function hostAllowed(request: Request, urls: RemotePublicUrls): boolean {

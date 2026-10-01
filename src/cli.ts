@@ -114,9 +114,6 @@ import {
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
 import {
   readRemoteAccessStatus,
-  readTermsAcceptance,
-  recordTermsAcceptance,
-  resolveCurrentTermsUrl,
   relayProcessRunning,
   remoteAccessDirForCli,
   remoteAccessStatusView,
@@ -270,9 +267,7 @@ async function main(): Promise<void> {
 
   if (args[0] === 'connections') {
     try {
-      const result = args[1] === 'terms'
-        ? await runConnectionsTermsCommand(args.slice(2))
-        : runConnectionsCommand(args.slice(1));
+      const result = runConnectionsCommand(args.slice(1));
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
@@ -1129,7 +1124,6 @@ function printHelp(): void {
   console.log('  olympus connections list');
   console.log('  olympus connections revoke <id>');
   console.log('  olympus connections status');
-  console.log('  olympus connections terms [--accept]');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
@@ -1166,7 +1160,6 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connections list': 'olympus connections list',
   'connections revoke': 'olympus connections revoke <id>',
   'connections status': 'olympus connections status',
-  'connections terms': 'olympus connections terms [--accept]',
   dashboard: 'olympus dashboard [--read-only] [--no-open]',
   'source extract-pdfs': 'olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
@@ -1245,8 +1238,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus connections pair            Print a one-time code to approve Claude, ChatGPT or Grok',
     '  olympus connections list',
     '  olympus connections revoke <id>',
-    '  olympus connections status          Remote access: relay, public URLs, certificate expiry',
-    '  olympus connections terms [--accept]  Show (or accept) the Let\'s Encrypt subscriber agreement',
+    '  olympus connections status          Remote access: relay session and public URLs',
   ],
   data: [
     'Usage: olympus data <command>',
@@ -2579,8 +2571,8 @@ function remoteUrlFields(urls: RemoteAccessUrls): Record<string, unknown> {
 }
 
 /**
- * `olympus connections status`: remote access mode, relay session,
- * certificate expiry and the URLs to hand an agent. The same JSON is what the
+ * `olympus connections status`: remote access mode, relay session and the
+ * URLs to hand an agent. The same JSON is what the
  * dashboard's "Connect an agent" panel consumes.
  */
 function runConnectionsStatus(env: Record<string, string | undefined>): Record<string, unknown> {
@@ -2593,65 +2585,7 @@ function runConnectionsStatus(env: Record<string, string | undefined>): Record<s
     status,
     configuredWorkerBaseUrl: loadConfig(layeredEnv).email.baseUrl,
   });
-  return { ...remoteAccessStatusView({ dir, urls, status }) };
-}
-
-/**
- * `olympus connections terms [--accept]`: shows the certificate authority's
- * subscriber agreement, and records the owner's acceptance of that exact
- * version. The relay places no certificate order until this is recorded, and a
- * new agreement from the CA needs a new acceptance.
- */
-export async function runConnectionsTermsCommand(
-  args: readonly string[],
-  env: Record<string, string | undefined> = process.env,
-  dependencies: { fetchTerms?: () => Promise<string | undefined>; now?: () => Date } = {},
-): Promise<Record<string, unknown>> {
-  const accept = args.length === 1 && args[0] === '--accept';
-  if (args.length > 1 || (args.length === 1 && !accept)) {
-    throw new OperationError('invalid_params', 'Usage: olympus connections terms [--accept]');
-  }
-  const dir = remoteAccessDirForCli(env);
-  const status = readRemoteAccessStatus(dir);
-  const fetchTerms = dependencies.fetchTerms
-    ?? (async () => (await import('./core/remote-access-terms.ts')).fetchLetsEncryptTermsUrl());
-  let termsUrl: string | undefined;
-  try {
-    // The relay's reported agreement, or none when the CA named none, else
-    // the CA directory now: the one resolution the dashboard shares.
-    termsUrl = await resolveCurrentTermsUrl(status, fetchTerms);
-  } catch {
-    throw new OperationError(
-      'config_error',
-      'Could not read the Let\'s Encrypt subscriber agreement URL from its directory.',
-      'Check the network and retry; the agreement is published at https://letsencrypt.org/repository/.',
-    );
-  }
-  const acceptance = readTermsAcceptance(dir);
-  if (accept) {
-    const recorded = recordTermsAcceptance(dir, termsUrl, dependencies.now?.() ?? new Date());
-    return {
-      kind: 'remote_access_terms',
-      url: termsUrl ?? null,
-      accepted: true,
-      accepted_at: recorded.accepted_at,
-      notice: termsUrl
-        ? 'Accepted. Olympus will now request this install\'s certificate through the relay.'
-        : 'Accepted. The certificate authority publishes no agreement URL, so this records consent to its terms as it states them; if it later publishes an agreement, you will be asked again.',
-    };
-  }
-  const accepted = acceptance !== undefined && (termsUrl === undefined || acceptance.terms_url === termsUrl);
-  return {
-    kind: 'remote_access_terms',
-    url: termsUrl ?? null,
-    accepted,
-    accepted_at: accepted ? acceptance!.accepted_at : null,
-    notice: accepted
-      ? 'Already accepted.'
-      : termsUrl
-        ? 'Remote access needs a certificate for this install\'s own hostname, which means agreeing to the certificate authority\'s Subscriber Agreement. Read it at the url above; to accept, run olympus connections terms --accept.'
-        : 'Remote access needs a certificate for this install\'s own hostname. The certificate authority publishes no agreement URL; to consent to its terms and continue, run olympus connections terms --accept.',
-  };
+  return { ...remoteAccessStatusView({ urls, status }) };
 }
 
 function remoteConnectionView(connection: RemoteConnectionRecord): Record<string, unknown> {

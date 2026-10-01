@@ -1,18 +1,18 @@
 /**
- * The worker's side of the dashboard's remote-access toggle: ask the Gateway
- * to change `remote.enabled` through OpenClaw's config write path
- * (core/remote-access-config.ts), over the loopback plugin route watch
- * delivery already uses, with the worker bearer. The worker never writes
- * OpenClaw config itself.
+ * The worker's side of the dashboard's remote-access toggle, per host:
+ *
+ * - under OpenClaw, ask the Gateway to change `remote.enabled` through
+ *   OpenClaw's config write path (core/remote-access-config.ts), over the
+ *   loopback plugin route watch delivery already uses, with the worker bearer.
+ *   The worker never writes OpenClaw config itself;
+ * - under the standalone engine, change `remote.enabled` in its own config
+ *   file (~/.olympus/engine.json, the shape of the plugin config) and ask the
+ *   engine to restart.
  */
+import { randomBytes } from 'node:crypto';
+import { chmodSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { REMOTE_ACCESS_CONFIG_ROUTE } from '../core/remote-access-config.ts';
 import type { TimeoutFetch } from '../core/http-timeout.ts';
-import {
-  readRemoteAccessStatus,
-  recordTermsAcceptance,
-  resolveCurrentTermsUrl,
-  termsAccepted,
-} from '../core/remote-access.ts';
 import type { DashboardRemoteAccessControl, RemoteAccessConfigWrite } from './agent-connections.ts';
 import { postOpenClawGatewayPluginRoute } from './source-watch-runtime.ts';
 
@@ -64,21 +64,50 @@ export function createGatewayRemoteAccessConfigWriter(options: {
 }
 
 /**
- * The dashboard's remote-access control: the CA agreement resolved, checked
- * and recorded with exactly the functions `olympus connections terms` uses, in
- * the same state directory, and the config change handed to `setEnabled`.
+ * The standalone engine's toggle: `remote.enabled` in its config file, written
+ * atomically (0600), then `restart` (the engine host's own restart; wired at
+ * integration). Other keys in the file are kept as they are.
  */
-export function createDashboardRemoteAccessControl(options: {
-  /** The connect-relay state directory (`remoteAccessDir`). */
-  dir: () => string;
-  fetchTerms: () => Promise<string | undefined>;
-  setEnabled: (enabled: boolean) => Promise<RemoteAccessConfigWrite>;
-  now?: () => Date;
-}): DashboardRemoteAccessControl {
-  return {
-    currentTermsUrl: () => resolveCurrentTermsUrl(readRemoteAccessStatus(options.dir()), options.fetchTerms),
-    termsAccepted: (url) => termsAccepted(options.dir(), url),
-    recordTermsAcceptance: (url) => { recordTermsAcceptance(options.dir(), url, options.now?.() ?? new Date()); },
-    setEnabled: options.setEnabled,
+export function createEngineConfigRemoteAccessWriter(options: {
+  configPath: string;
+  restart: () => Promise<void>;
+}): (enabled: boolean) => Promise<RemoteAccessConfigWrite> {
+  return async (enabled) => {
+    let config: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(options.configPath, 'utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+      config = parsed as Record<string, unknown>;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return { ok: false, status: 502, code: 'engine_config_unreadable', message: 'Olympus could not read its settings file (~/.olympus/engine.json). Fix or remove it, then try again.' };
+      }
+    }
+    const remote = config.remote && typeof config.remote === 'object' && !Array.isArray(config.remote)
+      ? config.remote as Record<string, unknown>
+      : {};
+    if ((remote.enabled === true) === enabled) return { ok: true, unchanged: true };
+    const next = { ...config, remote: { ...remote, enabled } };
+    try {
+      const temporary = `${options.configPath}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`;
+      writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+      chmodSync(temporary, 0o600);
+      renameSync(temporary, options.configPath);
+    } catch {
+      return { ok: false, status: 502, code: 'engine_config_write_failed', message: 'Olympus could not save its settings file. Try again in a moment.' };
+    }
+    try {
+      await options.restart();
+    } catch {
+      return { ok: false, status: 502, code: 'engine_restart_failed', message: 'The setting was saved, but Olympus could not restart. Run olympus engine restart.' };
+    }
+    return { ok: true };
   };
+}
+
+/** The dashboard's remote-access control: the config change handed to `setEnabled`. */
+export function createDashboardRemoteAccessControl(options: {
+  setEnabled: (enabled: boolean) => Promise<RemoteAccessConfigWrite>;
+}): DashboardRemoteAccessControl {
+  return { setEnabled: options.setEnabled };
 }
