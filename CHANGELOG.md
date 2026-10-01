@@ -1,15 +1,18 @@
 # Changelog
 
-## Unreleased (v0.5)
+## 0.4.0-beta.10 - 2026-10-01
 
-- **Remote access from the dashboard.** Setup's Agents section offers **Turn
+Remote access can be turned on and off from the dashboard, and a local
+embedding model served under an unlisted alias now reads ready.
+
+- **Remote access from the dashboard (#105).** Setup's Agents section offers **Turn
   on remote access** (after showing Let's Encrypt's subscriber agreement for
   explicit acceptance) and **Turn off remote access**. The change goes through
   OpenClaw's own config write; Olympus never edits openclaw.json. A public
   address set by `OLYMPUS_PUBLIC_BASE_URL` in worker.env is shown as such, with
   how to remove it, instead of a Turn off that could not work.
 - **Upgrade note: `remote.relayHost` now defaults to
-  `connect.olympusplugin.ai`.** A config with `remote.enabled: true` and no
+  `connect.olympusplugin.ai` (#105).** A config with `remote.enabled: true` and no
   address used to be an error that kept remote access off; after this upgrade
   the relay service starts and connects to the Olympus relay instead. Before
   the owner accepts the CA's subscriber agreement nothing public happens: the
@@ -19,6 +22,13 @@
   `remote.enabled false` or use **Turn off remote access**. Until the relay is
   deployed, status reads "Olympus relay unavailable" and Olympus retries with
   backoff.
+- **Local embedding alias (#119).** Setup's local model check refused a model
+  ID missing from the server's `/v1/models` list before any inference, so a
+  local embedding model served under an unlisted alias showed Needs attention
+  and blocked source connections. An embedding-only target may now be unlisted
+  if its embeddings probe returns a vector of exactly the expected dimension.
+  Chat and analyst targets keep the strict rule: an unlisted ID is refused
+  before inference.
 
 ## 0.4.0-beta.9 - 2026-09-30
 
