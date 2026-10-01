@@ -8,7 +8,6 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
-import { PENDING_VOCABULARY } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import {
   CHATGPT_DASHBOARD_CSS,
   CHATGPT_DASHBOARD_DARK,
@@ -170,8 +169,7 @@ describe('page source', () => {
 });
 
 describe('vocabulary', () => {
-  test('the producer\'s pending strings live in vocabulary.ts under the same keys', () => {
-    expect(Object.keys(DASHBOARD_CHATGPT_VOCABULARY).sort()).toEqual(Object.keys(PENDING_VOCABULARY).sort());
+  test('the producer\'s strings live in vocabulary.ts', () => {
     expect(DASHBOARD_CHATGPT_VOCABULARY).toMatchObject({
       installingNoSource: 'Connect a source to begin',
       installingModel: 'Getting search ready on your Mac',
@@ -181,6 +179,7 @@ describe('vocabulary', () => {
       embeddingNeedsAttention: 'Search has stopped working on your Mac.',
       answerModelNeedsAttention: 'Answers have stopped working on your Mac.',
       openOnMac: 'Open Olympus on your Mac',
+      changeModelsOnMac: 'Change models in Olympus on your Mac.',
     });
   });
 });

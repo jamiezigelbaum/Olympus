@@ -29,7 +29,7 @@ import type {
   DashboardViewModelV1,
 } from './dashboard-contract.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME } from './dashboard-contract.ts';
-import { PENDING_VOCABULARY } from './dashboard-view-model.ts';
+import { DASHBOARD_CHATGPT_VOCABULARY } from '../dashboard/vocabulary.ts';
 
 export interface ChatGptTextContent {
   type: 'text';
@@ -251,7 +251,7 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   if (usedPrivate) privateMatched = true;
   const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record.answer.replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER);
   const shownCitations = usedPrivate ? [] : citations;
-  const notes = privateMatched ? [PENDING_VOCABULARY.privateMatches] : [];
+  const notes = privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
   const textParts = [answer];
   if (shownCitations.length > 0) {
     textParts.push('', 'Sources:', ...shownCitations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));

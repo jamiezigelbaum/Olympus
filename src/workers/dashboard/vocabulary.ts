@@ -883,6 +883,7 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
   answerModelNeedsAttention: 'Answers have stopped working on your Mac.',
   fixOnMac: 'Open Olympus on your Mac to fix this.',
   privateMatches: 'Some matching items are private and stay on your Mac.',
+  changeModelsOnMac: 'Change models in Olympus on your Mac.',
 } as const;
 
 /**

@@ -44983,7 +44983,7 @@ function lowerFirst(value) {
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY;
+var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -45031,6 +45031,22 @@ var init_vocabulary = __esm(() => {
     "not_connected",
     "needs_setup"
   ]);
+  DASHBOARD_CHATGPT_VOCABULARY = {
+    installingNoSource: "Connect a source to begin",
+    installingModel: "Getting search ready on your Mac",
+    installingFirstIndex: "Indexing your sources for the first time",
+    connectOnMac: "Connect sources in Olympus on your Mac.",
+    reconnect: "Reconnect",
+    checkAgain: "Check again",
+    openOnMac: "Open Olympus on your Mac",
+    stageReading: "Reading",
+    stageSearchable: "Indexing",
+    embeddingNeedsAttention: "Search has stopped working on your Mac.",
+    answerModelNeedsAttention: "Answers have stopped working on your Mac.",
+    fixOnMac: "Open Olympus on your Mac to fix this.",
+    privateMatches: "Some matching items are private and stay on your Mac.",
+    changeModelsOnMac: "Change models in Olympus on your Mac."
+  };
   DASHBOARD_CHATGPT_CONNECTION_COPY = {
     not_installed: {
       title: "Olympus isn't on your Mac yet",
@@ -96931,8 +96947,8 @@ function chatgptDashboardClient(config2) {
       node.textContent = text;
     return node;
   }
-  function add(parent, ...children2) {
-    for (const child of children2)
+  function add(parent, ...children) {
+    for (const child of children)
       if (child)
         parent.appendChild(child);
     return parent;
@@ -97508,11 +97524,11 @@ function buildChatGptDashboardViewModel(view, options = {}) {
   const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").map(({ definition, card }) => attentionItem(definition, card, degraded));
   const embedding = options.embedding ?? embeddingFromModelSetup(view.model_setup);
   if (embedding.state === "failed") {
-    needsYou.push({ id: "model:embedding", sentence: PENDING_VOCABULARY.embeddingNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.openOnMac) });
+    needsYou.push({ id: "model:embedding", sentence: DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention, fix: onMacFix(DASHBOARD_CHATGPT_VOCABULARY.openOnMac) });
   }
   const answers = answersFromModelSetup(view.model_setup);
   if (answers && !answers.ready) {
-    needsYou.push({ id: "model:answers", sentence: PENDING_VOCABULARY.answerModelNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.openOnMac) });
+    needsYou.push({ id: "model:answers", sentence: DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention, fix: onMacFix(DASHBOARD_CHATGPT_VOCABULARY.openOnMac) });
   }
   const progress = overallProgress(rows.map((row) => row.card), rows.map((row) => row.status));
   const connected = rows.some(({ card }) => dashboardIsConnectedSource(card));
@@ -97566,33 +97582,33 @@ function attentionItem(definition, card, degraded) {
   const reason = dashboardAttentionLine(card, degraded ? { degradedCredentials: degraded } : undefined);
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
   const reauth = card.connection.state === "reauth_required" || card.connection.state !== "connected" && card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card);
-  const fix = reauth ? onMacFix(PENDING_VOCABULARY.reconnect) : { label: PENDING_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {} };
+  const fix = reauth ? onMacFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect) : { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {} };
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 function connectFix(kind) {
   if (kind === "none")
     return;
   const label = kind === "needs_setup" ? "Set up" : "Connect";
-  return { label, disabledReason: PENDING_VOCABULARY.connectOnMac };
+  return { label, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac };
 }
 function onMacFix(label) {
-  return { label, disabledReason: PENDING_VOCABULARY.fixOnMac };
+  return { label, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.fixOnMac };
 }
 function connectionFor(input) {
   const state = "installing";
   if (input.embedding.state === "downloading") {
     return {
       state,
-      progress: { percent: clampPercent3(input.embedding.percent ?? 0), label: PENDING_VOCABULARY.installingModel }
+      progress: { percent: clampPercent3(input.embedding.percent ?? 0), label: DASHBOARD_CHATGPT_VOCABULARY.installingModel }
     };
   }
   if (!input.connected) {
-    return { state, progress: { percent: 0, label: PENDING_VOCABULARY.installingNoSource } };
+    return { state, progress: { percent: 0, label: DASHBOARD_CHATGPT_VOCABULARY.installingNoSource } };
   }
   if (!input.anyAnswerReady) {
     return {
       state,
-      progress: { percent: clampPercent3(input.progress?.percent ?? 0), label: PENDING_VOCABULARY.installingFirstIndex }
+      progress: { percent: clampPercent3(input.progress?.percent ?? 0), label: DASHBOARD_CHATGPT_VOCABULARY.installingFirstIndex }
     };
   }
   return { state: "ready" };
@@ -97667,10 +97683,10 @@ function overallProgress(cards, statuses) {
     return;
   const progressUnit = mixed || unit === undefined ? "items" : unit;
   const details = [
-    { stage: PENDING_VOCABULARY.stageReading, unit: progressUnit, done: read, total: inScope }
+    { stage: DASHBOARD_CHATGPT_VOCABULARY.stageReading, unit: progressUnit, done: read, total: inScope }
   ];
   if (embeddedKnown) {
-    details.push({ stage: PENDING_VOCABULARY.stageSearchable, unit: progressUnit, done: embedded, total: inScope });
+    details.push({ stage: DASHBOARD_CHATGPT_VOCABULARY.stageSearchable, unit: progressUnit, done: embedded, total: inScope });
   }
   return {
     unit: progressUnit,
@@ -97800,25 +97816,10 @@ function isoOrUndefined(value) {
 function isoOrNow(value, now) {
   return isoOrUndefined(value) ?? now.toISOString();
 }
-var PENDING_VOCABULARY, ANSWER_MODEL_LABELS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS;
+var ANSWER_MODEL_LABELS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS;
 var init_dashboard_view_model = __esm(() => {
   init_source_dashboard();
   init_vocabulary();
-  PENDING_VOCABULARY = {
-    installingNoSource: "Connect a source to begin",
-    installingModel: "Getting search ready on your Mac",
-    installingFirstIndex: "Indexing your sources for the first time",
-    connectOnMac: "Connect sources in Olympus on your Mac.",
-    reconnect: "Reconnect",
-    checkAgain: "Check again",
-    openOnMac: "Open Olympus on your Mac",
-    stageReading: "Reading",
-    stageSearchable: "Indexing",
-    embeddingNeedsAttention: "Search has stopped working on your Mac.",
-    answerModelNeedsAttention: "Answers have stopped working on your Mac.",
-    fixOnMac: "Open Olympus on your Mac to fix this.",
-    privateMatches: "Some matching items are private and stay on your Mac."
-  };
   ANSWER_MODEL_LABELS = { venice: "Venice", local: "Local models", built_in: "Built-in" };
   KNOWN_CONNECTION_LABELS = new Set([
     "not connected",
@@ -98008,7 +98009,7 @@ function answerToolResult(raw, options = {}) {
     privateMatched = true;
   const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record3.answer.replace(UNSAFE_CHARS, "").slice(0, MAX_ANSWER);
   const shownCitations = usedPrivate ? [] : citations;
-  const notes = privateMatched ? [PENDING_VOCABULARY.privateMatches] : [];
+  const notes = privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
   const textParts = [answer];
   if (shownCitations.length > 0) {
     textParts.push("", "Sources:", ...shownCitations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));
@@ -98123,7 +98124,7 @@ var MAX_TEXT = 400, MAX_ANSWER, MAX_CITATIONS = 20, UNSAFE_CHARS, FIX_TOOLS, FIX
 var init_response_builder = __esm(() => {
   init_operation_error();
   init_source_dashboard();
-  init_dashboard_view_model();
+  init_vocabulary();
   MAX_ANSWER = 64 * 1024;
   UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
   FIX_TOOLS = new Set([DASHBOARD_TOOL_NAME]);
