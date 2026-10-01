@@ -398,6 +398,8 @@ export interface AnswerPrivatelyOptions {
   signal?: AbortSignal;
 }
 
+export const PRIVATE_ANSWER_NOT_FOUND = 'These private items do not answer this question.';
+
 let sharedPanelModel: BuiltInAnalystModel | undefined;
 
 /**
@@ -422,7 +424,10 @@ export async function answerPrivately(
     : await run();
   const byId = new Map(evidence.map((item) => [item.id, item]));
   return {
-    answer: result.answer,
+    // An ungrounded local answer comes back as an escalation proposal. This
+    // path never escalates, so the proposal is dropped and the panel is told
+    // plainly that these items did not answer the question.
+    answer: result.escalation ? PRIVATE_ANSWER_NOT_FOUND : result.answer,
     citations: result.citations.map((citation) => {
       const id = citation.provenance.sourceItem.providerItemId;
       const item = byId.get(id);

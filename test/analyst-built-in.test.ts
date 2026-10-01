@@ -305,6 +305,7 @@ describe('answerPrivately', () => {
     expect(answer.citations).toEqual([]);
     expect(answer.unanswered.length).toBeGreaterThan(0);
     expect(Object.keys(answer)).not.toContain('escalation');
+    expect(answer.answer).not.toContain('escalation');
   });
 
   test('no evidence means no model call', async () => {
