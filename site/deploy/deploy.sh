@@ -32,9 +32,13 @@ fi
 
 echo "Publishing $SITE_DIR to $TARGET:$REMOTE_DIR"
 rsync -rlt --delete --itemize-changes ${DRY_RUN[@]+"${DRY_RUN[@]}"} \
-  --chmod=D755,F644 \
   --exclude '/deploy/' \
   --exclude '.*' \
   -e "ssh -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes" \
   "$SITE_DIR/" "$TARGET:$REMOTE_DIR/"
+# macOS ships openrsync, which has no --chmod: set modes on the host instead.
+if [ ${#DRY_RUN[@]} -eq 0 ]; then
+  ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes "$TARGET" \
+    "find '$REMOTE_DIR' -type d -exec chmod 755 {} + && find '$REMOTE_DIR' -type f -exec chmod 644 {} +"
+fi
 echo "Done."
