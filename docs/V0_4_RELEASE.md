@@ -21,6 +21,26 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-01 — ChatGPT is the release target; engine on the user's Mac.**
+  Owner direction: get Olympus working as a ChatGPT plugin (the 2026-09-29
+  plugin platform) with the dashboard inside ChatGPT, built to the final
+  design rather than staged. A ChatGPT user installs only the Olympus engine
+  (ChatGPT's desktop agent can run the installer); OpenClaw becomes one
+  optional host. No extra installs and no new accounts except an optional
+  Venice account. ChatGPT reaches each Mac through one hosted relay at
+  `mcp.olympusplugin.ai` (Hetzner `olympus-relay-1`); consent happens on the
+  Mac's loopback page. Claude, Grok and Muse are out of scope for now. No
+  pre-submission contact with OpenAI. Design and build plan:
+  [`design/chatgpt-plugin.md`](design/chatgpt-plugin.md); it supersedes the
+  hosted-relay parts of `design/hosted-agent-compatibility.md`. The OpenClaw
+  outcome below stays valid for existing OpenClaw installs.
+
+- **2026-10-01 — Built-in embeddings are the default for new installs.**
+  Owner approval: a small model runs inside Olympus with zero setup and
+  nothing leaving the machine; other providers stay opt-in. Embedding custody
+  is unchanged: re-embedding an existing store still needs the owner's
+  advance approval with its cost estimate and an embedding-ledger entry.
+
 - **2026-09-30 — Repair PDF extraction; attachment metadata only.** Owner
   authorization: every PDF the connected file sources allow is extracted,
   with no automatic bulk embedding. Diagnosis: a download label the text lane
