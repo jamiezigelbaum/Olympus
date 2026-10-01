@@ -320,9 +320,8 @@ Open the dashboard's **Setup** page and press **Connect an agent**. Pick the
 agent you use and follow its steps; every address and snippet has a copy
 button.
 
-- **Claude** (web, desktop and phone), **ChatGPT**, **Grok** and **Grok Bot**:
-  add the Olympus address as a custom connector, then approve it on the Olympus
-  approval page with a one-time code from **Get pairing code**.
+- **ChatGPT**: add `https://mcp.olympusplugin.ai/mcp` as a connector, then
+  approve it with one click on the page that opens on this computer.
 - **Muse** and the **Grok API**: paste the address, then press **Create key**
   and give the agent the key. The key is shown once.
 - **Claude Code** and **Codex** on this computer: copy the prompt (or the
@@ -330,12 +329,13 @@ button.
 
 Agents in the cloud reach Olympus only when remote access is on; the Agents
 section says whether it is. To turn it on, press **Turn on remote access** in
-that section. It first shows Let's Encrypt's subscriber agreement (a link plus
-a short summary), because Olympus gets a free certificate for this computer's
-own address, and turns remote access on only after you accept. Olympus then
-connects through the Olympus relay (`connect.olympusplugin.ai`): you create no
-account and run no tunnel. The relay forwards encrypted traffic and cannot read
-questions or answers. **Turn off remote access** turns it off again. If the
+that section. Olympus then connects through the Olympus relay
+(`mcp.olympusplugin.ai`): you create no account and run no tunnel. The relay
+passes requests between the agent and this computer; it stores and logs no
+questions, answers or tokens, but like any HTTPS endpoint it handles them in
+transit. Approving an agent such as ChatGPT happens on this computer only, with
+one click on a page Olympus serves locally. **Turn off remote access** turns it
+off again. If the
 relay cannot be reached, the section says **Olympus relay unavailable** and
 Olympus keeps retrying on its own; agents on this computer are unaffected.
 Advanced: to use a tunnel you run yourself instead of the relay, set

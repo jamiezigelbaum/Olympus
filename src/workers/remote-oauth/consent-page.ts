@@ -191,8 +191,8 @@ ${input.verifiedHost
     : '<div class="host unverified">Not verified</div><p class="meta">A program on this computer named itself</p>'}
 <p class="meta">After you approve, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
 </div>
-<p>${name} will be able to ask Olympus questions and read the answers, drawn from the sources you marked Public or Personal, with links to where each answer came from.</p>
-<p><strong>Private and Secret items never leave this Mac.</strong></p>
+<p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
+<p><strong>${name} never sees the text of your Private items or any Secret.</strong> For Private items it gets only answers that Venice or a model on this Mac reasoned out, with each item's title and source.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
 <form method="post" action="/connect/authorize">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">

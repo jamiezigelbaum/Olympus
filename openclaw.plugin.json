@@ -2512,7 +2512,7 @@
           },
           "relayHost": {
             "type": "string",
-            "description": "The connect relay zone. Unset means the Olympus relay, connect.olympusplugin.ai. Leave unset when publicBaseUrl is set."
+            "description": "The Olympus relay host. Unset means the Olympus relay, mcp.olympusplugin.ai. Leave unset when publicBaseUrl is set."
           },
           "publicBaseUrl": {
             "type": "string",

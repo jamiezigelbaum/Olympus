@@ -71,27 +71,18 @@ const CONSENT_REQUEST_TTL_MS = 10 * 60_000;
 const CONSENT_MAX_ATTEMPTS = 5;
 /**
  * Waiting approvals are bounded, but a full table never refuses a new one: a
- * new request evicts an older one instead (see admitPending), so a flood can
+ * new request evicts the oldest instead (see admitPending), so a flood can
  * cost the owner an approval page, never ten minutes of being locked out.
+ * Every caller reaches the worker over loopback (directly, or through a
+ * tunnel that forwards no trustworthy address), so there is no per-caller
+ * share to keep.
  */
-const MAX_PENDING_CONSENTS = 256;
-/** Waiting approvals one caller (relay-reported address) may hold; its own oldest makes room. */
-const MAX_PENDING_CONSENTS_PER_CALLER = 8;
-/**
- * Waiting approvals one client id may hold, so no single app takes the whole
- * table. Half, not less: anyone can name the owner's own app (Claude's client
- * id is public), and inside that scope the owner is protected only by fair
- * share, so a smaller cap would let fewer addresses evict the owner.
- */
-const MAX_PENDING_CONSENTS_PER_CLIENT = 128;
+const MAX_PENDING_CONSENTS = 64;
 /** Pacing for pairing-code checks: see pairingPacer. */
 const PAIRING_FAILURE_WINDOW_MS = 15 * 60_000;
-const PAIRING_PER_CALLER_MAX_DELAY_MS = 60_000;
-const PAIRING_GLOBAL_FAILURES_BEFORE_DELAY = 20;
-const PAIRING_GLOBAL_DELAY_MS = 2_000;
+const PAIRING_MAX_DELAY_MS = 60_000;
 /** Longer than this and the page asks the person to come back instead of holding the request. */
 const PAIRING_MAX_HELD_MS = 10_000;
-const PAIRING_MAX_TRACKED_CALLERS = 1024;
 const MAX_LIVE_CODES = 256;
 const MAX_FORM_BYTES = 8 * 1024;
 const MAX_REGISTRATION_BYTES = 16 * 1024;
@@ -122,7 +113,6 @@ interface ResolvedClient {
 }
 
 interface PendingConsent {
-  caller: string;
   client: ResolvedClient;
   redirectUri: string;
   codeChallenge: string;
@@ -196,9 +186,6 @@ export function authorizationServerMetadata(urls: RemotePublicUrls): Record<stri
 export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (request: Request) => Promise<Response> {
   const now = options.now ?? Date.now;
   const isRelayed = options.isRelayed ?? isRelayedRequest;
-  // Every caller reaches the worker over loopback, directly or through a
-  // tunnel, and no forwarded address is believed: one shared key.
-  const callerKey = (_request: Request): string => 'direct';
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3_600_000, now);
   const pending = new Map<string, PendingConsent>();
   const codes = new Map<string, IssuedCode>();
@@ -211,38 +198,13 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
   };
 
   /**
-   * Makes room for one more waiting approval from `caller` for `clientId`.
-   * Nothing is refused; the table only ever evicts:
-   * - a caller at its cap loses its own oldest unpinned request;
-   * - a client id at its cap, or a full table, loses a request of the caller
-   *   holding the most slots in that scope (fair share).
-   * An attacker spread over many addresses therefore evicts itself first. The
-   * owner, holding one request, is evicted only when every holder is down to
-   * one, which takes more distinct addresses (IPv6 /64s) than the scope has
-   * slots. A page whose pairing check the pacer admitted is pinned: among the
-   * heaviest callers' entries, unpinned ones go first. Pinning never moves an
-   * eviction onto a caller holding fewer entries.
+   * Makes room for one more waiting approval: a full table loses its oldest
+   * unpinned request (map order is insertion order), else its oldest.
    */
-  const admitPending = (caller: string, clientId: string): void => {
-    const evictFairShare = (scope: Array<[string, PendingConsent]>): void => {
-      // Fair share over the whole scope, pinned or not: the caller holding the
-      // most entries loses one. Pinning never shifts eviction onto a lighter
-      // caller; it only chooses among the heaviest callers' entries.
-      const held = new Map<string, number>();
-      for (const [, entry] of scope) held.set(entry.caller, (held.get(entry.caller) ?? 0) + 1);
-      const heaviest = Math.max(0, ...held.values());
-      const candidates = scope.filter(([, entry]) => held.get(entry.caller) === heaviest);
-      // Map order is insertion order, so the first match is the oldest.
-      const victim = candidates.find(([, entry]) => !entry.pinned) ?? candidates[0];
-      if (victim) pending.delete(victim[0]);
-    };
-    const own = [...pending].filter(([, entry]) => entry.caller === caller);
-    if (own.length >= MAX_PENDING_CONSENTS_PER_CALLER) {
-      pending.delete((own.find(([, entry]) => !entry.pinned) ?? own[0]!)[0]);
-    }
-    const sameClient = [...pending].filter(([, entry]) => entry.client.clientId === clientId);
-    if (sameClient.length >= MAX_PENDING_CONSENTS_PER_CLIENT) evictFairShare(sameClient);
-    if (pending.size >= MAX_PENDING_CONSENTS) evictFairShare([...pending]);
+  const admitPending = (): void => {
+    if (pending.size < MAX_PENDING_CONSENTS) return;
+    const victim = [...pending].find(([, entry]) => !entry.pinned) ?? [...pending][0];
+    if (victim) pending.delete(victim[0]);
   };
 
   const resolveClient = (clientId: string, u: RemotePublicUrls): ResolvedClient | string => {
@@ -303,12 +265,10 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       return fail('invalid_target', 'The requested resource is not this Olympus.');
     }
     sweep();
-    const caller = callerKey(request);
-    admitPending(caller, client.clientId);
+    admitPending();
     const requestId = randomBytes(16).toString('hex');
     const csrf = randomBytes(32).toString('base64url');
     const entry: PendingConsent = {
-      caller,
       client,
       redirectUri,
       codeChallenge,
@@ -394,8 +354,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     };
     // Relay mode: a direct loopback visit is the proof of ownership.
     if (u.installId) return issueCode();
-    const caller = callerKey(request);
-    const wait = pacer.delayFor(caller);
+    const wait = pacer.delay();
     if (wait > PAIRING_MAX_HELD_MS) {
       return consentPage(requestId, entry, u,
         `Too many wrong codes were tried from here. Wait ${Math.ceil(wait / 1000)} seconds, then try again.`, false);
@@ -410,7 +369,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
         // A typo is not a guess: it names no code, burns nothing, and costs no delay.
         return consentPage(requestId, entry, u, 'A pairing code looks like ABCD-EFGH-JKMN (12 letters and digits).', false);
       }
-      pacer.recordFailure(caller);
+      pacer.recordFailure();
       entry.attempts += 1;
       if (entry.attempts >= CONSENT_MAX_ATTEMPTS) {
         return finish({ error: 'access_denied', error_description: 'Too many wrong pairing codes.' });
@@ -580,54 +539,30 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
 }
 
 /**
- * Slows pairing-code guessing without ever closing pairing. Each caller's
- * wrong codes double its wait before the next check (1s, 2s, 4s… up to a
- * minute); once more than a threshold of wrong codes have arrived from
- * anywhere in the window, every check also waits a couple of seconds. The
- * owner, arriving from their own address with no failures, only ever pays the
- * small global delay.
+ * Slows pairing-code guessing without ever closing pairing: each wrong code
+ * doubles the wait before the next check (1s, 2s, 4s… up to a minute), and
+ * the waits forget failures older than the window.
  */
 function pairingPacer(now: () => number, sleep: (ms: number) => Promise<void>): {
-  delayFor(caller: string): number;
+  delay(): number;
   hold(ms: number): Promise<void>;
-  recordFailure(caller: string): void;
+  recordFailure(): void;
 } {
-  const callers = new Map<string, { failures: number[]; nextAt: number }>();
-  let global: number[] = [];
-  const prune = (at: number): void => {
-    const cutoff = at - PAIRING_FAILURE_WINDOW_MS;
-    global = global.filter((t) => t > cutoff);
-    for (const [key, entry] of callers) {
-      entry.failures = entry.failures.filter((t) => t > cutoff);
-      if (entry.failures.length === 0 && entry.nextAt <= at) callers.delete(key);
-    }
-  };
+  let failures: number[] = [];
+  let nextAt = 0;
   return {
-    delayFor(caller) {
+    delay() {
       const at = now();
-      prune(at);
-      const own = Math.max(0, (callers.get(caller)?.nextAt ?? 0) - at);
-      return own + (global.length > PAIRING_GLOBAL_FAILURES_BEFORE_DELAY ? PAIRING_GLOBAL_DELAY_MS : 0);
+      failures = failures.filter((t) => t > at - PAIRING_FAILURE_WINDOW_MS);
+      return Math.max(0, nextAt - at);
     },
     async hold(ms) {
       if (ms > 0) await sleep(ms);
     },
-    recordFailure(caller) {
+    recordFailure() {
       const at = now();
-      global.push(at);
-      if (global.length > 10_000) global = global.slice(-10_000);
-      let entry = callers.get(caller);
-      if (!entry) {
-        if (callers.size >= PAIRING_MAX_TRACKED_CALLERS) {
-          const oldest = callers.keys().next().value;
-          if (oldest !== undefined) callers.delete(oldest);
-        }
-        entry = { failures: [], nextAt: 0 };
-        callers.set(caller, entry);
-      }
-      entry.failures.push(at);
-      const delay = Math.min(PAIRING_PER_CALLER_MAX_DELAY_MS, 1000 * 2 ** (entry.failures.length - 1));
-      entry.nextAt = at + delay;
+      failures = [...failures.filter((t) => t > at - PAIRING_FAILURE_WINDOW_MS), at];
+      nextAt = at + Math.min(PAIRING_MAX_DELAY_MS, 1000 * 2 ** (failures.length - 1));
     },
   };
 }
