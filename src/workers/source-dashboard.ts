@@ -4685,6 +4685,8 @@ function providerLabel(provider: SovereigntyProfileProvider): string {
       return 'Anthropic';
     case 'openai-compatible':
       return 'OpenAI-compatible';
+    case 'built-in':
+      return 'Built into Olympus';
   }
 }
 

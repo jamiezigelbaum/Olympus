@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { createSovereigntyEngine, loadSovereigntyPreset, type SovereigntyConfig, type SovereigntyTrustDomainPolicy } from '../src/core/sovereignty.ts';
+import { createSovereigntyEngine, type SovereigntyConfig, type SovereigntyTrustDomainPolicy } from '../src/core/sovereignty.ts';
+import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createSourceIndexEmbeddingProviderFromSovereignty } from '../src/workers/email-source/server.ts';
 import {
@@ -10,7 +11,7 @@ import {
 describe('worker boot secretRef degradation', () => {
   test('a fresh preset and connected Gemini key construct the boot provider without dimension configuration', () => {
     const provider = createSourceIndexEmbeddingProviderFromSovereignty(
-      createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')),
+      createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive')),
       'internal',
       { OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY: 'fixture-key' },
     );
@@ -135,7 +136,7 @@ describe('worker boot secretRef degradation', () => {
   });
 
   test('publishes positive readiness bound to the exact policy profile without secret material', async () => {
-    const engine = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive'));
+    const engine = createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive'));
     const profile = engine.config.modelProfiles['gemini-source-embedding']!;
     const resolver = new WorkerBootSecretResolver({
       schedule: () => undefined,

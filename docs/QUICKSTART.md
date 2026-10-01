@@ -42,10 +42,17 @@ The preset prerequisites are:
 
 | Preset | Required before first source answer |
 |---|---|
-| `local-first` — Local models with Venice fallback | Gemini key for Public and Personal embeddings; a funded Venice API key; local answer and embedding models with exact registered IDs and matching output dimensions. Both shipped local profiles use `http://127.0.0.1:28090/v1`. |
-| `local-only` — Local models | Gemini key for Public and Personal embeddings; local answer and embedding models with exact registered IDs and matching output dimensions, using `http://127.0.0.1:28090/v1` in the shipped preset. No Venice account is needed. |
-| `private-cloud-only` — Venice | Gemini key for Public and Personal embeddings; a funded Venice API key for Private answers and approved Private embeddings; no local server required. Confirm the embedding model, dimensions, and cost before activation. |
-| `no-sensitive` — Don't ingest Private data | Gemini key for Public and Personal embeddings. Private content is unavailable to answering. |
+| `local-first` — Local models with Venice fallback | A funded Venice API key; a local answer model with its exact registered ID at `http://127.0.0.1:28090/v1`. |
+| `local-only` — Local models | A local answer model with its exact registered ID at `http://127.0.0.1:28090/v1`. No Venice account is needed. |
+| `private-cloud-only` — Venice | A funded Venice API key for Private answers; no local server required. |
+| `no-sensitive` — Don't ingest Private data | Nothing. Private content is unavailable to answering. |
+
+Every preset makes content searchable with the built-in embedding model: a
+small model that runs inside Olympus, downloads once (about 225 MB, checksum
+pinned) on first use, needs no account or key, and sends nothing off the
+computer. Gemini, a local embedding server, or a Venice Private embedding
+model remain opt-in choices; see
+[SOVEREIGNTY_CONFIG.md](SOVEREIGNTY_CONFIG.md#built-in-embeddings).
 
 A local runtime means a server actually answering at the effective policy's
 endpoints and serving its exact answer and embedding model IDs. An

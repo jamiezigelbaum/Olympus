@@ -1,16 +1,18 @@
 {
   "schemaVersion": 1,
   "modelProfiles": {
-    "built-in-embedding": {
-      "provider": "built-in",
-      "trust": "local",
-      "model": "arctic-embed-m-v1.5-int8-e58a8f7",
-      "purpose": "embedding"
-    },
     "cloud-openclaw-infer": {
       "provider": "openclaw-infer",
       "trust": "standard_cloud",
       "purpose": "analyst"
+    },
+    "gemini-source-embedding": {
+      "provider": "google-gemini",
+      "trust": "standard_cloud",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "model": "gemini-embedding-2",
+      "secretRef": "env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
+      "purpose": "embedding"
     }
   },
   "routes": {
@@ -35,14 +37,14 @@
       "internal": {
         "minimumExecutionTrust": "standard_cloud",
         "allowedEmbeddingTrust": ["local", "standard_cloud"],
-        "embeddingProfile": "built-in-embedding",
+        "embeddingProfile": "gemini-source-embedding",
         "allowCloudQuery": true,
         "activationMode": "hybrid_shadow"
       },
       "public_safe": {
         "minimumExecutionTrust": "standard_cloud",
         "allowedEmbeddingTrust": ["local", "standard_cloud"],
-        "embeddingProfile": "built-in-embedding",
+        "embeddingProfile": "gemini-source-embedding",
         "allowCloudQuery": true,
         "activationMode": "hybrid_shadow"
       }

@@ -134,7 +134,7 @@ describe('pilot installation entry points', () => {
     );
     expect(step3).toContain('**Model keys are entered in the dashboard, not collected by you.**');
     expect(step3).toContain("not through OpenClaw's own secret prompt or store");
-    expect(document).toContain('Gemini API key (source embeddings, all presets; headless fallback only)');
+    expect(document).toContain('Gemini API key (only when the operator opted into Gemini embeddings instead\n  of the built-in model; headless fallback only)');
     expect(document).toContain('report\nit as "finished in the dashboard\'s Models section" and continue');
   });
 

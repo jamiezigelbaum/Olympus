@@ -102,10 +102,11 @@ describe('ModelSetupService status', () => {
   });
 
   test.each([
-    { preset: 'local-only' as const, cards: ['gemini', 'local'] },
-    { preset: 'no-sensitive' as const, cards: ['gemini'] },
-    { preset: 'local-first' as const, cards: ['gemini', 'venice', 'local'] },
-    { preset: 'private-cloud-only' as const, cards: ['gemini', 'venice'] },
+    // The built-in embedding model needs no card: nothing to configure.
+    { preset: 'local-only' as const, cards: ['local'] },
+    { preset: 'no-sensitive' as const, cards: [] },
+    { preset: 'local-first' as const, cards: ['venice', 'local'] },
+    { preset: 'private-cloud-only' as const, cards: ['venice'] },
   ])('$preset requires only its active provider cards', ({ preset, cards }) => {
     const service = new ModelSetupService({
       config: loadSovereigntyPreset(preset), credentialState: () => 'ready',

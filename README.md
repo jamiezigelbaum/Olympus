@@ -107,10 +107,10 @@ fork:
 | **Do not add secure data to Olympus** (`no-sensitive`) | frontier cloud | **not ingested** — reported as an honest gap |
 
 “Private cloud only” describes **Private-data handling**: Venice answers
-Private questions, and Private search is keyword-only by default. Venice
-Private embeddings for Private content are available but switched on only
-with the owner's explicit, advance approval. Gemini still supplies embeddings
-for Public and Personal content, and Private content never goes to Gemini. Public and Personal
+Private questions. Search indexing for every tier uses a small embedding model
+built into Olympus: it downloads once, runs on your computer, needs no account
+or key, and sends nothing anywhere. Gemini, local, or Venice Private embeddings
+stay an opt-in choice, and Private content never goes to Gemini. Public and Personal
 questions use OpenClaw's own configured default model.
 
 One question searches every tier. When it finds Private evidence, the private

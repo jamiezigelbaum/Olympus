@@ -33,6 +33,7 @@ const repoRoot = join(import.meta.dir, '..');
 // what live stores hold.
 const QWEN3_EPOCH = 'local:openai-compatible:secure-local-qwen3-embed:2560';
 const GEMINI_EPOCH = 'cloud:google-gemini:gemini-embedding-2:provider-reported';
+const BUILT_IN_EPOCH = 'local:built-in:arctic-embed-m-v1.5-int8-e58a8f7:768';
 
 // The variant the alternation produced. No exported constructor may be able
 // to emit it again.
@@ -53,6 +54,13 @@ describe('embedding identity canon', () => {
       backend: 'cloud',
       dimension: 3072,
       epochId: GEMINI_EPOCH,
+    });
+    expect(canonicalEmbeddingIdentityForModel('arctic-embed-m-v1.5-int8-e58a8f7')).toEqual({
+      provider: 'built-in',
+      modelId: 'arctic-embed-m-v1.5-int8-e58a8f7',
+      backend: 'local',
+      dimension: 768,
+      epochId: BUILT_IN_EPOCH,
     });
     expect(canonicalEmbeddingDimension('secure-local-qwen3-embed')).toBe(2560);
     expect(canonicalEmbeddingDimension('unknown-model')).toBeUndefined();

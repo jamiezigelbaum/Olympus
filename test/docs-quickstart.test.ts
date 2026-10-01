@@ -133,8 +133,8 @@ describe('first-run docs', () => {
     const posture = install.slice(install.indexOf('> 3. **Venice**'), install.indexOf("> 4. **Don't ingest Private data**"))
       .replace(/>\s*/g, '').replace(/\s+/g, ' ');
     expect(posture).toContain('Private content goes only to Venice');
-    expect(posture).toContain('Gemini indexes only your Public and Personal data');
-    expect(posture).toContain('separately approved Private embedding model for Private search');
+    expect(posture).toContain('Search indexing for every tier uses the model built into Olympus');
+    expect(posture).toContain('separately approved Venice Private embedding model stays an opt-in');
     expect(posture).toContain('Private content never goes to Gemini');
     expect(posture).not.toContain('Private cloud only');
   });
