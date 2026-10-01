@@ -8346,7 +8346,6 @@ var init_readwise = __esm(() => {
   init_live_control();
   init_live_sync();
 });
-
 // src/core/opsec.ts
 var init_opsec = () => {};
 
