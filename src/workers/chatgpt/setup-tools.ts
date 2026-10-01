@@ -30,6 +30,7 @@ import type {
 import {
   CONNECT_SOURCE_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
+  MODEL_RETRY_TOOL_NAME,
   MODEL_SET_TOOL_NAME,
   PRIVACY_GET_TOOL_NAME,
   PRIVACY_SET_TOOL_NAME,
@@ -50,6 +51,7 @@ import {
   ChatGptSurfaceError,
   connectSourceToolResult,
   disconnectToolResult,
+  modelRetryToolResult,
   modelSetToolResult,
   privacyToolResult,
   scopeConflictToolResult,
@@ -99,6 +101,11 @@ export interface ChatGptSetupBackend {
   disconnect(sourceId: ChatGptDisconnectSourceId): Promise<void>;
   /** Switches between configured models; throws ModelChoiceRefusal for one that is not set up. */
   setModels(choice: ChatGptModelChoice): Promise<{ changed: boolean; embedding: 'built_in' | 'custom'; answers?: 'local' | 'venice'; restarting: boolean }>;
+  /**
+   * Starts a built-in model's install again (resuming a partial download);
+   * answers at once. False when that model is not the built-in one here.
+   */
+  retryModel(model: 'embedding' | 'answers'): boolean;
   /** The owner's Secrets locations; throws when the rules cannot be read. */
   secretLocations(): SecretLocations;
   /** The saved privacy settings and the privacy-check backlog; throws when the profile cannot be read. */
@@ -250,6 +257,21 @@ export const MODEL_SET_TOOL: ToolDefinition = {
   _meta: WIDGET_ONLY,
 };
 
+export const MODEL_RETRY_TOOL: ToolDefinition = {
+  name: MODEL_RETRY_TOOL_NAME,
+  title: 'Retry an Olympus model install',
+  description: 'For the Olympus panel: start the built-in search or answer model\'s install again on the Mac after it failed.',
+  inputSchema: {
+    type: 'object',
+    properties: { model: { type: 'string', enum: ['embedding', 'answers'] } },
+    required: ['model'],
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  securitySchemes: OAUTH2_REQUIRED,
+  _meta: WIDGET_ONLY,
+};
+
 /** folder {key, display?}; label {key: id, value: name}; sender {value: address or @domain}. */
 const PRIVACY_RULE_SCHEMA = {
   type: 'object',
@@ -307,6 +329,7 @@ export const SETUP_TOOLS: readonly ToolDefinition[] = [
   SCOPE_SET_TOOL,
   DISCONNECT_SOURCE_TOOL,
   MODEL_SET_TOOL,
+  MODEL_RETRY_TOOL,
   PRIVACY_GET_TOOL,
   PRIVACY_SET_TOOL,
 ];
@@ -358,6 +381,11 @@ export async function callSetupTool(
           ...(result.answers ? { answers: result.answers } : {}),
           restarting: result.restarting,
         });
+      }
+      case MODEL_RETRY_TOOL_NAME: {
+        const model = oneOf(args.model, ['embedding', 'answers'] as const);
+        if (!backend.retryModel(model)) throw new ChatGptSurfaceError('model_not_configured');
+        return modelRetryToolResult({ status: 'retrying', model });
       }
       case PRIVACY_GET_TOOL_NAME:
         return privacyToolResult(visiblePrivacy(backend.privacySettings(), secretLocations(backend)), 'current');

@@ -22521,6 +22521,9 @@ var LLAMA_SERVER_RUNTIME = {
 
 // src/workers/source-index/built-in-reasoning/install.ts
 var STALE_LOCK_MS = 60 * 60000;
+var DOWNLOAD_STALL_MS = 2 * 60000;
+var VERIFY_TIMEOUT_MS = 15 * 60000;
+var EXTRACT_TIMEOUT_MS = 5 * 60000;
 
 // src/core/analyst-delphi.ts
 init_operation_error();
@@ -22924,10 +22927,25 @@ function integrityAlgorithm(integrity) {
   }
   return algorithm;
 }
-function sha256File(path) {
+function sha256File(path, timeoutMs = 10 * 60000) {
   return new Promise((resolve4, reject) => {
     const hash = createHash13("sha256");
-    createReadStream(path).on("data", (chunk) => hash.update(chunk)).on("error", reject).on("end", () => resolve4(hash.digest("hex")));
+    let settled = false;
+    const stream = createReadStream(path);
+    const finish = (error) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        stream.destroy();
+        reject(error);
+      } else {
+        resolve4(hash.digest("hex"));
+      }
+    };
+    const timer = setTimeout(() => finish(new BuiltInEmbeddingInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
+    stream.on("data", (chunk) => hash.update(chunk)).on("error", (error) => finish(error)).on("end", () => finish()).on("close", () => finish(new Error(`Reading ${path} stopped before the end.`)));
   });
 }
 async function withInstallLock(lockPath, waitMs, run) {
@@ -23312,6 +23330,11 @@ class BuiltInSourceEmbeddingProvider {
     return readBuiltInEmbeddingStatus(this.env, this.spec);
   }
   async prepare() {
+    await this.load();
+  }
+  async retry() {
+    if (!this.loading)
+      this.lastFailure = undefined;
     await this.load();
   }
   async embed(inputs, options) {

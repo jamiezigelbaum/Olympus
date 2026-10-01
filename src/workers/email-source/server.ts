@@ -1,3 +1,4 @@
+import { modelInstallFailedReason } from '../../core/model-install-failure.ts';
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
 import {
@@ -4272,6 +4273,17 @@ export async function main(): Promise<void> {
     credentialPresent: (_id, profile) => profile.secretRef === undefined
       || safeModelCredential(profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) }) !== undefined,
     requestReload: () => requestModelReload(),
+    retryModel: (model) => {
+      if (model === 'answers') {
+        if (!workerBuiltInModel) return false;
+        void workerBuiltInModel.model.prepare();
+        return true;
+      }
+      const builtIn = [...new Set([internalPolicyEmbeddingProvider, secureLocalPolicyEmbeddingProvider])]
+        .filter((provider): provider is BuiltInSourceEmbeddingProvider => provider instanceof BuiltInSourceEmbeddingProvider);
+      for (const provider of builtIn) void provider.retry().catch(() => undefined);
+      return builtIn.length > 0;
+    },
   });
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === '1';
   // source_answer needs an Analyst the Mac can actually run; without one,
@@ -4360,7 +4372,14 @@ export async function main(): Promise<void> {
             privateModel: () => {
               if (!workerBuiltInModel) return undefined;
               const status = builtInPrivateModelStatus(process.env);
-              return status.enabled ? { state: status.state, percent: status.percent } : undefined;
+              if (!status.enabled) return undefined;
+              return {
+                state: status.state,
+                percent: status.percent,
+                bytesDone: status.bytesDone,
+                bytesTotal: status.bytesTotal,
+                ...(status.state === 'failed' ? { failedReason: modelInstallFailedReason(status.failure) } : {}),
+              };
             },
             privacy: () => {
               const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());

@@ -24,6 +24,7 @@ import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { openRemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
 import { PRIVATE_ANSWER_META_KEY, PRIVATE_ANSWER_RESOURCE_URI, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
 import {
   PRIVATE_ANSWER_PAD_BUCKETS,
@@ -325,7 +326,7 @@ describe('dashboard: the built-in private model as the answer model', () => {
       embedding: { kind: 'built_in', state: 'ready' },
       privateModel: { state: 'downloading', percent: 30 },
     });
-    expect(downloading.models.answers).toEqual({ kind: 'built_in', label: 'Built-in', ready: false });
+    expect(downloading.models.answers).toEqual({ kind: 'built_in', label: 'Built-in', ready: false, install: { state: 'downloading', percent: 30 } });
     expect(downloading.connection).toEqual({ state: 'ready' });
     expect(downloading.needsYou.some((item) => item.id === 'model:answers')).toBe(false);
 
@@ -335,8 +336,38 @@ describe('dashboard: the built-in private model as the answer model', () => {
     });
     expect(ready.models.answers).toEqual({ kind: 'built_in', label: 'Built-in', ready: true });
 
-    const failed = buildChatGptDashboardViewModel(view, { privateModel: { state: 'failed', percent: 0 } });
-    expect(failed.needsYou.some((item) => item.id === 'model:answers')).toBe(true);
+    const failed = buildChatGptDashboardViewModel(view, { privateModel: { state: 'failed', percent: 0, failedReason: 'disk_full' } });
+    expect(failed.models.answers?.install).toEqual({ state: 'failed', failedReason: 'disk_full' });
+    // A failed built-in install is started again from the page.
+    expect(failed.needsYou.find((item) => item.id === 'model:answers')?.fix)
+      .toEqual({ label: 'Try again', tool: 'olympus_model_retry', args: { model: 'answers' } });
+  });
+
+  test('verifying reports bytes checked; a failed built-in embedding gets the retry fix; fields survive the copy', () => {
+    const verifying = buildChatGptDashboardViewModel(view, {
+      embedding: { kind: 'built_in', state: 'verifying', percent: 40, bytesDone: 400, bytesTotal: 1_000 },
+      privateModel: { state: 'verifying', percent: 61, bytesDone: 1_671_000_000, bytesTotal: 2_740_937_888 },
+    });
+    expect(verifying.models.answers?.install).toEqual({ state: 'verifying', percent: 61, bytesDone: 1_671_000_000, bytesTotal: 2_740_937_888 });
+    // Checking the search model is still installing: indexing waits for it.
+    expect(verifying.connection).toMatchObject({ state: 'installing' });
+    const copied = copyDashboardViewModel(verifying);
+    expect(copied.models.embedding).toEqual({ kind: 'built_in', state: 'verifying', percent: 40, bytesDone: 400, bytesTotal: 1_000 });
+    expect(copied.models.answers?.install).toEqual({ state: 'verifying', percent: 61, bytesDone: 1_671_000_000, bytesTotal: 2_740_937_888 });
+
+    const failed = buildChatGptDashboardViewModel(view, {
+      embedding: { kind: 'built_in', state: 'failed', failedReason: 'network' },
+      privateModel: { state: 'ready', percent: 100 },
+    });
+    expect(failed.needsYou.find((item) => item.id === 'model:embedding')?.fix)
+      .toEqual({ label: 'Try again', tool: 'olympus_model_retry', args: { model: 'embedding' } });
+    const copiedFailed = copyDashboardViewModel(failed);
+    expect(copiedFailed.models.embedding).toEqual({ kind: 'built_in', state: 'failed', failedReason: 'network' });
+    expect(copiedFailed.needsYou.find((item) => item.id === 'model:embedding')?.fix?.tool).toBe('olympus_model_retry');
+    expect(copiedFailed.models.answers).toEqual({ kind: 'built_in', label: 'Built-in', ready: true });
+    // Only fixed failure codes cross the copy.
+    const odd = copyDashboardViewModel({ ...failed, models: { ...failed.models, embedding: { kind: 'built_in', state: 'failed', failedReason: '/Users/me/disk' as never } } });
+    expect(odd.models.embedding.failedReason).toBe('unknown');
   });
 
   test('while the embedding model also downloads, the installing bar waits for both', () => {

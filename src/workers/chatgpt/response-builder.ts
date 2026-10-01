@@ -39,6 +39,9 @@ import type {
   MailCategory,
   MailScopeList,
   MailWindow,
+  ModelInstall,
+  ModelInstallFailedReason,
+  ModelRetryResult,
   ModelSetResult,
   PrivacyRuleView,
   PrivacySettings,
@@ -56,6 +59,7 @@ import {
   DASHBOARD_RESOURCE_URI,
   DASHBOARD_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
+  MODEL_RETRY_TOOL_NAME,
   MODEL_SET_TOOL_NAME,
   PRIVACY_GET_TOOL_NAME,
   PRIVACY_META_KEY,
@@ -103,6 +107,7 @@ const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
   [SCOPE_LIST_TOOL_NAME]: { source_id: SCOPE_SOURCE_IDS },
   [DISCONNECT_SOURCE_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
   [MODEL_SET_TOOL_NAME]: { embedding: new Set(['built_in']), answers: new Set(['local', 'venice']) },
+  [MODEL_RETRY_TOOL_NAME]: { model: new Set(['embedding', 'answers']) },
   [PRIVACY_GET_TOOL_NAME]: {},
 };
 const FIX_HREF_HOST = 'olympusplugin.ai';
@@ -113,7 +118,9 @@ const CONNECTION_STATES = new Set<ConnectionState>(['not_installed', 'installing
 const CONNECTION_ACTIONS = new Set(['install', 'open_olympus', 'wake_mac', 'retry']);
 const STATUSES = new Set(['Fresh', 'Working', 'Waiting', 'Needs you', 'Failing', 'Off']);
 const UNITS = new Set(['files', 'messages', 'items']);
-const EMBEDDING_STATES = new Set(['downloading', 'ready', 'failed']);
+const EMBEDDING_STATES = new Set(['downloading', 'verifying', 'ready', 'failed']);
+const INSTALL_STATES = new Set(['downloading', 'verifying', 'ready', 'failed']);
+const FAILED_REASONS = new Set<ModelInstallFailedReason>(['disk_full', 'network', 'checksum', 'unknown']);
 const ANSWER_KINDS = new Set(['built_in', 'venice', 'local']);
 /** Trust domains whose item metadata may be cited. Private (secure_local) and Secret never. */
 const CITABLE_TRUST_DOMAINS = new Set(['public_safe', 'internal']);
@@ -153,10 +160,7 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     models: {
       embedding: {
         kind: view.models?.embedding?.kind === 'built_in' ? 'built_in' : 'custom',
-        state: EMBEDDING_STATES.has(view.models?.embedding?.state) ? view.models.embedding.state : 'failed',
-        ...(view.models?.embedding?.state === 'downloading' && finite(view.models.embedding.percent)
-          ? { percent: percent(view.models.embedding.percent) }
-          : {}),
+        ...copyInstall(view.models?.embedding, 'failed'),
       },
     },
     generatedAt: iso(view.generatedAt) ?? new Date().toISOString(),
@@ -165,6 +169,9 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
   const answers = view.models?.answers;
   if (answers && ANSWER_KINDS.has(answers.kind)) {
     out.models.answers = { kind: answers.kind, label: text(answers.label), ready: answers.ready === true };
+    if (answers.kind === 'built_in' && answers.ready !== true && answers.install) {
+      out.models.answers.install = copyInstall(answers.install, 'downloading');
+    }
   }
   if (view.models?.change) out.models.change = copyFix(view.models.change);
   if (view.privacy) {
@@ -608,6 +615,15 @@ export function modelSetToolResult(result: ModelSetResult): ChatGptToolResult {
   return { content: [{ type: 'text', text: parts.join(' ') }], structuredContent: structured as unknown as Record<string, unknown> };
 }
 
+export function modelRetryToolResult(result: ModelRetryResult): ChatGptToolResult {
+  const model = result.model === 'answers' ? 'answers' : 'embedding';
+  const structured: ModelRetryResult = { status: 'retrying', model };
+  const text = model === 'answers'
+    ? 'Olympus is installing its built-in answer model again on the Mac.'
+    : 'Olympus is installing its built-in search model again on the Mac.';
+  return { content: [{ type: 'text', text }], structuredContent: structured as unknown as Record<string, unknown> };
+}
+
 /**
  * `olympus_privacy_get` / `olympus_privacy_set`. Rules (folder and label
  * names, keys, senders) go only to `_meta`, like the picker; the model sees
@@ -895,6 +911,23 @@ function text(value: unknown): string {
 
 function identifier(value: unknown): string {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? value : '';
+}
+
+/** A model install's fields, each only in the states that carry it; fixed failure codes only. */
+function copyInstall(install: Partial<ModelInstall> | undefined, fallback: ModelInstall['state']): ModelInstall {
+  const state = install?.state !== undefined && INSTALL_STATES.has(install.state) ? install.state : fallback;
+  const out: ModelInstall = { state };
+  if ((state === 'downloading' || state === 'verifying') && install) {
+    if (finite(install.percent)) out.percent = percent(install.percent);
+    if (finite(install.bytesTotal) && install.bytesTotal > 0 && finite(install.bytesDone)) {
+      out.bytesTotal = whole(install.bytesTotal);
+      out.bytesDone = Math.min(whole(install.bytesDone), out.bytesTotal);
+    }
+  }
+  if (state === 'failed' && install?.failedReason !== undefined) {
+    out.failedReason = FAILED_REASONS.has(install.failedReason) ? install.failedReason : 'unknown';
+  }
+  return out;
 }
 
 function finite(value: unknown): value is number {

@@ -40,6 +40,7 @@ import {
 import {
   CONNECT_SOURCE_TOOL_NAME,
   DASHBOARD_TOOL_NAME,
+  MODEL_RETRY_TOOL_NAME,
   PRIVACY_GET_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
@@ -51,6 +52,8 @@ import {
   type DashboardItem,
   type DashboardSource,
   type DashboardViewModelV1,
+  type ModelInstall,
+  type ModelInstallFailedReason,
   type SourceProgress,
   type SourceStalledReason,
 } from './dashboard-contract.ts';
@@ -141,6 +144,10 @@ export interface BuiltInPrivateModelView {
   state: 'not_started' | 'downloading' | 'verifying' | 'loading' | 'ready' | 'failed';
   /** 0-100. */
   percent?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  /** `failed` only: a fixed code (core/model-install-failure.ts), never the installer's message. */
+  failedReason?: ModelInstallFailedReason;
 }
 
 export function buildChatGptDashboardViewModel(
@@ -176,17 +183,26 @@ export function buildChatGptDashboardViewModel(
     .filter(({ status }) => status === 'Needs you' || status === 'Failing')
     .map(({ definition, card, connecting, progress }) => attentionItem(definition, card, degraded, connecting, progress));
 
-  // Models are status only in ChatGPT (owner decision 2026-10-01): the fix is
-  // to check again; a built-in download retries on its own.
+  // Models are status only in ChatGPT (owner decision 2026-10-01): a
+  // configured model's fix is to check again; a built-in install that failed
+  // is started again from here (olympus_model_retry).
   if (embedding.state === 'failed') {
-    needsYou.push({ id: 'model:embedding', sentence: DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention, fix: checkAgainFix() });
+    needsYou.push({
+      id: 'model:embedding',
+      sentence: DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention,
+      fix: embedding.kind === 'built_in' ? retryFix('embedding') : checkAgainFix(),
+    });
   }
   const answers = answersFromModelSetup(view.model_setup) ?? builtInAnswers(options.privateModel);
   // A built-in model still downloading is not something for the owner to fix.
   const answersNeedAttention = answers !== undefined && !answers.ready
     && (answers.kind !== 'built_in' || options.privateModel?.state === 'failed');
   if (answersNeedAttention) {
-    needsYou.push({ id: 'model:answers', sentence: DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention, fix: checkAgainFix() });
+    needsYou.push({
+      id: 'model:answers',
+      sentence: DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention,
+      fix: answers.kind === 'built_in' ? retryFix('answers') : checkAgainFix(),
+    });
   }
 
   // Privacy is set once, in ChatGPT: until then it is one thing the owner
@@ -476,7 +492,9 @@ function stalledReason(input: {
   credentialsMissing: boolean;
 }): SourceStalledReason | undefined {
   if (input.credentialsMissing) return 'waiting_for_credentials';
-  if (input.stage === 'indexing' && input.embedding.state === 'downloading') return 'model_downloading';
+  if (input.stage === 'indexing' && (input.embedding.state === 'downloading' || input.embedding.state === 'verifying')) {
+    return 'model_downloading';
+  }
   if (input.open.state !== 'stalled') return undefined;
   const failures = input.scrubbed.schedule?.consecutive_failures ?? 0;
   if (failures > 0 || dashboardSyncKeepsFailing(input.scrubbed)) return 'provider_unavailable';
@@ -485,6 +503,11 @@ function stalledReason(input: {
 
 function checkAgainFix(): DashboardFix {
   return { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {} };
+}
+
+/** Starts a failed built-in install again. */
+function retryFix(model: 'embedding' | 'answers'): DashboardFix {
+  return { label: DASHBOARD_CHATGPT_PICKER_COPY.tryAgain, tool: MODEL_RETRY_TOOL_NAME, args: { model } };
 }
 
 /** The publisher-app OAuth source for a definition, when ChatGPT can connect it. */
@@ -532,7 +555,7 @@ function connectionFor(input: {
   // The built-in private model downloading alone never does: it joins the
   // percent only while the embedding model is downloading too, so the bar
   // reaches 100 when both are done.
-  if (input.embedding.state === 'downloading') {
+  if (input.embedding.state === 'downloading' || input.embedding.state === 'verifying') {
     const state: ConnectionState = 'installing';
     let percent = clampPercent(input.embedding.percent ?? 0);
     if (input.privateModel && PRIVATE_MODEL_INSTALLING.has(input.privateModel.state)) {
@@ -558,7 +581,27 @@ const PRIVATE_MODEL_INSTALLING = new Set<BuiltInPrivateModelView['state']>(['dow
 
 function builtInAnswers(model: BuiltInPrivateModelView | undefined): DashboardViewModelV1['models']['answers'] {
   if (!model) return undefined;
-  return { kind: 'built_in', label: ANSWER_MODEL_LABELS.built_in, ready: model.state === 'ready' || model.state === 'loading' };
+  const ready = model.state === 'ready' || model.state === 'loading';
+  return {
+    kind: 'built_in',
+    label: ANSWER_MODEL_LABELS.built_in,
+    ready,
+    ...(ready ? {} : { install: builtInInstall(model) }),
+  };
+}
+
+/**
+ * The install line for a built-in model that is not ready. Not started yet
+ * reads as a download at 0%: the install starts at boot or on the first
+ * Private question, never on the owner's say-so.
+ */
+function builtInInstall(model: BuiltInPrivateModelView): ModelInstall {
+  if (model.state === 'failed') return { state: 'failed', failedReason: model.failedReason ?? 'unknown' };
+  const state = model.state === 'verifying' ? 'verifying' as const : 'downloading' as const;
+  const bytes = Number.isFinite(model.bytesTotal) && (model.bytesTotal ?? 0) > 0
+    ? { bytesDone: Math.max(0, Math.floor(model.bytesDone ?? 0)), bytesTotal: Math.floor(model.bytesTotal!) }
+    : {};
+  return { state, percent: clampPercent(model.state === 'not_started' ? 0 : model.percent ?? 0), ...bytes };
 }
 
 function answersFromModelSetup(setup: ModelSetupView | undefined): DashboardViewModelV1['models']['answers'] {

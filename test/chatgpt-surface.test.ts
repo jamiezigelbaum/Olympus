@@ -590,6 +590,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         'olympus_scope_set',
         'olympus_disconnect_source',
         'olympus_model_set',
+        'olympus_model_retry',
         'olympus_privacy_get',
         'olympus_privacy_set',
       ]);

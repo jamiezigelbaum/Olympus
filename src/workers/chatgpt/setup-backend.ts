@@ -57,6 +57,8 @@ export interface ChatGptSetupBackendOptions {
   requestReload: () => boolean;
   /** Items held for the privacy check across every tier ledger (counts only). */
   pendingClassificationCount?: () => number;
+  /** Starts a built-in model's install again; false when that model is not built in here. */
+  retryModel?: (model: 'embedding' | 'answers') => boolean;
   env?: Record<string, string | undefined>;
 }
 
@@ -187,6 +189,10 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
     },
 
     savedMailDraft,
+
+    retryModel(model) {
+      return options.retryModel?.(model) ?? false;
+    },
 
     async disconnect(sourceId) {
       // A sign-in still outstanding for this source is cancelled first, so

@@ -567,3 +567,15 @@ describe('real model (opt-in)', () => {
     }
   }, 30 * 60_000);
 });
+
+describe('install failure codes', () => {
+  test('only fixed codes, never the message', async () => {
+    const { modelInstallFailedReason } = await import('../src/core/model-install-failure.ts');
+    expect(modelInstallFailedReason({ reason: 'download_failed', message: 'x' })).toBe('network');
+    expect(modelInstallFailedReason({ reason: 'checksum_mismatch' })).toBe('checksum');
+    expect(modelInstallFailedReason({ reason: 'disk_write_failed', message: 'ENOSPC: no space left on device, write' })).toBe('disk_full');
+    expect(modelInstallFailedReason({ reason: 'disk_write_failed', message: 'EACCES /Users/me' })).toBe('unknown');
+    expect(modelInstallFailedReason({ reason: 'runtime_load_failed' })).toBe('unknown');
+    expect(modelInstallFailedReason(undefined)).toBe('unknown');
+  });
+});

@@ -30,6 +30,7 @@ describe('relay ChatGPT assets', () => {
         'olympus_scope_set',
         'olympus_disconnect_source',
         'olympus_model_set',
+        'olympus_model_retry',
         'olympus_privacy_get',
         'olympus_privacy_set',
       ].map((name) => [name, [{ type: 'oauth2', scopes: [] }]]),
