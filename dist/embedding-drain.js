@@ -22586,6 +22586,9 @@ var DOWNLOAD_STALL_MS = 2 * 60000;
 var VERIFY_TIMEOUT_MS = 15 * 60000;
 var EXTRACT_TIMEOUT_MS = 5 * 60000;
 
+// src/core/analyst-built-in.ts
+var utf82 = new TextEncoder;
+
 // src/core/analyst-delphi.ts
 init_operation_error();
 

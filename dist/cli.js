@@ -25402,7 +25402,7 @@ function coerceCitation(value) {
 function stripCodeFences(text) {
   return text.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "").trim();
 }
-var analystAbortSignalStorage, ANALYST_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, ANALYST_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, promptEncoder, ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
@@ -25454,6 +25454,23 @@ var init_analyst = __esm(() => {
 `);
   DEFAULT_AUDIT_MAX_OUTPUT_CHARS = DEFAULT_ANALYST_MAX_OUTPUT_CHARS + AUDIT_OUTPUT_HEADROOM_CHARS;
   promptEncoder = new TextEncoder;
+  ANALYST_EVIDENCE_SCAFFOLDING_LABELS = [
+    "trust: public_safe/",
+    "trust: internal/",
+    "trust: secure_local/",
+    "local_private_provenance:",
+    "citation_metadata:",
+    "source-instruction flags:",
+    "extracted facts:",
+    "source_data:",
+    "coverage — searched:",
+    '"source_label":',
+    '"conversation_label":',
+    '"author_label":',
+    '"authored_at":',
+    '"updated_at":',
+    '"locator":'
+  ];
   STOP_WORDS = new Set([
     "a",
     "about",
@@ -29344,7 +29361,37 @@ async function searchReleasedEvidence(input) {
     }
   };
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500;
+async function searchPrivateEvidence(input) {
+  const question = input.question.trim();
+  if (!question)
+    throw new OperationError("invalid_params", "A question is required.");
+  const maxResults = Math.max(1, Math.min(MAX_EVIDENCE_CANDIDATES, input.maxResults ?? PRIVATE_EVIDENCE_MAX_RESULTS));
+  const request = {
+    question,
+    retrieval_mode: "hybrid",
+    include_internal: false,
+    include_secure_local: true,
+    include_secure_local_content: true,
+    max_results: maxResults
+  };
+  const lanes = input.lanes(request);
+  const detail = await buildEvidencePackDetailed({
+    question,
+    maxResults,
+    searchContext: { allowedTrustDomains: ["secure_local"], allowCloudQueries: false },
+    registry: lanes.registry,
+    adapters: lanes.adapters,
+    contentProviders: lanes.contentProviders,
+    maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
+    evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,
+    ...input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {},
+    ...lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}
+  });
+  assertEvidencePackModelEligible(detail.pack);
+  const candidates = detail.pack.candidates.filter((candidate) => candidate.trustDomain === "secure_local");
+  return { matched: candidates.length, candidates };
+}
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000;
 var init_analyst_answer = __esm(() => {
   init_analyst();
   init_analyst_openclaw_infer();
@@ -94638,7 +94685,7 @@ function isLocalServiceDown(error2) {
 }
 async function answerPrivately(question, evidence, options = {}) {
   const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
-  const pack = privateEvidencePack(question, evidence);
+  const pack = fitPrivatePack(privateEvidencePack(question, evidence), options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES);
   const analyst = createAnalyst(model, { auditSuspiciousDrafts: true });
   const run = () => analyst.analyze(pack, {
     localOnly: true,
@@ -94646,8 +94693,13 @@ async function answerPrivately(question, evidence, options = {}) {
   });
   const result = options.signal ? await runWithAnalystAbortSignal(options.signal, run) : await run();
   const byId = new Map(evidence.map((item) => [item.id, item]));
+  const modelId = `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`;
+  const unanswered = result.unanswered.filter((line) => !echoesEvidenceScaffolding(line));
+  if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
+    return { answer: PRIVATE_ANSWER_NOT_FOUND, citations: [], unanswered, modelId };
+  }
   return {
-    answer: result.escalation ? PRIVATE_ANSWER_NOT_FOUND : result.answer,
+    answer: result.answer,
     citations: result.citations.map((citation) => {
       const id = citation.provenance.sourceItem.providerItemId;
       const item = byId.get(id);
@@ -94658,9 +94710,61 @@ async function answerPrivately(question, evidence, options = {}) {
         claim: citation.claim
       };
     }),
-    unanswered: [...result.unanswered],
-    modelId: `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`
+    unanswered,
+    modelId
   };
+}
+function echoesEvidenceScaffolding(text) {
+  const normalized = text.toLowerCase().split(/\s+/).join(" ").split(" /").join("/").split("/ ").join("/").split(" :").join(":");
+  return ANALYST_EVIDENCE_SCAFFOLDING_LABELS.some((label) => normalized.includes(label));
+}
+function fitPrivatePack(pack, maxPromptBytes) {
+  const options = { localOnly: true };
+  if (analystPromptBytes(pack, options) <= maxPromptBytes)
+    return pack;
+  for (let keep = pack.candidates.length;keep >= 1; keep -= 1) {
+    const base = pack.candidates.slice(0, keep);
+    const overhead = analystPromptBytes({ ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: [] })) }, options);
+    if (overhead >= maxPromptBytes)
+      continue;
+    let share = Math.floor((maxPromptBytes - overhead) / keep);
+    for (let attempt = 0;attempt < 6; attempt += 1) {
+      if (share < MIN_PRIVATE_PASSAGE_BYTES && keep > 1)
+        break;
+      const fitted = { ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, share) })) };
+      const bytes = analystPromptBytes(fitted, options);
+      if (bytes <= maxPromptBytes)
+        return fitted;
+      share = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
+    }
+  }
+  return { ...pack, candidates: pack.candidates.slice(0, 1).map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, MIN_PRIVATE_PASSAGE_BYTES) })) };
+}
+function clipUtf8(chunks2, maxBytes) {
+  const kept = [];
+  let remaining = Math.max(0, Math.floor(maxBytes));
+  for (const chunk of chunks2) {
+    if (remaining <= 0)
+      break;
+    const bytes = utf82.encode(chunk).length;
+    if (bytes <= remaining) {
+      kept.push(chunk);
+      remaining -= bytes;
+      continue;
+    }
+    let cut = "";
+    for (const codePoint of chunk) {
+      const size = utf82.encode(codePoint).length;
+      if (size > remaining)
+        break;
+      cut += codePoint;
+      remaining -= size;
+    }
+    if (cut)
+      kept.push(cut);
+    break;
+  }
+  return kept;
 }
 function privateEvidencePack(question, evidence) {
   const candidates = evidence.map((item) => ({
@@ -94690,13 +94794,14 @@ function privateEvidencePack(question, evidence) {
     builtAt: new Date().toISOString()
   };
 }
-var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 300000, DEFAULT_IDLE_SHUTDOWN_SECONDS = 600, DEFAULT_STARTUP_TIMEOUT_MS3 = 120000, PRIVATE_ANSWER_NOT_FOUND = "These private items do not answer this question.", sharedPanelModel;
+var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 300000, DEFAULT_IDLE_SHUTDOWN_SECONDS = 600, DEFAULT_STARTUP_TIMEOUT_MS3 = 120000, DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES = 28000, MIN_PRIVATE_PASSAGE_BYTES = 600, PRIVATE_ANSWER_NOT_FOUND = "These private items do not answer this question.", sharedPanelModel, utf82;
 var init_analyst_built_in = __esm(() => {
   init_analyst();
   init_operation_error();
   init_install();
   init_manifest2();
   init_server4();
+  utf82 = new TextEncoder;
 });
 
 // src/core/analyst-delphi.ts
@@ -104666,7 +104771,7 @@ function chatgptPrivateAnswerProgram(config2) {
       render();
   }
   const subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
-  const utf82 = (text2) => new TextEncoder().encode(text2);
+  const utf83 = (text2) => new TextEncoder().encode(text2);
   function fromB64url(text2) {
     if (typeof text2 !== "string" || !text2 || !/^[A-Za-z0-9_-]+$/.test(text2))
       return null;
@@ -104702,8 +104807,8 @@ function chatgptPrivateAnswerProgram(config2) {
     const macKey = await subtle.importKey("raw", macRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
     const shared = await subtle.deriveBits({ name: "ECDH", public: macKey }, privateKey, 256);
     const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-    const key = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf82(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
-    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf82(jobId) }, key, ciphertext);
+    const key = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key, ciphertext);
     return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ""));
   }
   function readAnswer(value) {
@@ -105200,7 +105305,7 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const [raw, probed] = await Promise.all([
           options.evidenceSearch({ question, ...limit ? { limit } : {} }, signal),
-          probe(question, ctx).catch(() => false)
+          probeWithinDeadline(probe, question, ctx)
         ]);
         const match = normalizeProbe(probed);
         const privateMatch = match.count > 0 ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later) }, options) : undefined;
@@ -105220,7 +105325,7 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
             include_secure_local_content: false,
             timeoutMs: SOURCE_ANSWER_TIMEOUT_MS
           }),
-          probe(question, ctx).catch(() => false)
+          probeWithinDeadline(probe, question, ctx)
         ]);
         const match = normalizeProbe(probed);
         const pending = match.count > 0 ? { question, match, refresh: privateRefresh(question, probe, later) } : undefined;
@@ -105263,8 +105368,16 @@ function normalizeProbe(value) {
   }
   return { count: 0, evidence: [] };
 }
+function probeWithinDeadline(probe, question, ctx) {
+  let timer;
+  const timeout = new Promise((resolve10) => {
+    timer = setTimeout(() => resolve10(false), PROBE_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  return Promise.race([probe(question, ctx).catch(() => false), timeout]).finally(() => clearTimeout(timer));
+}
 function privateRefresh(question, probe, context) {
-  return async () => normalizeProbe(await probe(question, context())).evidence;
+  return async () => normalizeProbe(await probeWithinDeadline(probe, question, context())).evidence;
 }
 function beginPrivateAnswer(pending, options) {
   const { question, match, refresh } = pending;
@@ -106589,10 +106702,10 @@ async function importPanelPublicKey(value) {
 async function aesKey(privateKey, peerPublicKey, jobId, usage) {
   const shared = await subtle().deriveBits({ name: "ECDH", public: peerPublicKey }, privateKey, 256);
   const ikm = await subtle().importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-  return subtle().deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf82(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
+  return subtle().deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
 }
 function padPrivateAnswerPlaintext(json2) {
-  const bytes = utf82(json2).byteLength;
+  const bytes = utf83(json2).byteLength;
   const largest = PRIVATE_ANSWER_PAD_BUCKETS[PRIVATE_ANSWER_PAD_BUCKETS.length - 1];
   const target = PRIVATE_ANSWER_PAD_BUCKETS.find((bucket) => bytes <= bucket) ?? Math.ceil(bytes / largest) * largest;
   return json2 + " ".repeat(target - bytes);
@@ -106601,11 +106714,11 @@ async function sealPrivateAnswer(jobId, panelPublicKey, plaintext) {
   const mac2 = await subtle().generateKey({ name: "ECDH", namedCurve: PRIVATE_ANSWER_CURVE }, false, ["deriveBits"]);
   const key = await aesKey(mac2.privateKey, panelPublicKey, jobId, "encrypt");
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTES));
-  const ciphertext = await subtle().encrypt({ name: "AES-GCM", iv, additionalData: utf82(jobId) }, key, utf82(plaintext));
+  const ciphertext = await subtle().encrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key, utf83(plaintext));
   const macPublicKey = new Uint8Array(await subtle().exportKey("raw", mac2.publicKey));
   return { macPublicKey: toBase64Url(macPublicKey), iv: toBase64Url(iv), ciphertext: toBase64Url(new Uint8Array(ciphertext)) };
 }
-var PRIVATE_ANSWER_CURVE = "P-256", RAW_PUBLIC_KEY_BYTES = 65, IV_BYTES = 12, subtle = () => globalThis.crypto.subtle, utf82 = (value) => new TextEncoder().encode(value), PRIVATE_ANSWER_PAD_BUCKETS;
+var PRIVATE_ANSWER_CURVE = "P-256", RAW_PUBLIC_KEY_BYTES = 65, IV_BYTES = 12, subtle = () => globalThis.crypto.subtle, utf83 = (value) => new TextEncoder().encode(value), PRIVATE_ANSWER_PAD_BUCKETS;
 var init_private_answer_crypto = __esm(() => {
   PRIVATE_ANSWER_PAD_BUCKETS = [1024, 4096, 16384, 65536];
 });
@@ -106965,7 +107078,9 @@ var init_private_answer_jobs = __esm(() => {
 // src/workers/chatgpt/private-answer-model.ts
 var exports_private_answer_model = {};
 __export(exports_private_answer_model, {
+  withoutEvidenceMarkers: () => withoutEvidenceMarkers,
   privateEvidenceItems: () => privateEvidenceItems,
+  privateEvidence: () => privateEvidence,
   createBuiltInPrivateAnswerModel: () => createBuiltInPrivateAnswerModel
 });
 function createBuiltInPrivateAnswerModel(options) {
@@ -106990,9 +107105,12 @@ function createBuiltInPrivateAnswerModel(options) {
     async answerPrivately(question, evidence, signal) {
       if (!model)
         throw new Error("no private answer model");
-      const items = privateEvidenceItems(evidence);
-      if (items.length === 0)
-        throw new Error("no private evidence");
+      const { items, unreadable } = privateEvidence(evidence);
+      if (items.length === 0) {
+        if (unreadable === 0)
+          throw new Error("no private evidence");
+        return { answer: unreadableAnswer(unreadable), citations: [], unanswered: [] };
+      }
       const result = await options.answer(question, items, { model, ...signal ? { signal } : {} });
       const byId = new Map(items.map((item) => [item.id, item]));
       const citations = [];
@@ -107009,25 +107127,34 @@ function createBuiltInPrivateAnswerModel(options) {
           ...item?.date ? { date: item.date } : {}
         });
       }
-      return { answer: result.answer, citations, unanswered: [...result.unanswered] };
+      const unanswered = [...result.unanswered];
+      if (unreadable > 0)
+        unanswered.push(unreadableNote(unreadable));
+      return { answer: withoutEvidenceMarkers(result.answer), citations, unanswered };
     },
     async reset() {
       await model?.stop();
     }
   };
 }
-function privateEvidenceItems(hits) {
+function privateEvidence(hits) {
   const items = [];
+  let unreadable = 0;
   hits.forEach((hit, index) => {
-    const sourceItem = record3(hit.sourceItem);
     const provenance = record3(hit.provenance);
+    const sourceItem = record3(hit.sourceItem) ?? record3(provenance?.sourceItem);
     const citation = record3(provenance?.citation);
     const content = record3(hit.internalContent);
     const title = string4(citation?.title) ?? string4(hit.title);
-    const passage = string4(content?.passage) ?? string4(hit.excerpt) ?? string4(hit.text);
-    const text2 = (passage ?? title)?.slice(0, MAX_PASSAGE_CHARS);
-    if (!text2)
+    const chunks2 = Array.isArray(hit.chunks) ? hit.chunks.filter((chunk) => typeof chunk === "string" && chunk.trim() !== "").map((chunk) => chunk.trim()) : [];
+    const passage = (chunks2.length > 0 ? chunks2.join(`
+…
+`) : undefined) ?? string4(content?.passage) ?? string4(hit.excerpt) ?? string4(hit.text);
+    const text2 = passage?.slice(0, MAX_PASSAGE_CHARS);
+    if (!text2) {
+      unreadable += 1;
       return;
+    }
     const id = string4(sourceItem?.localItemId) ?? string4(sourceItem?.providerItemId) ?? `item-${index + 1}`;
     const locator = string4(hit.locator) ?? string4(citation?.uri) ?? string4(content?.url);
     const source = string4(citation?.sourceLabel) ?? string4(sourceItem?.provider);
@@ -107041,7 +107168,19 @@ function privateEvidenceItems(hits) {
       ...date4 ? { date: date4 } : {}
     });
   });
-  return items;
+  return { items, unreadable };
+}
+function privateEvidenceItems(hits) {
+  return privateEvidence(hits).items;
+}
+function withoutEvidenceMarkers(answer) {
+  return answer.replace(/\s*\[\d{1,2}(?:\s*[,;–-]\s*\d{1,2})*\]/g, "").trim();
+}
+function unreadableNote(count2) {
+  return count2 === 1 ? "1 matching private item has no readable text on this computer, so it was not read." : `${count2} matching private items have no readable text on this computer, so they were not read.`;
+}
+function unreadableAnswer(count2) {
+  return count2 === 1 ? "The matching private item has no readable text on this computer, so there is no private answer." : `None of the ${count2} matching private items has readable text on this computer, so there is no private answer.`;
 }
 function record3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
@@ -110256,6 +110395,10 @@ async function main() {
       sourceAnswersInFlight -= 1;
     }
   } : undefined;
+  const chatgptPrivateMatchProbe = sourceAnswerLanes ? async (question) => {
+    const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes, question });
+    return { count: result.matched, evidence: result.candidates };
+  } : undefined;
   const chatgptEmbeddingState = () => {
     const builtIn = ["public_safe", "internal", "secure_local"].some((domain) => sovereigntyEngine.resolveEmbeddingProfile(domain)?.profile.provider === "built-in");
     return builtIn ? builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(process.env)) : undefined;
@@ -110286,6 +110429,7 @@ async function main() {
         },
         setup: chatgptSetup,
         ...chatgptEvidenceSearch ? { evidenceSearch: chatgptEvidenceSearch } : {},
+        ...chatgptPrivateMatchProbe ? { privateMatchProbe: chatgptPrivateMatchProbe } : {},
         answerModelAvailable: chatgptAnswerModelAvailable,
         embedding: chatgptEmbeddingState,
         privateModel: () => {
