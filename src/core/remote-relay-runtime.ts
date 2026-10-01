@@ -17,7 +17,9 @@
 import { randomBytes } from 'node:crypto';
 import { loadOrCreateIdentity } from '../../connect-relay/client/identity.ts';
 import { RelayClient, type RelayClientStatus } from '../../connect-relay/client/relay-client.ts';
+import { DEMO_AUTHORIZE_PATH, FORWARDED_PATHS } from '../../connect-relay/client/forward.ts';
 import {
+  demoInstallMarked,
   emptyRemoteAccessStatus,
   loopbackWorkerOrigin,
   olympusDataDir,
@@ -92,6 +94,8 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
     // Minted per boot and never written down: only this process and the
     // requests it forwards carry it.
     relaySecret: randomBytes(32).toString('base64url'),
+    // A demo install also forwards reviewer sign-in; every other install never does.
+    forwardedPaths: demoInstallMarked(dir) ? [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH] : FORWARDED_PATHS,
     onStatus,
     ...(options.heartbeatMs ? { heartbeatMs: options.heartbeatMs } : {}),
     ...(options.backoff ? { backoff: options.backoff } : {}),

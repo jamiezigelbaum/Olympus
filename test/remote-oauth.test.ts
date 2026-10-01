@@ -44,6 +44,8 @@ import {
   withRemoteMcpRoute,
 } from '../src/workers/remote-mcp.ts';
 import { CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { DEMO_SIGN_IN_BURST, resolveDemoConsent, type DemoConsentSettings } from '../src/workers/remote-oauth/demo-consent.ts';
+import { demoInstallMarked, DEMO_INSTALL_MARKER_FILE, DEMO_INSTALL_MARKER_TEXT } from '../src/core/remote-access.ts';
 import { authorizationServerMetadata, createRemoteOAuthHandler, withRemoteOAuthRoutes } from '../src/workers/remote-oauth/handler.ts';
 import type {
   SourceAnswerLatencyLedgerRecord,
@@ -107,6 +109,7 @@ interface AssembleOptions {
   /** Relay mode: the install id the relay child reported. */
   installId?: string;
   registrationBurst?: number;
+  demoConsent?: () => DemoConsentSettings | undefined;
 }
 
 function assemble(options: AssembleOptions = {}): void {
@@ -141,6 +144,7 @@ function assemble(options: AssembleOptions = {}): void {
       connections: () => store,
       now: () => clock,
       sleep: async (ms) => { sleeps.push(ms); },
+      ...(options.demoConsent ? { demoConsent: options.demoConsent } : {}),
       ...(options.registrationBurst !== undefined ? { registrationBurst: options.registrationBurst } : {}),
     }),
     withRemoteOpenApiRoutes(
@@ -472,6 +476,122 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
     expect((await register('https://grok.com/connectors/oauth/callback')).status).toBe(400);
     const local = await register('http://127.0.0.1/callback');
     expect(local.status).toBe(201);
+  });
+});
+
+describe('demo installs: reviewer sign-in through the relay', () => {
+  const RELAY_ORIGIN = 'https://mcp.olympus.test';
+  const DEMO_PASSWORD = 'sample-only-demo-password';
+  let settings: DemoConsentSettings;
+  const demoUrl = (params: Record<string, string> = {}) => {
+    const url = new URL(`${base}/connect/demo/authorize`);
+    url.search = new URLSearchParams({
+      response_type: 'code', client_id: CHATGPT_CLIENT_ID, redirect_uri: CHATGPT_REDIRECT_URI,
+      code_challenge: 'x'.repeat(43), code_challenge_method: 'S256', state: 's', ...params,
+    }).toString();
+    return url;
+  };
+  /** As the relay forwards it: marked, no cookie, the relay origin. */
+  const relayedHeaders = { 'x-olympus-relay': 'per-boot', Origin: RELAY_ORIGIN };
+  const openDemo = async (url: URL = demoUrl()) => {
+    const response = await fetch(url, { redirect: 'manual', headers: { 'x-olympus-relay': 'per-boot' } });
+    const html = await response.text();
+    return {
+      response,
+      html,
+      requestId: /name="request_id" value="([^"]+)"/.exec(html)?.[1] ?? '',
+      csrf: /name="csrf" value="([^"]+)"/.exec(html)?.[1] ?? '',
+    };
+  };
+  const signIn = (page: { requestId: string; csrf: string }, fields: Record<string, string>, headers: Record<string, string> = relayedHeaders) =>
+    fetch(`${base}/connect/demo/authorize`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...headers },
+      body: new URLSearchParams({ request_id: page.requestId, csrf: page.csrf, ...fields }).toString(),
+    });
+
+  beforeEach(async () => {
+    settings = { username: 'reviewer', passwordHash: await Bun.password.hash(DEMO_PASSWORD) };
+    assemble({ publicBaseUrl: RELAY_ORIGIN, installId: INSTALL_ID, demoConsent: () => settings });
+  });
+
+  test('the right username and password approve, through the relay, with a code naming the install', async () => {
+    const page = await openDemo();
+    expect(page.response.status).toBe(200);
+    expect(page.html).toContain('Sign in to the Olympus demo');
+    expect(page.html).toContain('made-up sample data');
+    expect(page.html).toContain('type="password"');
+    const approved = await signIn(page, { action: 'approve', username: 'reviewer', password: DEMO_PASSWORD });
+    expect(approved.status).toBe(303);
+    const callback = new URL(approved.headers.get('location')!);
+    expect(callback.origin + callback.pathname).toBe(CHATGPT_REDIRECT_URI);
+    expect(callback.searchParams.get('iss')).toBe(RELAY_ORIGIN);
+    expect(credentialInstallId('code', callback.searchParams.get('code'))).toBe(INSTALL_ID);
+  });
+
+  test('wrong credentials, a foreign origin, a wrong token or an owner page are refused; five wrong end the page', async () => {
+    const page = await openDemo();
+    expect((await signIn(page, { action: 'approve', username: 'reviewer', password: DEMO_PASSWORD }, { Origin: 'https://evil.example' })).status).toBe(403);
+    expect((await signIn({ ...page, csrf: 'x'.repeat(43) }, { action: 'approve', username: 'reviewer', password: DEMO_PASSWORD })).status).toBe(403);
+    for (let i = 0; i < 4; i += 1) {
+      const wrong = await signIn(page, { action: 'approve', username: i % 2 ? 'reviewer' : 'Reviewer', password: 'guess' });
+      expect(wrong.status).toBe(400);
+      expect(await wrong.text()).toContain('do not match');
+    }
+    const fifth = await signIn(page, { action: 'approve', username: 'reviewer', password: 'guess' });
+    expect(fifth.status).toBe(303);
+    expect(new URL(fifth.headers.get('location')!).searchParams.get('error')).toBe('access_denied');
+
+    // An owner approval page cannot be finished through the demo path, nor the reverse.
+    const ownerPage = await openConsent(demoUrl().toString().replace('/connect/demo/authorize', '/connect/authorize'));
+    expect((await signIn(ownerPage, { action: 'approve', username: 'reviewer', password: DEMO_PASSWORD })).status).toBe(400);
+    const demoPage = await openDemo();
+    expect((await submitConsent({ ...demoPage, cookie: '' }, { action: 'approve' })).status).toBe(400);
+  });
+
+  test('sign-in attempts are rate limited across all callers', async () => {
+    let limited = false;
+    for (let i = 0; i < DEMO_SIGN_IN_BURST + 1 && !limited; i += 1) {
+      const page = await openDemo();
+      const response = await signIn(page, { action: 'approve', username: 'reviewer', password: 'guess' });
+      limited = (await response.text()).includes('Too many sign-in attempts');
+    }
+    expect(limited).toBe(true);
+    const page = await openDemo();
+    expect(await (await signIn(page, { action: 'approve', username: 'reviewer', password: DEMO_PASSWORD })).text()).toContain('Too many sign-in attempts');
+    clock += 15 * 60_000;
+    expect((await signIn(await openDemo(), { action: 'approve', username: 'reviewer', password: DEMO_PASSWORD })).status).toBe(303);
+  });
+
+  test('every non-demo install answers the demo path 404', async () => {
+    assemble({ publicBaseUrl: RELAY_ORIGIN, installId: INSTALL_ID });
+    expect((await openDemo()).response.status).toBe(404);
+    assemble({ publicBaseUrl: RELAY_ORIGIN, installId: INSTALL_ID, demoConsent: () => undefined });
+    expect((await openDemo()).response.status).toBe(404);
+    // Not relay mode (a tunnel of the owner's own): never.
+    assemble({ demoConsent: () => settings });
+    expect((await openDemo()).response.status).toBe(404);
+  });
+
+  test('settings resolve only with the flag, a username, an Argon2 hash and the demo marker', async () => {
+    const remote = (demoConsent: Record<string, unknown>) => ({ enabled: true, demoConsent: demoConsent as never });
+    const hash = settings.passwordHash;
+    expect(resolveDemoConsent(remote({ enabled: true, username: 'reviewer', passwordHash: hash }), () => true)).toEqual({ username: 'reviewer', passwordHash: hash });
+    expect(resolveDemoConsent(remote({ enabled: true, username: 'reviewer', passwordHash: hash }), () => false)).toBeUndefined();
+    expect(resolveDemoConsent(remote({ enabled: false, username: 'reviewer', passwordHash: hash }), () => true)).toBeUndefined();
+    expect(resolveDemoConsent(remote({ enabled: true, username: 'reviewer', passwordHash: DEMO_PASSWORD }), () => true)).toBeUndefined();
+    expect(resolveDemoConsent(remote({ enabled: true, passwordHash: hash }), () => true)).toBeUndefined();
+    expect(resolveDemoConsent({ enabled: true }, () => true)).toBeUndefined();
+    expect(resolveDemoConsent(undefined, () => true)).toBeUndefined();
+
+    const markerDir = join(dir, 'connect-relay');
+    mkdirSync(markerDir, { recursive: true });
+    expect(demoInstallMarked(markerDir)).toBe(false);
+    writeFileSync(join(markerDir, DEMO_INSTALL_MARKER_FILE), 'demo\n');
+    expect(demoInstallMarked(markerDir)).toBe(false);
+    writeFileSync(join(markerDir, DEMO_INSTALL_MARKER_FILE), `${DEMO_INSTALL_MARKER_TEXT}\n`);
+    expect(demoInstallMarked(markerDir)).toBe(true);
   });
 });
 

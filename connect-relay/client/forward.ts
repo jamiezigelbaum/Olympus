@@ -18,6 +18,11 @@
 export const RELAY_HEADER = 'x-olympus-relay';
 
 export const FORWARDED_PATHS = ['/mcp', '/connect/token', '/connect/revoke'] as const;
+/**
+ * Reviewer sign-in, forwarded only by a demo install (its data directory
+ * carries the demo marker; src/core/remote-access.ts `demoInstallMarked`).
+ */
+export const DEMO_AUTHORIZE_PATH = '/connect/demo/authorize';
 export const FORWARDED_METHODS = new Set(['GET', 'POST', 'DELETE']);
 
 const HOP_BY_HOP = new Set([

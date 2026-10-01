@@ -21,6 +21,11 @@
  * Clients: ChatGPT by its pinned client metadata URL (pinned-clients.ts; no
  * metadata document is ever fetched), or a dynamically registered client.
  *
+ * A demo install (synthetic sample data, demo marker present) may also let a
+ * directory reviewer approve with a username and password through the relay,
+ * at `/connect/demo/authorize` (demo-consent.ts). Every other install answers
+ * that path 404.
+ *
  * Routes (exact paths; everything else stays behind the worker bearer):
  * - `GET /.well-known/oauth-protected-resource[/mcp]`  RFC 9728 metadata
  * - `GET /.well-known/oauth-authorization-server`      RFC 8414 metadata
@@ -52,7 +57,8 @@ import { normalizePairingCode } from '../../core/remote-oauth-store.ts';
 import { currentRemotePublicUrls, isConfiguredResource, type RemotePublicUrls, type RemotePublicUrlsSource } from '../../core/remote-public-url.ts';
 import { isClientIdMetadataUrl, pinnedClient } from './pinned-clients.ts';
 import { readBoundedRequestText } from '../remote-request-body.ts';
-import { renderConsentErrorPage, renderConsentPage, renderLoopbackConsentPage } from './consent-page.ts';
+import { renderConsentErrorPage, renderConsentPage, renderDemoSignInPage, renderLoopbackConsentPage } from './consent-page.ts';
+import { demoSignInLimiter, verifyDemoSignIn, type DemoConsentSettings } from './demo-consent.ts';
 import { isAcceptableRedirectUri, isLoopbackRedirectUri, redirectHost, redirectUriMatches } from './redirect-uris.ts';
 
 export const REMOTE_OAUTH_PATHS = {
@@ -60,6 +66,7 @@ export const REMOTE_OAUTH_PATHS = {
   protectedResourceMcp: '/.well-known/oauth-protected-resource/mcp',
   authorizationServer: '/.well-known/oauth-authorization-server',
   authorize: '/connect/authorize',
+  demoAuthorize: '/connect/demo/authorize',
   token: '/connect/token',
   register: '/connect/register',
   revoke: '/connect/revoke',
@@ -96,6 +103,8 @@ export interface RemoteOAuthHandlerOptions {
   publicUrls: RemotePublicUrlsSource;
   /** Whether a request came through the relay (default: it carries `x-olympus-relay`). */
   isRelayed?: (request: Request) => boolean;
+  /** Active demo sign-in settings, asked per request; undefined on every real install. */
+  demoConsent?: () => DemoConsentSettings | undefined;
   /** The connection store; OAuth may create the database (registration precedes pairing). */
   connections: () => RemoteConnectionStore;
   now?: () => number;
@@ -128,6 +137,8 @@ interface PendingConsent {
    * pairing check, and five wrong codes end the page.
    */
   pinned: boolean;
+  /** Opened at the demo sign-in path: only that path may approve it. */
+  demo: boolean;
 }
 
 interface IssuedCode {
@@ -186,6 +197,10 @@ export function authorizationServerMetadata(urls: RemotePublicUrls): Record<stri
 export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (request: Request) => Promise<Response> {
   const now = options.now ?? Date.now;
   const isRelayed = options.isRelayed ?? isRelayedRequest;
+  const demoAttempts = demoSignInLimiter(now);
+  /** Demo sign-in is active only in relay mode, and only where the settings resolve. */
+  const demoSettings = (u: RemotePublicUrls): DemoConsentSettings | undefined =>
+    (u.installId ? options.demoConsent?.() : undefined);
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3_600_000, now);
   const pending = new Map<string, PendingConsent>();
   const codes = new Map<string, IssuedCode>();
@@ -233,8 +248,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
   const notOnThisMac = (): Response =>
     errorPage(403, 'Approve on the Mac where Olympus runs: open the link from ChatGPT on that Mac.');
 
-  const authorizeGet = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
-    if (u.installId && !directLoopback(request)) return notOnThisMac();
+  const authorizeGet = async (request: Request, u: RemotePublicUrls, demo = false): Promise<Response> => {
+    if (demo && !demoSettings(u)) return jsonResponse(404, { error: 'not_found' });
+    if (!demo && u.installId && !directLoopback(request)) return notOnThisMac();
     const params = new URL(request.url).searchParams;
     const single = singleParams(params);
     if (!single) return errorPage(400, 'The request repeated a parameter.');
@@ -244,6 +260,8 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     if (!redirectUri) return errorPage(400, 'The request did not say where to return (redirect_uri).');
     const client = resolveClient(clientId, u);
     if (typeof client === 'string') return errorPage(400, client);
+    // The demo serves pinned clients (ChatGPT) only.
+    if (demo && !client.verifiedHost) return errorPage(400, 'The demo connects ChatGPT only.');
     // Until the redirect URI is known to belong to the client, errors stay on
     // this page: redirecting them would make Olympus an open redirector.
     if (!redirectUriMatches(redirectUri, client.redirectUris)) {
@@ -278,9 +296,74 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       attempts: 0,
       expiresAt: now() + CONSENT_REQUEST_TTL_MS,
       pinned: false,
+      demo,
     };
     pending.set(requestId, entry);
-    return consentPage(requestId, entry, u);
+    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u);
+  };
+
+  const demoPage = (requestId: string, entry: PendingConsent, error?: string): Response => {
+    const page = renderDemoSignInPage({
+      requestId,
+      csrf: entry.csrf,
+      clientName: entry.client.clientName,
+      redirectHost: redirectHost(entry.redirectUri),
+      redirectOrigin: new URL(entry.redirectUri).origin,
+      ...(error ? { error } : {}),
+    });
+    return new Response(page.body, { status: error ? 400 : 200, headers: page.headers });
+  };
+
+  /** Mints a code for an approved request and redirects back to the client. */
+  const issueCode = (requestId: string, entry: PendingConsent, u: RemotePublicUrls): Response => {
+    if (codes.size >= MAX_LIVE_CODES) sweep();
+    // Relay mode: the code names this install, so the relay can route its exchange.
+    const code = u.installId ? mintCredential('code', u.installId) : randomBytes(32).toString('base64url');
+    codes.set(sha256(code), {
+      clientId: entry.client.clientId,
+      displayName: entry.client.clientName,
+      redirectUri: entry.redirectUri,
+      codeChallenge: entry.codeChallenge,
+      resource: entry.resource,
+      expiresAt: now() + AUTHORIZATION_CODE_TTL_MS,
+    });
+    pending.delete(requestId);
+    return redirectWithParams(entry.redirectUri, { code, state: entry.state, iss: u.issuer });
+  };
+
+  /**
+   * The demo sign-in POST, which arrives through the relay: no cookie survives
+   * the relay, so the page's request id and CSRF token carry the binding, and
+   * a browser's Origin, when sent, must be the relay origin.
+   */
+  const demoPost = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
+    const settings = demoSettings(u);
+    if (!settings) return jsonResponse(404, { error: 'not_found' });
+    const origin = request.headers.get('origin');
+    if (origin !== null && origin !== u.origin) return errorPage(403, 'This sign-in did not come from the Olympus demo page.');
+    const form = await readForm(request);
+    if (!form) return errorPage(400, 'The sign-in form was malformed.');
+    const requestId = form.get('request_id') ?? '';
+    sweep();
+    const entry = /^[a-f0-9]{32}$/.test(requestId) ? pending.get(requestId) : undefined;
+    if (!entry || !entry.demo) return errorPage(400, 'This sign-in has expired. Start again from ChatGPT.');
+    if (!constantTimeEqual(form.get('csrf') ?? '', entry.csrf)) return errorPage(403, 'This sign-in did not come from the Olympus demo page.');
+    const action = form.get('action');
+    if (action === 'deny') {
+      pending.delete(requestId);
+      return redirectWithParams(entry.redirectUri, { error: 'access_denied', error_description: 'The sign-in was cancelled.', state: entry.state, iss: u.issuer });
+    }
+    if (action !== 'approve') return errorPage(400, 'The sign-in form was malformed.');
+    if (!demoAttempts.take()) return demoPage(requestId, entry, 'Too many sign-in attempts. Wait a few minutes, then try again.');
+    if (!await verifyDemoSignIn(settings, form.get('username') ?? '', form.get('password') ?? '')) {
+      entry.attempts += 1;
+      if (entry.attempts >= CONSENT_MAX_ATTEMPTS) {
+        pending.delete(requestId);
+        return redirectWithParams(entry.redirectUri, { error: 'access_denied', error_description: 'Too many wrong sign-ins.', state: entry.state, iss: u.issuer });
+      }
+      return demoPage(requestId, entry, 'That username and password do not match.');
+    }
+    return issueCode(requestId, entry, u);
   };
 
   const consentPage = (
@@ -323,7 +406,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     const requestId = form.get('request_id') ?? '';
     sweep();
     const entry = /^[a-f0-9]{32}$/.test(requestId) ? pending.get(requestId) : undefined;
-    if (!entry) return errorPage(400, 'This approval has expired or was replaced by a newer one. Start again from the app.');
+    if (!entry || entry.demo) return errorPage(400, 'This approval has expired or was replaced by a newer one. Start again from the app.');
     const csrf = form.get('csrf') ?? '';
     const cookie = readCookie(request, consentCookieName(requestId)) ?? '';
     if (!constantTimeEqual(csrf, entry.csrf) || !constantTimeEqual(cookie, entry.csrf)) {
@@ -338,22 +421,13 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     const action = form.get('action');
     if (action === 'deny') return finish({ error: 'access_denied', error_description: 'The owner denied the request.' });
     if (action !== 'approve') return errorPage(400, 'The approval form was malformed.');
-    const issueCode = (): Response => {
-      if (codes.size >= MAX_LIVE_CODES) sweep();
-      // Relay mode: the code names this install, so the relay can route its exchange.
-      const code = u.installId ? mintCredential('code', u.installId) : randomBytes(32).toString('base64url');
-      codes.set(sha256(code), {
-        clientId: entry.client.clientId,
-        displayName: entry.client.clientName,
-        redirectUri: entry.redirectUri,
-        codeChallenge: entry.codeChallenge,
-        resource: entry.resource,
-        expiresAt: now() + AUTHORIZATION_CODE_TTL_MS,
-      });
-      return finish({ code });
+    const approve = (): Response => {
+      const response = issueCode(requestId, entry, u);
+      response.headers.append('Set-Cookie', consentCookie(requestId, '', cookieSecure(u), 0));
+      return response;
     };
     // Relay mode: a direct loopback visit is the proof of ownership.
-    if (u.installId) return issueCode();
+    if (u.installId) return approve();
     const wait = pacer.delay();
     if (wait > PAIRING_MAX_HELD_MS) {
       return consentPage(requestId, entry, u,
@@ -376,7 +450,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       }
       return consentPage(requestId, entry, u, 'That pairing code is not valid, has expired, or was already used.');
     }
-    return issueCode();
+    return approve();
   };
 
   const token = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
@@ -519,6 +593,10 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
         case REMOTE_OAUTH_PATHS.authorize:
           if (method === 'GET') return await authorizeGet(request, urls);
           if (method === 'POST') return await authorizePost(request, urls);
+          return methodNotAllowed('GET, POST');
+        case REMOTE_OAUTH_PATHS.demoAuthorize:
+          if (method === 'GET') return await authorizeGet(request, urls, true);
+          if (method === 'POST') return await demoPost(request, urls);
           return methodNotAllowed('GET, POST');
         case REMOTE_OAUTH_PATHS.token:
           if (method !== 'POST') return methodNotAllowed('POST');

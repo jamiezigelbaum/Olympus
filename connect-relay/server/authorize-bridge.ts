@@ -12,7 +12,8 @@
  * The page tries to reach the engine first and continues automatically when
  * something answers; otherwise it keeps the link and offers to install
  * Olympus. Browsers that refuse a public page talking to loopback simply show
- * both choices.
+ * both choices. A relay configured with a demo install also links reviewers
+ * to its sign-in (`/connect/demo/authorize`, same query).
  */
 import { randomBytes } from 'node:crypto';
 
@@ -23,6 +24,8 @@ export interface BridgeOptions {
   readonly enginePort: number;
   /** Where "Install Olympus" leads. */
   readonly installUrl: string;
+  /** The relay has a demo install: offer reviewers its sign-in. */
+  readonly demo?: boolean;
 }
 
 function escapeHtml(value: string): string {
@@ -60,6 +63,7 @@ export function authorizeBridge(url: URL, options: BridgeOptions): Response {
   <h1>Approve ChatGPT on your Mac</h1>
   <p>Olympus asks for approval on the Mac where it runs, so only you can connect it.</p>
   <a class="button" id="continue" href="${escapeHtml(target)}">Continue on this Mac</a>
+  ${options.demo ? `<p><a href="${escapeHtml(`/connect/demo/authorize${query}`)}">Reviewing Olympus? Sign in to the demo</a></p>` : ''}
   <section id="missing">
     <h2>Olympus did not answer on this computer</h2>
     <p>Open this page on the Mac where Olympus runs, or install Olympus first.</p>

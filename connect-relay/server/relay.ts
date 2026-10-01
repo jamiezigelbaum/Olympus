@@ -9,6 +9,8 @@
  * - the install-independent OAuth documents and `/healthz` (oauth-metadata.ts);
  * - `GET /connect/authorize`: the bridge page to the owner's own Mac
  *   (authorize-bridge.ts);
+ * - `/connect/demo/authorize`: reviewer sign-in, routed only to the one demo
+ *   install the relay is configured with (none by default);
  * - `POST /connect/token`, `POST /connect/revoke` and `/mcp`: routed per
  *   request to the install their credential names (shared/tokens.ts). ChatGPT
  *   may reuse one connection for many users, so routing never sticks to a
@@ -66,6 +68,12 @@ export interface RelayConfig {
   readonly enginePort?: number;
   /** Where the bridge's and the not-installed dashboard's "Install Olympus" lead. */
   readonly installUrl?: string;
+  /**
+   * The demo install (synthetic sample data) directory reviewers sign in to.
+   * Unset (the default) means no demo: the bridge offers no demo sign-in and
+   * `/connect/demo/authorize` answers 404.
+   */
+  readonly demoInstallId?: string;
   /** OpenAI's domain verification token, read per request; empty or undefined answers 404. */
   readonly appsChallenge?: () => string | undefined;
   /**
@@ -129,6 +137,8 @@ const REQUEST_HEADER_ALLOWLIST = new Set([
   'accept',
   'authorization',
   'content-type',
+  // The demo sign-in checks the browser's Origin.
+  'origin',
   'last-event-id',
   'mcp-protocol-version',
   'mcp-session-id',
@@ -141,7 +151,14 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const log: RelayLog = config.log ?? (() => {});
   const registry = config.registry;
   const origin = relayOrigin(config.publicHost);
-  const bridge = { enginePort: config.enginePort ?? DEFAULT_ENGINE_PORT, installUrl: config.installUrl ?? DEFAULT_INSTALL_URL };
+  if (config.demoInstallId !== undefined && !INSTALL_ID_PATTERN.test(config.demoInstallId)) {
+    throw new Error('demoInstallId must be an install id');
+  }
+  const bridge = {
+    enginePort: config.enginePort ?? DEFAULT_ENGINE_PORT,
+    installUrl: config.installUrl ?? DEFAULT_INSTALL_URL,
+    demo: config.demoInstallId !== undefined,
+  };
   const sessions = new Map<string, InstallSession>();
   const admission = createInstallAdmission(limits, now);
   const registrationsPerIp = new KeyedTokenBuckets(limits.registrationsPerIp, now);
@@ -347,6 +364,20 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     });
   };
 
+  /** Reviewer sign-in: GET the page, POST the form, both to the demo install only. */
+  const demoSignIn = async (request: Request, path: string): Promise<Response> => {
+    const demoInstallId = config.demoInstallId;
+    if (!demoInstallId) return json(404, { error: 'not_found' });
+    if (request.method !== 'GET' && request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' });
+    const body = request.method === 'POST' ? await readBody(request, MAX_FORM_BYTES) : new Uint8Array();
+    if (!body) return json(413, { error: 'payload_too_large' });
+    const unavailable = () => new Response('The Olympus demo is not available right now. Try again later.', {
+      status: 503,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '60' },
+    });
+    return toInstall({ installId: demoInstallId, request, path, body, dashboard: false, offline: unavailable, unknown: unavailable });
+  };
+
   // -------------------------------------------------------------------------
   // Install sessions
 
@@ -448,6 +479,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         case OAUTH_PATHS.authorize:
           if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
           return authorizeBridge(url, bridge);
+        case OAUTH_PATHS.demoAuthorize:
+          return demoSignIn(request, `${OAUTH_PATHS.demoAuthorize}${url.search}`);
         case OAUTH_PATHS.token:
           return oauthForm(request, OAUTH_PATHS.token, 'token');
         case OAUTH_PATHS.revoke:

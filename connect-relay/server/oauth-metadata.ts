@@ -14,6 +14,7 @@ export const OAUTH_PATHS = {
   protectedResourceMcp: '/.well-known/oauth-protected-resource/mcp',
   authorizationServer: '/.well-known/oauth-authorization-server',
   authorize: '/connect/authorize',
+  demoAuthorize: '/connect/demo/authorize',
   token: '/connect/token',
   revoke: '/connect/revoke',
   mcp: '/mcp',

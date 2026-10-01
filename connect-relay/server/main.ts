@@ -7,6 +7,7 @@
  *   RELAY_LISTEN_PORT     default 8787
  *   RELAY_ENGINE_PORT     the engine worker's loopback port for the authorize bridge (default 8010)
  *   RELAY_INSTALL_URL     where "Install Olympus" leads (authorize bridge, not-installed dashboard)
+ *   RELAY_DEMO_INSTALL_ID the demo install reviewers sign in to (unset: no demo)
  *   RELAY_OPENAI_APPS_CHALLENGE / RELAY_OPENAI_APPS_CHALLENGE_FILE
  *                         OpenAI's domain verification token (unset: 404)
  *   RELAY_REGISTRY_PATH   default /var/lib/olympus-relay/registry.jsonl
@@ -58,6 +59,7 @@ relay = await startRelay({
   listen: { host: process.env.RELAY_LISTEN_HOST ?? '127.0.0.1', port: port('RELAY_LISTEN_PORT', 8787) },
   enginePort: port('RELAY_ENGINE_PORT', 8010),
   ...(process.env.RELAY_INSTALL_URL ? { installUrl: process.env.RELAY_INSTALL_URL } : {}),
+  ...(process.env.RELAY_DEMO_INSTALL_ID ? { demoInstallId: process.env.RELAY_DEMO_INSTALL_ID } : {}),
   appsChallenge,
   trustProxy: true,
   log,

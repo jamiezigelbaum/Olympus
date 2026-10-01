@@ -9,6 +9,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RelayClient, type RelayClientStatus } from '../client/relay-client.ts';
+import { DEMO_AUTHORIZE_PATH, FORWARDED_PATHS } from '../client/forward.ts';
 import { loadOrCreateIdentity, type InstallIdentity } from '../client/identity.ts';
 import { PROTOCOL_VERSION, base64url, installIdForPublicKey, signInstallMessage, spkiOf } from '../shared/protocol.ts';
 import { mintCredential } from '../shared/tokens.ts';
@@ -89,19 +90,29 @@ function fakeWorker(name: string, options: { bigBodyBytes?: number } = {}): Fake
 
 const logLines: string[] = [];
 
-async function makeRelay(limits: Partial<RelayLimits> = {}, registry = new MemoryInstallRegistry()): Promise<RelayHandle> {
+async function makeRelay(
+  limits: Partial<RelayLimits> = {},
+  registry = new MemoryInstallRegistry(),
+  extra: { demoInstallId?: string } = {},
+): Promise<RelayHandle> {
   const relay = await startRelay({
     publicHost: PUBLIC_HOST,
     registry,
     listen: { host: '127.0.0.1', port: 0 },
     limits,
+    ...extra,
     log: (event, fields) => logLines.push(JSON.stringify({ event, ...fields })),
   });
   cleanups.push(() => relay.close());
   return relay;
 }
 
-async function connectInstall(relay: RelayHandle, worker: FakeWorker, identity = loadOrCreateIdentity(tempDir())) {
+async function connectInstall(
+  relay: RelayHandle,
+  worker: FakeWorker,
+  identity = loadOrCreateIdentity(tempDir()),
+  forwardedPaths?: readonly string[],
+) {
   const statuses: RelayClientStatus[] = [];
   const secret = base64url(crypto.getRandomValues(new Uint8Array(32)));
   const client = new RelayClient({
@@ -113,6 +124,7 @@ async function connectInstall(relay: RelayHandle, worker: FakeWorker, identity =
     heartbeatMs: 500,
     backoff: { minMs: 50, maxMs: 200 },
     onStatus: (status) => statuses.push(status),
+    ...(forwardedPaths ? { forwardedPaths } : {}),
   });
   client.start();
   cleanups.push(() => client.stop());
@@ -325,6 +337,50 @@ describe('routing', () => {
     expect(html).toContain('href="http://127.0.0.1:8010/connect/authorize?response_type=code&amp;client_id=https%3A%2F%2Fchatgpt.com%2Foauth%2Fclient.json&amp;state=a%22%3Cb"');
     expect(html).toContain('Install Olympus');
     expect(bridge.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+  });
+});
+
+describe('demo sign-in', () => {
+  test('without a demo install the bridge offers none and the path is 404', async () => {
+    const relay = await makeRelay();
+    expect(await (await fetch(`${relay.url}/connect/authorize?state=s`)).text()).not.toContain('demo');
+    expect((await fetch(`${relay.url}/connect/demo/authorize?state=s`)).status).toBe(404);
+  });
+
+  test('routes only to the configured demo install, and only a demo install forwards it', async () => {
+    const demoWorker = fakeWorker('demo');
+    const realWorker = fakeWorker('real');
+    cleanups.push(demoWorker.stop, realWorker.stop);
+    const demoIdentity = loadOrCreateIdentity(tempDir());
+    const relay = await makeRelay({}, new MemoryInstallRegistry(), { demoInstallId: demoIdentity.installId });
+    await connectInstall(relay, demoWorker, demoIdentity, [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH]);
+    const real = await connectInstall(relay, realWorker);
+
+    const bridge = await (await fetch(`${relay.url}/connect/authorize?state=s`)).text();
+    expect(bridge).toContain('href="/connect/demo/authorize?state=s"');
+    const page = await fetch(`${relay.url}/connect/demo/authorize?state=s`, { headers: { authorization: `Bearer ${mintCredential('access', real.identity.installId)}` } });
+    expect(await page.json()).toMatchObject({ worker: 'demo', path: '/connect/demo/authorize' });
+    expect(demoWorker.requests.at(-1)!.path).toBe('/connect/demo/authorize?state=s');
+    expect(demoWorker.requests.at(-1)!.headers['x-olympus-relay']).toBeDefined();
+    const posted = await fetch(`${relay.url}/connect/demo/authorize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: `https://${PUBLIC_HOST}` },
+      body: 'request_id=x&csrf=y',
+    });
+    expect(posted.status).toBe(200);
+    expect(demoWorker.requests.at(-1)!.headers.origin).toBe(`https://${PUBLIC_HOST}`);
+    expect(realWorker.requests).toHaveLength(0);
+  });
+
+  test('a relay pointed at a non-demo install still cannot reach its demo path', async () => {
+    const worker = fakeWorker('real');
+    cleanups.push(worker.stop);
+    const identity = loadOrCreateIdentity(tempDir());
+    const relay = await makeRelay({}, new MemoryInstallRegistry(), { demoInstallId: identity.installId });
+    await connectInstall(relay, worker, identity);
+    const response = await fetch(`${relay.url}/connect/demo/authorize?state=s`);
+    expect(response.status).toBe(404);
+    expect(worker.requests).toHaveLength(0);
   });
 });
 

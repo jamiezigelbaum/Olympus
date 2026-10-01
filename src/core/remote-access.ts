@@ -12,6 +12,8 @@
  *
  *   status.json          what the service and the relay child report
  *   install-key.pem      the install's Ed25519 identity (relay child only)
+ *   demo-install         present only on a demo install (synthetic data);
+ *                        see `demoInstallMarked`
  *
  * The worker learns its public base URL and install id from status.json
  * without restarting; see `createRemotePublicUrlSource`. Issuer and resource
@@ -303,6 +305,21 @@ export function createRemotePublicUrlSource(
     options.now ?? Date.now,
   );
   return { origin: 'status', current: read };
+}
+
+/**
+ * The demo marker: a file an operator creates by hand on a demo install, which
+ * holds synthetic sample data only. Its first line must be exactly
+ * DEMO_INSTALL_MARKER_TEXT. Demo sign-in (remote.demoConsent) and forwarding
+ * of the demo sign-in path both require it, so the config flag alone never
+ * opens password sign-in on a real install.
+ */
+export const DEMO_INSTALL_MARKER_FILE = 'demo-install';
+export const DEMO_INSTALL_MARKER_TEXT = 'olympus demo install: synthetic sample data only';
+
+export function demoInstallMarked(dir: string): boolean {
+  const text = readPrivateFile(raJoin(dir, DEMO_INSTALL_MARKER_FILE));
+  return text !== undefined && text.split('\n', 1)[0]!.trim() === DEMO_INSTALL_MARKER_TEXT;
 }
 
 /** Whether a request came through the relay (it carries the relay child's marker, whatever its value). */

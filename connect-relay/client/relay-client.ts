@@ -49,6 +49,8 @@ export interface RelayClientOptions {
   readonly revokedBackoffMs?: number;
   /** Requests served at once; more are answered 503 locally (default 32). */
   readonly maxConcurrent?: number;
+  /** Paths forwarded to the worker (default FORWARDED_PATHS; a demo install adds its sign-in path). */
+  readonly forwardedPaths?: readonly string[];
   /** Request body cap (default 1 MiB, the relay's own). */
   readonly maxRequestBodyBytes?: number;
   readonly fetch?: typeof fetch;
@@ -269,7 +271,9 @@ export class RelayClient {
     }
     this.inbound.set(id, {
       method,
-      path: FORWARDED_METHODS.has(method) && typeof message.path === 'string' ? forwardPath(message.path) : undefined,
+      path: FORWARDED_METHODS.has(method) && typeof message.path === 'string'
+        ? forwardPath(message.path, this.options.forwardedPaths)
+        : undefined,
       headers,
       body: [],
       bytes: 0,

@@ -90,6 +90,8 @@ label { display: block; font-weight: 600; margin-bottom: .35rem; }
 input[type=text] { width: 100%; font: 600 1.35rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em;
   padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg);
   text-transform: uppercase; }
+input.plain { width: 100%; font: 1rem/1.3 system-ui, sans-serif; letter-spacing: normal; text-transform: none;
+  padding: .6rem .7rem; margin-bottom: .9rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg); }
 .hint { color: var(--muted); font-size: .88rem; margin: .4rem 0 1.25rem; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 .actions { display: flex; gap: .75rem; }
@@ -203,6 +205,60 @@ ${input.verifiedHost
 </div>
 </form>
 <p class="small">This page is served by Olympus on this Mac, and only here.</p>
+</main>
+</body>
+</html>`;
+  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
+}
+
+export interface DemoSignInPageInput {
+  requestId: string;
+  csrf: string;
+  clientName: string;
+  redirectHost: string;
+  redirectOrigin: string;
+  error?: string;
+}
+
+/**
+ * A demo install's reviewer sign-in (workers/remote-oauth/demo-consent.ts),
+ * served through the relay. It says plainly that this is a demo with sample
+ * data, so no one mistakes it for signing in to a real Olympus.
+ */
+export function renderDemoSignInPage(input: DemoSignInPageInput): { body: string; headers: Record<string, string> } {
+  const nonce = randomBytes(16).toString('base64');
+  const name = escapeHtml(input.clientName);
+  const error = input.error ? `<p class="err" role="alert">${escapeHtml(input.error)}</p>` : '';
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Olympus demo sign-in</title>
+<style nonce="${nonce}">${STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Sign in to the Olympus demo</h1>
+<div class="warn">This is a demo of Olympus with made-up sample data, for reviewers. A real Olympus is approved only on the owner's own Mac, never with a password.</div>
+<div class="card">
+<div class="name">${name}</div>
+<p class="meta">After you sign in, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
+</div>
+<form method="post" action="/connect/demo/authorize">
+<input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
+${error}
+<label for="username">Username</label>
+<input class="plain" type="text" id="username" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="128" required>
+<label for="password">Password</label>
+<input class="plain" type="password" id="password" name="password" autocomplete="current-password" maxlength="1024" required>
+<div class="actions">
+<button class="approve" type="submit" name="action" value="approve">Sign in and connect</button>
+<button class="deny" type="submit" name="action" value="deny" formnovalidate>Cancel</button>
+</div>
+</form>
 </main>
 </body>
 </html>`;

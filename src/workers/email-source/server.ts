@@ -3969,6 +3969,7 @@ export async function main(): Promise<void> {
   const { resolveRemotePublicUrls } = await import('../../core/remote-public-url.ts');
   const { createRemotePublicUrlSource, isRelayedRequest } = await import('../../core/remote-access.ts');
   const { createRemoteOAuthHandler, withRemoteOAuthRoutes } = await import('../remote-oauth/handler.ts');
+  const { resolveDemoConsent } = await import('../remote-oauth/demo-consent.ts');
   // OAuth for hosted agents is on only with a public base URL: a manual
   // OLYMPUS_PUBLIC_BASE_URL (fixed for this process), else what the relay
   // service reports in status.json, followed live without a restart.
@@ -3985,7 +3986,7 @@ export async function main(): Promise<void> {
   dashboardAgentStore = remoteConnections;
   // The panel's remote-access line: the address this worker serves right now,
   // explained by the relay status `olympus connections status` prints.
-  const { readRemoteAccessStatus, remoteAccessDir, remoteAccessStatusView, resolveRemoteAccessUrls } = await import('../../core/remote-access.ts');
+  const { demoInstallMarked, readRemoteAccessStatus, remoteAccessDir, remoteAccessStatusView, resolveRemoteAccessUrls } = await import('../../core/remote-access.ts');
   // Seam for the standalone engine (its host detection lands separately):
   // which commands the owner is told to run.
   const remoteAccessHostKind: 'openclaw' | 'standalone' = 'openclaw';
@@ -4062,6 +4063,8 @@ export async function main(): Promise<void> {
       createRemoteOAuthHandler({
         publicUrls: remotePublicUrls,
         isRelayed: isRelayedRequest,
+        // Demo installs only: inert without remote.demoConsent AND the demo marker.
+        demoConsent: () => resolveDemoConsent(olympusConfig.remote, () => demoInstallMarked(remoteAccessDir(process.env))),
         connections: () => remoteConnections({ create: true })!,
       }),
       withRemoteOpenApiRoutes(remoteOpenApi, withRemoteMcpRoute(

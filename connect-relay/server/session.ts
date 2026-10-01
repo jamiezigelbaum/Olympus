@@ -29,6 +29,13 @@ const RESPONSE_HEADER_ALLOWLIST = new Set([
   'www-authenticate',
   'retry-after',
   'allow',
+  // The demo sign-in page: its redirect back to ChatGPT, and its page policy.
+  'location',
+  'content-security-policy',
+  'x-frame-options',
+  'x-content-type-options',
+  'referrer-policy',
+  'cross-origin-opener-policy',
 ]);
 
 export interface SessionSocket {
