@@ -38,6 +38,7 @@ import {
 } from './index.ts';
 import {
   createAnalystSourceIndexAnswerHandler,
+  searchReleasedEvidence,
   type AnalystAnswerLanes,
   type SecureLocalAnalystRouteStatus,
   type SovereigntyAnalystRoutePlan,
@@ -245,8 +246,10 @@ import {
 import { canonicalEmbeddingDimension } from '../source-index/embedding-identity.ts';
 import {
   BuiltInSourceEmbeddingProvider,
+  builtInEmbeddingDashboardState,
   sharedBuiltInSourceEmbeddingProvider,
 } from '../source-index/built-in-embedding/provider.ts';
+import { readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/assets.ts';
 import { BUILT_IN_EMBEDDING_MODEL } from '../source-index/built-in-embedding/manifest.ts';
 import {
   createGmailConnectorStoreSchedulerSource,
@@ -3876,6 +3879,9 @@ export async function main(): Promise<void> {
   let dashboardAgentStore: DashboardAgentConnectionsBackend['store'] | undefined;
   let dashboardRemoteAccess: DashboardAgentConnectionsBackend['remoteAccess'] = () => ({ state: 'off' });
   let dashboardRemoteAccessControl: DashboardAgentConnectionsBackend['remoteAccessControl'];
+  // Where a sign-in started from ChatGPT returns (the relay's origin and this
+  // install's id); assigned once the relay URL source exists below.
+  let chatgptOAuthHandback: () => { origin: string; installId: string } | undefined = () => undefined;
   const worker = createEmailSourceWorker({
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
@@ -3928,6 +3934,7 @@ export async function main(): Promise<void> {
             registryPath: handleRegistryPathFromEnv(process.env, true)!,
             ...(sourceDashboardHistory ? { history: sourceDashboardHistory } : {}),
             ingestionDispositions: () => openIngestionDispositionsRuntime(process.env),
+            oauthHandback: () => chatgptOAuthHandback(),
             ...(fileSourceScopes ? { fileSourceScopes } : {}),
             enforceConnectedSourceReads: true,
             // The filter applies to the override too. An override is a caller
@@ -4003,6 +4010,10 @@ export async function main(): Promise<void> {
   }
   const remotePublicSource = createRemotePublicUrlSource(process.env);
   const remotePublicUrls = () => remotePublicSource.current();
+  chatgptOAuthHandback = () => {
+    const urls = remotePublicUrls();
+    return urls?.installId ? { origin: urls.origin, installId: urls.installId } : undefined;
+  };
   const remoteConnections = lazyRemoteConnectionStore(
     () => resolveRemoteConnectionsDbPath(process.env),
     openRemoteConnectionStore,
@@ -4074,6 +4085,63 @@ export async function main(): Promise<void> {
     publicBaseUrl: () => remotePublicUrls()?.origin,
   });
 
+  // Setup from ChatGPT (workers/chatgpt): one-time sign-in links, the
+  // picker and model switching through the dashboard's own routes, and
+  // retrieval-only search for ChatGPT's model to answer from.
+  const { createChatGptHandoffs, createChatGptHandoffHandler, withChatGptHandoffRoutes } = await import('../chatgpt/handoff.ts');
+  const { createChatGptSetupBackend } = await import('../chatgpt/setup-backend.ts');
+  const chatgptHandoffs = createChatGptHandoffs();
+  const chatgptSetup = createChatGptSetupBackend({
+    workerFetch: worker.fetch,
+    handoffs: chatgptHandoffs,
+    publicUrls: remotePublicUrls,
+    ...(fileSourceScopes ? { scopeSummaries: () => fileSourceScopes.summaries() as ReadonlyArray<Record<string, unknown>> } : {}),
+    sovereignty: {
+      config: sovereigntyEngine.config,
+      source: sovereigntyEngine.source,
+      ...(sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}),
+    },
+    credentialPresent: (_id, profile) => profile.secretRef === undefined
+      || safeModelCredential(profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) }) !== undefined,
+    requestReload: () => requestModelReload(),
+  });
+  const engineHosted = process.env.OLYMPUS_ENGINE_HOST === '1';
+  // source_answer needs an Analyst the Mac can actually run; without one,
+  // ChatGPT answers from olympus_search alone.
+  const chatgptAnswerModelAvailable = (): boolean => {
+    if (!sourceAnswer || !getModelSetup().ready) return false;
+    return (['public_safe', 'internal'] as const).some((domain) => {
+      const route = sovereigntyEngine.config.routes[domain];
+      if (!route || route.mode === 'disabled') return false;
+      return (route.pool?.members ?? route.analyst ?? []).some((id) => {
+        const profile = sovereigntyEngine.config.modelProfiles[id];
+        return profile !== undefined && profile.provider !== 'built-in'
+          && !(profile.provider === 'openclaw-infer' && engineHosted);
+      });
+    });
+  };
+  const chatgptEvidenceSearch = sourceAnswerLanes
+    ? async (input: { question: string; limit?: number }) => {
+        if (sourceAnswersInFlight === 0) preemptTierSniffer?.();
+        sourceAnswersInFlight += 1;
+        try {
+          return await searchReleasedEvidence({
+            lanes: sourceAnswerLanes!,
+            question: input.question,
+            ...(input.limit ? { maxResults: input.limit } : {}),
+          });
+        } finally {
+          sourceAnswersInFlight -= 1;
+        }
+      }
+    : undefined;
+  // The dashboard's install progress follows the built-in model's download.
+  const chatgptEmbeddingState = () => {
+    const builtIn = (['public_safe', 'internal', 'secure_local'] as const)
+      .some((domain) => sovereigntyEngine.resolveEmbeddingProfile(domain)?.profile.provider === 'built-in');
+    return builtIn ? builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(process.env)) : undefined;
+  };
+
   const server = Bun.serve({
     hostname,
     port,
@@ -4082,8 +4150,10 @@ export async function main(): Promise<void> {
     // connection tokens, or OAuth access tokens bound to this resource); the
     // OAuth metadata and `/connect/*` routes serve the approval flow; every
     // other route keeps the worker bearer. See workers/remote-mcp.ts,
-    // workers/remote-openapi.ts and workers/remote-oauth/handler.ts.
-    fetch: withRemoteOAuthRoutes(
+    // workers/remote-openapi.ts and workers/remote-oauth/handler.ts. One-time
+    // `/go/<id>` sign-in links answer their stored redirect once
+    // (workers/chatgpt/handoff.ts).
+    fetch: withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withRemoteOAuthRoutes(
       createRemoteOAuthHandler({
         publicUrls: remotePublicUrls,
         isRelayed: isRelayedRequest,
@@ -4109,11 +4179,15 @@ export async function main(): Promise<void> {
               if (!response.ok) throw new Error(`dashboard view unavailable (${response.status})`);
               return await response.json() as SourceDashboardViewModel;
             },
+            setup: chatgptSetup,
+            ...(chatgptEvidenceSearch ? { evidenceSearch: chatgptEvidenceSearch } : {}),
+            answerModelAvailable: chatgptAnswerModelAvailable,
+            embedding: chatgptEmbeddingState,
           },
         }),
         withWorkerBearerAuth(worker.fetch, { authToken }),
       )),
-    ),
+    )),
   });
   sourceScheduler?.start();
   await reconcileCaptures();

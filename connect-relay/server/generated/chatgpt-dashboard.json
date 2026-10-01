@@ -13,6 +13,14 @@
           "domain": "https://mcp.olympusplugin.ai",
           "prefersBorder": false
         },
+        "openai/widgetCSP": {
+          "connect_domains": [],
+          "resource_domains": [],
+          "redirect_domains": [
+            "https://mcp.olympusplugin.ai",
+            "https://olympusplugin.ai"
+          ]
+        },
         "openai/ui": {
           "preferredDisplayMode": "fullscreen",
           "availableDisplayModes": [

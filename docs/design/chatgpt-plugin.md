@@ -169,11 +169,52 @@ ever included, folder names included.
 The TypeScript definition in `src/workers/chatgpt/dashboard-contract.ts` is
 the contract (v1, agreed with the dashboard lane 2026-10-01). The UI holds
 the copy for connection states; all other sentences come from
-`vocabulary.ts`. Folder and mail pickers get their own data tool in v2.
+`vocabulary.ts`. The folder and mail pickers have their own data tools (see
+"Setup from ChatGPT").
 
 `installing` covers model download, first index build and no source connected
 yet. `relay_unavailable` is never sent by a server: the UI derives it from a
 failed `tools/call`.
+
+## Setup from ChatGPT (added 2026-10-01)
+
+Owner direction: a ChatGPT user does everything inside ChatGPT, with no
+other dashboard. The UI lane renders it; this lane owns the tools and the
+contract (`src/workers/chatgpt/dashboard-contract.ts`).
+
+- **Answers: Olympus retrieves, ChatGPT reasons.** `olympus_search` returns
+  the release-gated evidence for Public and Personal items (no Analyst on the
+  Mac) and its description carries the generic Analyst instruction.
+  `source_answer` is listed only when an answer model is set up on the Mac.
+  A fresh install is keyless: `olympus engine install` seeds the
+  `no-sensitive` preset (built-in embeddings for every tier, nothing to
+  supply) when `~/.olympus/sovereignty.json` is absent.
+- **Connect** (`olympus_connect_source`): Gmail, Google Drive and Dropbox
+  through Olympus's publisher apps. The engine starts the dashboard's own
+  OAuth with the relay hand-back and returns a one-time link
+  `https://mcp.olympusplugin.ai/go/oly2g.<installId>.<secret>` (10 minutes,
+  single use, in memory). The relay routes it by install; the engine answers
+  with a 302 to the provider. The provider returns to
+  auth.olympusplugin.ai, whose page bounces to the state's origin, here the
+  relay; the relay routes `/oauth/callback/<source>` by the install prefix in
+  the signed state's nonce, and the engine verifies signature, nonce, origin
+  (fixed at start) and freshness. This works from a phone and from any
+  desktop, not only on the Mac; the non-loopback interstitial on the bounce
+  page asks for one click. X (owner app) and the paired chats are set up on
+  the Mac.
+- **Keys:** none through ChatGPT (owner decision). Venice and Readwise are
+  configured on the Mac only; `olympus_model_set` switches between models
+  already set up there and never takes a key. Models are status only in the
+  panel.
+- **Folders and mail** (`olympus_scope_list`, `olympus_scope_set`): the Mac
+  picker's data and compare-and-swap through the worker's own routes. Names,
+  keys and cursors travel only in those results' `_meta` (owner decision:
+  names may reach ChatGPT only through the picker); Secrets-tier locations
+  (owner tier rules) are left out and their saved choices kept on save.
+- **Fixes:** every Fix names a tool (connect, choose folders, disconnect,
+  check again); none sends the owner to their Mac.
+- `openExternal` domains: `mcp.olympusplugin.ai` and `olympusplugin.ai` only
+  (`openai/widgetCSP.redirect_domains`).
 
 ## Build sequence (today)
 

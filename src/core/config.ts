@@ -348,8 +348,18 @@ export function defaultConfig(): OlympusConfig {
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): OlympusConfig {
+  // On a Mac running the standalone engine, its engine.json is the config:
+  // a leftover ~/.olympus/config.json from an older setup (pointing at a
+  // worker that no longer runs) must not win over it. OLYMPUS_CONFIG still does.
+  const engineConfig = env.OLYMPUS_CONFIG ? undefined : installedEngineConfig(env);
+  if (engineConfig) {
+    const config = configFromPluginConfig(engineConfig, { requireResolvedWorkerSecrets: false });
+    applyEnvironmentOverrides(config, env);
+    validateConfig(config);
+    return config;
+  }
   const config = defaultConfig();
-  const configPath = env.OLYMPUS_CONFIG ?? join(homedir(), '.olympus', 'config.json');
+  const configPath = env.OLYMPUS_CONFIG ?? join(env.HOME?.trim() || homedir(), '.olympus', 'config.json');
 
   if (existsSync(configPath)) {
     const raw = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<OlympusConfig>;
@@ -360,6 +370,30 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 
   validateConfig(config);
   return config;
+}
+
+/**
+ * The standalone engine's config (`~/.olympus/engine.json`, the schema of the
+ * OpenClaw plugin config; core/engine-service.ts) when the engine host is
+ * installed here: its LaunchAgent exists, or this process runs under it.
+ */
+function installedEngineConfig(env: Record<string, string | undefined>): Record<string, unknown> | undefined {
+  const home = env.HOME?.trim() || homedir();
+  const enginePath = join(home, '.olympus', 'engine.json');
+  // ENGINE_LABEL in core/engine-service.ts (not imported: that module imports this one's dependents).
+  const agentPath = join(home, 'Library', 'LaunchAgents', 'ai.olympusplugin.engine.plist');
+  if (env.OLYMPUS_ENGINE_HOST !== '1' && !existsSync(agentPath)) return undefined;
+  if (!existsSync(enginePath)) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(enginePath, 'utf8'));
+  } catch {
+    throw new OperationError('config_error', `${enginePath} is not valid JSON.`, 'Fix or remove it, then run olympus engine install again.');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new OperationError('config_error', `${enginePath} must hold a JSON object.`);
+  }
+  return parsed as Record<string, unknown>;
 }
 
 /**

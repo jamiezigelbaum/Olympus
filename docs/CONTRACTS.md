@@ -316,6 +316,19 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-01 (no version change): a new consumer of the EvidencePack. On
+  the ChatGPT path (`olympus_search`, `src/workers/chatgpt/`) the engine runs
+  the shared EvidencePack build restricted to Public and Personal tiers,
+  passes each candidate through the same release gate an Analyst answer
+  passes, and returns the released items (source label, title, an https link
+  only where released, date, bounded excerpt) with counts-only coverage to
+  ChatGPT, whose own model then does the Analyst's job under the one generic
+  instruction: answer from this evidence only, cite each claim, say what you
+  could not find. No Analyst is called on that path and no per-question logic
+  is added; `source_answer` stays the Analyst path and is listed to ChatGPT
+  only when an answer model is set up on the Mac. Private evidence never
+  enters that pack. The three contract types are unchanged, so the
+  fingerprint is unchanged; no stored data migrates.
 - 2026-09-23 — **Four-tier classification P2 (no contract shape change).** The
   privacy-safe sniffer answers the classifier's open questions (a local model
   or Venice Private only, owner-approved in the classification ledger, verdicts

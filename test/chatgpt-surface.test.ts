@@ -115,7 +115,16 @@ describe('dashboard view-model producer', () => {
       ['dropbox.files', 'Dropbox', 'cloud', 'Off'],
     ]);
     expect(vm.sources[0]!.detail).toBe('synced 12m ago');
-    expect(vm.sources[1]!.primary).toEqual({ label: 'Connect', disabledReason: 'Connect sources in Olympus on your Mac.' });
+    expect(vm.sources[1]!.primary).toEqual({ label: 'Connect', tool: 'olympus_connect_source', args: { source: 'dropbox' } });
+    expect(vm.sources[0]!.menu).toEqual([
+      { label: 'Disconnect', tool: 'olympus_disconnect_source', args: { source_id: 'gmail.email' }, destructive: true },
+    ]);
+    expect(vm.models.change).toEqual({
+      label: 'Change',
+      tool: DASHBOARD_TOOL_NAME,
+      args: {},
+      disabledReason: 'Change models in Olympus on your Mac.',
+    });
     expect(vm.needsYou).toEqual([]);
     expect(vm.progress).toBeUndefined();
     expect(vm.generatedAt).toBe(NOW.toISOString());
@@ -154,7 +163,7 @@ describe('dashboard view-model producer', () => {
     expect(vm.sources[0]!.status).toBe('Working');
   });
 
-  test('a source needing reauth is under needsYou with an on-Mac fix', () => {
+  test('a source needing reauth is under needsYou with a reconnect tool call', () => {
     const vm = buildChatGptDashboardViewModel(view([card('gmail.email', {
       connection: { state: 'reauth_required', label: 'reauth required' },
     })]), { now: NOW });
@@ -162,8 +171,42 @@ describe('dashboard view-model producer', () => {
     expect(vm.needsYou).toEqual([{
       id: 'source:gmail.email',
       sentence: 'Gmail — reauth required',
-      fix: { label: 'Reconnect', disabledReason: 'Open Olympus on your Mac to fix this.' },
+      fix: { label: 'Reconnect', tool: 'olympus_connect_source', args: { source: 'gmail' } },
     }]);
+  });
+
+  test('a connected source waiting for its folders is fixed by opening the picker', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('google_drive.docs', {
+      family: 'file',
+      scope_selection: { required: true, kind: 'folders', status: 'scope_pending', connected: true },
+      connection: { state: 'connected', label: 'connected · choose folders to start' },
+      coverage: { indexed_items: 0, content_ready_items: 0, embedded_items: 0 },
+      answer_readiness: { state: 'empty', label: 'Waiting for the first sync' },
+    })]), { now: NOW });
+    const drive = vm.sources[0]!;
+    expect(drive.primary).toEqual({ label: 'Choose folders', tool: 'olympus_scope_list', args: { source_id: 'google_drive.docs' } });
+    for (const item of vm.needsYou) expect(item.fix.tool).toBeString();
+  });
+
+  test('every fix the engine sends names a tool, and none sends the owner to their Mac', () => {
+    const vm = buildChatGptDashboardViewModel(view([
+      card('gmail.email', { connection: { state: 'reauth_required', label: 'reauth required' } }),
+      offCard('dropbox.files'),
+      offCard('x.bookmarks'),
+      card('readwise.library', { connection: { state: 'reauth_required', label: 'reauth required' } }),
+    ]), { now: NOW, embedding: { kind: 'built_in', state: 'failed' } });
+    const fixes = [
+      ...vm.needsYou.map((item) => item.fix),
+      ...vm.sources.flatMap((source) => [source.primary, ...(source.menu ?? [])]).filter((fix) => fix !== undefined),
+      vm.models.change!,
+    ];
+    expect(fixes.length).toBeGreaterThan(4);
+    for (const fix of fixes) {
+      expect(typeof fix.tool).toBe('string');
+      expect(fix.args).toBeDefined();
+      expect(fix.label).not.toBe('Open Olympus on your Mac');
+    }
+    expect(copyDashboardViewModel(vm)).toEqual(vm);
   });
 
   test('a model download keeps the engine installing; embedding state passes through', () => {
@@ -412,10 +455,26 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     const client = await connectClient();
     try {
       const { tools } = await client.listTools();
-      expect(tools.map((tool) => tool.name).sort())
-        .toEqual([DASHBOARD_TOOL_NAME, 'source_answer', 'source_answer_result', 'source_index_status']);
+      expect(tools.map((tool) => tool.name)).toEqual([
+        DASHBOARD_TOOL_NAME,
+        'olympus_search',
+        'source_index_status',
+        'source_answer',
+        'source_answer_result',
+        'olympus_connect_source',
+        'olympus_scope_list',
+        'olympus_scope_set',
+        'olympus_disconnect_source',
+        'olympus_model_set',
+      ]);
+      const readOnly = new Set([DASHBOARD_TOOL_NAME, 'olympus_search', 'source_index_status', 'source_answer', 'source_answer_result', 'olympus_scope_list']);
       for (const tool of tools) {
-        expect(tool.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+        if (readOnly.has(tool.name)) {
+          expect(tool.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+        } else {
+          expect(tool.annotations?.readOnlyHint).toBe(false);
+          expect(tool.annotations?.destructiveHint).toBe(tool.name === 'olympus_disconnect_source');
+        }
       }
       const dashboard = tools.find((tool) => tool.name === DASHBOARD_TOOL_NAME)!;
       expect(dashboard._meta).toEqual({

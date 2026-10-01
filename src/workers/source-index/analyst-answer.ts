@@ -2395,3 +2395,145 @@ function sourceItemsEqual(left: SourceItemIdentity, right: SourceItemIdentity): 
     && left.localItemId === right.localItemId
     && left.sourceVersion === right.sourceVersion;
 }
+
+// --- Released evidence for an external analyst ------------------------------
+// The retrieval-only path (ChatGPT on the owner's Mac, no local model): the
+// same shared EvidencePack build the Analyst path runs, restricted to Public
+// and Personal tiers, with every item passed through the same release gate
+// the Analyst's answer passes, item by item. The calling assistant's own model
+// then does the Analyst's job under the one generic instruction (answer from
+// this evidence only, cite each claim, say what you could not find). No
+// Analyst call, no per-question logic, no change to the EvidencePack contract:
+// this is a new consumer of it (docs/CONTRACTS.md change log, 2026-10-01).
+
+export interface ReleasedEvidenceItem extends SourceIndexAnswerEvidence {
+  // The candidate's own chunks, bounded; absent for a matched item no reader
+  // could open (it still counts as matched).
+  excerpt?: string;
+  // The release gate saw instruction-like text in this excerpt; it is data.
+  source_instructions_flagged?: true;
+}
+
+export interface ReleasedEvidenceCoverage {
+  searched_corpora: number;
+  skipped_corpora: number;
+  unreadable_items: number;
+  partially_read_items: number;
+  unclassified_items: number;
+  // Breadth per family beyond the bounded selection (counts only).
+  matches: Array<{ family: string; matched_items: number; in_evidence: number; at_least: boolean }>;
+}
+
+export interface ReleasedEvidenceResult {
+  evidence: ReleasedEvidenceItem[];
+  // Items the release gate held back (count only).
+  withheld: number;
+  coverage: ReleasedEvidenceCoverage;
+}
+
+const RELEASED_EXCERPT_MAX_CHARS = 1_500;
+
+export async function searchReleasedEvidence(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  question: string;
+  maxResults?: number;
+  maxCharsPerCandidate?: number;
+  evidenceByteBudget?: number;
+  laneTimeoutMs?: number;
+}): Promise<ReleasedEvidenceResult> {
+  const question = input.question.trim();
+  if (!question) throw new OperationError('invalid_params', 'A question is required.');
+  const maxResults = Math.max(1, Math.min(MAX_EVIDENCE_CANDIDATES, input.maxResults ?? DEFAULT_MAX_RESULTS));
+  const request: SourceIndexAnswerRequest = {
+    question,
+    retrieval_mode: 'hybrid',
+    include_internal: true,
+    include_secure_local: false,
+    include_secure_local_content: false,
+    max_results: maxResults,
+  };
+  const lanes = input.lanes(request);
+  const detail = await buildEvidencePackDetailed({
+    question,
+    maxResults,
+    // Public and Personal only: Private never enters this pack.
+    searchContext: { allowedTrustDomains: ['public_safe', 'internal'], allowCloudQueries: true },
+    registry: lanes.registry,
+    adapters: lanes.adapters,
+    contentProviders: lanes.contentProviders,
+    maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
+    evidenceByteBudget: input.evidenceByteBudget ?? DEFAULT_EVIDENCE_BYTE_BUDGET,
+    ...(input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}),
+    ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
+    ...(lanes.classificationCoverage ? { classificationCoverage: lanes.classificationCoverage } : {}),
+  });
+  assertEvidencePackModelEligible(detail.pack);
+  const evidence: ReleasedEvidenceItem[] = [];
+  let withheld = 0;
+  const seen = new Set<string>();
+  detail.pack.candidates.forEach((candidate, index) => {
+    if (candidate.trustDomain !== 'public_safe' && candidate.trustDomain !== 'internal') {
+      withheld += 1;
+      return;
+    }
+    const corpusId = detail.candidateCorpusIds[index] ?? 'unknown';
+    const item = candidate.provenance.sourceItem;
+    const key = `${corpusId}:${item.providerItemId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const excerpt = candidate.chunks.join('\n…\n').trim().slice(0, RELEASED_EXCERPT_MAX_CHARS);
+    const cite = candidate.provenance.citation;
+    const fact = createStructuredEvidenceFact({
+      factId: `evidence-${index + 1}`,
+      claim: excerpt || cite?.title || item.providerItemId,
+      sourceProvenance: [candidate.provenance],
+      sensitivity: buildSourceSensitivity({ trustTier: candidate.trustTier, trustDomain: candidate.trustDomain }),
+      confidence: 'medium',
+      extractionKind: excerpt ? 'quoted_fact' : 'metadata',
+    });
+    const decision = evaluateReleaseGate({
+      facts: [fact],
+      draftAnswer: excerpt,
+      destination: 'calling_agent',
+      action: 'answer',
+      caller: 'worker',
+    });
+    if (decision.decision !== 'allow') {
+      withheld += 1;
+      return;
+    }
+    evidence.push(withoutSecretLikeLabels({
+      corpus_id: corpusId,
+      trust_domain: candidate.trustDomain,
+      family: item.family,
+      provider: item.provider,
+      provider_item_id: item.providerItemId,
+      ...(cite?.title ? { title: cite.title } : {}),
+      ...(cite?.sourceLabel ? { source_label: cite.sourceLabel } : {}),
+      ...(cite?.uri ? { uri: cite.uri } : {}),
+      ...(cite?.authoredAt ? { authored_at: cite.authoredAt } : {}),
+      ...(cite?.updatedAt ? { updated_at: cite.updatedAt } : {}),
+      ...(excerpt ? { excerpt } : {}),
+      ...(fact.sourceInstructionFlags.length > 0 ? { source_instructions_flagged: true as const } : {}),
+    }));
+  });
+  const coverage = detail.pack.coverage;
+  return {
+    evidence,
+    withheld,
+    coverage: {
+      searched_corpora: coverage.searchedCorpora.length,
+      skipped_corpora: detail.skippedCorpora.filter((skip) => skip.trustDomain !== 'secure_local').length,
+      unreadable_items: coverage.extractionGaps.length
+        + (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.unreadDocuments, 0),
+      partially_read_items: (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.partialDocuments, 0),
+      unclassified_items: (detail.classificationCoverage ?? []).reduce((sum, note) => sum + note.pendingClassificationItems, 0),
+      matches: (coverage.matchCounts ?? []).map((count) => ({
+        family: count.family,
+        matched_items: count.matchedItems,
+        in_evidence: count.inEvidence,
+        at_least: count.atLeast,
+      })),
+    },
+  };
+}
