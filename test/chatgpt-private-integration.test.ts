@@ -36,6 +36,8 @@ import {
 import { PrivateAnswerJobs, createPrivateAnswerHandler, isPrivateEligible } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { createBuiltInPrivateAnswerModel, privateEvidenceItems } from '../src/workers/chatgpt/private-answer-model.ts';
 import { privateAnswerPageHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
+import { CHATGPT_PRIVATE_ANSWER_JOB_ID } from '../src/workers/dashboard/chatgpt/private-answer.ts';
+import { PRIVATE_ANSWER_PATH_PATTERN } from '../connect-relay/shared/private-answer.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
@@ -251,10 +253,11 @@ describe('sealing and the panel page', () => {
 
   test('the panel only builds a fetch URL from a routable private job id, and renders nothing without a match', () => {
     const html = privateAnswerPageHtml({ relayOrigin: 'https://relay.test' });
-    expect(html).toContain('var JOB_ID = /^oly2p\\.[a-z2-7]{32}\\.[A-Za-z0-9_-]{43}$/;');
-    expect(html).toContain('!JOB_ID.test(info.jobId)');
-    expect(html).toContain('var height = info ? Math.ceil(document.documentElement.scrollHeight || 0) : 0;');
-    const pattern = /^oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
+    // The panel's job id pattern is exactly the relay's routable path shape
+    // (test/chatgpt-private-answer-ui.test.ts drives the page itself).
+    const pattern = CHATGPT_PRIVATE_ANSWER_JOB_ID;
+    expect(PRIVATE_ANSWER_PATH_PATTERN.source).toBe(`^\\/private\\/${pattern.source.slice(1)}`);
+    expect(html).toContain(JSON.stringify(pattern.source));
     expect(pattern.test(`oly2p.${INSTALL}.${'A'.repeat(43)}`)).toBe(true);
     for (const bad of [`oly2p.${INSTALL}.${'A'.repeat(43)}/../mcp`, `oly2.${INSTALL}.${'A'.repeat(43)}`, '../../mcp', `oly2p.${INSTALL}.x?y=1`]) {
       expect(pattern.test(bad)).toBe(false);

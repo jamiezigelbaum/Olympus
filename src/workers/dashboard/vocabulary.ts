@@ -1433,3 +1433,39 @@ export const DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
   sentence: 'Tell Olympus what\'s private for you',
   label: 'Set up privacy',
 } as const;
+
+/**
+ * The private answer panel under a ChatGPT search result
+ * (src/workers/dashboard/chatgpt/private-answer.ts). `{n}`, `{percent}`,
+ * `{list}` are filled in by the panel. Nothing here names a source item.
+ */
+export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
+  pageTitle: 'Olympus private answer',
+  title: 'Private answer from your Mac',
+  badge: 'Not sent to ChatGPT',
+  count: {
+    one: '1 private item matches',
+    many: '{n} private items match',
+  },
+  /** The count text when it reached the cap. */
+  capped: '50+',
+  show: 'Show private answer',
+  hide: 'Hide',
+  tryAgain: 'Try again',
+  noModel: 'Private answers need the private model on your Mac.',
+  downloading: 'The private model is downloading ({percent}%)…',
+  downloadingUnknown: 'The private model is downloading…',
+  downloadingLabel: 'Private model download',
+  preparing: 'Preparing the answer on your Mac…',
+  slow: 'Your Mac is taking longer than usual to prepare the answer.',
+  failed: 'Olympus couldn\'t answer this on your Mac.',
+  claimed: 'This answer was already opened in another window.',
+  expired: 'This answer has expired. Ask again to get a new one.',
+  rateLimited: 'Too many requests — try again in a moment.',
+  macOffline: 'Your Mac is offline, so the private answer can\'t be shown.',
+  unreachable: 'Olympus couldn\'t reach your Mac. Try again in a moment.',
+  generic: 'Olympus couldn\'t show the private answer here.',
+  sources: 'From: {list}',
+  more: 'and {n} more',
+  unanswered: 'Not found in your private items: {list}',
+} as const;

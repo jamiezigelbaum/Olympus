@@ -45294,7 +45294,7 @@ function unknownStatus(value) {
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY;
+var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -45691,6 +45691,35 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
     sentence: "Tell Olympus what's private for you",
     label: "Set up privacy"
+  };
+  DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
+    pageTitle: "Olympus private answer",
+    title: "Private answer from your Mac",
+    badge: "Not sent to ChatGPT",
+    count: {
+      one: "1 private item matches",
+      many: "{n} private items match"
+    },
+    capped: "50+",
+    show: "Show private answer",
+    hide: "Hide",
+    tryAgain: "Try again",
+    noModel: "Private answers need the private model on your Mac.",
+    downloading: "The private model is downloading ({percent}%)…",
+    downloadingUnknown: "The private model is downloading…",
+    downloadingLabel: "Private model download",
+    preparing: "Preparing the answer on your Mac…",
+    slow: "Your Mac is taking longer than usual to prepare the answer.",
+    failed: "Olympus couldn't answer this on your Mac.",
+    claimed: "This answer was already opened in another window.",
+    expired: "This answer has expired. Ask again to get a new one.",
+    rateLimited: "Too many requests — try again in a moment.",
+    macOffline: "Your Mac is offline, so the private answer can't be shown.",
+    unreachable: "Olympus couldn't reach your Mac. Try again in a moment.",
+    generic: "Olympus couldn't show the private answer here.",
+    sources: "From: {list}",
+    more: "and {n} more",
+    unanswered: "Not found in your private items: {list}"
   };
 });
 
@@ -104535,10 +104564,552 @@ var init_setup_tools = __esm(() => {
   };
 });
 
+// src/workers/dashboard/chatgpt/private-answer.ts
+function chatgptPrivateAnswerProgram(config2) {
+  const doc2 = document;
+  const root = doc2.getElementById("panel");
+  const T = config2.copy;
+  const JOB_ID = new RegExp(config2.jobIdPattern);
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  let info = null;
+  let phase = "idle";
+  let errorText = "";
+  let canRetry = false;
+  let answer = null;
+  let pair = null;
+  let run = 0;
+  let theme = "";
+  let focusAfter = "";
+  let nextId = 1;
+  const pending = {};
+  function post(message) {
+    if (window.parent && window.parent !== window)
+      window.parent.postMessage(message, "*");
+  }
+  function request(method, params, onResult) {
+    const id = nextId++;
+    pending[id] = onResult;
+    post({ jsonrpc: "2.0", id, method, params });
+  }
+  function notify(method, params) {
+    post({ jsonrpc: "2.0", method, params: params || {} });
+  }
+  function openai() {
+    return window.openai || null;
+  }
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent)
+      return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== "2.0")
+      return;
+    if (message.id !== undefined && pending[message.id]) {
+      const done = pending[message.id];
+      delete pending[message.id];
+      done(message.result);
+      return;
+    }
+    if (message.method === "ui/notifications/tool-result" && message.params)
+      accept(message.params._meta);
+    else if (message.method === "ui/notifications/host-context-changed")
+      hostContext(message.params);
+  });
+  function hostContext(context) {
+    if (!context || typeof context !== "object")
+      return;
+    if (context.theme === "light" || context.theme === "dark") {
+      theme = context.theme;
+      render();
+    }
+  }
+  function readGlobals() {
+    const host = openai();
+    if (!host)
+      return;
+    if (host.theme === "light" || host.theme === "dark")
+      theme = host.theme;
+    if (host.toolResponseMetadata)
+      accept(host.toolResponseMetadata, true);
+  }
+  window.addEventListener("openai:set_globals", () => {
+    readGlobals();
+    render();
+  });
+  function accept(meta2, quiet) {
+    const value = meta2 && typeof meta2 === "object" ? meta2[config2.metaKey] : null;
+    let next = null;
+    if (value && typeof value === "object" && value.v === 1 && typeof value.count === "number" && isFinite(value.count) && value.count >= 1 && (value.state === "ready" || value.state === "no_model" || value.state === "model_downloading")) {
+      const percent2 = typeof value.percent === "number" && isFinite(value.percent) ? Math.max(0, Math.min(100, Math.round(value.percent))) : -1;
+      next = {
+        count: Math.floor(value.count),
+        state: value.state,
+        jobId: value.state === "ready" && typeof value.jobId === "string" ? value.jobId : "",
+        percent: value.state === "model_downloading" ? percent2 : -1
+      };
+    }
+    const same = !!info && !!next && info.count === next.count && info.state === next.state && info.jobId === next.jobId && info.percent === next.percent;
+    if (same || !info && !next)
+      return;
+    if (!next || !info || next.jobId !== info.jobId) {
+      run++;
+      phase = "idle";
+      errorText = "";
+      canRetry = false;
+      answer = null;
+      pair = null;
+    }
+    info = next;
+    if (!quiet)
+      render();
+  }
+  const subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
+  const utf82 = (text2) => new TextEncoder().encode(text2);
+  function fromB64url(text2) {
+    if (typeof text2 !== "string" || !text2 || !/^[A-Za-z0-9_-]+$/.test(text2))
+      return null;
+    let s = text2.replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4)
+      s += "=";
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0;i < bin.length; i++)
+      out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function toB64url(bytes) {
+    let bin = "";
+    for (let i = 0;i < bytes.length; i++)
+      bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  async function keyPair(jobId) {
+    if (pair && pair.jobId === jobId)
+      return pair;
+    const made = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+    const raw = new Uint8Array(await subtle.exportKey("raw", made.publicKey));
+    pair = { jobId, privateKey: made.privateKey, publicKey: toB64url(raw) };
+    return pair;
+  }
+  async function open6(jobId, privateKey, sealed) {
+    const macRaw = fromB64url(sealed.macPublicKey);
+    const iv = fromB64url(sealed.iv);
+    const ciphertext = fromB64url(sealed.ciphertext);
+    if (!macRaw || macRaw.length !== 65 || !iv || iv.length !== 12 || !ciphertext)
+      throw new Error("malformed");
+    const macKey = await subtle.importKey("raw", macRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
+    const shared = await subtle.deriveBits({ name: "ECDH", public: macKey }, privateKey, 256);
+    const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+    const key = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf82(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf82(jobId) }, key, ciphertext);
+    return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ""));
+  }
+  function readAnswer(value) {
+    if (!value || typeof value !== "object" || value.v !== 1 || typeof value.answer !== "string")
+      return null;
+    const sources = [];
+    const seen = {};
+    const citations = Array.isArray(value.citations) ? value.citations : [];
+    for (let i = 0;i < citations.length; i++) {
+      const c = citations[i];
+      if (!c || typeof c !== "object")
+        continue;
+      const name = typeof c.title === "string" && c.title.trim() ? c.title.trim() : typeof c.source === "string" && c.source.trim() ? c.source.trim() : "";
+      if (name && !seen[name]) {
+        seen[name] = true;
+        sources.push(name);
+      }
+    }
+    const unanswered = (Array.isArray(value.unanswered) ? value.unanswered : []).filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
+    return { text: value.answer, sources, unanswered };
+  }
+  function wait(ms) {
+    return new Promise((resolve10) => setTimeout(resolve10, ms));
+  }
+  function fail(text2, retry) {
+    phase = "error";
+    errorText = text2;
+    canRetry = retry;
+    focusAfter = retry ? "retry" : "status";
+    render();
+  }
+  async function show() {
+    if (!info || info.state !== "ready" || phase === "working")
+      return;
+    if (answer) {
+      phase = "revealed";
+      focusAfter = "answer";
+      render();
+      return;
+    }
+    const jobId = info.jobId;
+    if (!JOB_ID.test(jobId) || !subtle || typeof window.fetch !== "function") {
+      fail(T.generic, false);
+      return;
+    }
+    const mine = ++run;
+    phase = "working";
+    errorText = "";
+    canRetry = false;
+    focusAfter = "status";
+    render();
+    const started = Date.now();
+    try {
+      const keys = await keyPair(jobId);
+      for (;; ) {
+        if (mine !== run)
+          return;
+        let response;
+        try {
+          response = await window.fetch(config2.relayOrigin + "/private/" + jobId, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
+            credentials: "omit",
+            cache: "no-store",
+            referrerPolicy: "no-referrer",
+            mode: "cors"
+          });
+        } catch {
+          if (mine === run)
+            fail(T.unreachable, true);
+          return;
+        }
+        if (mine !== run)
+          return;
+        let body = null;
+        try {
+          body = await response.json();
+        } catch {
+          body = null;
+        }
+        if (mine !== run)
+          return;
+        const status = body && typeof body.status === "string" ? body.status : "";
+        const code = response.status;
+        if (code === 200 && status === "ready") {
+          let opened = null;
+          try {
+            opened = readAnswer(await open6(jobId, keys.privateKey, body));
+          } catch {
+            opened = null;
+          }
+          if (mine !== run)
+            return;
+          if (!opened) {
+            fail(T.generic, false);
+            return;
+          }
+          answer = opened;
+          phase = "revealed";
+          focusAfter = "answer";
+          render();
+          return;
+        }
+        if (code === 200 && status === "failed")
+          return fail(T.failed, false);
+        if (code === 409)
+          return fail(T.claimed, false);
+        if (code === 410 || code === 404)
+          return fail(T.expired, false);
+        if (code === 429)
+          return fail(T.rateLimited, true);
+        const keepWaiting = code === 202 || code === 503 && status === "busy";
+        if (code === 503 && !keepWaiting)
+          return fail(T.macOffline, true);
+        if (!keepWaiting)
+          return fail(T.generic, false);
+        const header = Number(response.headers && response.headers.get ? response.headers.get("retry-after") : NaN);
+        const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
+        if (Date.now() - started + seconds * config2.secondMs > config2.pollCapMs) {
+          phase = "slow";
+          errorText = T.slow;
+          canRetry = true;
+          focusAfter = "retry";
+          render();
+          return;
+        }
+        await wait(seconds * config2.secondMs);
+      }
+    } catch {
+      if (mine === run)
+        fail(T.generic, false);
+    }
+  }
+  function hide() {
+    phase = "hidden";
+    focusAfter = "show";
+    render();
+  }
+  function el(tag, cls, text2) {
+    const node = doc2.createElement(tag);
+    if (cls)
+      node.className = cls;
+    if (text2)
+      node.textContent = text2;
+    return node;
+  }
+  function fill(template, values) {
+    return template.replace(/\{(\w+)\}/g, (whole2, key) => (key in values) ? values[key] : whole2);
+  }
+  function button(label, key, onClick) {
+    const node = el("button", "btn", label);
+    node.type = "button";
+    node.setAttribute("data-key", key);
+    node.addEventListener("click", onClick);
+    return node;
+  }
+  function lock() {
+    const svg = doc2.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "lock");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const body = doc2.createElementNS(SVG_NS, "rect");
+    body.setAttribute("x", "3");
+    body.setAttribute("y", "7");
+    body.setAttribute("width", "10");
+    body.setAttribute("height", "7.5");
+    body.setAttribute("rx", "1.5");
+    const shackle = doc2.createElementNS(SVG_NS, "path");
+    shackle.setAttribute("d", "M5.25 7V5a2.75 2.75 0 0 1 5.5 0v2");
+    svg.appendChild(body);
+    svg.appendChild(shackle);
+    return svg;
+  }
+  function head(into) {
+    const row = el("div", "head");
+    row.appendChild(lock());
+    row.appendChild(el("h2", "title", T.title));
+    into.appendChild(row);
+    into.appendChild(el("span", "badge", T.badge));
+  }
+  function countLine(count2) {
+    if (count2 >= config2.countCap)
+      return fill(T.count.many, { n: T.capped });
+    return count2 === 1 ? T.count.one : fill(T.count.many, { n: String(count2) });
+  }
+  function sourcesLine(sources) {
+    const shown = sources.slice(0, 3);
+    let list = shown.join(", ");
+    if (sources.length > shown.length)
+      list += " " + fill(T.more, { n: String(sources.length - shown.length) });
+    return fill(T.sources, { list });
+  }
+  function cardView(current) {
+    const card = el("section", "card");
+    card.setAttribute("aria-label", T.title);
+    const text2 = el("div", "text");
+    head(text2);
+    text2.appendChild(el("p", "sub count", countLine(current.count)));
+    card.appendChild(text2);
+    const live = el("div", "live");
+    live.setAttribute("role", "status");
+    live.setAttribute("aria-live", "polite");
+    live.setAttribute("tabindex", "-1");
+    live.setAttribute("data-key", "status");
+    if (current.state === "no_model") {
+      text2.appendChild(el("p", "sub", T.noModel));
+      return card;
+    }
+    if (current.state === "model_downloading") {
+      const known = current.percent >= 0;
+      text2.appendChild(el("p", "sub", known ? fill(T.downloading, { percent: String(current.percent) }) : T.downloadingUnknown));
+      if (known) {
+        const bar = el("div", "bar");
+        bar.setAttribute("role", "progressbar");
+        bar.setAttribute("aria-label", T.downloadingLabel);
+        bar.setAttribute("aria-valuemin", "0");
+        bar.setAttribute("aria-valuemax", "100");
+        bar.setAttribute("aria-valuenow", String(current.percent));
+        const fillBar = el("div", "bar-fill");
+        fillBar.style.width = current.percent + "%";
+        bar.appendChild(fillBar);
+        text2.appendChild(bar);
+      }
+      return card;
+    }
+    if (phase === "working") {
+      const line = el("p", "sub working");
+      line.appendChild(el("span", "spinner"));
+      line.appendChild(doc2.createTextNode(T.preparing));
+      live.appendChild(line);
+      text2.appendChild(live);
+      return card;
+    }
+    if (phase === "error" || phase === "slow") {
+      live.appendChild(el("p", "note", errorText));
+      text2.appendChild(live);
+      if (canRetry)
+        card.appendChild(button(T.tryAgain, "retry", () => void show()));
+      return card;
+    }
+    text2.appendChild(live);
+    card.appendChild(button(T.show, "show", () => void show()));
+    return card;
+  }
+  function revealedView(shown) {
+    const card = el("section", "card open");
+    card.setAttribute("aria-label", T.title);
+    const text2 = el("div", "text");
+    const top = el("div", "top");
+    head(top);
+    text2.appendChild(top);
+    const body = el("div", "answer");
+    body.setAttribute("tabindex", "-1");
+    body.setAttribute("data-key", "answer");
+    const paragraphs = shown.text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
+    for (const part of paragraphs)
+      body.appendChild(el("p", "", part));
+    text2.appendChild(body);
+    if (shown.sources.length)
+      text2.appendChild(el("p", "sub", sourcesLine(shown.sources)));
+    if (shown.unanswered.length)
+      text2.appendChild(el("p", "sub", fill(T.unanswered, { list: shown.unanswered.join("; ") })));
+    card.appendChild(text2);
+    const actions = el("div", "actions");
+    actions.appendChild(button(T.hide, "hide", hide));
+    card.appendChild(actions);
+    return card;
+  }
+  function render() {
+    if (theme)
+      doc2.documentElement.setAttribute("data-theme", theme);
+    else
+      doc2.documentElement.removeAttribute("data-theme");
+    root.textContent = "";
+    if (info)
+      root.appendChild(phase === "revealed" && answer ? revealedView(answer) : cardView(info));
+    if (focusAfter) {
+      const key = focusAfter;
+      focusAfter = "";
+      const target = root.querySelector('[data-key="' + key + '"]');
+      if (target && typeof target.focus === "function")
+        target.focus();
+    }
+    reportHeight(true);
+  }
+  let lastHeight = -1;
+  function reportHeight(force) {
+    const height = info && root.firstChild ? Math.ceil(root.firstChild.getBoundingClientRect().height) : 0;
+    if (!force && height === lastHeight && height !== 0)
+      return;
+    lastHeight = height;
+    const host = openai();
+    if (host && typeof host.notifyIntrinsicHeight === "function")
+      host.notifyIntrinsicHeight(height);
+    notify("ui/notifications/size-changed", { height });
+  }
+  if (typeof window.ResizeObserver === "function") {
+    new window.ResizeObserver(() => reportHeight()).observe(root);
+  }
+  readGlobals();
+  render();
+  request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    appInfo: { name: "olympus-private-answer", version: "1" },
+    appCapabilities: {}
+  }, (result) => {
+    if (result && result.hostContext)
+      hostContext(result.hostContext);
+    notify("ui/notifications/initialized");
+  });
+}
+function vars2(palette) {
+  return [
+    `--bg:${palette.bg}`,
+    `--text:${palette.text}`,
+    `--muted:${palette.muted}`,
+    `--line:${palette.line}`,
+    `--surface:${palette.surface}`,
+    `--accent:${palette.accent}`,
+    `--focus:${palette.focus}`,
+    `--run:${palette.run}`
+  ].join(";");
+}
+function chatgptPrivateAnswerPageHtml(options) {
+  const config2 = {
+    relayOrigin: options.relayOrigin,
+    metaKey: PRIVATE_ANSWER_META_KEY,
+    countCap: PRIVATE_MATCH_COUNT_CAP,
+    jobIdPattern: CHATGPT_PRIVATE_ANSWER_JOB_ID.source,
+    copy: DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY,
+    secondMs: options.secondMs ?? 1000,
+    pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS
+  };
+  return [
+    "<!doctype html>",
+    '<html lang="en">',
+    "<head>",
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>${DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY.pageTitle}</title>`,
+    `<style>${CHATGPT_PRIVATE_ANSWER_CSS}</style>`,
+    "</head>",
+    "<body>",
+    '<div id="panel"></div>',
+    `<script>(${chatgptPrivateAnswerProgram.toString()})(${scriptJson2(config2)});</script>`,
+    "</body>",
+    "</html>",
+    ""
+  ].join(`
+`);
+}
+function scriptJson2(value) {
+  return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
+}
+var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_JOB_ID, CHATGPT_PRIVATE_ANSWER_CSS;
+var init_private_answer2 = __esm(() => {
+  init_vocabulary();
+  init_private_answer_contract();
+  init_page();
+  CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS = 2 * 60000;
+  CHATGPT_PRIVATE_ANSWER_JOB_ID = /^oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
+  CHATGPT_PRIVATE_ANSWER_CSS = `
+:root{${vars2(CHATGPT_DASHBOARD_LIGHT)};color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){${vars2(CHATGPT_DASHBOARD_DARK)}}}
+:root[data-theme=dark]{${vars2(CHATGPT_DASHBOARD_DARK)};color-scheme:dark}
+:root[data-theme=light]{color-scheme:light}
+*{box-sizing:border-box}
+html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);overflow:hidden}
+body{font-size:0.9375rem;overflow-wrap:anywhere}
+p{margin:0}
+#panel:empty{display:none}
+.card{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 1rem;padding:0.75rem 1rem}
+.card.open{align-items:flex-start;flex-direction:column;gap:0.75rem}
+.text{flex:1 1 16rem;min-width:0;display:flex;flex-wrap:wrap;align-items:center;gap:0.125rem 0.5rem}
+.text>*{flex:1 1 100%;min-width:0}
+.text>.head,.text>.badge{flex:0 1 auto}
+.card.open .text{flex:none;width:100%;flex-direction:column;align-items:stretch;gap:0.5rem}
+.card.open .text>*{flex:none}
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
+.head{display:flex;align-items:center;gap:0.5rem}
+@media (max-width:26rem){.text>.count{flex:0 1 auto;order:1}.text>.badge{order:2}.text>:not(.head):not(.count):not(.badge){order:3}}
+.lock{flex:none;width:1rem;height:1rem;fill:none;stroke:var(--text);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.title{margin:0;font-size:0.9375rem;font-weight:600;line-height:1.4}
+.badge{flex:none;font-size:0.75rem;font-weight:500;line-height:1.25rem;padding:0 0.5rem;color:var(--accent);border:1px solid var(--accent);border-radius:999px;white-space:nowrap}
+.sub{color:var(--muted);font-size:0.875rem}
+.note{font-size:0.875rem}
+.live:empty{display:none}
+.live:focus{outline:none}
+.working{display:flex;align-items:center;gap:0.5rem}
+.spinner{flex:none;width:0.875rem;height:0.875rem;border-radius:50%;border:2px solid var(--line);border-top-color:var(--text);animation:spin 0.9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bar{height:0.25rem;margin-top:0.375rem;border-radius:999px;background:var(--surface);overflow:hidden}
+.bar-fill{height:100%;background:var(--run)}
+.answer{display:flex;flex-direction:column;gap:0.5rem;white-space:pre-line}
+.answer:focus{outline:none}
+.btn{flex:none;font:inherit;font-size:0.875rem;font-weight:500;min-height:2.25rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
+.btn:hover{background:var(--surface)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){.spinner{animation-duration:3s}}
+`;
+});
+
 // src/workers/chatgpt/private-answer-resource.ts
 function privateAnswerResourceMeta(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN) {
   return {
-    ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: true },
+    ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
     "openai/widgetDescription": "Shows how many private items match and, when the user asks, a private answer that ChatGPT never receives."
   };
 }
@@ -104546,191 +105117,13 @@ function privateAnswerResourceHtml(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN) {
   return privateAnswerPageHtml({ relayOrigin });
 }
 function privateAnswerPageHtml(options) {
-  const config2 = JSON.stringify({ relayOrigin: options.relayOrigin, metaKey: PRIVATE_ANSWER_META_KEY }).replace(/</g, "\\u003c");
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Olympus private answer</title>
-<style>
-:root { color-scheme: light dark; --text: #0d0d0d; --muted: #5d5d5d; --line: #d9d9d9; --accent: #5b45c2; --on-accent: #fff; }
-@media (prefers-color-scheme: dark) { :root { --text: #ececec; --muted: #b4b4b4; --line: #4a4a4a; --accent: #a594f0; --on-accent: #14121f; } }
-body { margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--text); background: transparent; }
-#root { padding: 12px 16px; }
-#root:empty { padding: 0; }
-.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-.badge { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
-button { font: inherit; border: 0; border-radius: 8px; padding: 6px 12px; background: var(--accent); color: var(--on-accent); cursor: pointer; }
-button:disabled { opacity: .6; cursor: default; }
-.answer { white-space: pre-wrap; margin: 8px 0 0; }
-.muted { color: var(--muted); }
-ol, ul { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
-html, body { min-height: 0; }
-</style>
-</head>
-<body>
-<div id="root" aria-live="polite"></div>
-<script>
-(function () {
-  "use strict";
-  var CONFIG = ${config2};
-  var root = document.getElementById("root");
-  var info = null;
-  var phase = "idle";
-  var message = "";
-  var result = null;
-  // The one job id shape the panel will put in a URL (connect-relay/shared/tokens.ts).
-  var JOB_ID = /^oly2p\\.[a-z2-7]{32}\\.[A-Za-z0-9_-]{43}$/;
-
-  function post(msg) { if (window.parent && window.parent !== window) window.parent.postMessage(msg, "*"); }
-  var nextId = 1;
-  function request(method, params) { post({ jsonrpc: "2.0", id: nextId++, method: method, params: params || {} }); }
-  function notify(method, params) { post({ jsonrpc: "2.0", method: method, params: params || {} }); }
-
-  function accept(meta) {
-    var value = meta && typeof meta === "object" ? meta[CONFIG.metaKey] : null;
-    if (!value || value.v !== 1 || typeof value.count !== "number" || value.count <= 0) {
-      // No private match on this result: render nothing at all.
-      if (info) { info = null; phase = "idle"; message = ""; result = null; render(); }
-      return;
-    }
-    if (value.state === "ready" && !(typeof value.jobId === "string" && JOB_ID.test(value.jobId))) {
-      value = { v: 1, count: value.count, state: "no_model" };
-    }
-    if (info && info.jobId === value.jobId && info.state === value.state) return;
-    info = value; phase = "idle"; message = ""; result = null; render();
-  }
-  window.addEventListener("message", function (event) {
-    if (event.source !== window.parent) return;
-    var msg = event.data;
-    if (!msg || msg.jsonrpc !== "2.0") return;
-    if (msg.method === "ui/notifications/tool-result" && msg.params) accept(msg.params._meta);
-  });
-  function readGlobals() { var host = window.openai; if (host && host.toolResponseMetadata) accept(host.toolResponseMetadata); }
-  window.addEventListener("openai:set_globals", readGlobals);
-
-  function b64urlToBytes(text) {
-    var s = text.replace(/-/g, "+").replace(/_/g, "/");
-    while (s.length % 4) s += "=";
-    var bin = atob(s), out = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  }
-  function bytesToB64url(bytes) {
-    var bin = "";
-    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-    return btoa(bin).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/, "");
-  }
-  var subtle = window.crypto && window.crypto.subtle;
-
-  async function open(jobId, privateKey, sealed) {
-    var enc = new TextEncoder();
-    var macKey = await subtle.importKey("raw", b64urlToBytes(sealed.macPublicKey), { name: "ECDH", namedCurve: "P-256" }, false, []);
-    var shared = await subtle.deriveBits({ name: "ECDH", public: macKey }, privateKey, 256);
-    var ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-    var key = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: enc.encode(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
-    var plain = await subtle.decrypt({ name: "AES-GCM", iv: b64urlToBytes(sealed.iv), additionalData: enc.encode(jobId) }, key, b64urlToBytes(sealed.ciphertext));
-    return JSON.parse(new TextDecoder().decode(plain));
-  }
-
-  var FAIL = {
-    claimed: "This private answer was already opened elsewhere. If that was not you, ask again for a new one.",
-    gone: "This private answer is no longer available. Ask again to get a new one.",
-    failed: "Olympus could not answer this privately on your Mac.",
-    mac_offline: "Your Mac is offline. Ask again when your Mac is awake and online.",
-    forbidden: "This panel cannot reach Olympus from here.",
-    invalid: "Olympus could not read this request.",
-    network: "Olympus could not be reached. Try again shortly."
-  };
-
-  async function show() {
-    if (!info || typeof info.jobId !== "string" || !JOB_ID.test(info.jobId) || phase === "working") return;
-    if (!subtle) { phase = "error"; message = FAIL.forbidden; render(); return; }
-    phase = "working"; message = "Preparing the private answer on your Mac..."; render();
-    var jobId = info.jobId;
-    try {
-      var pair = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
-      var publicKey = bytesToB64url(new Uint8Array(await subtle.exportKey("raw", pair.publicKey)));
-      var deadline = Date.now() + 10 * 60 * 1000;
-      for (;;) {
-        var response = await fetch(CONFIG.relayOrigin + "/private/" + jobId, {
-          method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ v: 1, publicKey: publicKey }), credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer"
-        });
-        var body = null;
-        try { body = await response.json(); } catch (e) { body = null; }
-        var status = body && typeof body.status === "string" ? body.status : "";
-        if (response.status === 200 && status === "ready") {
-          result = await open(jobId, pair.privateKey, body);
-          phase = "done"; message = ""; render(); return;
-        }
-        if ((response.status === 202 && status === "pending") || response.status === 429 || (response.status === 503 && status !== "mac_offline")) {
-          if (Date.now() > deadline) { phase = "error"; message = FAIL.gone; render(); return; }
-          var wait = Number(response.headers.get("retry-after")) || 2;
-          await new Promise(function (resolve) { setTimeout(resolve, Math.min(10, Math.max(1, wait)) * 1000); });
-          continue;
-        }
-        phase = "error"; message = FAIL[status] || FAIL.network; render(); return;
-      }
-    } catch (error) {
-      phase = "error"; message = FAIL.network; render();
-    }
-  }
-
-  function el(tag, text, cls) { var node = document.createElement(tag); if (text) node.textContent = text; if (cls) node.className = cls; return node; }
-  function render() {
-    root.textContent = "";
-    if (info) {
-      var n = info.count >= 50 ? "50+" : String(info.count);
-      var row = el("div", null, "row");
-      row.appendChild(el("strong", n + (info.count === 1 ? " private item matches" : " private items match")));
-      row.appendChild(el("span", "Not sent to ChatGPT", "badge"));
-      root.appendChild(row);
-      if (info.state === "no_model") root.appendChild(el("p", "Set up a private answer model in Olympus on your Mac to see a private answer here.", "muted"));
-      else if (info.state === "model_downloading") root.appendChild(el("p", "The private answer model is still downloading" + (typeof info.percent === "number" ? " (" + info.percent + "%)" : "") + ". Ask again when it is ready.", "muted"));
-      else if (phase === "done" && result) {
-        root.appendChild(el("p", String(result.answer || ""), "answer"));
-        var cites = Array.isArray(result.citations) ? result.citations : [];
-        if (cites.length) {
-          var list = el("ol");
-          cites.forEach(function (c) { list.appendChild(el("li", [c.source, c.title, c.date].filter(Boolean).join(" \\u00b7 "))); });
-          root.appendChild(list);
-        }
-        var gaps = Array.isArray(result.unanswered) ? result.unanswered : [];
-        if (gaps.length) {
-          root.appendChild(el("p", "Not answered by these items:", "muted"));
-          var missing = el("ul");
-          gaps.forEach(function (g) { missing.appendChild(el("li", String(g))); });
-          root.appendChild(missing);
-        }
-      } else {
-        var button = el("button", "Show private answer");
-        button.disabled = phase === "working" || phase === "error";
-        button.addEventListener("click", show);
-        root.appendChild(button);
-        if (message) root.appendChild(el("p", message, "muted"));
-      }
-    }
-    var height = info ? Math.ceil(document.documentElement.scrollHeight || 0) : 0;
-    if (window.openai && typeof window.openai.notifyIntrinsicHeight === "function") window.openai.notifyIntrinsicHeight(height);
-    notify("ui/notifications/size-changed", { height: height });
-  }
-
-  readGlobals();
-  render();
-  request("ui/initialize", { protocolVersion: "2026-01-26", appInfo: { name: "olympus-private-answer", version: "1" }, appCapabilities: {} });
-  notify("ui/notifications/initialized");
-})();
-</script>
-</body>
-</html>
-`;
+  return chatgptPrivateAnswerPageHtml(options);
 }
 var PRIVATE_ANSWER_RESOURCE, PRIVATE_ANSWER_RELAY_ORIGIN = "https://mcp.olympusplugin.ai";
 var init_private_answer_resource = __esm(() => {
   init_dashboard_resource();
   init_private_answer_contract();
+  init_private_answer2();
   PRIVATE_ANSWER_RESOURCE = {
     uri: PRIVATE_ANSWER_RESOURCE_URI,
     name: "Olympus private answer",
