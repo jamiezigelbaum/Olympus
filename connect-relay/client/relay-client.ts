@@ -261,6 +261,12 @@ export class RelayClient {
     const headers = parseHeaderList(message.headers);
     const method = typeof message.method === 'string' ? message.method.toUpperCase() : '';
     if (id === undefined || !headers || this.inbound.has(id)) return;
+    // Requests still receiving their body count too, so a relay cannot make
+    // this process hold an unbounded number of half-sent requests.
+    if (this.inbound.size >= (this.options.maxConcurrent ?? 32)) {
+      this.respondLocally(id, 503, { error: 'busy', message: 'Olympus is busy. Try again shortly.' });
+      return;
+    }
     this.inbound.set(id, {
       method,
       path: FORWARDED_METHODS.has(method) && typeof message.path === 'string' ? forwardPath(message.path) : undefined,
@@ -290,10 +296,6 @@ export class RelayClient {
     request.started = true;
     if (!request.path) {
       this.respondLocally(id, 404, { error: 'not_found', message: 'This Olympus address only serves its remote agent endpoints.' });
-      return;
-    }
-    if (this.inbound.size > (this.options.maxConcurrent ?? 32)) {
-      this.respondLocally(id, 503, { error: 'busy', message: 'Olympus is busy. Try again shortly.' });
       return;
     }
     void this.serve(id, request, request.path);

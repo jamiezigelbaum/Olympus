@@ -6,11 +6,12 @@
  * - `/mcp` (and the OpenAPI tool paths, through the same check) accept ONLY a
  *   connection credential the connection store verifies: a bearer connection
  *   token (`olympus_conn_…`), or, when a public base URL is configured, an
- *   OAuth access token (`olympus_at_…`) issued for exactly this resource (see
+ *   OAuth access token (`oly2.<installId>.…` through the relay, `olympus_at_…`
+ *   behind a tunnel of the owner's own) issued for exactly this resource (see
  *   workers/remote-oauth). The worker's own shared bearer is neither, so it
  *   cannot reach them. A 401 names the protected-resource metadata (RFC 9728)
- *   whenever OAuth is on, which is how Claude, ChatGPT and Grok discover where
- *   to ask the owner for approval.
+ *   whenever OAuth is on, which is how ChatGPT discovers where to ask the
+ *   owner for approval.
  * - Every other worker route stays behind `withWorkerBearerAuth`, which
  *   accepts only the worker bearer, so a connection token reaches nothing else.
  *
