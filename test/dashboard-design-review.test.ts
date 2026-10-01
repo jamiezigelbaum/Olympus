@@ -121,24 +121,19 @@ test('dashboard implementation is guarded and visual approval cannot survive cha
         // rendered_from_commit; the screenshots Jamie viewed are on
         // codex/v05-remote-toggle-screenshots at screenshot_commit.
         id: 'setup_agents',
-        rendered_html_sha256: 'cb7a9b8dcea5486197a21bba41b9df6e149eaf1cf428c0c4bd62daad52064d2a',
+        rendered_html_sha256: 'da90e0a8a1d5ba5a83de517c4d00cf224098121a5677fdd424830acc2b34244f',
         approved_by: 'jamie',
         approved_on: '2026-10-01',
-        approval: 'In chat: approve the text',
-        screenshot_commit: '99f776c714a12a2da98dfff503a183bcb562a67c',
-        rendered_from_commit: '9595baa6c25873ebdca1345bcd2b1743c3678780',
-        // The look, approved the day before; the text change above came after it.
+        approval: 'In chat: yes, re-approve the Agents section with the release 3 look',
+        screenshot_commit: 'e6b8ae6461d08f845a40d367eed2b5394ba95bf5',
+        rendered_from_commit: 'e6b8ae6461d08f845a40d367eed2b5394ba95bf5',
+        // The earlier approval (the text), superseded by the release 3 look.
         prior_approval: {
-          rendered_html_sha256: 'f9628dc809afff7f7e23f9ce7d5c6b1d94ed57ed104a345bfce108524c0dae13',
-          approved_on: '2026-09-30',
-          approval: 'In chat: I approve the look.',
-          screenshot_commit: '03d23ee78c3e7c0f156a0c2df8672d89c6f06718',
-          rendered_from_commit: '8bceaa8c70fcb6b1a33d99dfeca03da8ad3828c2',
-        },
-        pending_review: {
-          requested_on: '2026-10-01',
-          reason: 'Release 3 of the 2026-10-01 dashboard UX review changes the theme colours and makes each row\'s main action the filled button, which changes the Agents section\'s status dots and button fills; this render awaits Jamie\'s re-approval.',
-          candidate_rendered_html_sha256: 'da90e0a8a1d5ba5a83de517c4d00cf224098121a5677fdd424830acc2b34244f',
+          rendered_html_sha256: 'cb7a9b8dcea5486197a21bba41b9df6e149eaf1cf428c0c4bd62daad52064d2a',
+          approved_on: '2026-10-01',
+          approval: 'In chat: approve the text',
+          screenshot_commit: '99f776c714a12a2da98dfff503a183bcb562a67c',
+          rendered_from_commit: '9595baa6c25873ebdca1345bcd2b1743c3678780',
         },
       },
     ],
