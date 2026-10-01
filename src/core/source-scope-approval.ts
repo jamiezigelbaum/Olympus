@@ -60,6 +60,12 @@ export interface FileSourceScopeApprovalSnapshot {
   selections: FileSourceScopeSelection[];
   wholeAccount: boolean;
   reason?: 'not_connected' | 'missing' | 'malformed' | 'account_changed';
+  /**
+   * Set only by `approveFileSourceScope` when the request was a second
+   * delivery of the save that produced the current approval: nothing was
+   * written, and callers must not redo that save's side effects.
+   */
+  replayed?: true;
 }
 
 interface PersistedFileSourceScopeApproval {
@@ -70,6 +76,8 @@ interface PersistedFileSourceScopeApproval {
   selections: FileSourceScopeSelection[];
   whole_account: boolean;
   approved_at: string;
+  /** The revision this approval replaced: what its save was sent with. */
+  replaced_revision?: string;
 }
 
 interface PersistedFileSourceScopeState {
@@ -191,13 +199,29 @@ export function approveFileSourceScope(input: {
     if (!current.accountGeneration || current.accountGeneration !== input.accountGeneration) {
       throw new OperationError('source_index_policy_violation', 'The connected account changed. Browse the current account and choose its scope again.');
     }
-    if (current.revision !== input.expectedRevision) {
-      throw new OperationError('source_index_policy_violation', 'The source scope changed. Reload it before saving.');
-    }
     if (input.wholeAccount && input.explicitWholeAccountConfirmation !== true) {
       throw new OperationError('invalid_request', 'Whole-account access requires its visible confirmation.');
     }
     const selections = normalizeSelections(input.selections);
+    if (current.revision !== input.expectedRevision) {
+      // Nothing but a save writes this state, so between a browse and its
+      // save the revision moves only when a save lands. The one save that can
+      // land first is this very one, delivered twice: the first delivery
+      // committed, its answer outlived the ChatGPT tool call (or the host sent
+      // it again), and the second carries the revision the first replaced
+      // (owner fresh-install test, 2026-10-01). That second delivery is the
+      // same decision, so it answers with the approval it already made;
+      // anything else that differs is still a real conflict.
+      if (current.status === 'approved' && isSameSaveReplayed(input.statePath, input.sourceId, {
+        accountGeneration: input.accountGeneration,
+        expectedRevision: input.expectedRevision,
+        selections,
+        wholeAccount: input.wholeAccount,
+      })) {
+        return { ...current, replayed: true };
+      }
+      throw new OperationError('source_index_policy_violation', 'The source scope changed. Reload it before saving.');
+    }
     if (!input.wholeAccount && selections.some((selection) =>
       selection.key === '/' || (input.sourceId === 'google_drive.docs' && selection.key.toLowerCase() === 'root')
     )) {
@@ -216,6 +240,7 @@ export function approveFileSourceScope(input: {
       selections,
       whole_account: input.wholeAccount,
       approved_at: (input.now ?? new Date()).toISOString(),
+      replaced_revision: input.expectedRevision,
     });
     const state: PersistedFileSourceScopeState = { version: 1, approvals };
     lease.commit(() => writePrivateFileAtomicSync(input.statePath, `${JSON.stringify(state, null, 2)}\n`));
@@ -285,6 +310,26 @@ function matchingSelections(
   return itemScopeKeys
     .map((key) => byKey.get(key))
     .filter((selection): selection is FileSourceScopeSelection => selection !== undefined);
+}
+
+function isSameSaveReplayed(
+  statePath: string,
+  sourceId: FileSourceScopeId,
+  request: {
+    accountGeneration: string;
+    expectedRevision: string;
+    selections: readonly FileSourceScopeSelection[];
+    wholeAccount: boolean;
+  },
+): boolean {
+  const read = readState(statePath);
+  if (read.kind !== 'valid') return false;
+  const approval = read.state.approvals.find((candidate) => candidate.source_id === sourceId);
+  return approval !== undefined
+    && approval.replaced_revision === request.expectedRevision
+    && approval.account_generation === request.accountGeneration
+    && approval.whole_account === request.wholeAccount
+    && JSON.stringify(approval.selections) === JSON.stringify(request.selections);
 }
 
 function pendingSnapshot(
@@ -373,6 +418,8 @@ function parseApproval(value: unknown): PersistedFileSourceScopeApproval {
     || typeof record.whole_account !== 'boolean'
     || typeof record.approved_at !== 'string' || !Number.isFinite(Date.parse(record.approved_at))
     || !Array.isArray(record.selections)
+    || (record.replaced_revision !== undefined
+      && (typeof record.replaced_revision !== 'string' || record.replaced_revision.length > 512))
   ) throw new Error('approval');
   const selections = normalizeSelections(record.selections.map((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('selection');
@@ -395,5 +442,6 @@ function parseApproval(value: unknown): PersistedFileSourceScopeApproval {
     selections,
     whole_account: record.whole_account,
     approved_at: record.approved_at,
+    ...(typeof record.replaced_revision === 'string' ? { replaced_revision: record.replaced_revision } : {}),
   };
 }

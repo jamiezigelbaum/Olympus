@@ -3977,7 +3977,9 @@ export async function main(): Promise<void> {
         explicitWholeAccountConfirmation: input.explicitWholeAccountConfirmation,
       });
       let invalidatedJobs = 0;
-      if (fileExtractionRuntime) {
+      // A replayed save (the same request delivered twice) changed nothing:
+      // re-invalidating would cancel the jobs its first delivery just queued.
+      if (fileExtractionRuntime && approval.replayed !== true) {
         const corpora = input.sourceId === 'dropbox.files'
           ? [DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID]
           : [GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID];
@@ -3991,7 +3993,7 @@ export async function main(): Promise<void> {
         sourceScheduler.updateSources(schedulerSourcesForHandles(readActiveConnectedHandles(process.env)).sources);
         if (fileSourceScopeMetadataEnabled(approval)
           && sourceScheduler.status().sources.some((source) => source.source_id === input.sourceId)) {
-          startApprovedSourceRun(sourceScheduler, input.sourceId);
+          if (approval.replayed !== true) startApprovedSourceRun(sourceScheduler, input.sourceId);
           started = true;
         }
       }
