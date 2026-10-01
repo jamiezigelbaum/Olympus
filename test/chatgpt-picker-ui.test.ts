@@ -9,6 +9,7 @@ import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-cont
 import { CHATGPT_DASHBOARD_CSS, chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { CHATGPT_PICKER_TOOLS, CHATGPT_SCOPE_META_KEY } from '../src/workers/dashboard/chatgpt/picker.ts';
 import { DASHBOARD_CHATGPT_PICKER_COPY as Q } from '../src/workers/dashboard/vocabulary.ts';
+import { FIRST_RUN_RESOURCES, FIRST_RUN_RESOURCES_KEY, FIRST_RUN_ROOT } from './fixtures/chatgpt-picker-first-run.ts';
 
 const T = CHATGPT_PICKER_TOOLS;
 type Result = { structuredContent?: unknown; isError?: boolean; content?: unknown[]; _meta?: Record<string, unknown> | undefined };
@@ -194,8 +195,14 @@ describe('connect', () => {
     for (let i = 0; i < 40 && !host.text().includes('Tax Returns 2024'); i++) await sleep(5);
     expect(polls).toBe(3);
     expect(host.toolCalls(T.scopeList)).toEqual([{ source_id: 'dropbox.files' }]);
-    expect(host.text()).toContain('Dropbox is connected.');
+    // The connect hello is one quiet line with no side stripe, gone after the first choice.
+    const hello = host.win.document.querySelector('.fnote')!;
+    expect(hello.textContent).toBe('Dropbox is connected.');
+    expect(hello.className).toBe('fnote muted');
+    expect(host.win.document.querySelector('.notice')).toBeNull();
     expect(host.text()).toContain(Q.foldersTitle);
+    (host.win.document.querySelector('.seg-opt[data-key="picker:seg:k-b:ingest"]') as unknown as HTMLButtonElement).click();
+    expect(host.text()).not.toContain('Dropbox is connected.');
     expectNamesOnlyInPicker(host);
   });
 
@@ -263,64 +270,110 @@ describe('connect', () => {
 
 describe('folder picker', () => {
   const doc = (host: Host) => host.win.document;
-  const status = (host: Host, name: string) => {
-    const found = Array.from(doc(host).querySelectorAll('button.fstatus'))
-      .find((node) => String(node.getAttribute('aria-label')).startsWith(`Choice for ${name}: `));
-    if (!found) throw new Error(`no status for ${name}`);
-    return found as unknown as HTMLButtonElement;
+  const rowOf = (host: Host, name: string) => {
+    const found = Array.from(doc(host).querySelectorAll('li.seg-row')).find((node) => node.querySelector('.fname-text')!.textContent === name);
+    if (!found) throw new Error(`no row for ${name}`);
+    return found as unknown as HTMLElement;
   };
-  const statusText = (host: Host, name: string) => status(host, name).querySelector('.fstatus-text')!.textContent;
-  const openFolder = (host: Host, name: string) => {
-    const found = Array.from(doc(host).querySelectorAll('button.fname')).find((node) => node.querySelector('.fname-text')!.textContent === name);
-    if (!found) throw new Error(`no folder button for ${name}`);
-    (found as unknown as HTMLButtonElement).click();
+  const segIn = (scope: HTMLElement, state: string) => scope.querySelector(`.seg-opt[data-key$=":${state}"]`) as unknown as HTMLButtonElement;
+  const seg = (host: Host, name: string, state: string) => segIn(rowOf(host, name), state);
+  const thisSeg = (host: Host, state: string) => segIn(doc(host).querySelector('.this-row') as unknown as HTMLElement, state);
+  /** What a control shows: the pressed segment, and the one drawn as inherited. */
+  const shown = (scope: HTMLElement) => {
+    const segs = Array.from(scope.querySelectorAll('.seg-opt')) as unknown as HTMLButtonElement[];
+    const state = (button?: HTMLButtonElement) => (button ? String(button.getAttribute('data-key')).split(':').pop() : '');
+    return {
+      pressed: state(segs.find((button) => button.getAttribute('aria-pressed') === 'true')),
+      inherited: state(segs.find((button) => button.className.includes('inherited'))),
+    };
   };
-  const radio = (host: Host, value: string) => doc(host).querySelector(`input[data-key="picker:sheet:${value || 'parent'}"]`) as unknown as HTMLInputElement;
-  const pick = (host: Host, value: string) => {
-    const input = radio(host, value);
-    input.checked = true;
-    input.dispatchEvent(ev(host, 'change'));
-  };
-  const sheet = (host: Host) => doc(host).querySelector('.sheet')?.textContent ?? '';
+  const rowShows = (host: Host, name: string) => shown(rowOf(host, name));
+  const thisShows = (host: Host) => shown(doc(host).querySelector('.this-row') as unknown as HTMLElement);
+  const tap = (host: Host, name: string, state: string) => seg(host, name, state).click();
+  const openFolder = (host: Host, name: string) => (rowOf(host, name).querySelector('.fopen') as unknown as HTMLButtonElement).click();
   const footer = (host: Host) => doc(host).querySelector('.picker-footer')!.textContent!;
   const escapeKey = (host: Host) => doc(host).dispatchEvent(new host.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }) as any);
   const focused = (host: Host) => (doc(host).activeElement as any)?.getAttribute('data-key');
-  const choose = (host: Host, name: string, value: string) => {
-    status(host, name).click();
-    pick(host, value);
-    host.button(Q.done).click();
-  };
+  const rowNames = (host: Host) => Array.from(doc(host).querySelectorAll('li.seg-row .fname-text')).map((node) => node.textContent);
+  const mixedTag = (host: Host, name: string) => rowOf(host, name).querySelector('.ftag');
 
-  test('root: the whole-account row, the top-level folders with sizes, a disabled Save, and no <select> anywhere', async () => {
+  test('root: one thin row per folder with a three-segment control, nothing chosen, a disabled Save, and no <select>, sheet or status links', async () => {
     const host = await openFolders({}, { displayMode: 'fullscreen' });
-    const account = doc(host).querySelector('button.account')!;
-    expect(account.textContent).toContain('Everything in Dropbox');
-    expect(account.textContent).toContain(Q.notIncluded);
-    expect(host.text()).toContain('Tax Returns 2024');
-    expect(host.text()).toContain('2 GB · 1,200 files');
-    expect(host.text()).toContain('500 MB · 1 file');
-    expect(statusText(host, 'Medical Records')).toBe(Q.notIncluded);
+    const top = doc(host).querySelector('.this-row')!;
+    expect(top.querySelector('.this-label')!.textContent).toBe('Everything in Dropbox');
+    expect(thisShows(host)).toEqual({ pressed: '', inherited: '' });
+    // The contract carries the whole account as on or off: only Full can be chosen there.
+    expect(thisSeg(host, 'ingest').disabled).toBe(false);
+    for (const state of ['metadata_only', 'exclude']) {
+      expect(thisSeg(host, state).disabled).toBe(true);
+      expect(thisSeg(host, state).getAttribute('aria-description')).toBe(Q.wholeOnlyFull);
+    }
+    expect(rowOf(host, 'Tax Returns 2024').querySelector('.fname')!.textContent).toBe('Tax Returns 20242 GB· 1,200 files');
+    expect(rowOf(host, 'Medical Records').querySelector('.fname')!.textContent).toBe('Medical Records500 MB· 1 file');
+    // Every row: name, one control, then › (or an empty slot so the controls line up).
+    for (const row of Array.from(doc(host).querySelectorAll('li.seg-row'))) {
+      const opens = !!row.querySelector('.fopen');
+      expect(Array.from(row.children).map((child) => child.className)).toEqual([opens ? 'fname' : 'fname leaf', 'seg', opens ? 'fopen' : 'fopen-gap']);
+      expect(Array.from(row.querySelectorAll('.seg-opt .seg-long')).map((node) => node.textContent)).toEqual(['Full', 'Names only', 'Skip']);
+      expect(Array.from(row.querySelectorAll('.seg-opt .seg-short')).map((node) => node.textContent)).toEqual(['Full', 'Names', 'Skip']);
+    }
+    expect(rowShows(host, 'Medical Records')).toEqual({ pressed: '', inherited: '' });
+    // Nothing repeats per row: no status line, no "Not included", no underlined links, no notice.
+    expect(host.text()).not.toContain(Q.notIncluded);
+    expect(doc(host).querySelectorAll('.fstatus, .two-line, .sheet, .scrim, .notice, .fnote').length).toBe(0);
     expect(host.text()).not.toContain('Therapy Notes');
-    expect(host.text()).not.toContain('Exceptions');
+    expect(doc(host).querySelector('.exceptions')).toBeNull();
     expect(footer(host)).toContain(Q.summaryNone);
     expect(host.button(Q.saveNoStart).disabled).toBe(true);
     expect(footer(host)).toContain(Q.needChoice);
     expect(doc(host).querySelectorAll('select').length).toBe(0);
     expect(doc(host).querySelectorAll('.tree, [aria-expanded]').length).toBe(0);
-    // Each status is a real button, a separate target from the name.
-    expect(status(host, 'Medical Records').tagName).toBe('BUTTON');
-    expect(status(host, 'Medical Records').getAttribute('aria-haspopup')).toBe('dialog');
-    // The size sits on its own line inside the same target, under the choice.
-    expect(status(host, 'Medical Records').querySelector('.fmeta')!.textContent).toBe('500 MB · 1 file');
     expectNoJargon(host);
+  });
+
+  test('accessibility: a labelled radiogroup per row, aria-pressed segments, one tab stop, and arrow keys move between segments', async () => {
+    const host = await openFolders();
+    const group = rowOf(host, 'Medical Records').querySelector('.seg')!;
+    expect(group.getAttribute('role')).toBe('radiogroup');
+    expect(group.getAttribute('aria-label')).toBe('Choice for Medical Records');
+    const segs = () => Array.from(rowOf(host, 'Medical Records').querySelectorAll('.seg-opt')) as unknown as HTMLButtonElement[];
+    expect(segs().map((button) => button.tagName)).toEqual(['BUTTON', 'BUTTON', 'BUTTON']);
+    expect(segs().map((button) => button.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false']);
+    expect(segs().map((button) => button.getAttribute('aria-label'))).toEqual(['Full', 'Names only', 'Skip']);
+    expect(segs().map((button) => button.tabIndex)).toEqual([0, -1, -1]);
+    const press = (name: string) => {
+      const from = doc(host).activeElement as unknown as HTMLButtonElement;
+      from.dispatchEvent(new host.win.KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }) as any);
+    };
+    segs()[0]!.focus();
+    press('ArrowRight');
+    expect(focused(host)).toBe('picker:seg:k-b:metadata_only');
+    expect(segs().map((button) => button.tabIndex)).toEqual([-1, 0, -1]);
+    press('ArrowRight');
+    press('ArrowRight');
+    expect(focused(host)).toBe('picker:seg:k-b:ingest');
+    press('ArrowLeft');
+    expect(focused(host)).toBe('picker:seg:k-b:exclude');
+    press('Home');
+    expect(focused(host)).toBe('picker:seg:k-b:ingest');
+    press('End');
+    expect(focused(host)).toBe('picker:seg:k-b:exclude');
+    // The › is the keyboard way in; the wide name target stays out of the tab order.
+    const open = rowOf(host, 'Tax Returns 2024').querySelector('.fopen')!;
+    expect(open.getAttribute('aria-label')).toBe('Open Tax Returns 2024');
+    expect((rowOf(host, 'Tax Returns 2024').querySelector('.fname') as unknown as HTMLButtonElement).tabIndex).toBe(-1);
+    expect(rowOf(host, 'Tax Returns 2024').querySelector('.fname')!.getAttribute('title')).toBe('Tax Returns 2024');
+    // After a choice the chosen segment keeps focus and is the group's tab stop.
+    tap(host, 'Medical Records', 'metadata_only');
+    expect(focused(host)).toBe('picker:seg:k-b:metadata_only');
+    expect(segs().map((button) => button.tabIndex)).toEqual([-1, 0, -1]);
   });
 
   test('folders are listed alphabetically, numbers in numeric order', async () => {
     const host = await openFolders({}, { displayMode: 'fullscreen' });
-    const names = Array.from(doc(host).querySelectorAll('button.fstatus'))
-      .map((node) => String(node.getAttribute('aria-label')).replace(/^Choice for (.*?): .*$/, '$1'));
+    const names = rowNames(host);
     expect(names.length).toBeGreaterThan(1);
-    const sorted = [...names].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+    const sorted = [...names].sort((a, b) => a!.localeCompare(b!, undefined, { numeric: true, sensitivity: 'base' }));
     expect(names).toEqual(sorted);
   });
 
@@ -330,7 +383,9 @@ describe('folder picker', () => {
     await host.settle();
     expect(host.toolCalls(T.scopeList).at(-1)).toEqual({ source_id: 'dropbox.files', parent_key: 'k-a' });
     expect(doc(host).querySelector('.fpath')!.textContent).toBe('Dropbox / Tax Returns 2024');
-    expect(doc(host).querySelector('.this-row')!.textContent).toContain(`${Q.thisFolder} ${Q.notIncluded}`);
+    expect(doc(host).querySelector('.this-row .this-label')!.textContent).toBe(Q.thisFolder);
+    expect(doc(host).querySelector('.this-row .seg')!.getAttribute('aria-label')).toBe('Choice for Tax Returns 2024');
+    expect(doc(host).querySelector('.this-row button.btn')).toBeNull();
     expect(host.text()).toContain('Therapy Notes');
     expect(host.text()).not.toContain('Medical Records');
     expect(focused(host)).toBe('picker:up');
@@ -338,9 +393,9 @@ describe('folder picker', () => {
     host.button(Q.up).click();
     expect(host.text()).toContain('Medical Records');
     expect(focused(host)).toBe('picker:open:k-a');
-    // Cached: the second visit lists nothing.
+    // Cached: the second visit lists nothing. Tapping the name drills in too.
     const listed = host.toolCalls(T.scopeList).length;
-    openFolder(host, 'Tax Returns 2024');
+    (rowOf(host, 'Tax Returns 2024').querySelector('.fname') as unknown as HTMLButtonElement).click();
     openFolder(host, 'Divorce');
     await host.settle();
     expect(host.toolCalls(T.scopeList).length).toBe(listed + 1);
@@ -356,47 +411,45 @@ describe('folder picker', () => {
     expect(host.text()).toContain('Medical Records');
   });
 
-  test('the sheet: inherited text, Same as parent, Mixed derived from children, the footer counts, and the exact save payload', async () => {
+  test('one tap chooses, a second tap clears; inherited choices are drawn weaker; Mixed; the footer counts and the exact save payload', async () => {
     const host = await openFolders({}, { displayMode: 'fullscreen' });
-    status(host, 'Tax Returns 2024').click();
-    expect(doc(host).querySelectorAll('.sheet').length).toBe(1);
-    expect(doc(host).querySelector('.sheet')!.getAttribute('role')).toBe('dialog');
-    expect(doc(host).querySelector('.picker-body')!.hasAttribute('inert')).toBe(true);
-    for (const state of ['ingest', 'metadata_only', 'exclude'] as const) {
-      expect(sheet(host)).toContain(Q.states[state]);
-      expect(sheet(host)).toContain(Q.consequences[state]);
-    }
-    expect(sheet(host)).toContain('Same as everything else (Not included)');
-    expect(radio(host, '').checked).toBe(true);
-    pick(host, 'ingest');
-    expect(focused(host)).toBe('picker:sheet:ingest');
-    host.button(Q.done).click();
-    expect(doc(host).querySelector('.sheet')).toBeNull();
-    expect(focused(host)).toBe('picker:choice:k-a');
-    expect(statusText(host, 'Tax Returns 2024')).toBe('Fully indexed');
+    tap(host, 'Tax Returns 2024', 'ingest');
+    expect(rowShows(host, 'Tax Returns 2024')).toEqual({ pressed: 'ingest', inherited: '' });
+    expect(seg(host, 'Tax Returns 2024', 'ingest').className).toBe('seg-opt on');
+    expect(focused(host)).toBe('picker:seg:k-a:ingest');
+    expect(footer(host)).toContain('1 folder fully indexed · about 2 GB');
+    // A second tap on the chosen segment clears it.
+    tap(host, 'Tax Returns 2024', 'ingest');
+    expect(rowShows(host, 'Tax Returns 2024')).toEqual({ pressed: '', inherited: '' });
+    expect(footer(host)).toContain(Q.summaryNone);
+    // Another segment switches in one tap.
+    tap(host, 'Tax Returns 2024', 'metadata_only');
+    tap(host, 'Tax Returns 2024', 'ingest');
+    expect(rowShows(host, 'Tax Returns 2024')).toEqual({ pressed: 'ingest', inherited: '' });
     openFolder(host, 'Tax Returns 2024');
     await host.settle();
-    expect(statusText(host, 'Divorce')).toBe('Fully indexed · from Tax Returns 2024');
-    expect(doc(host).querySelector('.this-row')!.textContent).toContain('Fully indexed');
-    status(host, 'Therapy Notes').click();
-    expect(sheet(host)).toContain('Inherited from Tax Returns 2024');
-    expect(sheet(host)).toContain('Same as parent (Fully indexed)');
-    pick(host, 'exclude');
-    escapeKey(host);
-    expect(doc(host).querySelector('.sheet')).toBeNull();
-    expect(statusText(host, 'Therapy Notes')).toBe('Skipped');
-    expect(doc(host).querySelector('.this-row')!.textContent).toContain('Fully indexed · Mixed: some skipped');
+    expect(thisShows(host)).toEqual({ pressed: 'ingest', inherited: '' });
+    // Children inherit Full: outlined, not pressed, saying where it comes from without visible text.
+    expect(rowShows(host, 'Divorce')).toEqual({ pressed: '', inherited: 'ingest' });
+    const inheritedSeg = seg(host, 'Divorce', 'ingest');
+    expect(inheritedSeg.getAttribute('aria-pressed')).toBe('false');
+    expect(inheritedSeg.className).toBe('seg-opt inherited');
+    expect(inheritedSeg.getAttribute('aria-description')).toBe('Inherited from Tax Returns 2024');
+    expect(rowOf(host, 'Divorce').textContent).not.toContain('Tax Returns 2024');
+    tap(host, 'Therapy Notes', 'exclude');
+    expect(rowShows(host, 'Therapy Notes')).toEqual({ pressed: 'exclude', inherited: '' });
     host.button(Q.up).click();
-    expect(statusText(host, 'Tax Returns 2024')).toBe('Fully indexed · Mixed: some skipped');
-    const exceptions = doc(host).querySelector('.fsection')!.textContent!;
-    expect(exceptions).toContain('Exceptions (2)');
-    expect(exceptions).toContain('Therapy Notes');
+    expect(mixedTag(host, 'Tax Returns 2024')!.textContent).toBe(Q.mixed);
+    expect(mixedTag(host, 'Tax Returns 2024')!.getAttribute('title')).toBe('Mixed: some folders inside are skipped');
+    expect(mixedTag(host, 'Medical Records')).toBeNull();
+    const exceptions = doc(host).querySelector('.exceptions')!;
+    expect(exceptions.querySelector('h2')!.textContent).toBe('Exceptions (2)');
+    expect(Array.from(exceptions.querySelectorAll('.jump-btn')).map((node) => node.textContent)).toEqual(['Tax Returns 2024Full›', 'Tax Returns 2024 / Therapy NotesSkip›']);
     expect(footer(host)).toContain('1 folder fully indexed, 1 skipped · about 1 GB');
-    choose(host, 'Medical Records', 'metadata_only');
+    tap(host, 'Medical Records', 'metadata_only');
     expect(footer(host)).toContain('1 folder fully indexed, 1 with names only, 1 skipped');
-    choose(host, 'Medical Records', '');
-    const notifications = host.calls.filter(([name]) => name === 'notifyIntrinsicHeight').length;
-    expect(notifications).toBeGreaterThan(5);
+    tap(host, 'Medical Records', 'metadata_only');
+    expect(host.calls.filter(([name]) => name === 'notifyIntrinsicHeight').length).toBeGreaterThan(5);
     expectNoJargon(host);
     host.serve[T.scopeSet] = () => SAVED;
     host.button(Q.saveFolders).click();
@@ -417,18 +470,29 @@ describe('folder picker', () => {
     expectNamesOnlyInPicker(host);
   });
 
-  test('Same as parent removes the rule; the sheet closes on an outside tap and never stacks', async () => {
+  test('under a stricter parent the more-open segments are disabled and say why, without visible text', async () => {
     const host = await openFolders();
-    choose(host, 'Medical Records', 'metadata_only');
-    expect(statusText(host, 'Medical Records')).toBe('Names only');
-    status(host, 'Medical Records').click();
-    expect(() => status(host, 'Medical Records').click()).not.toThrow();
-    expect(doc(host).querySelectorAll('.sheet').length).toBe(1);
-    pick(host, '');
-    (doc(host).querySelector('.scrim') as unknown as HTMLElement).click();
-    expect(doc(host).querySelector('.sheet')).toBeNull();
-    expect(statusText(host, 'Medical Records')).toBe(Q.notIncluded);
-    expect(footer(host)).toContain(Q.summaryNone);
+    tap(host, 'Tax Returns 2024', 'metadata_only');
+    openFolder(host, 'Tax Returns 2024');
+    await host.settle();
+    expect(rowShows(host, 'Therapy Notes')).toEqual({ pressed: '', inherited: 'metadata_only' });
+    const states = ['ingest', 'metadata_only', 'exclude'].map((state) => [state, seg(host, 'Therapy Notes', state).disabled]);
+    expect(states).toEqual([['ingest', true], ['metadata_only', false], ['exclude', false]]);
+    const why = 'Not possible while Tax Returns 2024 is names only.';
+    expect(seg(host, 'Therapy Notes', 'ingest').getAttribute('aria-description')).toBe(why);
+    expect(seg(host, 'Therapy Notes', 'ingest').getAttribute('title')).toBe(why);
+    expect(host.text()).not.toContain(why);
+    // Choosing the inherited segment makes it the folder's own choice; a second tap clears it again.
+    tap(host, 'Therapy Notes', 'metadata_only');
+    expect(rowShows(host, 'Therapy Notes')).toEqual({ pressed: 'metadata_only', inherited: '' });
+    tap(host, 'Therapy Notes', 'metadata_only');
+    expect(rowShows(host, 'Therapy Notes')).toEqual({ pressed: '', inherited: 'metadata_only' });
+    // Under a skipped parent only Skip is possible.
+    host.button(Q.up).click();
+    tap(host, 'Tax Returns 2024', 'exclude');
+    openFolder(host, 'Tax Returns 2024');
+    expect(['ingest', 'metadata_only', 'exclude'].map((state) => seg(host, 'Divorce', state).disabled)).toEqual([true, true, false]);
+    expect(thisShows(host)).toEqual({ pressed: 'exclude', inherited: '' });
   });
 
   test('changing a parent keeps its children\'s own choices, and a stricter parent wins visibly', async () => {
@@ -438,35 +502,21 @@ describe('folder picker', () => {
         { key: 'k-a1', state: 'metadata_only', ancestor_keys: ['k-a'] },
       ],
     });
-    status(host, 'Tax Returns 2024').click();
-    expect(sheet(host)).toContain('1 folder inside keeps its own choice.');
-    pick(host, 'exclude');
-    host.button(Q.done).click();
+    tap(host, 'Tax Returns 2024', 'exclude');
     openFolder(host, 'Tax Returns 2024');
     await host.settle();
-    expect(statusText(host, 'Therapy Notes')).toBe('Skipped · from Tax Returns 2024');
-    status(host, 'Therapy Notes').click();
-    expect(sheet(host)).toContain('This folder is set to Names only, but Tax Returns 2024 is Skipped, which wins.');
-    expect(radio(host, 'metadata_only').checked).toBe(true);
-    expect(radio(host, 'ingest').disabled).toBe(true);
-    expect(sheet(host)).toContain('Not possible while Tax Returns 2024 is skipped.');
-    escapeKey(host);
+    // Its own Names only stays pressed beside the parent's Skip that wins, and can still be cleared.
+    expect(rowShows(host, 'Therapy Notes')).toEqual({ pressed: 'metadata_only', inherited: 'exclude' });
+    expect(seg(host, 'Therapy Notes', 'metadata_only').disabled).toBe(false);
+    expect(seg(host, 'Therapy Notes', 'metadata_only').getAttribute('aria-description')).toBe('This folder is set to Names only, but Tax Returns 2024 is Skipped, which wins.');
+    expect(seg(host, 'Therapy Notes', 'ingest').disabled).toBe(true);
+    expect(seg(host, 'Therapy Notes', 'ingest').getAttribute('aria-description')).toBe('Not possible while Tax Returns 2024 is skipped.');
     host.serve[T.scopeSet] = () => SAVED;
     host.button(Q.saveNoStart).click();
     expect(host.toolCalls(T.scopeSet).at(-1).selections).toEqual([
       { key: 'k-a', state: 'exclude', ancestor_keys: [] },
       { key: 'k-a1', state: 'metadata_only', ancestor_keys: ['k-a'] },
     ]);
-  });
-
-  test('a child under a Names only parent cannot be fully indexed', async () => {
-    const host = await openFolders();
-    choose(host, 'Tax Returns 2024', 'metadata_only');
-    openFolder(host, 'Tax Returns 2024');
-    await host.settle();
-    status(host, 'Therapy Notes').click();
-    const states = ['', 'ingest', 'metadata_only', 'exclude'].map((value) => [value, radio(host, value).disabled]);
-    expect(states).toEqual([['', false], ['ingest', true], ['metadata_only', false], ['exclude', false]]);
   });
 
   test('saved deep choices: Mixed before anything is opened, and an exception jumps to its folder, loading each level once', async () => {
@@ -476,10 +526,11 @@ describe('folder picker', () => {
         { key: 'k-deep', state: 'metadata_only', ancestor_keys: ['k-a', 'k-a2'] },
       ],
     });
-    expect(statusText(host, 'Tax Returns 2024')).toBe('Fully indexed · Mixed: some names only');
-    expect(statusText(host, 'Medical Records')).toBe(Q.notIncluded);
+    expect(rowShows(host, 'Tax Returns 2024')).toEqual({ pressed: 'ingest', inherited: '' });
+    expect(mixedTag(host, 'Tax Returns 2024')!.getAttribute('title')).toBe('Mixed: some folders inside are names only');
+    expect(rowShows(host, 'Medical Records')).toEqual({ pressed: '', inherited: '' });
     const jumps = Array.from(doc(host).querySelectorAll('button.jump-btn')).map((node) => node.textContent);
-    expect(jumps).toEqual(['Tax Returns 2024Fully indexed›', 'A folder inside Tax Returns 2024Names only›']);
+    expect(jumps).toEqual(['Tax Returns 2024Full›', 'A folder inside Tax Returns 2024Names only›']);
     (doc(host).querySelector('button[data-key="picker:jump:k-deep"]') as unknown as HTMLButtonElement).click();
     await host.settle();
     expect(host.toolCalls(T.scopeList).slice(-3)).toEqual([
@@ -488,15 +539,15 @@ describe('folder picker', () => {
       { source_id: 'dropbox.files', parent_key: 'k-deep' },
     ]);
     expect(doc(host).querySelector('.fpath')!.textContent).toBe('… / Divorce / Old Letters');
-    expect(doc(host).querySelector('.this-row')!.textContent).toContain('Names only');
+    expect(thisShows(host)).toEqual({ pressed: 'metadata_only', inherited: '' });
     host.button(Q.up).click();
-    expect(statusText(host, 'Old Letters')).toBe('Names only');
+    expect(rowShows(host, 'Old Letters')).toEqual({ pressed: 'metadata_only', inherited: '' });
     host.button(Q.up).click();
     host.button(Q.up).click();
     // Now loaded, the exception shows its name under its parent's.
     expect(doc(host).querySelector('button[data-key="picker:jump:k-deep"]')!.textContent).toBe('Divorce / Old LettersNames only›');
     openFolder(host, 'Tax Returns 2024');
-    expect(statusText(host, 'Therapy Notes')).toBe('Fully indexed · from Tax Returns 2024');
+    expect(rowShows(host, 'Therapy Notes')).toEqual({ pressed: '', inherited: 'ingest' });
     expectNamesOnlyInPicker(host);
   });
 
@@ -511,24 +562,29 @@ describe('folder picker', () => {
     expect(host.hasButton(Q.loadMore)).toBe(false);
   });
 
-  test('the whole account is a choice on its own row and needs an explicit inline confirmation before Save', async () => {
+  test('Everything in Dropbox: Full asks for an inline confirmation before Save, every folder then inherits it, and a second tap turns it off', async () => {
     const host = await openFolders();
-    (doc(host).querySelector('button.account') as unknown as HTMLButtonElement).click();
-    expect(sheet(host)).toContain(Q.consequences.wholeIngest);
-    pick(host, 'ingest');
-    expect(sheet(host)).toContain(Q.wholePrompt.replace('{source}', 'Dropbox'));
+    const prompt = Q.wholePrompt.replace('{source}', 'Dropbox');
+    thisSeg(host, 'ingest').click();
+    expect(thisShows(host)).toEqual({ pressed: 'ingest', inherited: '' });
+    expect(host.text()).toContain(prompt);
     (doc(host).querySelector('button[data-key="picker:whole:no"]') as unknown as HTMLButtonElement).click();
-    expect(radio(host, '').checked).toBe(true);
-    pick(host, 'ingest');
-    host.button(Q.done).click();
-    // Still unconfirmed: the prompt stays on the root, and Save waits.
-    expect(host.text()).toContain(Q.wholePrompt.replace('{source}', 'Dropbox'));
+    expect(thisShows(host)).toEqual({ pressed: '', inherited: '' });
+    expect(host.text()).not.toContain(prompt);
+    thisSeg(host, 'ingest').click();
     expect(host.button(Q.saveFolders).disabled).toBe(true);
     expect(footer(host)).toContain(Q.needConfirm);
-    expect(statusText(host, 'Medical Records')).toBe('Fully indexed · whole account');
-    expect(doc(host).querySelector('button.account')!.textContent).toContain('Fully indexed');
+    expect(rowShows(host, 'Medical Records')).toEqual({ pressed: '', inherited: 'ingest' });
+    expect(seg(host, 'Medical Records', 'ingest').getAttribute('aria-description')).toBe('Inherited from Everything in Dropbox');
     host.button(Q.wholeConfirm).click();
+    expect(host.text()).not.toContain(prompt);
     expect(footer(host)).toContain(Q.summaryWhole.replace('{source}', 'Dropbox'));
+    // A second tap turns the whole account off again.
+    thisSeg(host, 'ingest').click();
+    expect(thisShows(host)).toEqual({ pressed: '', inherited: '' });
+    expect(rowShows(host, 'Medical Records')).toEqual({ pressed: '', inherited: '' });
+    thisSeg(host, 'ingest').click();
+    host.button(Q.wholeConfirm).click();
     host.serve[T.scopeSet] = () => SAVED;
     host.button(Q.saveFolders).click();
     expect(host.toolCalls(T.scopeSet)).toEqual([{
@@ -541,12 +597,10 @@ describe('folder picker', () => {
     const selections = Array.from({ length: 100 }, (_, i) => ({ key: `k-x${i}`, state: 'metadata_only', ancestor_keys: ['k-z'] }));
     const host = await openFolders({ selections });
     expect(footer(host)).toContain(Q.capReached.replace('{max}', '100'));
-    status(host, 'Medical Records').click();
-    expect(radio(host, 'ingest').disabled).toBe(true);
-    expect(radio(host, 'exclude').disabled).toBe(true);
-    expect(sheet(host)).toContain(Q.capReached.replace('{max}', '100'));
-    escapeKey(host);
-    expect(statusText(host, 'Medical Records')).toBe(Q.notIncluded);
+    expect(seg(host, 'Medical Records', 'ingest').disabled).toBe(true);
+    expect(seg(host, 'Medical Records', 'exclude').getAttribute('aria-description')).toBe(Q.capReached.replace('{max}', '100'));
+    tap(host, 'Medical Records', 'exclude');
+    expect(rowShows(host, 'Medical Records')).toEqual({ pressed: '', inherited: '' });
     host.serve[T.scopeSet] = () => SAVED;
     host.button(Q.saveFolders).click();
     expect(host.toolCalls(T.scopeSet).at(-1).selections.length).toBe(100);
@@ -554,7 +608,7 @@ describe('folder picker', () => {
 
   test('a conflict re-lists and says the view was refreshed', async () => {
     const host = await openFolders();
-    choose(host, 'Medical Records', 'metadata_only');
+    tap(host, 'Medical Records', 'metadata_only');
     const fresh = browse(ROOT, { scope_revision: 'r2', next_cursor: 'c1', selections: [{ key: 'k-b', state: 'exclude', ancestor_keys: [] }] });
     host.serve[T.scopeSet] = () => ({ structuredContent: { status: 'conflict', source_id: 'dropbox.files', current: fresh.structuredContent }, _meta: fresh._meta });
     host.serve[T.scopeList] = folderServer({ scope_revision: 'r2' });
@@ -564,22 +618,24 @@ describe('folder picker', () => {
     expect(host.text()).toContain(Q.conflict);
     // The conflict carried the fresh list, so nothing is listed again.
     expect(host.toolCalls(T.scopeList).length).toBe(listed);
-    expect(statusText(host, 'Medical Records')).toBe('Skipped');
+    expect(rowShows(host, 'Medical Records')).toEqual({ pressed: 'exclude', inherited: '' });
     host.serve[T.scopeSet] = () => SAVED;
-    choose(host, 'Medical Records', 'ingest');
+    tap(host, 'Medical Records', 'ingest');
+    // The refreshed-view warning stays until the next save.
+    expect(host.text()).toContain(Q.conflict);
     host.button(Q.saveFolders).click();
     expect(host.toolCalls(T.scopeSet).at(-1).scope_revision).toBe('r2');
   });
 
   test('a failed save keeps the choices and says so inline', async () => {
     const host = await openFolders();
-    choose(host, 'Medical Records', 'ingest');
+    tap(host, 'Medical Records', 'ingest');
     host.serve[T.scopeSet] = () => ({ isError: true, content: [{ type: 'text', text: 'Medical Records failed' }] });
     host.button(Q.saveFolders).click();
     await host.settle();
     expect(host.text()).toContain(Q.saveFailed);
     expect(host.text()).not.toContain('Medical Records failed');
-    expect(statusText(host, 'Medical Records')).toBe('Fully indexed');
+    expect(rowShows(host, 'Medical Records')).toEqual({ pressed: 'ingest', inherited: '' });
     host.serve[T.scopeSet] = () => 'fail';
     host.button(Q.saveFolders).click();
     await host.settle();
@@ -610,12 +666,12 @@ describe('folder picker', () => {
 
   test('Back with unsaved choices confirms inline; Back to Olympus leaves no names behind', async () => {
     const host = await openFolders();
-    choose(host, 'Medical Records', 'ingest');
+    tap(host, 'Medical Records', 'ingest');
     host.button(Q.back).click();
     expect(host.text()).toContain(Q.discardPrompt);
     escapeKey(host);
     expect(host.text()).not.toContain(Q.discardPrompt);
-    expect(statusText(host, 'Medical Records')).toBe('Fully indexed');
+    expect(rowShows(host, 'Medical Records')).toEqual({ pressed: 'ingest', inherited: '' });
     host.button(Q.back).click();
     host.button(Q.discard).click();
     expect(host.text()).toContain('Sources');
@@ -623,6 +679,65 @@ describe('folder picker', () => {
     expect(focused(host)).toBe('primary:dropbox.files');
     expect(host.toolCalls(T.scopeSet)).toEqual([]);
     expectNamesOnlyInPicker(host);
+  });
+});
+
+describe('folder picker: a real first run (45 folders, nothing chosen)', () => {
+  const firstRunServer: Serve = (args) => browse(args.parent_key === FIRST_RUN_RESOURCES_KEY ? FIRST_RUN_RESOURCES : args.parent_key ? [] : FIRST_RUN_ROOT);
+  const open = async () => {
+    const host = mount({ serve: { [T.scopeList]: firstRunServer } });
+    host.push({ structuredContent: pendingDropbox });
+    host.button('Choose folders').click();
+    await host.settle();
+    return host;
+  };
+  const rows = (host: Host) => Array.from(host.win.document.querySelectorAll('li.seg-row')) as unknown as HTMLElement[];
+
+  test('every folder is one quiet line: no repeated status text, nothing pressed or outlined, no Mixed, full names in the title', async () => {
+    const host = await open();
+    const all = rows(host);
+    expect(all.length).toBe(45);
+    expect(all.slice(0, 5).map((row) => row.querySelector('.fname-text')!.textContent)).toEqual(['0 Inbox', '1 Projects', '2 Areas', '3 Resources', '4 Archive']);
+    for (const row of all) {
+      expect(row.querySelectorAll('.seg-opt.on, .seg-opt.inherited, .ftag').length).toBe(0);
+      expect(row.querySelectorAll('.seg-opt:disabled').length).toBe(0);
+      const name = row.querySelector('.fname-text')!.textContent!;
+      expect(row.querySelector('.fname')!.getAttribute('title')).toBe(name);
+      // Only the name, the size and the file count are text; the control's words are its own.
+      expect(row.querySelector('.fname')!.textContent!.startsWith(name)).toBe(true);
+    }
+    const text = host.text();
+    expect(text).not.toContain(Q.notIncluded);
+    expect(text).not.toContain(Q.mixed);
+    expect(text).not.toContain(Q.connected.replace('{source}', 'Dropbox'));
+    expect(host.win.document.querySelector('.exceptions')).toBeNull();
+    expect(host.win.document.querySelectorAll('.this-row').length).toBe(1);
+    expectNoJargon(host);
+  });
+
+  test('a choice is one tap from the list, and a level of 30 shows the parent\'s choice as inherited', async () => {
+    const host = await open();
+    const row = (name: string) => rows(host).find((node) => node.querySelector('.fname-text')!.textContent === name)!;
+    (row('3 Resources').querySelector('.seg-opt[data-key$=":metadata_only"]') as unknown as HTMLButtonElement).click();
+    (row('Camera Uploads').querySelector('.seg-opt[data-key$=":exclude"]') as unknown as HTMLButtonElement).click();
+    (row('1 Projects').querySelector('.seg-opt[data-key$=":ingest"]') as unknown as HTMLButtonElement).click();
+    expect(host.win.document.querySelector('.picker-footer')!.textContent).toContain('1 folder fully indexed, 1 with names only, 1 skipped · about 48.3 GB');
+    expect(host.button(Q.saveFolders).disabled).toBe(false);
+    (row('3 Resources').querySelector('.fopen') as unknown as HTMLButtonElement).click();
+    await host.settle();
+    expect(host.win.document.querySelector('.fpath')!.textContent).toBe('Dropbox / 3 Resources');
+    expect(rows(host).length).toBe(30);
+    for (const child of rows(host)) {
+      expect(Array.from(child.querySelectorAll('.seg-opt.inherited')).map((node) => node.getAttribute('data-key')!.split(':').pop())).toEqual(['metadata_only']);
+      expect((child.querySelector('.seg-opt[data-key$=":ingest"]') as unknown as HTMLButtonElement).disabled).toBe(true);
+    }
+    host.serve[T.scopeSet] = () => SAVED;
+    host.button(Q.saveFolders).click();
+    expect(host.toolCalls(T.scopeSet).at(-1).selections).toEqual([
+      { key: FIRST_RUN_RESOURCES_KEY, state: 'metadata_only', ancestor_keys: [] },
+      { key: 'fr-6', state: 'exclude', ancestor_keys: [] },
+      { key: 'fr-1', state: 'ingest', ancestor_keys: [] },
+    ]);
   });
 });
 
@@ -705,10 +820,22 @@ describe('page rules', () => {
     for (const banned of ['http://', 'https://', 'window.confirm', 'confirm(', 'alert(', 'navigator.clipboard', 'console.', 'localStorage', 'setWidgetState', 'update-model-context']) {
       expect(html).not.toContain(banned);
     }
-    expect(CHATGPT_DASHBOARD_CSS).not.toMatch(/overflow:|overflow-[xy]/);
-    // The only pinned layers are the choice sheet (sticky to the bottom, in page flow) and its scrim.
+    // Clipping for an ellipsis only: nothing scrolls inside the page.
+    expect(CHATGPT_DASHBOARD_CSS).not.toMatch(/(?<![-a-z])overflow(-[xy])?:(?!hidden)/);
+    // Nothing is pinned: no sheet, no scrim, the footer sits in page flow.
     const pinned = CHATGPT_DASHBOARD_CSS.split('}').filter((rule) => /position:(sticky|fixed)/.test(rule)).map((rule) => rule.split('{')[0]!.trim());
-    expect(pinned).toEqual(['.scrim', '.sheet']);
+    expect(pinned).toEqual([]);
     expect(CHATGPT_DASHBOARD_CSS).not.toContain('.choice{');
+    expect(CHATGPT_DASHBOARD_CSS).not.toContain('.sheet');
+    // No one-side accent stripe anywhere, and no underlined status text.
+    expect(CHATGPT_DASHBOARD_CSS).not.toMatch(/border-(left|right):/);
+    expect(CHATGPT_DASHBOARD_CSS).not.toContain('text-decoration:underline');
+    // Thin rows: one line, at least 48px, segments at least 44px wide with a 44px tall hit area.
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.frow.seg-row{flex-direction:row;align-items:center;gap:0.5rem;min-height:3rem}');
+    expect(CHATGPT_DASHBOARD_CSS).toMatch(/\.seg-opt\{[^}]*min-width:2\.75rem[^}]*height:2rem/);
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.seg-opt::before{content:"";position:absolute;inset:-0.4375rem 0}');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.fopen,.fopen-gap{flex:none;width:2.75rem;height:2.75rem}');
+    // Short segment labels below a 420px container.
+    expect(CHATGPT_DASHBOARD_CSS).toContain('@container (max-width:26.25rem){.seg-long{display:none}.seg-short{display:inline}');
   });
 });

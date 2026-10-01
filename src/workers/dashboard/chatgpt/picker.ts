@@ -104,7 +104,7 @@ export interface ChatGptPicker {
   start(fix: Any, sourceId: string, sourceLabel: string, returnKey: string): void;
   /**
    * Browse one folder source a level per screen and pick a single folder, with
-   * no choices sheet and no save: `done` gets the folder, or null on Back.
+   * no choices and no save: `done` gets the folder, or null on Back.
    * `taken` keys show as already picked.
    */
   pickFolder(sourceId: string, sourceLabel: string, words: ChatGptFolderPickWords, taken: string[], done: (folder: ChatGptPickedFolder | null) => void): void;
@@ -126,7 +126,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   let p: Any = null;
   let session = 0;
   let timer: Any = null;
-  /** The whole-account row's key in the sheet and focus keys (never a provider key). */
+  /** The whole-account row's key in focus keys (never a provider key). */
   const ACCOUNT = '@account';
   /** olympus_scope_set accepts at most this many explicit rules (its input schema's maxItems). */
   const MAX_RULES = 100;
@@ -317,10 +317,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       // folders
       roots: [], rootCursor: '', branches: new Map(), cursors: new Map(), catalog: new Map(),
       ancestors: new Map(), own: new Map(), whole: false, wholeConfirmed: false,
-      path: [], sheet: '', sheetReturn: '', capHit: false,
+      path: [], lastSeg: '',
       // mail
       draft: null, labels: [], categories: [], suggestions: [], sampleSize: 0, estimate: null,
-      // pick mode (privacy): one folder, no sheet, no save
+      // pick mode (privacy): one folder, no choices, no save
       pick: pick || null,
     };
     if (initial && mail) takeMail(initial, 'picker:back');
@@ -365,7 +365,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   // ---- folders -----------------------------------------------------------
   // One level per screen: the root (the whole-account row, the exceptions,
   // the top-level folders) or a folder (its own choice, then its folders).
-  // A choice is changed in one bottom sheet that never stacks. Only explicit
+  // Every row carries one segmented control (Full, Names only, Skip): a tap
+  // sets that folder's own choice and a second tap clears it. Only explicit
   // rules are stored; inherited choices and Mixed are derived on every render.
   function list(parentKey: string, append: boolean, after?: () => void): void {
     const cursor = append ? (parentKey ? p.cursors.get(parentKey) : p.rootCursor) : '';
@@ -525,21 +526,6 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return from === ACCOUNT ? fill(Q.accountRow, { source: p.label }) : nameOf(from);
   }
 
-  /** The muted line under a folder's name: its effective choice, where it comes from, and Mixed. */
-  function statusText(key: string): string {
-    const own = p.own.get(key) || '';
-    const from = inherited(key);
-    const state = effective(key);
-    let text: string;
-    if (own && state === own) text = stateName(own);
-    else if (from.from === ACCOUNT && state === from.state) text = fill(Q.fromAccount, { state: stateName(state) });
-    else if (from.from) text = fill(Q.fromParent, { state: stateName(state), parent: nameOf(from.from) });
-    else text = stateName(state);
-    const differs = mixed(key);
-    if (differs) text += ' · ' + fill(Q.mixedSome, { state: (Q.statesLower as Any)[differs] });
-    return text;
-  }
-
   function size(bytes: number): string {
     const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
     let value = bytes;
@@ -552,14 +538,16 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return shown + ' ' + units[unit];
   }
 
-  function nodeMeta(node: Any): string {
-    const parts: string[] = [];
-    if (typeof node.size_bytes === 'number' && isFinite(node.size_bytes) && node.size_bytes >= 0) parts.push(size(node.size_bytes));
+  /** The muted size and file count after a folder's name: [size, count], either may be ''. */
+  function nodeMeta(node: Any): [string, string] {
+    let bytes = '';
+    let files = '';
+    if (typeof node.size_bytes === 'number' && isFinite(node.size_bytes) && node.size_bytes >= 0) bytes = size(node.size_bytes);
     if (typeof node.file_count === 'number' && isFinite(node.file_count) && node.file_count >= 0) {
       const n = Math.round(node.file_count);
-      parts.push(fill(n === 1 ? Q.folderFiles.one : Q.folderFiles.many, { n: kit.count(n) }));
+      files = fill(n === 1 ? Q.folderFiles.one : Q.folderFiles.many, { n: kit.count(n) });
     }
-    return parts.join(' · ');
+    return [bytes, files];
   }
 
   /** Exceptions: folders whose own rule differs from what they would inherit. */
@@ -571,7 +559,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return out;
   }
 
-  function choose(key: string, value: string): void {
+  /** Set (or with '' clear) one folder's own choice, or the whole account's. */
+  function choose(key: string, value: string, focus: string): void {
     if (p.saving) return;
     if (key === ACCOUNT) {
       const whole = value === 'ingest';
@@ -583,34 +572,15 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     } else {
       if (value && STATES.indexOf(value) < 0) return;
       if (value && !allowed(key, value)) return;
-      if (value && !p.own.has(key) && p.own.size >= MAX_RULES) {
-        p.capHit = true;
-        kit.render('picker:sheet:parent');
-        return;
-      }
+      if (value && !p.own.has(key) && p.own.size >= MAX_RULES) return;
       if (value) p.own.set(key, value);
       else p.own.delete(key);
       p.edited = true;
     }
-    p.capHit = false;
+    // The connect line is a one-time hello; a refreshed-view warning stays until the next save.
+    if (p.notice && p.notice !== Q.conflict) p.notice = '';
     p.saveError = '';
-    kit.render('picker:sheet:' + (value || 'parent'));
-  }
-
-  function openSheet(key: string, returnKey: string): void {
-    if (p.saving) return;
-    p.sheet = key;
-    p.sheetReturn = returnKey;
-    p.capHit = false;
-    const own = key === ACCOUNT ? (p.whole ? 'ingest' : '') : p.own.get(key) || '';
-    kit.render('picker:sheet:' + (own || 'parent'));
-  }
-
-  function closeSheet(): void {
-    const focus = p.sheetReturn || 'picker:back';
-    p.sheet = '';
-    p.sheetReturn = '';
-    p.capHit = false;
+    p.lastSeg = focus;
     kit.render(focus);
   }
 
@@ -644,7 +614,6 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
 
   function up(): void {
     const left = p.path.pop();
-    p.sheet = '';
     kit.render(left ? 'picker:open:' + left : 'picker:back');
   }
 
@@ -741,7 +710,6 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   function save(args: Any, focus: string): void {
     p.saving = true;
     p.saveError = '';
-    p.sheet = '';
     kit.render(focus);
     const mine = session;
     kit.call(T.scopeSet, args).then((result) => {
@@ -773,43 +741,118 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     add(confirm, el('p', 'strong', fill(Q.wholePrompt, { source: p.label })), add(el('div', 'actions'),
       kit.button(Q.wholeConfirm, 'picker:whole:yes', p.saving ? null : () => {
         p.wholeConfirmed = true;
-        kit.render(p.sheet ? 'picker:sheet:done' : 'picker:choice:' + ACCOUNT);
+        kit.render('picker:seg:' + ACCOUNT + ':ingest');
       }, 'danger'),
       kit.button(Q.cancel, 'picker:whole:no', p.saving ? null : () => {
         p.whole = false;
         p.wholeConfirmed = false;
-        kit.render(p.sheet ? 'picker:sheet:parent' : 'picker:choice:' + ACCOUNT);
+        kit.render('picker:seg:' + ACCOUNT + ':ingest');
       }, 'plain')));
     return confirm;
   }
 
-  /** Two lines on one control: a label and the muted choice under it. */
-  function twoLine(cls: string, key: string, top: string, bottom: string, onClick: (() => void) | null, label?: string): HTMLButtonElement {
-    const control = el('button', cls) as HTMLButtonElement;
-    control.type = 'button';
-    control.setAttribute('data-key', key);
-    add(control, add(el('span', 'two-line'), el('span', 'two-top', top), el('span', 'two-bottom', bottom)));
-    const chevron = el('span', 'chev', '›');
-    chevron.setAttribute('aria-hidden', 'true');
-    add(control, chevron);
-    if (label) control.setAttribute('aria-label', label);
-    if (onClick) control.addEventListener('click', onClick);
-    else control.disabled = true;
-    return control;
+  /** Arrow keys, Home and End move focus between a control's enabled segments. */
+  function segKeys(event: KeyboardEvent, buttons: HTMLButtonElement[], current: HTMLButtonElement): void {
+    const live = buttons.filter((button) => !button.disabled);
+    if (!live.length) return;
+    const at = live.indexOf(current);
+    let next: HTMLButtonElement | undefined;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = live[(at + 1) % live.length];
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = live[(at - 1 + live.length) % live.length];
+    else if (event.key === 'Home') next = live[0];
+    else if (event.key === 'End') next = live[live.length - 1];
+    if (!next) return;
+    event.preventDefault();
+    for (const button of buttons) button.tabIndex = button === next ? 0 : -1;
+    next.focus();
   }
 
-  /** The choice line, with the size and file count on their own muted line under it, in one 44px target. */
-  function statusButton(key: string, name: string, text: string, enabled: boolean, focusKey: string, meta: string): HTMLButtonElement {
-    const control = el('button', 'fstatus') as HTMLButtonElement;
-    control.type = 'button';
-    add(control, el('span', 'fstatus-text', text));
-    if (meta) add(control, el('span', 'fmeta', meta));
-    control.setAttribute('data-key', focusKey);
-    control.setAttribute('aria-haspopup', 'dialog');
-    control.setAttribute('aria-label', fill(Q.choiceFor, { name, state: text }) + (meta ? ' · ' + meta : ''));
-    if (enabled && !p.saving) control.addEventListener('click', () => openSheet(key, focusKey));
-    else control.disabled = true;
-    return control;
+  interface SegModel {
+    /** The explicit choice ('' when none). */
+    pressed: string;
+    /** The choice that applies without being chosen here: drawn weaker than an explicit one. */
+    inherited: string;
+    /** Why a segment cannot be chosen here, or ''. */
+    blocked(state: string): string;
+    /** A quiet description for a segment (where an inherited choice comes from), or ''. */
+    note(state: string): string;
+    pick(state: string): void;
+  }
+
+  /**
+   * One pill of three segments (Full, Names only, Skip): buttons with
+   * aria-pressed in a radiogroup, one tab stop, arrow keys between segments.
+   */
+  function segControl(name: string, focusBase: string, model: SegModel): HTMLElement {
+    const group = el('div', 'seg');
+    group.setAttribute('role', 'radiogroup');
+    group.setAttribute('aria-label', fill(Q.choiceGroup, { name }));
+    const buttons: HTMLButtonElement[] = [];
+    for (const state of STATES) {
+      const words = (Q.segments as Any)[state] as readonly [string, string];
+      const pressed = model.pressed === state;
+      const button = el('button', 'seg-opt' + (pressed ? ' on' : model.inherited === state ? ' inherited' : '')) as HTMLButtonElement;
+      button.type = 'button';
+      button.setAttribute('data-key', focusBase + state);
+      button.setAttribute('aria-label', words[0]);
+      button.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+      add(button, el('span', 'seg-long', words[0]), el('span', 'seg-short', words[1]));
+      const blocked = pressed ? '' : model.blocked(state);
+      const note = blocked || model.note(state);
+      if (note) {
+        button.setAttribute('aria-description', note);
+        button.title = note;
+      }
+      if (blocked || p.saving) button.disabled = true;
+      else button.addEventListener('click', () => model.pick(state));
+      button.addEventListener('keydown', (event: KeyboardEvent) => segKeys(event, buttons, button));
+      buttons.push(button);
+      add(group, button);
+    }
+    const live = buttons.filter((button) => !button.disabled);
+    const home = live.filter((button) => button.getAttribute('data-key') === p.lastSeg)[0]
+      || live.filter((button) => button.getAttribute('aria-pressed') === 'true')[0]
+      || live.filter((button) => button.className.indexOf('inherited') >= 0)[0]
+      || live[0];
+    for (const button of buttons) button.tabIndex = button === home ? 0 : -1;
+    return group;
+  }
+
+  /** A folder's control: its own choice, what it inherits, and the engine's no-more-open-than-the-parent rule. */
+  function folderControl(key: string, name: string, node: Any): HTMLElement {
+    const own = p.own.get(key) || '';
+    const from = inherited(key);
+    const now = effective(key);
+    const selectable = !node || node.selectable !== false;
+    const capped = !own && p.own.size >= MAX_RULES;
+    return segControl(name, 'picker:seg:' + key + ':', {
+      pressed: own,
+      // An own choice a stricter parent overrides shows the winning choice beside it.
+      inherited: own ? (now !== own ? now : '') : from.state,
+      blocked: (state) => {
+        if (!selectable) return Q.cannotChoose;
+        if (!allowed(key, state)) return fill(Q.notPossible, { parent: sourceName(from.from), state: (Q.statesLower as Any)[from.state] });
+        if (capped) return fill(Q.capReached, { max: kit.count(MAX_RULES) });
+        return '';
+      },
+      note: (state) => {
+        if (own === state && now !== own) return fill(Q.overridden, { own: stateName(own), parent: sourceName(from.from), state: stateName(from.state) });
+        if (!own && from.from && from.state === state) return fill(Q.inheritedFrom, { parent: sourceName(from.from) });
+        return '';
+      },
+      pick: (state) => choose(key, own === state ? '' : state, 'picker:seg:' + key + ':' + state),
+    });
+  }
+
+  /** The whole account is on or off in the contract: Full is the only choice it can carry. */
+  function accountControl(): HTMLElement {
+    return segControl(fill(Q.accountRow, { source: p.label }), 'picker:seg:' + ACCOUNT + ':', {
+      pressed: p.whole ? 'ingest' : '',
+      inherited: '',
+      blocked: (state) => (state === 'ingest' ? '' : Q.wholeOnlyFull),
+      note: () => '',
+      pick: (state) => choose(ACCOUNT, p.whole ? '' : state, 'picker:seg:' + ACCOUNT + ':' + state),
+    });
   }
 
   /** Pick mode: Make private, or Already private when the caller holds it. */
@@ -821,9 +864,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return control;
   }
 
-  function folderRow(node: Any): HTMLElement {
+  /** Pick mode keeps its own row: the name opens the folder, Make private on the right. */
+  function pickRow(node: Any): HTMLElement {
     const key = node.key;
-    const li = el('li', p.pick ? 'frow pick' : 'frow');
+    const li = el('li', 'frow pick');
     if (node.has_children) {
       const open = el('button', 'fname') as HTMLButtonElement;
       open.type = 'button';
@@ -836,11 +880,65 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       else open.addEventListener('click', () => drill(key));
       add(li, open);
     } else add(li, add(el('p', 'fname leaf'), el('span', 'fname-text', node.name)));
-    if (p.pick) {
-      if (node.selectable !== false) add(li, pickButton(key, node.name, 'picker:pick:' + key));
-      return li;
+    if (node.selectable !== false) add(li, pickButton(key, node.name, 'picker:pick:' + key));
+    return li;
+  }
+
+  /**
+   * The name and a Mixed tag when the folders inside differ (together, the
+   * name truncating first), then the muted size and file count, each shown
+   * only when it fits whole on the line.
+   */
+  function nameParts(target: HTMLElement, name: string, key: string, node: Any): void {
+    const main = add(el('span', 'fname-main'), el('span', 'fname-text', name));
+    const differs = key ? mixed(key) : '';
+    if (differs) {
+      const tag = el('span', 'ftag', Q.mixed);
+      tag.title = fill(Q.mixedSome, { state: (Q.statesLower as Any)[differs] });
+      add(main, tag);
     }
-    add(li, statusButton(key, node.name, statusText(key), node.selectable !== false, 'picker:choice:' + key, nodeMeta(node)));
+    add(target, main);
+    if (node) {
+      const [bytes, files] = nodeMeta(node);
+      if (bytes) add(target, el('span', 'fmeta fsize', bytes));
+      if (files) add(target, el('span', 'fmeta fcount', (bytes ? '· ' : '') + files));
+    }
+  }
+
+  /** One thin line: name (opens the folder), the choice control, then › to open it. */
+  function folderRow(node: Any): HTMLElement {
+    if (p.pick) return pickRow(node);
+    const key = node.key;
+    const li = el('li', 'frow seg-row');
+    const busy = p.loading || p.saving;
+    let label: HTMLElement;
+    if (node.has_children) {
+      const open = el('button', 'fname') as HTMLButtonElement;
+      open.type = 'button';
+      // The › button is the keyboard target for opening; the name is the wide tap target.
+      open.tabIndex = -1;
+      open.setAttribute('data-key', 'picker:name:' + key);
+      if (busy) open.disabled = true;
+      else open.addEventListener('click', () => drill(key));
+      label = open;
+    } else label = el('p', 'fname leaf');
+    label.title = node.name;
+    nameParts(label, node.name, key, node);
+    add(li, label, folderControl(key, node.name, node));
+    if (node.has_children) {
+      const chevron = el('button', 'fopen', '›') as HTMLButtonElement;
+      chevron.type = 'button';
+      chevron.setAttribute('data-key', 'picker:open:' + key);
+      chevron.setAttribute('aria-label', fill(Q.openFolder, { name: node.name }));
+      chevron.title = fill(Q.openFolder, { name: node.name });
+      if (busy) chevron.disabled = true;
+      else chevron.addEventListener('click', () => drill(key));
+      add(li, chevron);
+    } else {
+      const spacer = el('span', 'fopen-gap');
+      spacer.setAttribute('aria-hidden', 'true');
+      add(li, spacer);
+    }
     return li;
   }
 
@@ -864,6 +962,35 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return line;
   }
 
+  /** The level's own choice, as a compact row above its folders. */
+  function topRow(text: string, control: HTMLElement): HTMLElement {
+    const row = el('div', 'this-row');
+    add(row, el('p', 'this-label', text), control);
+    return row;
+  }
+
+  function exceptionList(rules: string[]): HTMLElement {
+    const section = el('section', 'fsection exceptions');
+    add(section, el('h2', '', fill(Q.exceptions, { n: kit.count(rules.length) })));
+    const listNode = el('ul', 'flist');
+    for (const key of rules) {
+      const path = shortPath(key);
+      const state = p.own.get(key);
+      const jumpButton = el('button', 'jump-btn') as HTMLButtonElement;
+      jumpButton.type = 'button';
+      jumpButton.setAttribute('data-key', 'picker:jump:' + key);
+      jumpButton.title = path;
+      add(jumpButton, el('span', 'fname-text', path), el('span', 'jtag jtag-' + state, (Q.segments as Any)[state][0]));
+      const chevron = el('span', 'chev', '›');
+      chevron.setAttribute('aria-hidden', 'true');
+      add(jumpButton, chevron);
+      if (p.loading || p.saving) jumpButton.disabled = true;
+      else jumpButton.addEventListener('click', () => jump(key));
+      add(listNode, add(el('li', 'frow jump'), jumpButton));
+    }
+    return add(section, listNode);
+  }
+
   function rootScreen(body: HTMLElement): void {
     add(body, el('h1', '', p.title));
     add(body, el('p', 'muted intro', fill(p.pick ? p.pick.words.intro : Q.foldersIntro, { source: p.label })));
@@ -879,22 +1006,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       add(body, only);
       return;
     }
-    const account = fill(Q.accountRow, { source: p.label });
-    add(body, twoLine('account', 'picker:choice:' + ACCOUNT, account, stateName(p.whole ? 'ingest' : ''),
-      p.saving ? null : () => openSheet(ACCOUNT, 'picker:choice:' + ACCOUNT),
-      fill(Q.choiceFor, { name: account, state: stateName(p.whole ? 'ingest' : '') })));
-    if (p.whole && !p.wholeConfirmed && p.sheet !== ACCOUNT) add(body, wholeConfirm());
+    add(body, topRow(fill(Q.accountRow, { source: p.label }), accountControl()));
+    if (p.whole && !p.wholeConfirmed) add(body, wholeConfirm());
     const rules = exceptions();
-    if (rules.length) {
-      const section = el('section', 'fsection');
-      add(section, el('h2', '', fill(Q.exceptions, { n: kit.count(rules.length) })));
-      const listNode = el('ul', 'flist');
-      for (const key of rules) {
-        add(listNode, add(el('li', 'frow jump'), twoLine('jump-btn', 'picker:jump:' + key, shortPath(key), stateName(p.own.get(key)),
-          p.loading || p.saving ? null : () => jump(key))));
-      }
-      add(body, add(section, listNode));
-    }
+    if (rules.length) add(body, exceptionList(rules));
     const folders = add(el('section', 'fsection'), el('h2', '', Q.foldersHeading));
     add(folders, loadingLine());
     add(folders, levelList('', p.roots, !!p.rootCursor));
@@ -917,29 +1032,20 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     add(body, pathLine());
     noticeAndError(body);
     const node = p.catalog.get(key);
-    const here = el('div', 'this-row');
     if (p.pick) {
+      const here = el('div', 'this-row pick');
       add(here, add(el('p', 'this-text'), el('span', 'this-label', nameOf(key))));
       if (!node || node.selectable !== false) add(here, pickButton(key, nameOf(key), 'picker:pick-this'));
       add(body, here);
-      add(body, loadingLine());
-      add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
-      return;
-    }
-    const text = statusText(key);
-    add(here, add(el('p', 'this-text'), el('span', 'this-label', Q.thisFolder + ' '), el('span', '', text)));
-    const change = kit.button(Q.change, 'picker:this', node && node.selectable === false || p.saving ? null : () => openSheet(key, 'picker:this'), 'plain');
-    change.setAttribute('aria-haspopup', 'dialog');
-    change.setAttribute('aria-label', fill(Q.choiceFor, { name: nameOf(key), state: text }));
-    add(here, change);
-    add(body, here);
+    } else add(body, topRow(Q.thisFolder, folderControl(key, nameOf(key), node)));
     add(body, loadingLine());
     add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
   }
 
+  /** A quiet line (the connect hello, or why the view was refreshed) and a load error with Try again. */
   function noticeAndError(body: HTMLElement): void {
     if (p.notice) {
-      const notice = el('p', 'notice', p.notice);
+      const notice = el('p', p.notice === Q.conflict ? 'fnote strong' : 'fnote muted', p.notice);
       notice.setAttribute('role', 'status');
       add(body, notice);
     }
@@ -965,92 +1071,12 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return footer;
   }
 
-  function sheetOption(value: string, text: string, hint: string, checked: boolean, enabled: boolean, onPick: () => void): HTMLElement {
-    const label = el('label', 'sheet-opt' + (enabled ? '' : ' off'));
-    const input = el('input') as HTMLInputElement;
-    input.type = 'radio';
-    input.name = 'picker-choice';
-    input.value = value;
-    input.checked = checked;
-    input.disabled = !enabled || p.saving;
-    input.setAttribute('data-key', 'picker:sheet:' + (value || 'parent'));
-    input.addEventListener('change', () => {
-      if (input.checked) onPick();
-    });
-    const words = add(el('span', 'opt-text'), el('span', 'sheet-opt-name', text));
-    if (hint) add(words, el('span', 'muted opt-hint', hint));
-    return add(label, input, words);
-  }
-
-  function sheet(): HTMLElement {
-    const key = p.sheet;
-    const box = el('section', 'sheet');
-    box.setAttribute('role', 'dialog');
-    box.setAttribute('aria-modal', 'true');
-    box.setAttribute('aria-labelledby', 'picker-sheet-title');
-    const grip = el('span', 'grip');
-    grip.setAttribute('aria-hidden', 'true');
-    add(box, grip);
-    const options = el('fieldset', 'sheet-opts');
-    if (key === ACCOUNT) {
-      const title = el('h2', '', fill(Q.accountRow, { source: p.label }));
-      title.id = 'picker-sheet-title';
-      add(box, title, el('p', 'muted', Q.accountHelp));
-      add(options, add(el('legend', 'sr'), el('span', '', fill(Q.accountRow, { source: p.label }))));
-      add(options, sheetOption('', Q.notIncluded, Q.consequences.none, !p.whole, true, () => choose(ACCOUNT, '')));
-      add(options, sheetOption('ingest', Q.states.ingest, Q.consequences.wholeIngest, p.whole, true, () => choose(ACCOUNT, 'ingest')));
-      add(box, options);
-      if (p.whole && !p.wholeConfirmed) add(box, wholeConfirm());
-    } else {
-      const name = nameOf(key);
-      const title = el('h2', '', name);
-      title.id = 'picker-sheet-title';
-      add(box, title);
-      const own = p.own.get(key) || '';
-      const from = inherited(key);
-      if (!own && from.from) add(box, el('p', 'muted', fill(Q.inheritedFrom, { parent: sourceName(from.from) })));
-      if (own && effective(key) !== own) {
-        add(box, el('p', 'reason strong', fill(Q.overridden, { own: stateName(own), parent: sourceName(from.from), state: stateName(from.state) })));
-      }
-      add(options, add(el('legend', 'sr'), el('span', '', fill(Q.choiceFor, { name, state: statusText(key) }))));
-      const top = !(p.ancestors.get(key) || []).length;
-      add(options, sheetOption('', fill(top ? Q.sameAsAccount : Q.sameAsParent, { state: stateName(from.state) }), Q.consequences.parent,
-        !own, true, () => choose(key, '')));
-      const capped = !own && p.own.size >= MAX_RULES;
-      for (const state of STATES) {
-        const ok = allowed(key, state) && !capped;
-        const hint = !allowed(key, state)
-          ? fill(Q.notPossible, { parent: sourceName(from.from), state: (Q.statesLower as Any)[from.state] })
-          : (Q.consequences as Any)[state];
-        add(options, sheetOption(state, (Q.states as Any)[state], hint, own === state, ok, () => choose(key, state)));
-      }
-      add(box, options);
-      if (capped || p.capHit) {
-        const cap = el('p', 'reason strong', fill(Q.capReached, { max: kit.count(MAX_RULES) }));
-        cap.setAttribute('role', 'alert');
-        add(box, cap);
-      }
-      const inside = descendants(key).length;
-      if (inside) add(box, el('p', 'muted', fill(inside === 1 ? Q.keepOwn.one : Q.keepOwn.many, { n: kit.count(inside) })));
-    }
-    add(box, add(el('div', 'actions'), kit.button(Q.done, 'picker:sheet:done', closeSheet, 'plain')));
-    return box;
-  }
-
   function foldersView(page: HTMLElement): void {
     const body = el('div', 'picker-body');
     if (p.path.length) folderScreen(body);
     else rootScreen(body);
     if (p.loaded && !p.pick) add(body, folderFooter());
     add(page, body);
-    if (p.sheet && p.loaded && !p.pick) {
-      body.setAttribute('inert', '');
-      body.setAttribute('aria-hidden', 'true');
-      const scrim = el('div', 'scrim');
-      scrim.setAttribute('aria-hidden', 'true');
-      scrim.addEventListener('click', closeSheet);
-      add(page, scrim, sheet());
-    }
   }
 
   function saveRow(enabled: boolean, label: string, onSave: () => void, reason: string): HTMLElement {
@@ -1236,7 +1262,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     add(page, el('h1', '', p.title));
     add(page, el('p', 'muted', fill(Q.mailIntro, { source: p.label })));
     if (p.notice) {
-      const notice = el('p', 'notice', p.notice);
+      const notice = el('p', p.notice === Q.conflict ? 'fnote strong' : 'fnote muted', p.notice);
       notice.setAttribute('role', 'status');
       add(page, notice);
     }
@@ -1381,11 +1407,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return page;
   }
 
-  /** Back and Escape: close the sheet, then the discard prompt, then go up a level, then leave. */
+  /** Back and Escape: close the discard prompt, then go up a level, then leave. */
   function escape(): void {
     if (!p) return;
-    if (p.mode === 'folders' && p.sheet) closeSheet();
-    else if (p.discarding) {
+    if (p.discarding) {
       p.discarding = false;
       kit.render('picker:back');
     } else if (p.mode === 'folders' && p.path.length) up();
