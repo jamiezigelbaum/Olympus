@@ -18,19 +18,28 @@ function modelView(ready = false): ModelSetupView {
   ] };
 }
 
-test('Models precede Sources and only new source connections are gated', () => {
+test('a model blocker leads the page and every source connection says why it is locked', () => {
   const view = buildDashboardPreviewView('fresh');
   view.model_setup = modelView();
   const html = renderDashboardSetupPage(view);
-  expect(html.indexOf('aria-label="Models"')).toBeLessThan(html.indexOf('class="source-model-gate"'));
+  // One banner at the top: the cause, and the one button that clears it.
+  const banner = segment(html, 'class="attncard banner blocker"', '</div></div>');
+  expect(banner).toContain('Add your Gemini API key to start connecting sources.');
+  expect(banner).toContain('data-focus-target="#model-key-field-gemini"');
+  expect(html.indexOf('data-blocker')).toBeLessThan(html.indexOf('aria-label="Models"'));
+  expect(html).toContain('id="model-key-field-gemini"');
+  expect(html.indexOf('aria-label="Models"')).toBeLessThan(html.indexOf('Available to connect'));
   expect(html).toContain('name="source" value="gemini"');
   expect(html).toContain('name="source" value="venice"');
-  expect(html).toContain('source-model-gate" disabled');
+  // Blocked controls look blocked and carry the reason beside themselves.
+  expect(html).toContain('<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">Connect</button><span class="hint">Locked until models are ready</span></span>');
+  expect(html).not.toContain('Finish the required model setup above');
   expect(html).toContain('Check readiness');
   expect(html).toContain('method="post" action="/dashboard/connect/api-key"');
   view.model_setup = modelView(true);
   const ready = renderDashboardSetupPage(view);
-  expect(ready).not.toContain('source-model-gate" disabled');
+  expect(ready).not.toContain('data-blocker');
+  expect(ready).not.toContain('Locked until models are ready');
   expect(ready).toContain('Replace key');
   expect(ready).toContain('Models are ready.');
 });
@@ -75,7 +84,7 @@ test('ready models collapse to source-style rows; a model without its key keeps 
   expect(partial).toContain('class="attncard plain modelrow" data-model-card="gemini"');
   const venice = segment(partial, '<section class="modelcard" data-model-card="venice"', '</section>');
   expect(venice).toContain('Not configured');
-  expect(venice).toContain('class="keyfield" type="password" name="api_key"');
+  expect(venice).toContain('class="keyfield" id="model-key-field-venice" type="password" name="api_key"');
   expect(venice).toContain('Get a Venice API key');
   expect(partial).toContain('Add the keys required by your privacy choice');
   expect(partial).toContain('Optional: your agent can help connect models you already run');

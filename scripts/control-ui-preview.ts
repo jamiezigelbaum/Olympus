@@ -110,7 +110,8 @@ export function buildDispositionsPreviewView(): SourceDispositionsView {
   };
 }
 
-function readResult(params: OlympusDashboardReadParams, canWrite: boolean) {
+/** The preview's read handler; tests render the same pages through it. */
+export function readResult(params: OlympusDashboardReadParams, canWrite: boolean, setupState = SETUP_STATE) {
   if (params.view === 'dispositions') {
     if (params.source_id === 'dropbox.files' || params.source_id === 'google_drive.docs') {
       const source = params.source_id as OlympusFolderScopeSourceId;
@@ -137,7 +138,7 @@ function readResult(params: OlympusDashboardReadParams, canWrite: boolean) {
   }
   return renderDashboardControlUi({
     params,
-    view: buildDashboardPreviewView(params.view === 'setup' ? SETUP_STATE : 'full'),
+    view: buildDashboardPreviewView(params.view === 'setup' ? setupState : 'full'),
     canWrite,
     options: {
       now: DASHBOARD_PREVIEW_NOW,

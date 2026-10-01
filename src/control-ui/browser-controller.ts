@@ -184,7 +184,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       case 'start_oauth': return 'Waiting for authorization. This card updates when the connection completes.';
       case 'cancel_oauth': return 'Connection attempt cancelled. Press Connect when you are ready to start a new one.';
       case 'sync_now': return 'Sync started. This card updates when it finishes.';
-      case 'set_embedding_priority': return 'Embedding preference saved.';
+      case 'set_embedding_priority': return 'Saved.';
       case 'disconnect': return 'Disconnected. This card updates when Olympus confirms it.';
       case 'unpair': return 'Unpaired on this computer.';
       default: return 'Saved.';
@@ -877,6 +877,19 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const slot = done.closest<HTMLElement>('[data-agent-secret-slot]');
       if (slot) clearAgentSecret(slot);
       void refreshAgentList();
+      return;
+    }
+    const focusButton = target.closest<HTMLElement>('[data-focus-target]');
+    if (focusButton) {
+      // A blocker's button that leads to the field below it: scroll there and
+      // put the cursor in it, on both surfaces (no fragment navigation, which
+      // a shadow root cannot resolve).
+      const selector = focusButton.dataset.focusTarget;
+      const field = selector ? query(selector) : null;
+      if (field) {
+        field.scrollIntoView({ block: 'center' });
+        (field as HTMLElement).focus();
+      }
       return;
     }
     const copy = target.closest<HTMLElement>('[data-copy-target]');

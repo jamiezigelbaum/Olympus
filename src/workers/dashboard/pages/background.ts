@@ -40,7 +40,10 @@ export { BACKGROUND_CSS };
 import type { DashboardSourceCard, SourceDashboardViewModel } from '../../source-dashboard.ts';
 import {
   DASHBOARD_LANE_CSS,
+  DASHBOARD_PROGRESS_CSS,
+  advancedPanel,
   attentionRow,
+  detailsDisclosure,
   escapeHtml,
   miniBar,
   pageShell,
@@ -64,11 +67,17 @@ import {
 import { DASHBOARD_NAV_CSS, renderDashboardNav } from '../nav.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from '../scheduler-markers.ts';
 import {
+  DASHBOARD_INDEX_FASTER,
+  DASHBOARD_INDEXING_NAME,
   dashboardCheckedLabel,
+  dashboardIndexingLine,
+  dashboardJobsLine,
   dashboardCount,
   dashboardDuration,
+  dashboardIndexingFacts,
   dashboardRelativeFromMs,
   dashboardSyncKeepsFailing,
+  type DashboardIndexingProgress,
 } from '../vocabulary.ts';
 import type { DashboardPageOptions } from './home.ts';
 
@@ -175,8 +184,58 @@ export function dashboardBackgroundLanes(
 ): DashboardBackgroundLane[] {
   const now = options?.now ?? new Date();
   const basePath = options?.basePath;
-  return [embeddingsLane(view, options), visionLane(view, basePath), syncsLane(view, now, basePath)]
+  return [embeddingsLane(view, options, now), visionLane(view, basePath), syncsLane(view, now, basePath)]
     .filter((lane): lane is DashboardBackgroundLane => lane !== undefined);
+}
+
+/**
+ * Where indexing stands, from the same evidence the Background page reads:
+ * the backlog's own denominator, and the drain's measured rate when one
+ * exists. Undefined when nothing reports any indexing work at all.
+ *
+ * The percent is the backlog's (chunks); `itemsLeft` is only ever a per-item
+ * count — the cards' `embedded_files` — and is omitted unless every card that
+ * indexes publishes one. An ETA is only ever the lane's measured one.
+ */
+export function dashboardIndexingProgress(
+  view: SourceDashboardViewModel,
+  options: DashboardBackgroundPageOptions | undefined,
+  now: Date,
+): DashboardIndexingProgress | undefined {
+  const lane = embeddingsLaneView(view, options, now);
+  const backlog = view.background_work?.embedding_backlog;
+  if (lane === undefined && backlog === undefined) return undefined;
+  const disabled = view.background_work?.embedding_lane_state === 'embedding_lane_disabled';
+  const percent = lane?.fraction === undefined ? undefined : lane.fraction * 100;
+  const itemsLeft = indexItemsLeft(view.sources);
+  const base = {
+    ...(percent === undefined ? {} : { percent }),
+    ...(itemsLeft === undefined ? {} : { itemsLeft }),
+  };
+  if (backlog !== undefined && backlog.missing_chunks <= 0) return { ...base, state: 'done' };
+  if (disabled) return { ...base, state: 'off' };
+  const status = lane?.status;
+  if (status === undefined) return { ...base, state: 'unknown' };
+  if (status.stuck !== undefined) return { ...base, state: 'stalled' };
+  if (status.kind === 'active') {
+    return { ...base, state: 'moving', ...(status.etaMs === undefined ? {} : { etaMs: status.etaMs }) };
+  }
+  if (status.kind === 'waiting') return { ...base, state: 'paused' };
+  if (status.kind === 'done') return { ...base, state: 'done' };
+  return { ...base, state: 'unknown' };
+}
+
+/** Items with text still waiting to be indexed, when every indexing card counts them. */
+function indexItemsLeft(sources: readonly DashboardSourceCard[]): number | undefined {
+  const indexing = sources.filter((source) => source.embedding_backlog !== undefined);
+  if (indexing.length === 0) return undefined;
+  let left = 0;
+  for (const source of indexing) {
+    const files = source.coverage.embedded_files;
+    if (files === undefined) return undefined;
+    left += Math.max(0, source.coverage.content_ready_items - files);
+  }
+  return left;
 }
 
 /** This source's detail page, on whatever prefix carries the reader's token. */
@@ -642,7 +701,7 @@ function actionableConditions(
   if (view.background_work?.embedding_lane_state === 'embedding_lane_disabled') {
     actionable.push({
       lane: 'Embeddings',
-      words: 'The embedding lane is switched off, so nothing will embed the chunks that are left.',
+      words: 'Indexing is switched off, so new material will not become searchable.',
     });
   }
   if (options?.embeddingRuntime?.state === 'guard_paused') {
@@ -651,8 +710,7 @@ function actionableConditions(
     // here lifts the pause, so this is stated rather than offered as a control.
     actionable.push({
       lane: 'Embeddings',
-      words: 'The overnight guard is paused, so nothing will start or stop the embedding lane '
-        + 'until the pause is lifted.',
+      words: 'Background work is paused, so indexing will not start again until it is resumed.',
     });
   }
   for (const source of view.sources) {
@@ -660,7 +718,7 @@ function actionableConditions(
     if (drain === 'held' || drain === 'disabled') {
       actionable.push({
         lane: 'Vision',
-        words: `Extraction is ${drain === 'held' ? 'held' : 'switched off'} on ${source.label}, so no new text is being extracted from it.`,
+        words: `Reading new files is ${drain === 'held' ? 'paused' : 'switched off'} on ${source.label}.`,
         ...detailLink(source, basePath),
       });
     }
@@ -673,8 +731,8 @@ function actionableConditions(
     if (dashboardSyncKeepsFailing(source)) {
       actionable.push({
         lane: 'Syncs',
-        words: `${source.label}'s scheduled sync keeps failing`
-          + `${schedule.last_error_kind ? ` (${maskSecrets(schedule.last_error_kind)})` : ''}, so new material is not coming in.`,
+        words: `${source.label} keeps failing to sync, so new material is not coming in.`,
+        ...(schedule.last_error_kind ? { detail: `Last error: ${schedule.last_error_kind}` } : {}),
         ...detailLink(source, basePath),
       });
       continue;
@@ -686,8 +744,8 @@ function actionableConditions(
     if (booked || retrying) continue;
     actionable.push({
       lane: 'Syncs',
-      words: `${source.label} has failed ${dashboardCount(schedule.consecutive_failures)} `
-        + `${plural(schedule.consecutive_failures, 'time')} in a row and nothing is scheduled to try it again.`,
+      words: `${source.label} has failed to sync ${dashboardCount(schedule.consecutive_failures)} `
+        + `${plural(schedule.consecutive_failures, 'time')} in a row and no retry is booked.`,
       ...detailLink(source, basePath),
     });
   }
@@ -698,7 +756,8 @@ function actionableConditions(
     if (reason === undefined || OPERATOR_PAUSED_SCHEDULER_MARKERS.has(reason)) continue;
     actionable.push({
       lane: 'Syncs',
-      words: `The scheduler is running ${source.label} degraded — ${maskSecrets(reason)}.`,
+      words: `${source.label} is syncing in a reduced mode.`,
+      detail: `The scheduler is running ${source.label} degraded — ${reason}.`,
       ...detailLink(source, basePath),
     });
   }
@@ -714,14 +773,14 @@ export function renderDashboardBackgroundPage(
   const now = options?.now ?? new Date();
   const lanes = backgroundLaneViews(view, options, now);
   const checked = dashboardCheckedLabel(view.generated_at, now);
-  const head = laneHeadline(lanes);
+  const head = jobsHeadline(lanes);
   return pageShell({
     title: 'Olympus',
     crumb: 'Background',
     ...(options?.basePath === undefined ? {} : { basePath: options.basePath }),
     meta: checked ? `${head} · ${checked}` : head,
     body: renderBackgroundBody(view, lanes, now, options),
-    styles: [DASHBOARD_LANE_CSS, DASHBOARD_NAV_CSS, BACKGROUND_CSS],
+    styles: [DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_NAV_CSS, BACKGROUND_CSS],
     // The embedding toggle is the first control this page has ever carried, so
     // it is also the first time this page needs the shared control wiring — the
     // same token prompt and the same auth-check every other control uses.
@@ -760,30 +819,68 @@ function renderBackgroundBody(
   });
   if (lanes.length === 0) {
     return `${nav}
-        <div class="foot">No background lane is reporting right now.</div>${renderInformational(options)}`;
+        <div class="foot">Nothing is running in the background right now.</div>`
+      + advancedPanel({ label: 'Details', body: renderInformational(options) });
   }
   const banners = armLaneBanners({
     lanes: lanes.map((lane) => ({ name: lane.name, status: lane.status })),
     actionable: actionableConditions(view, options),
   });
+  // The owner's half: what needs them, where indexing stands, the one control,
+  // and the runs they asked for. Every lane, guard and counter is under
+  // Details, unchanged, for whoever is debugging.
   return [
     nav,
-    renderBanners(banners),
-    renderKpis(backgroundKpis(view, lanes)),
-    renderLanes(lanes),
+    renderBanners(banners, lanes),
+    renderProgress(view, options, now),
     renderRecentRuns(view, now),
-    renderInformational(options),
+    advancedPanel({
+      label: 'Details',
+      body: [
+        renderKpis(backgroundKpis(view, lanes)),
+        renderLanes(lanes),
+        renderInformational(options),
+      ].join(''),
+    }),
   ].filter((section) => section.length > 0).join('');
 }
 
-function laneHeadline(lanes: readonly BackgroundLaneView[]): string {
-  if (lanes.length === 0) return 'nothing reporting';
+/** "1 job running" — the header's one fact, in the owner's words. */
+function jobsHeadline(lanes: readonly BackgroundLaneView[]): string {
   const stuck = lanes.filter((lane) => lane.status.stuck !== undefined).length;
-  if (stuck > 0) return `${dashboardCount(stuck)} ${plural(stuck, 'lane')} not moving`;
   const working = lanes.filter((lane) => lane.status.kind === 'active').length;
-  return working === 0
-    ? 'no lane working'
-    : `${dashboardCount(working)} ${plural(working, 'lane')} working`;
+  return dashboardJobsLine(working, stuck);
+}
+
+/** The owner's name for a lane. A lane with no owner name keeps its own. */
+const LANE_OWNER_NAMES: Readonly<Record<string, string>> = {
+  Embeddings: DASHBOARD_INDEXING_NAME,
+  Vision: 'Reading files',
+  Syncs: 'Syncing',
+};
+
+function laneOwnerName(lane: string): string {
+  return LANE_OWNER_NAMES[lane] ?? 'A background job';
+}
+
+/**
+ * Where indexing stands, as one line and a labelled bar, and the one control
+ * that changes it. Nothing renders when nothing reports indexing work.
+ */
+function renderProgress(
+  view: SourceDashboardViewModel,
+  options: DashboardBackgroundPageOptions | undefined,
+  now: Date,
+): string {
+  const progress = dashboardIndexingProgress(view, options, now);
+  if (progress === undefined) return '';
+  const line = dashboardIndexingLine(progress);
+  const bar = progress.percent === undefined
+    ? ''
+    : `<div class="lbar">${miniBar({ percent: progress.percent, label: `${DASHBOARD_INDEXING_NAME} ${Math.floor(progress.percent)} percent done` })}</div>`;
+  const control = options?.embeddingRuntime === undefined ? '' : renderEmbeddingToggle(options.embeddingRuntime, options);
+  return `
+        <div class="lane indexing" data-indexing-progress><div class="lfacts">${escapeHtml(line)}</div>${bar}${control}</div>`;
 }
 
 /**
@@ -794,21 +891,38 @@ function laneHeadline(lanes: readonly BackgroundLaneView[]): string {
  * attention row so a stuck lane looks exactly like every other thing on this
  * dashboard that wants the owner's eyes.
  */
-function renderBanners(banners: readonly DashboardLaneBanner[]): string {
+function renderBanners(
+  banners: readonly DashboardLaneBanner[],
+  lanes: readonly BackgroundLaneView[],
+): string {
   if (banners.length === 0) return '';
+  const stuckLanes = new Set(lanes.filter((lane) => lane.status.stuck !== undefined).map((lane) => lane.name));
   const rows = banners.map((banner) => {
-    const why = banner.lastGoverning === undefined
-      ? banner.words
-      : `${banner.words} Last governing condition: ${banner.lastGoverning}.`;
-    return attentionRow({
-      label: banner.lane,
+    // A stuck lane's own words name counters and arbiters; the row says what
+    // the owner sees, and the lane's words wait under Details.
+    const stuck = stuckLanes.has(banner.lane) && banner.href === undefined;
+    const why = stuck ? 'has stopped moving' : banner.words;
+    const technical = [
+      stuck ? banner.words : '',
+      banner.detail ?? '',
+      banner.lastGoverning === undefined ? '' : `Last governing condition: ${banner.lastGoverning}.`,
+    ].filter((part) => part !== '').join(' ');
+    const href = safeHref(banner.href);
+    const row = attentionRow({
+      label: laneOwnerName(banner.lane),
       why: maskSecrets(why),
       attention: true,
-      ...(safeHref(banner.href) === undefined ? {} : { href: banner.href! }),
+      ...(href === undefined ? {} : {
+        href,
+        action: { label: (banner.hrefLabel ?? 'Open').replace(/\s*→$/, ''), kind: 'link' as const, href },
+      }),
     });
+    return technical === ''
+      ? row
+      : `${row}${detailsDisclosure('Details', `<p class="hint">${escapeHtml(maskSecrets(technical))}</p>`)}`;
   }).join('');
   return `
-        <div class="sect attn">Needs a look</div>${rows}`;
+        <div class="sect attn">Needs you</div>${rows}`;
 }
 
 /** The state word a lane's pill carries. Never a claim the state does not make. */
@@ -1082,23 +1196,19 @@ function renderKpis(kpis: readonly BackgroundKpi[]): string {
  */
 function embeddingsLane(
   view: SourceDashboardViewModel,
-  options: DashboardPageOptions | undefined,
+  options: DashboardBackgroundPageOptions | undefined,
+  now: Date,
 ): DashboardBackgroundLane | undefined {
   const backlog = view.background_work?.embedding_backlog;
   const disabled = view.background_work?.embedding_lane_state === 'embedding_lane_disabled';
   const runtime = options?.embeddingRuntime;
   if (!backlog && !disabled && !runtime) return undefined;
-  const facts: string[] = [];
   const checks: DashboardBackgroundCheck[] = [];
   let fraction: number | undefined;
+  const progress = dashboardIndexingProgress(view, options, now);
   if (backlog) {
     fraction = backlog.chunks > 0 ? clampFraction(backlog.embedded_chunks / backlog.chunks) : undefined;
-    if (fraction !== undefined) facts.push(`${Math.round(fraction * 100)}% embedded`);
-    facts.push(backlog.missing_chunks > 0
-      ? `${compactCount(backlog.missing_chunks)} of ${compactCount(backlog.chunks)} chunks left`
-      : `all ${compactCount(backlog.chunks)} chunks embedded`);
     if (backlog.refresh_needed) {
-      facts.push('re-embed needed');
       checks.push({
         name: 'EMBEDDING_PARITY',
         observed: `${dashboardCount(backlog.missing_chunks)} of ${dashboardCount(backlog.chunks)} chunks missing`,
@@ -1110,7 +1220,6 @@ function embeddingsLane(
     }
   }
   if (disabled) {
-    facts.push('embedding lane disabled');
     checks.push({
       name: 'EMBEDDING_LANE',
       observed: 'disabled',
@@ -1120,8 +1229,8 @@ function embeddingsLane(
     });
   }
   return {
-    name: 'Embeddings',
-    facts: facts.join(' · '),
+    name: DASHBOARD_INDEXING_NAME,
+    facts: progress === undefined ? '' : dashboardIndexingFacts(progress),
     working: runtime === undefined
       ? !disabled && (backlog?.missing_chunks ?? 0) > 0
       : runtime.state === 'running' || runtime.state === 'operator_priority',
@@ -1142,17 +1251,15 @@ function visionLane(
   const stuck = view.sources.filter((source) => source.ingestion_health.stuck_count > 0);
   if (queued === undefined && held.length === 0 && stuck.length === 0) return undefined;
   const facts: string[] = [];
-  if (queued !== undefined) facts.push(`${dashboardCount(queued)} ${plural(queued, 'job')} queued`);
+  if (queued !== undefined && queued > 0) facts.push(`${dashboardCount(queued)} ${plural(queued, 'file')} waiting`);
   const waitingOn = view.sources
     .filter((source) => (source.vlm_extraction_queued ?? 0) > 0)
     .map((source) => source.label);
-  if (waitingOn.length > 0) facts.push(waitingOn.join(', '));
-  if (held.length > 0) {
-    facts.push(`extraction held on ${dashboardCount(held.length)} ${plural(held.length, 'source')}`);
+  if (waitingOn.length > 0) facts.push(`from ${waitingOn.join(', ')}`);
+  if (held.length > 0 || off.length > 0) {
+    facts.push(`paused on ${[...held, ...off].map((source) => source.label).join(', ')}`);
   }
-  if (off.length > 0) {
-    facts.push(`extraction off on ${dashboardCount(off.length)} ${plural(off.length, 'source')}`);
-  }
+  if (facts.length === 0) facts.push('nothing waiting');
   const checks: DashboardBackgroundCheck[] = [];
   for (const source of [...held, ...off]) {
     checks.push({
@@ -1180,7 +1287,7 @@ function visionLane(
     });
   }
   return {
-    name: 'Vision',
+    name: DASHBOARD_READING_NAME,
     facts: facts.join(' · '),
     working: (queued ?? 0) > 0 && held.length === 0,
     checks,
@@ -1202,9 +1309,7 @@ function syncsLane(
   if (running.length > 0) {
     facts.push(`${dashboardCount(running.length)} syncing now`);
   } else if (failing.length === 0) {
-    facts.push(`all ${dashboardCount(scheduled.length)} on schedule`);
-  } else {
-    facts.push(`${dashboardCount(scheduled.length - failing.length)} of ${dashboardCount(scheduled.length)} on schedule`);
+    facts.push('on schedule');
   }
   // Failing is the word for a task that keeps failing — the same count that
   // puts the source under Needs you. One that failed once has a retry booked,
@@ -1213,17 +1318,20 @@ function syncsLane(
   // wrong (owner-reported, 2026-09-24).
   const persistentlyFailing = failing.filter((source) => dashboardSyncKeepsFailing(source));
   const retryingOnly = failing.length - persistentlyFailing.length;
+  // Named, not counted: "1 source retrying" read as an alarm that never said
+  // which source, or whether anything was asked of the owner.
+  const retrying = failing.filter((source) => !dashboardSyncKeepsFailing(source));
   if (retryingOnly > 0) {
-    facts.push(`${dashboardCount(retryingOnly)} ${plural(retryingOnly, 'source')} retrying`);
+    facts.push(`${listLabels(retrying)} ${retryingOnly === 1 ? 'is' : 'are'} retrying on ${retryingOnly === 1 ? 'its' : 'their'} own`);
   }
   if (persistentlyFailing.length > 0) {
-    facts.push(`${dashboardCount(persistentlyFailing.length)} ${plural(persistentlyFailing.length, 'source')} failing`);
+    facts.push(`${listLabels(persistentlyFailing)} ${persistentlyFailing.length === 1 ? 'keeps' : 'keep'} failing`);
   }
   const queued = view.sources.reduce(
     (total, source) => total + source.queue_health.waiting + source.queue_health.active,
     0,
   );
-  if (queued > 0) facts.push(`${dashboardCount(queued)} ${plural(queued, 'item')} queued`);
+  if (queued > 0) facts.push(`${dashboardCount(queued)} ${plural(queued, 'item')} waiting`);
   const next = nextRunLabel(scheduled, now);
   if (next) facts.push(next);
   const checks: DashboardBackgroundCheck[] = [];
@@ -1249,7 +1357,7 @@ function syncsLane(
   }
   const strip = runStrip(scheduled);
   return {
-    name: 'Syncs',
+    name: DASHBOARD_SYNCING_NAME,
     facts: facts.join(' · '),
     working: running.length > 0,
     checks,
@@ -1298,7 +1406,9 @@ function renderEmbeddingDetail(
     lines.push(`<div class="embline warn">The operator override file could not be read, so the toggle `
       + `below cannot report its current position.</div>`);
   }
-  lines.push(renderEmbeddingToggle(runtime, options));
+  if (options?.readOnly !== true) {
+    lines.push('<div class="embline">The Index faster switch takes effect within a minute — the guard re-reads it on its next tick.</div>');
+  }
   return `
         <div class="embblock">${lines.join('')}
         </div>`;
@@ -1315,24 +1425,18 @@ function renderEmbeddingToggle(
   runtime: EmbeddingRuntimeFacts,
   options: DashboardPageOptions | undefined,
 ): string {
-  const takesEffect = '<div class="embline">Takes effect within a minute — the guard re-reads this on its next tick.</div>';
   if (options?.readOnly === true) {
-    return `<div class="embline">Embedding priority is ${runtime.overrideOn ? 'on' : 'off'}. `
-      + `Changing it asks for the worker bearer token, which this read-only link does not carry.</div>`;
+    return `<div class="embline">Index faster is ${runtime.overrideOn ? 'on' : 'off'}. `
+      + `Changing it needs dashboard controls, which this read-only link does not have.</div>`;
   }
-  const label = runtime.overrideOn
-    ? 'Turn off embedding priority'
-    : 'Give embedding priority';
-  const explain = runtime.overrideOn
-    ? 'Priority is on: the supervisors are parked and this lane keeps running. Turning it off restores normal arbitration.'
-    : 'Turning this on parks the source-processing supervisors so this lane keeps running until you turn it off.';
-  return `<div class="embline">${escapeHtml(explain)}</div>`
-    + `<form class="rowform" data-embedding-kind="operator_override">`
+  const label = runtime.overrideOn ? DASHBOARD_INDEX_FASTER.off : DASHBOARD_INDEX_FASTER.on;
+  const explain = runtime.overrideOn ? DASHBOARD_INDEX_FASTER.explainOff : DASHBOARD_INDEX_FASTER.explainOn;
+  return `<form class="rowform" data-embedding-kind="operator_override">`
     + `<input type="hidden" name="on" value="${runtime.overrideOn ? 'false' : 'true'}">`
     + `<button class="btn" type="submit">${escapeHtml(label)}</button>`
+    + `<span class="hint">${escapeHtml(explain)}</span>`
     + `<span class="actmsg" data-action-message role="status"></span>`
-    + `</form>`
-    + takesEffect;
+    + `</form>`;
 }
 
 /**
@@ -1474,6 +1578,17 @@ function compactCount(value: number): string {
   }
   return `${Math.round(value / 100_000) / 10}M`;
 }
+
+/** "Gmail", "Gmail and Drive", "Gmail, Drive and Dropbox". */
+function listLabels(sources: readonly DashboardSourceCard[]): string {
+  const labels = sources.map((source) => source.label);
+  if (labels.length <= 1) return labels[0] ?? '';
+  return `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+}
+
+/** The owner's names for the background jobs. Internal lane names stay in Details. */
+const DASHBOARD_READING_NAME = 'Reading files';
+const DASHBOARD_SYNCING_NAME = 'Syncing';
 
 function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;

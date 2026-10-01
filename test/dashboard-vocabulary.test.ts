@@ -563,7 +563,7 @@ describe('sub-line grammar', () => {
     // acts on it, which is everything the old ordering was defending.
     // `first ingest` is a phase, not a competing number, and a
     // card in its first pass should say so before quoting a ratio about to move.
-    expect(dashboardSubLine(source)).toBe('8% answer-ready · first ingest · 4,812 indexed · ~38m left');
+    expect(dashboardSubLine(source)).toBe('8% answer-ready · first sync · 4,812 indexed · ~38m left');
   });
 
   test('a source with nothing indexed draws no donut and claims no ratio', () => {
@@ -606,11 +606,11 @@ describe('sub-line grammar', () => {
     expect(dashboardSubLine(card({
       configured: false,
       connection: { state: 'not_connected', label: 'not connected' },
-    }))).toBe('connection lost · reauthenticate to resume syncing');
+    }))).toBe('signed out');
     expect(dashboardSubLine(card({
       configured: false,
       connection: { state: 'needs_setup', label: 'not connected' },
-    }))).toBe('connection lost · reauthenticate to resume syncing');
+    }))).toBe('signed out');
   });
 });
 
@@ -619,13 +619,13 @@ describe('attention lines', () => {
     const source = card({ label: 'Dropbox', provider: 'dropbox', source_id: 'dropbox.files' });
     expect(dashboardAttentionLine(source, {
       degradedCredentials: [degradation({ display_name: 'Dropbox', state: 'retrying', attempts: 2, max_attempts: 3 })],
-    })).toBe('credential unavailable · retrying (2 of 3)');
+    })).toBe("can't sign in · retrying (2 of 3)");
     expect(dashboardAttentionLine(source, {
       degradedCredentials: [degradation({ display_name: 'Dropbox', state: 'stopped' })],
-    })).toBe('credential unavailable · retries stopped');
+    })).toBe("can't sign in · retries stopped");
     expect(dashboardAttentionLine(source, {
       degradedCredentials: [degradation({ display_name: 'Dropbox', state: 'resolved_restart_required' })],
-    })).toBe('credential unavailable · resolved · restart required');
+    })).toBe("can't sign in · fixed · restart Olympus to use it");
   });
 
   test('point a pending consent at the tab it is waiting on', () => {
@@ -666,12 +666,12 @@ describe('attention lines', () => {
       connection: { state: 'reauth_required', label: 'reauth required' },
       answer_readiness: { state: 'needs_attention', label: 'Reauthenticate this source' },
     });
-    expect(dashboardAttentionLine(source)).toBe('reauth required');
+    expect(dashboardAttentionLine(source)).toBe('signed out');
   });
 
   test('carry the machine failure the readiness label names', () => {
     const source = card({ answer_readiness: { state: 'needs_attention', label: 'Content extraction is stalled' } });
-    expect(dashboardAttentionLine(source)).toBe('content extraction is stalled');
+    expect(dashboardAttentionLine(source)).toBe('paused — reading files has stalled');
   });
 
   // Was: "count the stuck work when nothing names a cause", pinning "3 items
@@ -680,12 +680,12 @@ describe('attention lines', () => {
   // the reader cannot act on.
   test('name the stuck work without counting it when nothing names a cause', () => {
     const source = card({ queue_health: { label: 'Needs attention', needs_attention: 3, retrying_tasks: 1 } });
-    expect(dashboardAttentionLine(source)).toBe('some work is stuck part-way through');
+    expect(dashboardAttentionLine(source)).toBe('some items could not be read');
   });
 
   test('name a retrying task as the self-healing thing it is, with no count', () => {
     const source = card({ queue_health: { label: 'Needs attention', needs_attention: 0, retrying_tasks: 2 } });
-    expect(dashboardAttentionLine(source)).toBe('a sync task is retrying itself');
+    expect(dashboardAttentionLine(source)).toBe('a sync is retrying on its own');
   });
 
   test('stay empty rather than invent a cause', () => {
@@ -749,7 +749,7 @@ describe('page-level lines', () => {
       card({ source_id: 'b.two', ingestion_health: { drain_state: 'held' } }),
     ]);
     expect(dashboardBackgroundLine(view))
-      .toBe('Background: 808 items queued · 3 needing attention · 1 task retrying · ingestion paused on 1 source');
+      .toBe('Background: 808 items queued · 3 needing attention · 1 task retrying · reading paused on 1 source');
   });
 
   test('the background line says nothing when nothing is running', () => {
@@ -958,7 +958,7 @@ describe('dashboard working summary', () => {
     expect(summary?.searchable_percent).toBe(12);
     expect(summary?.fully_working).toBe(false);
     expect(dashboardWorkingHeadline(summary!))
-      .toBe('97% of text extracted · 12% searchable until re-embed completes');
+      .toBe('97% of text extracted · 12% searchable until re-indexing completes');
   });
 
   test('says everything is working only when extraction and parity are both done', () => {
@@ -993,7 +993,7 @@ describe('dashboard working summary', () => {
     // is not answerable yet, and one number would say it was.
     expect(summary?.fully_working).toBe(false);
     expect(dashboardWorkingHeadline(summary!))
-      .toBe('100% of text extracted · 40% searchable until re-embed completes');
+      .toBe('100% of text extracted · 40% searchable until re-indexing completes');
   });
 
   test('gives no summary at all for a card with nothing in scope', () => {

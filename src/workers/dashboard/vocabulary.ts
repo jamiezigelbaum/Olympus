@@ -372,16 +372,16 @@ export function dashboardAttentionLine(
   const degradation = degradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
-    return clause ? `credential unavailable · ${clause}` : 'credential unavailable';
+    return clause ? `can't sign in · ${clause}` : `can't sign in`;
   }
-  // The provider's own refusal, in this page's bounded words. It replaces every
-  // connection-state line below, because "not connected" over an attempt the
-  // provider explicitly rejected explains nothing the owner can act on.
-  const refusal = source.connection.provider_refusal;
-  if (refusal) return refusal.reason;
+  // The provider's refusal, translated. It replaces every connection-state
+  // line below, because "not connected" over an attempt the provider
+  // explicitly rejected explains nothing the owner can act on. The provider's
+  // own words stay in the sheet's How to fix disclosure.
+  if (source.connection.provider_refusal) return dashboardProviderRefusalLine(source);
   switch (source.connection.state) {
     case 'reauth_required':
-      return 'reauth required';
+      return DASHBOARD_SIGNED_OUT;
     case 'awaiting_consent': {
       // The label is the provider's own name off the card, so the sentence
       // points at the tab the owner is actually looking at.
@@ -399,22 +399,200 @@ export function dashboardAttentionLine(
       // — Set up" on a source with 4,000 files read as a demand for a source
       // nobody asked for).
       return source.coverage.indexed_items > 0
-        ? 'connection lost · reauthenticate to resume syncing'
+        ? DASHBOARD_SIGNED_OUT
         : source.connection.label;
     default:
       break;
   }
-  if (source.answer_readiness.state === 'needs_attention') return lowerFirst(source.answer_readiness.label);
+  if (source.answer_readiness.state === 'needs_attention') return `paused — ${pausedReason(source)}`;
   // Owner ruling, 2026-08-24: NO ERROR COUNTS ANYWHERE. This line used to end
   // "3 items need attention · 1 task retrying", which is a number about queue
   // depth dressed as a number about the reader's data — and the reader can do
   // nothing with either figure. The row still says which of the two states it
   // is in, because the row exists and has to explain itself; it just stops
   // quantifying a fault nobody can act on by the size of it.
-  if (source.queue_health.needs_attention > 0) return 'some work is stuck part-way through';
-  if ((source.queue_health.retrying_tasks ?? 0) > 0) return 'a sync task is retrying itself';
+  if (source.queue_health.needs_attention > 0) return 'some items could not be read';
+  if ((source.queue_health.retrying_tasks ?? 0) > 0) return 'a sync is retrying on its own';
   return '';
 }
+
+/** The row word for a connection the owner has to sign back into. */
+export const DASHBOARD_SIGNED_OUT = 'signed out';
+
+/**
+ * The one verb for repairing a connection, everywhere on owner surfaces. The
+ * view model still names it "Reauthenticate" on some actions; every label a
+ * button shows passes through dashboardActionLabel, which says Reconnect.
+ */
+export const DASHBOARD_RECONNECT_LABEL = 'Reconnect';
+
+/** A button's words, in the dashboard's vocabulary. */
+export function dashboardActionLabel(label: string): string {
+  return /^re-?auth/i.test(label.trim()) ? DASHBOARD_RECONNECT_LABEL : label;
+}
+
+/** Why a source whose answers are held back is paused, in one clause. */
+function pausedReason(source: DashboardSourceCard): string {
+  // A readiness label that names its own cause is already the sentence; only
+  // the generic one is replaced with the reason the card's fields carry.
+  const label = source.answer_readiness.label.trim();
+  const known = READINESS_REASONS[label];
+  if (known !== undefined) return known;
+  if (label !== '' && label !== GENERIC_READINESS_ATTENTION_LABEL) return lowerFirst(label);
+  if ((source.queue_health.failing_tasks ?? 0) > 0) return 'its sync keeps failing';
+  if (source.queue_health.needs_attention > 0) return 'some items could not be read';
+  const relative = typeof source.freshness.hours === 'number' ? dashboardRelativeFromHours(source.freshness.hours) : '';
+  return relative ? `last synced ${relative}, later than expected` : 'it has not synced when expected';
+}
+
+/** The view model's readiness labels that name a cause, in the owner's words. */
+const READINESS_REASONS: Readonly<Record<string, string>> = {
+  'Reauthenticate this source': DASHBOARD_SIGNED_OUT,
+  'Embedding lane needs attention': 'indexing has stopped',
+  'Content extraction is stalled': 'reading files has stalled',
+};
+
+/** The view model's catch-all readiness label, which names no cause. */
+const GENERIC_READINESS_ATTENTION_LABEL = 'Needs attention before answers';
+
+function lowerFirst(value: string): string {
+  return value.length > 0 ? value[0]!.toLowerCase() + value.slice(1) : value;
+}
+
+/** Provider error codes that mean the sign-in address is not registered. */
+const REDIRECT_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  'redirect_uri_mismatch',
+  'invalid_redirect_uri',
+  'redirect_uri_not_registered',
+]);
+
+/**
+ * A provider's refusal as the row's reason half ("rejected the sign-in
+ * address — fix it in your Dropbox app settings"). The provider's own code and
+ * the address to register are technical detail; they live in the connect
+ * sheet's How to fix disclosure, never on the row.
+ */
+export function dashboardProviderRefusalLine(source: DashboardSourceCard): string {
+  const code = source.connection.provider_refusal?.code ?? '';
+  if (REDIRECT_REFUSAL_CODES.has(code)) {
+    return `rejected the sign-in address — fix it in your ${source.label} app settings`;
+  }
+  if (code === 'access_denied') return 'sign-in was declined — connect again to retry';
+  return 'refused the sign-in — see How to fix';
+}
+
+/** The same refusal as a full sentence, for the top of the connect sheet. */
+export function dashboardProviderRefusalSentence(source: DashboardSourceCard): string {
+  const code = source.connection.provider_refusal?.code ?? '';
+  if (REDIRECT_REFUSAL_CODES.has(code)) {
+    return `${source.label} rejected the sign-in address. Fix it in your ${source.label} app settings, then connect again.`;
+  }
+  if (code === 'access_denied') return `${source.label} sign-in was declined. Connect again to retry.`;
+  return `${source.label} refused the sign-in. How to fix has the details.`;
+}
+
+/** The raw refusal, for the How to fix disclosure only. */
+export function dashboardProviderRefusalDetail(source: DashboardSourceCard): string | undefined {
+  return source.connection.provider_refusal?.reason;
+}
+
+/* ------------------------------------------------------ progress words -- */
+
+/**
+ * Where indexing stands, as the page measured it.
+ *
+ * `percent` is the share of the work done (its unit is whatever the backlog
+ * counts; a percentage carries no unit). `itemsLeft` is set only from a real
+ * per-item count — never relabelled chunks. `etaMs` is set only from a
+ * measured rate.
+ */
+export interface DashboardIndexingProgress {
+  /** 0..100, absent when there is no denominator (nothing to index). */
+  percent?: number;
+  itemsLeft?: number;
+  etaMs?: number;
+  state: 'done' | 'moving' | 'stalled' | 'paused' | 'off' | 'unknown';
+}
+
+/** The owner's name for indexing — the embedding work. */
+export const DASHBOARD_INDEXING_NAME = 'Indexing';
+
+/**
+ * "98% done, 4,055 items left, about 2 hours" — the half after the name.
+ *
+ * Moving with no measured rate says "estimating time left"; a stopped lane
+ * says stalled; a lane something parked says paused. No ETA is printed
+ * without a rate behind it.
+ */
+export function dashboardIndexingFacts(progress: DashboardIndexingProgress): string {
+  if (progress.state === 'done') return 'up to date';
+  const parts: string[] = [];
+  if (progress.percent !== undefined) parts.push(`${Math.floor(progress.percent)}% done`);
+  if (progress.itemsLeft !== undefined && progress.itemsLeft > 0) {
+    parts.push(`${dashboardCount(progress.itemsLeft)} ${plural(progress.itemsLeft, 'item')} left`);
+  }
+  switch (progress.state) {
+    case 'moving':
+      parts.push(progress.etaMs !== undefined && progress.etaMs > 0
+        ? dashboardEtaWords(progress.etaMs)
+        : 'estimating time left…');
+      break;
+    case 'stalled':
+      parts.push('stalled');
+      break;
+    case 'paused':
+      parts.push('paused');
+      break;
+    case 'off':
+      parts.push('switched off');
+      break;
+    case 'unknown':
+      break;
+  }
+  return parts.join(', ');
+}
+
+/** "Indexing — 98% done, 4,055 items left, about 2 hours". */
+export function dashboardIndexingLine(progress: DashboardIndexingProgress): string {
+  return `${DASHBOARD_INDEXING_NAME} — ${dashboardIndexingFacts(progress)}`;
+}
+
+/**
+ * "about 2 hours" — an estimate rounded to the precision it has. A rate
+ * measured over minutes cannot support seconds.
+ */
+export function dashboardEtaWords(etaMs: number): string {
+  const minutes = etaMs / 60_000;
+  if (minutes < 1.5) return 'about a minute';
+  if (minutes < 60) return `about ${Math.round(minutes)} minutes`;
+  const hours = minutes / 60;
+  if (hours < 1.5) return 'about an hour';
+  if (hours < 36) return `about ${Math.round(hours)} hours`;
+  const days = Math.round(hours / 24);
+  return `about ${days} ${plural(days, 'day')}`;
+}
+
+/** "1 job running" / "3 jobs running" / "nothing running", with stalls named. */
+export function dashboardJobsLine(running: number, stalled = 0): string {
+  const head = running > 0 ? `${dashboardCount(running)} ${plural(running, 'job')} running` : 'nothing running';
+  return stalled > 0 ? `${head} · ${dashboardCount(stalled)} stalled` : head;
+}
+
+/** "4 sources connected, 1 ready to answer". */
+export function dashboardConnectedSummary(connected: number, ready: number): string {
+  return `${dashboardCount(connected)} ${plural(connected, 'source')} connected, ${dashboardCount(ready)} ready to answer`;
+}
+
+/** Why a connect control is greyed out while models are not ready. */
+export const DASHBOARD_MODELS_BLOCKED_REASON = 'Locked until models are ready';
+
+/** The control that speeds indexing up, and what it costs. */
+export const DASHBOARD_INDEX_FASTER = {
+  on: 'Index faster (pauses syncing)',
+  off: 'Stop indexing faster',
+  explainOn: 'Index faster; syncing pauses until you turn this off.',
+  explainOff: 'Indexing faster now; syncing is paused until you turn this off.',
+} as const;
 
 /**
  * Fraction of the working donut, 0..1, or undefined when nothing on the card
@@ -501,7 +679,7 @@ export function dashboardBackgroundLine(view: SourceDashboardViewModel): string 
   if (queued > 0) parts.push(`${dashboardCount(queued)} ${plural(queued, 'item')} queued`);
   if (attention > 0) parts.push(`${dashboardCount(attention)} needing attention`);
   if (retrying > 0) parts.push(`${dashboardCount(retrying)} ${plural(retrying, 'task')} retrying`);
-  if (paused > 0) parts.push(`ingestion paused on ${dashboardCount(paused)} ${plural(paused, 'source')}`);
+  if (paused > 0) parts.push(`reading paused on ${dashboardCount(paused)} ${plural(paused, 'source')}`);
   if (parts.length === 0) return undefined;
   return `Background: ${parts.join(' · ')}`;
 }
@@ -679,7 +857,7 @@ export function dashboardWorkingHeadline(summary: DashboardWorkingSummary): stri
   const read = `${formatPercent(summary.read_percent)} of text extracted`;
   return summary.searchable_percent === undefined
     ? read
-    : `${read} · ${formatPercent(summary.searchable_percent)} searchable until re-embed completes`;
+    : `${read} · ${formatPercent(summary.searchable_percent)} searchable until re-indexing completes`;
 }
 
 /** Whole numbers stay whole; a fraction keeps one decimal. */
@@ -758,7 +936,7 @@ export function dashboardSyncKeepsFailing(source: DashboardSourceCard): boolean 
  */
 function workingLine(source: DashboardSourceCard): string {
   const parts: string[] = [];
-  const firstIngest = source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? 'first ingest' : undefined;
+  const firstIngest = source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? 'first sync' : undefined;
   const readyWhileUpdating = source.answer_readiness.state === 'ready'
     && source.coverage.indexed_items > 0
     && (source.connection.state === 'syncing' || source.queue_health.active > 0 || source.queue_health.waiting > 0);
@@ -790,7 +968,7 @@ function workingLine(source: DashboardSourceCard): string {
 
 function waitingLine(source: DashboardSourceCard): string {
   if (dashboardScopePending(source)) {
-    return source.scope_selection?.kind === 'mail' ? 'waiting for mail selection' : 'waiting for folder selection';
+    return source.scope_selection?.kind === 'mail' ? 'choose which mail to include' : 'choose which folders to include';
   }
   if (source.connection.state === 'waiting_for_first_sync') return 'waiting for the first sync';
   const queued = source.queue_health.waiting + source.queue_health.active;
@@ -805,7 +983,7 @@ function degradationClause(degradation: WorkerCredentialDegradation): string {
     case 'stopped':
       return 'retries stopped';
     case 'resolved_restart_required':
-      return 'resolved · restart required';
+      return 'fixed · restart Olympus to use it';
     default:
       return '';
   }
@@ -854,10 +1032,6 @@ function degradedInput(
 
 function unknownStatus(value: string): DashboardStatusResolution {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value };
-}
-
-function lowerFirst(value: string): string {
-  return value.length > 0 ? value[0]!.toLowerCase() + value.slice(1) : value;
 }
 
 function plural(count: number, word: string): string {

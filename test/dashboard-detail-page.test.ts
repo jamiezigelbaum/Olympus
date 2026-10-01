@@ -597,7 +597,7 @@ describe('dashboard detail attention banner', () => {
     expect(html).toContain('Press Reauthenticate and approve Olympus on X bookmarks&#39;s own consent page.');
     expect(html).toContain('<form class="rowform" data-connect-kind="oauth">');
     expect(html).toContain('<input type="hidden" name="source" value="x">');
-    expect(html).toContain('>Reauthenticate</button>');
+    expect(html).toContain('>Reconnect</button>');
   });
 
   test('leads a Readwise key failure with the key field itself', () => {
@@ -918,7 +918,7 @@ describe('dashboard detail attention banner', () => {
     }), { now: NOW, readOnly: true });
 
     expect(html).toContain('the link you arrived with is read-only');
-    expect(html).toContain('<a class="btn" href="/dashboard?setup">Reauthenticate</a>');
+    expect(html).toContain('<a class="btn" href="/dashboard?setup">Reconnect</a>');
     expect(html).not.toContain('<form class="rowform"');
   });
 });

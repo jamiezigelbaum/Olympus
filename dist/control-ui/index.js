@@ -117,7 +117,7 @@ function mountDashboardController(options) {
       case "sync_now":
         return "Sync started. This card updates when it finishes.";
       case "set_embedding_priority":
-        return "Embedding preference saved.";
+        return "Saved.";
       case "disconnect":
         return "Disconnected. This card updates when Olympus confirms it.";
       case "unpair":
@@ -756,6 +756,16 @@ function mountDashboardController(options) {
       if (slot)
         clearAgentSecret(slot);
       refreshAgentList();
+      return;
+    }
+    const focusButton = target.closest("[data-focus-target]");
+    if (focusButton) {
+      const selector = focusButton.dataset.focusTarget;
+      const field = selector ? query(selector) : null;
+      if (field) {
+        field.scrollIntoView({ block: "center" });
+        field.focus();
+      }
       return;
     }
     const copy = target.closest("[data-copy-target]");
@@ -2091,6 +2101,18 @@ a.attncard.rowzone .go { color: var(--t4); font-size: 13px; }
 .btn.primary { background: var(--link-line); color: #E8EDF8; }
 .btn.quiet { border-color: transparent; color: var(--t4); }
 .btn.quiet:hover { border-color: var(--line2); color: var(--t2); }
+/* A blocked control looks blocked and says why beside itself. */
+.btn:disabled, .btn[aria-disabled="true"] { background: none; border-color: var(--line2); color: var(--t4); cursor: not-allowed; }
+.blocked { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.blocked .hint { color: var(--t3); }
+/* The page's one blocker: full width at the top, a real warning colour. */
+.attncard.blocker { border-color: var(--warn); margin-bottom: 20px; }
+.attncard.blocker .name { color: var(--warn); }
+/* Technical detail under a problem, closed by default. */
+details.howto { margin: 6px 0 0; }
+details.howto > summary { color: var(--t3); font-size: 12.5px; cursor: pointer; }
+details.howto > summary:hover { color: var(--link); }
+details.howto[open] > summary { margin-bottom: 6px; }
 .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
 .cards.four { grid-template-columns: repeat(4, 1fr); }
 .card { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; }
@@ -2281,11 +2303,7 @@ var DASHBOARD_NAV_CSS = `.top { position: sticky; top: 0; z-index: 12; backgroun
 .dnav .dnavlink:focus-visible { outline: 1px solid var(--link); outline-offset: -2px; border-radius: 4px; }
 .dnav .dnavlink.on { color: var(--t1); border-bottom-color: var(--link-line); }
 `;
-var SETUP_JOURNEY_CSS = `.setupsummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 18px; }
-.setupsummary .sumcard { min-width: 0; border: 1px solid var(--line2); border-radius: 8px; padding: 11px 12px; background: var(--panel); }
-.setupsummary b { display: block; color: var(--t4); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
-.setupsummary span { display: block; color: var(--t2); font-size: 13px; line-height: 1.3; }
-@media (max-width: 700px) { .setupsummary { grid-template-columns: 1fr; } }`;
+var SETUP_JOURNEY_CSS = `.setupsummary { color: var(--t2); font-size: 13px; margin: 0 0 18px; }`;
 var BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
 .lane .lanehd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .lane .lnm { font-weight: 600; font-size: 13.5px; color: var(--t2); }
@@ -2570,7 +2588,7 @@ var AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 4px 0 0; 
 var MODEL_SETUP_CSS = `
 .modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{border:1px solid var(--border,#333);border-radius:12px;padding:16px 18px;min-width:0}
 .modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:12.5px}
-.modelcard p{margin:6px 0 0}.source-model-gate{border:0;padding:0;margin:0;min-width:0}.source-model-gate[disabled]{opacity:.5}
+.modelcard p{margin:6px 0 0}
 .modelaction{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:12px}
 .modelaction form{display:flex;flex:1 1 320px;flex-wrap:wrap;align-items:center;gap:8px;margin:0;min-width:0}
 .modelaction input[type=password]{flex:1 1 180px;min-width:0;width:auto}.modelaction a{white-space:nowrap}.modelaction .modelnote{color:var(--t3)}

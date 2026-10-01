@@ -6324,7 +6324,7 @@ var init_answer_ready_coverage = __esm(() => {
 });
 
 // src/workers/dashboard/vocabulary.ts
-var DASHBOARD_UNCONNECTED_STATES;
+var DASHBOARD_UNCONNECTED_STATES, REDIRECT_REFUSAL_CODES;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -6332,6 +6332,11 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_UNCONNECTED_STATES = new Set([
     "not_connected",
     "needs_setup"
+  ]);
+  REDIRECT_REFUSAL_CODES = new Set([
+    "redirect_uri_mismatch",
+    "invalid_redirect_uri",
+    "redirect_uri_not_registered"
   ]);
 });
 
