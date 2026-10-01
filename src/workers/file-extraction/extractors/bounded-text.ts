@@ -279,19 +279,36 @@ export function normalizeMimeType(input: string | undefined): string | undefined
 }
 
 /**
- * Prefer the fetched mime, fall back to the enqueued one when the transport
- * returned a generic octet stream.
+ * Prefer the catalogued mime; the transport's only fills a gap.
+ *
+ * The catalogue records what the file is. A download's Content-Type records
+ * what the provider chose to send, and file providers send generic labels
+ * (`application/octet-stream`, and for some files `application/binary`).
+ * Letting any label other than octet-stream win settled every job of one
+ * provider `skipped_unsupported`, whatever its type: the text lane did not
+ * recognise the label, so no PDF was ever read.
  */
 export function resolveExtractionMimeType(
   refMimeType: string | undefined,
   fetchedMimeType: string | undefined,
 ): string | undefined {
   const enqueued = normalizeMimeType(refMimeType);
-  const fetched = normalizeMimeType(fetchedMimeType);
-  if (!fetched || fetched === 'application/octet-stream' || fetched === 'binary/octet-stream') {
-    return enqueued;
-  }
-  return fetched;
+  if (enqueued && !GENERIC_MIME_TYPES.has(enqueued)) return enqueued;
+  return normalizeMimeType(fetchedMimeType) ?? enqueued;
+}
+
+const GENERIC_MIME_TYPES: ReadonlySet<string> = new Set([
+  'application/octet-stream',
+  'binary/octet-stream',
+  'application/binary',
+]);
+
+/**
+ * A PDF names itself in its first bytes, whatever label it arrived under.
+ */
+export function hasPdfSignature(bytes: Uint8Array): boolean {
+  return bytes.length >= 5
+    && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d;
 }
 
 /**

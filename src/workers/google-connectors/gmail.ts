@@ -239,6 +239,7 @@ export interface GmailMessage {
 }
 
 interface GmailMessagePart {
+  partId?: string;
   mimeType?: string;
   filename?: string;
   headers?: Array<{ name?: string; value?: string }>;
@@ -1018,6 +1019,10 @@ function rawItemFromGmailMessage(
       labels: message.labelIds ?? [],
       attachmentCount: attachments.count,
       attachmentBytesDeclared: attachments.bytes,
+      // Name, type, size and MIME part of each attachment, searchable with the
+      // message. No attachment bytes are fetched; the message id plus the part
+      // id is what a later fetch needs (Gmail re-issues attachment ids).
+      ...(attachments.lines.length > 0 ? { attachments: attachments.lines } : {}),
       // This is an explicit product boundary, not a claim that an empty text
       // body means the message was fully covered.
       attachmentsNotIngested: attachments.count,
@@ -1028,20 +1033,36 @@ function rawItemFromGmailMessage(
   };
 }
 
-function gmailAttachmentInventory(part: GmailMessagePart | undefined): { count: number; bytes: number } {
-  if (!part) return { count: 0, bytes: 0 };
-  const filenameBearing = Boolean(part.filename?.trim());
-  let count = filenameBearing ? 1 : 0;
-  let bytes = filenameBearing && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0
+function gmailAttachmentInventory(
+  part: GmailMessagePart | undefined,
+): { count: number; bytes: number; lines: string[] } {
+  if (!part) return { count: 0, bytes: 0, lines: [] };
+  const filename = part.filename?.trim();
+  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0
     ? part.body!.size!
-    : 0;
+    : undefined;
+  let count = filename ? 1 : 0;
+  let bytes = size ?? 0;
+  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
   for (const child of part.parts ?? []) {
     const nested = gmailAttachmentInventory(child);
     count += nested.count;
     bytes += nested.bytes;
+    lines.push(...nested.lines);
   }
-  return { count, bytes };
+  return { count, bytes, lines };
 }
+
+function gmailAttachmentLine(filename: string, part: GmailMessagePart, size: number | undefined): string {
+  const details = [
+    part.mimeType?.trim() || undefined,
+    size !== undefined ? `${size} bytes` : undefined,
+    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined,
+  ].filter((value): value is string => Boolean(value));
+  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(', ')})` : ''}`;
+}
+
+const MAX_ATTACHMENT_NAME_CHARS = 256;
 
 function metadataCount(metadata: Readonly<Record<string, unknown>>, key: string): number {
   const value = metadata[key];

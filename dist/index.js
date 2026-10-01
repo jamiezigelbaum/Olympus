@@ -7096,6 +7096,7 @@ function rawItemFromGmailMessage(message, account, options = {}) {
       labels: message.labelIds ?? [],
       attachmentCount: attachments.count,
       attachmentBytesDeclared: attachments.bytes,
+      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
       attachmentsNotIngested: attachments.count,
       locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message.id)}`,
       contentHash: hashString(`${message.historyId ?? ""}:${metadataOnly ? "metadata_only" : text}`)
@@ -7105,16 +7106,27 @@ function rawItemFromGmailMessage(message, account, options = {}) {
 }
 function gmailAttachmentInventory(part) {
   if (!part)
-    return { count: 0, bytes: 0 };
-  const filenameBearing = Boolean(part.filename?.trim());
-  let count = filenameBearing ? 1 : 0;
-  let bytes = filenameBearing && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : 0;
+    return { count: 0, bytes: 0, lines: [] };
+  const filename = part.filename?.trim();
+  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
+  let count = filename ? 1 : 0;
+  let bytes = size ?? 0;
+  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
   for (const child of part.parts ?? []) {
     const nested = gmailAttachmentInventory(child);
     count += nested.count;
     bytes += nested.bytes;
+    lines.push(...nested.lines);
   }
-  return { count, bytes };
+  return { count, bytes, lines };
+}
+function gmailAttachmentLine(filename, part, size) {
+  const details = [
+    part.mimeType?.trim() || undefined,
+    size !== undefined ? `${size} bytes` : undefined,
+    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined
+  ].filter((value) => Boolean(value));
+  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
 }
 function metadataCount(metadata, key) {
   const value = metadata[key];
@@ -7209,7 +7221,7 @@ function safeProviderDetail(value) {
 function hashString(value) {
   return createHash4("sha256").update(value).digest("hex");
 }
-var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS;
+var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_mail_source_scope();
   init_sender_rules();
@@ -11652,6 +11664,22 @@ class EmailClient {
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
     return parseSourceIndexStatusResult(data);
+  }
+  async extractPdfs(options = {}) {
+    if (!this.config.email.enabled) {
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before extracting PDFs.");
+    }
+    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/files/extract-pdfs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...options.requeue ? { requeue: true } : {},
+        ...options.maxSeconds !== undefined ? { max_seconds: options.maxSeconds } : {}
+      })
+    }, { timeoutMs: ((options.maxSeconds ?? 240) + 600) * 1000 });
+    const data = asRecord7(response);
+    assertNoRawEmailFields(data);
+    return data;
   }
   async xBookmarksContentRecovery(options = {}) {
     if (!this.config.email.enabled) {

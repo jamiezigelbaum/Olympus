@@ -150,6 +150,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'source answer',
   'source index status',
   'source index search',
+  'source extract-pdfs',
   'data export',
   'data verify',
   'data delete',
@@ -234,6 +235,7 @@ export const V0_4_CANONICAL_DOCUMENTS = [
 
 export const V0_4_PUBLIC_PACKAGE_FILES = [
   'assets/icon.png',
+  'assets/olympus-banner.png',
   'package.json',
   'openclaw.plugin.json',
   'index.js',

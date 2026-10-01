@@ -1,5 +1,7 @@
 <div align="center">
 
+![Olympus: a towering mountain crowned by a celestial palace, surrounded by cyborg gods, AI agents, and lobster adventurers](assets/olympus-banner.png)
+
 # ⛰️ Olympus
 
 **Your whole digital life, searchable by your AI — on your privacy terms.**
@@ -161,7 +163,7 @@ starting with the automatic download and existing-install checks. Its install
 command for a clean machine is:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.7.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.9.tgz --force --accept-capabilities
 # On OpenClaw 2026.7.1, omit both flags for a clean install.
 # On newer hosts, --force also overwrites an existing plugin: check first.
 openclaw plugins enable olympus

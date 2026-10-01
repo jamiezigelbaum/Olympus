@@ -12,6 +12,7 @@ import {
 } from './dropbox-files/index.ts';
 import type { DropboxProviderStoreSyncHandler } from './dropbox-files/provider-store-sync.ts';
 import type { FileExtractionRunner } from './file-extraction/runner.ts';
+import { GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY } from './google-connectors/drive-extraction-source.ts';
 import {
   EMBEDDING_ITEMS_FAILED_REASON,
   EMBEDDING_PROVIDER_UNAVAILABLE_REASON,
@@ -24,6 +25,8 @@ import {
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
+  GOOGLE_DRIVE_PROVIDER,
+  GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
   GoogleRequestBudgetError,
   defaultGmailLiveSyncConfig,
   defaultGoogleDriveLiveSyncConfig,
@@ -1084,57 +1087,18 @@ export function createCanonicalDropboxSchedulerSource(input: {
 
   if (input.fileExtraction) {
     for (const approvedScopeKey of extractionScopes) {
-      const scopeHash = schedulerScopeHash(approvedScopeKey);
-      const accountScope = accountFromApprovedScope(approvedScopeKey) ?? 'personal';
-      tasks.push({
-        id: `dropbox.files_extract.${scopeHash}`,
-        kind: 'extract',
-        writer: true,
-        run: async (context?: SourceSchedulerTaskRunContext) => {
-          const plan = await input.fileExtraction!.plan({
-            corpusId: input.policy.corpusId,
-            provider: 'dropbox',
-            accountScope,
-            approvedScopeKey,
-            limit: input.policy.content.plan_limit,
-            policyDecision: 'index_allowed',
-            ...(context?.checkpoint ? { cursor: context.checkpoint } : {}),
-          });
-          const run = await input.fileExtraction!.run({
-            corpusId: input.policy.corpusId,
-            provider: 'dropbox',
-            accountScope,
-            approvedScopeKey,
-            limit: input.policy.content.batch_size,
-            preflightExtractorKinds: plan.extractorKinds,
-          });
-          const counts = {
-            candidates_seen: plan.candidates,
-            jobs_queued: plan.jobsQueued,
-            jobs_existing: plan.jobsExisting,
-            jobs_unroutable: plan.jobsUnroutable,
-            jobs_processed: run.processedJobs,
-            jobs_indexed: run.counts.indexed,
-            jobs_metadata_only: run.counts.metadata_only,
-            jobs_unsupported: run.counts.skipped_unsupported,
-            jobs_too_large: run.counts.skipped_too_large,
-            jobs_failed_retryable: run.counts.failed_retryable,
-            jobs_failed_terminal: run.counts.failed_terminal,
-          };
-          if (run.paused) {
-            throw new SourceSchedulerTaskFailure('Dropbox extraction paused at the extractor health gate.', {
-              errorKind: run.preflightErrorKind ?? run.pauseReason ?? 'extractor_health_probe_failed',
-              ...(run.pauseReason ? { warnings: [run.pauseReason] } : {}),
-              counts,
-            });
-          }
-          return {
-            status: plan.jobsQueued > 0 || run.processedJobs > 0 ? 'progress' : 'idle',
-            counts,
-            checkpoint: plan.done ? null : plan.nextCursor ?? context?.checkpoint ?? null,
-          };
+      tasks.push(fileExtractionSchedulerTask({
+        id: `dropbox.files_extract.${schedulerScopeHash(approvedScopeKey)}`,
+        runner: input.fileExtraction,
+        lane: {
+          corpusId: input.policy.corpusId,
+          provider: 'dropbox',
+          accountScope: accountFromApprovedScope(approvedScopeKey) ?? 'personal',
+          approvedScopeKey,
         },
-      });
+        planLimit: input.policy.content.plan_limit,
+        batchSize: input.policy.content.batch_size,
+      }));
     }
   }
 
@@ -1192,6 +1156,66 @@ export function createCanonicalDropboxSchedulerSource(input: {
       );
       if (completions.some((completedAt) => completedAt === undefined)) return undefined;
       return completions.sort()[0];
+    },
+  };
+}
+
+/**
+ * One scheduled extraction pass for a file lane: queue the next page of
+ * candidates, then extract a small batch. The pace is deliberately modest —
+ * every extracted chunk feeds the lane's embedding task — and a whole backlog
+ * is drained on the owner's word instead (`olympus source extract-pdfs`).
+ */
+export function fileExtractionSchedulerTask(input: {
+  id: string;
+  runner: FileExtractionRunner;
+  lane: { corpusId: string; provider: string; accountScope: string; approvedScopeKey: string };
+  planLimit: number;
+  batchSize: number;
+  mimeTypes?: readonly string[];
+}): SourceSchedulerTask {
+  return {
+    id: input.id,
+    kind: 'extract',
+    writer: true,
+    run: async (context?: SourceSchedulerTaskRunContext) => {
+      const plan = await input.runner.plan({
+        ...input.lane,
+        limit: input.planLimit,
+        policyDecision: 'index_allowed',
+        ...(input.mimeTypes ? { mimeTypes: input.mimeTypes } : {}),
+        ...(context?.checkpoint ? { cursor: context.checkpoint } : {}),
+      });
+      const run = await input.runner.run({
+        ...input.lane,
+        limit: input.batchSize,
+        preflightExtractorKinds: plan.extractorKinds,
+      });
+      const counts = {
+        candidates_seen: plan.candidates,
+        jobs_queued: plan.jobsQueued,
+        jobs_existing: plan.jobsExisting,
+        jobs_unroutable: plan.jobsUnroutable,
+        jobs_processed: run.processedJobs,
+        jobs_indexed: run.counts.indexed,
+        jobs_metadata_only: run.counts.metadata_only,
+        jobs_unsupported: run.counts.skipped_unsupported,
+        jobs_too_large: run.counts.skipped_too_large,
+        jobs_failed_retryable: run.counts.failed_retryable,
+        jobs_failed_terminal: run.counts.failed_terminal,
+      };
+      if (run.paused) {
+        throw new SourceSchedulerTaskFailure('File extraction paused at the extractor health gate.', {
+          errorKind: run.preflightErrorKind ?? run.pauseReason ?? 'extractor_health_probe_failed',
+          ...(run.pauseReason ? { warnings: [run.pauseReason] } : {}),
+          counts,
+        });
+      }
+      return {
+        status: plan.jobsQueued > 0 || run.processedJobs > 0 ? 'progress' : 'idle',
+        counts,
+        checkpoint: plan.done ? null : plan.nextCursor ?? context?.checkpoint ?? null,
+      };
     },
   };
 }
@@ -1282,19 +1306,25 @@ export const CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true;
  * Per source: may its embedding sweep embed store-wide (every hybrid-served
  * chunk still missing a vector), not only what its syncs queued? Readwise: yes,
  * owner decision 2026-09-24 (embedding ledger decision-2026-09-24-readwise-hybrid).
- * Scoped file and mail lanes (Gmail, Drive, Dropbox) are absent: they stay
- * queue-only under their scope binding, and Dropbox keeps its own embed tasks.
+ * Gmail: only its internal (non-secure) store, owner decision 2026-09-30
+ * (embedding ledger decision-2026-09-30-gmail-catch-up), so that backlog embeds
+ * once; the secure mail store stays queue-only. A list names the only corpora
+ * of the source that may sweep store-wide. The file
+ * lanes (Drive, Dropbox) are absent: they stay queue-only under their scope
+ * binding, and Dropbox keeps its own embed tasks.
  */
-export const WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE: Readonly<Record<string, boolean>> = {
+export const WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE: Readonly<Record<string, boolean | readonly string[]>> = {
   [SCHEDULER_SOURCE_IDS.readwise]: true,
+  [SCHEDULER_SOURCE_IDS.gmail]: ['internal.email'],
   [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
   [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
   [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
 };
 
-/** Whether a source's sweep may run store-wide; see WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE. */
-export function wholeStoreEmbeddingSweepAllowed(sourceId: string): boolean {
-  return WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId] === true;
+/** Whether a source's store may sweep store-wide; see WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE. */
+export function wholeStoreEmbeddingSweepAllowed(sourceId: string, corpusId?: string): boolean {
+  const allowed = WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId];
+  return allowed === true || (Array.isArray(allowed) && corpusId !== undefined && allowed.includes(corpusId));
 }
 
 /**
@@ -1661,6 +1691,9 @@ export function createGoogleDriveConnectorStoreSchedulerSource(input: {
   internalStore?: LocalConnectorStore;
   secureStore?: LocalConnectorStore;
   liveConfig?: GoogleDriveLiveSyncConfig;
+  /** Extracts the Drive PDFs the connector catalogues by name only. */
+  fileExtraction?: FileExtractionRunner;
+  extractionAccountScope?: string;
 }): SourceSchedulerSource | undefined {
   // Fail closed per lane, like Readwise and X: without the bounded
   // connector-store handler there is no Drive lane to register at all. The
@@ -1722,6 +1755,24 @@ export function createGoogleDriveConnectorStoreSchedulerSource(input: {
           }
         },
       },
+      ...(input.fileExtraction
+        ? [GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID]
+          .filter((corpusId) => input.fileExtraction!.corpusIds().includes(corpusId))
+          .map((corpusId) =>
+          fileExtractionSchedulerTask({
+            id: `google_drive.docs_extract.${schedulerScopeHash(corpusId)}`,
+            runner: input.fileExtraction!,
+            lane: {
+              corpusId,
+              provider: GOOGLE_DRIVE_PROVIDER,
+              accountScope: input.extractionAccountScope ?? 'personal',
+              approvedScopeKey: GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY,
+            },
+            planLimit: 25,
+            batchSize: 2,
+            mimeTypes: ['application/pdf'],
+          }))
+        : []),
     ],
     lastSyncCompletedAt: lastCompletedAt,
   };

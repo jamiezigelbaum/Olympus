@@ -1184,3 +1184,104 @@ function summarizeEgressDestinations(
 function hashToken(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
+
+// --- owner-triggered PDF backlog drain --------------------------------------
+
+export const PDF_MIME_TYPES: readonly string[] = Object.freeze(['application/pdf']);
+
+export interface PdfExtractionDrainLaneResult {
+  corpusId: string;
+  provider: string;
+  scopeKeyHash: string;
+  candidatesRequeued: number;
+  jobsProcessed: number;
+  jobsIndexed: number;
+  jobsMetadataOnly: number;
+  jobsFailed: number;
+  /**
+   * Queued, retrying or in-flight jobs of the extractor kind in this lane.
+   */
+  jobsRemaining: number;
+  paused: boolean;
+}
+
+/**
+ * Extract a lane's PDF backlog now, within a time budget.
+ *
+ * `requeue` first queues every catalogued PDF that still has no text —
+ * including ones an earlier pass settled without text — so a fixed extractor
+ * reads them again. Extraction then runs in small batches until the lane is
+ * empty or the budget is spent; the caller repeats the call to continue. Each
+ * extracted PDF lands in its store awaiting embedding by the normal pipeline.
+ */
+export async function drainPdfExtraction(input: {
+  runner: FileExtractionRunner;
+  lanes: readonly ExtractionLaneKey[];
+  requeue: boolean;
+  deadlineMs: number;
+  extractorKind: string;
+  now?: () => number;
+}): Promise<PdfExtractionDrainLaneResult[]> {
+  const now = input.now ?? Date.now;
+  const results: PdfExtractionDrainLaneResult[] = [];
+  for (const lane of input.lanes) {
+    const result: PdfExtractionDrainLaneResult = {
+      corpusId: lane.corpusId,
+      provider: lane.provider,
+      scopeKeyHash: createHash('sha256').update(lane.approvedScopeKey).digest('hex').slice(0, 16),
+      candidatesRequeued: 0,
+      jobsProcessed: 0,
+      jobsIndexed: 0,
+      jobsMetadataOnly: 0,
+      jobsFailed: 0,
+      jobsRemaining: 0,
+      paused: false,
+    };
+    if (input.requeue) {
+      let cursor: string | undefined;
+      for (;;) {
+        const plan = await input.runner.plan({
+          ...lane,
+          limit: PDF_DRAIN_PLAN_PAGE,
+          mimeTypes: PDF_MIME_TYPES,
+          extractorKind: input.extractorKind,
+          policyDecision: 'index_allowed',
+          force: true,
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+        result.candidatesRequeued += plan.jobsQueued + plan.jobsForced;
+        if (plan.done || plan.nextCursor === undefined) break;
+        cursor = plan.nextCursor;
+      }
+    }
+    while (now() < input.deadlineMs) {
+      const run = await input.runner.run({
+        ...lane,
+        limit: PDF_DRAIN_BATCH,
+        leaseSeconds: 1_800,
+        extractorKind: input.extractorKind,
+        preflightExtractorKinds: [input.extractorKind],
+      });
+      result.jobsProcessed += run.processedJobs;
+      result.jobsIndexed += run.counts.indexed;
+      result.jobsMetadataOnly += run.counts.metadata_only;
+      result.jobsFailed += run.counts.failed_retryable + run.counts.failed_terminal;
+      if (run.paused) {
+        result.paused = true;
+        break;
+      }
+      if (run.leasedJobs === 0) break;
+    }
+    result.jobsRemaining = input.runner.counts(lane)
+      .filter((count) => count.extractorKind === input.extractorKind
+        && (count.status === 'queued' || count.status === 'failed_retryable' || count.status === 'leased'))
+      .reduce((sum, count) => sum + count.jobs, 0);
+    results.push(result);
+  }
+  return results;
+}
+
+const PDF_DRAIN_PLAN_PAGE = 500;
+// One job per lease: a scan can take a text pass plus an OCR pass, so the
+// deadline is checked between single jobs rather than after a long batch.
+const PDF_DRAIN_BATCH = 1;

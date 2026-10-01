@@ -205,7 +205,45 @@ describe('Gmail connector-store lane', () => {
     expect(client.getCalls).toEqual(['msg-1']);
     expect(JSON.stringify(outcome.receipt)).not.toContain('private-contract');
     expect(JSON.stringify(outcome.receipt)).not.toContain('opaque-a');
-    expect(lane.internalStore.searchItems('attachment-only-secret-marker', 5)).toEqual([]);
+    // Search now also matches the recorded attachment names, so the content
+    // guarantee is asserted on the stored text itself.
+    expect(JSON.stringify(lane.internalStore.localContent('personal:msg-1', 10_000)))
+      .not.toContain('attachment-only-secret-marker');
+    // Each attachment's name, type, size and MIME part is searchable with its
+    // message, while its bytes stay unread and its opaque id unrecorded.
+    const byName = lane.internalStore.searchItems('private-contract', 5);
+    expect(byName.map((hit) => hit.sourceItem.localItemId)).toEqual(['personal:msg-1']);
+    const stored = lane.internalStore.localContent('personal:msg-1', 10_000);
+    expect(JSON.stringify(stored)).not.toContain('opaque-a');
+  });
+
+  test('each attachment is recorded by name, type, size and part on its message', async () => {
+    const message = gmailMessage(1);
+    message.payload = {
+      mimeType: 'multipart/mixed',
+      ...(message.payload?.headers ? { headers: message.payload.headers } : {}),
+      parts: [
+        { partId: '0', mimeType: 'text/plain', body: { data: Buffer.from('Body.').toString('base64url') } },
+        {
+          partId: '1',
+          mimeType: 'application/pdf',
+          filename: 'Harbor-invoice-7731.pdf',
+          body: { attachmentId: 'opaque-a', size: 12_345 },
+        },
+      ],
+    };
+    const connector = new GoogleGmailSourceConnector({
+      account: 'personal',
+      apiClient: fakeGmailClient([message]),
+      maxMessages: 10,
+    });
+    const pages = [];
+    for await (const page of connector.listItems({ limit: 10 })) pages.push(page);
+    const item = pages[0]?.items[0];
+    expect(item?.metadata.attachments).toEqual([
+      'Attachment: Harbor-invoice-7731.pdf (application/pdf, 12345 bytes, part 1)',
+    ]);
+    expect(item?.content.kind === 'text' ? item.content.text : '').not.toContain('Harbor-invoice');
   });
 
   test('a nested attachment subtree never supplies the message body', async () => {

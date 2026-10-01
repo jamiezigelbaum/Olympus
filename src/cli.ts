@@ -481,6 +481,20 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === 'source' && args[1] === 'extract-pdfs' && !isHelpRequest(args)) {
+    try {
+      console.log(JSON.stringify(await runExtractPdfsCommand(args.slice(2)), null, 2));
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
   if (args[0] === 'tier') {
     try {
       console.log(JSON.stringify(await runTierCommand(args.slice(1)), null, 2));
@@ -666,6 +680,7 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
 
   const [group, command] = commandArgs;
   if (group === 'setup' || group === 'dashboard' || group === 'serve') return group;
+  if (group === 'source' && command === 'extract-pdfs') return 'source extract-pdfs';
   if (
     group === 'sovereignty'
     || group === 'sensitivity'
@@ -1094,6 +1109,7 @@ function printHelp(): void {
   console.log('  olympus source answer <question>');
   console.log('  olympus source index status');
   console.log('  olympus source index search <query> --corpus-id <corpus>');
+  console.log('  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]');
   console.log(`  olympus setup --preset ${SOVEREIGNTY_PRESETS.join('|')} --yes [--cloud-lane subscription|api-key]`);
   console.log(`  olympus sovereignty init --preset ${SOVEREIGNTY_PRESETS.join('|')} [--path ~/.olympus/sovereignty.json]`);
   console.log('  olympus sensitivity validate [--path ~/.olympus/sensitivity-map.json]');
@@ -1152,6 +1168,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connections status': 'olympus connections status',
   'connections terms': 'olympus connections terms [--accept]',
   dashboard: 'olympus dashboard [--read-only] [--no-open]',
+  'source extract-pdfs': 'olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
@@ -1191,6 +1208,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus source answer <question>',
     '  olympus source index status',
     '  olympus source index search <query> --corpus-id <corpus>',
+    '  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]',
   ],
   'source index': [
     'Usage: olympus source index <command>',
@@ -2903,4 +2921,60 @@ export function formatCliFatalError(error: unknown): string[] {
     lines.push('Retryable: retry the operation after the transient condition clears.');
   }
   return lines;
+}
+
+/**
+ * `olympus source extract-pdfs`: report the PDF extraction backlog, or with
+ * `--run` extract it now. Without `--run` nothing changes: it prints each file
+ * corpus's pending PDFs and the estimated cost of embedding them once read
+ * (the same figures `olympus source index status` reports). `--run` drains the
+ * backlog in bounded worker calls until it is empty or `--max-minutes` pass;
+ * rerun to continue. `--requeue` first re-queues every PDF still without text,
+ * including ones an earlier extractor settled without reading.
+ */
+export async function runExtractPdfsCommand(args: readonly string[]): Promise<Record<string, unknown>> {
+  let run = false;
+  let requeue = false;
+  let maxMinutes = 50;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--run') run = true;
+    else if (arg === '--requeue') requeue = true;
+    else if (arg === '--max-minutes') {
+      maxMinutes = Number(args[index + 1]);
+      index += 1;
+      if (!Number.isFinite(maxMinutes) || maxMinutes <= 0 || maxMinutes > 24 * 60) {
+        throw new OperationError('invalid_params', '--max-minutes must be between 1 and 1440.');
+      }
+    } else {
+      throw new OperationError('invalid_params', `Unknown extract-pdfs option: ${arg}`);
+    }
+  }
+  if (requeue && !run) {
+    throw new OperationError('invalid_params', '--requeue only applies with --run.');
+  }
+  const email = makeContext().email;
+  const backlog = async () => {
+    const status = await email.sourceIndexStatus({ includeItems: false });
+    return (status.corpora as Array<Record<string, unknown>>)
+      .filter((corpus) => corpus.pdf_extraction !== undefined)
+      .map((corpus) => ({ corpus_id: corpus.corpus_id, ...(corpus.pdf_extraction as Record<string, unknown>) }));
+  };
+  if (!run) return { kind: 'pdf_extraction_backlog', corpora: await backlog() };
+
+  const deadline = Date.now() + maxMinutes * 60_000;
+  const passes: unknown[] = [];
+  let first = true;
+  for (;;) {
+    const secondsLeft = Math.floor((deadline - Date.now()) / 1_000);
+    if (secondsLeft <= 0) break;
+    const pass = await email.extractPdfs({ requeue: requeue && first, maxSeconds: Math.min(secondsLeft, 240) });
+    first = false;
+    passes.push(pass);
+    const lanes = Array.isArray(pass.lanes) ? pass.lanes as Array<Record<string, unknown>> : [];
+    const progressed = lanes.some((lane) => Number(lane.jobs_processed) > 0);
+    const paused = lanes.some((lane) => lane.paused === true);
+    if (!progressed || paused) break;
+  }
+  return { kind: 'pdf_extraction_run', passes, corpora: await backlog() };
 }

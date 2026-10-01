@@ -7096,6 +7096,30 @@ export class LocalConnectorStore {
     return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
   }
 
+  /**
+   * PDFs catalogued here with no extracted text yet, and the volume of those
+   * that were extracted — the observed basis for estimating what embedding the
+   * rest would cost once they are read.
+   */
+  pdfExtractionBacklog(): { pendingPdfs: number; extractedPdfs: number; extractedChars: number } {
+    const row = this.db.query(`
+      SELECT
+        SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
+        COALESCE(SUM(chars), 0) AS chars
+      FROM (
+        SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
+        FROM items i
+        WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
+      )
+    `).get() as { pending: number | null; extracted: number | null; chars: number };
+    return {
+      pendingPdfs: row.pending ?? 0,
+      extractedPdfs: row.extracted ?? 0,
+      extractedChars: row.chars,
+    };
+  }
+
   private embeddingTierExclusionFilter(): { filter: string; params: string[] } {
     const tierExcluded = this.tierHiddenItemPks();
     const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
@@ -9923,6 +9947,9 @@ function itemSearchText(
         : []),
       ...metadataStringList(item.metadata, 'identityAliases'),
       ...metadataStringList(item.metadata, 'aliases'),
+      // Attachment names and types, so a file sent by mail is findable with
+      // its message even though its bytes are not ingested.
+      ...metadataStringList(item.metadata, 'attachments'),
       reactionLine,
     ];
   const seen = new Set<string>();

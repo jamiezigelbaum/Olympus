@@ -20,6 +20,49 @@
   deployed, status reads "Olympus relay unavailable" and Olympus retries with
   backoff.
 
+## 0.4.0-beta.9 - 2026-09-30
+
+PDFs from connected file sources are now read, scans included, and you can
+see and drain the backlog.
+
+- **PDF extraction repair (#114).** When a file provider labelled a download
+  with a type the text reader did not recognise, that label replaced the
+  file's catalogued type and the file was skipped as unsupported, so on an
+  affected install no PDF was read. The catalogued type now wins, and a PDF is
+  also recognised by its first bytes. A PDF with no text
+  layer is read by the existing `ocrmypdf` command when the host has it; without
+  OCR it stays visibly `ocr_required`, and without `pdftotext` the built-in
+  decoder reads the text layer. A job whose lease expired on every attempt now
+  settles instead of being retried indefinitely.
+- **Google Drive PDFs (#114).** Drive PDFs, previously catalogued by name only,
+  join the same extraction lane for each Drive store the worker serves.
+- **Backlog report and drain (#114).** `olympus source extract-pdfs` shows each
+  file source's PDFs still without text and an estimate of what embedding them
+  would cost once read (also in `olympus source index status`). With `--run`
+  it extracts the backlog now, in bounded passes (`--max-minutes`, default 50;
+  rerun to continue); `--requeue` first re-reads PDFs an earlier pass left
+  without text. The scheduled pace is unchanged, and extracted text waits for
+  the existing embedding pipeline; nothing new starts embedding.
+- **Gmail attachment names (#114).** Each message now records its attachments'
+  name, type, size and MIME part, searchable with the message. Attachment
+  contents are still not downloaded or indexed. Messages pick this up when they
+  are next synced.
+
+## 0.4.0-beta.8 - 2026-09-30
+
+A one-time catch-up so existing Gmail mail becomes searchable by meaning.
+
+- **Gmail backlog embedding (#111).** Gmail's embedding sweep now also embeds
+  every chunk in the internal mail store that is still missing a vector, not
+  only the chunks a sync queued, so mail indexed before hybrid search embeds
+  once on the store's approved embedding identity. Each pass is bounded, and
+  the source page and `doctor` show the remaining backlog with its estimated
+  token count and cost. No model, endpoint or epoch changes and no existing
+  vector is re-embedded; the secure mail store, Google Drive and Dropbox stay
+  queue-only. The decision is recorded in the embedding ledger
+  (`decision-2026-09-30-gmail-catch-up`).
+- **README banner (#110).** The README opens with the Olympus banner image.
+
 ## 0.4.0-beta.7 - 2026-09-30
 
 A compatibility fix for OpenClaw 2026.9.7's plugin updater, slow answers for
