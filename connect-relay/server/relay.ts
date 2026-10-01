@@ -478,7 +478,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
    * `GET /go/<oly2g.installId.secret>`: a one-time hand-off link, routed by
    * the install it names. The engine owns single use and expiry.
    */
-  const handoff = async (request: Request, path: string): Promise<Response> => {
+  const handoff = async (request: Request, path: string, ip: string): Promise<Response> => {
     if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
     const installId = credentialInstallId('handoff', path.slice(HANDOFF_PATH_PREFIX.length));
     if (!installId) return expiredLink();
@@ -487,7 +487,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       request,
       path,
       body: new Uint8Array(),
-      lane: 'unverified',
+      // Owner browser hand-offs: the control lane, paced per address.
+      lane: 'control',
+      ip,
       dashboard: false,
       offline: macOffline,
       unknown: expiredLink,
@@ -500,7 +502,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
    * Routed by the install prefix of the state's nonce; the engine verifies the
    * signed state, so a forged one opens nothing.
    */
-  const oauthHandback = async (request: Request, url: URL): Promise<Response> => {
+  const oauthHandback = async (request: Request, url: URL, ip: string): Promise<Response> => {
     if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
     const installId = oauthHandbackInstallId(url.searchParams.get('state'));
     if (!installId) return expiredLink();
@@ -509,7 +511,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       request,
       path: `${url.pathname}${url.search}`,
       body: new Uint8Array(),
-      lane: 'unverified',
+      // Owner browser hand-offs: the control lane, paced per address.
+      lane: 'control',
+      ip,
       dashboard: false,
       offline: macOffline,
       unknown: expiredLink,
@@ -623,8 +627,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       const routableMcp = path === OAUTH_PATHS.mcp && credentialInstallId('access', /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')?.trim() ?? '')?.[1]);
       if (!routableMcp && !publicRequests.take(ip)) return tooMany();
 
-      if (path.startsWith(HANDOFF_PATH_PREFIX)) return handoff(request, path);
-      if ((OAUTH_HANDBACK_PATHS as readonly string[]).includes(path)) return oauthHandback(request, url);
+      if (path.startsWith(HANDOFF_PATH_PREFIX)) return handoff(request, path, ip);
+      if ((OAUTH_HANDBACK_PATHS as readonly string[]).includes(path)) return oauthHandback(request, url, ip);
 
       switch (path) {
         case OAUTH_PATHS.protectedResource:
