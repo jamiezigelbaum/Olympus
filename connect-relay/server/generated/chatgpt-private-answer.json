@@ -13,7 +13,7 @@
             "resourceDomains": []
           },
           "domain": "https://mcp.olympusplugin.ai",
-          "prefersBorder": true
+          "prefersBorder": false
         },
         "openai/widgetDescription": "Shows how many private items match and, when the user asks, a private answer that ChatGPT never receives."
       }

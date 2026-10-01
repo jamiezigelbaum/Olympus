@@ -31,7 +31,7 @@ export const PRIVATE_ANSWER_RELAY_ORIGIN = 'https://mcp.olympusplugin.ai';
 /** `_meta` on the resource contents: the relay is the one origin the panel may contact. */
 export function privateAnswerResourceMeta(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN): Record<string, unknown> {
   return {
-    ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: true },
+    ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
     'openai/widgetDescription': 'Shows how many private items match and, when the user asks, a private answer that ChatGPT never receives.',
   };
 }

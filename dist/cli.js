@@ -105109,7 +105109,7 @@ p{margin:0}
 // src/workers/chatgpt/private-answer-resource.ts
 function privateAnswerResourceMeta(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN) {
   return {
-    ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: true },
+    ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
     "openai/widgetDescription": "Shows how many private items match and, when the user asks, a private answer that ChatGPT never receives."
   };
 }
