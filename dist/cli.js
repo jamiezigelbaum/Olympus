@@ -94308,14 +94308,14 @@ var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://ol
 // src/workers/chatgpt/dashboard-resource.ts
 function dashboardResourceMeta() {
   return {
-    ui: { csp: { connectDomains: [], resourceDomains: [] }, prefersBorder: false },
+    ui: { csp: { connectDomains: [], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
     "openai/ui": { preferredDisplayMode: "fullscreen", availableDisplayModes: ["inline", "fullscreen"] }
   };
 }
 function dashboardResourceHtml() {
   return PLACEHOLDER_HTML;
 }
-var MCP_APP_MIME_TYPE = "text/html;profile=mcp-app", DASHBOARD_RESOURCE, PLACEHOLDER_HTML = `<!doctype html>
+var MCP_APP_MIME_TYPE = "text/html;profile=mcp-app", DASHBOARD_RESOURCE, DASHBOARD_UI_DOMAIN = "https://mcp.olympusplugin.ai", PLACEHOLDER_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -94416,11 +94416,11 @@ function buildChatGptDashboardViewModel(view, options = {}) {
   const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").map(({ definition, card }) => attentionItem(definition, card, degraded));
   const embedding = options.embedding ?? embeddingFromModelSetup(view.model_setup);
   if (embedding.state === "failed") {
-    needsYou.push({ id: "model:embedding", sentence: PENDING_VOCABULARY.embeddingNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.checkAgain) });
+    needsYou.push({ id: "model:embedding", sentence: PENDING_VOCABULARY.embeddingNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.openOnMac) });
   }
   const answers = answersFromModelSetup(view.model_setup);
   if (answers && !answers.ready) {
-    needsYou.push({ id: "model:answers", sentence: PENDING_VOCABULARY.answerModelNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.checkAgain) });
+    needsYou.push({ id: "model:answers", sentence: PENDING_VOCABULARY.answerModelNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.openOnMac) });
   }
   const progress = overallProgress(rows.map((row) => row.card), rows.map((row) => row.status));
   const connected = rows.some(({ card }) => dashboardIsConnectedSource(card));
@@ -94714,16 +94714,18 @@ var init_dashboard_view_model = __esm(() => {
   init_vocabulary();
   PENDING_VOCABULARY = {
     installingNoSource: "Connect a source to begin",
-    installingModel: "Getting the built-in model ready",
-    installingFirstIndex: "Building your first index",
+    installingModel: "Getting search ready on your Mac",
+    installingFirstIndex: "Indexing your sources for the first time",
     connectOnMac: "Connect sources in Olympus on your Mac.",
     reconnect: "Reconnect",
     checkAgain: "Check again",
+    openOnMac: "Open Olympus on your Mac",
     stageReading: "Reading",
-    stageSearchable: "Making searchable",
-    embeddingNeedsAttention: "The search model needs attention on your Mac.",
-    answerModelNeedsAttention: "The answer model needs attention on your Mac.",
-    fixOnMac: "Open Olympus on your Mac to fix this."
+    stageSearchable: "Indexing",
+    embeddingNeedsAttention: "Search has stopped working on your Mac.",
+    answerModelNeedsAttention: "Answers have stopped working on your Mac.",
+    fixOnMac: "Open Olympus on your Mac to fix this.",
+    privateMatches: "Some matching items are private and stay on your Mac."
   };
   ANSWER_MODEL_LABELS = { venice: "Venice", local: "Local models", built_in: "Built-in" };
   KNOWN_CONNECTION_LABELS = new Set([
@@ -94746,7 +94748,6 @@ var init_dashboard_view_model = __esm(() => {
   SYNCED_RELATIVE = /^synced (just now|less than 1 hour ago|\d+ (minute|hour|day|week|month|year)s? ago)$/;
   KNOWN_READINESS_LABELS = new Set([
     "Connect this source",
-    "Needs attention before answers",
     "Ready for questions; sync paused",
     "Ready for questions",
     "Syncing now",
@@ -94865,7 +94866,7 @@ function dashboardSummary(view) {
   if (view.progress)
     parts.push(`Indexing ${view.progress.percent}% done, ${view.progress.itemsLeft} ${view.progress.unit} left.`);
   if (view.needsYou.length > 0)
-    parts.push(`Needs attention: ${view.needsYou.map((item) => item.sentence.replace(/\.$/, "")).join("; ")}.`);
+    parts.push(`Needs you: ${view.needsYou.map((item) => item.sentence.replace(/\.$/, "")).join("; ")}.`);
   return parts.join(" ");
 }
 function sourceStatusToolResult(view) {
@@ -94884,7 +94885,7 @@ function sourceStatusToolResult(view) {
     structuredContent: structured
   };
 }
-function answerToolResult(raw) {
+function answerToolResult(raw, options = {}) {
   const record3 = asRecord14(raw);
   if (record3?.status === "working" && typeof record3.job_id === "string" && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record3.job_id)) {
     return {
@@ -94895,36 +94896,52 @@ function answerToolResult(raw) {
   if (!record3 || typeof record3.answer !== "string") {
     return errorToolResult(new OperationError("source_index_error", "unexpected answer shape"));
   }
-  const answer = record3.answer.replace(UNSAFE_CHARS, "").slice(0, MAX_ANSWER);
-  const citations = (Array.isArray(record3.evidence) ? record3.evidence : []).map(citationFrom).filter((citation) => citation !== undefined).slice(0, MAX_CITATIONS);
-  const textParts = [answer];
-  if (citations.length > 0) {
-    textParts.push("", "Sources:", ...citations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));
+  let privateMatched = options.privateMatched === true;
+  const citations = [];
+  for (const value of Array.isArray(record3.evidence) ? record3.evidence : []) {
+    const evidence = asRecord14(value);
+    if (!evidence)
+      continue;
+    if (typeof evidence.trust_domain !== "string" || !CITABLE_TRUST_DOMAINS.has(evidence.trust_domain)) {
+      privateMatched = true;
+      continue;
+    }
+    const citation = citationFrom(evidence);
+    if (citation && citations.length < MAX_CITATIONS)
+      citations.push(citation);
   }
+  const synthesis = asRecord14(asRecord14(record3.audit)?.answer_synthesis);
+  const usedPrivate = synthesis?.private_context_used === true || typeof synthesis?.secure_local_items_consulted === "number" && synthesis.secure_local_items_consulted > 0;
+  if (usedPrivate)
+    privateMatched = true;
+  const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record3.answer.replace(UNSAFE_CHARS, "").slice(0, MAX_ANSWER);
+  const shownCitations = usedPrivate ? [] : citations;
+  const notes = privateMatched ? [PENDING_VOCABULARY.privateMatches] : [];
+  const textParts = [answer];
+  if (shownCitations.length > 0) {
+    textParts.push("", "Sources:", ...shownCitations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));
+  }
+  if (notes.length > 0)
+    textParts.push("", ...notes);
   return {
     content: [{ type: "text", text: textParts.join(`
 `) }],
-    structuredContent: { status: "answered", answer, citations }
+    structuredContent: { status: "answered", answer, citations: shownCitations, ...notes.length > 0 ? { notes } : {} }
   };
 }
-function citationFrom(value) {
-  const evidence = asRecord14(value);
-  if (!evidence)
-    return;
+function citationFrom(evidence) {
   const source = sourceLabel3(evidence.provider, evidence.family);
   if (!source)
     return;
   const citation = { source };
-  if (typeof evidence.trust_domain === "string" && CITABLE_TRUST_DOMAINS.has(evidence.trust_domain)) {
-    if (typeof evidence.title === "string" && evidence.title.trim())
-      citation.title = text(evidence.title);
-    const url = httpsUrl(evidence.uri);
-    if (url)
-      citation.url = url;
-    const date4 = dateOnly(evidence.authored_at) ?? dateOnly(evidence.updated_at);
-    if (date4)
-      citation.date = date4;
-  }
+  if (typeof evidence.title === "string" && evidence.title.trim())
+    citation.title = text(evidence.title);
+  const url = httpsUrl(evidence.uri);
+  if (url)
+    citation.url = url;
+  const date4 = dateOnly(evidence.authored_at) ?? dateOnly(evidence.updated_at);
+  if (date4)
+    citation.date = date4;
   return citation;
 }
 function citationLine(citation) {
@@ -95010,10 +95027,11 @@ function safeHref2(value) {
 function asRecord14(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
-var MAX_TEXT = 400, MAX_ANSWER, MAX_CITATIONS = 20, UNSAFE_CHARS, FIX_TOOLS, FIX_HREF_HOST = "olympusplugin.ai", CONNECTION_STATES, CONNECTION_ACTIONS, STATUSES, UNITS, EMBEDDING_STATES, ANSWER_KINDS, CITABLE_TRUST_DOMAINS, PENDING_TEXT, ERROR_TEXT, ChatGptSurfaceError;
+var MAX_TEXT = 400, MAX_ANSWER, MAX_CITATIONS = 20, UNSAFE_CHARS, FIX_TOOLS, FIX_HREF_HOST = "olympusplugin.ai", CONNECTION_STATES, CONNECTION_ACTIONS, STATUSES, UNITS, EMBEDDING_STATES, ANSWER_KINDS, CITABLE_TRUST_DOMAINS, PENDING_TEXT, PRIVATE_ANSWER_WITHHELD = "Olympus can answer this only from private items, which stay on your Mac.", ERROR_TEXT, ChatGptSurfaceError;
 var init_response_builder = __esm(() => {
   init_operation_error();
   init_source_dashboard();
+  init_dashboard_view_model();
   MAX_ANSWER = 64 * 1024;
   UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
   FIX_TOOLS = new Set([DASHBOARD_TOOL_NAME]);
@@ -95078,13 +95096,28 @@ async function callChatGptTool(name, args, ctx, options, signal) {
         const question = typeof args.question === "string" ? args.question.trim() : "";
         if (!question)
           throw new ChatGptSurfaceError("invalid_params");
-        return answerToolResult(await runOperation(SOURCE_ANSWER_TOOL.name, ctx, { question, timeoutMs: SOURCE_ANSWER_TIMEOUT_MS }));
+        const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
+        const [raw, privateMatched] = await Promise.all([
+          runOperation(SOURCE_ANSWER_TOOL.name, ctx, {
+            question,
+            include_secure_local: false,
+            include_secure_local_content: false,
+            timeoutMs: SOURCE_ANSWER_TIMEOUT_MS
+          }),
+          probe(question, ctx).catch(() => false)
+        ]);
+        const jobId = pendingJobId(raw);
+        if (jobId)
+          rememberPrivateMatch(jobId, privateMatched);
+        return answerToolResult(raw, { privateMatched });
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
         const jobId = typeof args.job_id === "string" ? args.job_id.trim() : "";
         if (!jobId)
           throw new ChatGptSurfaceError("invalid_params");
-        return answerToolResult(await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId }));
+        const raw = await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId });
+        const privateMatched = privateMatchForJob(jobId, pendingJobId(raw) === undefined);
+        return answerToolResult(raw, { privateMatched });
       }
       default:
         throw new ChatGptSurfaceError("unknown_tool");
@@ -95092,6 +95125,41 @@ async function callChatGptTool(name, args, ctx, options, signal) {
   } catch (error2) {
     return errorToolResult(error2);
   }
+}
+async function defaultPrivateMatchProbe(question, ctx) {
+  const query = question.slice(0, PROBE_QUERY_MAX_CHARS);
+  const corpora = createPublicSourceCorpusRegistry(ctx.config.sourceIndex.corpusRegistry).list("search").filter((corpus) => corpus.trustDomain === "secure_local");
+  if (corpora.length === 0)
+    return false;
+  const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: 1, allTiers: false }).then((result) => Array.isArray(result.hits) && result.hits.length > 0, () => false));
+  const timeout = new Promise((resolve10) => {
+    const timer = setTimeout(() => resolve10(false), PROBE_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  return Promise.race([Promise.all(searches).then((hits) => hits.some(Boolean)), timeout]);
+}
+function pendingJobId(raw) {
+  const record3 = typeof raw === "object" && raw !== null ? raw : undefined;
+  return record3?.status === "working" && typeof record3.job_id === "string" ? record3.job_id : undefined;
+}
+function rememberPrivateMatch(jobId, matched) {
+  const now = Date.now();
+  for (const [id, entry] of privateMatchByJob)
+    if (entry.expiresAt <= now)
+      privateMatchByJob.delete(id);
+  while (privateMatchByJob.size >= PRIVATE_MATCH_MAX_JOBS) {
+    const oldest = privateMatchByJob.keys().next().value;
+    if (oldest === undefined)
+      break;
+    privateMatchByJob.delete(oldest);
+  }
+  privateMatchByJob.set(jobId, { matched, expiresAt: now + PRIVATE_MATCH_TTL_MS });
+}
+function privateMatchForJob(jobId, done) {
+  const entry = privateMatchByJob.get(jobId);
+  if (done)
+    privateMatchByJob.delete(jobId);
+  return entry !== undefined && entry.expiresAt > Date.now() && entry.matched;
 }
 async function runOperation(name, ctx, params) {
   const operation = findOperationByName(name);
@@ -95132,12 +95200,13 @@ function createChatGptMcpServer(makeOperationContext, options) {
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
   return server;
 }
-var READ_ONLY, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, ANSWER_TOOLS;
+var READ_ONLY, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, ANSWER_TOOLS, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000;
 var init_mcp_surface = __esm(() => {
   init_server2();
   init_types2();
   init_operation_exposure();
   init_operations();
+  init_source_corpus_registry();
   init_version();
   init_dashboard_resource();
   init_dashboard_view_model();
@@ -95208,6 +95277,8 @@ var init_mcp_surface = __esm(() => {
     annotations: READ_ONLY
   };
   ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL];
+  privateMatchByJob = new Map;
+  PRIVATE_MATCH_TTL_MS = 30 * 60000;
 });
 
 // src/workers/remote-request-body.ts
@@ -95319,7 +95390,7 @@ function createRemoteMcpHandler(options) {
     } catch {}
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
-    const server = options.chatgpt ? createChatGptMcpServer(() => ctx, options.chatgpt) : createOlympusMcpServer("remote", () => ctx);
+    const server = options.chatgpt?.servesRequest(request) ? createChatGptMcpServer(() => ctx, options.chatgpt) : createOlympusMcpServer("remote", () => ctx);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);
@@ -99447,6 +99518,7 @@ async function main() {
     }), withRemoteOpenApiRoutes2(remoteOpenApi, withRemoteMcpRoute2(createRemoteMcpHandler2({
       ...remoteAgentOptions,
       chatgpt: {
+        servesRequest: trustRelayHeaders,
         dashboardView: async (signal) => {
           const response = await worker.fetch(new Request("http://olympus-worker.internal/dashboard.json", signal ? { signal } : {}));
           if (!response.ok)

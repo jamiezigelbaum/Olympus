@@ -20,6 +20,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { shouldExposeOperation } from '../../core/operation-exposure.ts';
 import { findOperationByName, type OperationContext } from '../../core/operations.ts';
+import { createPublicSourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
 import { VERSION } from '../../version.ts';
 import type { SourceDashboardViewModel } from '../source-dashboard.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME } from './dashboard-contract.ts';
@@ -38,6 +39,11 @@ import {
 export interface ChatGptSurfaceOptions {
   /** The engine's dashboard view (the `/dashboard.json` object). */
   dashboardView: (signal?: AbortSignal) => Promise<SourceDashboardViewModel>;
+  /**
+   * Whether any Private item matches the question. Only the boolean leaves
+   * this function; defaults to a one-hit search of each Private corpus.
+   */
+  privateMatchProbe?: (question: string, ctx: OperationContext) => Promise<boolean>;
   /** The built-in embedding model's state, when the embeddings lane reports one. */
   embedding?: () => ChatGptDashboardOptions['embedding'];
 }
@@ -152,12 +158,28 @@ export async function callChatGptTool(
       case SOURCE_ANSWER_TOOL.name: {
         const question = typeof args.question === 'string' ? args.question.trim() : '';
         if (!question) throw new ChatGptSurfaceError('invalid_params');
-        return answerToolResult(await runOperation(SOURCE_ANSWER_TOOL.name, ctx, { question, timeoutMs: SOURCE_ANSWER_TIMEOUT_MS }));
+        const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
+        const [raw, privateMatched] = await Promise.all([
+          // Public and Personal evidence only: nothing Private, not even a
+          // bounded derivative, is answered from on this surface.
+          runOperation(SOURCE_ANSWER_TOOL.name, ctx, {
+            question,
+            include_secure_local: false,
+            include_secure_local_content: false,
+            timeoutMs: SOURCE_ANSWER_TIMEOUT_MS,
+          }),
+          probe(question, ctx).catch(() => false),
+        ]);
+        const jobId = pendingJobId(raw);
+        if (jobId) rememberPrivateMatch(jobId, privateMatched);
+        return answerToolResult(raw, { privateMatched });
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
         const jobId = typeof args.job_id === 'string' ? args.job_id.trim() : '';
         if (!jobId) throw new ChatGptSurfaceError('invalid_params');
-        return answerToolResult(await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId }));
+        const raw = await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId });
+        const privateMatched = privateMatchForJob(jobId, pendingJobId(raw) === undefined);
+        return answerToolResult(raw, { privateMatched });
       }
       default:
         throw new ChatGptSurfaceError('unknown_tool');
@@ -165,6 +187,57 @@ export async function callChatGptTool(
   } catch (error) {
     return errorToolResult(error);
   }
+}
+
+/**
+ * Whether a Private item matches: one hit from each Private corpus, searched
+ * in the engine. Nothing but the boolean is kept; an unsearchable corpus
+ * counts as no match.
+ */
+export async function defaultPrivateMatchProbe(question: string, ctx: OperationContext): Promise<boolean> {
+  const query = question.slice(0, PROBE_QUERY_MAX_CHARS);
+  const corpora = createPublicSourceCorpusRegistry(ctx.config.sourceIndex.corpusRegistry)
+    .list('search')
+    .filter((corpus) => corpus.trustDomain === 'secure_local');
+  if (corpora.length === 0) return false;
+  const searches = corpora.map((corpus) => ctx.email
+    .sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: 1, allTiers: false })
+    .then((result) => Array.isArray(result.hits) && result.hits.length > 0, () => false));
+  const timeout = new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), PROBE_TIMEOUT_MS);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  return Promise.race([Promise.all(searches).then((hits) => hits.some(Boolean)), timeout]);
+}
+
+const PROBE_QUERY_MAX_CHARS = 500;
+const PROBE_TIMEOUT_MS = 20_000;
+
+/** A handed-off answer's probe result, until its source_answer_result collects it. */
+const privateMatchByJob = new Map<string, { matched: boolean; expiresAt: number }>();
+const PRIVATE_MATCH_TTL_MS = 30 * 60_000;
+const PRIVATE_MATCH_MAX_JOBS = 1_000;
+
+function pendingJobId(raw: unknown): string | undefined {
+  const record = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : undefined;
+  return record?.status === 'working' && typeof record.job_id === 'string' ? record.job_id : undefined;
+}
+
+function rememberPrivateMatch(jobId: string, matched: boolean): void {
+  const now = Date.now();
+  for (const [id, entry] of privateMatchByJob) if (entry.expiresAt <= now) privateMatchByJob.delete(id);
+  while (privateMatchByJob.size >= PRIVATE_MATCH_MAX_JOBS) {
+    const oldest = privateMatchByJob.keys().next().value;
+    if (oldest === undefined) break;
+    privateMatchByJob.delete(oldest);
+  }
+  privateMatchByJob.set(jobId, { matched, expiresAt: now + PRIVATE_MATCH_TTL_MS });
+}
+
+function privateMatchForJob(jobId: string, done: boolean): boolean {
+  const entry = privateMatchByJob.get(jobId);
+  if (done) privateMatchByJob.delete(jobId);
+  return entry !== undefined && entry.expiresAt > Date.now() && entry.matched;
 }
 
 async function runOperation(name: string, ctx: OperationContext, params: Record<string, unknown>): Promise<unknown> {

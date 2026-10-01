@@ -137,7 +137,7 @@ describe('dashboard view-model producer', () => {
       progress: { indexed_items_per_hour: 100, eta_minutes: 90 },
     })]), { now: NOW });
     expect(vm.connection.state).toBe('installing');
-    expect(vm.connection.progress).toEqual({ percent: 25, label: 'Building your first index' });
+    expect(vm.connection.progress).toEqual({ percent: 25, label: 'Indexing your sources for the first time' });
     expect(vm.progress).toEqual({
       unit: 'files',
       phase: 'initial',
@@ -147,7 +147,7 @@ describe('dashboard view-model producer', () => {
       stalled: false,
       details: [
         { stage: 'Reading', unit: 'files', done: 50, total: 200 },
-        { stage: 'Making searchable', unit: 'files', done: 20, total: 200 },
+        { stage: 'Indexing', unit: 'files', done: 20, total: 200 },
       ],
     });
     expect(vm.sources[0]!.status).toBe('Working');
@@ -170,7 +170,7 @@ describe('dashboard view-model producer', () => {
       now: NOW,
       embedding: { kind: 'built_in', state: 'downloading', percent: 40 },
     });
-    expect(vm.connection).toEqual({ state: 'installing', progress: { percent: 40, label: 'Getting the built-in model ready' } });
+    expect(vm.connection).toEqual({ state: 'installing', progress: { percent: 40, label: 'Getting search ready on your Mac' } });
     expect(vm.models.embedding).toEqual({ kind: 'built_in', state: 'downloading', percent: 40 });
   });
 
@@ -307,8 +307,8 @@ function sentinelAnswer(): SourceIndexAnswerResult {
       skipped_corpora: [{ corpus_id: S('SKIPPED'), trust_domain: 'secure_local', reason: S('SKIP_REASON') }],
       lane_audits: [],
       answer_synthesis: {
-        private_context_used: true,
-        secure_local_items_consulted: 1,
+        private_context_used: privateContextUsed,
+        secure_local_items_consulted: privateContextUsed ? 1 : 0,
         internal_content_used: false,
         internal_items_consulted: 0,
         internal_content_failures: 0,
@@ -335,15 +335,24 @@ let server: ReturnType<typeof Bun.serve>;
 let base: string;
 let answerMode: 'ok' | 'throw';
 let dashboardMode: 'ok' | 'throw';
+let privateContextUsed: boolean;
+let privateProbe: boolean;
+let servesChatGpt: boolean;
+let answerRequests: Array<Record<string, unknown>>;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'olympus-chatgpt-surface-'));
   store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
   answerMode = 'ok';
   dashboardMode = 'ok';
+  privateContextUsed = false;
+  privateProbe = true;
+  servesChatGpt = true;
+  answerRequests = [];
   const worker = createEmailSourceWorker({
     sourceAnswer: {
-      async answer() {
+      async answer(request) {
+        answerRequests.push(request as unknown as Record<string, unknown>);
         if (answerMode === 'throw') throw new Error(`answer failed at /Users/owner/${S('ERROR_PATH')}`);
         return sentinelAnswer();
       },
@@ -361,6 +370,8 @@ beforeEach(() => {
       signal,
     }),
     chatgpt: {
+      servesRequest: () => servesChatGpt,
+      async privateMatchProbe() { return privateProbe; },
       async dashboardView() {
         if (dashboardMode === 'throw') throw new Error(S('DASHBOARD_ERROR'));
         return sentinelView();
@@ -429,7 +440,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
       expect(content.mimeType).toBe('text/html;profile=mcp-app');
       expect(content.text).toContain('<!doctype html>');
       expect(content.text).toContain('tools/call');
-      expect(content._meta).toMatchObject({ ui: { csp: { connectDomains: [], resourceDomains: [] } } });
+      expect(content._meta).toMatchObject({ ui: { csp: { connectDomains: [], resourceDomains: [] }, domain: 'https://mcp.olympusplugin.ai' } });
       await expect(client.readResource({ uri: 'ui://olympus/other' })).rejects.toThrow();
     } finally {
       await client.close();
@@ -451,18 +462,59 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     }
   });
 
-  test('answers carry the released answer and citations; Private items are cited by source only', async () => {
+  test('answers use Public and Personal evidence only; a Private match adds one fixed sentence', async () => {
     const client = await connectClient();
     try {
       const result = await client.callTool({ name: 'source_answer', arguments: { question: 'When was the budget approved?' } });
+      expect(answerRequests[0]).toMatchObject({ include_secure_local: false, include_secure_local_content: false });
       expect(result.structuredContent).toEqual({
         status: 'answered',
         answer: 'The budget was approved in March.',
         citations: [
-          { source: 'Gmail' },
           { source: 'Google Drive', title: 'Budget plan 2026', url: 'https://docs.google.com/document/d/abc', date: '2026-03-01' },
         ],
+        notes: ['Some matching items are private and stay on your Mac.'],
       });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('an answer synthesized from Private context is withheld', async () => {
+    privateContextUsed = true;
+    const client = await connectClient();
+    try {
+      const result = await client.callTool({ name: 'source_answer', arguments: { question: 'budget?' } });
+      expect(result.structuredContent).toEqual({
+        status: 'answered',
+        answer: 'Olympus can answer this only from private items, which stay on your Mac.',
+        citations: [],
+        notes: ['Some matching items are private and stay on your Mac.'],
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('no Private match and no Private evidence: no private sentence', async () => {
+    privateProbe = false;
+    const client = await connectClient();
+    try {
+      const result = await client.callTool({ name: 'source_answer', arguments: { question: 'budget?' } });
+      // The fixture's Gmail item is tiered Private, so it still triggers the sentence.
+      expect((result.structuredContent as { notes?: string[] }).notes).toEqual(['Some matching items are private and stay on your Mac.']);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('callers the ChatGPT predicate does not accept keep the remote operation surface', async () => {
+    servesChatGpt = false;
+    const client = await connectClient();
+    try {
+      const { tools } = await client.listTools();
+      expect(tools.map((tool) => tool.name).sort()).toEqual(['source_answer', 'source_answer_result', 'source_index_status']);
+      expect(tools.some((tool) => tool.name === DASHBOARD_TOOL_NAME)).toBe(false);
     } finally {
       await client.close();
     }
@@ -479,6 +531,9 @@ describe('ChatGPT MCP surface over the remote handler', () => {
       captured.push(await settle(client.callTool({ name: DASHBOARD_TOOL_NAME, arguments: {} })));
       captured.push(await settle(client.callTool({ name: 'source_index_status', arguments: {} })));
       captured.push(await settle(client.callTool({ name: 'source_answer', arguments: { question: 'budget?' } })));
+      privateContextUsed = true;
+      captured.push(await settle(client.callTool({ name: 'source_answer', arguments: { question: 'budget?' } })));
+      privateContextUsed = false;
       captured.push(await settle(client.callTool({ name: 'source_answer_result', arguments: { job_id: 'saj_unknown' } })));
       captured.push(await settle(client.callTool({ name: 'source_answer', arguments: {} })));
       captured.push(await settle(client.callTool({ name: S('UNKNOWN_TOOL'), arguments: {} })));

@@ -55,11 +55,13 @@ export interface RemoteMcpHandlerOptions {
   /** `signal` is the remote client's request signal; see createInProcessOperationContext. */
   makeOperationContext: (caller: OperationCaller, signal: AbortSignal) => OperationContext;
   /**
-   * When set, `/mcp` serves the ChatGPT surface (workers/chatgpt): the answer
-   * tools with ChatGPT-written descriptions, the dashboard tool and its MCP
-   * Apps resource, every response through the allowlisted response builder.
+   * The ChatGPT surface (workers/chatgpt): the answer tools with
+   * ChatGPT-written descriptions, the dashboard tool and its MCP Apps
+   * resource, every response through the allowlisted response builder.
+   * Served only to requests `servesRequest` accepts; every other caller keeps
+   * the remote operation surface unchanged.
    */
-  chatgpt?: ChatGptSurfaceOptions;
+  chatgpt?: ChatGptSurfaceOptions & { servesRequest: (request: Request) => boolean };
 }
 
 export function isRemoteMcpRequest(request: Request): boolean {
@@ -102,7 +104,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     }
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
-    const server = options.chatgpt
+    const server = options.chatgpt?.servesRequest(request)
       ? createChatGptMcpServer(() => ctx, options.chatgpt)
       : createOlympusMcpServer('remote', () => ctx);
     // No sessionIdGenerator: stateless mode.

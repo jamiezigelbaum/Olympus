@@ -4066,9 +4066,13 @@ export async function main(): Promise<void> {
       withRemoteOpenApiRoutes(remoteOpenApi, withRemoteMcpRoute(
         createRemoteMcpHandler({
           ...remoteAgentOptions,
-          // `/mcp` is the ChatGPT surface (docs/design/chatgpt-plugin.md). Its
+          // Relayed requests get the ChatGPT surface (docs/design/chatgpt-plugin.md):
+          // the hosted relay is the ChatGPT path, and only the relay's local
+          // endpoint can present the per-install relay secret. Direct and
+          // bearer connections keep the remote operation surface. The
           // dashboard tool reads the view `/dashboard.json` serves, in-process.
           chatgpt: {
+            servesRequest: trustRelayHeaders,
             dashboardView: async (signal?: AbortSignal) => {
               const response = await worker.fetch(new Request(
                 'http://olympus-worker.internal/dashboard.json',

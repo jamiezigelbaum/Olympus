@@ -20,6 +20,9 @@
         "category": "Productivity",
         "capabilities": ["Read"],
         "websiteURL": "https://olympusplugin.ai",
+        "supportURL": "https://olympusplugin.ai/support",
+        "privacyPolicyURL": "https://olympusplugin.ai/privacy",
+        "termsOfServiceURL": "https://olympusplugin.ai/terms",
         "defaultPrompt": [
           "Ask Olympus what I decided about the budget last month.",
           "Use Olympus to find what Sam sent me about the lease.",

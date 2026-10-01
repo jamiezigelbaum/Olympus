@@ -48,16 +48,18 @@ import {
  */
 export const PENDING_VOCABULARY = {
   installingNoSource: 'Connect a source to begin',
-  installingModel: 'Getting the built-in model ready',
-  installingFirstIndex: 'Building your first index',
+  installingModel: 'Getting search ready on your Mac',
+  installingFirstIndex: 'Indexing your sources for the first time',
   connectOnMac: 'Connect sources in Olympus on your Mac.',
   reconnect: 'Reconnect',
   checkAgain: 'Check again',
+  openOnMac: 'Open Olympus on your Mac',
   stageReading: 'Reading',
-  stageSearchable: 'Making searchable',
-  embeddingNeedsAttention: 'The search model needs attention on your Mac.',
-  answerModelNeedsAttention: 'The answer model needs attention on your Mac.',
+  stageSearchable: 'Indexing',
+  embeddingNeedsAttention: 'Search has stopped working on your Mac.',
+  answerModelNeedsAttention: 'Answers have stopped working on your Mac.',
   fixOnMac: 'Open Olympus on your Mac to fix this.',
+  privateMatches: 'Some matching items are private and stay on your Mac.',
 } as const;
 
 /** Static, product-owned labels for answer models. Never the card's own text. */
@@ -85,7 +87,6 @@ const SYNCED_RELATIVE = /^synced (just now|less than 1 hour ago|\d+ (minute|hour
 
 const KNOWN_READINESS_LABELS = new Set([
   'Connect this source',
-  'Needs attention before answers',
   'Ready for questions; sync paused',
   'Ready for questions',
   'Syncing now',
@@ -130,11 +131,11 @@ export function buildChatGptDashboardViewModel(
 
   const embedding = options.embedding ?? embeddingFromModelSetup(view.model_setup);
   if (embedding.state === 'failed') {
-    needsYou.push({ id: 'model:embedding', sentence: PENDING_VOCABULARY.embeddingNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.checkAgain) });
+    needsYou.push({ id: 'model:embedding', sentence: PENDING_VOCABULARY.embeddingNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.openOnMac) });
   }
   const answers = answersFromModelSetup(view.model_setup);
   if (answers && !answers.ready) {
-    needsYou.push({ id: 'model:answers', sentence: PENDING_VOCABULARY.answerModelNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.checkAgain) });
+    needsYou.push({ id: 'model:answers', sentence: PENDING_VOCABULARY.answerModelNeedsAttention, fix: onMacFix(PENDING_VOCABULARY.openOnMac) });
   }
 
   const progress = overallProgress(rows.map((row) => row.card), rows.map((row) => row.status));

@@ -10,10 +10,10 @@
  * - Free text is either a fixed string from this module or the dashboard
  *   producer's closed vocabulary, or the released `answer` the release gate
  *   already decided the calling assistant may see.
- * - Item metadata (titles, links, dates) is copied only for evidence the
- *   engine tiers Public or Personal. Private and Secret items are cited by
- *   source name only; secret locations, folder names, corpus ids, internal ids
- *   and timings are never copied.
+ * - Only Public and Personal evidence is cited (titles, links, dates). Private
+ *   and Secret items are never cited or summarized; a Private match adds one
+ *   fixed sentence, no counts. Secret locations, folder names, corpus ids,
+ *   internal ids and timings are never copied.
  * - Errors carry a fixed sentence per error code, never the internal message.
  *
  * `_meta` reaches only the UI, never the model, but it still leaves the Mac
@@ -29,6 +29,7 @@ import type {
   DashboardViewModelV1,
 } from './dashboard-contract.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME } from './dashboard-contract.ts';
+import { PENDING_VOCABULARY } from './dashboard-view-model.ts';
 
 export interface ChatGptTextContent {
   type: 'text';
@@ -171,7 +172,7 @@ function dashboardSummary(view: DashboardViewModelV1): string {
     parts.push(`Sources: ${connected.map((source) => `${source.label} (${source.status})`).join(', ')}.`);
   }
   if (view.progress) parts.push(`Indexing ${view.progress.percent}% done, ${view.progress.itemsLeft} ${view.progress.unit} left.`);
-  if (view.needsYou.length > 0) parts.push(`Needs attention: ${view.needsYou.map((item) => item.sentence.replace(/\.$/, '')).join('; ')}.`);
+  if (view.needsYou.length > 0) parts.push(`Needs you: ${view.needsYou.map((item) => item.sentence.replace(/\.$/, '')).join('; ')}.`);
   return parts.join(' ');
 }
 
@@ -206,11 +207,22 @@ export interface ChatGptCitation {
   date?: string;
 }
 
+export interface AnswerResultOptions {
+  /** A Private item matched the question (found by the surface's own probe). */
+  privateMatched?: boolean;
+}
+
 /**
  * A source_answer or source_answer_result outcome: the released answer and
  * citations, or the working marker with its job id.
+ *
+ * ChatGPT gets nothing tiered Private or Secret, summaries included. The
+ * surface asks for Public and Personal evidence only; this is the second
+ * line: Private evidence is never cited, and an answer whose synthesis used
+ * Private context is withheld. Either way, or when the probe saw a Private
+ * match, the reply carries one fixed sentence and nothing else about it.
  */
-export function answerToolResult(raw: unknown): ChatGptToolResult {
+export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}): ChatGptToolResult {
   const record = asRecord(raw);
   if (record?.status === 'working' && typeof record.job_id === 'string' && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record.job_id)) {
     return {
@@ -221,34 +233,49 @@ export function answerToolResult(raw: unknown): ChatGptToolResult {
   if (!record || typeof record.answer !== 'string') {
     return errorToolResult(new OperationError('source_index_error', 'unexpected answer shape'));
   }
-  const answer = record.answer.replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER);
-  const citations = (Array.isArray(record.evidence) ? record.evidence : [])
-    .map(citationFrom)
-    .filter((citation): citation is ChatGptCitation => citation !== undefined)
-    .slice(0, MAX_CITATIONS);
-  const textParts = [answer];
-  if (citations.length > 0) {
-    textParts.push('', 'Sources:', ...citations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));
+  let privateMatched = options.privateMatched === true;
+  const citations: ChatGptCitation[] = [];
+  for (const value of Array.isArray(record.evidence) ? record.evidence : []) {
+    const evidence = asRecord(value);
+    if (!evidence) continue;
+    if (typeof evidence.trust_domain !== 'string' || !CITABLE_TRUST_DOMAINS.has(evidence.trust_domain)) {
+      privateMatched = true;
+      continue;
+    }
+    const citation = citationFrom(evidence);
+    if (citation && citations.length < MAX_CITATIONS) citations.push(citation);
   }
+  const synthesis = asRecord(asRecord(record.audit)?.answer_synthesis);
+  const usedPrivate = synthesis?.private_context_used === true
+    || (typeof synthesis?.secure_local_items_consulted === 'number' && synthesis.secure_local_items_consulted > 0);
+  if (usedPrivate) privateMatched = true;
+  const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record.answer.replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER);
+  const shownCitations = usedPrivate ? [] : citations;
+  const notes = privateMatched ? [PENDING_VOCABULARY.privateMatches] : [];
+  const textParts = [answer];
+  if (shownCitations.length > 0) {
+    textParts.push('', 'Sources:', ...shownCitations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));
+  }
+  if (notes.length > 0) textParts.push('', ...notes);
   return {
     content: [{ type: 'text', text: textParts.join('\n') }],
-    structuredContent: { status: 'answered', answer, citations },
+    structuredContent: { status: 'answered', answer, citations: shownCitations, ...(notes.length > 0 ? { notes } : {}) },
   };
 }
 
-function citationFrom(value: unknown): ChatGptCitation | undefined {
-  const evidence = asRecord(value);
-  if (!evidence) return undefined;
+/** Proposed vocabulary: the whole answer when only Private items could answer. */
+export const PRIVATE_ANSWER_WITHHELD = 'Olympus can answer this only from private items, which stay on your Mac.';
+
+/** Public or Personal evidence only; the caller has already dropped the rest. */
+function citationFrom(evidence: Record<string, unknown>): ChatGptCitation | undefined {
   const source = sourceLabel(evidence.provider, evidence.family);
   if (!source) return undefined;
   const citation: ChatGptCitation = { source };
-  if (typeof evidence.trust_domain === 'string' && CITABLE_TRUST_DOMAINS.has(evidence.trust_domain)) {
-    if (typeof evidence.title === 'string' && evidence.title.trim()) citation.title = text(evidence.title);
-    const url = httpsUrl(evidence.uri);
-    if (url) citation.url = url;
-    const date = dateOnly(evidence.authored_at) ?? dateOnly(evidence.updated_at);
-    if (date) citation.date = date;
-  }
+  if (typeof evidence.title === 'string' && evidence.title.trim()) citation.title = text(evidence.title);
+  const url = httpsUrl(evidence.uri);
+  if (url) citation.url = url;
+  const date = dateOnly(evidence.authored_at) ?? dateOnly(evidence.updated_at);
+  if (date) citation.date = date;
   return citation;
 }
 
