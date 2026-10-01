@@ -869,7 +869,7 @@ describe('dashboard privacy field', () => {
     expect(unset.needsYou.find((item) => item.id === 'privacy:setup')).toEqual({
       id: 'privacy:setup',
       sentence: 'Tell Olympus what\'s private for you',
-      fix: { label: 'Tell Olympus', tool: 'olympus_privacy_get', args: {} },
+      fix: { label: 'Set up privacy', tool: 'olympus_privacy_get', args: {} },
     });
     const set = buildChatGptDashboardViewModel(emptyView(), { privacy: { configured: true, pendingCount: 0, ruleCount: 2 } });
     expect(set.privacy).toEqual({ configured: true, pendingCount: 0, ruleCount: 2 });

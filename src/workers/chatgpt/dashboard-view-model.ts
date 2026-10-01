@@ -35,6 +35,7 @@ import {
   DASHBOARD_CHATGPT_VOCABULARY,
   DASHBOARD_CHATGPT_PICKER_COPY,
   DASHBOARD_CHATGPT_SETUP_LABELS as CHATGPT_SETUP_LABELS,
+  DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
 } from '../dashboard/vocabulary.ts';
 import {
   CONNECT_SOURCE_TOOL_NAME,
@@ -129,15 +130,6 @@ export interface ChatGptDashboardOptions {
   privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
 }
 
-/**
- * The privacy setup prompt. Kept here, not in vocabulary.ts, until the
- * dashboard lane adopts it there (it owns that file).
- */
-export const CHATGPT_PRIVACY_SETUP_COPY = {
-  sentence: 'Tell Olympus what\'s private for you',
-  label: 'Tell Olympus',
-} as const;
-
 export function buildChatGptDashboardViewModel(
   view: SourceDashboardViewModel,
   options: ChatGptDashboardOptions = {},
@@ -186,8 +178,8 @@ export function buildChatGptDashboardViewModel(
   if (options.privacy && !options.privacy.configured) {
     needsYou.push({
       id: 'privacy:setup',
-      sentence: CHATGPT_PRIVACY_SETUP_COPY.sentence,
-      fix: { label: CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} },
+      sentence: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.sentence,
+      fix: { label: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} },
     });
   }
 
