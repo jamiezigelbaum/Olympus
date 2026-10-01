@@ -32,7 +32,7 @@ import {
   type SealedPrivateAnswer,
 } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs, createPrivateAnswerHandler } from '../src/workers/chatgpt/private-answer-jobs.ts';
-import { privateAnswerPageHtml, privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
+import { privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { copyPrivateMatch } from '../src/workers/chatgpt/response-builder.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { DASHBOARD_CHATGPT_VOCABULARY } from '../src/workers/dashboard/vocabulary.ts';
@@ -114,23 +114,8 @@ describe('sealing', () => {
     expect(await importPanelPublicKey(toBase64Url(point))).toBeUndefined();
   });
 
-  test('the panel page decrypts with the same algorithm as the engine', async () => {
-    const html = privateAnswerPageHtml({ relayOrigin: 'https://relay.test' });
-    const grab = (name: string) => {
-      const match = new RegExp(`(async )?function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}`).exec(html);
-      if (!match) throw new Error(`no ${name} in the page`);
-      return match[0];
-    };
-    const source = [grab('b64urlToBytes'), grab('bytesToB64url'), grab('open'), 'return { open, bytesToB64url };'].join('\n');
-    const page = new Function('subtle', 'atob', 'btoa', source)(crypto.subtle, atob, btoa) as {
-      open: (jobId: string, key: CryptoKey, sealed: SealedPrivateAnswer) => Promise<unknown>;
-    };
-    const panel = await generatePanelKeyPair();
-    const jobId = mintCredential('private', INSTALL);
-    const plaintext = JSON.stringify({ v: 1, answer: 'from the page', citations: [] });
-    const sealed = await sealPrivateAnswer(jobId, (await importPanelPublicKey(panel.publicKey))!.key, plaintext);
-    expect(await page.open(jobId, panel.privateKey, sealed)).toEqual({ v: 1, answer: 'from the page', citations: [] });
-  });
+  // The panel page's copy of this algorithm is driven end to end, against
+  // sealPrivateAnswer, in test/chatgpt-private-answer-ui.test.ts.
 });
 
 describe('one-time jobs', () => {
