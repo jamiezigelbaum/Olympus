@@ -565,6 +565,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const privateAnswer = async (request: Request, url: URL, ip: string): Promise<Response> => {
     const requestOrigin = request.headers.get('origin');
     const allowed = isPanelOrigin(requestOrigin, panelOrigins);
+    // The widget host's origin is not private; logging refusals shows which
+    // ChatGPT surfaces (web, desktop) serve the panel from where.
+    if (!allowed) log('panel_origin_refused', { origin: (requestOrigin ?? 'none').slice(0, 120) });
     const cors = allowed ? privateAnswerCorsHeaders(requestOrigin) : {};
     const reply = (status: number, body: Record<string, unknown>, headers: Record<string, string> = {}) =>
       json(status, body, { ...cors, ...headers });

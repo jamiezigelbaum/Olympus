@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 
 export type RelayEvent =
   | 'session_ready'
+  | 'panel_origin_refused'
   | 'session_closed'
   | 'session_replaced'
   | 'session_rejected'
