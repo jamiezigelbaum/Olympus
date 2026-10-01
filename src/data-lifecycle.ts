@@ -811,7 +811,7 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     })),
     serviceUnitTarget(workerServicePaths('darwin', home).unitPath),
     serviceUnitTarget(workerServicePaths('linux', home).unitPath),
-    ...globExisting(join(home, 'Library', 'LaunchAgents'), /^(?:com|org)\.openclaw\.olympus.*\.plist$/)
+    ...globExisting(join(home, 'Library', 'LaunchAgents'), /^(?:(?:com|org)\.openclaw\.olympus.*|ai\.olympusplugin\.engine)\.plist$/)
       .map(serviceUnitTarget),
     ...globExisting(join(home, '.config', 'systemd', 'user'), /^olympus.*\.(service|timer)$/)
       .map(serviceUnitTarget),

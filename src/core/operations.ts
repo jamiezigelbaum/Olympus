@@ -1,5 +1,5 @@
 import { DelphiClient } from './delphi.ts';
-import { runDoctor } from './doctor.ts';
+import { defaultDoctorHostProbe, runDoctor, type DoctorHostFacts } from './doctor.ts';
 import { EmailClient, type SourceAnswerSelectedItemOption } from './email.ts';
 import { defaultConfig, type OlympusConfig } from './config.ts';
 import { resolveLane, resolveModelProfile } from './config.ts';
@@ -47,6 +47,8 @@ export interface OperationContext {
    * hands off to a background job; without it, it waits as it always has.
    */
   sourceAnswerJobs?: SourceAnswerJobScope;
+  /** Test seam for olympus_doctor's host check; production probes this machine. */
+  doctorHostProbe?: () => DoctorHostFacts;
 }
 
 export interface Operation {
@@ -552,7 +554,7 @@ export const operations: Operation[] = [
     mutating: false,
     nativeExposure: 'always',
     cliHints: { name: 'doctor' },
-    handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env }),
+    handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === 'native' })) }),
   },
 ];
 

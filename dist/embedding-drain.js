@@ -17267,6 +17267,9 @@ var init_classification = __esm(() => {
   init_sensitivity_map();
 });
 
+// src/core/package-root.ts
+var init_package_root = () => {};
+
 // src/workers/credential-broker/unpaired-sources.ts
 var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
 var init_unpaired_sources = __esm(() => {
@@ -19669,6 +19672,7 @@ import { dirname as dirname17, isAbsolute as isAbsolute3 } from "node:path";
 
 // src/workers/email-source/server.ts
 init_classification();
+init_package_root();
 
 // src/core/messaging-capture.ts
 init_atomic_file();

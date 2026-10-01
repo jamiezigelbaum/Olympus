@@ -663,6 +663,26 @@ function nextWorkerEnvPath(text: string, options: WorkerServiceInstallOptions): 
     : `${text.replace(/\n?$/, '\n')}PATH=${desiredPath}\n`;
 }
 
+/**
+ * Create or reconcile only the managed worker environment (worker.env), with
+ * the same custody checks `installWorkerService` applies, and no service unit.
+ * The standalone engine host supervises the worker itself, so it needs the
+ * environment (token, PATH, port) without the legacy worker LaunchAgent.
+ */
+export function ensureManagedWorkerEnvironment(
+  options: Pick<WorkerServiceInstallOptions, 'homeDir' | 'bunBin' | 'openclawBin' | 'authToken' | 'port' | 'schedulerEnabled' | 'envPath'> = {},
+): { path: string; wrote: boolean } {
+  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir(), 'home directory');
+  const envPath = options.envPath ?? join(homeDir, '.config', 'olympus', 'worker.env');
+  validateManagedPath(envPath, 'worker environment');
+  ensurePrivateRootDirectorySync(homeDir);
+  if (pathIsWithin(homeDir, envPath)) {
+    assertManagedParentSafety(homeDir, envPath, 'worker environment');
+    ensurePrivateDirectoryTreeSync(homeDir, dirname(envPath));
+  }
+  return { path: envPath, wrote: reconcileWorkerEnv(envPath, { ...options, homeDir }) };
+}
+
 function reconcileWorkerEnv(envPath: string, options: WorkerServiceInstallOptions): boolean {
   mkdirSync(dirname(envPath), { recursive: true });
   if (!existsSync(envPath)) {
