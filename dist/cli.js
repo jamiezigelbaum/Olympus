@@ -16787,8 +16787,22 @@ function createConnectorStoreContentProvider(options) {
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId)
         return;
-      if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
-        return;
+      const contentInScope = options.contentAllowed !== false && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters);
+      if (!contentInScope) {
+        if (!options.metadataFilters || !store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)) {
+          return;
+        }
+        const names = store.localContent(localItemId, request.maxChars, undefined, { withoutContent: true });
+        if (!names)
+          return;
+        return {
+          sensitivity: buildSourceSensitivity({ trustTier: names.trustTier, trustDomain: store.trustDomain }),
+          chunks: [],
+          namesOnly: true,
+          coverageGaps: [CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP],
+          ...names.locatorUri ? { locatorUri: names.locatorUri } : {}
+        };
+      }
       const anchorChunkIndex = request.provenance.chunk?.chunkIndex;
       const content = store.localContent(localItemId, request.maxChars, {
         ...request.query?.trim() ? { query: request.query } : {},
@@ -16803,6 +16817,7 @@ function createConnectorStoreContentProvider(options) {
         chunks: content.chunks,
         ...content.truncated ? { truncated: true } : {},
         ...coverageGaps.length > 0 ? { coverageGaps } : {},
+        ...metadataOnlyRuleId !== undefined ? { namesOnly: true } : {},
         ...content.locatorUri ? { locatorUri: content.locatorUri } : {}
       };
     }
@@ -18519,7 +18534,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -22440,7 +22455,7 @@ var init_local_index = __esm(() => {
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       }), () => "content").map((row) => searchRowFromItemRow(row));
     }
-    localContent(localItemId, maxChars, passageFocus) {
+    localContent(localItemId, maxChars, passageFocus, options = {}) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
         provider_conversation_id,
@@ -22458,10 +22473,10 @@ var init_local_index = __esm(() => {
       if (!this.copyServable(identity)) {
         return;
       }
-      const servesContent = this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
+      const servesContent = options.withoutContent !== true && this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
       const chunkRows = servesContent ? this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk) : [];
       const { chunks, truncated } = selectEvidencePassages(chunkRows.map((chunk) => chunk.bounded_text), maxChars, passageFocus);
-      const reactionLine = renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json));
+      const reactionLine = servesContent ? renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json)) : undefined;
       return {
         trustTier: trustTierFromRow(row.trust_tier),
         chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
@@ -24687,6 +24702,11 @@ var init_dropbox2 = __esm(() => {
   init_approved_scope_filter();
 });
 
+// src/core/names-only-coverage.ts
+function namesOnlyCoverageNote(count) {
+  return count === 1 ? "1 match is in a folder set to Names only, so Olympus has its name but not its contents. " + "Switch that folder to Full in the folder picker to let Olympus read it." : `${count} matches are in folders set to Names only, so Olympus has their names but not their contents. ` + "Switch those folders to Full in the folder picker to let Olympus read them.";
+}
+
 // src/core/opsec.ts
 function createStructuredEvidenceFact(input) {
   const factId = input.factId.trim();
@@ -26578,6 +26598,8 @@ async function buildEvidencePackDetailed(input) {
   const extractionGaps = [];
   const policyDeniedCoverageGaps = [];
   let policyDeniedCandidates = 0;
+  const namesOnlyCandidateIndexes = [];
+  let unreadCandidates = 0;
   const hydrationStartedAt = Date.now();
   const maxBytesPerCandidate = evidenceBytesPerCandidate(routedHits.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
   const maxCharsPerCandidate = maxBytesPerCandidate;
@@ -26626,6 +26648,10 @@ async function buildEvidencePackDetailed(input) {
       ...hit.score !== undefined ? { score: hit.score } : {}
     };
     assertEvidenceCandidateModelEligible(candidate);
+    if (content?.namesOnly === true)
+      namesOnlyCandidateIndexes.push(candidates.length);
+    else if (!provider || !content || content.chunks.length === 0)
+      unreadCandidates += 1;
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
     const gap = extractionGapFor(hit, provider !== undefined, content);
@@ -26652,6 +26678,8 @@ async function buildEvidencePackDetailed(input) {
     policyDeniedCandidates,
     policyDeniedCoverageGaps,
     corpusReadabilityGaps,
+    namesOnlyCandidateIndexes,
+    unreadCandidates,
     ...secretLocations.length > 0 ? { secretLocations } : {},
     ...classificationCoverage.length > 0 ? { classificationCoverage } : {}
   };
@@ -29113,12 +29141,17 @@ function safeUnsupportedCoverageGaps(pack, nonPublicPack) {
   return [`${gaps.length} source item${gaps.length === 1 ? "" : "s"} could not be read or extracted in this pass.`];
 }
 function safeUnreadableMatchedCoverageGaps(detail) {
-  const count = unreadableMatchedCandidateIndexes(detail).length;
-  if (count === 0)
-    return [];
-  return [
-    `${count} matched file${count === 1 ? "" : "s"} found, but ` + `${count === 1 ? "it could" : "they could"} not be read or extracted in this pass.`
-  ];
+  const namesOnly = new Set(detail.namesOnlyCandidateIndexes ?? []);
+  const matched = unreadableMatchedCandidateIndexes(detail);
+  const namesOnlyCount = matched.filter((index) => namesOnly.has(index)).length;
+  const count = matched.length - namesOnlyCount;
+  const notes = [];
+  if (count > 0) {
+    notes.push(`${count} matched file${count === 1 ? "" : "s"} found, but ` + `${count === 1 ? "it could" : "they could"} not be read or extracted in this pass.`);
+  }
+  if (namesOnlyCount > 0)
+    notes.push(namesOnlyCoverageNote(namesOnlyCount));
+  return notes;
 }
 function appendUniqueCoverageNotes(notes, additions) {
   const result = [];
@@ -29388,7 +29421,8 @@ async function searchReleasedEvidence(input) {
     coverage: {
       searched_corpora: coverage.searchedCorpora.length,
       skipped_corpora: detail.skippedCorpora.filter((skip) => skip.trustDomain !== "secure_local").length,
-      unreadable_items: coverage.extractionGaps.length + (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.unreadDocuments, 0),
+      unreadable_items: (detail.unreadCandidates ?? 0) + (detail.policyDeniedCandidates ?? 0) + (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.unreadDocuments, 0),
+      names_only_items: detail.namesOnlyCandidateIndexes?.length ?? 0,
       partially_read_items: (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.partialDocuments, 0),
       unclassified_items: (detail.classificationCoverage ?? []).reduce((sum, note) => sum + note.pendingClassificationItems, 0),
       matches: (coverage.matchCounts ?? []).map((count) => ({
@@ -96065,6 +96099,11 @@ function sourceSchedulerConstructionLogLines(input) {
     summary
   ];
 }
+function sourceSchedulerEnabledLogLine(input) {
+  const allowlist = new Set(input.selectedSourceIds);
+  const selected = allowlist.size === 0 ? input.constructedSourceIds.length : input.constructedSourceIds.filter((sourceId) => allowlist.has(sourceId)).length;
+  return `In-process source scheduler enabled for ${input.constructedSourceIds.length} constructed source(s); ` + `${selected} selected.`;
+}
 function attachSourceWatchSchedulerTask(input) {
   const selected = new Set(input.selectedSourceIds);
   const hostIndex = input.sources.findIndex((source) => selected.has(source.sourceId));
@@ -103646,10 +103685,13 @@ function searchToolResult(raw, options = {}) {
   const coverage = {
     searchedSources: whole(coverageRecord.searched_corpora),
     unreadableItems: whole(coverageRecord.unreadable_items),
+    namesOnlyItems: whole(coverageRecord.names_only_items),
     partiallyReadItems: whole(coverageRecord.partially_read_items),
     unclassifiedItems: whole(coverageRecord.unclassified_items)
   };
   const notes = [];
+  if (coverage.namesOnlyItems > 0)
+    notes.push(namesOnlyCoverageNote(coverage.namesOnlyItems));
   if (coverage.unreadableItems > 0)
     notes.push(`Olympus could not read ${plural4(coverage.unreadableItems, "matching item")}.`);
   if (coverage.partiallyReadItems > 0)
@@ -109199,8 +109241,15 @@ async function main() {
       }
     } : {}
   });
-  if (dropboxConnectorStore && dropboxExtractionScopes.length > 0 && !dropboxHandle) {
-    console.warn(`[file-extraction] corpus=${DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID} provider=dropbox deferred ` + "reason=no_credential_handle — extraction starts on the next scheduler pass after Dropbox is " + "connected, with no restart.");
+  if (dropboxConnectorStore && dropboxExtractionScopes.length > 0 && !dropboxHandle && !selectedSourceCredentialHandle({
+    env: process.env,
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
+    provider: "dropbox",
+    capability: "dropbox.files.sync",
+    handles: readActiveConnectedHandles(process.env),
+    warn: () => {}
+  })) {
+    console.log("[file-extraction] Dropbox extraction waits for Dropbox to be connected.");
   }
   const assertFileSourceScopeCurrent = (provider) => {
     const sourceId = provider === "dropbox" ? "dropbox.files" : provider === "google_drive" ? "google_drive.docs" : undefined;
@@ -109620,10 +109669,12 @@ async function main() {
           contentProviders: {
             ...Object.fromEntries(readConnectorStores.flatMap((store) => {
               const mandatoryScope = connectorStoreReadScope(store);
-              return mandatoryScope.allowed && mandatoryScope.contentAllowed !== false ? [[store.corpusId, createConnectorStoreContentProvider({
+              return mandatoryScope.allowed ? [[store.corpusId, createConnectorStoreContentProvider({
                 store,
                 ...mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {},
-                ...mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {}
+                ...mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {},
+                ...mandatoryScope.filters ? { metadataFilters: mandatoryScope.filters } : {},
+                contentAllowed: mandatoryScope.contentAllowed !== false
               })]] : [];
             }))
           }
@@ -110565,7 +110616,10 @@ async function main() {
     })) {
       console.log(line);
     }
-    console.log(`In-process source scheduler enabled for ${schedulerSources.length} constructed source(s); ${olympusConfig.worker.scheduler.sourceIds.length} selected.`);
+    console.log(sourceSchedulerEnabledLogLine({
+      constructedSourceIds: schedulerSources.map((source) => source.sourceId),
+      selectedSourceIds: olympusConfig.worker.scheduler.sourceIds
+    }));
     if (schedulerSources.length === 0) {
       console.log("[source-scheduler] idle: no source is connected yet; the scheduler is running and will adopt each source as you connect it in the dashboard.");
     }

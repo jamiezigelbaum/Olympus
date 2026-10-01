@@ -16734,7 +16734,7 @@ var init_local_index = __esm(() => {
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       }), () => "content").map((row) => searchRowFromItemRow(row));
     }
-    localContent(localItemId, maxChars, passageFocus) {
+    localContent(localItemId, maxChars, passageFocus, options = {}) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
         provider_conversation_id,
@@ -16752,10 +16752,10 @@ var init_local_index = __esm(() => {
       if (!this.copyServable(identity)) {
         return;
       }
-      const servesContent = this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
+      const servesContent = options.withoutContent !== true && this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
       const chunkRows = servesContent ? this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk) : [];
       const { chunks, truncated } = selectEvidencePassages(chunkRows.map((chunk) => chunk.bounded_text), maxChars, passageFocus);
-      const reactionLine = renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json));
+      const reactionLine = servesContent ? renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json)) : undefined;
       return {
         trustTier: trustTierFromRow(row.trust_tier),
         chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
@@ -17527,7 +17527,6 @@ var init_dropbox2 = __esm(() => {
   init_credential_broker();
   init_approved_scope_filter();
 });
-
 // src/core/opsec.ts
 var init_opsec = () => {};
 
