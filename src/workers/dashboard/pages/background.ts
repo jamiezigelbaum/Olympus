@@ -262,11 +262,15 @@ function detailLink(
 export function dashboardBackgroundRowLines(
   lanes: readonly DashboardBackgroundLane[],
 ): DashboardBackgroundRowLine[] {
-  return lanes.map((lane) => ({
-    name: lane.name,
-    facts: lane.facts,
-    ...(lane.fraction === undefined ? {} : { percent: lane.fraction * 100 }),
-  }));
+  // A lane with nothing left to say (its only news is already under Needs you)
+  // draws no row: a bare "Syncing" label read as a missing value.
+  return lanes
+    .filter((lane) => (lane.facts ?? '').trim() !== '' || lane.fraction !== undefined)
+    .map((lane) => ({
+      name: lane.name,
+      facts: lane.facts,
+      ...(lane.fraction === undefined ? {} : { percent: lane.fraction * 100 }),
+    }));
 }
 
 /* ------------------------------------------------------------ lane views -- */

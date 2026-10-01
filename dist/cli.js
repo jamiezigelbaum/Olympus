@@ -81682,7 +81682,7 @@ function detailLink(source, basePath) {
   return { href: detailHref(source, basePath), hrefLabel: `Open ${source.label} →` };
 }
 function dashboardBackgroundRowLines(lanes) {
-  return lanes.map((lane) => ({
+  return lanes.filter((lane) => (lane.facts ?? "").trim() !== "" || lane.fraction !== undefined).map((lane) => ({
     name: lane.name,
     facts: lane.facts,
     ...lane.fraction === undefined ? {} : { percent: lane.fraction * 100 }
