@@ -30,12 +30,40 @@ export interface BuiltInPrivateAnswerModelOptions {
   available: () => boolean;
   /** analyst-built-in.ts answerPrivately (injected, so tests run a stub). */
   answer: (question: string, evidence: readonly BuiltInEvidenceItem[], options: AnswerPrivatelyOptions) => Promise<PrivateAnswer>;
+  /** The panel's work bound (PANEL_ANSWER_LIMITS by default). */
+  limits?: Partial<PanelAnswerLimits>;
 }
 
-const MAX_PASSAGE_CHARS = 6_000;
+/**
+ * How much work one panel answer may cost. The panel waits for it live, on
+ * a small local model, so it reads only the most relevant readable items
+ * (the evidence arrives in relevance order), each with its best passages, in
+ * one tight prompt, and skips the Analyst's second (audit) pass, which would
+ * cost a second full prompt. Generic: no question or source is consulted.
+ */
+export interface PanelAnswerLimits {
+  /** Readable items read, most relevant first. */
+  maxItems: number;
+  /** Characters of passage text per item. */
+  maxPassageChars: number;
+  /** Ceiling on the prompt's UTF-8 bytes (answerPrivately fits the evidence to it). */
+  maxPromptBytes: number;
+  /** The answer's character budget (bounds generation). */
+  maxAnswerChars: number;
+  audit: boolean;
+}
+
+export const PANEL_ANSWER_LIMITS: Readonly<PanelAnswerLimits> = {
+  maxItems: 6,
+  maxPassageChars: 2_400,
+  maxPromptBytes: 12_000,
+  maxAnswerChars: 1_000,
+  audit: false,
+};
 
 export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerModelOptions): PrivateAnswerModel {
   const { model } = options;
+  const limits: PanelAnswerLimits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
   return {
     status() {
       if (!model) return { state: 'no_model' };
@@ -51,15 +79,29 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       }
       return { state: 'no_model' };
     },
-    async answerPrivately(question, evidence, signal) {
+    async answerPrivately(question, evidence, signal, observe) {
       if (!model) throw new Error('no private answer model');
-      const { items, unreadable } = privateEvidence(evidence);
+      const read = privateEvidence(evidence, limits.maxPassageChars);
+      const unreadable = read.unreadable;
+      const items = read.items.slice(0, Math.max(1, limits.maxItems));
+      try {
+        observe?.evidence?.({ items: items.length, unreadable, bytes: items.reduce((sum, item) => sum + utf8Bytes(item.text), 0) });
+      } catch {
+        // A reporting hook never fails the answer.
+      }
       if (items.length === 0) {
         if (unreadable === 0) throw new Error('no private evidence');
         // Never answer from titles alone: say plainly that nothing was readable.
         return { answer: unreadableAnswer(unreadable), citations: [], unanswered: [] };
       }
-      const result = await options.answer(question, items, { model, ...(signal ? { signal } : {}) });
+      const result = await options.answer(question, items, {
+        model,
+        maxPromptBytes: limits.maxPromptBytes,
+        maxAnswerChars: limits.maxAnswerChars,
+        audit: limits.audit,
+        ...(observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {}),
+        ...(signal ? { signal } : {}),
+      });
       const byId = new Map(items.map((item) => [item.id, item]));
       const citations: PrivateAnswerCitation[] = [];
       const seen = new Set<string>();
@@ -91,7 +133,10 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
  * returned. An item with no readable text is left out and counted as
  * unreadable, never answered from its title.
  */
-export function privateEvidence(hits: readonly PrivateEvidenceItem[]): { items: BuiltInEvidenceItem[]; unreadable: number } {
+export function privateEvidence(
+  hits: readonly PrivateEvidenceItem[],
+  maxPassageChars = MAX_PASSAGE_CHARS,
+): { items: BuiltInEvidenceItem[]; unreadable: number } {
   const items: BuiltInEvidenceItem[] = [];
   let unreadable = 0;
   hits.forEach((hit, index) => {
@@ -105,7 +150,7 @@ export function privateEvidence(hits: readonly PrivateEvidenceItem[]): { items: 
       : [];
     const passage = (chunks.length > 0 ? chunks.join('\n…\n') : undefined)
       ?? string(content?.passage) ?? string(hit.excerpt) ?? string(hit.text);
-    const text = passage?.slice(0, MAX_PASSAGE_CHARS);
+    const text = passage?.slice(0, maxPassageChars);
     if (!text) {
       unreadable += 1;
       return;
@@ -152,6 +197,12 @@ function unreadableAnswer(count: number): string {
   return count === 1
     ? 'The matching private item has no readable text on this computer, so there is no private answer.'
     : `None of the ${count} matching private items has readable text on this computer, so there is no private answer.`;
+}
+
+const MAX_PASSAGE_CHARS = 6_000;
+
+function utf8Bytes(text: string): number {
+  return Buffer.byteLength(text, 'utf8');
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

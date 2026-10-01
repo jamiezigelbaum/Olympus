@@ -20,6 +20,7 @@ import {
   type AnalystModel,
   type AnalystModelCompletion,
   type AnalystModelRequest,
+  type AnalystModelUsage,
 } from './analyst.ts';
 import type { Analyst, EvidenceCandidate, EvidencePack } from './contracts.ts';
 import { OperationError } from './operation-error.ts';
@@ -294,7 +295,11 @@ async function chatCompletion(
         max_tokens: maxTokensForChars(request.maxOutputChars),
         // Every Analyst-seam prompt asks for one JSON object; a grammar keeps
         // a small model from wrapping it in prose or truncating its syntax.
-        response_format: { type: 'json_object' },
+        // With a response schema the grammar also bounds each field, so the
+        // object closes within the output budget.
+        response_format: request.responseSchema
+          ? { type: 'json_schema', json_schema: { name: 'reply', schema: request.responseSchema } }
+          : { type: 'json_object' },
       }),
       signal,
     });
@@ -316,12 +321,30 @@ async function chatCompletion(
   }
   const payload = await response.json() as {
     choices?: Array<{ message?: { content?: unknown } }>;
+    timings?: Record<string, unknown>;
   };
   const content = payload.choices?.[0]?.message?.content;
   if (typeof content !== 'string') {
     throw new OperationError('argus_error', 'The built-in private model returned no text.');
   }
-  return { text: content, modelId: `${BUILT_IN_ANALYST_NAME}/${spec.modelId}` };
+  const usage = llamaUsage(payload.timings);
+  return { text: content, modelId: `${BUILT_IN_ANALYST_NAME}/${spec.modelId}`, ...(usage ? { usage } : {}) };
+}
+
+/** llama-server's per-request `timings` (counts and milliseconds only). */
+function llamaUsage(timings: Record<string, unknown> | undefined): AnalystModelUsage | undefined {
+  if (!timings) return undefined;
+  const count = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined);
+  const usage: AnalystModelUsage = {};
+  const promptTokens = count(timings.prompt_n);
+  const promptMs = count(timings.prompt_ms);
+  const outputTokens = count(timings.predicted_n);
+  const outputMs = count(timings.predicted_ms);
+  if (promptTokens !== undefined) usage.promptTokens = promptTokens;
+  if (promptMs !== undefined) usage.promptMs = promptMs;
+  if (outputTokens !== undefined) usage.outputTokens = outputTokens;
+  if (outputMs !== undefined) usage.outputMs = outputMs;
+  return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
 // ~3 characters per token for prose; the JSON envelope and citation claims
@@ -399,7 +422,23 @@ export interface AnswerPrivatelyOptions {
   maxAnswerChars?: number;
   /** Ceiling on the main prompt's UTF-8 bytes; the evidence is fitted to it. */
   maxPromptBytes?: number;
+  /**
+   * The Analyst's second, audit pass over the draft (default on). It costs a
+   * second full prompt; an interactive caller with a tight deadline turns it off.
+   */
+  audit?: boolean;
+  /** Called after each model call with its stage and timing (counts only, never content). */
+  onModelCall?: (call: PrivateModelCallTiming) => void;
   signal?: AbortSignal;
+}
+
+/** One model call of answerPrivately: what it cost, never what it said. */
+export interface PrivateModelCallTiming extends AnalystModelUsage {
+  /** `main` is the answer; `audit` the optional second pass. */
+  stage: 'main' | 'audit';
+  ms: number;
+  promptBytes: number;
+  ok: boolean;
 }
 
 // The built-in model serves a 12,288-token context. The main prompt (system
@@ -428,7 +467,10 @@ export async function answerPrivately(
     privateEvidencePack(question, evidence),
     options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES,
   );
-  const analyst = createAnalyst(model, { auditSuspiciousDrafts: true });
+  const analyst = createAnalyst(options.onModelCall ? timedModel(model, options.onModelCall) : model, {
+    auditSuspiciousDrafts: options.audit ?? true,
+    boundedResponseSchema: true,
+  });
   const run = () => analyst.analyze(pack, {
     localOnly: true,
     ...(options.maxAnswerChars !== undefined ? { maxAnswerChars: options.maxAnswerChars } : {}),
@@ -461,6 +503,34 @@ export async function answerPrivately(
     }),
     unanswered,
     modelId,
+  };
+}
+
+/** The model, reporting each call's stage (the first is the answer, any later one the audit) and cost. */
+function timedModel(model: AnalystModel, report: (call: PrivateModelCallTiming) => void): AnalystModel {
+  let calls = 0;
+  return {
+    async complete(request) {
+      const stage = calls === 0 ? 'main' : 'audit';
+      calls += 1;
+      const started = performance.now();
+      const promptBytes = utf8.encode(request.system).length + utf8.encode(request.prompt).length;
+      const done = (ok: boolean, usage?: AnalystModelUsage) => {
+        try {
+          report({ stage, ms: Math.round(performance.now() - started), promptBytes, ok, ...(usage ?? {}) });
+        } catch {
+          // A reporting hook never fails the answer.
+        }
+      };
+      try {
+        const completion = await model.complete(request);
+        done(true, completion.usage);
+        return completion;
+      } catch (error) {
+        done(false);
+        throw error;
+      }
+    },
   };
 }
 

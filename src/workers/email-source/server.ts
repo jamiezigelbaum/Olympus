@@ -339,6 +339,7 @@ import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-source
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
 import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveTierSnifferRuntime } from '../classification/built-in-sniffer.ts';
+import { createAnswerActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
@@ -1731,9 +1732,12 @@ export async function main(): Promise<void> {
   // Shared with the answer handler so the sniffer reads the private pool's
   // breakers, and counts answers in flight so it never competes with one.
   const secureAnalystPoolState = new SecureAnalystPoolState();
-  let sourceAnswersInFlight = 0;
   // Set once the sniffer runs: aborts its in-flight call when an answer starts.
   let preemptTierSniffer: (() => void) | undefined;
+  // Answers in flight (source answers, ChatGPT searches, private answer
+  // panel jobs): the first one preempts the sniffer, which yields until none
+  // is left. The private panel's answer and the sniffer share one local model.
+  const answerActivity = createAnswerActivity(() => preemptTierSniffer?.());
   // Set once the sniffer runs: its backlog, for the status surface.
   let tierSnifferBacklog: (() => ReturnType<TierSnifferService['backlog']>) | undefined;
   const connector = createEmailSourceConnectorFromEnv();
@@ -3258,13 +3262,7 @@ export async function main(): Promise<void> {
     ? {
         async answer(request: Parameters<typeof analystSourceAnswer.answer>[0]) {
           // The sniffer shares the private pool: an answer takes it at once.
-          if (sourceAnswersInFlight === 0) preemptTierSniffer?.();
-          sourceAnswersInFlight += 1;
-          try {
-            return await analystSourceAnswer.answer(request);
-          } finally {
-            sourceAnswersInFlight -= 1;
-          }
+          return answerActivity.run(() => analystSourceAnswer.answer(request));
         },
       }
     : undefined;
@@ -4243,6 +4241,8 @@ export async function main(): Promise<void> {
   const privateAnswers = new PrivateAnswerJobs({
     model: () => privateAnswerModel,
     installId: () => remotePublicUrls()?.installId,
+    // From claim to ready/failed the sniffer stays off the shared model.
+    activity: answerActivity,
   });
   const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30_000);
   privateAnswerSweep.unref?.();
@@ -4330,17 +4330,11 @@ export async function main(): Promise<void> {
   };
   const chatgptEvidenceSearch = sourceAnswerLanes
     ? async (input: { question: string; limit?: number }) => {
-        if (sourceAnswersInFlight === 0) preemptTierSniffer?.();
-        sourceAnswersInFlight += 1;
-        try {
-          return await searchReleasedEvidence({
-            lanes: sourceAnswerLanes!,
-            question: input.question,
-            ...(input.limit ? { maxResults: input.limit } : {}),
-          });
-        } finally {
-          sourceAnswersInFlight -= 1;
-        }
+        return answerActivity.run(() => searchReleasedEvidence({
+          lanes: sourceAnswerLanes!,
+          question: input.question,
+          ...(input.limit ? { maxResults: input.limit } : {}),
+        }));
       }
     : undefined;
   // Which Private items match, for the private answer panel: the shared
@@ -4456,7 +4450,8 @@ export async function main(): Promise<void> {
         intervalMs: snifferEnv.intervalMs,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         maxCallsPerDay: snifferEnv.maxCallsPerDay,
-        shouldYield: () => sourceAnswersInFlight > 0
+        answersInFlight: () => answerActivity.busy,
+        shouldYield: () => answerActivity.busy
           || secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
         log: (line) => console.log(line),
         // Owner defaults 2026-10-01: the built-in private model is approved

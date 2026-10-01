@@ -69,6 +69,28 @@ export interface PrivateAnswerPlaintextV1 {
 export type PrivateEvidenceItem = Readonly<Record<string, unknown>>;
 
 /**
+ * Stage costs of one private answer, for the engine's timing log: counts,
+ * sizes and milliseconds only, never content.
+ */
+export interface PrivateAnswerObserver {
+  /** The evidence the model reads: items kept, items without readable text, their text bytes. */
+  evidence?(stats: { items: number; unreadable: number; bytes: number }): void;
+  /** One model call finished (or failed). */
+  modelCall?(call: PrivateAnswerModelCall): void;
+}
+
+export interface PrivateAnswerModelCall {
+  stage: 'main' | 'audit';
+  ms: number;
+  promptBytes: number;
+  ok: boolean;
+  promptTokens?: number;
+  promptMs?: number;
+  outputTokens?: number;
+  outputMs?: number;
+}
+
+/**
  * The private answer model, provided by the private-model lane (an
  * AnalystModel named `built_in`). This lane codes against this interface and
  * ships an unavailable stub until that lane lands.
@@ -79,6 +101,7 @@ export interface PrivateAnswerModel {
     question: string,
     evidence: readonly PrivateEvidenceItem[],
     signal?: AbortSignal,
+    observe?: PrivateAnswerObserver,
   ): Promise<{ answer: string; citations: PrivateAnswerCitation[]; unanswered?: string[] }>;
   /**
    * Kill or reset the model runtime (its child process or session). Called

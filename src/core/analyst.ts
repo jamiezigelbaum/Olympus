@@ -42,12 +42,27 @@ export interface AnalystModelRequest {
   prompt: string;
   localOnly: boolean;
   maxOutputChars?: number;
+  /**
+   * A JSON Schema the reply must match, for models that decode under a
+   * constraint (a grammar). Others ignore it; the prompt states the shape too.
+   */
+  responseSchema?: Record<string, unknown>;
   signal?: AbortSignal;
 }
 
 export interface AnalystModelCompletion {
   text: string;
   modelId: string;
+  // Token counts and timings when the model service reports them: counts
+  // only, never content.
+  usage?: AnalystModelUsage;
+}
+
+export interface AnalystModelUsage {
+  promptTokens?: number;
+  promptMs?: number;
+  outputTokens?: number;
+  outputMs?: number;
 }
 
 export interface AnalystModel {
@@ -152,6 +167,45 @@ export interface CreateAnalystOptions {
   // enables it only for its bounded local Analyst lane, where weaker local
   // models benefit from checking the complete draft against the same evidence.
   auditSuspiciousDrafts?: boolean;
+  /**
+   * Send each call a response schema whose string and list lengths fit its
+   * output budget, so a model that decodes under a grammar always closes the
+   * JSON object within the budget instead of running on until its token
+   * limit cuts the object off. Off by default.
+   */
+  boundedResponseSchema?: boolean;
+}
+
+/**
+ * The Analyst's reply shape as a JSON Schema whose worst case stays near
+ * `maxOutputChars`: the answer takes over half of it, citation claims and
+ * gaps share the rest.
+ */
+export function analystResponseSchema(maxOutputChars: number): Record<string, unknown> {
+  const budget = Math.max(400, Math.floor(maxOutputChars));
+  const citations = 6;
+  const gaps = 3;
+  return {
+    type: 'object',
+    properties: {
+      answer: { type: 'string', maxLength: Math.floor(budget * 0.55) },
+      citations: {
+        type: 'array',
+        maxItems: citations,
+        items: {
+          type: 'object',
+          properties: {
+            evidence: { type: 'integer' },
+            claim: { type: 'string', maxLength: Math.max(40, Math.floor((budget * 0.25) / citations)) },
+          },
+          required: ['evidence', 'claim'],
+        },
+      },
+      unanswered: { type: 'array', maxItems: gaps, items: { type: 'string', maxLength: Math.max(40, Math.floor((budget * 0.1) / gaps)) } },
+      sufficient: { type: 'boolean' },
+    },
+    required: ['answer', 'citations', 'unanswered', 'sufficient'],
+  };
 }
 
 export function noEvidenceAnalystResult(pack: EvidencePack): AnalystResult {
@@ -198,6 +252,7 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
         prompt: buildAnalystPrompt(pack, localOnly),
         localOnly,
         maxOutputChars,
+        ...(createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(maxOutputChars) } : {}),
         ...(signal ? { signal } : {}),
       };
       const completion = await model.complete(request);
@@ -209,6 +264,7 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
           prompt: buildAnalystAuditPrompt(pack, parsed, localOnly),
           localOnly,
           maxOutputChars: auditMaxOutputChars,
+          ...(createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(auditMaxOutputChars) } : {}),
           ...(signal ? { signal } : {}),
         });
         parsed = parseAnalystModelOutput(auditCompletion.text) ?? parsed;

@@ -626,3 +626,57 @@ describe('install failure codes', () => {
     expect(modelInstallFailedReason(undefined)).toBe('unknown');
   });
 });
+
+describe('answer speed: bounded output, optional audit, stage timings', () => {
+  const evidence = [
+    { id: 'lab', title: 'Lab results', text: 'Hemoglobin 13.9 g/dL, collected 12 June 2026.' },
+    { id: 'note', title: 'Clinic note', text: 'Follow-up booked for July.' },
+  ];
+  const reply = JSON.stringify({ answer: 'Hemoglobin was 13.9 g/dL [1].', citations: [{ evidence: 1, claim: 'Hemoglobin 13.9 g/dL.' }], unanswered: [], sufficient: true });
+
+  test("llama-server's timings come back as usage, and a response schema becomes a json_schema grammar", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const { model } = stubModel('', {
+      fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return Response.json({
+          choices: [{ message: { content: '{"answer":"x"}' } }],
+          timings: { prompt_n: 3_900, prompt_ms: 17_582.4, predicted_n: 197, predicted_ms: 21_339.9 },
+        });
+      }) as typeof fetch,
+    });
+    const schema = { type: 'object', properties: { answer: { type: 'string', maxLength: 10 } } };
+    const completion = await model.complete({ system: 's', prompt: 'p', localOnly: true, maxOutputChars: 1_000, responseSchema: schema });
+    expect(completion.usage).toEqual({ promptTokens: 3_900, promptMs: 17_582, outputTokens: 197, outputMs: 21_340 });
+    expect(requests[0]!.response_format).toEqual({ type: 'json_schema', json_schema: { name: 'reply', schema } });
+  });
+
+  test('every answerPrivately call carries a bounded schema; audit off is one call; each call reports its stage and cost, never content', async () => {
+    const { model, requests } = stubModel(reply);
+    const calls: Array<Record<string, unknown>> = [];
+    const answer = await answerPrivately('What did my June blood work show?', evidence, {
+      model,
+      audit: false,
+      maxAnswerChars: 1_000,
+      onModelCall: (call) => calls.push({ ...call }),
+    });
+    expect(answer.answer).toContain('13.9 g/dL');
+    expect(requests).toHaveLength(1);
+    const format = requests[0]!.body.response_format as { type: string; json_schema: { schema: { properties: { answer: { maxLength: number } } } } };
+    expect(format.type).toBe('json_schema');
+    expect(format.json_schema.schema.properties.answer.maxLength).toBeLessThanOrEqual(1_000);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ stage: 'main', ok: true });
+    expect(typeof calls[0]!.ms).toBe('number');
+    expect(calls[0]!.promptBytes).toBeGreaterThan(0);
+    expect(JSON.stringify(calls)).not.toMatch(/Hemoglobin|June|13\.9/);
+  });
+
+  test('with the audit on (the default) the second call reports as the audit stage', async () => {
+    const { model, requests } = stubModel(reply);
+    const stages: string[] = [];
+    await answerPrivately('What did my June blood work show?', evidence, { model, onModelCall: (call) => stages.push(call.stage) });
+    expect(requests).toHaveLength(2);
+    expect(stages).toEqual(['main', 'audit']);
+  });
+});

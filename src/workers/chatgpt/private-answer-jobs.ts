@@ -21,11 +21,15 @@
  *    panel's request (by anyone who saw it) is harmless and cannot consume
  *    the answer: only the holder of the panel's private key can open it.
  *
- * A hard deadline outside the model call frees the analysis slot even when a
- * model ignores its abort signal: the job fails and the slot is freed first,
- * then the model's `reset` (when it has one) runs in the background, with its
- * own timeout, to kill or reset its runtime. Inference never starts after the
- * deadline, even when the evidence refresh finishes late.
+ * A hard deadline, counted from the claim (queue wait included) and inside
+ * the panel's own wait, settles every claimed job as ready or failed, and
+ * frees the analysis slot even when a model ignores its abort signal: the
+ * job fails and the slot is freed first, then the model's `reset` (when it
+ * has one) runs in the background, with its own timeout, to kill or reset
+ * its runtime. Inference never starts after the deadline, even when the
+ * evidence refresh finishes late. From claim to settle the job counts as
+ * answer activity, so background model work (the tier sniffer) yields to it,
+ * and each settled job logs one content-free line of stage timings.
  *
  * Pending polls by the claiming key are rate limited per job (429), never
  * destructive. Unknown, expired (ten minutes from creation) and wrong-install
@@ -48,6 +52,7 @@ import {
   PRIVATE_MATCH_COUNT_CAP,
   type PrivateAnswerCitation,
   type PrivateAnswerModel,
+  type PrivateAnswerModelCall,
   type PrivateAnswerPlaintextV1,
   type PrivateEvidenceItem,
   type PrivateMatchSummary,
@@ -76,10 +81,70 @@ export interface PrivateAnswerJobsOptions {
   resetTimeoutMs?: number;
   /** Claims across all jobs: burst and refill per second. */
   claimRate?: { capacity: number; refillPerSecond: number };
-  /** Hard deadline for one analysis (evidence refresh plus model), enforced outside the model. */
+  /**
+   * Hard deadline for one analysis, from the claim (queue wait, evidence
+   * refresh and model), enforced outside the model.
+   */
   analysisTimeoutMs?: number;
   /** Local audit log (default: one line on stderr). */
   audit?: (event: PrivateAnswerAuditEvent) => void;
+  /**
+   * Answer activity: `begin` when a job is claimed, `end` once it is ready
+   * or failed (exactly once each). The worker pauses the tier sniffer and
+   * other background model work in between, so the answer never waits on it.
+   */
+  activity?: { begin(): void; end(): void };
+  /** The per-job stage timing line (default: stdout). Counts and milliseconds only. */
+  log?: (line: string) => void;
+}
+
+/** One analysis's stage costs, logged once it settles. No id, question, evidence or answer. */
+interface AnalysisTiming {
+  outcome: 'sealed' | 'failed';
+  reason: 'deadline' | 'aborted' | 'no_evidence' | 'error';
+  queuedMs: number;
+  refreshMs?: number;
+  matched?: number;
+  items?: number;
+  unreadable?: number;
+  evidenceBytes?: number;
+  modelMs?: number;
+  calls: PrivateAnswerModelCall[];
+  totalMs?: number;
+}
+
+class AnalysisStop extends Error {
+  constructor(readonly reason: 'aborted' | 'no_evidence') {
+    super(reason);
+  }
+}
+
+const defaultLog = (line: string) => {
+  console.log(line);
+};
+
+/** `[private-answer] outcome=… queued_ms=… refresh_ms=… …`: stage costs only. */
+export function formatAnalysisTiming(timing: AnalysisTiming): string {
+  const fields: string[] = [`outcome=${timing.outcome}`];
+  if (timing.outcome === 'failed') fields.push(`reason=${timing.reason}`);
+  fields.push(`queued_ms=${timing.queuedMs}`);
+  if (timing.refreshMs !== undefined) fields.push(`refresh_ms=${timing.refreshMs}`);
+  if (timing.matched !== undefined) fields.push(`matched=${timing.matched}`);
+  if (timing.items !== undefined) fields.push(`items=${timing.items}`);
+  if (timing.unreadable !== undefined) fields.push(`unreadable=${timing.unreadable}`);
+  if (timing.evidenceBytes !== undefined) fields.push(`evidence_bytes=${timing.evidenceBytes}`);
+  if (timing.modelMs !== undefined) fields.push(`model_ms=${timing.modelMs}`);
+  for (const call of timing.calls) {
+    const prefix = call.stage;
+    fields.push(`${prefix}_ms=${call.ms}`, `${prefix}_prompt_bytes=${call.promptBytes}`);
+    if (!call.ok) fields.push(`${prefix}_ok=false`);
+    if (call.promptTokens !== undefined) fields.push(`${prefix}_prompt_tokens=${call.promptTokens}`);
+    if (call.promptMs !== undefined) fields.push(`${prefix}_prefill_ms=${call.promptMs}`);
+    if (call.outputTokens !== undefined) fields.push(`${prefix}_output_tokens=${call.outputTokens}`);
+    if (call.outputMs !== undefined) fields.push(`${prefix}_generate_ms=${call.outputMs}`);
+  }
+  if (timing.totalMs !== undefined) fields.push(`total_ms=${timing.totalMs}`);
+  return `[private-answer] ${fields.join(' ')}`;
 }
 
 /** Re-reads the job's evidence at claim time, at the items' current tiers. */
@@ -111,6 +176,12 @@ const MAX_CITATION_TEXT = 300;
 const MAX_QUESTION_CHARS = 4_000;
 const MAX_EVIDENCE_ITEMS = 50;
 const PENDING_RETRY_SECONDS = 2;
+/**
+ * Inside the panel's own two-minute wait (CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS),
+ * so the panel always sees `ready` or `failed`, never gives up on a job the
+ * engine is still running.
+ */
+export const PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 100_000;
 const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
 
 const defaultAudit = (event: PrivateAnswerAuditEvent) => {
@@ -164,7 +235,7 @@ export class PrivateAnswerJobs {
     this.pollRate = options.pollRate ?? { capacity: 10, refillPerSecond: 1 };
     this.resetTimeoutMs = options.resetTimeoutMs ?? 30_000;
     this.claimRate = options.claimRate ?? { capacity: 60, refillPerSecond: 10 };
-    this.analysisTimeoutMs = options.analysisTimeoutMs ?? 5 * 60_000;
+    this.analysisTimeoutMs = options.analysisTimeoutMs ?? PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS;
     this.audit = options.audit ?? defaultAudit;
     this.tokens = this.claimRate.capacity;
     this.refilledAt = this.now();
@@ -269,52 +340,135 @@ export class PrivateAnswerJobs {
   private startAnalysis(job: Job, panelKey: CryptoKey): void {
     const abort = new AbortController();
     job.abort = abort;
-    this.queue = this.queue.then(async () => {
+    const claimedAt = this.now();
+    const timing: AnalysisTiming = { outcome: 'failed', reason: 'error', queuedMs: 0, calls: [] };
+    let running = false;
+    let settled = false;
+    // Answers come first: the sniffer and other background model work yield
+    // from the claim until this job settles, however it settles.
+    this.beginActivity();
+    const settle = (outcome: Job['outcome'], reason?: AnalysisTiming['reason']) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadlineTimer);
+      if (this.jobs.get(job.id) === job) job.outcome = outcome;
+      timing.outcome = outcome?.kind ?? 'failed';
+      if (reason) timing.reason = reason;
+      timing.totalMs = this.now() - claimedAt;
+      this.endActivity();
+      this.logTiming(timing);
+    };
+    // The deadline runs from the claim, queue wait included, so every
+    // claimed job is ready or failed within analysisTimeoutMs whatever the
+    // queue, the evidence refresh or the model do.
+    const deadlineTimer = setTimeout(() => {
+      if (settled) return;
+      this.audit('analysis_deadline');
+      // Fail the job and free the slot first; a model that was running is
+      // reset in the background with its own timeout, so a hung reset
+      // blocks nothing.
+      const wasRunning = running;
+      settle({ kind: 'failed' }, 'deadline');
+      abort.abort();
+      if (wasRunning) this.resetInBackground();
+    }, this.analysisTimeoutMs);
+    (deadlineTimer as { unref?: () => void }).unref?.();
+    // A job dropped (expired) while it waits in the queue settles at once.
+    abort.signal.addEventListener('abort', () => {
+      if (!running) settle({ kind: 'failed' }, 'aborted');
+    }, { once: true });
+    const run = async () => {
       // A model reset after an earlier deadline finishes (or times out)
       // first, so two inferences never overlap and the reset cannot kill
       // this job's run.
       if (this.resetting) await this.resetting;
-      if (abort.signal.aborted || this.jobs.get(job.id) !== job) return;
+      timing.queuedMs = this.now() - claimedAt;
+      if (settled || abort.signal.aborted || this.jobs.get(job.id) !== job) {
+        settle({ kind: 'failed' }, 'aborted');
+        return;
+      }
       const question = job.question ?? '';
       const cached = job.evidence ?? [];
       const refresh = job.refresh;
       job.question = undefined;
       job.evidence = undefined;
       job.refresh = undefined;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<'deadline'>((resolve) => {
-        timer = setTimeout(() => resolve('deadline'), this.analysisTimeoutMs);
-        (timer as { unref?: () => void }).unref?.();
-      });
+      running = true;
       const work = (async () => {
-        const evidence = (refresh ? await refresh(abort.signal) : cached).filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
+        const refreshStarted = this.now();
+        const found = refresh ? await refresh(abort.signal) : cached;
+        if (refresh) timing.refreshMs = this.now() - refreshStarted;
+        const evidence = found.filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
+        timing.matched = evidence.length;
         // A refresh that finished after the deadline (or after the job was
         // dropped) must not start inference.
-        if (abort.signal.aborted) throw new Error('aborted');
-        if (evidence.length === 0) throw new Error('no private evidence');
+        if (abort.signal.aborted) throw new AnalysisStop('aborted');
+        if (evidence.length === 0) throw new AnalysisStop('no_evidence');
         const model = this.options.model();
-        const result = await model.answerPrivately(question, evidence, abort.signal);
-        return sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(plaintextOf(result))));
+        const modelStarted = this.now();
+        try {
+          return await model.answerPrivately(question, evidence, abort.signal, {
+            evidence: (stats) => {
+              timing.items = stats.items;
+              timing.unreadable = stats.unreadable;
+              timing.evidenceBytes = stats.bytes;
+            },
+            modelCall: (call) => {
+              timing.calls.push(call);
+            },
+          });
+        } finally {
+          timing.modelMs = this.now() - modelStarted;
+        }
       })();
       work.catch(() => undefined);
+      // Bounded by the deadline: the queue moves on when it fires, even if
+      // the model ignores its abort signal.
+      const stopped = new Promise<void>((resolve) => {
+        if (abort.signal.aborted) resolve();
+        abort.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
       try {
-        const settled = await Promise.race([work, deadline]);
-        if (settled === 'deadline') {
-          abort.abort();
-          this.audit('analysis_deadline');
-          // Fail the job and free the slot first; the reset runs in the
-          // background with its own timeout, so a hung reset blocks nothing.
-          this.resetInBackground();
-          throw new Error('deadline');
+        const result = await Promise.race([work, stopped]);
+        if (settled || abort.signal.aborted || result === undefined) {
+          settle({ kind: 'failed' }, 'aborted');
+          return;
         }
-        if (abort.signal.aborted) throw new Error('aborted');
-        job.outcome = { kind: 'sealed', sealed: settled };
-      } catch {
-        if (this.jobs.get(job.id) === job) job.outcome = { kind: 'failed' };
+        const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(plaintextOf(result))));
+        settle({ kind: 'sealed', sealed });
+      } catch (error) {
+        settle({ kind: 'failed' }, error instanceof AnalysisStop ? error.reason : 'error');
       } finally {
-        clearTimeout(timer);
+        running = false;
       }
+    };
+    this.queue = this.queue.then(run, run).catch(() => {
+      settle({ kind: 'failed' }, 'error');
     });
+  }
+
+  private beginActivity(): void {
+    try {
+      this.options.activity?.begin();
+    } catch {
+      // A hook never fails a job.
+    }
+  }
+
+  private endActivity(): void {
+    try {
+      this.options.activity?.end();
+    } catch {
+      // A hook never fails a job.
+    }
+  }
+
+  private logTiming(timing: AnalysisTiming): void {
+    try {
+      (this.options.log ?? defaultLog)(formatAnalysisTiming(timing));
+    } catch {
+      // Logging never fails a job.
+    }
   }
 
   private resetInBackground(): void {

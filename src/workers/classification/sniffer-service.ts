@@ -68,6 +68,12 @@ export interface TierSnifferServiceOptions {
   maxCallsPerDay?: number;
   /** True while an answer needs the private pool, or its breaker is open. */
   shouldYield?: () => boolean;
+  /**
+   * True while answers are in flight. The pass's automatic tier moves
+   * (which re-embed items on this computer) wait for them as well, so an
+   * answer never shares the machine with background work it can avoid.
+   */
+  answersInFlight?: () => boolean;
   now?: () => Date;
   log?: (line: string) => void;
   /**
@@ -356,10 +362,18 @@ export class TierSnifferService {
         + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}.`,
       );
     }
-    const autoMoves = this.options.autoMoves && !signal.aborted && this.options.autoMoves.localEmbeddingsOnly()
+    const autoMoves = this.options.autoMoves && !signal.aborted && !this.answering() && this.options.autoMoves.localEmbeddingsOnly()
       ? await this.runAutoMoves(this.options.autoMoves, signal)
       : undefined;
     return { state: 'ran', report, ...(rejudged.seen > 0 ? { rejudged } : {}), ...(autoMoves ? { autoMoves } : {}) };
+  }
+
+  private answering(): boolean {
+    try {
+      return this.options.answersInFlight?.() ?? false;
+    } catch {
+      return false;
+    }
   }
 
   /** Re-judges a page of each set's routed items decided under older inputs; never throws. */
@@ -410,7 +424,7 @@ export class TierSnifferService {
         continue;
       }
       for (const record of queued) {
-        if (budget === 0 || signal.aborted) break;
+        if (budget === 0 || signal.aborted || this.answering()) break;
         budget -= 1;
         try {
           const identity = {

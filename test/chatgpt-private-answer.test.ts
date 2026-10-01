@@ -61,7 +61,7 @@ function readyModel(overrides: Partial<PrivateAnswerModel> = {}): PrivateAnswerM
 }
 
 function makeJobs(model: PrivateAnswerModel, clock = { now: 1_000_000 }, extra: Partial<ConstructorParameters<typeof PrivateAnswerJobs>[0]> = {}) {
-  return new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, now: () => clock.now, ...extra });
+  return new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, now: () => clock.now, log: () => {}, ...extra });
 }
 
 /** Nothing model-visible (text, structuredContent) tells the model a private match exists. */
@@ -173,10 +173,11 @@ describe('one-time jobs', () => {
     const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     expect((await jobs.claim(stuck, panel.publicKey)).status).toBe(202);
-    expect((await jobs.claim(next, panel.publicKey)).status).toBe(202);
     await Bun.sleep(120);
-    await settled(jobs);
     expect(await jobs.claim(stuck, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
+    // The deadline runs from the claim; a job claimed after the stuck one failed runs at once.
+    expect((await jobs.claim(next, panel.publicKey)).status).toBe(202);
+    await settled(jobs);
     const ready = await jobs.claim(next, panel.publicKey);
     expect(ready.body.status).toBe('ready');
     expect(JSON.parse(await openPrivateAnswer(next, panel.privateKey, ready.body as unknown as SealedPrivateAnswer)).answer).toBe('second answer');
@@ -344,10 +345,11 @@ describe('one-time jobs', () => {
     const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(stuck, panel.publicKey);
-    await jobs.claim(next, panel.publicKey);
     await Bun.sleep(80);
-    // The stuck job failed and its reset is running: the next one has not started.
+    // The stuck job failed and its reset is running: the next one, claimed now, has not started.
     expect(await jobs.claim(stuck, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
+    expect((await jobs.claim(next, panel.publicKey)).status).toBe(202);
+    await Bun.sleep(10);
     expect(events).toEqual(['start:stuck', 'reset:start']);
     expect((await jobs.claim(next, panel.publicKey)).status).toBe(202);
     finishReset();
@@ -364,13 +366,15 @@ describe('one-time jobs', () => {
         : Promise.resolve({ answer: 'next answer', citations: [] })),
       reset: () => { resets += 1; return new Promise<void>(() => {}); },
     });
-    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 30, resetTimeoutMs: 40, audit: () => {} });
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 100, resetTimeoutMs: 60, audit: () => {} });
     const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE }).jobId!;
     const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(stuck, panel.publicKey);
+    await Bun.sleep(110);
+    // Claimed while the hung reset holds the slot: it runs once the reset times out.
     await jobs.claim(next, panel.publicKey);
-    await Bun.sleep(150);
+    await Bun.sleep(100);
     expect(await jobs.claim(stuck, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
     const ready = await jobs.claim(next, panel.publicKey);
     expect(ready.body.status).toBe('ready');
