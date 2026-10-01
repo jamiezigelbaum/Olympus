@@ -15,6 +15,7 @@ import {
   TEXT_EXTRACTOR_KIND,
   TEXT_EXTRACTOR_VERSION,
   createTextExtractor,
+  pdfTextLooksUndecoded,
 } from '../src/workers/file-extraction/extractors/text.ts';
 import {
   extractorInput,
@@ -520,6 +521,17 @@ describe('text extractor: PDF text layer', () => {
       bytes: pdfWithoutContent(),
       mimeType: PDF_MIME,
     }))).rejects.toThrow(/pdftotext is not installed/);
+  });
+
+  test('glyph ids from a composite font are not text: the inline decoder reports no text layer', async () => {
+    // A CID font draws two-byte glyph ids; read as text they are control characters.
+    const result = await createTextExtractor().extract(extractorInput({
+      bytes: pdfWithFlateTextStream('BT /F1 12 Tf 72 720 Td [<0003001100120013000400050006>] TJ ET'),
+      mimeType: PDF_MIME,
+    }));
+    expect(result.status).toBe('empty_output');
+    expect(pdfTextLooksUndecoded('Alpha Beta\nGamma\tDelta')).toBe(false);
+    expect(pdfTextLooksUndecoded('\u0003\u0011\u0012Ab\u0013\u0004')).toBe(true);
   });
 
   test('a PDF with neither text nor image markers is empty output', async () => {

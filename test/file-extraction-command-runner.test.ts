@@ -18,6 +18,7 @@ import {
   ExtractionCommandError,
   ExtractionCommandTimeoutError,
   killExtractionProcessGroup,
+  resolveExtractionCommand,
   runExtractionCommand,
   type ExtractionKillFn,
 } from '../src/workers/file-extraction/extractors/command-runner.ts';
@@ -233,4 +234,20 @@ describe('killExtractionProcessGroup: ESRCH is benign, anything else is a termin
     }
     expect((caught as ExtractionCommandTimeoutError).terminationFailed).toBeUndefined();
   }, 15_000);
+});
+
+describe('resolveExtractionCommand', () => {
+  // A launchd agent's PATH names only the runtime and the system directories,
+  // so a Homebrew pdftotext was invisible and every PDF fell back to the
+  // inline decoder (fresh-install diagnosis, 2026-10-01).
+  test('a bare name found only in a package-manager directory resolves to its absolute path', () => {
+    const executables = new Set(['/opt/homebrew/bin/pdftotext', '/usr/bin/true']);
+    const isExecutable = (path: string) => executables.has(path);
+    expect(resolveExtractionCommand('pdftotext', { path: '/usr/bin:/bin', isExecutable })).toBe('/opt/homebrew/bin/pdftotext');
+    // PATH first.
+    expect(resolveExtractionCommand('true', { path: '/usr/bin:/bin', isExecutable })).toBe('/usr/bin/true');
+    // A path, or a name found nowhere, is unchanged (the spawn reports ENOENT as before).
+    expect(resolveExtractionCommand('/custom/pdftotext', { path: '', isExecutable })).toBe('/custom/pdftotext');
+    expect(resolveExtractionCommand('tesseract', { path: '/usr/bin', fallbackDirs: [], isExecutable })).toBe('tesseract');
+  });
 });
