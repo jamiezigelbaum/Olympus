@@ -45119,7 +45119,7 @@ function lowerFirst(value) {
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY;
+var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_PICKER_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -45264,6 +45264,114 @@ var init_vocabulary = __esm(() => {
       messages: { one: "message", many: "messages" },
       items: { one: "item", many: "items" }
     }
+  };
+  DASHBOARD_CHATGPT_PICKER_COPY = {
+    back: "Back to Olympus",
+    cancel: "Cancel",
+    tryAgain: "Try again",
+    checkAgain: "Check again",
+    connectTitle: "Connect {source}",
+    connectStarting: "Opening sign-in…",
+    connectWaiting: "Waiting for you to finish signing in…",
+    connectWaitingHelp: "Sign in to {source} in the window that opened. This page updates on its own when you are done.",
+    connectReopen: "Open sign-in again",
+    connectTimeout: "Olympus has not heard back from {source} yet. If you finished signing in, check again.",
+    connectFailed: "Olympus could not start signing in to {source}. Try again.",
+    connected: "{source} is connected.",
+    foldersTitle: "Choose folders",
+    foldersIntro: "Choose which {source} folders Olympus may read. Nothing starts until you save.",
+    mailTitle: "Choose mail",
+    mailIntro: "Choose which {source} mail Olympus may read. Nothing starts until you save.",
+    loadingFolders: "Loading folders…",
+    loadingMail: "Reading your labels and senders…",
+    loadFailed: "Olympus could not load this list. Try again.",
+    search: "Search listed folders",
+    searchEmpty: "No listed folder matches.",
+    noFolders: "No folders here.",
+    loadMore: "Load more folders",
+    expand: "Show folders inside {name}",
+    collapse: "Hide folders inside {name}",
+    choiceFor: "Choice for {name}",
+    states: { ingest: "Fully indexed", metadata_only: "Names only", exclude: "Skipped" },
+    notSelected: "Not selected",
+    sameAsParent: "Same as its parent ({state})",
+    sameAsAccount: "Same as the entire account ({state})",
+    inherited: "inherited",
+    mixed: "Mixed",
+    mixedHelp: "folders inside differ",
+    meaningTitle: "What these choices mean",
+    meanings: [
+      "Fully indexed: Olympus reads the files and can answer from them.",
+      "Names only: Olympus keeps file names and dates, never what is inside.",
+      "Skipped: Olympus ignores the folder and everything in it.",
+      "Not selected: the folder stays out unless a folder above it is chosen."
+    ],
+    folderSize: "{size}",
+    folderFiles: { one: "{n} file", many: "{n} files" },
+    wholeAccount: "Use the entire account, including folders added later",
+    wholePrompt: "Olympus will read every folder in {source}, now and later, except folders you mark Names only or Skipped.",
+    wholeConfirm: "Yes, use the entire account",
+    wholeConfirmed: "Entire account confirmed.",
+    summaryTitle: "What happens when you save",
+    summaryNone: "No folders chosen yet, so nothing will be read.",
+    summaryWhole: "The entire account, including folders added later.",
+    summaryFolder: { one: "folder", many: "folders" },
+    summaryIngest: "{n} fully indexed",
+    summaryMetadata: "{n} with names only",
+    summaryExclude: "{n} skipped",
+    summarySize: "About {size} will be fully indexed.",
+    summaryRest: "Folders you do not choose stay out.",
+    needChoice: "Choose at least one folder first.",
+    needConfirm: "Confirm the entire account first.",
+    saveFolders: "Save scope and start",
+    saveNoStart: "Save scope",
+    saveMail: "Save and start",
+    saving: "Saving…",
+    saveFailed: "Olympus could not save. Your choices are still here. Try again.",
+    conflict: "These choices were changed somewhere else, so this view has been refreshed. Check it and save again.",
+    saved: "{source}: saved. Olympus is starting.",
+    discardPrompt: "Discard your changes?",
+    discard: "Discard changes",
+    keep: "Keep choosing",
+    mailWindow: "Read the full text of mail from",
+    mailWindowHelp: "For older mail Olympus keeps only the subject, sender, date and labels.",
+    mailWindows: {
+      "6m": "The last 6 months",
+      "1y": "The last year",
+      "2y": "The last 2 years",
+      "5y": "The last 5 years",
+      all: "All time"
+    },
+    mailRecommended: "Recommended",
+    mailCategories: "Gmail categories",
+    mailCategoriesHelp: "Checked categories are read. Promotions and Social are skipped at first.",
+    mailCategoryNames: {
+      primary: ["Primary", "Personal mail"],
+      updates: ["Updates", "Receipts, statements, confirmations"],
+      forums: ["Forums", "Mailing lists and groups"],
+      social: ["Social", "Social network notifications"],
+      promotions: ["Promotions", "Marketing and offers"]
+    },
+    mailCategoryCount: "{count} in your mailbox",
+    mailLabels: "Labels",
+    mailLabelsHelp: "Checked labels are read. Uncheck a label to skip all mail that has it.",
+    mailLabelsEmpty: "This mailbox has no labels of its own.",
+    mailSentLabel: "Sent",
+    mailSenders: "Senders",
+    mailPrivate: "Always private",
+    mailPrivateHelp: "One address or @domain per line. Their new mail is treated as private and never goes to the cloud.",
+    mailSkip: "Skip",
+    mailSkipHelp: "One address or @domain per line. Their new mail is never read.",
+    mailSuggestions: "Frequent senders in a sample of your recent mail",
+    mailSuggestionCount: "{n} of {total}",
+    mailEstimate: "About {content} messages read in full and {metadata} by subject and sender only.",
+    mailCost: "Indexing costs at most ${cost}.",
+    mailEstimateNote: "Counts are Gmail's own estimates. Nothing has been read yet.",
+    mailUpdateEstimate: "Update estimate",
+    mailSummaryWindow: "Full text from {window}",
+    mailSummarySkipped: { one: "{n} category or label skipped", many: "{n} categories and labels skipped" },
+    mailSummaryPrivate: { one: "{n} sender always private", many: "{n} senders always private" },
+    mailSummarySkipSenders: { one: "{n} sender skipped", many: "{n} senders skipped" }
   };
 });
 
@@ -96923,7 +97031,7 @@ var init_webStandardStreamableHttp = __esm(() => {
 var DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", SCOPE_UI_META_KEY = "olympus/scope";
 
 // src/workers/dashboard/chatgpt/client.ts
-function chatgptDashboardClient(config2) {
+function chatgptDashboardClient(config2, pickerProgram) {
   const doc2 = document;
   const root = doc2.getElementById("app");
   const P = config2.page;
@@ -96938,7 +97046,8 @@ function chatgptDashboardClient(config2) {
     theme: "",
     displayMode: "",
     canFullscreen: true,
-    open: {}
+    open: {},
+    notice: ""
   };
   let nextId = 1;
   const pending = {};
@@ -97055,6 +97164,7 @@ function chatgptDashboardClient(config2) {
   function callTool(name, args, key) {
     state.busy = key;
     state.confirming = "";
+    state.notice = "";
     render();
     request("tools/call", { name, arguments: args || {} }, config2.resultTimeoutMs).then((result) => {
       state.busy = "";
@@ -97070,6 +97180,9 @@ function chatgptDashboardClient(config2) {
   }
   function refresh() {
     callTool(config2.toolName, {}, "refresh");
+  }
+  function callRaw(name, args) {
+    return request("tools/call", { name, arguments: args || {} }, config2.resultTimeoutMs);
   }
   function openLink(href) {
     if (typeof href !== "string" || href.slice(0, 6) !== "https:")
@@ -97215,7 +97328,7 @@ function chatgptDashboardClient(config2) {
   function compact() {
     return state.displayMode !== "" && state.displayMode !== "fullscreen";
   }
-  function fixControl(fix, key, style, allowConfirm) {
+  function fixControl(fix, key, style, allowConfirm, source) {
     const wrap = el("span", "fix");
     if (!fix || typeof fix.label !== "string")
       return wrap;
@@ -97230,7 +97343,13 @@ function chatgptDashboardClient(config2) {
       return add(wrap, busy);
     }
     let action = null;
-    if (typeof fix.tool === "string" && fix.tool)
+    if (picker && picker.handles(fix)) {
+      action = () => {
+        state.notice = "";
+        state.confirming = "";
+        picker.start(fix, source ? source.id : "", source ? source.label : "", key);
+      };
+    } else if (typeof fix.tool === "string" && fix.tool)
       action = () => callTool(fix.tool, fix.args || {}, key);
     else if (typeof fix.href === "string" && fix.href)
       action = () => openLink(fix.href);
@@ -97299,12 +97418,20 @@ function chatgptDashboardClient(config2) {
       add(body, actions);
     return add(banner, body);
   }
+  function itemSource(item) {
+    const id = typeof item.id === "string" && item.id.indexOf("source:") === 0 ? item.id.slice(7) : "";
+    if (!id)
+      return;
+    const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
+    const match = sources.filter((source) => source && String(source.id) === id)[0];
+    return { id, label: match ? String(match.label || id) : id };
+  }
   function itemBanner(item, key, allowConfirm) {
     const banner = el("section", "banner warn");
     banner.setAttribute("role", "alert");
     add(banner, icon("!"));
     const body = add(el("div", "banner-body"), el("p", "banner-title", String(item.sentence || "")));
-    add(body, add(el("div", "actions"), fixControl(item.fix, key, "main", allowConfirm)));
+    add(body, add(el("div", "actions"), fixControl(item.fix, key, "main", allowConfirm, itemSource(item))));
     return add(banner, body);
   }
   function staleLine() {
@@ -97324,7 +97451,7 @@ function chatgptDashboardClient(config2) {
     const list = el("ul", "rows");
     items.forEach((item, index) => {
       const key = "need:" + String(item.id || index);
-      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key, "main", true));
+      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key, "main", true, itemSource(item)));
       add(list, add(el("li", "row need"), el("span", "dot tone-warn"), body));
     });
     return add(section, list);
@@ -97347,8 +97474,9 @@ function chatgptDashboardClient(config2) {
       add(main, el("p", "muted", meta2.join(" · ")));
     add(row, main);
     const controls = el("div", "source-actions");
+    const context = { id, label: String(source.label || id) };
     if (source.primary)
-      add(controls, fixControl(source.primary, "primary:" + id, "main", true));
+      add(controls, fixControl(source.primary, "primary:" + id, "main", true, context));
     const menu = Array.isArray(source.menu) ? source.menu : [];
     let menuBox = null;
     if (menu.length) {
@@ -97357,7 +97485,7 @@ function chatgptDashboardClient(config2) {
       const hidden = el("span", "sr", fill(P.moreActions, { source: String(source.label || "") }));
       const box = details("menu:" + id, add(el("span"), glyph, hidden), "menu");
       const panel = el("div", "menu-panel");
-      menu.forEach((fix, index) => add(panel, fixControl(fix, "menu:" + id + ":" + index, "plain", true)));
+      menu.forEach((fix, index) => add(panel, fixControl(fix, "menu:" + id + ":" + index, "plain", true, context)));
       menuBox = add(box, panel);
     }
     if (controls.childNodes.length) {
@@ -97478,6 +97606,11 @@ function chatgptDashboardClient(config2) {
     add(page, el("h1", "", P.title));
     const data = state.data;
     add(page, connectionBanner());
+    if (state.notice) {
+      const notice = el("p", "notice", state.notice);
+      notice.setAttribute("role", "status");
+      add(page, notice);
+    }
     if (!data) {
       if (!state.relayDown)
         add(page, el("p", "muted", P.loading));
@@ -97499,11 +97632,14 @@ function chatgptDashboardClient(config2) {
       doc2.documentElement.setAttribute("data-theme", theme);
     else
       doc2.documentElement.removeAttribute("data-theme");
-    doc2.documentElement.setAttribute("data-mode", compact() ? "inline" : "fullscreen");
+    const picking = !!picker && picker.active();
+    doc2.documentElement.setAttribute("data-mode", compact() && !picking ? "inline" : "fullscreen");
     accentUsed = false;
-    const view = compact() ? renderCompact() : renderFull();
+    const view = picking ? picker.view() : compact() ? renderCompact() : renderFull();
     root.textContent = "";
     root.appendChild(view);
+    if (picking)
+      picker.afterRender();
     if (keepFocus) {
       const nodes = root.querySelectorAll("[data-key]");
       for (let i = 0;i < nodes.length; i++) {
@@ -97523,6 +97659,45 @@ function chatgptDashboardClient(config2) {
       host.notifyIntrinsicHeight(height);
     notify("ui/notifications/size-changed", { height });
   }
+  const picker = pickerProgram ? pickerProgram({
+    config: config2.picker,
+    dashboardTool: config2.toolName,
+    el,
+    add,
+    button,
+    fill,
+    count,
+    call: callRaw,
+    render,
+    reportHeight,
+    openLink,
+    compact,
+    fullscreen: goFullscreen,
+    isDashboard,
+    setDashboard: (value) => {
+      if (!isDashboard(value))
+        return;
+      state.data = value;
+      state.relayDown = false;
+    },
+    close: (notice, again, focusKey) => {
+      state.notice = notice;
+      if (again) {
+        state.busy = "refresh";
+        render(focusKey);
+        request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
+          state.busy = "";
+          acceptResult(result, false);
+          render(focusKey);
+        }, () => {
+          state.busy = "";
+          render(focusKey);
+        });
+        return;
+      }
+      render(focusKey);
+    }
+  }) : null;
   readOpenAiGlobals();
   render();
   request("ui/initialize", {
@@ -97539,6 +97714,1058 @@ function chatgptDashboardClient(config2) {
   if (!state.data)
     waitForResult();
 }
+
+// src/workers/dashboard/chatgpt/picker.ts
+function chatgptPickerProgram(kit) {
+  const T = kit.config.tools;
+  const Q = kit.config.copy;
+  const el = kit.el;
+  const add = kit.add;
+  const fill = kit.fill;
+  const STATES = ["ingest", "metadata_only", "exclude"];
+  const WINDOWS = ["6m", "1y", "2y", "5y", "all"];
+  const CATEGORIES = ["primary", "updates", "forums", "social", "promotions"];
+  let p = null;
+  let session = 0;
+  let timer = null;
+  let searchRows = [];
+  let searchEmpty = null;
+  function handles(fix) {
+    return !!fix && (fix.tool === T.connectSource || fix.tool === T.scopeList);
+  }
+  function stopTimer() {
+    if (timer)
+      clearTimeout(timer);
+    timer = null;
+  }
+  function leave(notice, refresh) {
+    stopTimer();
+    const key = p ? p.returnKey : "";
+    p = null;
+    session++;
+    searchRows = [];
+    kit.close(notice, refresh, key);
+  }
+  function start(fix, sourceId, sourceLabel3, returnKey) {
+    stopTimer();
+    session++;
+    if (kit.compact())
+      kit.fullscreen();
+    const args = fix && fix.args && typeof fix.args === "object" ? fix.args : {};
+    const id = String(args.source_id || sourceId || args.source || "");
+    const label = sourceLabel3 || id;
+    if (fix.tool === T.connectSource)
+      startConnect(args, id, label, returnKey);
+    else
+      openScope(id, label, String(fix.label || ""), returnKey, "");
+  }
+  function authorizeHref(content) {
+    if (!content || typeof content !== "object")
+      return "";
+    for (const value of [content.openUrl]) {
+      if (typeof value !== "string")
+        continue;
+      let parsed;
+      try {
+        parsed = new URL(value);
+      } catch {
+        continue;
+      }
+      if (parsed.protocol === "https:" && parsed.hostname === kit.config.connectHost && parsed.pathname.indexOf("/go/") === 0 && parsed.pathname.length > 4 && !parsed.username && !parsed.password) {
+        return parsed.href;
+      }
+    }
+    return "";
+  }
+  function startConnect(args, id, label, returnKey) {
+    p = { mode: "connect", id, label, returnKey, phase: "starting", href: "", startedAt: 0, connectArgs: args };
+    const mine = session;
+    kit.render("picker:back");
+    kit.call(T.connectSource, args).then((result) => {
+      if (mine !== session || !p)
+        return;
+      const href = result && !result.isError ? authorizeHref(result.structuredContent) : "";
+      if (!href) {
+        p.phase = "error";
+        kit.render("picker:connect:retry");
+        return;
+      }
+      p.href = href;
+      p.phase = "waiting";
+      p.startedAt = Date.now();
+      kit.openLink(href);
+      kit.render("picker:back");
+      schedulePoll();
+    }, () => {
+      if (mine !== session || !p)
+        return;
+      p.phase = "error";
+      kit.render("picker:connect:retry");
+    });
+  }
+  function schedulePoll() {
+    stopTimer();
+    const mine = session;
+    timer = setTimeout(() => {
+      timer = null;
+      if (mine !== session || !p || p.mode !== "connect")
+        return;
+      kit.call(kit.dashboardTool, {}).then((result) => {
+        if (mine !== session || !p)
+          return;
+        const content = result && !result.isError ? result.structuredContent : null;
+        if (kit.isDashboard(content)) {
+          kit.setDashboard(content);
+          const sources = Array.isArray(content.sources) ? content.sources : [];
+          const source = sources.filter((entry) => entry && String(entry.id) === p.id)[0];
+          if (source && source.status !== "Off") {
+            connected(source);
+            return;
+          }
+        }
+        continuePolling();
+      }, () => {
+        if (mine !== session || !p)
+          return;
+        continuePolling();
+      });
+    }, kit.config.pollMs);
+  }
+  function continuePolling() {
+    if (Date.now() - p.startedAt >= kit.config.pollCapMs) {
+      p.phase = "timeout";
+      kit.render("picker:connect:check");
+      return;
+    }
+    schedulePoll();
+  }
+  function connected(source) {
+    const next = source.primary;
+    if (next && next.tool === T.scopeList && !next.disabledReason) {
+      const args = next.args && typeof next.args === "object" ? next.args : {};
+      openScope(String(args.source_id || p.id), p.label, String(next.label || ""), p.returnKey, fill(Q.connected, { source: p.label }));
+      return;
+    }
+    leave(fill(Q.connected, { source: p.label }), false);
+  }
+  function connectView(page) {
+    add(page, el("h1", "", fill(Q.connectTitle, { source: p.label })));
+    const box = el("div", "picker-status");
+    if (p.phase === "starting") {
+      const line = el("p", "", Q.connectStarting);
+      line.setAttribute("role", "status");
+      add(box, line);
+    } else if (p.phase === "waiting") {
+      const line = el("p", "strong", Q.connectWaiting);
+      line.setAttribute("role", "status");
+      add(box, line, el("p", "muted", fill(Q.connectWaitingHelp, { source: p.label })));
+      add(box, add(el("div", "actions"), kit.button(Q.connectReopen, "picker:connect:reopen", () => kit.openLink(p.href), "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", false), "plain")));
+    } else if (p.phase === "timeout") {
+      const line = el("p", "", fill(Q.connectTimeout, { source: p.label }));
+      line.setAttribute("role", "alert");
+      add(box, line, add(el("div", "actions"), kit.button(Q.checkAgain, "picker:connect:check", () => {
+        p.phase = "waiting";
+        p.startedAt = Date.now();
+        kit.render("picker:connect:cancel");
+        schedulePoll();
+      }, "main"), kit.button(Q.connectReopen, "picker:connect:reopen", () => kit.openLink(p.href), "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", false), "plain")));
+    } else {
+      const line = el("p", "", fill(Q.connectFailed, { source: p.label }));
+      line.setAttribute("role", "alert");
+      add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", () => {
+        session++;
+        startConnect(p.connectArgs, p.id, p.label, p.returnKey);
+      }, "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", false), "plain")));
+    }
+    add(page, box);
+  }
+  function openScope(id, label, title, returnKey, notice, initial) {
+    stopTimer();
+    session++;
+    const mail = id === kit.config.mailSourceId;
+    p = {
+      mode: mail ? "mail" : "folders",
+      id,
+      label,
+      returnKey,
+      notice,
+      title: title || (mail ? Q.mailTitle : Q.foldersTitle),
+      loading: "root",
+      loaded: false,
+      error: "",
+      retry: null,
+      generation: "",
+      revision: "",
+      edited: false,
+      saving: false,
+      saveError: "",
+      discarding: false,
+      roots: [],
+      rootCursor: "",
+      branches: new Map,
+      cursors: new Map,
+      expanded: new Set,
+      catalog: new Map,
+      ancestors: new Map,
+      own: new Map,
+      whole: false,
+      wholeConfirmed: false,
+      search: "",
+      draft: null,
+      labels: [],
+      categories: [],
+      suggestions: [],
+      sampleSize: 0,
+      estimate: null
+    };
+    if (initial && mail)
+      takeMail(initial, "picker:back");
+    else if (initial && validBrowse(initial))
+      takeFolders(initial, "", false, "picker:back");
+    else {
+      kit.render("picker:back");
+      if (mail)
+        listMail(false);
+      else
+        list("", false);
+    }
+  }
+  function reload(message, fresh2) {
+    const keep = p;
+    openScope(keep.id, keep.label, keep.title, keep.returnKey, message, fresh2 || undefined);
+  }
+  function scopeData(result) {
+    if (!result || result.isError || !result._meta || typeof result._meta !== "object")
+      return null;
+    const data = result._meta[kit.config.scopeMetaKey];
+    return data && typeof data === "object" ? data : null;
+  }
+  function validNode(node) {
+    return !!node && typeof node.key === "string" && !!node.key && typeof node.name === "string";
+  }
+  function validBrowse(page) {
+    return !!page && typeof page === "object" && typeof page.account_generation === "string" && !!page.account_generation && typeof page.scope_revision === "string" && !!page.scope_revision && Array.isArray(page.nodes) && page.nodes.every(validNode);
+  }
+  function failLoad(retry, focus) {
+    p.loading = "";
+    p.error = Q.loadFailed;
+    p.retry = retry;
+    kit.render(focus);
+  }
+  function list(parentKey, append) {
+    const cursor = append ? parentKey ? p.cursors.get(parentKey) : p.rootCursor : "";
+    const args = { source_id: p.id };
+    if (parentKey)
+      args.parent_key = parentKey;
+    if (cursor)
+      args.cursor = cursor;
+    p.loading = parentKey || "root";
+    p.error = "";
+    const focus = append ? "picker:more:" + parentKey : parentKey ? "picker:open:" + parentKey : "picker:back";
+    kit.render(focus);
+    const mine = session;
+    kit.call(T.scopeList, args).then((result) => {
+      if (mine !== session || !p)
+        return;
+      const page = scopeData(result);
+      if (!validBrowse(page)) {
+        failLoad(() => list(parentKey, append), "picker:retry");
+        return;
+      }
+      if (p.loaded && (page.account_generation !== p.generation || page.scope_revision !== p.revision)) {
+        reload(Q.conflict, parentKey || append ? null : page);
+        return;
+      }
+      takeFolders(page, parentKey, append, focus);
+    }, () => {
+      if (mine !== session || !p)
+        return;
+      failLoad(() => list(parentKey, append), "picker:retry");
+    });
+  }
+  function takeFolders(page, parentKey, append, focus) {
+    if (!p.loaded) {
+      p.generation = page.account_generation;
+      p.revision = page.scope_revision;
+      p.whole = page.whole_account_selected === true;
+      const saved = Array.isArray(page.selections) ? page.selections : [];
+      for (const selection of saved) {
+        if (!selection || typeof selection.key !== "string" || STATES.indexOf(selection.state) < 0)
+          continue;
+        p.own.set(selection.key, selection.state);
+        p.ancestors.set(selection.key, Array.isArray(selection.ancestor_keys) ? selection.ancestor_keys.filter((key) => typeof key === "string") : []);
+      }
+      p.loaded = true;
+    }
+    const trail = parentKey ? (p.ancestors.get(parentKey) || []).concat([parentKey]) : [];
+    const previous = append ? parentKey ? p.branches.get(parentKey) || [] : p.roots : [];
+    const seen = {};
+    for (const node of previous)
+      seen[node.key] = true;
+    const fresh2 = page.nodes.filter((node) => !seen[node.key] && trail.indexOf(node.key) < 0);
+    for (const node of fresh2) {
+      p.catalog.set(node.key, node);
+      p.ancestors.set(node.key, trail);
+    }
+    const nodes = previous.concat(fresh2);
+    const next = typeof page.next_cursor === "string" && page.next_cursor ? page.next_cursor : "";
+    if (parentKey) {
+      p.branches.set(parentKey, nodes);
+      p.expanded.add(parentKey);
+      if (next)
+        p.cursors.set(parentKey, next);
+      else
+        p.cursors.delete(parentKey);
+    } else {
+      p.roots = nodes;
+      p.rootCursor = next;
+    }
+    p.loading = "";
+    kit.render(focus);
+  }
+  function inherited(key) {
+    let state = p.whole ? "ingest" : "";
+    const ancestors = p.ancestors.get(key) || [];
+    for (const ancestor of ancestors) {
+      const choice = p.own.get(ancestor);
+      if (choice === "exclude")
+        return "exclude";
+      if (choice === "metadata_only")
+        state = "metadata_only";
+      else if (choice === "ingest" && !state)
+        state = "ingest";
+    }
+    return state;
+  }
+  function effective(key) {
+    const from = inherited(key);
+    const own = p.own.get(key);
+    if (from === "exclude" || own === "exclude")
+      return "exclude";
+    if (from === "metadata_only")
+      return "metadata_only";
+    return own || from || "exclude";
+  }
+  function allowed(key, state) {
+    const from = inherited(key);
+    if (!state)
+      return true;
+    if (from === "exclude")
+      return state === "exclude";
+    if (from === "metadata_only")
+      return state !== "ingest";
+    return true;
+  }
+  function mixed(key) {
+    const mine = effective(key);
+    let differs = false;
+    p.own.forEach((_state, other) => {
+      if (differs || other === key)
+        return;
+      const ancestors = p.ancestors.get(other) || [];
+      if (ancestors.indexOf(key) >= 0 && effective(other) !== mine)
+        differs = true;
+    });
+    return differs;
+  }
+  function hasAncestorChoice(key) {
+    const ancestors = p.ancestors.get(key) || [];
+    return ancestors.some((ancestor) => p.own.has(ancestor));
+  }
+  function size(bytes) {
+    const units = ["bytes", "KB", "MB", "GB", "TB"];
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1000 && unit < units.length - 1) {
+      value /= 1000;
+      unit++;
+    }
+    const shown = unit === 0 || value >= 100 ? String(Math.round(value)) : String(Math.round(value * 10) / 10);
+    return shown + " " + units[unit];
+  }
+  function nodeMeta(node) {
+    const parts = [];
+    if (typeof node.size_bytes === "number" && isFinite(node.size_bytes) && node.size_bytes >= 0)
+      parts.push(size(node.size_bytes));
+    if (typeof node.file_count === "number" && isFinite(node.file_count) && node.file_count >= 0) {
+      const n = Math.round(node.file_count);
+      parts.push(fill(n === 1 ? Q.folderFiles.one : Q.folderFiles.many, { n: kit.count(n) }));
+    }
+    return parts.join(" · ");
+  }
+  function choose(key, value) {
+    if (value && STATES.indexOf(value) < 0)
+      return;
+    if (value)
+      p.own.set(key, value);
+    else
+      p.own.delete(key);
+    p.edited = true;
+    p.saveError = "";
+    kit.render("picker:choice:" + key);
+  }
+  function folderRow(node) {
+    const key = node.key;
+    const li = el("li", "folder-item");
+    const row = el("div", "folder");
+    const toggle = el("span", "folder-toggle");
+    if (node.has_children) {
+      const open6 = p.expanded.has(key);
+      const loadingHere = p.loading === key;
+      const control = kit.button(open6 ? "▾" : "▸", "picker:open:" + key, loadingHere ? null : () => {
+        if (open6) {
+          p.expanded.delete(key);
+          kit.render("picker:open:" + key);
+        } else if (p.branches.has(key)) {
+          p.expanded.add(key);
+          kit.render("picker:open:" + key);
+        } else
+          list(key, false);
+      }, "plain");
+      control.className = "btn icon-btn";
+      control.setAttribute("aria-expanded", String(open6));
+      control.setAttribute("aria-label", fill(open6 ? Q.collapse : Q.expand, { name: node.name }));
+      add(toggle, control);
+    }
+    const text = el("div", "folder-text");
+    const nameLine = add(el("p", "folder-name"), el("span", "", node.name));
+    const own = p.own.get(key);
+    const from = inherited(key);
+    let status = "";
+    if (mixed(key))
+      status = Q.mixed + " — " + Q.mixedHelp;
+    else if (own || from) {
+      status = Q.states[effective(key)];
+      if (!own && from)
+        status += " · " + Q.inherited;
+    } else
+      status = Q.notSelected;
+    add(text, nameLine);
+    const metaParts = [status];
+    const meta2 = nodeMeta(node);
+    if (meta2)
+      metaParts.push(meta2);
+    add(text, el("p", "muted folder-meta", metaParts.join(" · ")));
+    const choice = el("select", "choice");
+    choice.setAttribute("data-key", "picker:choice:" + key);
+    choice.setAttribute("aria-label", fill(Q.choiceFor, { name: node.name }));
+    if (node.selectable === false || p.saving)
+      choice.disabled = true;
+    const none = el("option", "", from ? fill(hasAncestorChoice(key) ? Q.sameAsParent : Q.sameAsAccount, { state: Q.states[from] }) : Q.notSelected);
+    none.value = "";
+    add(choice, none);
+    for (const state of STATES) {
+      const option2 = el("option", "", Q.states[state]);
+      option2.value = state;
+      if (!allowed(key, state))
+        option2.disabled = true;
+      add(choice, option2);
+    }
+    choice.value = own || "";
+    choice.addEventListener("change", () => choose(key, choice.value));
+    add(row, toggle, text, choice);
+    add(li, row);
+    const record3 = { li, name: String(node.name).toLowerCase(), children: [] };
+    if (node.has_children && p.expanded.has(key)) {
+      const children = p.branches.get(key) || [];
+      const group2 = el("ul", "tree");
+      group2.setAttribute("role", "group");
+      for (const child of children) {
+        const built = folderRow(child);
+        record3.children.push(built.row);
+        add(group2, built.li);
+      }
+      if (!children.length && p.loading !== key)
+        add(group2, el("li", "muted folder-empty", Q.noFolders));
+      if (p.cursors.has(key))
+        add(group2, add(el("li", "folder-more"), loadMore(key)));
+      add(li, group2);
+    }
+    if (p.loading === key) {
+      const line = el("p", "muted folder-loading", Q.loadingFolders);
+      line.setAttribute("role", "status");
+      add(li, line);
+    }
+    return { li, row: record3 };
+  }
+  function loadMore(parentKey) {
+    const busy = p.loading === (parentKey || "root");
+    return kit.button(busy ? Q.loadingFolders : Q.loadMore, "picker:more:" + parentKey, busy ? null : () => list(parentKey, true), "plain");
+  }
+  function applySearch() {
+    const needle = String(p && p.search || "").trim().toLowerCase();
+    let any2 = false;
+    const visit = (record3) => {
+      let show = !needle || record3.name.indexOf(needle) >= 0;
+      for (const child of record3.children)
+        if (visit(child))
+          show = true;
+      record3.li.hidden = !show;
+      if (show)
+        any2 = true;
+      return show;
+    };
+    for (const record3 of searchRows)
+      visit(record3);
+    if (searchEmpty)
+      searchEmpty.hidden = !needle || any2 || !searchRows.length;
+  }
+  function counts() {
+    const totals = { ingest: 0, metadata_only: 0, exclude: 0 };
+    p.own.forEach((_state, key) => {
+      totals[effective(key)]++;
+    });
+    return totals;
+  }
+  function indexedBytes() {
+    if (p.whole)
+      return -1;
+    let total = 0;
+    let known = true;
+    p.own.forEach((_state, key) => {
+      const state = effective(key);
+      const ancestors = p.ancestors.get(key) || [];
+      let nearest = "";
+      for (const ancestor of ancestors)
+        if (p.own.has(ancestor))
+          nearest = ancestor;
+      const parentIngest = nearest !== "" && effective(nearest) === "ingest";
+      let sign2 = 0;
+      if (state === "ingest" && !parentIngest)
+        sign2 = 1;
+      else if (state !== "ingest" && parentIngest)
+        sign2 = -1;
+      if (!sign2)
+        return;
+      const node = p.catalog.get(key);
+      if (!node || typeof node.size_bytes !== "number" || !isFinite(node.size_bytes)) {
+        known = false;
+        return;
+      }
+      total += sign2 * node.size_bytes;
+    });
+    return known ? Math.max(0, total) : -1;
+  }
+  function folderSummary() {
+    const totals = counts();
+    const lines = [];
+    const parts = [];
+    const templates = [["ingest", Q.summaryIngest], ["metadata_only", Q.summaryMetadata], ["exclude", Q.summaryExclude]];
+    for (const [state, template] of templates) {
+      const n = totals[state] || 0;
+      if (!n)
+        continue;
+      let part = fill(template, { n: kit.count(n) });
+      if (!parts.length) {
+        const noun = n === 1 ? Q.summaryFolder.one : Q.summaryFolder.many;
+        part = part.replace(kit.count(n), kit.count(n) + " " + noun);
+      }
+      parts.push(part);
+    }
+    if (p.whole)
+      lines.push(Q.summaryWhole);
+    if (parts.length)
+      lines.push(parts.join(", ") + ".");
+    else if (!p.whole)
+      lines.push(Q.summaryNone);
+    const bytes = indexedBytes();
+    if (bytes > 0)
+      lines.push(fill(Q.summarySize, { size: size(bytes) }));
+    if (!p.whole)
+      lines.push(Q.summaryRest);
+    return lines;
+  }
+  function anyChosen() {
+    let chosen = false;
+    p.own.forEach((_state, key) => {
+      if (effective(key) !== "exclude")
+        chosen = true;
+    });
+    return chosen;
+  }
+  function saveFolders() {
+    if (!canSaveFolders())
+      return;
+    const selections = [];
+    p.own.forEach((_state, key) => {
+      selections.push({ key, state: effective(key), ancestor_keys: (p.ancestors.get(key) || []).slice() });
+    });
+    const args = {
+      source_id: p.id,
+      account_generation: p.generation,
+      scope_revision: p.revision,
+      selections,
+      whole_account_selected: p.whole
+    };
+    if (p.whole)
+      args.confirm_whole_account = true;
+    save(args, "picker:save");
+  }
+  function canSaveFolders() {
+    if (!p.loaded || p.saving || !p.generation || !p.revision)
+      return false;
+    if (p.whole)
+      return p.wholeConfirmed;
+    return anyChosen() || p.edited;
+  }
+  function save(args, focus) {
+    p.saving = true;
+    p.saveError = "";
+    kit.render(focus);
+    const mine = session;
+    kit.call(T.scopeSet, args).then((result) => {
+      if (mine !== session || !p)
+        return;
+      p.saving = false;
+      const content = result && !result.isError ? result.structuredContent : null;
+      const status = content && typeof content === "object" ? content.status : "";
+      if (status === "conflict") {
+        reload(Q.conflict, scopeData(result));
+        return;
+      }
+      if (status === "saved") {
+        leave(fill(Q.saved, { source: p.label }), true);
+        return;
+      }
+      p.saveError = Q.saveFailed;
+      kit.render(focus);
+    }, () => {
+      if (mine !== session || !p)
+        return;
+      p.saving = false;
+      p.saveError = Q.saveFailed;
+      kit.render(focus);
+    });
+  }
+  function wholeControl() {
+    const box = el("div", "whole");
+    const label = el("label", "opt");
+    const input = el("input");
+    input.type = "checkbox";
+    input.checked = p.whole;
+    input.disabled = !p.loaded || p.saving;
+    input.setAttribute("data-key", "picker:whole");
+    input.addEventListener("change", () => {
+      p.whole = input.checked;
+      p.wholeConfirmed = false;
+      p.edited = true;
+      kit.render(p.whole ? "picker:whole:no" : "picker:whole");
+    });
+    add(box, add(label, input, el("span", "", Q.wholeAccount)));
+    if (p.whole && !p.wholeConfirmed) {
+      const confirm = el("div", "confirm-box");
+      confirm.setAttribute("role", "alert");
+      add(confirm, el("p", "strong", fill(Q.wholePrompt, { source: p.label })), add(el("div", "actions"), kit.button(Q.wholeConfirm, "picker:whole:yes", () => {
+        p.wholeConfirmed = true;
+        kit.render("picker:whole");
+      }, "danger"), kit.button(Q.cancel, "picker:whole:no", () => {
+        p.whole = false;
+        kit.render("picker:whole");
+      }, "plain")));
+      add(box, confirm);
+    } else if (p.whole) {
+      add(box, el("p", "muted", Q.wholeConfirmed));
+    }
+    return box;
+  }
+  function meanings() {
+    const box = el("details", "disclosure");
+    const head = el("summary", "", Q.meaningTitle);
+    head.setAttribute("data-key", "picker:meanings");
+    add(box, head);
+    const listNode = el("ul", "plain");
+    for (const line of Q.meanings)
+      add(listNode, el("li", "", line));
+    return add(box, listNode);
+  }
+  function foldersView(page) {
+    add(page, el("h1", "", p.title));
+    add(page, el("p", "muted", fill(Q.foldersIntro, { source: p.label })));
+    if (p.notice) {
+      const notice = el("p", "notice", p.notice);
+      notice.setAttribute("role", "status");
+      add(page, notice);
+    }
+    add(page, meanings());
+    if (p.error) {
+      const error2 = el("div", "banner");
+      error2.setAttribute("role", "alert");
+      add(error2, add(el("div", "banner-body"), el("p", "", p.error), add(el("div", "actions"), kit.button(Q.tryAgain, "picker:retry", () => p.retry && p.retry(), "plain"))));
+      add(page, error2);
+    }
+    if (!p.loaded) {
+      if (p.loading) {
+        const line = el("p", "muted", Q.loadingFolders);
+        line.setAttribute("role", "status");
+        add(page, line);
+      }
+      return;
+    }
+    const search = el("label", "field");
+    add(search, el("span", "field-label", Q.search));
+    const input = el("input", "text");
+    input.type = "search";
+    input.value = p.search;
+    input.setAttribute("data-key", "picker:search");
+    input.addEventListener("input", () => {
+      p.search = input.value;
+      applySearch();
+      kit.reportHeight();
+    });
+    add(page, add(search, input));
+    const tree = el("ul", "tree root");
+    searchRows = [];
+    for (const node of p.roots) {
+      const built = folderRow(node);
+      searchRows.push(built.row);
+      add(tree, built.li);
+    }
+    if (!p.roots.length)
+      add(tree, el("li", "muted folder-empty", Q.noFolders));
+    if (p.rootCursor)
+      add(tree, add(el("li", "folder-more"), loadMore("")));
+    add(page, tree);
+    searchEmpty = el("p", "muted search-empty", Q.searchEmpty);
+    searchEmpty.hidden = true;
+    add(page, searchEmpty);
+    add(page, wholeControl());
+    const footer = el("section", "picker-footer");
+    footer.setAttribute("aria-label", Q.summaryTitle);
+    const summary = el("div", "summary");
+    summary.setAttribute("aria-live", "polite");
+    for (const line of folderSummary())
+      add(summary, el("p", "", line));
+    add(footer, summary);
+    add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders, p.whole && !p.wholeConfirmed ? Q.needConfirm : !anyChosen() && !p.edited ? Q.needChoice : ""));
+    add(page, footer);
+  }
+  function saveRow(enabled, label, onSave, reason) {
+    const row = el("div", "actions");
+    if (p.saving) {
+      const busy = kit.button(Q.saving, "picker:save", null, "main");
+      busy.setAttribute("aria-busy", "true");
+      add(row, busy);
+    } else
+      add(row, kit.button(label, "picker:save", enabled ? onSave : null, "main"));
+    add(row, kit.button(Q.cancel, "picker:cancel", p.saving ? null : back, "plain"));
+    const wrap = el("div", "save");
+    add(wrap, row);
+    if (!enabled && !p.saving && reason)
+      add(wrap, el("p", "reason", reason));
+    if (p.saveError) {
+      const error2 = el("p", "error", p.saveError);
+      error2.setAttribute("role", "alert");
+      add(wrap, error2);
+    }
+    return wrap;
+  }
+  function strings(value) {
+    return Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : [];
+  }
+  function normalizeDraft(value) {
+    const draft = value && typeof value === "object" ? value : {};
+    return {
+      window: WINDOWS.indexOf(draft.window) >= 0 ? draft.window : "2y",
+      skipped_categories: Array.isArray(draft.skipped_categories) ? draft.skipped_categories.filter((entry) => CATEGORIES.indexOf(entry) >= 0) : ["promotions", "social"],
+      skipped_labels: Array.isArray(draft.skipped_labels) ? draft.skipped_labels.filter((entry) => entry && typeof entry.id === "string" && typeof entry.name === "string").map((entry) => ({ id: entry.id, name: entry.name })) : [],
+      always_private_senders: strings(draft.always_private_senders),
+      skip_senders: strings(draft.skip_senders)
+    };
+  }
+  function draftOut() {
+    const clean = (lines) => {
+      const out = [];
+      for (const line of lines) {
+        const value = line.trim();
+        if (value && out.indexOf(value) < 0)
+          out.push(value);
+      }
+      return out;
+    };
+    return {
+      window: p.draft.window,
+      skipped_categories: p.draft.skipped_categories.slice(),
+      skipped_labels: p.draft.skipped_labels.map((label) => ({ id: label.id, name: label.name })),
+      always_private_senders: clean(p.draft.always_private_senders),
+      skip_senders: clean(p.draft.skip_senders)
+    };
+  }
+  function listMail(withDraft) {
+    const args = { source_id: p.id };
+    if (withDraft && p.draft)
+      args[kit.config.mailArgs.list] = draftOut();
+    p.loading = "root";
+    p.error = "";
+    const focus = withDraft ? "picker:estimate" : "picker:back";
+    kit.render(focus);
+    const mine = session;
+    kit.call(T.scopeList, args).then((result) => {
+      if (mine !== session || !p)
+        return;
+      const body = scopeData(result);
+      if (!validMail(body)) {
+        failLoad(() => listMail(withDraft), "picker:retry");
+        return;
+      }
+      if (p.loaded && (body.account_generation !== p.generation || body.scope_revision !== p.revision)) {
+        reload(Q.conflict, withDraft ? null : body);
+        return;
+      }
+      takeMail(body, focus);
+    }, () => {
+      if (mine !== session || !p)
+        return;
+      failLoad(() => listMail(withDraft), "picker:retry");
+    });
+  }
+  function validMail(body) {
+    return !!body && typeof body === "object" && typeof body.account_generation === "string" && !!body.account_generation && typeof body.scope_revision === "string" && !!body.scope_revision;
+  }
+  function takeMail(body, focus) {
+    if (!validMail(body))
+      return;
+    if (!p.loaded) {
+      p.generation = body.account_generation;
+      p.revision = body.scope_revision;
+      p.draft = normalizeDraft(body.draft);
+      p.loaded = true;
+    }
+    p.labels = Array.isArray(body.labels) ? body.labels.filter((label) => label && typeof label.id === "string" && typeof label.name === "string") : [];
+    p.categories = Array.isArray(body.categories) ? body.categories : [];
+    p.suggestions = Array.isArray(body.sender_suggestions) ? body.sender_suggestions.filter((entry) => entry && typeof entry.sender === "string") : [];
+    p.sampleSize = typeof body.sample_size === "number" ? body.sample_size : 0;
+    p.estimate = body.estimate && typeof body.estimate === "object" ? body.estimate : null;
+    p.loading = "";
+    kit.render(focus);
+  }
+  function mailEdited(focus) {
+    p.edited = true;
+    p.saveError = "";
+    kit.render(focus);
+  }
+  function option(type, name, key, checked, text, hint, onChange) {
+    const label = el("label", "opt");
+    const input = el("input");
+    input.type = type;
+    if (name)
+      input.name = name;
+    input.checked = checked;
+    input.disabled = p.saving;
+    input.setAttribute("data-key", key);
+    input.addEventListener("change", () => onChange(input));
+    const words = add(el("span", "opt-text"), el("span", "", text));
+    if (hint)
+      add(words, el("span", "muted opt-hint", hint));
+    return add(label, input, words);
+  }
+  function group(legend, help) {
+    const box = el("fieldset", "group");
+    add(box, el("legend", "", legend));
+    if (help)
+      add(box, el("p", "muted", help));
+    return box;
+  }
+  function senderField(which, title, help) {
+    const label = el("label", "field");
+    add(label, el("span", "field-label", title), el("span", "muted", help));
+    const area = el("textarea", "text");
+    area.rows = 3;
+    area.spellcheck = false;
+    area.disabled = p.saving;
+    area.value = p.draft[which].join(`
+`);
+    area.setAttribute("data-key", "picker:senders:" + which);
+    area.addEventListener("input", () => {
+      p.draft[which] = area.value.split(`
+`);
+      p.edited = true;
+      const slot = p.summaryNode;
+      if (slot)
+        slot.textContent = mailSummary();
+    });
+    return add(label, area);
+  }
+  function lowerFirst2(value) {
+    return value ? value.charAt(0).toLowerCase() + value.slice(1) : value;
+  }
+  function plural4(words, n) {
+    return fill(n === 1 ? words.one : words.many, { n: kit.count(n) });
+  }
+  function mailSummary() {
+    const draft = draftOut();
+    const skipped2 = draft.skipped_categories.length + draft.skipped_labels.length;
+    return [
+      fill(Q.mailSummaryWindow, { window: lowerFirst2(Q.mailWindows[draft.window]) }),
+      plural4(Q.mailSummarySkipped, skipped2),
+      plural4(Q.mailSummaryPrivate, draft.always_private_senders.length),
+      plural4(Q.mailSummarySkipSenders, draft.skip_senders.length)
+    ].join(" · ");
+  }
+  function addSender(which, sender, focus) {
+    const listNow = p.draft[which].map((line) => line.trim()).filter((line) => line);
+    if (listNow.indexOf(sender) < 0)
+      listNow.push(sender);
+    p.draft[which] = listNow;
+    mailEdited(focus);
+  }
+  function mailView(page) {
+    add(page, el("h1", "", p.title));
+    add(page, el("p", "muted", fill(Q.mailIntro, { source: p.label })));
+    if (p.notice) {
+      const notice = el("p", "notice", p.notice);
+      notice.setAttribute("role", "status");
+      add(page, notice);
+    }
+    if (p.error) {
+      const error2 = el("div", "banner");
+      error2.setAttribute("role", "alert");
+      add(error2, add(el("div", "banner-body"), el("p", "", p.error), add(el("div", "actions"), kit.button(Q.tryAgain, "picker:retry", () => p.retry && p.retry(), "plain"))));
+      add(page, error2);
+    }
+    if (!p.loaded) {
+      if (p.loading) {
+        const line = el("p", "muted", Q.loadingMail);
+        line.setAttribute("role", "status");
+        add(page, line);
+      }
+      return;
+    }
+    const draft = p.draft;
+    const windows = group(Q.mailWindow, Q.mailWindowHelp);
+    for (const value of WINDOWS) {
+      add(windows, option("radio", "mail-window", "picker:window:" + value, draft.window === value, Q.mailWindows[value], value === "2y" ? Q.mailRecommended : "", () => {
+        draft.window = value;
+        mailEdited("picker:window:" + value);
+      }));
+    }
+    add(page, windows);
+    const categories = group(Q.mailCategories, Q.mailCategoriesHelp);
+    for (const category of CATEGORIES) {
+      const words = Q.mailCategoryNames[category];
+      const known = p.categories.filter((entry) => entry && entry.category === category)[0];
+      const hint = known && typeof known.messages_total === "number" ? words[1] + " · " + fill(Q.mailCategoryCount, { count: kit.count(known.messages_total) }) : words[1];
+      add(categories, option("checkbox", "", "picker:category:" + category, draft.skipped_categories.indexOf(category) < 0, words[0], hint, (input) => {
+        const rest = draft.skipped_categories.filter((entry) => entry !== category);
+        draft.skipped_categories = input.checked ? rest : rest.concat([category]);
+        mailEdited("picker:category:" + category);
+      }));
+    }
+    add(page, categories);
+    const labels = group(Q.mailLabels, Q.mailLabelsHelp);
+    if (!p.labels.length)
+      add(labels, el("p", "muted", Q.mailLabelsEmpty));
+    p.labels.forEach((label, index) => {
+      const skipped2 = draft.skipped_labels.some((entry) => entry.id === label.id);
+      add(labels, option("checkbox", "", "picker:label:" + index, !skipped2, label.id === "SENT" ? Q.mailSentLabel : label.name, "", (input) => {
+        const rest = draft.skipped_labels.filter((entry) => entry.id !== label.id);
+        draft.skipped_labels = input.checked ? rest : rest.concat([{ id: label.id, name: label.name }]);
+        mailEdited("picker:label:" + index);
+      }));
+    });
+    add(page, labels);
+    const senders = group(Q.mailSenders, "");
+    add(senders, senderField("always_private_senders", Q.mailPrivate, Q.mailPrivateHelp));
+    add(senders, senderField("skip_senders", Q.mailSkip, Q.mailSkipHelp));
+    if (p.suggestions.length) {
+      add(senders, el("p", "field-label", Q.mailSuggestions));
+      const listNode = el("ul", "suggestions");
+      p.suggestions.forEach((entry, index) => {
+        const item = el("li", "suggestion");
+        const text = add(el("p", "suggestion-text"), el("span", "", entry.sender));
+        if (typeof entry.sample_messages === "number" && p.sampleSize > 0) {
+          add(text, el("span", "muted", " · " + fill(Q.mailSuggestionCount, { n: kit.count(entry.sample_messages), total: kit.count(p.sampleSize) })));
+        }
+        add(item, text, add(el("div", "actions"), kit.button(Q.mailPrivate, "picker:suggest:private:" + index, p.saving ? null : () => addSender("always_private_senders", entry.sender, "picker:suggest:private:" + index), "plain"), kit.button(Q.mailSkip, "picker:suggest:skip:" + index, p.saving ? null : () => addSender("skip_senders", entry.sender, "picker:suggest:skip:" + index), "plain")));
+        add(listNode, item);
+      });
+      add(senders, listNode);
+    }
+    add(page, senders);
+    const footer = el("section", "picker-footer");
+    footer.setAttribute("aria-label", Q.summaryTitle);
+    const summary = el("div", "summary");
+    summary.setAttribute("aria-live", "polite");
+    const summaryLine = el("p", "", mailSummary());
+    p.summaryNode = summaryLine;
+    add(summary, summaryLine);
+    const estimate = p.estimate;
+    if (estimate && typeof estimate.content_messages === "number" && typeof estimate.metadata_messages === "number") {
+      add(summary, el("p", "", fill(Q.mailEstimate, { content: kit.count(estimate.content_messages), metadata: kit.count(estimate.metadata_messages) })));
+      if (typeof estimate.embedding_cost_usd === "number" && isFinite(estimate.embedding_cost_usd)) {
+        add(summary, el("p", "", fill(Q.mailCost, { cost: estimate.embedding_cost_usd.toFixed(2) })));
+      }
+      add(summary, el("p", "muted", Q.mailEstimateNote));
+    }
+    add(summary, add(el("div", "actions"), kit.button(p.loading ? Q.loadingMail : Q.mailUpdateEstimate, "picker:estimate", p.loading || p.saving ? null : () => listMail(true), "plain")));
+    add(footer, summary);
+    add(footer, saveRow(!p.saving && !p.loading, Q.saveMail, () => {
+      if (p.saving || !p.loaded)
+        return;
+      const args = { source_id: p.id, account_generation: p.generation, scope_revision: p.revision };
+      args[kit.config.mailArgs.set] = draftOut();
+      save(args, "picker:save");
+    }, ""));
+    add(page, footer);
+  }
+  function back() {
+    if (!p)
+      return;
+    if (p.mode !== "connect" && p.edited && !p.saving) {
+      p.discarding = true;
+      kit.render("picker:discard:no");
+      return;
+    }
+    leave("", false);
+  }
+  function view() {
+    const page = el("main", "page picker");
+    searchRows = [];
+    searchEmpty = null;
+    if (!p)
+      return page;
+    const top = el("div", "picker-top");
+    const backButton = kit.button(Q.back, "picker:back", back, "plain");
+    backButton.className = "btn back";
+    add(top, backButton);
+    add(page, top);
+    if (p.discarding) {
+      const confirm = el("div", "confirm-box");
+      confirm.setAttribute("role", "alert");
+      add(confirm, el("p", "strong", Q.discardPrompt), add(el("div", "actions"), kit.button(Q.discard, "picker:discard:yes", () => leave("", false), "danger"), kit.button(Q.keep, "picker:discard:no", () => {
+        p.discarding = false;
+        kit.render("picker:back");
+      }, "plain")));
+      add(page, confirm);
+    }
+    if (p.mode === "connect")
+      connectView(page);
+    else if (p.mode === "mail")
+      mailView(page);
+    else
+      foldersView(page);
+    return page;
+  }
+  return {
+    handles,
+    start,
+    active: () => !!p,
+    view,
+    afterRender: () => {
+      if (p && p.mode === "folders")
+        applySearch();
+    }
+  };
+}
+var CHATGPT_PICKER_TOOLS, CHATGPT_PICKER_MAIL_ARGS, CHATGPT_SCOPE_META_KEY = "olympus/scope", CHATGPT_CONNECT_HOST = "mcp.olympusplugin.ai", CHATGPT_CONNECT_POLL_MS = 3000, CHATGPT_CONNECT_POLL_CAP_MS, CHATGPT_MAIL_SOURCE_ID = "gmail.email";
+var init_picker = __esm(() => {
+  CHATGPT_PICKER_TOOLS = {
+    connectSource: "olympus_connect_source",
+    scopeList: "olympus_scope_list",
+    scopeSet: "olympus_scope_set"
+  };
+  CHATGPT_PICKER_MAIL_ARGS = { list: "draft", set: "mail" };
+  CHATGPT_CONNECT_POLL_CAP_MS = 3 * 60000;
+});
 
 // src/workers/dashboard/chatgpt/page.ts
 function vars(palette) {
@@ -97571,7 +98798,17 @@ function chatgptDashboardPageHtml(options = {}) {
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
-    staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS
+    staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
+    picker: {
+      tools: CHATGPT_PICKER_TOOLS,
+      mailArgs: CHATGPT_PICKER_MAIL_ARGS,
+      scopeMetaKey: CHATGPT_SCOPE_META_KEY,
+      copy: DASHBOARD_CHATGPT_PICKER_COPY,
+      connectHost: CHATGPT_CONNECT_HOST,
+      mailSourceId: CHATGPT_MAIL_SOURCE_ID,
+      pollMs: options.connectPollMs ?? CHATGPT_CONNECT_POLL_MS,
+      pollCapMs: options.connectPollCapMs ?? CHATGPT_CONNECT_POLL_CAP_MS
+    }
   };
   return [
     "<!doctype html>",
@@ -97584,7 +98821,7 @@ function chatgptDashboardPageHtml(options = {}) {
     "</head>",
     "<body>",
     '<div id="app"></div>',
-    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config2)});</script>`,
+    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config2)}, ${chatgptPickerProgram.toString()});</script>`,
     "</body>",
     "</html>",
     ""
@@ -97597,6 +98834,7 @@ function scriptJson(value) {
 var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_DASHBOARD_STALE_AFTER_MS, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
 var init_page = __esm(() => {
   init_vocabulary();
+  init_picker();
   CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60000;
   STATUS_TONE = Object.fromEntries(Object.keys(DASHBOARD_STATUS_PRESENTATION).map((status) => [status, DASHBOARD_STATUS_PRESENTATION[status].colorToken]));
   CHATGPT_DASHBOARD_LIGHT = {
@@ -97713,6 +98951,45 @@ summary{cursor:pointer;border-radius:0.375rem}
 .models summary{font-size:1rem;color:var(--text);font-weight:600}
 .models{padding-top:0.75rem;border-top:1px solid var(--line)}
 .plain{margin:0.5rem 0;padding-left:1.25rem}
+.notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border-left:3px solid var(--good);background:var(--surface);border-radius:0.25rem}
+.strong{font-weight:600}
+.error{color:var(--danger);font-weight:600}
+.picker-top{margin:0 0 0.75rem}
+.btn.back::before{content:"\\2190\\00a0"}
+.picker h1{margin-bottom:0.25rem}
+.picker>.muted{margin-bottom:0.75rem}
+.picker-status{display:flex;flex-direction:column;gap:0.75rem;margin-top:1rem}
+.field{display:flex;flex-direction:column;gap:0.25rem;margin:0.75rem 0}
+.field-label{font-weight:600;font-size:0.875rem}
+.text{font:inherit;font-size:1rem;width:100%;min-height:2.25rem;padding:0.375rem 0.625rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
+textarea.text{resize:vertical;min-height:4.5rem}
+.tree{list-style:none;margin:0;padding:0}
+.tree.root{border-top:1px solid var(--line);margin-top:0.5rem}
+.tree .tree{padding-left:1rem;border-left:1px solid var(--line);margin-left:1.125rem}
+.folder{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem;padding:0.5rem 0;border-bottom:1px solid var(--line)}
+.folder-toggle{flex:none;width:2.25rem;display:inline-flex;justify-content:center}
+.folder-text{flex:1 1 9rem;min-width:0}
+.folder-name{font-weight:500}
+.folder-meta{font-size:0.8125rem}
+.folder-empty,.folder-loading{padding:0.5rem 0 0.5rem 2.75rem}
+.folder-more{padding:0.5rem 0 0.5rem 2.75rem}
+.icon-btn{min-width:2.25rem;padding:0.25rem;border-radius:0.5rem}
+.choice{font:inherit;font-size:0.875rem;min-height:2.25rem;max-width:100%;padding:0.25rem 0.5rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
+.whole{margin-top:1.25rem}
+.opt{display:flex;align-items:flex-start;gap:0.5rem;padding:0.375rem 0;cursor:pointer}
+.opt input{flex:none;width:1.125rem;height:1.125rem;margin:0.125rem 0 0;accent-color:var(--accent)}
+.opt-text{display:flex;flex-direction:column;min-width:0}
+.opt-hint{font-size:0.8125rem}
+.confirm-box{display:flex;flex-direction:column;gap:0.5rem;margin:0.5rem 0 0.75rem;padding:0.75rem;border:1px solid var(--warn-line);border-radius:0.75rem;background:var(--warn-bg)}
+.group{border:0;border-top:1px solid var(--line);margin:1rem 0 0;padding:0.75rem 0 0;min-width:0}
+.group legend{font-weight:600;padding:0;float:left;width:100%;margin-bottom:0.25rem}
+.group legend+*{clear:both}
+.suggestions{list-style:none;margin:0.25rem 0 0;padding:0}
+.suggestion{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.75rem;padding:0.375rem 0;border-bottom:1px solid var(--line)}
+.suggestion-text{flex:1 1 12rem;min-width:0}
+.picker-footer{margin-top:1.5rem;padding:1rem;border:1px solid var(--line);border-radius:0.75rem;background:var(--surface);display:flex;flex-direction:column;gap:0.75rem}
+.summary{display:flex;flex-direction:column;gap:0.25rem}
+.save{display:flex;flex-direction:column;gap:0.375rem}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu,.menu-panel{align-items:flex-start}}

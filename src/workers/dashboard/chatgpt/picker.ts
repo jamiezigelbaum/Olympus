@@ -17,20 +17,24 @@
 import type { DASHBOARD_CHATGPT_PICKER_COPY } from '../vocabulary.ts';
 
 /**
- * The backend tools the picker calls. One map, so a rename on the engine side
- * is a one-line change here.
+ * The backend tools the picker calls (src/workers/chatgpt/dashboard-contract.ts
+ * setup additions: CONNECT_SOURCE_TOOL_NAME, SCOPE_LIST_TOOL_NAME,
+ * SCOPE_SET_TOOL_NAME). One map, so a rename is a one-line change here.
  */
 export const CHATGPT_PICKER_TOOLS = {
-  /** {source} → structuredContent with an authorize URL on the connect host's /go/ path. */
+  /** {source} → structuredContent {status: 'open_link', openUrl} on the connect host's /go/ path. */
   connectSource: 'olympus_connect_source',
-  /** {source_id, parent_key?, cursor?} → a folder browse result, or the mail picker's data. */
+  /** {source_id, parent_key?, cursor?, draft?} → ScopeSummary; the picker data is in `_meta[scopeMetaKey]`. */
   scopeList: 'olympus_scope_list',
-  /** Saves the scope and starts the source, or answers a conflict. */
+  /** {..., selections | mail} → {status: 'saved'} or {status: 'conflict'} with the fresh list in `_meta`. */
   scopeSet: 'olympus_scope_set',
 } as const;
 
 /** Argument names that carry the mail draft (list: the estimate; set: the save). */
-export const CHATGPT_PICKER_MAIL_ARGS = { list: 'draft', set: 'scope' } as const;
+export const CHATGPT_PICKER_MAIL_ARGS = { list: 'draft', set: 'mail' } as const;
+
+/** The result `_meta` key that carries picker data (names, keys, cursors) to the widget only. */
+export const CHATGPT_SCOPE_META_KEY = 'olympus/scope';
 
 /** The only host an authorize link may point at; its path must start with /go/. */
 export const CHATGPT_CONNECT_HOST = 'mcp.olympusplugin.ai';
@@ -41,6 +45,7 @@ export const CHATGPT_MAIL_SOURCE_ID = 'gmail.email';
 export interface ChatGptPickerConfig {
   tools: typeof CHATGPT_PICKER_TOOLS;
   mailArgs: typeof CHATGPT_PICKER_MAIL_ARGS;
+  scopeMetaKey: string;
   copy: typeof DASHBOARD_CHATGPT_PICKER_COPY;
   connectHost: string;
   mailSourceId: string;
@@ -129,8 +134,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   // ---- connect -----------------------------------------------------------
   function authorizeHref(content: Any): string {
     if (!content || typeof content !== 'object') return '';
-    const candidates = [content.authorizeUrl, content.authorize_url, content.authorizationUrl, content.url, content.href];
-    for (const value of candidates) {
+    for (const value of [content.openUrl]) {
       if (typeof value !== 'string') continue;
       let parsed: URL;
       try {
@@ -256,7 +260,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   // ---- scope sessions ----------------------------------------------------
-  function openScope(id: string, label: string, title: string, returnKey: string, notice: string): void {
+  function openScope(id: string, label: string, title: string, returnKey: string, notice: string, initial?: Any): void {
     stopTimer();
     session++;
     const mail = id === kit.config.mailSourceId;
@@ -271,14 +275,26 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       // mail
       draft: null, labels: [], categories: [], suggestions: [], sampleSize: 0, estimate: null,
     };
-    kit.render('picker:back');
-    if (mail) listMail(false);
-    else list('', false);
+    if (initial && mail) takeMail(initial, 'picker:back');
+    else if (initial && validBrowse(initial)) takeFolders(initial, '', false, 'picker:back');
+    else {
+      kit.render('picker:back');
+      if (mail) listMail(false);
+      else list('', false);
+    }
   }
 
-  function reload(message: string): void {
+  /** Start over from the saved scope: the fresh list when the conflict carried it, else a new listing. */
+  function reload(message: string, fresh?: Any): void {
     const keep = p;
-    openScope(keep.id, keep.label, keep.title, keep.returnKey, message);
+    openScope(keep.id, keep.label, keep.title, keep.returnKey, message, fresh || undefined);
+  }
+
+  /** Picker data lives only in the result's `_meta`, never in structuredContent. */
+  function scopeData(result: Any): Any {
+    if (!result || result.isError || !result._meta || typeof result._meta !== 'object') return null;
+    const data = result._meta[kit.config.scopeMetaKey];
+    return data && typeof data === 'object' ? data : null;
   }
 
   function validNode(node: Any): boolean {
@@ -289,14 +305,6 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return !!page && typeof page === 'object' && typeof page.account_generation === 'string' && !!page.account_generation
       && typeof page.scope_revision === 'string' && !!page.scope_revision
       && Array.isArray(page.nodes) && page.nodes.every(validNode);
-  }
-
-  function isConflict(content: Any): boolean {
-    if (!content || typeof content !== 'object') return false;
-    if (content.conflict === true || content.status === 'conflict') return true;
-    const error = content.error;
-    const code = error && typeof error === 'object' ? error.code : error;
-    return code === 'conflict' || code === 'scope_conflict' || code === 'stale_scope_revision';
   }
 
   function failLoad(retry: () => void, focus: string): void {
@@ -319,54 +327,58 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const mine = session;
     kit.call(T.scopeList, args).then((result) => {
       if (mine !== session || !p) return;
-      const page = result && !result.isError ? result.structuredContent : null;
+      const page = scopeData(result);
       if (!validBrowse(page)) {
         failLoad(() => list(parentKey, append), 'picker:retry');
         return;
       }
       if (p.loaded && (page.account_generation !== p.generation || page.scope_revision !== p.revision)) {
-        reload(Q.conflict);
+        reload(Q.conflict, parentKey || append ? null : page);
         return;
       }
-      if (!p.loaded) {
-        p.generation = page.account_generation;
-        p.revision = page.scope_revision;
-        p.whole = page.whole_account_selected === true;
-        const saved = Array.isArray(page.selections) ? page.selections : [];
-        for (const selection of saved) {
-          if (!selection || typeof selection.key !== 'string' || STATES.indexOf(selection.state) < 0) continue;
-          p.own.set(selection.key, selection.state);
-          p.ancestors.set(selection.key, Array.isArray(selection.ancestor_keys)
-            ? selection.ancestor_keys.filter((key: Any) => typeof key === 'string') : []);
-        }
-        p.loaded = true;
-      }
-      const trail: string[] = parentKey ? (p.ancestors.get(parentKey) || []).concat([parentKey]) : [];
-      const previous: Any[] = append ? (parentKey ? p.branches.get(parentKey) || [] : p.roots) : [];
-      const seen: Record<string, boolean> = {};
-      for (const node of previous) seen[node.key] = true;
-      const fresh = page.nodes.filter((node: Any) => !seen[node.key] && trail.indexOf(node.key) < 0);
-      for (const node of fresh) {
-        p.catalog.set(node.key, node);
-        p.ancestors.set(node.key, trail);
-      }
-      const nodes = previous.concat(fresh);
-      const next = typeof page.next_cursor === 'string' && page.next_cursor ? page.next_cursor : '';
-      if (parentKey) {
-        p.branches.set(parentKey, nodes);
-        p.expanded.add(parentKey);
-        if (next) p.cursors.set(parentKey, next);
-        else p.cursors.delete(parentKey);
-      } else {
-        p.roots = nodes;
-        p.rootCursor = next;
-      }
-      p.loading = '';
-      kit.render(focus);
+      takeFolders(page, parentKey, append, focus);
     }, () => {
       if (mine !== session || !p) return;
       failLoad(() => list(parentKey, append), 'picker:retry');
     });
+  }
+
+  function takeFolders(page: Any, parentKey: string, append: boolean, focus: string): void {
+    if (!p.loaded) {
+      p.generation = page.account_generation;
+      p.revision = page.scope_revision;
+      p.whole = page.whole_account_selected === true;
+      const saved = Array.isArray(page.selections) ? page.selections : [];
+      for (const selection of saved) {
+        if (!selection || typeof selection.key !== 'string' || STATES.indexOf(selection.state) < 0) continue;
+        p.own.set(selection.key, selection.state);
+        p.ancestors.set(selection.key, Array.isArray(selection.ancestor_keys)
+          ? selection.ancestor_keys.filter((key: Any) => typeof key === 'string') : []);
+      }
+      p.loaded = true;
+    }
+    const trail: string[] = parentKey ? (p.ancestors.get(parentKey) || []).concat([parentKey]) : [];
+    const previous: Any[] = append ? (parentKey ? p.branches.get(parentKey) || [] : p.roots) : [];
+    const seen: Record<string, boolean> = {};
+    for (const node of previous) seen[node.key] = true;
+    const fresh = page.nodes.filter((node: Any) => !seen[node.key] && trail.indexOf(node.key) < 0);
+    for (const node of fresh) {
+      p.catalog.set(node.key, node);
+      p.ancestors.set(node.key, trail);
+    }
+    const nodes = previous.concat(fresh);
+    const next = typeof page.next_cursor === 'string' && page.next_cursor ? page.next_cursor : '';
+    if (parentKey) {
+      p.branches.set(parentKey, nodes);
+      p.expanded.add(parentKey);
+      if (next) p.cursors.set(parentKey, next);
+      else p.cursors.delete(parentKey);
+    } else {
+      p.roots = nodes;
+      p.rootCursor = next;
+    }
+    p.loading = '';
+    kit.render(focus);
   }
 
   function inherited(key: string): string {
@@ -619,7 +631,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       selections,
       whole_account_selected: p.whole,
     };
-    if (p.whole) args.explicit_whole_account_confirmation = true;
+    if (p.whole) args.confirm_whole_account = true;
     save(args, 'picker:save');
   }
 
@@ -637,13 +649,13 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     kit.call(T.scopeSet, args).then((result) => {
       if (mine !== session || !p) return;
       p.saving = false;
-      const content = result ? result.structuredContent : null;
-      if (isConflict(content)) {
-        reload(Q.conflict);
+      const content = result && !result.isError ? result.structuredContent : null;
+      const status = content && typeof content === 'object' ? content.status : '';
+      if (status === 'conflict') {
+        reload(Q.conflict, scopeData(result));
         return;
       }
-      if (result && !result.isError && content && typeof content === 'object' && content.ok !== false
-        && (validBrowse(content) || content.ok === true || typeof content.scope_revision === 'string')) {
+      if (status === 'saved') {
         leave(fill(Q.saved, { source: p.label }), true);
         return;
       }
@@ -821,12 +833,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
 
   function listMail(withDraft: boolean): void {
     const args: Any = { source_id: p.id };
-    if (withDraft && p.draft) {
-      // Label names leave the page only in the save; the estimate gets opaque ids.
-      const draft = draftOut();
-      draft.skipped_labels = draft.skipped_labels.map((label: Any) => ({ id: label.id }));
-      args[kit.config.mailArgs.list] = draft;
-    }
+    // The draft (label ids and names, as the contract requires) goes only to the picker's own tools.
+    if (withDraft && p.draft) args[kit.config.mailArgs.list] = draftOut();
     p.loading = 'root';
     p.error = '';
     const focus = withDraft ? 'picker:estimate' : 'picker:back';
@@ -834,36 +842,44 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const mine = session;
     kit.call(T.scopeList, args).then((result) => {
       if (mine !== session || !p) return;
-      const raw = result && !result.isError ? result.structuredContent : null;
-      if (!raw || typeof raw !== 'object' || typeof raw.account_generation !== 'string' || !raw.account_generation
-        || typeof raw.scope_revision !== 'string' || !raw.scope_revision) {
+      const body = scopeData(result);
+      if (!validMail(body)) {
         failLoad(() => listMail(withDraft), 'picker:retry');
         return;
       }
-      const body = raw.summary && typeof raw.summary === 'object' ? Object.assign({}, raw, raw.summary) : raw;
       if (p.loaded && (body.account_generation !== p.generation || body.scope_revision !== p.revision)) {
-        reload(Q.conflict);
+        reload(Q.conflict, withDraft ? null : body);
         return;
       }
-      if (!p.loaded) {
-        p.generation = body.account_generation;
-        p.revision = body.scope_revision;
-        p.draft = normalizeDraft(body.scope || body.mail_scope || body.draft);
-        p.loaded = true;
-      }
-      p.labels = Array.isArray(body.labels)
-        ? body.labels.filter((label: Any) => label && typeof label.id === 'string' && typeof label.name === 'string') : [];
-      p.categories = Array.isArray(body.categories) ? body.categories : [];
-      p.suggestions = Array.isArray(body.sender_suggestions)
-        ? body.sender_suggestions.filter((entry: Any) => entry && typeof entry.sender === 'string') : [];
-      p.sampleSize = typeof body.sample_size === 'number' ? body.sample_size : 0;
-      p.estimate = body.estimate && typeof body.estimate === 'object' ? body.estimate : null;
-      p.loading = '';
-      kit.render(focus);
+      takeMail(body, focus);
     }, () => {
       if (mine !== session || !p) return;
       failLoad(() => listMail(withDraft), 'picker:retry');
     });
+  }
+
+  function validMail(body: Any): boolean {
+    return !!body && typeof body === 'object' && typeof body.account_generation === 'string' && !!body.account_generation
+      && typeof body.scope_revision === 'string' && !!body.scope_revision;
+  }
+
+  function takeMail(body: Any, focus: string): void {
+    if (!validMail(body)) return;
+    if (!p.loaded) {
+      p.generation = body.account_generation;
+      p.revision = body.scope_revision;
+      p.draft = normalizeDraft(body.draft);
+      p.loaded = true;
+    }
+    p.labels = Array.isArray(body.labels)
+      ? body.labels.filter((label: Any) => label && typeof label.id === 'string' && typeof label.name === 'string') : [];
+    p.categories = Array.isArray(body.categories) ? body.categories : [];
+    p.suggestions = Array.isArray(body.sender_suggestions)
+      ? body.sender_suggestions.filter((entry: Any) => entry && typeof entry.sender === 'string') : [];
+    p.sampleSize = typeof body.sample_size === 'number' ? body.sample_size : 0;
+    p.estimate = body.estimate && typeof body.estimate === 'object' ? body.estimate : null;
+    p.loading = '';
+    kit.render(focus);
   }
 
   function mailEdited(focus: string): void {

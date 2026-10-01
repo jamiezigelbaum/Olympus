@@ -979,6 +979,19 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
 } as const;
 
 /**
+ * Control labels the ChatGPT producer puts on setup fixes
+ * (src/workers/chatgpt/dashboard-view-model.ts, which proposed them as
+ * CHATGPT_SETUP_LABELS). Closed set, owner words.
+ */
+export const DASHBOARD_CHATGPT_SETUP_LABELS = {
+  connect: 'Connect',
+  chooseFolders: 'Choose folders',
+  chooseMail: 'Choose mail',
+  disconnect: 'Disconnect',
+  changeModels: 'Change',
+} as const;
+
+/**
  * Words for the ChatGPT page's in-place Connect flow and its folder and mail
  * pickers (src/workers/dashboard/chatgpt/picker.ts). Folder names, label names
  * and senders are never part of this copy: the picker prints them only beside

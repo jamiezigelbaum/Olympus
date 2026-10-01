@@ -25,6 +25,7 @@ import {
   CHATGPT_MAIL_SOURCE_ID,
   CHATGPT_PICKER_MAIL_ARGS,
   CHATGPT_PICKER_TOOLS,
+  CHATGPT_SCOPE_META_KEY,
   chatgptPickerProgram,
 } from './picker.ts';
 
@@ -202,6 +203,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     picker: {
       tools: CHATGPT_PICKER_TOOLS,
       mailArgs: CHATGPT_PICKER_MAIL_ARGS,
+      scopeMetaKey: CHATGPT_SCOPE_META_KEY,
       copy: DASHBOARD_CHATGPT_PICKER_COPY,
       connectHost: CHATGPT_CONNECT_HOST,
       mailSourceId: CHATGPT_MAIL_SOURCE_ID,

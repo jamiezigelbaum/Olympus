@@ -7,11 +7,11 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { CHATGPT_DASHBOARD_CSS, chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
-import { CHATGPT_PICKER_TOOLS } from '../src/workers/dashboard/chatgpt/picker.ts';
+import { CHATGPT_PICKER_TOOLS, CHATGPT_SCOPE_META_KEY } from '../src/workers/dashboard/chatgpt/picker.ts';
 import { DASHBOARD_CHATGPT_PICKER_COPY as Q } from '../src/workers/dashboard/vocabulary.ts';
 
 const T = CHATGPT_PICKER_TOOLS;
-type Result = { structuredContent?: unknown; isError?: boolean; content?: unknown[] };
+type Result = { structuredContent?: unknown; isError?: boolean; content?: unknown[]; _meta?: Record<string, unknown> | undefined };
 type Serve = (args: any) => Result | 'hang' | 'fail';
 
 interface Host {
@@ -35,8 +35,9 @@ afterEach(async () => {
 });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const ev = (host: Host, type: string) => new host.win.Event(type) as unknown as Event;
 
-function mount(options: { openai?: Record<string, any>; serve?: Record<string, Serve>; pollMs?: number; pollCapMs?: number } = {}): Host {
+function mount(options: { openai?: Record<string, any> | undefined; serve?: Record<string, Serve>; pollMs?: number; pollCapMs?: number } = {}): Host {
   const html = chatgptDashboardPageHtml({ resultTimeoutMs: 5_000, connectPollMs: options.pollMs ?? 5, connectPollCapMs: options.pollCapMs ?? 5_000 });
   const start = html.indexOf('<script>') + '<script>'.length;
   const script = html.slice(start, html.indexOf('</script>', start));
@@ -108,6 +109,7 @@ function model(overrides: Partial<DashboardViewModelV1> = {}): DashboardViewMode
   return { v: 1, connection: { state: 'ready' }, needsYou: [], sources: [], models: { embedding: { kind: 'built_in', state: 'ready' } }, generatedAt: new Date().toISOString(), ...overrides };
 }
 
+const connectResult = (openUrl: string): Result => ({ structuredContent: { status: 'open_link', source: 'dropbox', openUrl, expiresAt: new Date(Date.now() + 600_000).toISOString() } });
 const CONNECT_FIX = { label: 'Connect', tool: T.connectSource, args: { source: 'dropbox' } };
 const CHOOSE_FIX = { label: 'Choose folders', tool: T.scopeList, args: { source_id: 'dropbox.files' } };
 const offDropbox = model({ sources: [{ id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Off', primary: CONNECT_FIX }] });
@@ -123,9 +125,20 @@ const ROOT = [
 const ROOT_PAGE_2 = [node('k-d', 'Kids Photos')];
 const CHILDREN = [node('k-a1', 'Therapy Notes', { size_bytes: 1_000_000_000 }), node('k-a2', 'Divorce', { size_bytes: 300_000_000, has_children: true })];
 
-function browse(nodes: unknown[], extra: Record<string, unknown> = {}) {
-  return { structuredContent: { source_id: 'dropbox.files', account_generation: 'g1', scope_revision: 'r1', status: 'scope_pending', nodes, selections: [], whole_account_selected: false, ...extra } };
+/** A scope tool result as the backend sends it: counts in structuredContent, picker data only in _meta. */
+function scopeResult(list: Record<string, any>, structured?: Record<string, unknown>): Result {
+  const summary = {
+    kind: list.kind, source_id: list.source_id, status: list.status, account_generation: list.account_generation,
+    scope_revision: list.scope_revision, shown: (list.nodes ?? list.labels ?? []).length, has_more: !!list.next_cursor,
+    choices: (list.selections ?? []).length, whole_account_selected: !!list.whole_account_selected,
+  };
+  return { structuredContent: structured ?? summary, _meta: { [CHATGPT_SCOPE_META_KEY]: list } };
 }
+
+function browse(nodes: unknown[], extra: Record<string, unknown> = {}): Result {
+  return scopeResult({ kind: 'folders', source_id: 'dropbox.files', account_generation: 'g1', scope_revision: 'r1', status: 'scope_pending', nodes, selections: [], whole_account_selected: false, ...extra });
+}
+const SAVED: Result = { structuredContent: { status: 'saved', source_id: 'dropbox.files', scope_revision: 'r2', indexing_started: true } };
 
 function folderServer(extra: Record<string, unknown> = {}): Serve {
   return (args) => {
@@ -150,9 +163,12 @@ function expectNoJargon(host: Host) {
   for (const word of JARGON) expect(text).not.toContain(word);
 }
 
-function expectNamesOnlyInPicker(host: Host, allowedIn: (message: any) => boolean = () => false) {
+/** Names may leave the page only in the picker's own two tools' arguments (the mail draft carries label names). */
+const PICKER_CALL = (message: any) => message.method === 'tools/call' && [T.scopeList, T.scopeSet].includes(message.params.name);
+
+function expectNamesOnlyInPicker(host: Host) {
   for (const message of host.sent) {
-    if (allowedIn(message)) continue;
+    if (PICKER_CALL(message)) continue;
     const raw = JSON.stringify(message);
     for (const name of NAMES) expect(raw).not.toContain(name);
   }
@@ -167,7 +183,7 @@ describe('connect', () => {
     const host = mount({
       openai: { displayMode: 'fullscreen' },
       serve: {
-        [T.connectSource]: () => ({ structuredContent: { authorizeUrl: 'https://mcp.olympusplugin.ai/go/abc123' } }),
+        [T.connectSource]: () => (connectResult('https://mcp.olympusplugin.ai/go/abc123')),
         olympus_dashboard: () => ({ structuredContent: ++polls < 3 ? offDropbox : pendingDropbox }),
         [T.scopeList]: folderServer(),
       },
@@ -189,7 +205,7 @@ describe('connect', () => {
   });
 
   test('without window.openai the link goes through ui/open-link', async () => {
-    const host = mount({ serve: { [T.connectSource]: () => ({ structuredContent: { authorize_url: 'https://mcp.olympusplugin.ai/go/x1' } }), olympus_dashboard: () => 'hang' } });
+    const host = mount({ serve: { [T.connectSource]: () => (connectResult('https://mcp.olympusplugin.ai/go/x1')), olympus_dashboard: () => 'hang' } });
     host.push({ structuredContent: offDropbox });
     host.button('Connect').click();
     await host.settle();
@@ -198,7 +214,7 @@ describe('connect', () => {
 
   test('a link anywhere but the connect host\'s /go/ path is refused', async () => {
     for (const url of ['https://evil.example/go/abc', 'https://mcp.olympusplugin.ai/oauth/abc', 'http://mcp.olympusplugin.ai/go/abc']) {
-      const host = mount({ openai: {}, serve: { [T.connectSource]: () => ({ structuredContent: { authorizeUrl: url } }) } });
+      const host = mount({ openai: {}, serve: { [T.connectSource]: () => (connectResult(url)) } });
       host.push({ structuredContent: offDropbox });
       host.button('Connect').click();
       await host.settle();
@@ -209,7 +225,7 @@ describe('connect', () => {
   });
 
   test('Cancel stops waiting and returns to the dashboard', async () => {
-    const host = mount({ openai: {}, pollMs: 20, serve: { [T.connectSource]: () => ({ structuredContent: { url: 'https://mcp.olympusplugin.ai/go/a' } }), olympus_dashboard: () => ({ structuredContent: offDropbox }) } });
+    const host = mount({ openai: {}, pollMs: 20, serve: { [T.connectSource]: () => (connectResult('https://mcp.olympusplugin.ai/go/a')), olympus_dashboard: () => ({ structuredContent: offDropbox }) } });
     host.push({ structuredContent: offDropbox });
     host.button('Connect').click();
     await host.settle();
@@ -221,7 +237,7 @@ describe('connect', () => {
   });
 
   test('waiting is capped; Check again resumes', async () => {
-    const host = mount({ openai: {}, pollMs: 2, pollCapMs: 15, serve: { [T.connectSource]: () => ({ structuredContent: { url: 'https://mcp.olympusplugin.ai/go/a' } }), olympus_dashboard: () => ({ structuredContent: offDropbox }) } });
+    const host = mount({ openai: {}, pollMs: 2, pollCapMs: 15, serve: { [T.connectSource]: () => (connectResult('https://mcp.olympusplugin.ai/go/a')), olympus_dashboard: () => ({ structuredContent: offDropbox }) } });
     host.push({ structuredContent: offDropbox });
     host.button('Connect').click();
     for (let i = 0; i < 50 && !host.hasButton('Check again'); i++) await sleep(3);
@@ -270,14 +286,14 @@ describe('folder picker', () => {
     // Parent fully indexed: children inherit, visibly.
     const parent = host.select('Tax Returns 2024');
     parent.value = 'ingest';
-    parent.dispatchEvent(new host.win.Event('change'));
+    parent.dispatchEvent(ev(host, 'change'));
     const divorceRow = () => host.select('Divorce').closest('.folder')!.textContent!;
     expect(divorceRow()).toContain('Fully indexed · inherited');
     expect(host.select('Divorce').options[0]!.textContent).toBe('Same as its parent (Fully indexed)');
     // A child that differs makes the parent Mixed.
     const child = host.select('Therapy Notes');
     child.value = 'exclude';
-    child.dispatchEvent(new host.win.Event('change'));
+    child.dispatchEvent(ev(host, 'change'));
     expect(host.select('Tax Returns 2024').closest('.folder')!.textContent).toContain('Mixed');
     const footer = host.win.document.querySelector('.picker-footer')!.textContent!;
     expect(footer).toContain('1 folder fully indexed, 1 skipped.');
@@ -287,7 +303,7 @@ describe('folder picker', () => {
     const notifications = host.calls.filter(([name]) => name === 'notifyIntrinsicHeight').length;
     expect(notifications).toBeGreaterThan(3);
     expectNoJargon(host);
-    host.serve[T.scopeSet] = () => browse(ROOT, { status: 'approved', scope_revision: 'r2' });
+    host.serve[T.scopeSet] = () => SAVED;
     host.button(Q.saveFolders).click();
     expect(host.toolCalls(T.scopeSet)).toEqual([{
       source_id: 'dropbox.files',
@@ -313,7 +329,7 @@ describe('folder picker', () => {
     await host.settle();
     const parent = host.select('Tax Returns 2024');
     parent.value = 'metadata_only';
-    parent.dispatchEvent(new host.win.Event('change'));
+    parent.dispatchEvent(ev(host, 'change'));
     const options = Array.from(host.select('Therapy Notes').options).map((option) => [option.value, option.disabled]);
     expect(options).toEqual([['', false], ['ingest', true], ['metadata_only', false], ['exclude', false]]);
   });
@@ -351,7 +367,7 @@ describe('folder picker', () => {
     await host.settle();
     const input = host.win.document.querySelector('input[type=search]') as unknown as HTMLInputElement;
     input.value = 'therapy';
-    input.dispatchEvent(new host.win.Event('input'));
+    input.dispatchEvent(ev(host, 'input'));
     const visible = () => Array.from(host.win.document.querySelectorAll('.folder-item'))
       .filter((li) => !(li as unknown as HTMLElement).hidden && !(li.parentElement!.closest('.folder-item') as unknown as HTMLElement | null)?.hidden)
       .map((li) => li.querySelector('.folder-name')!.textContent);
@@ -359,13 +375,13 @@ describe('folder picker', () => {
     const empty = () => (host.win.document.querySelector('.search-empty') as unknown as HTMLElement).hidden;
     expect(empty()).toBe(true);
     input.value = 'nothing like this';
-    input.dispatchEvent(new host.win.Event('input'));
+    input.dispatchEvent(ev(host, 'input'));
     expect(visible()).toEqual([]);
     expect(empty()).toBe(false);
     // The search survives a re-render.
     const choice = host.select('Medical Records');
     choice.value = 'ingest';
-    choice.dispatchEvent(new host.win.Event('change'));
+    choice.dispatchEvent(ev(host, 'change'));
     expect((host.win.document.querySelector('input[type=search]') as unknown as HTMLInputElement).value).toBe('nothing like this');
     expect(empty()).toBe(false);
   });
@@ -374,7 +390,7 @@ describe('folder picker', () => {
     const host = await openFolders();
     const whole = host.win.document.querySelector('input[data-key="picker:whole"]') as unknown as HTMLInputElement;
     whole.checked = true;
-    whole.dispatchEvent(new host.win.Event('change'));
+    whole.dispatchEvent(ev(host, 'change'));
     expect(host.text()).toContain(Q.wholePrompt.replace('{source}', 'Dropbox'));
     expect(host.button(Q.saveFolders).disabled).toBe(true);
     expect(host.text()).toContain(Q.needConfirm);
@@ -384,15 +400,15 @@ describe('folder picker', () => {
     expect((host.win.document.querySelector('input[data-key="picker:whole"]') as unknown as HTMLInputElement).checked).toBe(false);
     const again = host.win.document.querySelector('input[data-key="picker:whole"]') as unknown as HTMLInputElement;
     again.checked = true;
-    again.dispatchEvent(new host.win.Event('change'));
+    again.dispatchEvent(ev(host, 'change'));
     host.button(Q.wholeConfirm).click();
     expect(host.text()).toContain(Q.wholeConfirmed);
     expect(host.text()).toContain(Q.summaryWhole);
-    host.serve[T.scopeSet] = () => browse(ROOT, { whole_account_selected: true, scope_revision: 'r2' });
+    host.serve[T.scopeSet] = () => SAVED;
     host.button(Q.saveFolders).click();
     expect(host.toolCalls(T.scopeSet)).toEqual([{
       source_id: 'dropbox.files', account_generation: 'g1', scope_revision: 'r1', selections: [],
-      whole_account_selected: true, explicit_whole_account_confirmation: true,
+      whole_account_selected: true, confirm_whole_account: true,
     }]);
   });
 
@@ -400,18 +416,21 @@ describe('folder picker', () => {
     const host = await openFolders();
     const choice = host.select('Medical Records');
     choice.value = 'metadata_only';
-    choice.dispatchEvent(new host.win.Event('change'));
-    host.serve[T.scopeSet] = () => ({ structuredContent: { conflict: true, scope_revision: 'r2' } });
-    host.serve[T.scopeList] = folderServer({ scope_revision: 'r2', selections: [{ key: 'k-b', state: 'exclude', ancestor_keys: [] }] });
+    choice.dispatchEvent(ev(host, 'change'));
+    const fresh = browse(ROOT, { scope_revision: 'r2', next_cursor: 'c1', selections: [{ key: 'k-b', state: 'exclude', ancestor_keys: [] }] });
+    host.serve[T.scopeSet] = () => ({ structuredContent: { status: 'conflict', source_id: 'dropbox.files', current: fresh.structuredContent }, _meta: fresh._meta });
+    host.serve[T.scopeList] = folderServer({ scope_revision: 'r2' });
+    const listed = host.toolCalls(T.scopeList).length;
     host.button(Q.saveFolders).click();
     await host.settle();
     expect(host.text()).toContain(Q.conflict);
-    expect(host.toolCalls(T.scopeList).at(-1)).toEqual({ source_id: 'dropbox.files' });
+    // The conflict carried the fresh list, so nothing is listed again.
+    expect(host.toolCalls(T.scopeList).length).toBe(listed);
     expect(host.select('Medical Records').value).toBe('exclude');
-    host.serve[T.scopeSet] = () => browse(ROOT, { scope_revision: 'r3' });
+    host.serve[T.scopeSet] = () => SAVED;
     const again = host.select('Medical Records');
     again.value = 'ingest';
-    again.dispatchEvent(new host.win.Event('change'));
+    again.dispatchEvent(ev(host, 'change'));
     host.button(Q.saveFolders).click();
     expect(host.toolCalls(T.scopeSet).at(-1).scope_revision).toBe('r2');
   });
@@ -420,7 +439,7 @@ describe('folder picker', () => {
     const host = await openFolders();
     const choice = host.select('Medical Records');
     choice.value = 'ingest';
-    choice.dispatchEvent(new host.win.Event('change'));
+    choice.dispatchEvent(ev(host, 'change'));
     host.serve[T.scopeSet] = () => ({ isError: true, content: [{ type: 'text', text: 'Medical Records failed' }] });
     host.button(Q.saveFolders).click();
     await host.settle();
@@ -431,6 +450,16 @@ describe('folder picker', () => {
     host.button(Q.saveFolders).click();
     await host.settle();
     expect(host.text()).toContain(Q.saveFailed);
+  });
+
+  test('picker data is read only from _meta, never from structuredContent', async () => {
+    const leaky = browse(ROOT);
+    const host = mount({ serve: { [T.scopeList]: () => ({ structuredContent: leaky._meta![CHATGPT_SCOPE_META_KEY] }) } });
+    host.push({ structuredContent: pendingDropbox });
+    host.button('Choose folders').click();
+    await host.settle();
+    expect(host.text()).toContain(Q.loadFailed);
+    expect(host.text()).not.toContain('Tax Returns 2024');
   });
 
   test('a failed listing offers Try again', async () => {
@@ -449,7 +478,7 @@ describe('folder picker', () => {
     const host = await openFolders();
     const choice = host.select('Medical Records');
     choice.value = 'ingest';
-    choice.dispatchEvent(new host.win.Event('change'));
+    choice.dispatchEvent(ev(host, 'change'));
     host.button(Q.back).click();
     expect(host.text()).toContain(Q.discardPrompt);
     host.button(Q.keep).click();
@@ -465,13 +494,12 @@ describe('folder picker', () => {
 
 describe('mail picker', () => {
   const MAIL = {
-    source_id: 'gmail.email', account_generation: 'mg1', scope_revision: 'mr1', status: 'scope_pending',
-    scope: { window: '2y', skipped_categories: ['promotions', 'social'], skipped_labels: [], always_private_senders: [], skip_senders: [] },
+    kind: 'mail', source_id: 'gmail.email', account_generation: 'mg1', scope_revision: 'mr1', status: 'scope_pending',
+    draft: { window: '2y', skipped_categories: ['promotions', 'social'], skipped_labels: [], always_private_senders: [], skip_senders: [] },
     labels: [{ id: 'Label_7', name: 'Therapy Notes', system: false }, { id: 'SENT', name: 'SENT', system: true }],
     categories: [{ category: 'primary', label: 'Primary', messages_total: 18234 }],
     sender_suggestions: [{ sender: 'boss@example.com', sample_messages: 12 }],
-    sample_size: 200,
-    estimate: { estimate: true, content_messages: 12400, metadata_messages: 30100, total_messages: 42500, embedding_tokens: 1, embedding_cost_usd: 1.5 },
+    estimate: { content_messages: 12400, metadata_messages: 30100, total_messages: 42500 },
   };
   const gmail = model({
     needsYou: [{ id: 'source:gmail.email', sentence: 'Gmail — choose which mail to read', fix: { label: 'Choose mail', tool: T.scopeList, args: { source_id: 'gmail.email' } } }],
@@ -479,7 +507,7 @@ describe('mail picker', () => {
   });
 
   test('window, categories, labels and senders save as one draft', async () => {
-    const host = mount({ openai: {}, serve: { [T.scopeList]: () => ({ structuredContent: MAIL }), olympus_dashboard: () => ({ structuredContent: gmail }) } });
+    const host = mount({ openai: {}, serve: { [T.scopeList]: () => scopeResult(MAIL), olympus_dashboard: () => ({ structuredContent: gmail }) } });
     host.push({ structuredContent: gmail });
     host.button('Choose mail').click();
     await host.settle();
@@ -489,17 +517,17 @@ describe('mail picker', () => {
     expect(host.text()).toContain('Sent');
     expect(host.text()).toContain('Personal mail · 18,234 in your mailbox');
     expect(host.text()).toContain('About 12,400 messages read in full and 30,100 by subject and sender only.');
-    expect(host.text()).toContain('Indexing costs at most $1.50.');
+    expect(host.text()).not.toContain('$');
     const pick = (key: string) => host.win.document.querySelector(`input[data-key="${key}"]`) as unknown as HTMLInputElement;
     pick('picker:window:1y').checked = true;
-    pick('picker:window:1y').dispatchEvent(new host.win.Event('change'));
+    pick('picker:window:1y').dispatchEvent(ev(host, 'change'));
     pick('picker:category:updates').checked = false;
-    pick('picker:category:updates').dispatchEvent(new host.win.Event('change'));
+    pick('picker:category:updates').dispatchEvent(ev(host, 'change'));
     pick('picker:label:0').checked = false;
-    pick('picker:label:0').dispatchEvent(new host.win.Event('change'));
+    pick('picker:label:0').dispatchEvent(ev(host, 'change'));
     const area = host.win.document.querySelector('textarea[data-key="picker:senders:always_private_senders"]') as unknown as HTMLTextAreaElement;
     area.value = 'a@b.com\n\n a@b.com \n@clinic.example';
-    area.dispatchEvent(new host.win.Event('input'));
+    area.dispatchEvent(ev(host, 'input'));
     expect(host.text()).toContain('Full text from the last year · 4 categories and labels skipped · 2 senders always private · 0 senders skipped');
     host.button(Q.mailSkip).click();
     expectNoJargon(host);
@@ -511,27 +539,25 @@ describe('mail picker', () => {
       always_private_senders: ['a@b.com', '@clinic.example'],
       skip_senders: ['boss@example.com'],
     };
-    // The estimate carries label ids only; names go out only with the save.
-    expect(host.toolCalls(T.scopeList).at(-1)).toEqual({ source_id: 'gmail.email', draft: { ...draft, skipped_labels: [{ id: 'Label_7' }] } });
+    expect(host.toolCalls(T.scopeList).at(-1)).toEqual({ source_id: 'gmail.email', draft });
     await host.settle();
-    host.serve[T.scopeSet] = () => ({ structuredContent: { ...MAIL, status: 'approved', scope_revision: 'mr2' } });
+    host.serve[T.scopeSet] = () => ({ structuredContent: { status: 'saved', source_id: 'gmail.email', scope_revision: 'mr2', indexing_started: true } });
     host.button(Q.saveMail).click();
-    expect(host.toolCalls(T.scopeSet)).toEqual([{ source_id: 'gmail.email', account_generation: 'mg1', scope_revision: 'mr1', scope: draft }]);
+    expect(host.toolCalls(T.scopeSet)).toEqual([{ source_id: 'gmail.email', account_generation: 'mg1', scope_revision: 'mr1', mail: draft }]);
     await host.settle();
     expect(host.text()).toContain('Gmail: saved. Olympus is starting.');
-    // The label name left the page only inside scope_set (the contract carries id and name).
-    expectNamesOnlyInPicker(host, (message) => message.method === 'tools/call' && message.params.name === T.scopeSet);
+    expectNamesOnlyInPicker(host);
     expect(host.text()).not.toContain('Therapy Notes');
     expect(host.text()).not.toContain('boss@example.com');
   });
 
   test('a mail conflict re-lists with the saved scope', async () => {
-    const host = mount({ serve: { [T.scopeList]: () => ({ structuredContent: MAIL }) } });
+    const host = mount({ serve: { [T.scopeList]: () => scopeResult(MAIL) } });
     host.push({ structuredContent: gmail });
     host.button('Choose mail').click();
     await host.settle();
-    host.serve[T.scopeSet] = () => ({ isError: true, structuredContent: { error: { code: 'scope_conflict' }, scope_revision: 'mr9' } });
-    host.serve[T.scopeList] = () => ({ structuredContent: { ...MAIL, scope_revision: 'mr9', scope: { ...MAIL.scope, window: '5y' } } });
+    const fresh = scopeResult({ ...MAIL, scope_revision: 'mr9', draft: { ...MAIL.draft, window: '5y' } });
+    host.serve[T.scopeSet] = () => ({ structuredContent: { status: 'conflict', source_id: 'gmail.email', current: fresh.structuredContent }, _meta: fresh._meta });
     host.button(Q.saveMail).click();
     await host.settle();
     expect(host.text()).toContain(Q.conflict);
