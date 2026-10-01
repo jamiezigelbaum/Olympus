@@ -26208,8 +26208,15 @@ class TierSnifferService {
     if (report.calls > 0 || report.verdictsApplied > 0) {
       this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}.`);
     }
-    const autoMoves = this.options.autoMoves && !signal.aborted && this.options.autoMoves.localEmbeddingsOnly() ? await this.runAutoMoves(this.options.autoMoves, signal) : undefined;
+    const autoMoves = this.options.autoMoves && !signal.aborted && !this.answering() && this.options.autoMoves.localEmbeddingsOnly() ? await this.runAutoMoves(this.options.autoMoves, signal) : undefined;
     return { state: "ran", report, ...rejudged.seen > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
+  }
+  answering() {
+    try {
+      return this.options.answersInFlight?.() ?? false;
+    } catch {
+      return false;
+    }
   }
   rejudge() {
     const total = { seen: 0, updated: 0, movesQueued: 0, held: 0, skipped: 0, failed: 0 };
@@ -26253,7 +26260,7 @@ class TierSnifferService {
         continue;
       }
       for (const record of queued) {
-        if (budget === 0 || signal.aborted)
+        if (budget === 0 || signal.aborted || this.answering())
           break;
         budget -= 1;
         try {

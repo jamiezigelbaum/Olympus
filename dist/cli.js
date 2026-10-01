@@ -24988,6 +24988,32 @@ function runWithAnalystAbortSignal(signal, run) {
 function currentAnalystAbortSignal() {
   return analystAbortSignalStorage.getStore();
 }
+function analystResponseSchema(maxOutputChars) {
+  const budget = Math.max(400, Math.floor(maxOutputChars));
+  const citations = 6;
+  const gaps = 3;
+  return {
+    type: "object",
+    properties: {
+      answer: { type: "string", maxLength: Math.floor(budget * 0.55) },
+      citations: {
+        type: "array",
+        maxItems: citations,
+        items: {
+          type: "object",
+          properties: {
+            evidence: { type: "integer" },
+            claim: { type: "string", maxLength: Math.max(40, Math.floor(budget * 0.25 / citations)) }
+          },
+          required: ["evidence", "claim"]
+        }
+      },
+      unanswered: { type: "array", maxItems: gaps, items: { type: "string", maxLength: Math.max(40, Math.floor(budget * 0.1 / gaps)) } },
+      sufficient: { type: "boolean" }
+    },
+    required: ["answer", "citations", "unanswered", "sufficient"]
+  };
+}
 function noEvidenceAnalystResult(pack) {
   return {
     answer: "I have no matching evidence for this question.",
@@ -25013,6 +25039,7 @@ function createAnalyst(model, createOptions = {}) {
         prompt: buildAnalystPrompt(pack, localOnly),
         localOnly,
         maxOutputChars,
+        ...createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(maxOutputChars) } : {},
         ...signal ? { signal } : {}
       };
       const completion = await model.complete(request);
@@ -25023,6 +25050,7 @@ function createAnalyst(model, createOptions = {}) {
           prompt: buildAnalystAuditPrompt(pack, parsed, localOnly),
           localOnly,
           maxOutputChars: auditMaxOutputChars,
+          ...createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(auditMaxOutputChars) } : {},
           ...signal ? { signal } : {}
         });
         parsed = parseAnalystModelOutput(auditCompletion.text) ?? parsed;
@@ -94825,7 +94853,7 @@ async function chatCompletion(fetchImpl, endpoint2, spec, request, timeoutMs) {
         ],
         temperature: 0,
         max_tokens: maxTokensForChars2(request.maxOutputChars),
-        response_format: { type: "json_object" }
+        response_format: request.responseSchema ? { type: "json_schema", json_schema: { name: "reply", schema: request.responseSchema } } : { type: "json_object" }
       }),
       signal
     });
@@ -94843,7 +94871,27 @@ async function chatCompletion(fetchImpl, endpoint2, spec, request, timeoutMs) {
   if (typeof content !== "string") {
     throw new OperationError("argus_error", "The built-in private model returned no text.");
   }
-  return { text: content, modelId: `${BUILT_IN_ANALYST_NAME}/${spec.modelId}` };
+  const usage = llamaUsage(payload.timings);
+  return { text: content, modelId: `${BUILT_IN_ANALYST_NAME}/${spec.modelId}`, ...usage ? { usage } : {} };
+}
+function llamaUsage(timings) {
+  if (!timings)
+    return;
+  const count = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+  const usage = {};
+  const promptTokens = count(timings.prompt_n);
+  const promptMs = count(timings.prompt_ms);
+  const outputTokens = count(timings.predicted_n);
+  const outputMs = count(timings.predicted_ms);
+  if (promptTokens !== undefined)
+    usage.promptTokens = promptTokens;
+  if (promptMs !== undefined)
+    usage.promptMs = promptMs;
+  if (outputTokens !== undefined)
+    usage.outputTokens = outputTokens;
+  if (outputMs !== undefined)
+    usage.outputMs = outputMs;
+  return Object.keys(usage).length > 0 ? usage : undefined;
 }
 function maxTokensForChars2(chars) {
   if (chars === undefined)
@@ -94869,7 +94917,10 @@ function isLocalServiceDown(error2) {
 async function answerPrivately(question, evidence, options = {}) {
   const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
   const pack = fitPrivatePack(privateEvidencePack(question, evidence), options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES);
-  const analyst = createAnalyst(model, { auditSuspiciousDrafts: true });
+  const analyst = createAnalyst(options.onModelCall ? timedModel(model, options.onModelCall) : model, {
+    auditSuspiciousDrafts: options.audit ?? true,
+    boundedResponseSchema: true
+  });
   const run = () => analyst.analyze(pack, {
     localOnly: true,
     ...options.maxAnswerChars !== undefined ? { maxAnswerChars: options.maxAnswerChars } : {}
@@ -94895,6 +94946,30 @@ async function answerPrivately(question, evidence, options = {}) {
     }),
     unanswered,
     modelId
+  };
+}
+function timedModel(model, report) {
+  let calls = 0;
+  return {
+    async complete(request) {
+      const stage = calls === 0 ? "main" : "audit";
+      calls += 1;
+      const started = performance.now();
+      const promptBytes = utf82.encode(request.system).length + utf82.encode(request.prompt).length;
+      const done = (ok, usage) => {
+        try {
+          report({ stage, ms: Math.round(performance.now() - started), promptBytes, ok, ...usage ?? {} });
+        } catch {}
+      };
+      try {
+        const completion = await model.complete(request);
+        done(true, completion.usage);
+        return completion;
+      } catch (error2) {
+        done(false);
+        throw error2;
+      }
+    }
   };
 }
 function echoesEvidenceScaffolding(text) {
@@ -98519,6 +98594,39 @@ var init_built_in_sniffer = __esm(() => {
   });
 });
 
+// src/workers/answer-activity.ts
+function createAnswerActivity(onBusy) {
+  let inFlight = 0;
+  const activity = {
+    get busy() {
+      return inFlight > 0;
+    },
+    get inFlight() {
+      return inFlight;
+    },
+    begin() {
+      inFlight += 1;
+      if (inFlight === 1) {
+        try {
+          onBusy();
+        } catch {}
+      }
+    },
+    end() {
+      inFlight = Math.max(0, inFlight - 1);
+    },
+    async run(work) {
+      activity.begin();
+      try {
+        return await work();
+      } finally {
+        activity.end();
+      }
+    }
+  };
+  return activity;
+}
+
 // src/workers/classification/privacy-profile.ts
 import { createHash as createHash53 } from "node:crypto";
 import { mkdirSync as mkdirSync37 } from "node:fs";
@@ -99300,8 +99408,15 @@ class TierSnifferService {
     if (report.calls > 0 || report.verdictsApplied > 0) {
       this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}.`);
     }
-    const autoMoves = this.options.autoMoves && !signal.aborted && this.options.autoMoves.localEmbeddingsOnly() ? await this.runAutoMoves(this.options.autoMoves, signal) : undefined;
+    const autoMoves = this.options.autoMoves && !signal.aborted && !this.answering() && this.options.autoMoves.localEmbeddingsOnly() ? await this.runAutoMoves(this.options.autoMoves, signal) : undefined;
     return { state: "ran", report, ...rejudged.seen > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
+  }
+  answering() {
+    try {
+      return this.options.answersInFlight?.() ?? false;
+    } catch {
+      return false;
+    }
   }
   rejudge() {
     const total = { seen: 0, updated: 0, movesQueued: 0, held: 0, skipped: 0, failed: 0 };
@@ -99345,7 +99460,7 @@ class TierSnifferService {
         continue;
       }
       for (const record3 of queued) {
-        if (budget === 0 || signal.aborted)
+        if (budget === 0 || signal.aborted || this.answering())
           break;
         budget -= 1;
         try {
@@ -107295,10 +107410,47 @@ __export(exports_private_answer_jobs, {
   plaintextOf: () => plaintextOf,
   isPrivateEligible: () => isPrivateEligible,
   isPrivateAnswerRequest: () => isPrivateAnswerRequest,
+  formatAnalysisTiming: () => formatAnalysisTiming,
   createPrivateAnswerHandler: () => createPrivateAnswerHandler,
-  PrivateAnswerJobs: () => PrivateAnswerJobs
+  PrivateAnswerJobs: () => PrivateAnswerJobs,
+  PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
 import { randomBytes as randomBytes17 } from "node:crypto";
+function formatAnalysisTiming(timing) {
+  const fields = [`outcome=${timing.outcome}`];
+  if (timing.outcome === "failed")
+    fields.push(`reason=${timing.reason}`);
+  fields.push(`queued_ms=${timing.queuedMs}`);
+  if (timing.refreshMs !== undefined)
+    fields.push(`refresh_ms=${timing.refreshMs}`);
+  if (timing.matched !== undefined)
+    fields.push(`matched=${timing.matched}`);
+  if (timing.items !== undefined)
+    fields.push(`items=${timing.items}`);
+  if (timing.unreadable !== undefined)
+    fields.push(`unreadable=${timing.unreadable}`);
+  if (timing.evidenceBytes !== undefined)
+    fields.push(`evidence_bytes=${timing.evidenceBytes}`);
+  if (timing.modelMs !== undefined)
+    fields.push(`model_ms=${timing.modelMs}`);
+  for (const call of timing.calls) {
+    const prefix = call.stage;
+    fields.push(`${prefix}_ms=${call.ms}`, `${prefix}_prompt_bytes=${call.promptBytes}`);
+    if (!call.ok)
+      fields.push(`${prefix}_ok=false`);
+    if (call.promptTokens !== undefined)
+      fields.push(`${prefix}_prompt_tokens=${call.promptTokens}`);
+    if (call.promptMs !== undefined)
+      fields.push(`${prefix}_prefill_ms=${call.promptMs}`);
+    if (call.outputTokens !== undefined)
+      fields.push(`${prefix}_output_tokens=${call.outputTokens}`);
+    if (call.outputMs !== undefined)
+      fields.push(`${prefix}_generate_ms=${call.outputMs}`);
+  }
+  if (timing.totalMs !== undefined)
+    fields.push(`total_ms=${timing.totalMs}`);
+  return `[private-answer] ${fields.join(" ")}`;
+}
 function isPrivateEligible(item) {
   const domain = item.trust_domain ?? item.trustDomain;
   if (domain !== undefined && domain !== "secure_local")
@@ -107337,7 +107489,7 @@ class PrivateAnswerJobs {
     this.pollRate = options.pollRate ?? { capacity: 10, refillPerSecond: 1 };
     this.resetTimeoutMs = options.resetTimeoutMs ?? 30000;
     this.claimRate = options.claimRate ?? { capacity: 60, refillPerSecond: 10 };
-    this.analysisTimeoutMs = options.analysisTimeoutMs ?? 5 * 60000;
+    this.analysisTimeoutMs = options.analysisTimeoutMs ?? PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS;
     this.audit = options.audit ?? defaultAudit;
     this.tokens = this.claimRate.capacity;
     this.refilledAt = this.now();
@@ -107428,53 +107580,123 @@ class PrivateAnswerJobs {
   startAnalysis(job, panelKey) {
     const abort = new AbortController;
     job.abort = abort;
-    this.queue = this.queue.then(async () => {
+    const claimedAt = this.now();
+    const timing = { outcome: "failed", reason: "error", queuedMs: 0, calls: [] };
+    let running = false;
+    let settled = false;
+    this.beginActivity();
+    const settle = (outcome, reason) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(deadlineTimer);
+      if (this.jobs.get(job.id) === job)
+        job.outcome = outcome;
+      timing.outcome = outcome?.kind ?? "failed";
+      if (reason)
+        timing.reason = reason;
+      timing.totalMs = this.now() - claimedAt;
+      this.endActivity();
+      this.logTiming(timing);
+    };
+    const deadlineTimer = setTimeout(() => {
+      if (settled)
+        return;
+      this.audit("analysis_deadline");
+      const wasRunning = running;
+      settle({ kind: "failed" }, "deadline");
+      abort.abort();
+      if (wasRunning)
+        this.resetInBackground();
+    }, this.analysisTimeoutMs);
+    deadlineTimer.unref?.();
+    abort.signal.addEventListener("abort", () => {
+      if (!running)
+        settle({ kind: "failed" }, "aborted");
+    }, { once: true });
+    const run = async () => {
       if (this.resetting)
         await this.resetting;
-      if (abort.signal.aborted || this.jobs.get(job.id) !== job)
+      timing.queuedMs = this.now() - claimedAt;
+      if (settled || abort.signal.aborted || this.jobs.get(job.id) !== job) {
+        settle({ kind: "failed" }, "aborted");
         return;
+      }
       const question = job.question ?? "";
       const cached2 = job.evidence ?? [];
       const refresh = job.refresh;
       job.question = undefined;
       job.evidence = undefined;
       job.refresh = undefined;
-      let timer;
-      const deadline = new Promise((resolve10) => {
-        timer = setTimeout(() => resolve10("deadline"), this.analysisTimeoutMs);
-        timer.unref?.();
-      });
+      running = true;
       const work = (async () => {
-        const evidence = (refresh ? await refresh(abort.signal) : cached2).filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
+        const refreshStarted = this.now();
+        const found = refresh ? await refresh(abort.signal) : cached2;
+        if (refresh)
+          timing.refreshMs = this.now() - refreshStarted;
+        const evidence = found.filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
+        timing.matched = evidence.length;
         if (abort.signal.aborted)
-          throw new Error("aborted");
+          throw new AnalysisStop("aborted");
         if (evidence.length === 0)
-          throw new Error("no private evidence");
+          throw new AnalysisStop("no_evidence");
         const model = this.options.model();
-        const result = await model.answerPrivately(question, evidence, abort.signal);
-        return sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(plaintextOf(result))));
+        const modelStarted = this.now();
+        try {
+          return await model.answerPrivately(question, evidence, abort.signal, {
+            evidence: (stats) => {
+              timing.items = stats.items;
+              timing.unreadable = stats.unreadable;
+              timing.evidenceBytes = stats.bytes;
+            },
+            modelCall: (call) => {
+              timing.calls.push(call);
+            }
+          });
+        } finally {
+          timing.modelMs = this.now() - modelStarted;
+        }
       })();
       work.catch(() => {
         return;
       });
-      try {
-        const settled = await Promise.race([work, deadline]);
-        if (settled === "deadline") {
-          abort.abort();
-          this.audit("analysis_deadline");
-          this.resetInBackground();
-          throw new Error("deadline");
-        }
+      const stopped = new Promise((resolve10) => {
         if (abort.signal.aborted)
-          throw new Error("aborted");
-        job.outcome = { kind: "sealed", sealed: settled };
-      } catch {
-        if (this.jobs.get(job.id) === job)
-          job.outcome = { kind: "failed" };
+          resolve10();
+        abort.signal.addEventListener("abort", () => resolve10(), { once: true });
+      });
+      try {
+        const result = await Promise.race([work, stopped]);
+        if (settled || abort.signal.aborted || result === undefined) {
+          settle({ kind: "failed" }, "aborted");
+          return;
+        }
+        const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(plaintextOf(result))));
+        settle({ kind: "sealed", sealed });
+      } catch (error2) {
+        settle({ kind: "failed" }, error2 instanceof AnalysisStop ? error2.reason : "error");
       } finally {
-        clearTimeout(timer);
+        running = false;
       }
+    };
+    this.queue = this.queue.then(run, run).catch(() => {
+      settle({ kind: "failed" }, "error");
     });
+  }
+  beginActivity() {
+    try {
+      this.options.activity?.begin();
+    } catch {}
+  }
+  endActivity() {
+    try {
+      this.options.activity?.end();
+    } catch {}
+  }
+  logTiming(timing) {
+    try {
+      (this.options.log ?? defaultLog)(formatAnalysisTiming(timing));
+    } catch {}
   }
   resetInBackground() {
     let reset;
@@ -107629,13 +107851,22 @@ async function boundedText(request, max) {
   }
   return new TextDecoder().decode(Buffer.concat(chunks2));
 }
-var MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_UNANSWERED = 10, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, UNSAFE_CHARS2, defaultAudit = (event) => {
+var AnalysisStop, defaultLog = (line) => {
+  console.log(line);
+}, MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_UNANSWERED = 10, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, UNSAFE_CHARS2, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
 };
 var init_private_answer_jobs = __esm(() => {
   init_private_answer();
   init_private_answer_contract();
   init_private_answer_crypto();
+  AnalysisStop = class AnalysisStop extends Error {
+    reason;
+    constructor(reason) {
+      super(reason);
+      this.reason = reason;
+    }
+  };
   MAX_ANSWER_CHARS = 64 * 1024;
   UNSAFE_CHARS2 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
 });
@@ -107646,10 +107877,12 @@ __export(exports_private_answer_model, {
   withoutEvidenceMarkers: () => withoutEvidenceMarkers,
   privateEvidenceItems: () => privateEvidenceItems,
   privateEvidence: () => privateEvidence,
-  createBuiltInPrivateAnswerModel: () => createBuiltInPrivateAnswerModel
+  createBuiltInPrivateAnswerModel: () => createBuiltInPrivateAnswerModel,
+  PANEL_ANSWER_LIMITS: () => PANEL_ANSWER_LIMITS
 });
 function createBuiltInPrivateAnswerModel(options) {
   const { model } = options;
+  const limits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
   return {
     status() {
       if (!model)
@@ -107667,16 +107900,28 @@ function createBuiltInPrivateAnswerModel(options) {
       }
       return { state: "no_model" };
     },
-    async answerPrivately(question, evidence, signal) {
+    async answerPrivately(question, evidence, signal, observe) {
       if (!model)
         throw new Error("no private answer model");
-      const { items, unreadable } = privateEvidence(evidence);
+      const read = privateEvidence(evidence, limits.maxPassageChars);
+      const unreadable = read.unreadable;
+      const items = read.items.slice(0, Math.max(1, limits.maxItems));
+      try {
+        observe?.evidence?.({ items: items.length, unreadable, bytes: items.reduce((sum2, item) => sum2 + utf8Bytes(item.text), 0) });
+      } catch {}
       if (items.length === 0) {
         if (unreadable === 0)
           throw new Error("no private evidence");
         return { answer: unreadableAnswer(unreadable), citations: [], unanswered: [] };
       }
-      const result = await options.answer(question, items, { model, ...signal ? { signal } : {} });
+      const result = await options.answer(question, items, {
+        model,
+        maxPromptBytes: limits.maxPromptBytes,
+        maxAnswerChars: limits.maxAnswerChars,
+        audit: limits.audit,
+        ...observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {},
+        ...signal ? { signal } : {}
+      });
       const byId = new Map(items.map((item) => [item.id, item]));
       const citations = [];
       const seen = new Set;
@@ -107702,7 +107947,7 @@ function createBuiltInPrivateAnswerModel(options) {
     }
   };
 }
-function privateEvidence(hits) {
+function privateEvidence(hits, maxPassageChars = MAX_PASSAGE_CHARS) {
   const items = [];
   let unreadable = 0;
   hits.forEach((hit, index) => {
@@ -107715,7 +107960,7 @@ function privateEvidence(hits) {
     const passage = (chunks2.length > 0 ? chunks2.join(`
 …
 `) : undefined) ?? string4(content?.passage) ?? string4(hit.excerpt) ?? string4(hit.text);
-    const text2 = passage?.slice(0, MAX_PASSAGE_CHARS);
+    const text2 = passage?.slice(0, maxPassageChars);
     if (!text2) {
       unreadable += 1;
       return;
@@ -107747,13 +107992,25 @@ function unreadableNote(count2) {
 function unreadableAnswer(count2) {
   return count2 === 1 ? "The matching private item has no readable text on this computer, so there is no private answer." : `None of the ${count2} matching private items has readable text on this computer, so there is no private answer.`;
 }
+function utf8Bytes(text2) {
+  return Buffer.byteLength(text2, "utf8");
+}
 function record3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
 function string4(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
-var MAX_PASSAGE_CHARS = 6000;
+var PANEL_ANSWER_LIMITS, MAX_PASSAGE_CHARS = 6000;
+var init_private_answer_model = __esm(() => {
+  PANEL_ANSWER_LIMITS = {
+    maxItems: 6,
+    maxPassageChars: 2400,
+    maxPromptBytes: 12000,
+    maxAnswerChars: 1000,
+    audit: false
+  };
+});
 
 // src/workers/remote-openapi.ts
 var exports_remote_openapi = {};
@@ -109224,8 +109481,8 @@ async function main() {
     ownerContext: privacyOwnerWords
   });
   const secureAnalystPoolState = new SecureAnalystPoolState;
-  let sourceAnswersInFlight = 0;
   let preemptTierSniffer;
+  const answerActivity = createAnswerActivity(() => preemptTierSniffer?.());
   let tierSnifferBacklog;
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED, "OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED");
@@ -110168,14 +110425,7 @@ async function main() {
   })() : undefined;
   const sourceAnswer = analystSourceAnswer ? {
     async answer(request) {
-      if (sourceAnswersInFlight === 0)
-        preemptTierSniffer?.();
-      sourceAnswersInFlight += 1;
-      try {
-        return await analystSourceAnswer.answer(request);
-      } finally {
-        sourceAnswersInFlight -= 1;
-      }
+      return answerActivity.run(() => analystSourceAnswer.answer(request));
     }
   } : undefined;
   const sourceWatchStore = new LocalSourceWatchStore;
@@ -110869,7 +111119,7 @@ async function main() {
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30000);
   sourceAnswerJobSweep.unref?.();
   const { PrivateAnswerJobs: PrivateAnswerJobs2, createPrivateAnswerHandler: createPrivateAnswerHandler2, withPrivateAnswerRoute: withPrivateAnswerRoute2 } = await Promise.resolve().then(() => (init_private_answer_jobs(), exports_private_answer_jobs));
-  const { createBuiltInPrivateAnswerModel: createBuiltInPrivateAnswerModel2 } = await Promise.resolve().then(() => exports_private_answer_model);
+  const { createBuiltInPrivateAnswerModel: createBuiltInPrivateAnswerModel2 } = await Promise.resolve().then(() => (init_private_answer_model(), exports_private_answer_model));
   const { DASHBOARD_UI_DOMAIN: DASHBOARD_UI_DOMAIN2 } = await Promise.resolve().then(() => (init_dashboard_resource(), exports_dashboard_resource));
   const privateAnswerModel = createBuiltInPrivateAnswerModel2({
     model: workerBuiltInModel?.model,
@@ -110878,7 +111128,8 @@ async function main() {
   });
   const privateAnswers = new PrivateAnswerJobs2({
     model: () => privateAnswerModel,
-    installId: () => remotePublicUrls()?.installId
+    installId: () => remotePublicUrls()?.installId,
+    activity: answerActivity
   });
   const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30000);
   privateAnswerSweep.unref?.();
@@ -110956,18 +111207,11 @@ async function main() {
     });
   };
   const chatgptEvidenceSearch = sourceAnswerLanes ? async (input) => {
-    if (sourceAnswersInFlight === 0)
-      preemptTierSniffer?.();
-    sourceAnswersInFlight += 1;
-    try {
-      return await searchReleasedEvidence({
-        lanes: sourceAnswerLanes,
-        question: input.question,
-        ...input.limit ? { maxResults: input.limit } : {}
-      });
-    } finally {
-      sourceAnswersInFlight -= 1;
-    }
+    return answerActivity.run(() => searchReleasedEvidence({
+      lanes: sourceAnswerLanes,
+      question: input.question,
+      ...input.limit ? { maxResults: input.limit } : {}
+    }));
   } : undefined;
   const chatgptPrivateMatchProbe = sourceAnswerLanes ? async (question) => {
     const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes, question });
@@ -111047,7 +111291,8 @@ async function main() {
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
-    shouldYield: () => sourceAnswersInFlight > 0 || secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
+    answersInFlight: () => answerActivity.busy,
+    shouldYield: () => answerActivity.busy || secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line) => console.log(line),
     ...snifferRuntime.source === "built_in" ? { autoApproveBuiltIn: true } : {},
     autoMoves: {
