@@ -905,7 +905,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     }
   }
 
-  /** One thin line: name (opens the folder), the choice control, then › to open it. */
+  /** One thin line: › to open the folder, the name (opens it too), then the choice control at the right edge. */
   function folderRow(node: Any): HTMLElement {
     if (p.pick) return pickRow(node);
     const key = node.key;
@@ -924,7 +924,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     } else label = el('p', 'fname leaf');
     label.title = node.name;
     nameParts(label, node.name, key, node);
-    add(li, label, folderControl(key, node.name, node));
+    // A disclosure chevron first (or an empty slot of the same width, so names line up),
+    // then the name, then the control flush at the row's right edge.
     if (node.has_children) {
       const chevron = el('button', 'fopen', '›') as HTMLButtonElement;
       chevron.type = 'button';
@@ -939,6 +940,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       spacer.setAttribute('aria-hidden', 'true');
       add(li, spacer);
     }
+    add(li, label, folderControl(key, node.name, node));
     return li;
   }
 
