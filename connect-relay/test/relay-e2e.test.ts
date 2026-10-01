@@ -328,6 +328,13 @@ describe('routing', () => {
     expect(resource.result.contents).toEqual(generatedDashboard.contents);
     expect(resource.result.contents[0].mimeType).toBe('text/html;profile=mcp-app');
     expect(resource.result.contents[0].text).toContain('not_installed');
+    // Every advertised (versioned) URI reads the same bundle; an unknown one does not.
+    for (const advertised of generatedSurface.resources as { uri: string }[]) {
+      const read = await (await anonymous(rpc('resources/read', { uri: advertised.uri }))).json();
+      expect(read.result.contents.length).toBe(1);
+    }
+    const unknown = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/dashboard?v=zzz' }))).json();
+    expect(unknown.error.code).toBe(-32002);
     const dashboard = await (await anonymous(rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }))).json();
     expect(dashboard.result.structuredContent).toMatchObject({
       v: 1,

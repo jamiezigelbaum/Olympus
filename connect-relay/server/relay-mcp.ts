@@ -103,10 +103,14 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
       return rpcResult(id, { resources: CHATGPT_RESOURCES });
     case 'resources/templates/list':
       return rpcResult(id, { resourceTemplates: [] });
-    case 'resources/read':
-      if (args.uri === PRIVATE_ANSWER_RESOURCE_URI) return rpcResult(id, { contents: PRIVATE_ANSWER_RESOURCE_CONTENTS });
-      if (args.uri !== DASHBOARD_RESOURCE_URI) return rpcError(id, -32002, 'Resource not found');
+    case 'resources/read': {
+      // The engine advertises content-versioned URIs (`<base>?v=<12 hex>`);
+      // any version, or the bare URI, reads the bundle this relay carries.
+      const base = resourceBaseUri(args.uri);
+      if (base === PRIVATE_ANSWER_RESOURCE_URI) return rpcResult(id, { contents: PRIVATE_ANSWER_RESOURCE_CONTENTS });
+      if (base !== DASHBOARD_RESOURCE_URI) return rpcError(id, -32002, 'Resource not found');
       return rpcResult(id, { contents: DASHBOARD_RESOURCE_CONTENTS });
+    }
     case 'tools/call':
       if (args.name === DASHBOARD_TOOL_NAME) {
         // The page renders only from structuredContent, so the dashboard
@@ -148,4 +152,11 @@ export function isDashboardCall(body: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** A resource URI without its `?v=<12 hex>` content version; undefined for anything else. */
+function resourceBaseUri(uri: unknown): string | undefined {
+  if (typeof uri !== 'string') return undefined;
+  const match = /^(ui:\/\/olympus\/[a-z-]+)(?:\?v=[0-9a-f]{12})?$/.exec(uri);
+  return match?.[1];
 }
