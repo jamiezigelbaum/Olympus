@@ -15,6 +15,7 @@
  */
 import type { DashboardStatus } from '../vocabulary.ts';
 import type { ChatGptPicker, ChatGptPickerConfig, ChatGptPickerKit } from './picker.ts';
+import type { ChatGptPrivacy, ChatGptPrivacyConfig, ChatGptPrivacyKit } from './privacy.ts';
 import type {
   DASHBOARD_CHATGPT_CONNECTION_COPY,
   DASHBOARD_CHATGPT_PAGE_COPY,
@@ -31,6 +32,8 @@ export interface ChatGptDashboardClientConfig {
   staleAfterMs: number;
   /** The in-place Connect flow and folder/mail pickers (picker.ts). */
   picker: ChatGptPickerConfig;
+  /** The privacy setup screen and the dashboard's Privacy row (privacy.ts). */
+  privacy: ChatGptPrivacyConfig;
 }
 
 // Loose shapes: the page validates what it reads instead of trusting a type.
@@ -40,6 +43,7 @@ type Any = any;
 export function chatgptDashboardClient(
   config: ChatGptDashboardClientConfig,
   pickerProgram?: (kit: ChatGptPickerKit) => ChatGptPicker,
+  privacyProgram?: (kit: ChatGptPrivacyKit) => ChatGptPrivacy,
 ): void {
   const doc = document;
   const root = doc.getElementById('app') as HTMLElement;
@@ -59,6 +63,8 @@ export function chatgptDashboardClient(
     open: Record<string, boolean>;
     /** One line after the picker closes ("Dropbox: saved…"); never folder or label names. */
     notice: string;
+    /** How many always-private rules the last privacy load or save returned (a count, never names); -1 unknown. */
+    privacyRules: number;
   } = {
     data: null,
     relayDown: false,
@@ -70,6 +76,7 @@ export function chatgptDashboardClient(
     canFullscreen: true,
     open: {},
     notice: '',
+    privacyRules: -1,
   };
 
   // ---- host bridge -------------------------------------------------------
@@ -343,7 +350,10 @@ export function chatgptDashboardClient(
       return add(wrap, busy);
     }
     let action: (() => void) | null = null;
-    if (picker && picker.handles(fix)) {
+    if (privacy && privacy.handles(fix)) {
+      // Tell Olympus what's private, and the Privacy row's Edit, open the Privacy screen in place.
+      action = () => openPrivacy(key);
+    } else if (picker && picker.handles(fix)) {
       // Connect, Choose folders and Choose mail open in place, never as a plain tool call.
       action = () => {
         state.notice = '';
@@ -568,6 +578,45 @@ export function chatgptDashboardClient(
     return section;
   }
 
+  function openPrivacy(returnKey: string): void {
+    if (!privacy) return;
+    state.notice = '';
+    state.confirming = '';
+    privacy.start(returnKey);
+  }
+
+  /**
+   * The Privacy row, after Sources. Until privacy is set up its Needs-you item
+   * says so and carries the one call to action, so the row then shows only
+   * what is waiting to be checked, if anything.
+   */
+  function privacySection(data: Any): HTMLElement | null {
+    const info = data && data.privacy && typeof data.privacy === 'object' ? data.privacy : null;
+    if (!info || !privacy) return null;
+    const W = config.privacy.copy;
+    const configured = info.configured === true;
+    const pending = typeof info.pendingCount === 'number' && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : 0;
+    const asked = (Array.isArray(data.needsYou) ? data.needsYou : [])
+      .some((item: Any) => item && item.fix && privacy!.handles(item.fix));
+    if (!configured && (asked || !pending)) return null;
+    const section = add(el('section', 'section privacy-row'), el('h2', '', W.section));
+    const row = el('li', 'row');
+    const text = el('div', 'row-text');
+    if (configured) {
+      const rules = typeof info.ruleCount === 'number' && isFinite(info.ruleCount) ? Math.max(0, Math.round(info.ruleCount)) : state.privacyRules;
+      add(text, el('p', '', rules >= 0 ? fill(rules === 1 ? W.row.one : W.row.many, { n: count(rules) }) : W.rowNoCount));
+    }
+    if (pending > 0) add(text, el('p', 'muted', fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })));
+    add(row, text);
+    if (configured) {
+      const blocked = globalReason();
+      const edit = button(W.edit, 'privacy:edit', blocked ? null : () => openPrivacy('privacy:edit'), 'plain');
+      edit.setAttribute('aria-label', W.editLabel);
+      add(row, blocked ? add(el('span', 'fix'), edit, el('span', 'reason', blocked)) : edit);
+    }
+    return add(section, add(el('ul', 'rows'), row));
+  }
+
   /** Work cannot move while the Mac is unreachable: no items left, no ETA. */
   function progressPaused(): boolean {
     const current = connectionState();
@@ -672,6 +721,7 @@ export function chatgptDashboardClient(
     const listed = (Array.isArray(data.sources) ? data.sources : []).map((source: Any) => 'source:' + String(source && source.id));
     add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : []).filter((item: Any) => item && listed.indexOf(item.id) < 0)));
     add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
+    add(page, privacySection(data));
     add(page, progressSection(data.progress, true));
     add(page, modelsSection(data.models));
     return page;
@@ -684,10 +734,12 @@ export function chatgptDashboardClient(
     const theme = state.theme;
     if (theme) doc.documentElement.setAttribute('data-theme', theme);
     else doc.documentElement.removeAttribute('data-theme');
+    // The picker draws over the Privacy screen while it picks a folder for it.
     const picking = !!picker && picker.active();
-    doc.documentElement.setAttribute('data-mode', compact() && !picking ? 'inline' : 'fullscreen');
+    const privacyOpen = !picking && !!privacy && privacy.active();
+    doc.documentElement.setAttribute('data-mode', compact() && !picking && !privacyOpen ? 'inline' : 'fullscreen');
     accentUsed = false;
-    const view = picking ? picker!.view() : compact() ? renderCompact() : renderFull();
+    const view = picking ? picker!.view() : privacyOpen ? privacy!.view() : compact() ? renderCompact() : renderFull();
     root.textContent = '';
     root.appendChild(view);
     if (picking) picker!.afterRender();
@@ -732,24 +784,48 @@ export function chatgptDashboardClient(
       state.data = value;
       state.relayDown = false;
     },
-    close: (notice: string, again: boolean, focusKey: string) => {
-      state.notice = notice;
-      if (again) {
-        // The dashboard re-renders from the refreshed result; the notice stays until the next action.
-        state.busy = 'refresh';
-        render(focusKey);
-        request('tools/call', { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
-          state.busy = '';
-          acceptResult(result, false);
-          render(focusKey);
-        }, () => {
-          state.busy = '';
-          render(focusKey);
-        });
-        return;
-      }
+    close: (notice: string, again: boolean, focusKey: string) => closeScreen(notice, again, focusKey),
+  }) : null;
+
+  /** Back to the dashboard from the picker or the Privacy screen. */
+  function closeScreen(notice: string, again: boolean, focusKey: string): void {
+    state.notice = notice;
+    if (again) {
+      // The dashboard re-renders from the refreshed result; the notice stays until the next action.
+      state.busy = 'refresh';
       render(focusKey);
+      request('tools/call', { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+        state.busy = '';
+        acceptResult(result, false);
+        render(focusKey);
+      }, () => {
+        state.busy = '';
+        render(focusKey);
+      });
+      return;
+    }
+    render(focusKey);
+  }
+
+  // ---- privacy -----------------------------------------------------------
+  // Built after the picker, whose Escape handler runs first while it picks a folder.
+  const privacy: ChatGptPrivacy | null = privacyProgram ? privacyProgram({
+    config: config.privacy,
+    el,
+    add,
+    button,
+    fill,
+    count,
+    call: callRaw,
+    render,
+    compact,
+    fullscreen: goFullscreen,
+    data: () => state.data,
+    picker,
+    remember: (rules: number) => {
+      state.privacyRules = rules;
     },
+    close: (notice: string, again: boolean, focusKey: string) => closeScreen(notice, again, focusKey),
   }) : null;
 
   // ---- start -------------------------------------------------------------

@@ -12,6 +12,7 @@ import {
   DASHBOARD_CHATGPT_CONNECTION_COPY,
   DASHBOARD_CHATGPT_PAGE_COPY,
   DASHBOARD_CHATGPT_PICKER_COPY,
+  DASHBOARD_CHATGPT_PRIVACY_COPY,
   DASHBOARD_STATUS_PRESENTATION,
   type DashboardStatus,
   type DashboardStatusColorToken,
@@ -28,6 +29,12 @@ import {
   CHATGPT_SCOPE_META_KEY,
   chatgptPickerProgram,
 } from './picker.ts';
+import {
+  CHATGPT_PRIVACY_FOLDER_SOURCES,
+  CHATGPT_PRIVACY_META_KEY,
+  CHATGPT_PRIVACY_TOOLS,
+  chatgptPrivacyProgram,
+} from './privacy.ts';
 
 export interface ChatGptDashboardPageOptions {
   /** How long to wait for a tool result before saying the Mac is unreachable. */
@@ -216,6 +223,14 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .picker-footer{margin-top:1.5rem;padding:1rem;border:1px solid var(--line);border-radius:0.75rem;background:var(--surface);display:flex;flex-direction:column;gap:0.75rem}
 .summary{display:flex;flex-direction:column;gap:0.25rem}
 .save{display:flex;flex-direction:column;gap:0.375rem}
+.frow.pick{flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.25rem 0.75rem;padding:0.375rem 0}
+.frow.pick>.fname{flex:1 1 10rem;width:auto;align-items:center;min-height:2.5rem;padding:0.5rem 0}
+.frow.pick>.fname.leaf{display:flex;align-items:center;padding:0.5rem 0}
+.frow.pick>.fname.two-line{flex-direction:column;align-items:flex-start;gap:0.125rem}
+.frow.pick .two-top{font-weight:500}
+.add-rules{margin-top:0.75rem}
+.fsection>.reason{margin-top:0.375rem}
+.privacy>.intro{margin-bottom:0.5rem}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.sheet{margin:1rem -0.75rem -1.5rem;padding:0.5rem 0.75rem 1rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu,.menu-panel{align-items:flex-start}}
@@ -241,6 +256,15 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
       pollMs: options.connectPollMs ?? CHATGPT_CONNECT_POLL_MS,
       pollCapMs: options.connectPollCapMs ?? CHATGPT_CONNECT_POLL_CAP_MS,
     },
+    privacy: {
+      tools: CHATGPT_PRIVACY_TOOLS,
+      metaKey: CHATGPT_PRIVACY_META_KEY,
+      scopeList: CHATGPT_PICKER_TOOLS.scopeList,
+      scopeMetaKey: CHATGPT_SCOPE_META_KEY,
+      mailSourceId: CHATGPT_MAIL_SOURCE_ID,
+      folderSources: CHATGPT_PRIVACY_FOLDER_SOURCES,
+      copy: DASHBOARD_CHATGPT_PRIVACY_COPY,
+    },
   };
   return [
     '<!doctype html>',
@@ -253,7 +277,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     '</head>',
     '<body>',
     '<div id="app"></div>',
-    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config)}, ${chatgptPickerProgram.toString()});</script>`,
+    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config)}, ${chatgptPickerProgram.toString()}, ${chatgptPrivacyProgram.toString()});</script>`,
     '</body>',
     '</html>',
     '',

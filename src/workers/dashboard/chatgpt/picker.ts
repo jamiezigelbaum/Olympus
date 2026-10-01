@@ -12,7 +12,8 @@
  * written to widget state, model context, the page URL or logs, and the only
  * tool call that carries any of them is the scope save (opaque folder keys;
  * label id and name, which the mail contract requires). Closing the picker
- * drops the session.
+ * drops the session. Pick mode (the privacy flow's Add a folder) saves
+ * nothing: it hands the one picked folder's key and name back to its caller.
  */
 import type { DASHBOARD_CHATGPT_PICKER_COPY } from '../vocabulary.ts';
 import {
@@ -80,9 +81,31 @@ export interface ChatGptPickerKit {
   close(notice: string, refresh: boolean, focusKey: string): void;
 }
 
+/** Words for picking one folder (the privacy flow's Add a folder); the caller owns them. */
+export interface ChatGptFolderPickWords {
+  back: string;
+  title: string;
+  intro: string;
+  makePrivate: string;
+  makePrivateFor: string;
+  alreadyPrivate: string;
+}
+
+/** The folder picked in pick mode: its opaque key and its name, for the caller's own view only. */
+export interface ChatGptPickedFolder {
+  key: string;
+  name: string;
+}
+
 export interface ChatGptPicker {
   handles(fix: Any): boolean;
   start(fix: Any, sourceId: string, sourceLabel: string, returnKey: string): void;
+  /**
+   * Browse one folder source a level per screen and pick a single folder, with
+   * no choices sheet and no save: `done` gets the folder, or null on Back.
+   * `taken` keys show as already picked.
+   */
+  pickFolder(sourceId: string, sourceLabel: string, words: ChatGptFolderPickWords, taken: string[], done: (folder: ChatGptPickedFolder | null) => void): void;
   active(): boolean;
   view(): HTMLElement;
   afterRender(): void;
@@ -115,8 +138,15 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     timer = null;
   }
 
-  function leave(notice: string, refresh: boolean): void {
+  function leave(notice: string, refresh: boolean, picked?: ChatGptPickedFolder): void {
     stopTimer();
+    if (p && p.pick) {
+      const done = p.pick.done;
+      p = null;
+      session++;
+      done(picked || null);
+      return;
+    }
     const key = p ? p.returnKey : '';
     p = null;
     session++;
@@ -262,8 +292,16 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     add(page, box);
   }
 
+  function pickFolder(sourceId: string, sourceLabel: string, words: ChatGptFolderPickWords, taken: string[],
+    done: (folder: ChatGptPickedFolder | null) => void): void {
+    stopTimer();
+    session++;
+    if (kit.compact()) kit.fullscreen();
+    openScope(sourceId, sourceLabel, words.title, '', '', undefined, { words, taken: taken.slice(), done });
+  }
+
   // ---- scope sessions ----------------------------------------------------
-  function openScope(id: string, label: string, title: string, returnKey: string, notice: string, initial?: Any): void {
+  function openScope(id: string, label: string, title: string, returnKey: string, notice: string, initial?: Any, pick?: Any): void {
     stopTimer();
     session++;
     const mail = id === kit.config.mailSourceId;
@@ -278,6 +316,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       path: [], sheet: '', sheetReturn: '', capHit: false,
       // mail
       draft: null, labels: [], categories: [], suggestions: [], sampleSize: 0, estimate: null,
+      // pick mode (privacy): one folder, no sheet, no save
+      pick: pick || null,
     };
     if (initial && mail) takeMail(initial, 'picker:back');
     else if (initial && validBrowse(initial)) takeFolders(initial, '', false, 'picker:back');
@@ -291,7 +331,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   /** Start over from the saved scope: the fresh list when the conflict carried it, else a new listing. */
   function reload(message: string, fresh?: Any): void {
     const keep = p;
-    openScope(keep.id, keep.label, keep.title, keep.returnKey, message, fresh || undefined);
+    openScope(keep.id, keep.label, keep.title, keep.returnKey, message, fresh || undefined, keep.pick || undefined);
   }
 
   /** Picker data lives only in the result's `_meta`, never in structuredContent. */
@@ -341,7 +381,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
         failLoad(() => list(parentKey, append, after), 'picker:retry');
         return;
       }
-      if (p.loaded && (page.account_generation !== p.generation || page.scope_revision !== p.revision)) {
+      if (p.loaded && !p.pick && (page.account_generation !== p.generation || page.scope_revision !== p.revision)) {
         reload(Q.conflict, parentKey || append ? null : page);
         return;
       }
@@ -768,9 +808,18 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return control;
   }
 
+  /** Pick mode: Make private, or Already private when the caller holds it. */
+  function pickButton(key: string, name: string, focusKey: string): HTMLButtonElement {
+    const words = p.pick.words;
+    if (p.pick.taken.indexOf(key) >= 0) return kit.button(words.alreadyPrivate, focusKey, null, 'plain');
+    const control = kit.button(words.makePrivate, focusKey, p.loading ? null : () => leave('', false, { key, name }), 'plain');
+    control.setAttribute('aria-label', fill(words.makePrivateFor, { name }));
+    return control;
+  }
+
   function folderRow(node: Any): HTMLElement {
     const key = node.key;
-    const li = el('li', 'frow');
+    const li = el('li', p.pick ? 'frow pick' : 'frow');
     if (node.has_children) {
       const open = el('button', 'fname') as HTMLButtonElement;
       open.type = 'button';
@@ -783,6 +832,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       else open.addEventListener('click', () => drill(key));
       add(li, open);
     } else add(li, add(el('p', 'fname leaf'), el('span', 'fname-text', node.name)));
+    if (p.pick) {
+      if (node.selectable !== false) add(li, pickButton(key, node.name, 'picker:pick:' + key));
+      return li;
+    }
     add(li, statusButton(key, node.name, statusText(key), node.selectable !== false, 'picker:choice:' + key, nodeMeta(node)));
     return li;
   }
@@ -809,10 +862,17 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
 
   function rootScreen(body: HTMLElement): void {
     add(body, el('h1', '', p.title));
-    add(body, el('p', 'muted intro', fill(Q.foldersIntro, { source: p.label })));
+    add(body, el('p', 'muted intro', fill(p.pick ? p.pick.words.intro : Q.foldersIntro, { source: p.label })));
     noticeAndError(body);
     if (!p.loaded) {
       add(body, loadingLine());
+      return;
+    }
+    if (p.pick) {
+      const only = add(el('section', 'fsection'), el('h2', '', p.label));
+      add(only, loadingLine());
+      add(only, levelList('', p.roots, !!p.rootCursor));
+      add(body, only);
       return;
     }
     const account = fill(Q.accountRow, { source: p.label });
@@ -854,6 +914,14 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     noticeAndError(body);
     const node = p.catalog.get(key);
     const here = el('div', 'this-row');
+    if (p.pick) {
+      add(here, add(el('p', 'this-text'), el('span', 'this-label', nameOf(key))));
+      if (!node || node.selectable !== false) add(here, pickButton(key, nameOf(key), 'picker:pick-this'));
+      add(body, here);
+      add(body, loadingLine());
+      add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
+      return;
+    }
     const text = statusText(key);
     add(here, add(el('p', 'this-text'), el('span', 'this-label', Q.thisFolder + ' '), el('span', '', text)));
     const change = kit.button(Q.change, 'picker:this', node && node.selectable === false || p.saving ? null : () => openSheet(key, 'picker:this'), 'plain');
@@ -969,9 +1037,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const body = el('div', 'picker-body');
     if (p.path.length) folderScreen(body);
     else rootScreen(body);
-    if (p.loaded) add(body, folderFooter());
+    if (p.loaded && !p.pick) add(body, folderFooter());
     add(page, body);
-    if (p.sheet && p.loaded) {
+    if (p.sheet && p.loaded && !p.pick) {
       body.setAttribute('inert', '');
       body.setAttribute('aria-hidden', 'true');
       const scrim = el('div', 'scrim');
@@ -1284,9 +1352,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const deep = p.mode === 'folders' && p.path.length > 0;
     const backButton = deep
       ? kit.button(Q.up, 'picker:up', escape, 'plain')
-      : kit.button(Q.back, 'picker:back', escape, 'plain');
+      : kit.button(p.pick ? p.pick.words.back : Q.back, 'picker:back', escape, 'plain');
     if (deep) {
-      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : fill(Q.accountRow, { source: p.label });
+      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : p.pick ? p.label : fill(Q.accountRow, { source: p.label });
       backButton.setAttribute('aria-label', fill(Q.upTo, { name: above }));
     }
     backButton.className = 'btn back';
@@ -1331,6 +1399,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   return {
     handles,
     start,
+    pickFolder,
     active: () => !!p,
     view,
     afterRender: () => undefined,
