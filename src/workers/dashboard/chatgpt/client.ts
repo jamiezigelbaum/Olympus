@@ -14,6 +14,7 @@
  * so a destructive fix confirms inline and help is selectable text.
  */
 import type { DashboardStatus } from '../vocabulary.ts';
+import type { ChatGptPicker, ChatGptPickerConfig, ChatGptPickerKit } from './picker.ts';
 import type {
   DASHBOARD_CHATGPT_CONNECTION_COPY,
   DASHBOARD_CHATGPT_PAGE_COPY,
@@ -28,13 +29,18 @@ export interface ChatGptDashboardClientConfig {
   /** No tool result within this long means the relay cannot reach the Mac. */
   resultTimeoutMs: number;
   staleAfterMs: number;
+  /** The in-place Connect flow and folder/mail pickers (picker.ts). */
+  picker: ChatGptPickerConfig;
 }
 
 // Loose shapes: the page validates what it reads instead of trusting a type.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Any = any;
 
-export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): void {
+export function chatgptDashboardClient(
+  config: ChatGptDashboardClientConfig,
+  pickerProgram?: (kit: ChatGptPickerKit) => ChatGptPicker,
+): void {
   const doc = document;
   const root = doc.getElementById('app') as HTMLElement;
   const P = config.page;
@@ -51,6 +57,8 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
     displayMode: string;
     canFullscreen: boolean;
     open: Record<string, boolean>;
+    /** One line after the picker closes ("Dropbox: saved…"); never folder or label names. */
+    notice: string;
   } = {
     data: null,
     relayDown: false,
@@ -61,6 +69,7 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
     displayMode: '',
     canFullscreen: true,
     open: {},
+    notice: '',
   };
 
   // ---- host bridge -------------------------------------------------------
@@ -175,6 +184,7 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
   function callTool(name: string, args: Any, key: string): void {
     state.busy = key;
     state.confirming = '';
+    state.notice = '';
     render();
     request('tools/call', { name, arguments: args || {} }, config.resultTimeoutMs).then((result) => {
       state.busy = '';
@@ -189,6 +199,11 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
 
   function refresh(): void {
     callTool(config.toolName, {}, 'refresh');
+  }
+
+  /** A tools/call whose result the caller handles (the picker's own tools). */
+  function callRaw(name: string, args: Any): Promise<Any> {
+    return request('tools/call', { name, arguments: args || {} }, config.resultTimeoutMs);
   }
 
   function openLink(href: string): void {
@@ -314,7 +329,7 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
   }
 
   /** One fix: a button, or a disabled button with its reason beside it. */
-  function fixControl(fix: Any, key: string, style: 'main' | 'plain', allowConfirm: boolean): HTMLElement {
+  function fixControl(fix: Any, key: string, style: 'main' | 'plain', allowConfirm: boolean, source?: { id: string; label: string }): HTMLElement {
     const wrap = el('span', 'fix');
     if (!fix || typeof fix.label !== 'string') return wrap;
     const blocked = globalReason();
@@ -328,7 +343,14 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
       return add(wrap, busy);
     }
     let action: (() => void) | null = null;
-    if (typeof fix.tool === 'string' && fix.tool) action = () => callTool(fix.tool, fix.args || {}, key);
+    if (picker && picker.handles(fix)) {
+      // Connect, Choose folders and Choose mail open in place, never as a plain tool call.
+      action = () => {
+        state.notice = '';
+        state.confirming = '';
+        picker!.start(fix, source ? source.id : '', source ? source.label : '', key);
+      };
+    } else if (typeof fix.tool === 'string' && fix.tool) action = () => callTool(fix.tool, fix.args || {}, key);
     else if (typeof fix.href === 'string' && fix.href) action = () => openLink(fix.href);
     if (fix.destructive && action) {
       if (!allowConfirm) return wrap;
@@ -397,12 +419,21 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
     return add(banner, body);
   }
 
+  /** The source an attention item is about (`source:<id>`), for Connect and the pickers. */
+  function itemSource(item: Any): { id: string; label: string } | undefined {
+    const id = typeof item.id === 'string' && item.id.indexOf('source:') === 0 ? item.id.slice(7) : '';
+    if (!id) return undefined;
+    const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
+    const match = sources.filter((source: Any) => source && String(source.id) === id)[0];
+    return { id, label: match ? String(match.label || id) : id };
+  }
+
   function itemBanner(item: Any, key: string, allowConfirm: boolean): HTMLElement {
     const banner = el('section', 'banner warn');
     banner.setAttribute('role', 'alert');
     add(banner, icon('!'));
     const body = add(el('div', 'banner-body'), el('p', 'banner-title', String(item.sentence || '')));
-    add(body, add(el('div', 'actions'), fixControl(item.fix, key, 'main', allowConfirm)));
+    add(body, add(el('div', 'actions'), fixControl(item.fix, key, 'main', allowConfirm, itemSource(item))));
     return add(banner, body);
   }
 
@@ -424,7 +455,7 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
     items.forEach((item, index) => {
       const key = 'need:' + String(item.id || index);
       // The dot has its own column so it stays beside the sentence's first line.
-      const body = add(el('div', 'need-body'), el('p', 'row-text', String(item.sentence || '')), fixControl(item.fix, key, 'main', true));
+      const body = add(el('div', 'need-body'), el('p', 'row-text', String(item.sentence || '')), fixControl(item.fix, key, 'main', true, itemSource(item)));
       add(list, add(el('li', 'row need'), el('span', 'dot tone-warn'), body));
     });
     return add(section, list);
@@ -445,7 +476,8 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
     if (meta.length) add(main, el('p', 'muted', meta.join(' · ')));
     add(row, main);
     const controls = el('div', 'source-actions');
-    if (source.primary) add(controls, fixControl(source.primary, 'primary:' + id, 'main', true));
+    const context = { id, label: String(source.label || id) };
+    if (source.primary) add(controls, fixControl(source.primary, 'primary:' + id, 'main', true, context));
     const menu = Array.isArray(source.menu) ? source.menu : [];
     let menuBox: HTMLElement | null = null;
     if (menu.length) {
@@ -454,7 +486,7 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
       const hidden = el('span', 'sr', fill(P.moreActions, { source: String(source.label || '') }));
       const box = details('menu:' + id, add(el('span'), glyph, hidden), 'menu');
       const panel = el('div', 'menu-panel');
-      menu.forEach((fix: Any, index: number) => add(panel, fixControl(fix, 'menu:' + id + ':' + index, 'plain', true)));
+      menu.forEach((fix: Any, index: number) => add(panel, fixControl(fix, 'menu:' + id + ':' + index, 'plain', true, context)));
       menuBox = add(box, panel);
     }
     if (controls.childNodes.length) {
@@ -577,6 +609,11 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
     add(page, el('h1', '', P.title));
     const data = state.data;
     add(page, connectionBanner());
+    if (state.notice) {
+      const notice = el('p', 'notice', state.notice);
+      notice.setAttribute('role', 'status');
+      add(page, notice);
+    }
     if (!data) {
       if (!state.relayDown) add(page, el('p', 'muted', P.loading));
       return page;
@@ -597,11 +634,13 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
     const theme = state.theme;
     if (theme) doc.documentElement.setAttribute('data-theme', theme);
     else doc.documentElement.removeAttribute('data-theme');
-    doc.documentElement.setAttribute('data-mode', compact() ? 'inline' : 'fullscreen');
+    const picking = !!picker && picker.active();
+    doc.documentElement.setAttribute('data-mode', compact() && !picking ? 'inline' : 'fullscreen');
     accentUsed = false;
-    const view = compact() ? renderCompact() : renderFull();
+    const view = picking ? picker!.view() : compact() ? renderCompact() : renderFull();
     root.textContent = '';
     root.appendChild(view);
+    if (picking) picker!.afterRender();
     if (keepFocus) {
       const nodes = root.querySelectorAll('[data-key]');
       for (let i = 0; i < nodes.length; i++) {
@@ -621,6 +660,47 @@ export function chatgptDashboardClient(config: ChatGptDashboardClientConfig): vo
     if (host && typeof host.notifyIntrinsicHeight === 'function') host.notifyIntrinsicHeight(height);
     notify('ui/notifications/size-changed', { height });
   }
+
+  // ---- picker ------------------------------------------------------------
+  const picker: ChatGptPicker | null = pickerProgram ? pickerProgram({
+    config: config.picker,
+    dashboardTool: config.toolName,
+    el,
+    add,
+    button,
+    fill,
+    count,
+    call: callRaw,
+    render,
+    reportHeight,
+    openLink,
+    compact,
+    fullscreen: goFullscreen,
+    isDashboard,
+    setDashboard: (value: Any) => {
+      if (!isDashboard(value)) return;
+      state.data = value;
+      state.relayDown = false;
+    },
+    close: (notice: string, again: boolean, focusKey: string) => {
+      state.notice = notice;
+      if (again) {
+        // The dashboard re-renders from the refreshed result; the notice stays until the next action.
+        state.busy = 'refresh';
+        render(focusKey);
+        request('tools/call', { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+          state.busy = '';
+          acceptResult(result, false);
+          render(focusKey);
+        }, () => {
+          state.busy = '';
+          render(focusKey);
+        });
+        return;
+      }
+      render(focusKey);
+    },
+  }) : null;
 
   // ---- start -------------------------------------------------------------
   readOpenAiGlobals();

@@ -11,18 +11,32 @@
 import {
   DASHBOARD_CHATGPT_CONNECTION_COPY,
   DASHBOARD_CHATGPT_PAGE_COPY,
+  DASHBOARD_CHATGPT_PICKER_COPY,
   DASHBOARD_STATUS_PRESENTATION,
   type DashboardStatus,
   type DashboardStatusColorToken,
 } from '../vocabulary.ts';
 import { DASHBOARD_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
 import { chatgptDashboardClient, type ChatGptDashboardClientConfig } from './client.ts';
+import {
+  CHATGPT_CONNECT_HOST,
+  CHATGPT_CONNECT_POLL_CAP_MS,
+  CHATGPT_CONNECT_POLL_MS,
+  CHATGPT_MAIL_SOURCE_ID,
+  CHATGPT_PICKER_MAIL_ARGS,
+  CHATGPT_PICKER_TOOLS,
+  chatgptPickerProgram,
+} from './picker.ts';
 
 export interface ChatGptDashboardPageOptions {
   /** How long to wait for a tool result before saying the Mac is unreachable. */
   resultTimeoutMs?: number;
   /** When `generatedAt` is older than this, the page offers Check again. */
   staleAfterMs?: number;
+  /** How often the Connect flow checks whether sign-in finished. */
+  connectPollMs?: number;
+  /** How long the Connect flow waits before offering Check again. */
+  connectPollCapMs?: number;
 }
 
 export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
@@ -131,6 +145,45 @@ summary{cursor:pointer;border-radius:0.375rem}
 .models summary{font-size:1rem;color:var(--text);font-weight:600}
 .models{padding-top:0.75rem;border-top:1px solid var(--line)}
 .plain{margin:0.5rem 0;padding-left:1.25rem}
+.notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border-left:3px solid var(--good);background:var(--surface);border-radius:0.25rem}
+.strong{font-weight:600}
+.error{color:var(--danger);font-weight:600}
+.picker-top{margin:0 0 0.75rem}
+.btn.back::before{content:"\\2190\\00a0"}
+.picker h1{margin-bottom:0.25rem}
+.picker>.muted{margin-bottom:0.75rem}
+.picker-status{display:flex;flex-direction:column;gap:0.75rem;margin-top:1rem}
+.field{display:flex;flex-direction:column;gap:0.25rem;margin:0.75rem 0}
+.field-label{font-weight:600;font-size:0.875rem}
+.text{font:inherit;font-size:1rem;width:100%;min-height:2.25rem;padding:0.375rem 0.625rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
+textarea.text{resize:vertical;min-height:4.5rem}
+.tree{list-style:none;margin:0;padding:0}
+.tree.root{border-top:1px solid var(--line);margin-top:0.5rem}
+.tree .tree{padding-left:1rem;border-left:1px solid var(--line);margin-left:1.125rem}
+.folder{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem;padding:0.5rem 0;border-bottom:1px solid var(--line)}
+.folder-toggle{flex:none;width:2.25rem;display:inline-flex;justify-content:center}
+.folder-text{flex:1 1 9rem;min-width:0}
+.folder-name{font-weight:500}
+.folder-meta{font-size:0.8125rem}
+.folder-empty,.folder-loading{padding:0.5rem 0 0.5rem 2.75rem}
+.folder-more{padding:0.5rem 0 0.5rem 2.75rem}
+.icon-btn{min-width:2.25rem;padding:0.25rem;border-radius:0.5rem}
+.choice{font:inherit;font-size:0.875rem;min-height:2.25rem;max-width:100%;padding:0.25rem 0.5rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
+.whole{margin-top:1.25rem}
+.opt{display:flex;align-items:flex-start;gap:0.5rem;padding:0.375rem 0;cursor:pointer}
+.opt input{flex:none;width:1.125rem;height:1.125rem;margin:0.125rem 0 0;accent-color:var(--accent)}
+.opt-text{display:flex;flex-direction:column;min-width:0}
+.opt-hint{font-size:0.8125rem}
+.confirm-box{display:flex;flex-direction:column;gap:0.5rem;margin:0.5rem 0 0.75rem;padding:0.75rem;border:1px solid var(--warn-line);border-radius:0.75rem;background:var(--warn-bg)}
+.group{border:0;border-top:1px solid var(--line);margin:1rem 0 0;padding:0.75rem 0 0;min-width:0}
+.group legend{font-weight:600;padding:0;float:left;width:100%;margin-bottom:0.25rem}
+.group legend+*{clear:both}
+.suggestions{list-style:none;margin:0.25rem 0 0;padding:0}
+.suggestion{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.75rem;padding:0.375rem 0;border-bottom:1px solid var(--line)}
+.suggestion-text{flex:1 1 12rem;min-width:0}
+.picker-footer{margin-top:1.5rem;padding:1rem;border:1px solid var(--line);border-radius:0.75rem;background:var(--surface);display:flex;flex-direction:column;gap:0.75rem}
+.summary{display:flex;flex-direction:column;gap:0.25rem}
+.save{display:flex;flex-direction:column;gap:0.375rem}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu,.menu-panel{align-items:flex-start}}
@@ -146,6 +199,15 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
     staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
+    picker: {
+      tools: CHATGPT_PICKER_TOOLS,
+      mailArgs: CHATGPT_PICKER_MAIL_ARGS,
+      copy: DASHBOARD_CHATGPT_PICKER_COPY,
+      connectHost: CHATGPT_CONNECT_HOST,
+      mailSourceId: CHATGPT_MAIL_SOURCE_ID,
+      pollMs: options.connectPollMs ?? CHATGPT_CONNECT_POLL_MS,
+      pollCapMs: options.connectPollCapMs ?? CHATGPT_CONNECT_POLL_CAP_MS,
+    },
   };
   return [
     '<!doctype html>',
@@ -158,7 +220,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     '</head>',
     '<body>',
     '<div id="app"></div>',
-    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config)});</script>`,
+    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config)}, ${chatgptPickerProgram.toString()});</script>`,
     '</body>',
     '</html>',
     '',
