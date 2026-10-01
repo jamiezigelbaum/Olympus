@@ -27,7 +27,7 @@ import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME } from './dashboard-contrac
 import { DASHBOARD_RESOURCE, dashboardResourceHtml, dashboardResourceMeta } from './dashboard-resource.ts';
 import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from './dashboard-view-model.ts';
 import { PRIVATE_ANSWER_RESOURCE_URI, type PrivateEvidenceItem, type PrivateMatchSummary } from './private-answer-contract.ts';
-import type { PrivateAnswerJobs } from './private-answer-jobs.ts';
+import type { PrivateAnswerJobs, PrivateEvidenceRefresh } from './private-answer-jobs.ts';
 import { PRIVATE_ANSWER_RESOURCE, privateAnswerResourceHtml, privateAnswerResourceMeta } from './private-answer-resource.ts';
 import {
   answerToolMeta,
@@ -186,7 +186,13 @@ export async function callChatGptTool(
   ctx: OperationContext,
   options: ChatGptSurfaceOptions,
   signal?: AbortSignal,
+  /**
+   * A context for work that outlives this request (the private answer's
+   * claim-time evidence refresh): same caller, no request signal.
+   */
+  detachedContext?: () => OperationContext,
 ): Promise<ChatGptToolResult> {
+  const later = detachedContext ?? (() => ctx);
   try {
     switch (name) {
       case DASHBOARD_TOOL_NAME:
@@ -209,16 +215,27 @@ export async function callChatGptTool(
           probe(question, ctx).catch(() => false as const),
         ]);
         const match = normalizeProbe(probed);
-        const privateMatch = match.count > 0 ? beginPrivateAnswer(question, match, options) : undefined;
+        const pending: PendingPrivateMatch | undefined = match.count > 0
+          ? { question, match, refresh: privateRefresh(question, probe, later) }
+          : undefined;
         const jobId = pendingJobId(raw);
-        if (jobId) rememberPrivateMatch(jobId, privateMatch);
+        if (jobId) {
+          // Handed off: the private job is created only when the answered
+          // result is built (source_answer_result), so its id is never valid
+          // before ChatGPT can see it.
+          rememberPrivateMatch(jobId, pending);
+          return answerToolResult(raw);
+        }
+        const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
         return answerToolResult(raw, { privateMatched: privateMatch !== undefined, ...(privateMatch ? { privateMatch } : {}) });
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
         const jobId = typeof args.job_id === 'string' ? args.job_id.trim() : '';
         if (!jobId) throw new ChatGptSurfaceError('invalid_params');
         const raw = await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId });
-        const privateMatch = privateMatchForJob(jobId, pendingJobId(raw) === undefined);
+        const done = pendingJobId(raw) === undefined;
+        const pending = privateMatchForJob(jobId, done);
+        const privateMatch = done && pending ? beginPrivateAnswer(pending, options) : undefined;
         return answerToolResult(raw, { privateMatched: privateMatch !== undefined, ...(privateMatch ? { privateMatch } : {}) });
       }
       default:
@@ -238,11 +255,30 @@ function normalizeProbe(value: boolean | number | PrivateMatchProbeResult): Priv
   return { count: 0, evidence: [] };
 }
 
-/** The panel summary for a match: a one-time job when a private model is ready, else counts and state. */
-function beginPrivateAnswer(question: string, match: PrivateMatchProbeResult, options: ChatGptSurfaceOptions): PrivateMatchSummary & { jobId?: string } {
+interface PendingPrivateMatch {
+  question: string;
+  match: PrivateMatchProbeResult;
+  refresh: PrivateEvidenceRefresh;
+}
+
+/** The same Private search again, at claim time, so evidence is judged at its current tier. */
+function privateRefresh(
+  question: string,
+  probe: NonNullable<ChatGptSurfaceOptions['privateMatchProbe']>,
+  context: () => OperationContext,
+): PrivateEvidenceRefresh {
+  return async () => normalizeProbe(await probe(question, context())).evidence;
+}
+
+/**
+ * The panel summary for a match: a one-time job when a private model is
+ * ready, else counts and state. Called as the answered result is built.
+ */
+function beginPrivateAnswer(pending: PendingPrivateMatch, options: ChatGptSurfaceOptions): PrivateMatchSummary & { jobId?: string } {
+  const { question, match, refresh } = pending;
   if (!options.privateAnswers) return { count: match.count, panelState: 'no_model' };
   try {
-    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence });
+    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence, refresh });
   } catch {
     return { count: match.count, panelState: 'no_model' };
   }
@@ -287,7 +323,7 @@ const PROBE_QUERY_MAX_CHARS = 500;
 const PROBE_TIMEOUT_MS = 20_000;
 
 /** A handed-off answer's probe result, until its source_answer_result collects it. */
-const privateMatchByJob = new Map<string, { match: (PrivateMatchSummary & { jobId?: string }) | undefined; expiresAt: number }>();
+const privateMatchByJob = new Map<string, { match: PendingPrivateMatch | undefined; expiresAt: number }>();
 const PRIVATE_MATCH_TTL_MS = 30 * 60_000;
 const PRIVATE_MATCH_MAX_JOBS = 1_000;
 
@@ -296,7 +332,7 @@ function pendingJobId(raw: unknown): string | undefined {
   return record?.status === 'working' && typeof record.job_id === 'string' ? record.job_id : undefined;
 }
 
-function rememberPrivateMatch(jobId: string, match: (PrivateMatchSummary & { jobId?: string }) | undefined): void {
+function rememberPrivateMatch(jobId: string, match: PendingPrivateMatch | undefined): void {
   const now = Date.now();
   for (const [id, entry] of privateMatchByJob) if (entry.expiresAt <= now) privateMatchByJob.delete(id);
   while (privateMatchByJob.size >= PRIVATE_MATCH_MAX_JOBS) {
@@ -307,7 +343,7 @@ function rememberPrivateMatch(jobId: string, match: (PrivateMatchSummary & { job
   privateMatchByJob.set(jobId, { match, expiresAt: now + PRIVATE_MATCH_TTL_MS });
 }
 
-function privateMatchForJob(jobId: string, done: boolean): (PrivateMatchSummary & { jobId?: string }) | undefined {
+function privateMatchForJob(jobId: string, done: boolean): PendingPrivateMatch | undefined {
   const entry = privateMatchByJob.get(jobId);
   if (done) privateMatchByJob.delete(jobId);
   return entry !== undefined && entry.expiresAt > Date.now() ? entry.match : undefined;
@@ -366,6 +402,8 @@ export function readChatGptResource(uri: string): { contents: Array<Record<strin
 export function createChatGptMcpServer(
   makeOperationContext: () => OperationContext,
   options: ChatGptSurfaceOptions,
+  /** The same caller's context without the request's signal (see callChatGptTool). */
+  makeDetachedContext?: () => OperationContext,
 ): Server {
   const server = new Server(
     { name: 'olympus', version: VERSION },
@@ -373,7 +411,7 @@ export function createChatGptMcpServer(
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listChatGptTools(makeOperationContext()) }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
-    callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal));
+    callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal, makeDetachedContext));
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: CHATGPT_RESOURCES.map((resource) => ({ ...resource })) }));
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));

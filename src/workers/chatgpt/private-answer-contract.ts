@@ -76,6 +76,12 @@ export interface PrivateAnswerModel {
     evidence: readonly PrivateEvidenceItem[],
     signal?: AbortSignal,
   ): Promise<{ answer: string; citations: PrivateAnswerCitation[] }>;
+  /**
+   * Kill or reset the model runtime (its child process or session). Called
+   * when an analysis passes its hard deadline, after the engine has already
+   * freed the slot, so a model that ignores `signal` cannot block the next.
+   */
+  reset?(): void | Promise<void>;
 }
 
 /** No private model on this engine yet: every private match reports `no_model`. */

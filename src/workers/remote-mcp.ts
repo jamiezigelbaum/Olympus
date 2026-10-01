@@ -114,7 +114,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
     const server = options.chatgpt?.servesRequest(request)
-      ? createChatGptMcpServer(() => ctx, options.chatgpt)
+      ? createChatGptMcpServer(() => ctx, options.chatgpt, () => options.makeOperationContext(caller, new AbortController().signal))
       : createOlympusMcpServer('remote', () => ctx);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });

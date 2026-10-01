@@ -2,23 +2,32 @@
  * One-time private-answer jobs and the engine's `/private/<id>` endpoint.
  *
  * A ChatGPT answer whose question matches Private items creates a job here
- * (when a private model is ready). ChatGPT gets only the job id and the count,
- * in the tool result's widget-only `_meta`. The private answer panel collects
- * the answer itself, directly from the relay:
+ * (when a private model is ready) at the moment its tool result is built, so
+ * the id exists only once ChatGPT can see it. ChatGPT gets only the job id and
+ * the count, in the tool result's widget-only `_meta`. The private answer
+ * panel collects the answer itself, directly from the relay:
  *
  * 1. It POSTs an ephemeral ECDH public key. The first key to arrive claims
- *    the job; another key gets 409 `claimed` (and the owner's panel shows that
- *    someone else opened it).
- * 2. Claiming starts the private model on the Private evidence the search
- *    found (never Secret: Secrets are not in any searchable corpus). Until it
- *    finishes, the same key gets 202 `pending` with Retry-After.
- * 3. When it is done, the same key gets 200 `ready` with the answer sealed to
- *    that key (private-answer-crypto.ts), once. The job is deleted.
+ *    the job. Another key gets 409 `claimed`: the panel says the answer was
+ *    already opened elsewhere, and this Mac writes a content-free audit line.
+ * 2. Claiming starts the private model. The evidence is searched again at
+ *    that moment (current tiers, not the search-time cache), and anything not
+ *    Private-eligible now (Secret included) is dropped. Until the model is
+ *    done, the claiming key gets 202 `pending` with Retry-After.
+ * 3. When it is done, the claiming key gets 200 `ready` with the answer
+ *    sealed to that key (private-answer-crypto.ts). The same key gets the
+ *    same sealed bytes again until the job expires, so a replay of the
+ *    panel's request (by anyone who saw it) is harmless and cannot consume
+ *    the answer: only the holder of the panel's private key can open it.
  *
- * Unknown, expired (ten minutes from creation), collected, failed-and-reported
- * and over-polled jobs all answer 410 `gone`: the endpoint is no oracle for
- * which ids existed. Analyses run one at a time; claims are rate limited.
- * Nothing here is persisted: an engine restart forgets every job.
+ * A hard deadline outside the model call frees the analysis slot even when a
+ * model ignores its abort signal; the model's `reset` (when it has one) is
+ * then called to kill or reset its runtime.
+ *
+ * Unknown, expired (ten minutes from creation), wrong-install and over-polled
+ * jobs answer 410 `gone`: the endpoint is no oracle for which ids existed.
+ * Analyses run one at a time; claims are rate limited. Nothing here is
+ * persisted: an engine restart forgets every job.
  */
 import { randomBytes } from 'node:crypto';
 import {
@@ -37,7 +46,10 @@ import {
   type PrivateEvidenceItem,
   type PrivateMatchSummary,
 } from './private-answer-contract.ts';
-import { importPanelPublicKey, sealPrivateAnswer } from './private-answer-crypto.ts';
+import { importPanelPublicKey, sealPrivateAnswer, type SealedPrivateAnswer } from './private-answer-crypto.ts';
+
+/** A content-free local audit event: no job id, no question, no key. */
+export type PrivateAnswerAuditEvent = 'claimed_by_other_key' | 'analysis_deadline';
 
 export interface PrivateAnswerJobsOptions {
   /** The private model (the private-model lane's `built_in` analyst), read per use. */
@@ -48,23 +60,28 @@ export interface PrivateAnswerJobsOptions {
   ttlMs?: number;
   /** Live jobs at once; the oldest is dropped beyond this. */
   maxJobs?: number;
-  /** Claims (POSTs) one job answers before it is dropped. */
+  /** Polls one job answers while pending before it is dropped. */
   maxClaimsPerJob?: number;
   /** Claims across all jobs: burst and refill per second. */
   claimRate?: { capacity: number; refillPerSecond: number };
-  /** Longest one private analysis may take. */
+  /** Hard deadline for one analysis (evidence refresh plus model), enforced outside the model. */
   analysisTimeoutMs?: number;
+  /** Local audit log (default: one line on stderr). */
+  audit?: (event: PrivateAnswerAuditEvent) => void;
 }
+
+/** Re-reads the job's evidence at claim time, at the items' current tiers. */
+export type PrivateEvidenceRefresh = (signal: AbortSignal) => Promise<readonly PrivateEvidenceItem[]>;
 
 interface Job {
   readonly id: string;
   readonly expiresAt: number;
   question: string | undefined;
   evidence: readonly PrivateEvidenceItem[] | undefined;
+  refresh: PrivateEvidenceRefresh | undefined;
   claimKey?: string;
-  panelKey?: CryptoKey;
   claims: number;
-  outcome?: { kind: 'answered'; plaintext: string } | { kind: 'failed' };
+  outcome?: { kind: 'sealed'; sealed: SealedPrivateAnswer } | { kind: 'failed' } | undefined;
   abort?: AbortController;
 }
 
@@ -82,6 +99,27 @@ const MAX_EVIDENCE_ITEMS = 50;
 const PENDING_RETRY_SECONDS = 2;
 const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
 
+const defaultAudit = (event: PrivateAnswerAuditEvent) => {
+  console.warn(`[olympus] private answer audit: ${event === 'claimed_by_other_key'
+    ? 'a second key tried to open a private answer that was already claimed'
+    : 'a private analysis hit its deadline and was stopped'}`);
+};
+
+/**
+ * Whether a search hit may feed a private answer: Private (secure_local) only.
+ * A hit that names any other trust domain, or any Secret tier, is dropped.
+ * A hit naming neither came from a Private corpus search and is kept.
+ */
+export function isPrivateEligible(item: PrivateEvidenceItem): boolean {
+  const domain = item.trust_domain ?? item.trustDomain;
+  if (domain !== undefined && domain !== 'secure_local') return false;
+  for (const key of ['trust_tier', 'trustTier', 'tier', 'content_tier', 'contentTier', 'metadata_tier', 'metadataTier']) {
+    const tier = item[key];
+    if (typeof tier === 'string' && /secret/i.test(tier)) return false;
+  }
+  return true;
+}
+
 export class PrivateAnswerJobs {
   // Assigned in the constructor, not as field initializers: an initializer
   // would make the bundler keep this module in bundles that never use it.
@@ -92,10 +130,10 @@ export class PrivateAnswerJobs {
   private readonly maxClaimsPerJob: number;
   private readonly claimRate: { capacity: number; refillPerSecond: number };
   private readonly analysisTimeoutMs: number;
+  private readonly audit: (event: PrivateAnswerAuditEvent) => void;
   private tokens: number;
   private refilledAt: number;
   private queue: Promise<void>;
-
   private readonly options: PrivateAnswerJobsOptions;
 
   constructor(options: PrivateAnswerJobsOptions) {
@@ -108,6 +146,7 @@ export class PrivateAnswerJobs {
     this.maxClaimsPerJob = options.maxClaimsPerJob ?? 400;
     this.claimRate = options.claimRate ?? { capacity: 60, refillPerSecond: 10 };
     this.analysisTimeoutMs = options.analysisTimeoutMs ?? 5 * 60_000;
+    this.audit = options.audit ?? defaultAudit;
     this.tokens = this.claimRate.capacity;
     this.refilledAt = this.now();
   }
@@ -119,9 +158,17 @@ export class PrivateAnswerJobs {
   /**
    * A private match: the panel summary, with a job when a private model is
    * ready and this engine has a relay install id. Counts and state only
-   * otherwise. `count` is capped at PRIVATE_MATCH_COUNT_CAP.
+   * otherwise. `count` is capped at PRIVATE_MATCH_COUNT_CAP. Call it as the
+   * tool result is built, so the id is valid only from then on. `refresh`
+   * re-reads the evidence at claim time; without it the search-time hits are
+   * used, still filtered by isPrivateEligible.
    */
-  begin(input: { question: string; count: number; evidence: readonly PrivateEvidenceItem[] }): PrivateMatchSummary & { jobId?: string } {
+  begin(input: {
+    question: string;
+    count: number;
+    evidence: readonly PrivateEvidenceItem[];
+    refresh?: PrivateEvidenceRefresh;
+  }): PrivateMatchSummary & { jobId?: string } {
     const count = Math.max(0, Math.min(PRIVATE_MATCH_COUNT_CAP, Math.floor(input.count)));
     const status = this.options.model().status();
     if (status.state === 'model_downloading') {
@@ -148,39 +195,42 @@ export class PrivateAnswerJobs {
       expiresAt: this.now() + this.ttlMs,
       question: input.question.slice(0, MAX_QUESTION_CHARS),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
+      refresh: input.refresh,
       claims: 0,
     });
     return { count, panelState: 'ready', jobId: id };
   }
 
-  /** One panel POST: claim, poll, or collect. */
+  /** One panel POST: claim, poll, or collect (idempotent for the claiming key until expiry). */
   async claim(jobId: string, publicKey: unknown): Promise<ClaimResponse> {
     if (!this.takeToken()) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: 5 };
     this.sweep();
     const job = this.jobs.get(jobId);
-    // Wrong install, unknown, expired or collected: one answer for all.
+    // Wrong install, unknown or expired: one answer for all.
     if (!job || privateAnswerInstallId(jobId) !== this.options.installId()) return gone();
     const panel = await importPanelPublicKey(publicKey);
     if (!panel) return { status: 400, body: { status: 'invalid' } };
     // The job may have gone while the key was imported.
     if (this.jobs.get(jobId) !== job) return gone();
-    if (job.claimKey !== undefined && job.claimKey !== panel.raw) return { status: 409, body: { status: 'claimed' } };
-    job.claims += 1;
-    if (job.claims > this.maxClaimsPerJob) {
-      this.drop(jobId);
-      return gone();
+    if (job.claimKey !== undefined && job.claimKey !== panel.raw) {
+      this.audit('claimed_by_other_key');
+      return { status: 409, body: { status: 'claimed' } };
     }
     if (job.claimKey === undefined) {
       job.claimKey = panel.raw;
-      job.panelKey = panel.key;
-      this.startAnalysis(job);
+      this.startAnalysis(job, panel.key);
     }
     const outcome = job.outcome;
-    if (!outcome) return { status: 202, body: { status: 'pending' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
-    this.drop(jobId);
+    if (!outcome) {
+      job.claims += 1;
+      if (job.claims > this.maxClaimsPerJob) {
+        this.drop(jobId);
+        return gone();
+      }
+      return { status: 202, body: { status: 'pending' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
+    }
     if (outcome.kind === 'failed') return { status: 200, body: { status: 'failed' } };
-    const sealed = await sealPrivateAnswer(jobId, job.panelKey!, outcome.plaintext);
-    return { status: 200, body: { status: 'ready', v: 1, ...sealed } };
+    return { status: 200, body: { status: 'ready', v: 1, ...outcome.sealed } };
   }
 
   /** Drops expired jobs (and aborts their analyses). */
@@ -194,26 +244,51 @@ export class PrivateAnswerJobs {
     job.abort?.abort();
     job.question = undefined;
     job.evidence = undefined;
+    job.refresh = undefined;
+    job.outcome = undefined;
     this.jobs.delete(id);
   }
 
-  private startAnalysis(job: Job): void {
+  private startAnalysis(job: Job, panelKey: CryptoKey): void {
     const abort = new AbortController();
     job.abort = abort;
     this.queue = this.queue.then(async () => {
       if (abort.signal.aborted || this.jobs.get(job.id) !== job) return;
       const question = job.question ?? '';
-      const evidence = job.evidence ?? [];
+      const cached = job.evidence ?? [];
+      const refresh = job.refresh;
       job.question = undefined;
       job.evidence = undefined;
-      const timer = setTimeout(() => abort.abort(), this.analysisTimeoutMs);
-      (timer as { unref?: () => void }).unref?.();
+      job.refresh = undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<'deadline'>((resolve) => {
+        timer = setTimeout(() => resolve('deadline'), this.analysisTimeoutMs);
+        (timer as { unref?: () => void }).unref?.();
+      });
+      const work = (async () => {
+        const evidence = (refresh ? await refresh(abort.signal) : cached).filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
+        if (evidence.length === 0) throw new Error('no private evidence');
+        const model = this.options.model();
+        const result = await model.answerPrivately(question, evidence, abort.signal);
+        return sealPrivateAnswer(job.id, panelKey, JSON.stringify(plaintextOf(result)));
+      })();
+      work.catch(() => undefined);
       try {
-        const result = await this.options.model().answerPrivately(question, evidence, abort.signal);
+        const settled = await Promise.race([work, deadline]);
+        if (settled === 'deadline') {
+          abort.abort();
+          this.audit('analysis_deadline');
+          try {
+            await this.options.model().reset?.();
+          } catch {
+            // The slot is freed either way.
+          }
+          throw new Error('deadline');
+        }
         if (abort.signal.aborted) throw new Error('aborted');
-        job.outcome = { kind: 'answered', plaintext: JSON.stringify(plaintextOf(result)) };
+        job.outcome = { kind: 'sealed', sealed: settled };
       } catch {
-        job.outcome = { kind: 'failed' };
+        if (this.jobs.get(job.id) === job) job.outcome = { kind: 'failed' };
       } finally {
         clearTimeout(timer);
       }

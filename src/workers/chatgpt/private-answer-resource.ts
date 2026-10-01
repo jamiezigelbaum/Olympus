@@ -121,7 +121,7 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
   }
 
   var FAIL = {
-    claimed: "This private answer was already opened somewhere else. Ask again to get a new one.",
+    claimed: "This private answer was already opened elsewhere. If that was not you, ask again for a new one.",
     gone: "This private answer is no longer available. Ask again to get a new one.",
     failed: "Olympus could not answer this privately on your Mac.",
     mac_offline: "Your Mac is offline. Ask again when your Mac is awake and online.",

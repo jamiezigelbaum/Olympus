@@ -65,8 +65,8 @@ function makeJobs(model: PrivateAnswerModel, clock = { now: 1_000_000 }, extra: 
 }
 
 async function settled(jobs: PrivateAnswerJobs): Promise<void> {
-  // Analyses run on a promise chain; let it drain.
-  for (let i = 0; i < 10; i += 1) await Bun.sleep(0);
+  // Analyses (refresh, model, sealing) run on a promise chain; let it drain.
+  await Bun.sleep(50);
   void jobs;
 }
 
@@ -124,7 +124,7 @@ describe('sealing', () => {
 });
 
 describe('one-time jobs', () => {
-  test('claim, poll, collect once; then gone (replay)', async () => {
+  test('claim, poll, collect; replays of the same key get the same sealed bytes, any other key 409', async () => {
     const model = readyModel();
     const jobs = makeJobs(model);
     const begun = jobs.begin({ question: 'When does the lease end?', count: 3, evidence: EVIDENCE });
@@ -143,10 +143,88 @@ describe('one-time jobs', () => {
     expect(JSON.stringify(ready.body)).not.toMatch(SENTINEL_PATTERN);
     const opened = JSON.parse(await openPrivateAnswer(begun.jobId!, panel.privateKey, ready.body as unknown as SealedPrivateAnswer));
     expect(opened).toEqual({ v: 1, answer: SECRET_ANSWER, citations: [{ title: SECRET_CITATION, source: 'Gmail', date: '2026-04-01' }] });
-    // Replay with the same key, or any key: gone.
-    expect(await jobs.claim(begun.jobId!, panel.publicKey)).toMatchObject({ status: 410, body: { status: 'gone' } });
-    expect(await jobs.claim(begun.jobId!, (await generatePanelKeyPair()).publicKey)).toMatchObject({ status: 410 });
-    expect(jobs.size).toBe(0);
+    // A replay of the panel's request (by anyone who saw it) cannot consume
+    // the answer: same key, same sealed bytes, useless without the panel's
+    // private key. Any other key: 409, and a local audit line.
+    expect(await jobs.claim(begun.jobId!, panel.publicKey)).toEqual(ready);
+    expect(await jobs.claim(begun.jobId!, panel.publicKey)).toEqual(ready);
+    expect(await jobs.claim(begun.jobId!, (await generatePanelKeyPair()).publicKey)).toMatchObject({ status: 409, body: { status: 'claimed' } });
+    expect(model.calls).toHaveLength(1);
+    expect(jobs.size).toBe(1);
+  });
+
+  test('a second key is audited locally, without content', async () => {
+    const events: string[] = [];
+    const jobs = makeJobs(readyModel(), { now: 0 }, { audit: (event) => events.push(event) });
+    const { jobId } = jobs.begin({ question: SECRET_ANSWER, count: 1, evidence: EVIDENCE });
+    await jobs.claim(jobId!, (await generatePanelKeyPair()).publicKey);
+    await jobs.claim(jobId!, (await generatePanelKeyPair()).publicKey);
+    expect(events).toEqual(['claimed_by_other_key']);
+  });
+
+  test('a model that never resolves and ignores abort is cut off by the hard deadline; the next job runs', async () => {
+    const events: string[] = [];
+    let resets = 0;
+    let calls = 0;
+    const model = readyModel({
+      answerPrivately: (question) => {
+        calls += 1;
+        if (question === 'stuck') return new Promise(() => {});
+        return Promise.resolve({ answer: 'second answer', citations: [] });
+      },
+      reset: () => { resets += 1; },
+    });
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 50, audit: (event) => events.push(event) });
+    const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE }).jobId!;
+    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
+    const panel = await generatePanelKeyPair();
+    expect((await jobs.claim(stuck, panel.publicKey)).status).toBe(202);
+    expect((await jobs.claim(next, panel.publicKey)).status).toBe(202);
+    await Bun.sleep(120);
+    await settled(jobs);
+    expect(await jobs.claim(stuck, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
+    const ready = await jobs.claim(next, panel.publicKey);
+    expect(ready.body.status).toBe('ready');
+    expect(JSON.parse(await openPrivateAnswer(next, panel.privateKey, ready.body as unknown as SealedPrivateAnswer)).answer).toBe('second answer');
+    expect(calls).toBe(2);
+    expect(resets).toBe(1);
+    expect(events).toEqual(['analysis_deadline']);
+  });
+
+  test('evidence is re-read at claim time; an item re-tiered to Secret since the search is dropped', async () => {
+    const model = readyModel();
+    const jobs = makeJobs(model);
+    const searchTime = [
+      { item: 'lease', trust_domain: 'secure_local' },
+      { item: 'password', trust_domain: 'secure_local' },
+    ];
+    // Between search and claim the owner's classifier raised `password` to Secrets.
+    const claimTime = [
+      { item: 'lease', trust_domain: 'secure_local' },
+      { item: 'password', trust_domain: 'secure_local', trust_tier: 'secrets' },
+      { item: 'note', trust_domain: 'internal' },
+    ];
+    let refreshed = 0;
+    const { jobId } = jobs.begin({
+      question: 'q',
+      count: 2,
+      evidence: searchTime,
+      refresh: async () => { refreshed += 1; return claimTime; },
+    });
+    expect(refreshed).toBe(0);
+    await jobs.claim(jobId!, (await generatePanelKeyPair()).publicKey);
+    await settled(jobs);
+    expect(refreshed).toBe(1);
+    expect(model.calls[0]!.evidence).toEqual([{ item: 'lease', trust_domain: 'secure_local' }]);
+
+    // Everything gone from the Private tier by claim time: no answer at all.
+    const empty = makeJobs(model);
+    const second = empty.begin({ question: 'q', count: 1, evidence: searchTime, refresh: async () => [{ item: 'password', trust_tier: 'secret' }] });
+    const panel = await generatePanelKeyPair();
+    await empty.claim(second.jobId!, panel.publicKey);
+    await settled(empty);
+    expect(await empty.claim(second.jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
+    expect(model.calls).toHaveLength(1);
   });
 
   test('the first key wins; a second key gets 409 claimed', async () => {
@@ -187,7 +265,7 @@ describe('one-time jobs', () => {
     expect(await jobs.claim(jobId!, panel.publicKey)).toMatchObject({ status: 410 });
   });
 
-  test('a failed analysis reports failed once, then gone', async () => {
+  test('a failed analysis reports failed, idempotently', async () => {
     const jobs = makeJobs(readyModel({ answerPrivately: async () => { throw new Error(SECRET_ANSWER); } }));
     const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE });
     const panel = await generatePanelKeyPair();
@@ -195,7 +273,7 @@ describe('one-time jobs', () => {
     await settled(jobs);
     const failed = await jobs.claim(jobId!, panel.publicKey);
     expect(failed).toEqual({ status: 200, body: { status: 'failed' } });
-    expect((await jobs.claim(jobId!, panel.publicKey)).status).toBe(410);
+    expect(await jobs.claim(jobId!, panel.publicKey)).toEqual(failed);
   });
 
   test('no model, a downloading model, or no relay install: counts only, no job', () => {
@@ -262,7 +340,9 @@ describe('the /private/<id> endpoint', () => {
     const body = JSON.parse(text);
     expect(Object.keys(body).sort()).toEqual(['ciphertext', 'iv', 'macPublicKey', 'status', 'v']);
     expect(JSON.parse(await openPrivateAnswer(jobId!, panel.privateKey, body)).answer).toBe(SECRET_ANSWER);
-    expect((await post(handler, jobId!, good)).status).toBe(410);
+    const replay = await post(handler, jobId!, good);
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(text);
   });
 });
 
@@ -437,7 +517,9 @@ describe('end to end through a real relay', () => {
       const text = await ready.text();
       expect(text).not.toMatch(SENTINEL_PATTERN);
       expect(JSON.parse(await openPrivateAnswer(jobId!, panel.privateKey, JSON.parse(text))).answer).toBe(SECRET_ANSWER);
-      expect((await collect()).status).toBe(410);
+      const replay = await collect();
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(text);
       const logs = relayLog.join('\n');
       expect(logs).not.toContain(jobId!);
       expect(logs).not.toContain(identity.installId);

@@ -205,8 +205,11 @@ percent when known; counts only, no job).
 2. **Job.** When a private model reports `ready` and the engine has a relay
    install id, the engine creates a one-time job with id
    `oly2p.<installId>.<32 random bytes>` (routable like tokens:
-   `connect-relay/shared/tokens.ts`). It holds the question and the hits in
-   memory only, for at most **10 minutes** from creation.
+   `connect-relay/shared/tokens.ts`) as the answered tool result is built,
+   so the id is valid only from the moment ChatGPT can see it (a handed-off
+   answer creates it at `source_answer_result`, not at `source_answer`). It
+   holds the question in memory only, for at most **10 minutes** from
+   creation.
 3. **Tool result.** The answer tool's result `_meta["olympus/privateAnswer"]`
    is `{v:1, count, state, jobId?, percent?}` and nothing else (the response
    builder copies exactly these fields). `_meta` is widget-only: ChatGPT does
@@ -218,20 +221,35 @@ percent when known; counts only, no job).
    public key, directly to `https://mcp.olympusplugin.ai/private/<job id>`
    (`fetch`, allowed by the resource's `_meta.ui.csp.connectDomains`), not
    through `tools/call`. The first public key to arrive claims the job;
-   another key gets **409 `claimed`**. Claiming starts the private model (one
-   analysis at a time), so a match the user never opens costs no model time.
+   another key gets **409 `claimed`**, the panel says "This private answer was
+   already opened elsewhere", and the Mac writes a content-free local audit
+   line. Claiming starts the private model (one analysis at a time), so a
+   match the user never opens costs no model time.
+   - **Evidence at claim time.** The Private search runs again when the job
+     is claimed, so every item is judged at its current tier; anything not
+     Private-eligible now (re-tiered to Secret, or out of the Private tier)
+     is dropped, and the search-time hits are not trusted. No eligible item
+     left means `failed`.
+   - **Hard deadline.** One analysis (refresh plus model) has a deadline
+     enforced outside the model call (default 5 minutes): the engine frees
+     the slot, marks the job `failed`, and calls the model's `reset()` to
+     kill or reset its runtime, so a model that ignores abort cannot block
+     the queue.
 5. **Poll.** While the model works, the same key gets **202 `pending`** with
    `Retry-After: 2`; the panel polls with the same key.
 6. **Collect.** When done, the engine generates its own ephemeral P-256 pair,
    derives `HKDF-SHA256(ECDH(mac, panel), salt = empty, info = job id)` as an
    AES-256-GCM key, seals `{v:1, answer, citations}` with a random 12-byte IV
    and the job id as additional data, and answers **200**
-   `{status:"ready", v:1, macPublicKey, iv, ciphertext}` once. The job is
-   deleted. The panel derives the same key and decrypts locally.
-7. **Afterwards** every request for that id gets **410 `gone`**, as do
-   unknown, expired, wrong-install and over-polled ids (one answer for all,
-   so the endpoint is no oracle). A model failure answers `200 failed` once,
-   then 410.
+   `{status:"ready", v:1, macPublicKey, iv, ciphertext}`. The panel derives
+   the same key and decrypts locally. Collection is **idempotent for the
+   claiming key until expiry**: a replay of the panel's request (by the
+   relay, or anyone who saw it) gets the same sealed bytes, which only the
+   panel's private key opens, so a replay cannot consume or destroy the
+   answer. A model failure answers `200 failed`, also idempotently.
+7. **Expiry.** Ten minutes after creation the job is deleted; then, as for
+   unknown, wrong-install and over-polled ids, every request gets **410
+   `gone`** (one answer for all, so the endpoint is no oracle).
 
 Wire statuses (`connect-relay/shared/private-answer.ts`): `ready`, `failed`,
 `pending` (202), `claimed` (409), `gone` (410), `invalid` (400/405/413),
@@ -277,8 +295,13 @@ Residual risks, stated plainly:
 - **OpenAI serves the panel's HTML** and could alter it (or its sandbox could
   be compromised) to exfiltrate the decrypted answer. A party that both knows
   the job id (`_meta`) and can act first can also claim the job itself; the
-  owner's panel then shows "already opened somewhere else" (409), which is
-  tamper-evident but not preventive.
+  owner's panel then shows "This private answer was already opened
+  elsewhere" (409) and the Mac logs a content-free audit line, which is
+  tamper-evident but not preventive. Full prevention is impossible while
+  OpenAI serves the panel. Speed bumps: the engine and relay accept claims
+  only with a ChatGPT widget Origin (a non-browser caller can forge it, so
+  this is not a barrier), the id exists only from the moment the tool result
+  is built, and it expires after ten minutes.
 - A party that sees both the relay's traffic and the panel's memory sees
   everything.
 - The panel's browser holds the decrypted answer in memory while it is

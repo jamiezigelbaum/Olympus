@@ -98062,7 +98062,7 @@ ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
   }
 
   var FAIL = {
-    claimed: "This private answer was already opened somewhere else. Ask again to get a new one.",
+    claimed: "This private answer was already opened elsewhere. If that was not you, ask again for a new one.",
     gone: "This private answer is no longer available. Ask again to get a new one.",
     failed: "Olympus could not answer this privately on your Mac.",
     mac_offline: "Your Mac is offline. Ask again when your Mac is awake and online.",
@@ -98530,7 +98530,8 @@ function listChatGptTools(ctx) {
   }
   return tools;
 }
-async function callChatGptTool(name, args, ctx, options, signal) {
+async function callChatGptTool(name, args, ctx, options, signal, detachedContext) {
+  const later = detachedContext ?? (() => ctx);
   try {
     switch (name) {
       case DASHBOARD_TOOL_NAME:
@@ -98552,10 +98553,13 @@ async function callChatGptTool(name, args, ctx, options, signal) {
           probe(question, ctx).catch(() => false)
         ]);
         const match = normalizeProbe(probed);
-        const privateMatch = match.count > 0 ? beginPrivateAnswer(question, match, options) : undefined;
+        const pending = match.count > 0 ? { question, match, refresh: privateRefresh(question, probe, later) } : undefined;
         const jobId = pendingJobId(raw);
-        if (jobId)
-          rememberPrivateMatch(jobId, privateMatch);
+        if (jobId) {
+          rememberPrivateMatch(jobId, pending);
+          return answerToolResult(raw);
+        }
+        const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
         return answerToolResult(raw, { privateMatched: privateMatch !== undefined, ...privateMatch ? { privateMatch } : {} });
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
@@ -98563,7 +98567,9 @@ async function callChatGptTool(name, args, ctx, options, signal) {
         if (!jobId)
           throw new ChatGptSurfaceError("invalid_params");
         const raw = await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId });
-        const privateMatch = privateMatchForJob(jobId, pendingJobId(raw) === undefined);
+        const done = pendingJobId(raw) === undefined;
+        const pending = privateMatchForJob(jobId, done);
+        const privateMatch = done && pending ? beginPrivateAnswer(pending, options) : undefined;
         return answerToolResult(raw, { privateMatched: privateMatch !== undefined, ...privateMatch ? { privateMatch } : {} });
       }
       default:
@@ -98583,11 +98589,15 @@ function normalizeProbe(value) {
   }
   return { count: 0, evidence: [] };
 }
-function beginPrivateAnswer(question, match, options) {
+function privateRefresh(question, probe, context) {
+  return async () => normalizeProbe(await probe(question, context())).evidence;
+}
+function beginPrivateAnswer(pending, options) {
+  const { question, match, refresh } = pending;
   if (!options.privateAnswers)
     return { count: match.count, panelState: "no_model" };
   try {
-    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence });
+    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence, refresh });
   } catch {
     return { count: match.count, panelState: "no_model" };
   }
@@ -98674,10 +98684,10 @@ function readChatGptResource(uri) {
     }]
   };
 }
-function createChatGptMcpServer(makeOperationContext, options) {
+function createChatGptMcpServer(makeOperationContext, options, makeDetachedContext) {
   const server = new Server({ name: "olympus", version: VERSION }, { capabilities: { tools: {}, resources: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listChatGptTools(makeOperationContext()) }));
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal));
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal, makeDetachedContext));
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: CHATGPT_RESOURCES.map((resource) => ({ ...resource })) }));
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
@@ -98888,7 +98898,7 @@ function createRemoteMcpHandler(options) {
     } catch {}
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
-    const server = options.chatgpt?.servesRequest(request) ? createChatGptMcpServer(() => ctx, options.chatgpt) : createOlympusMcpServer("remote", () => ctx);
+    const server = options.chatgpt?.servesRequest(request) ? createChatGptMcpServer(() => ctx, options.chatgpt, () => options.makeOperationContext(caller, new AbortController().signal)) : createOlympusMcpServer("remote", () => ctx);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);
@@ -100071,11 +100081,23 @@ var exports_private_answer_jobs = {};
 __export(exports_private_answer_jobs, {
   withPrivateAnswerRoute: () => withPrivateAnswerRoute,
   plaintextOf: () => plaintextOf,
+  isPrivateEligible: () => isPrivateEligible,
   isPrivateAnswerRequest: () => isPrivateAnswerRequest,
   createPrivateAnswerHandler: () => createPrivateAnswerHandler,
   PrivateAnswerJobs: () => PrivateAnswerJobs
 });
 import { randomBytes as randomBytes16 } from "node:crypto";
+function isPrivateEligible(item) {
+  const domain = item.trust_domain ?? item.trustDomain;
+  if (domain !== undefined && domain !== "secure_local")
+    return false;
+  for (const key of ["trust_tier", "trustTier", "tier", "content_tier", "contentTier", "metadata_tier", "metadataTier"]) {
+    const tier = item[key];
+    if (typeof tier === "string" && /secret/i.test(tier))
+      return false;
+  }
+  return true;
+}
 
 class PrivateAnswerJobs {
   jobs;
@@ -100085,6 +100107,7 @@ class PrivateAnswerJobs {
   maxClaimsPerJob;
   claimRate;
   analysisTimeoutMs;
+  audit;
   tokens;
   refilledAt;
   queue;
@@ -100099,6 +100122,7 @@ class PrivateAnswerJobs {
     this.maxClaimsPerJob = options.maxClaimsPerJob ?? 400;
     this.claimRate = options.claimRate ?? { capacity: 60, refillPerSecond: 10 };
     this.analysisTimeoutMs = options.analysisTimeoutMs ?? 5 * 60000;
+    this.audit = options.audit ?? defaultAudit;
     this.tokens = this.claimRate.capacity;
     this.refilledAt = this.now();
   }
@@ -100133,6 +100157,7 @@ class PrivateAnswerJobs {
       expiresAt: this.now() + this.ttlMs,
       question: input.question.slice(0, MAX_QUESTION_CHARS),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
+      refresh: input.refresh,
       claims: 0
     });
     return { count: count2, panelState: "ready", jobId: id };
@@ -100149,26 +100174,26 @@ class PrivateAnswerJobs {
       return { status: 400, body: { status: "invalid" } };
     if (this.jobs.get(jobId) !== job)
       return gone();
-    if (job.claimKey !== undefined && job.claimKey !== panel.raw)
+    if (job.claimKey !== undefined && job.claimKey !== panel.raw) {
+      this.audit("claimed_by_other_key");
       return { status: 409, body: { status: "claimed" } };
-    job.claims += 1;
-    if (job.claims > this.maxClaimsPerJob) {
-      this.drop(jobId);
-      return gone();
     }
     if (job.claimKey === undefined) {
       job.claimKey = panel.raw;
-      job.panelKey = panel.key;
-      this.startAnalysis(job);
+      this.startAnalysis(job, panel.key);
     }
     const outcome = job.outcome;
-    if (!outcome)
+    if (!outcome) {
+      job.claims += 1;
+      if (job.claims > this.maxClaimsPerJob) {
+        this.drop(jobId);
+        return gone();
+      }
       return { status: 202, body: { status: "pending" }, retryAfterSeconds: PENDING_RETRY_SECONDS };
-    this.drop(jobId);
+    }
     if (outcome.kind === "failed")
       return { status: 200, body: { status: "failed" } };
-    const sealed = await sealPrivateAnswer(jobId, job.panelKey, outcome.plaintext);
-    return { status: 200, body: { status: "ready", v: 1, ...sealed } };
+    return { status: 200, body: { status: "ready", v: 1, ...outcome.sealed } };
   }
   sweep(at = this.now()) {
     for (const [id, job] of this.jobs)
@@ -100182,27 +100207,54 @@ class PrivateAnswerJobs {
     job.abort?.abort();
     job.question = undefined;
     job.evidence = undefined;
+    job.refresh = undefined;
+    job.outcome = undefined;
     this.jobs.delete(id);
   }
-  startAnalysis(job) {
+  startAnalysis(job, panelKey) {
     const abort = new AbortController;
     job.abort = abort;
     this.queue = this.queue.then(async () => {
       if (abort.signal.aborted || this.jobs.get(job.id) !== job)
         return;
       const question = job.question ?? "";
-      const evidence = job.evidence ?? [];
+      const cached2 = job.evidence ?? [];
+      const refresh = job.refresh;
       job.question = undefined;
       job.evidence = undefined;
-      const timer = setTimeout(() => abort.abort(), this.analysisTimeoutMs);
-      timer.unref?.();
+      job.refresh = undefined;
+      let timer;
+      const deadline = new Promise((resolve10) => {
+        timer = setTimeout(() => resolve10("deadline"), this.analysisTimeoutMs);
+        timer.unref?.();
+      });
+      const work = (async () => {
+        const evidence = (refresh ? await refresh(abort.signal) : cached2).filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
+        if (evidence.length === 0)
+          throw new Error("no private evidence");
+        const model = this.options.model();
+        const result = await model.answerPrivately(question, evidence, abort.signal);
+        return sealPrivateAnswer(job.id, panelKey, JSON.stringify(plaintextOf(result)));
+      })();
+      work.catch(() => {
+        return;
+      });
       try {
-        const result = await this.options.model().answerPrivately(question, evidence, abort.signal);
+        const settled = await Promise.race([work, deadline]);
+        if (settled === "deadline") {
+          abort.abort();
+          this.audit("analysis_deadline");
+          try {
+            await this.options.model().reset?.();
+          } catch {}
+          throw new Error("deadline");
+        }
         if (abort.signal.aborted)
           throw new Error("aborted");
-        job.outcome = { kind: "answered", plaintext: JSON.stringify(plaintextOf(result)) };
+        job.outcome = { kind: "sealed", sealed: settled };
       } catch {
-        job.outcome = { kind: "failed" };
+        if (this.jobs.get(job.id) === job)
+          job.outcome = { kind: "failed" };
       } finally {
         clearTimeout(timer);
       }
@@ -100316,7 +100368,9 @@ async function boundedText(request, max) {
   }
   return new TextDecoder().decode(Buffer.concat(chunks2));
 }
-var MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, UNSAFE_CHARS2;
+var MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, UNSAFE_CHARS2, defaultAudit = (event) => {
+  console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
+};
 var init_private_answer_jobs = __esm(() => {
   init_private_answer();
   init_private_answer_contract();
