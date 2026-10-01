@@ -338,6 +338,17 @@ section consolidates and supersedes all other policy wording.
   only when an answer model is set up on the Mac. Private evidence never
   enters that pack. The three contract types are unchanged, so the
   fingerprint is unchanged; no stored data migrates.
+- 2026-10-01 (no version change): Names only is reported apart from
+  unreadable. An item in a folder the owner set to Names only (or under a
+  metadata-only ingestion rule) is returned by its content provider without
+  text and marked `LocalContentBlock.namesOnly`; the build detail carries
+  `namesOnlyCandidateIndexes` and `unreadCandidates` beside the pack, and
+  released coverage gains `names_only_items` next to `unreadable_items`.
+  "Could not read" now means a genuine failed read (no provider, nothing
+  returned, no text); a deliberately unread match gets its own counts-only
+  sentence, and a truncated excerpt is no longer counted as unreadable. The
+  per-item gap string still reaches the Analyst. The three contract types are
+  unchanged; no stored data migrates.
 - 2026-09-23 — **Four-tier classification P2 (no contract shape change).** The
   privacy-safe sniffer answers the classifier's open questions (a local model
   or Venice Private only, owner-approved in the classification ledger, verdicts

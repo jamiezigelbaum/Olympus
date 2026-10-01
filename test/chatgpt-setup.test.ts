@@ -352,7 +352,7 @@ function searchResult(): Record<string, unknown> {
       },
     ],
     withheld: 1,
-    coverage: { searched_corpora: 4, skipped_corpora: 1, unreadable_items: 3, partially_read_items: 0, unclassified_items: 1, matches: [] },
+    coverage: { searched_corpora: 4, skipped_corpora: 1, unreadable_items: 3, names_only_items: 24, partially_read_items: 0, unclassified_items: 1, matches: [] },
   };
 }
 
@@ -694,8 +694,10 @@ describe('olympus_search (retrieval only)', () => {
           { id: 'E1', source: 'Google Drive', title: 'Budget plan 2026', url: 'https://docs.google.com/document/d/abc', date: '2026-03-01', excerpt: 'The budget was approved in March.' },
           { id: 'E2', source: 'Gmail', title: 'Re: budget', date: '2026-03-02' },
         ],
-        coverage: { searchedSources: 4, unreadableItems: 3, partiallyReadItems: 0, unclassifiedItems: 1 },
+        coverage: { searchedSources: 4, unreadableItems: 3, namesOnlyItems: 24, partiallyReadItems: 0, unclassifiedItems: 1 },
         notes: [
+          '24 matches are in folders set to Names only, so Olympus has their names but not their contents. '
+            + 'Switch those folders to Full in the folder picker to let Olympus read them.',
           'Olympus could not read 3 matching items.',
           '1 item is still being sorted into privacy tiers and not shown yet.',
           'Olympus held back some matching items under the owner\'s privacy rules.',

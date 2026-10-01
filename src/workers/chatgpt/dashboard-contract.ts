@@ -496,6 +496,8 @@ export interface SearchResult {
   coverage: {
     searchedSources: number;
     unreadableItems: number;
+    /** Matches in folders the owner set to Names only (contents not read on purpose). */
+    namesOnlyItems: number;
     partiallyReadItems: number;
     unclassifiedItems: number;
   };

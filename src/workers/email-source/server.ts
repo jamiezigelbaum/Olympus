@@ -276,6 +276,7 @@ import {
   withEmbeddingSweep,
   wholeStoreEmbeddingSweepAllowed,
   sourceSchedulerConstructionLogLines,
+  sourceSchedulerEnabledLogLine,
   SCHEDULER_SOURCE_IDS,
   type SourceSchedulerConstructionDecision,
   type SourceSchedulerSource,
@@ -2531,12 +2532,19 @@ export async function main(): Promise<void> {
         }
       : {}),
   });
-  if (dropboxConnectorStore && dropboxExtractionScopes.length > 0 && !dropboxHandle) {
-    console.warn(
-      `[file-extraction] corpus=${DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID} provider=dropbox deferred `
-      + 'reason=no_credential_handle — extraction starts on the next scheduler pass after Dropbox is '
-      + 'connected, with no restart.',
-    );
+  // The extraction lane resolves its handle lazily on every pass, so the
+  // boot-time snapshot is not the last word: ask the same way the lane does
+  // before saying anything, and say it as plain information, not a warning.
+  if (dropboxConnectorStore && dropboxExtractionScopes.length > 0 && !dropboxHandle
+    && !selectedSourceCredentialHandle({
+      env: process.env,
+      pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
+      provider: 'dropbox',
+      capability: 'dropbox.files.sync',
+      handles: readActiveConnectedHandles(process.env),
+      warn: () => {},
+    })) {
+    console.log('[file-extraction] Dropbox extraction waits for Dropbox to be connected.');
   }
   const assertFileSourceScopeCurrent = (provider: string): void => {
     const sourceId = provider === 'dropbox'
@@ -3226,11 +3234,16 @@ export async function main(): Promise<void> {
                 readConnectorStores
                   .flatMap((store) => {
                     const mandatoryScope = connectorStoreReadScope(store);
-                    return mandatoryScope.allowed && mandatoryScope.contentAllowed !== false
+                    // Built whenever names are searchable, even with no
+                    // content scope at all: an item in a Names-only folder
+                    // then reports as kept unread by choice, not unreadable.
+                    return mandatoryScope.allowed
                       ? [[store.corpusId, createConnectorStoreContentProvider({
                           store,
                           ...(mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {}),
                           ...(mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {}),
+                          ...(mandatoryScope.filters ? { metadataFilters: mandatoryScope.filters } : {}),
+                          contentAllowed: mandatoryScope.contentAllowed !== false,
                         })] as const]
                       : [];
                   }),
@@ -4503,10 +4516,10 @@ export async function main(): Promise<void> {
     })) {
       console.log(line);
     }
-    console.log(
-      `In-process source scheduler enabled for ${schedulerSources.length} constructed source(s); `
-      + `${olympusConfig.worker.scheduler.sourceIds.length} selected.`,
-    );
+    console.log(sourceSchedulerEnabledLogLine({
+      constructedSourceIds: schedulerSources.map((source) => source.sourceId),
+      selectedSourceIds: olympusConfig.worker.scheduler.sourceIds,
+    }));
     if (schedulerSources.length === 0) {
       // The state a fresh install boots into. Without this line the only
       // evidence was "constructed=0", which reads like a failure rather than

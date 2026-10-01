@@ -23,6 +23,7 @@
  * and passes through OpenAI, so it gets the same treatment.
  */
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
+import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import type {
   ChatGptDisconnectSourceId,
@@ -442,10 +443,12 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   const coverage: SearchResult['coverage'] = {
     searchedSources: whole(coverageRecord.searched_corpora),
     unreadableItems: whole(coverageRecord.unreadable_items),
+    namesOnlyItems: whole(coverageRecord.names_only_items),
     partiallyReadItems: whole(coverageRecord.partially_read_items),
     unclassifiedItems: whole(coverageRecord.unclassified_items),
   };
   const notes: string[] = [];
+  if (coverage.namesOnlyItems > 0) notes.push(namesOnlyCoverageNote(coverage.namesOnlyItems));
   if (coverage.unreadableItems > 0) notes.push(`Olympus could not read ${plural(coverage.unreadableItems, 'matching item')}.`);
   if (coverage.partiallyReadItems > 0) notes.push(`Olympus could read only part of ${plural(coverage.partiallyReadItems, 'document')}.`);
   if (coverage.unclassifiedItems > 0) {

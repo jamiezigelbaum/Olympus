@@ -27,6 +27,7 @@
 // - The Castor-visible result carries the gated answer, citation locators, and
 //   audits — never raw chunks, packets, or pack internals.
 
+import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
 import { analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
@@ -2120,12 +2121,19 @@ function safeUnsupportedCoverageGaps(pack: EvidencePack, nonPublicPack: boolean)
 }
 
 function safeUnreadableMatchedCoverageGaps(detail: EvidencePackBuildDetail): string[] {
-  const count = unreadableMatchedCandidateIndexes(detail).length;
-  if (count === 0) return [];
-  return [
-    `${count} matched file${count === 1 ? '' : 's'} found, but ` +
-    `${count === 1 ? 'it could' : 'they could'} not be read or extracted in this pass.`,
-  ];
+  const namesOnly = new Set(detail.namesOnlyCandidateIndexes ?? []);
+  const matched = unreadableMatchedCandidateIndexes(detail);
+  const namesOnlyCount = matched.filter((index) => namesOnly.has(index)).length;
+  const count = matched.length - namesOnlyCount;
+  const notes: string[] = [];
+  if (count > 0) {
+    notes.push(
+      `${count} matched file${count === 1 ? '' : 's'} found, but ` +
+      `${count === 1 ? 'it could' : 'they could'} not be read or extracted in this pass.`,
+    );
+  }
+  if (namesOnlyCount > 0) notes.push(namesOnlyCoverageNote(namesOnlyCount));
+  return notes;
 }
 
 function appendUniqueCoverageNotes(
@@ -2417,7 +2425,12 @@ export interface ReleasedEvidenceItem extends SourceIndexAnswerEvidence {
 export interface ReleasedEvidenceCoverage {
   searched_corpora: number;
   skipped_corpora: number;
+  // Matched items Olympus tried and failed to read (no provider, no text).
   unreadable_items: number;
+  // Matched items in folders the owner set to Names only: their names are
+  // searchable and their contents are deliberately not read. Never folded
+  // into unreadable_items.
+  names_only_items: number;
   partially_read_items: number;
   unclassified_items: number;
   // Breadth per family beyond the bounded selection (counts only).
@@ -2524,8 +2537,10 @@ export async function searchReleasedEvidence(input: {
     coverage: {
       searched_corpora: coverage.searchedCorpora.length,
       skipped_corpora: detail.skippedCorpora.filter((skip) => skip.trustDomain !== 'secure_local').length,
-      unreadable_items: coverage.extractionGaps.length
+      unreadable_items: (detail.unreadCandidates ?? 0)
+        + (detail.policyDeniedCandidates ?? 0)
         + (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.unreadDocuments, 0),
+      names_only_items: detail.namesOnlyCandidateIndexes?.length ?? 0,
       partially_read_items: (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.partialDocuments, 0),
       unclassified_items: (detail.classificationCoverage ?? []).reduce((sum, note) => sum + note.pendingClassificationItems, 0),
       matches: (coverage.matchCounts ?? []).map((count) => ({

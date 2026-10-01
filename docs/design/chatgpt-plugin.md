@@ -185,6 +185,12 @@ contract (`src/workers/chatgpt/dashboard-contract.ts`).
 - **Answers: Olympus retrieves, ChatGPT reasons.** `olympus_search` returns
   the release-gated evidence for Public and Personal items (no Analyst on the
   Mac) and its description carries the generic Analyst instruction.
+  Its coverage is counts-only fixed sentences: matches in folders set to
+  Names only are said apart ("N matches are in folders set to Names only, so
+  Olympus has their names but not their contents. Switch those folders to
+  Full in the folder picker to let Olympus read them."), and "could not
+  read" is kept for genuine failed reads. No folder name rides a coverage
+  sentence.
   `source_answer` is listed only when an answer model is set up on the Mac.
   A fresh install is keyless: `olympus engine install` seeds the
   `no-sensitive` preset (built-in embeddings for every tier, nothing to

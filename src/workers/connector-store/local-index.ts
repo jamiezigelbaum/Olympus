@@ -8514,6 +8514,9 @@ export class LocalConnectorStore {
     localItemId: string,
     maxChars?: number,
     passageFocus?: ConnectorStorePassageFocus,
+    // Names only: the item's stored tier and locator, never its text. For an
+    // item the owner's scope keeps unread, so no chunk row is even selected.
+    options: { withoutContent?: boolean } = {},
   ): ConnectorStoreLocalContent | undefined {
     const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
@@ -8545,7 +8548,8 @@ export class LocalConnectorStore {
     if (!this.copyServable(identity)) {
       return undefined;
     }
-    const servesContent = this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+    const servesContent = options.withoutContent !== true
+      && this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
     const chunkRows = servesContent
       ? this.db.query(
         'SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
@@ -8563,7 +8567,9 @@ export class LocalConnectorStore {
     // a released citation can carry "confirmed by 👍 ×2". It rides ahead of
     // the char budget deliberately: it is bounded and it is the only part of
     // the evidence a truncation must never silently drop.
-    const reactionLine = renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json));
+    const reactionLine = servesContent
+      ? renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json))
+      : undefined;
     return {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
@@ -9628,8 +9634,21 @@ function connectorStoreKeywordLaneAudit(
 export interface ConnectorStoreContentProviderOptions {
   store: LocalConnectorStore;
   accountScope?: string;
+  // The scope whose contents may be read.
   filters?: ConnectorStoreSearchFilters;
+  // The wider scope whose NAMES are searchable. An item inside it but outside
+  // `filters` (or any item in it when `contentAllowed` is false) sits in a
+  // folder the owner set to Names only: the provider returns it without text,
+  // marked `namesOnly`, so coverage says "kept unread by choice" rather than
+  // "could not be read". Omitted, nothing is reported as Names only.
+  metadataFilters?: ConnectorStoreSearchFilters;
+  contentAllowed?: boolean;
 }
+
+// The coverage sentence for an item in a Names-only folder. Source-agnostic:
+// it names the owner's choice, never the folder.
+export const CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP =
+  "the owner set this item's folder to Names only; its name is searchable and its contents are not read.";
 
 // LocalContentProvider over the store: bounded chunks, the item's stored
 // sensitivity, and the stored locator uri. Local by construction — every read
@@ -9648,7 +9667,23 @@ export function createConnectorStoreContentProvider(
       }
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return undefined;
-      if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) return undefined;
+      const contentInScope = options.contentAllowed !== false
+        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters);
+      if (!contentInScope) {
+        if (!options.metadataFilters
+          || !store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)) {
+          return undefined;
+        }
+        const names = store.localContent(localItemId, request.maxChars, undefined, { withoutContent: true });
+        if (!names) return undefined;
+        return {
+          sensitivity: buildSourceSensitivity({ trustTier: names.trustTier, trustDomain: store.trustDomain }),
+          chunks: [],
+          namesOnly: true,
+          coverageGaps: [CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP],
+          ...(names.locatorUri ? { locatorUri: names.locatorUri } : {}),
+        };
+      }
       const anchorChunkIndex = request.provenance.chunk?.chunkIndex;
       const content = store.localContent(localItemId, request.maxChars, {
         ...(request.query?.trim() ? { query: request.query } : {}),
@@ -9670,6 +9705,7 @@ export function createConnectorStoreContentProvider(
         chunks: content.chunks,
         ...(content.truncated ? { truncated: true } : {}),
         ...(coverageGaps.length > 0 ? { coverageGaps } : {}),
+        ...(metadataOnlyRuleId !== undefined ? { namesOnly: true } : {}),
         ...(content.locatorUri ? { locatorUri: content.locatorUri } : {}),
       };
     },

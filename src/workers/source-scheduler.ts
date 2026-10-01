@@ -182,6 +182,25 @@ export function sourceSchedulerConstructionLogLines(input: {
   ];
 }
 
+/**
+ * The boot summary line. "Selected" is the number of constructed sources the
+ * scheduler will actually run: every constructed source when there is no
+ * allowlist, otherwise the constructed sources the allowlist names. Printing
+ * the allowlist's length instead read "0 selected" on an install with no
+ * allowlist, where every constructed source runs.
+ */
+export function sourceSchedulerEnabledLogLine(input: {
+  constructedSourceIds: readonly string[];
+  selectedSourceIds: readonly string[];
+}): string {
+  const allowlist = new Set(input.selectedSourceIds);
+  const selected = allowlist.size === 0
+    ? input.constructedSourceIds.length
+    : input.constructedSourceIds.filter((sourceId) => allowlist.has(sourceId)).length;
+  return `In-process source scheduler enabled for ${input.constructedSourceIds.length} constructed source(s); `
+    + `${selected} selected.`;
+}
+
 export interface SourceSchedulerRetryAt {
   at: string;
   effectiveIntervalMs?: number;
