@@ -175,6 +175,132 @@ the copy for connection states; all other sentences come from
 yet. `relay_unavailable` is never sent by a server: the UI derives it from a
 failed `tools/call`.
 
+## Private answer panel (added 2026-10-01)
+
+Owner decision: a question that matches **Private** items can be answered
+from them inside ChatGPT, but only in a panel. There is no option to put a
+private answer into the normal chat. Secret items are never answered from.
+
+### What the user sees
+
+ChatGPT calls an answer tool (`source_answer` today; `olympus_search` from
+the native-tools lane uses the same hook). ChatGPT's model gets Public and
+Personal evidence as before, plus `structuredContent.privateMatch =
+{count, panelState}` when Private items match: a capped count (50) and a
+state, never titles or text. Under the answer, the `ui://olympus/private-answer`
+panel says "N private items match", carries the badge **"Not sent to
+ChatGPT"**, and offers **Show private answer**. On click, the panel fetches
+the answer itself, from the relay, and shows it as text.
+
+`panelState` is `ready` (a private model is ready; a job exists),
+`no_model` (no private model set up; counts only, no job) or
+`model_downloading` (the built-in private model is downloading, with a
+percent when known; counts only, no job).
+
+### Protocol
+
+1. **Match.** The surface searches each Private corpus (`all_tiers: false`,
+   up to 10 hits per corpus, so no Secret location and no other tier comes
+   back). The count leaves the engine; the hits stay in the engine.
+2. **Job.** When a private model reports `ready` and the engine has a relay
+   install id, the engine creates a one-time job with id
+   `oly2p.<installId>.<32 random bytes>` (routable like tokens:
+   `connect-relay/shared/tokens.ts`). It holds the question and the hits in
+   memory only, for at most **10 minutes** from creation.
+3. **Tool result.** The answer tool's result `_meta["olympus/privateAnswer"]`
+   is `{v:1, count, state, jobId?, percent?}` and nothing else (the response
+   builder copies exactly these fields). `_meta` is widget-only: ChatGPT does
+   not put it in the model's context. The job id never appears in the text
+   content or `structuredContent`. There is no key and no fetch token in
+   `_meta`, or anywhere in any tool output.
+4. **Claim.** On click the panel generates an ephemeral **ECDH P-256** key
+   pair with WebCrypto (private key non-extractable) and POSTs only its
+   public key, directly to `https://mcp.olympusplugin.ai/private/<job id>`
+   (`fetch`, allowed by the resource's `_meta.ui.csp.connectDomains`), not
+   through `tools/call`. The first public key to arrive claims the job;
+   another key gets **409 `claimed`**. Claiming starts the private model (one
+   analysis at a time), so a match the user never opens costs no model time.
+5. **Poll.** While the model works, the same key gets **202 `pending`** with
+   `Retry-After: 2`; the panel polls with the same key.
+6. **Collect.** When done, the engine generates its own ephemeral P-256 pair,
+   derives `HKDF-SHA256(ECDH(mac, panel), salt = empty, info = job id)` as an
+   AES-256-GCM key, seals `{v:1, answer, citations}` with a random 12-byte IV
+   and the job id as additional data, and answers **200**
+   `{status:"ready", v:1, macPublicKey, iv, ciphertext}` once. The job is
+   deleted. The panel derives the same key and decrypts locally.
+7. **Afterwards** every request for that id gets **410 `gone`**, as do
+   unknown, expired, wrong-install and over-polled ids (one answer for all,
+   so the endpoint is no oracle). A model failure answers `200 failed` once,
+   then 410.
+
+Wire statuses (`connect-relay/shared/private-answer.ts`): `ready`, `failed`,
+`pending` (202), `claimed` (409), `gone` (410), `invalid` (400/405/413),
+`forbidden` (403), `rate_limited` (429), `mac_offline` (503, from the
+relay), `busy` (503).
+
+### Relay
+
+- `/private/<id>` is routed by the install prefix of the job id, like
+  `/mcp` by its token; exactly that path shape, POST only, no query string,
+  a 512-byte body cap, and a per-address rate limit (`privateFetchesPerIp`,
+  30 burst, 1/s) on top of the per-install admission lanes.
+- CORS is answered by the relay, for ChatGPT widget origins only:
+  `https://web-sandbox.oaiusercontent.com`, one DNS label under it, and the
+  plugin's dedicated `_meta.ui.domain` (the relay origin). OpenAI documents
+  the sandbox default; the exact per-app origin when a dedicated domain is
+  set is not documented, so this list must be confirmed against a live
+  panel before directory submission. CORS keeps other web pages out; it
+  does not stop a non-browser caller, and nothing below relies on it to.
+- Logs carry only the install's hashed tag, never the job id.
+- Mac offline: the relay answers `503 mac_offline` (with CORS) and the panel
+  says the Mac is offline. The relay's offline MCP fallback serves the panel
+  resource too, from the generated relay assets.
+- The install's relay client forwards exactly `POST /private/oly2p.…`; the
+  engine serves it only to relayed requests from an allowed Origin.
+
+### Who can read the answer
+
+- **OpenAI** sees the tool result, `_meta` included, so it knows the job id
+  and the count. It never sees the panel's private key or the sealed answer
+  (the fetch goes from the user's browser to the relay, not through
+  ChatGPT's tool channel).
+- **The relay** sees the panel's public key, the engine's public key and the
+  ciphertext. Neither private key ever reaches it, so it cannot decrypt.
+
+Residual risks, stated plainly:
+
+- **A compromised relay could swap keys** (man in the middle: answer the
+  panel with its own key and claim the job from the engine with another).
+  Nothing authenticates the engine's key to the panel. This is the same trust
+  we already place in the relay for all MCP traffic, which it sees in
+  transit.
+- **OpenAI serves the panel's HTML** and could alter it (or its sandbox could
+  be compromised) to exfiltrate the decrypted answer. A party that both knows
+  the job id (`_meta`) and can act first can also claim the job itself; the
+  owner's panel then shows "already opened somewhere else" (409), which is
+  tamper-evident but not preventive.
+- A party that sees both the relay's traffic and the panel's memory sees
+  everything.
+- The panel's browser holds the decrypted answer in memory while it is
+  shown.
+
+Because of these, the badge says **"Not sent to ChatGPT"**, never
+"end-to-end encrypted". What the design guarantees is narrower and true: the
+private answer is never ChatGPT tool output, never enters the model's
+context, and never transits OpenAI's servers.
+
+### Ownership and handoff
+
+- This lane: `src/workers/chatgpt/private-answer-{contract,crypto,jobs}.ts`,
+  the response-builder fields, the relay route, and the placeholder page in
+  `src/workers/chatgpt/private-answer-resource.ts`, the single module the
+  dashboard lane replaces (like `dashboard-resource.ts`). The contract is
+  `private-answer-contract.ts`.
+- The private-model lane provides `PrivateAnswerModel` (an AnalystModel named
+  `built_in`): `status()` and `answerPrivately(question, evidence)`. Until it
+  lands the engine wires an unavailable stub, so every match reports
+  `no_model`.
+
 ## Build sequence (today)
 
 1. **Relay v2 + client v2 + engine OAuth** (critical path, critical-class).
