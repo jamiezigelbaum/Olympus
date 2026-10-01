@@ -20,6 +20,7 @@ import {
   type EngineExec,
 } from '../src/core/engine-service.ts';
 import { runDoctor, type DoctorDeps, type DoctorHostFacts } from '../src/core/doctor.ts';
+import { emptyRemoteAccessStatus, remoteAccessDir, writeRemoteAccessStatus } from '../src/core/remote-access.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { createOpenClawInferAnalystModel } from '../src/core/analyst-openclaw-infer.ts';
 import { buildEnvBridgeSovereigntyConfig } from '../src/core/sovereignty.ts';
@@ -306,6 +307,37 @@ describe('engine host without OpenClaw', () => {
     expect(report.ok).toBe(false);
     expect(report.host).toEqual({ mode: 'standalone', openclaw: 'not installed (not needed)' });
     expect(report.missing).toContain('The engine agent is not installed: run olympus engine install.');
+  });
+
+  test('engine status says when remote access is on but the relay is not running, whatever the service health says', async () => {
+    const { home, checkout, bun } = fixture();
+    const launchctl = fakeLaunchctl();
+    installEngine({ platform: 'darwin', homeDir: home, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun });
+    const report = () => engineStatusReport({
+      homeDir: home,
+      platform: 'darwin',
+      env: { HOME: home },
+      exec: launchctl.exec,
+      openclawPath: () => undefined,
+      fetchImpl: (async () => Response.json({ ok: true })) as unknown as typeof fetch,
+    });
+    const dir = remoteAccessDir({ HOME: home });
+    // The 2026-10-01 signature: status.json said off while the engine said ok.
+    writeRemoteAccessStatus(dir, emptyRemoteAccessStatus('off'));
+    const off = await report();
+    expect(off.ok).toBe(false);
+    expect(off.relay).toMatchObject({ mode: 'off', running: false });
+    expect(off.missing).toContain('Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.');
+
+    writeRemoteAccessStatus(dir, {
+      ...emptyRemoteAccessStatus('relay'),
+      pid: process.pid,
+      relay: { state: 'online', reason: null, retry_in_ms: null },
+    });
+    const live = await report();
+    expect(live.relay).toMatchObject({ mode: 'relay', running: true, state: 'online' });
+    expect(live.ok).toBe(true);
+    expect(live.missing).toEqual([]);
   });
 });
 

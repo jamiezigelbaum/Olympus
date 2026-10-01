@@ -23,6 +23,7 @@ import {
   emptyRemoteAccessStatus,
   loopbackWorkerOrigin,
   olympusDataDir,
+  readRemoteAccessStatus,
   remoteAccessDir,
   writeRemoteAccessStatus,
   type RemoteAccessStatusFile,
@@ -38,6 +39,8 @@ export interface RelayRuntimeOptions {
   relayUrl?: string;
   heartbeatMs?: number;
   backoff?: { minMs: number; maxMs: number };
+  /** How often the child re-asserts its status file (default 15 s). */
+  statusRefreshMs?: number;
 }
 
 export interface RelayRuntime {
@@ -102,11 +105,30 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
   });
   client.start();
 
+  // status.json is this child's to report while it runs, but the file is
+  // shared: a supervisor elsewhere (another Gateway, a test run against the
+  // real data root) can overwrite it, and the child writes only when its
+  // session changes, so an overwrite would stand for as long as the session
+  // stays up, telling the worker and the CLI remote access is off while it
+  // works. Re-assert it whenever it no longer names this instance.
+  const reassert = setInterval(() => {
+    if (stopped) return;
+    try {
+      const onDisk = readRemoteAccessStatus(dir);
+      if (onDisk?.mode === 'relay' && onDisk.instance_id === status.instance_id && onDisk.pid === status.pid) return;
+      write();
+    } catch {
+      // Advisory: the next tick or session change writes again.
+    }
+  }, options.statusRefreshMs ?? 15_000);
+  reassert.unref?.();
+
   return {
     client,
     async stop() {
       if (stopped) return;
       stopped = true;
+      clearInterval(reassert);
       await client.stop();
       status.relay = { state: 'stopped', reason: null, retry_in_ms: null };
       write();

@@ -13668,6 +13668,18 @@ function loopbackWorkerOrigin(value) {
   const url = new URL(origin);
   return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname) ? origin : undefined;
 }
+function relayProcessRunning(dir, isAlive = processIsAlive) {
+  const status = readRemoteAccessStatus(dir);
+  return status?.mode === "relay" && status.pid !== null && status.relay?.state !== "stopped" && isAlive(status.pid);
+}
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
 
 // src/core/native-relay-service.ts
 var SERVICE_ID7 = "olympus-remote-relay";
@@ -13721,13 +13733,22 @@ function prepareRelayStart(config, options) {
     local_url: localUrl ?? null,
     ...next
   });
+  const reportsOff = (next) => {
+    if (relayProcessRunning(statusDir))
+      return;
+    writeRemoteAccessStatus(statusDir, next);
+  };
   const fail = (error, statusMode2) => {
-    writeRemoteAccessStatus(statusDir, status({ mode: statusMode2, error }));
+    const next = status({ mode: statusMode2, error });
+    if (statusMode2 === "off")
+      reportsOff(next);
+    else
+      writeRemoteAccessStatus(statusDir, next);
     throw new NativeProcessConfigurationError(`Olympus remote access is off: ${error}`);
   };
   if (mode.mode === "off") {
     if (readRemoteAccessStatus(statusDir))
-      writeRemoteAccessStatus(statusDir, status({ mode: "off" }));
+      reportsOff(status({ mode: "off" }));
     return { statusDir, launch: undefined };
   }
   if (mode.mode === "error")

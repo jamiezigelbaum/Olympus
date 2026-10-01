@@ -57168,13 +57168,22 @@ function prepareRelayStart(config, options) {
     local_url: localUrl ?? null,
     ...next
   });
+  const reportsOff = (next) => {
+    if (relayProcessRunning(statusDir))
+      return;
+    writeRemoteAccessStatus(statusDir, next);
+  };
   const fail = (error, statusMode2) => {
-    writeRemoteAccessStatus(statusDir, status({ mode: statusMode2, error }));
+    const next = status({ mode: statusMode2, error });
+    if (statusMode2 === "off")
+      reportsOff(next);
+    else
+      writeRemoteAccessStatus(statusDir, next);
     throw new NativeProcessConfigurationError(`Olympus remote access is off: ${error}`);
   };
   if (mode.mode === "off") {
     if (readRemoteAccessStatus(statusDir))
-      writeRemoteAccessStatus(statusDir, status({ mode: "off" }));
+      reportsOff(status({ mode: "off" }));
     return { statusDir, launch: undefined };
   }
   if (mode.mode === "error")
@@ -72411,6 +72420,55 @@ class RelayClient {
     let revoked = false;
     let ready = false;
     const { identity } = this.options;
+    let handshakeTimer;
+    let finished = false;
+    const finish = () => {
+      if (finished)
+        return;
+      finished = true;
+      clearTimeout(handshakeTimer);
+      if (this.socket === socket) {
+        this.socket = undefined;
+        if (this.heartbeat)
+          clearInterval(this.heartbeat);
+        this.heartbeat = undefined;
+        this.abortAll();
+      }
+      if (this.stopped)
+        return;
+      if (replaced) {
+        const retryInMs = this.options.replacedBackoffMs ?? 5 * 60000;
+        this.options.onStatus?.({ state: "replaced", retryInMs });
+        this.schedule(retryInMs);
+        return;
+      }
+      if (revoked) {
+        const retryInMs = this.options.revokedBackoffMs ?? 6 * 60 * 60000;
+        this.options.onStatus?.({ state: "offline", reason, retryInMs });
+        this.schedule(retryInMs);
+        return;
+      }
+      if (this.register && this.failures === 0) {
+        this.failures = 1;
+        this.schedule(0);
+        return;
+      }
+      this.failures += 1;
+      const { minMs, maxMs } = this.options.backoff ?? { minMs: 1000, maxMs: 60000 };
+      const delay2 = Math.min(maxMs, minMs * 2 ** Math.min(this.failures - 1, 16));
+      const jittered = Math.round(delay2 / 2 + Math.random() * (delay2 / 2));
+      this.options.onStatus?.({ state: "offline", reason, retryInMs: jittered });
+      this.schedule(jittered);
+    };
+    const abandon = (code, why, describe2) => {
+      reason = describe2;
+      try {
+        socket.close(code, why);
+      } catch {}
+      finish();
+    };
+    handshakeTimer = setTimeout(() => abandon(4000, "handshake_timeout", "the relay did not answer"), this.options.handshakeTimeoutMs ?? 20000);
+    handshakeTimer.unref?.();
     socket.addEventListener("message", (event) => {
       if (this.socket !== socket)
         return;
@@ -72438,9 +72496,10 @@ class RelayClient {
             return;
           }
           ready = true;
+          clearTimeout(handshakeTimer);
           this.failures = 0;
           this.register = false;
-          this.startHeartbeat(socket);
+          this.startHeartbeat(() => abandon(4004, "heartbeat_timeout", "the relay stopped answering"));
           this.options.onStatus?.({ state: "online", installId: identity.installId, connectedAt: Date.now() });
           return;
         case "pong":
@@ -72480,47 +72539,16 @@ class RelayClient {
     socket.addEventListener("error", () => {
       reason = "could not reach the relay";
     });
-    socket.addEventListener("close", () => {
-      if (this.socket === socket)
-        this.socket = undefined;
-      if (this.heartbeat)
-        clearInterval(this.heartbeat);
-      this.abortAll();
-      if (this.stopped)
-        return;
-      if (replaced) {
-        const retryInMs = this.options.replacedBackoffMs ?? 5 * 60000;
-        this.options.onStatus?.({ state: "replaced", retryInMs });
-        this.schedule(retryInMs);
-        return;
-      }
-      if (revoked) {
-        const retryInMs = this.options.revokedBackoffMs ?? 6 * 60 * 60000;
-        this.options.onStatus?.({ state: "offline", reason, retryInMs });
-        this.schedule(retryInMs);
-        return;
-      }
-      if (this.register && this.failures === 0) {
-        this.failures = 1;
-        this.schedule(0);
-        return;
-      }
-      this.failures += 1;
-      const { minMs, maxMs } = this.options.backoff ?? { minMs: 1000, maxMs: 60000 };
-      const delay2 = Math.min(maxMs, minMs * 2 ** Math.min(this.failures - 1, 16));
-      const jittered = Math.round(delay2 / 2 + Math.random() * (delay2 / 2));
-      this.options.onStatus?.({ state: "offline", reason, retryInMs: jittered });
-      this.schedule(jittered);
-    });
+    socket.addEventListener("close", () => finish());
   }
-  startHeartbeat(socket) {
+  startHeartbeat(onTimeout) {
     if (this.heartbeat)
       clearInterval(this.heartbeat);
     const interval = this.options.heartbeatMs ?? 30000;
     this.lastPongAt = Date.now();
     this.heartbeat = setInterval(() => {
       if (Date.now() - this.lastPongAt > interval * 2 + 1000) {
-        socket.close(4004, "heartbeat_timeout");
+        onTimeout();
         return;
       }
       this.send({ type: "ping" });
@@ -72761,12 +72789,24 @@ async function startRelayRuntime(options) {
     ...options.backoff ? { backoff: options.backoff } : {}
   });
   client.start();
+  const reassert = setInterval(() => {
+    if (stopped)
+      return;
+    try {
+      const onDisk = readRemoteAccessStatus(dir);
+      if (onDisk?.mode === "relay" && onDisk.instance_id === status.instance_id && onDisk.pid === status.pid)
+        return;
+      write();
+    } catch {}
+  }, options.statusRefreshMs ?? 15000);
+  reassert.unref?.();
   return {
     client,
     async stop() {
       if (stopped)
         return;
       stopped = true;
+      clearInterval(reassert);
       await client.stop();
       status.relay = { state: "stopped", reason: null, retry_in_ms: null };
       write();
@@ -110814,7 +110854,9 @@ async function engineStatusReport(deps = {}) {
   const remoteMode = parsed ? resolveRemoteAccessMode(parsed.remote) : { mode: "off" };
   const baseUrl = parsed?.email.baseUrl ?? "http://127.0.0.1:8010/v1";
   const host = readEngineStatusFile(env);
-  const relayStatus = readRemoteAccessStatus(remoteAccessDirForCli(env));
+  const relayDir = remoteAccessDirForCli(env);
+  const relayStatus = readRemoteAccessStatus(relayDir);
+  const relayRunning = relayProcessRunning(relayDir);
   const openclaw = (deps.openclawPath ?? (() => resolveOpenClawExecutable({ env, homeDir })))();
   const worker = await probeWorker(deps.fetchImpl ?? fetch, baseUrl);
   const missing = [];
@@ -110828,8 +110870,11 @@ async function engineStatusReport(deps = {}) {
     missing.push(configError);
   if (agent.state === "running" && !worker.reachable)
     missing.push("The worker is not answering yet: see olympus engine logs.");
+  if (agent.state === "running" && remoteMode.mode === "relay" && !relayRunning) {
+    missing.push("Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.");
+  }
   return {
-    ok: agent.state === "running" && worker.reachable && !configError,
+    ok: agent.state === "running" && worker.reachable && !configError && (remoteMode.mode !== "relay" || relayRunning),
     host: openclaw ? { mode: "standalone", openclaw: "installed (optional; not used by the engine)", openclaw_path: openclaw } : { mode: "standalone", openclaw: "not installed (not needed)" },
     agent,
     engine: host ?? null,
@@ -110841,7 +110886,7 @@ async function engineStatusReport(deps = {}) {
       ..."error" in remoteMode ? { remote_error: remoteMode.error } : {}
     },
     worker: { base_url: baseUrl, ...worker },
-    relay: relayStatus ? { mode: relayStatus.mode, state: relayStatus.relay?.state ?? null, reason: relayStatus.relay?.reason ?? null, public_base_url: relayStatus.public_base_url ?? null } : null,
+    relay: relayStatus ? { mode: relayStatus.mode, running: relayRunning, state: relayStatus.relay?.state ?? null, reason: relayStatus.relay?.reason ?? null, public_base_url: relayStatus.public_base_url ?? null } : null,
     analyst: {
       public_personal: "answered in ChatGPT from evidence returned by the Olympus MCP tools",
       private: "answered by the configured local model or Venice; never sent to ChatGPT"
