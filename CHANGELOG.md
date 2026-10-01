@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.0-beta.11 - 2026-10-01
+
+Re-reading PDFs now works while another file source is still waiting for
+approval, and the dashboard speaks in plainer words.
+
+- **PDF re-read skips sources awaiting approval (#123, fixes #122).**
+  `olympus source extract-pdfs --run` used to stop with an error whenever any
+  connected file source had not yet been approved, so approved Dropbox PDFs
+  could not be re-read while Google Drive waited. It now skips each source
+  that is still waiting for approval, leaves its queued PDFs untouched, reads
+  the rest, and lists the skipped sources as waiting for approval.
+- **Error label fix (#123).** A connection error on a file-source request was
+  labelled "Private email lane"; it now reads "Private file-source lane".
+- **Dashboard clarity (#124).** Status lines use plain words (signed out,
+  Reconnect, paused with a reason, index rather than embed or ingest). Every
+  row that needs you carries one fix. Setup shows one banner naming the model
+  that blocks source connections and the button that clears it. Progress reads
+  as percent done with an estimate only when it is measured. Background keeps
+  lane details behind a Details disclosure. Local models are checked when the
+  worker starts and when the page opens, so a restart no longer leaves them
+  reading Not configured.
+
 ## 0.4.0-beta.10 - 2026-10-01
 
 Remote access can be turned on and off from the dashboard, and a local
