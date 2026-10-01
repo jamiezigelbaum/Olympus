@@ -100052,7 +100052,7 @@ summary{cursor:pointer;border-radius:0.375rem}
 .disclosure{margin-top:0.75rem}
 .disclosure summary,.models summary{color:var(--muted);font-size:0.875rem;padding:0.25rem 0}
 .models summary{font-size:1rem;color:var(--text);font-weight:600}
-.models{padding-top:0.75rem;border-top:1px solid var(--line)}
+.models{padding-top:0.75rem}
 .plain{margin:0.5rem 0;padding-left:1.25rem}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border-left:3px solid var(--good);background:var(--surface);border-radius:0.25rem}
 .strong{font-weight:600}
