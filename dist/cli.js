@@ -14791,7 +14791,15 @@ class TierLedger {
     return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
   corpusCopyIdentities(corpusId, filter) {
-    const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
+    const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_content_unread" ? `copy_state = 'current' AND layers = 'metadata'
+            AND NOT EXISTS (
+              SELECT 1 FROM tier_copies other
+              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+                AND other.conversation_key = tier_copies.conversation_key
+                AND other.provider_item_id = tier_copies.provider_item_id
+                AND other.corpus_id <> tier_copies.corpus_id
+                AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
+            )` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
     const page = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
       WHERE corpus_id = ? AND ${where}
@@ -18829,8 +18837,9 @@ var init_local_index = __esm(() => {
     }
     tierHiddenItemPks() {
       const ledger = this.visibilityLedger();
-      if (!ledger || !ledger.corpusHasCopies(this.corpusId))
-        return { hidden: [], held: [], metadataLayer: [], moving: 0 };
+      if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
+        return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+      }
       const pksFor = (identities) => {
         const lookup2 = this.db.query(`
         SELECT item_pk FROM items
@@ -18852,6 +18861,7 @@ var init_local_index = __esm(() => {
         ]),
         held: pksFor(ledger.corpusCopyIdentities(this.corpusId, "held")),
         metadataLayer: pksFor(ledger.corpusCopyIdentities(this.corpusId, "metadata_layer")),
+        metadataLayerContentUnread: pksFor(ledger.corpusCopyIdentities(this.corpusId, "metadata_layer_content_unread")),
         moving: ledger.corpusCopyCounts(this.corpusId).moving
       };
     }
@@ -22511,6 +22521,14 @@ var init_local_index = __esm(() => {
       ${namesOnlyNotIn}`;
       const parityWhere = `${contentWhere}
       ${heldNotIn}`;
+      const unread = new Set(tier.metadataLayerContentUnread);
+      const keptNamesOnlyPks = tier.metadataLayer.filter((pk) => !unread.has(pk));
+      const fileNamesOnlyNotIn = keptNamesOnlyPks.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const fileScopeWhere = `${scope?.contentAllowed === false ? "AND 0" : ""}
+      ${accountScope ? "AND i.account_scope = ?" : ""}
+      ${contentFilters.sql}
+      ${hiddenNotIn}
+      ${fileNamesOnlyNotIn}`;
       const jsonList = (pks) => pks.length > 0 ? [JSON.stringify(pks)] : [];
       const itemParams = [...accountScope ? [accountScope] : [], ...itemFilters.params, ...jsonList(tier.hidden)];
       const contentParams = [
@@ -22520,6 +22538,12 @@ var init_local_index = __esm(() => {
         ...jsonList(tier.metadataLayer)
       ];
       const parityParams = [...contentParams, ...jsonList(tier.held)];
+      const fileScopeParams = [
+        ...accountScope ? [accountScope] : [],
+        ...contentFilters.params,
+        ...jsonList(tier.hidden),
+        ...jsonList(keptNamesOnlyPks)
+      ];
       const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
@@ -22550,9 +22574,9 @@ var init_local_index = __esm(() => {
         (SELECT COUNT(*) FROM items i
           WHERE i.tombstoned = 0
             AND LOWER(i.mime_type) <> 'inode/directory'
-            ${contentWhere}
+            ${fileScopeWhere}
         ) AS full_ingestion_files
-    `).get(...itemParams, ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...contentParams);
+    `).get(...itemParams, ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
       let policyDeferredItems = 0;
       if (scope && scope.contentAllowed !== false && counts.full_ingestion_files > 0) {
         const rows = this.db.query(`
@@ -22560,8 +22584,8 @@ var init_local_index = __esm(() => {
         FROM items i
         WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory'
-          ${contentWhere}
-      `).all(...contentParams);
+          ${fileScopeWhere}
+      `).all(...fileScopeParams);
         for (const row of rows) {
           const decision = this.exclusions.evaluateItem({
             path: row.locator_uri,
@@ -96144,6 +96168,10 @@ class SourceScheduler {
   afterTickDrain;
   timer;
   fastWakeTimers = new Map;
+  continueAfterMs;
+  setTimeoutImpl;
+  clearTimeoutImpl;
+  continueWake;
   constructor(options) {
     this.enabled = options.enabled;
     this.tickMs = options.tickMs;
@@ -96158,6 +96186,9 @@ class SourceScheduler {
     this.afterTick = options.afterTick;
     this.stateStore = options.stateStore;
     this.zeroChangeDegradeRuns = options.zeroChangeDegradeRuns ?? DEFAULT_ZERO_CHANGE_DEGRADE_RUNS;
+    this.continueAfterMs = options.continueAfterMs ?? SOURCE_SCHEDULER_CONTINUE_AFTER_MS;
+    this.setTimeoutImpl = options.setTimeoutImpl ?? setTimeout;
+    this.clearTimeoutImpl = options.clearTimeoutImpl ?? clearTimeout;
     const firstRun = this.now().getTime();
     this.states = this.sources.flatMap((source) => source.tasks.map((task) => this.createTaskState(source, task, firstRun)));
   }
@@ -96202,6 +96233,44 @@ class SourceScheduler {
     for (const timer of this.fastWakeTimers.values())
       this.clearIntervalImpl(timer);
     this.fastWakeTimers.clear();
+    if (this.continueWake) {
+      this.clearTimeoutImpl(this.continueWake.timer);
+      this.continueWake = undefined;
+    }
+  }
+  scheduleContinueWake(at) {
+    if (!this.timer)
+      return;
+    if (this.continueWake && this.continueWake.at <= at)
+      return;
+    if (this.continueWake)
+      this.clearTimeoutImpl(this.continueWake.timer);
+    const timer = this.setTimeoutImpl(() => {
+      this.continueWake = undefined;
+      this.runDueTasks();
+    }, Math.max(0, at - this.now().getTime()));
+    timer.unref?.();
+    this.continueWake = { at, timer };
+  }
+  wakeDownstream(state, at) {
+    const downstream = state.task.kind === "sync" ? new Set(["extract", "embed"]) : state.task.kind === "extract" ? new Set(["embed"]) : new Set;
+    if (downstream.size === 0)
+      return;
+    let woke = false;
+    for (const sibling of this.states) {
+      if (sibling === state || sibling.source !== state.source || sibling.running)
+        continue;
+      if (!downstream.has(sibling.task.kind))
+        continue;
+      if (sibling.nextRunAt <= at)
+        continue;
+      if (sibling.consecutiveFailures > 0)
+        continue;
+      sibling.nextRunAt = at;
+      woke = true;
+    }
+    if (woke)
+      this.scheduleContinueWake(at);
   }
   refreshFastWakeTimers() {
     const desired = new Set(this.sources.flatMap((source) => source.tasks.filter((task) => taskCadence(source, task) === "continuous" && taskIntervalMs(source, task) < this.tickMs).map((task) => taskIntervalMs(source, task))));
@@ -96300,6 +96369,21 @@ class SourceScheduler {
             state.running = false;
           }
         }
+        if (provenance === "scheduled") {
+          const ran = new Set(group);
+          const now = this.now().getTime();
+          const due = this.states.filter((state) => !ran.has(state) && !state.running && taskCadence(state.source, state.task) === "continuous" && taskConcurrencyKey(state.source, state.task) === concurrencyKey && state.nextRunAt <= now);
+          for (const state of due) {
+            if (state.running)
+              continue;
+            state.running = true;
+            try {
+              await this.runTask(state, state.nextRunAt, provenance);
+            } finally {
+              state.running = false;
+            }
+          }
+        }
       } finally {
         this.busyConcurrencyKeys.delete(concurrencyKey);
       }
@@ -96348,7 +96432,9 @@ class SourceScheduler {
       const degradedReason = retryAt?.degradedReason ?? (zeroChangeRuns !== undefined && zeroChangeRuns >= this.zeroChangeDegradeRuns ? LANE_NOT_ADVANCING_DEGRADED_REASON : undefined) ?? (runningTask.kind === "sync" ? state.source.embeddingDeferredReason?.() : undefined);
       const configuredIntervalMs = taskIntervalMs(state.source, state.task);
       const effectiveIntervalMs = retryAt?.effectiveIntervalMs ?? configuredIntervalMs;
-      const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
+      const continueAt = Date.parse(completedAt) + this.continueAfterMs;
+      const continuing = result.continueSoon === true && !retryAt;
+      const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : continuing ? Math.min(continueAt, nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt))) : nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
       if (this.stateStore) {
         const checkpointSupplied = Object.prototype.hasOwnProperty.call(result, "checkpoint");
         this.applyPersistedState(state, this.stateStore.recordSuccess({
@@ -96385,6 +96471,10 @@ class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
+      if (continuing)
+        this.scheduleContinueWake(nextRunAt);
+      if (result.status === "progress" && !retryAt)
+        this.wakeDownstream(state, continueAt);
     } catch (error2) {
       const message = error2 instanceof Error ? error2.message : String(error2);
       const errorKind = safeSchedulerErrorKind(error2);
@@ -96689,11 +96779,7 @@ function createCanonicalDropboxSchedulerSource(input) {
           provider: input.embeddingProvider,
           limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS
         });
-        return progressFromCounts({
-          chunks_seen: result.chunksSeen,
-          chunks_embedded: result.chunksEmbedded,
-          chunks_skipped: result.chunksSkipped
-        });
+        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
       }
     });
   }
@@ -96710,11 +96796,7 @@ function createCanonicalDropboxSchedulerSource(input) {
           throw new Error("A secure_local tier store requires a local/private or approved Venice embedding provider.");
         }
         const result = await store.embedChunks({ provider: tier.provider, limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS });
-        return progressFromCounts({
-          chunks_seen: result.chunksSeen,
-          chunks_embedded: result.chunksEmbedded,
-          chunks_skipped: result.chunksSkipped
-        });
+        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
       }
     });
   }
@@ -96734,28 +96816,55 @@ function createCanonicalDropboxSchedulerSource(input) {
   };
 }
 function fileExtractionSchedulerTask(input) {
+  const maxPages = Math.max(1, input.maxPlanPages ?? FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS);
   return {
     id: input.id,
     kind: "extract",
     writer: true,
     run: async (context) => {
-      const plan = await input.runner.plan({
-        ...input.lane,
-        limit: input.planLimit,
-        policyDecision: "index_allowed",
-        ...input.mimeTypes ? { mimeTypes: input.mimeTypes } : {},
-        ...context?.checkpoint ? { cursor: context.checkpoint } : {}
-      });
+      let cursor = context?.checkpoint ?? undefined;
+      const startCursor = cursor;
+      let done = false;
+      let candidates = 0;
+      let jobsQueued = 0;
+      let jobsExisting = 0;
+      let jobsUnroutable = 0;
+      const extractorKinds = new Set;
+      for (let page = 0;page < maxPages; page += 1) {
+        const plan = await input.runner.plan({
+          ...input.lane,
+          limit: input.planLimit,
+          policyDecision: "index_allowed",
+          ...input.mimeTypes ? { mimeTypes: input.mimeTypes } : {},
+          ...cursor !== undefined ? { cursor } : {}
+        });
+        candidates += plan.candidates;
+        jobsQueued += plan.jobsQueued;
+        jobsExisting += plan.jobsExisting;
+        jobsUnroutable += plan.jobsUnroutable;
+        for (const kind of plan.extractorKinds)
+          extractorKinds.add(kind);
+        if (plan.done) {
+          done = true;
+          cursor = undefined;
+          break;
+        }
+        if (plan.nextCursor === undefined || plan.nextCursor === cursor)
+          break;
+        cursor = plan.nextCursor;
+        if (candidates >= input.planLimit)
+          break;
+      }
       const run = await input.runner.run({
         ...input.lane,
         limit: input.batchSize,
-        preflightExtractorKinds: plan.extractorKinds
+        preflightExtractorKinds: [...extractorKinds]
       });
       const counts = {
-        candidates_seen: plan.candidates,
-        jobs_queued: plan.jobsQueued,
-        jobs_existing: plan.jobsExisting,
-        jobs_unroutable: plan.jobsUnroutable,
+        candidates_seen: candidates,
+        jobs_queued: jobsQueued,
+        jobs_existing: jobsExisting,
+        jobs_unroutable: jobsUnroutable,
         jobs_processed: run.processedJobs,
         jobs_indexed: run.counts.indexed,
         jobs_metadata_only: run.counts.metadata_only,
@@ -96772,9 +96881,10 @@ function fileExtractionSchedulerTask(input) {
         });
       }
       return {
-        status: plan.jobsQueued > 0 || run.processedJobs > 0 ? "progress" : "idle",
+        status: jobsQueued > 0 || run.processedJobs > 0 ? "progress" : "idle",
         counts,
-        checkpoint: plan.done ? null : plan.nextCursor ?? context?.checkpoint ?? null
+        checkpoint: done ? null : cursor ?? null,
+        continueSoon: !done && cursor !== startCursor || run.processedJobs >= input.batchSize
       };
     }
   };
@@ -97272,6 +97382,16 @@ function googleDriveSchedulerFailure(error2) {
     }
   });
 }
+function embedPassResult(result, limit) {
+  return {
+    ...progressFromCounts({
+      chunks_seen: result.chunksSeen,
+      chunks_embedded: result.chunksEmbedded,
+      chunks_skipped: result.chunksSkipped
+    }),
+    ...result.chunksEmbedded >= limit ? { continueSoon: true } : {}
+  };
+}
 function progressFromCounts(counts) {
   return {
     status: Object.values(counts).some((value) => value > 0) ? "progress" : "idle",
@@ -97537,7 +97657,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SourceSchedulerTaskFailure, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true, WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS = 512, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true, WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS = 512, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS;
 var init_source_scheduler = __esm(() => {
   init_config();
   init_operation_error();
