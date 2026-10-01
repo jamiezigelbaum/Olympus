@@ -190,6 +190,21 @@ describe('per-source progress', () => {
     expect(block.className).toBe('source-progress');
   });
 
+  test('a working source with no fix renders no action column: no empty controls box, no has-actions grid', () => {
+    const host = mount({});
+    const disconnectDrive = { ...DISCONNECT, args: { source_id: 'google_drive.docs' } };
+    host.push({ structuredContent: model({ sources: [indexingDrive, { ...indexingDrive, id: 'dropbox.files', label: 'Dropbox', menu: [disconnectDrive] }] }) });
+    const drive = row(host, 'Google Drive');
+    expect(drive.querySelector('.source-actions')).toBeNull();
+    expect(drive.className).toBe('row source');
+    expect(Array.from(drive.children).map((node) => node.className)).toEqual(['source-main']);
+    expect(drive.querySelectorAll('button').length).toBe(0);
+    // With a ⋯ menu the row gets the menu's column only.
+    const dropbox = row(host, 'Dropbox');
+    expect(dropbox.querySelector('.source-actions')).toBeNull();
+    expect(dropbox.className).toBe('row source has-menu');
+  });
+
   test('while the total is unknown it says Finding items with no count', () => {
     const host = mount({});
     host.push({ structuredContent: model({ sources: [{ ...indexingDrive, progress: { stage: 'listing', unit: 'files', done: 0, total: 0, percent: 0, stalled: false } }] }) });
