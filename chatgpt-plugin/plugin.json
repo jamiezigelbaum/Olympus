@@ -4,7 +4,7 @@
   "version": "0.4.0-beta.10",
   "description": "Olympus answers questions from your own mail, files and notes, with citations. The engine runs privately on your Mac; ChatGPT asks it through one secure connection.",
   "author": {
-    "name": "Jamie Zigelbaum",
+    "name": "OCU Inc. (Open Coordination Unlimited, Inc.)",
     "url": "https://olympusplugin.ai"
   },
   "homepage": "https://olympusplugin.ai",
@@ -16,7 +16,7 @@
         "displayName": "Olympus",
         "shortDescription": "Ask your own mail and files",
         "longDescription": "Olympus is a private knowledge engine that runs on your Mac. It indexes the sources you choose, starting with local files and notes and then accounts you already have such as Gmail, Google Drive and Dropbox, and answers your questions in ChatGPT with citations. Your index stays on your Mac; ChatGPT reaches it through one secure connection you approve on the Mac. The Olympus dashboard in the ChatGPT sidebar shows what is connected, how far indexing has got and anything that needs you.",
-        "developerName": "Jamie Zigelbaum",
+        "developerName": "OCU Inc.",
         "category": "Productivity",
         "capabilities": ["Read"],
         "websiteURL": "https://olympusplugin.ai",
