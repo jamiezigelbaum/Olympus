@@ -29,13 +29,17 @@ export const PRIVATE_ANSWER_MAX_REQUEST_BYTES = 512;
  * the sandbox domain is accepted, plus the dedicated domain itself. CORS keeps
  * other web pages out; it is not a barrier to a non-browser caller, which the
  * design does not rely on it for.
+ *
+ * The ChatGPT desktop app (Work mode) serves the same sandbox under its own
+ * scheme: observed 2026-10-01 as
+ * `codex-sandbox://mcp-app-<hex>.web-sandbox.oaiusercontent.com`.
  */
 const SANDBOX_HOST = 'web-sandbox.oaiusercontent.com';
-const SANDBOX_SUBDOMAIN = /^https:\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.web-sandbox\.oaiusercontent\.com$/;
+const SANDBOX_SUBDOMAIN = /^(?:https|codex-sandbox):\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.web-sandbox\.oaiusercontent\.com$/;
 
 export function isPanelOrigin(origin: string | null | undefined, extraOrigins: readonly string[] = []): origin is string {
   if (typeof origin !== 'string' || origin.length > 255) return false;
-  if (origin === `https://${SANDBOX_HOST}` || SANDBOX_SUBDOMAIN.test(origin)) return true;
+  if (origin === `https://${SANDBOX_HOST}` || origin === `codex-sandbox://${SANDBOX_HOST}` || SANDBOX_SUBDOMAIN.test(origin)) return true;
   return extraOrigins.includes(origin);
 }
 

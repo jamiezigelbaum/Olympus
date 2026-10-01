@@ -424,6 +424,9 @@ describe('the /private/<id> endpoint', () => {
     expect(direct.status).toBe(404);
     expect((await post(handler, jobId!, good, { origin: 'https://evil.example' })).status).toBe(403);
     expect((await post(handler, jobId!, good, { origin: 'https://a.b.web-sandbox.oaiusercontent.com' })).status).toBe(403);
+    expect((await post(handler, jobId!, good, { origin: 'codex-sandbox://a.b.web-sandbox.oaiusercontent.com' })).status).toBe(403);
+    expect((await post(handler, jobId!, good, { origin: 'codex-sandbox://evil.example' })).status).toBe(403);
+    expect((await post(handler, jobId!, good, { origin: 'codex-sandbox://mcp-app-c0947ce45162d135a5b3225923aaa6fed60ae881dfeb3cf6.web-sandbox.oaiusercontent.com', 'x-olympus-relay': '' })).status).toBe(202);
     expect((await post(handler, jobId!, 'x'.repeat(600))).status).toBe(413);
     expect((await post(handler, jobId!, '{not json')).status).toBe(400);
     expect((await post(handler, jobId!, { v: 2, publicKey: panel.publicKey })).status).toBe(400);
