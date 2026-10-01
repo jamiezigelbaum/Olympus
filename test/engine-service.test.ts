@@ -109,9 +109,9 @@ describe('engine LaunchAgent plist', () => {
     if (process.platform === 'darwin') {
       const file = join(root, 'engine.plist');
       writeFileSync(file, plist);
-      expect(spawnSync('plutil', ['-lint', file]).status).toBe(0);
+      expect(spawnSync('plutil', ['-lint', file], { timeout: 10_000 }).status).toBe(0);
     }
-  });
+  }, 15_000);
 });
 
 describe('olympus engine install/uninstall', () => {
