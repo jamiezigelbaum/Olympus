@@ -12989,24 +12989,29 @@ function detectSecretFindingKinds(text) {
 function detectSensitiveContent(input) {
   const haystack = buildHaystack(input);
   const signals = [
-    ...detectFinancialSignals(haystack),
-    ...detectHealthSignals(input, haystack),
+    ...detectFinancialStructuredSignals(haystack),
     ...detectIdentityDocumentSignals(haystack)
   ];
+  const vocabulary = [
+    ...detectFinancialVocabularySignals(haystack),
+    ...detectHealthSignals(input, haystack)
+  ];
+  const structured = (family) => signals.some((signal) => signal.startsWith(`${family}:`));
+  const worded = (family) => vocabulary.some((signal) => signal.startsWith(`${family}:`));
   const borderline = [];
-  if (!signals.some((signal) => signal.startsWith("financial:")) && matchTerms(haystack, FINANCIAL_WEAK_TERMS).length === 1) {
+  if (!structured("financial") && (worded("financial") || matchTerms(haystack, FINANCIAL_WEAK_TERMS).length === 1)) {
     borderline.push("financial");
   }
-  if (!signals.some((signal) => signal.startsWith("health:")) && matchTerms(haystack, HEALTH_WEAK_TERMS).length === 1) {
+  if (worded("health") || matchTerms(haystack, HEALTH_WEAK_TERMS).length === 1) {
     borderline.push("health");
   }
   const text = input.text ?? "";
   if (PERSONAL_LIFE_NAME_PATTERN.test(text))
     borderline.push("personal_life");
-  if (!signals.some((signal) => signal.startsWith("identity:")) && IDENTITY_NAME_PATTERN.test(text)) {
+  if (!structured("identity") && IDENTITY_NAME_PATTERN.test(text)) {
     borderline.push("identity");
   }
-  return { signals, borderline };
+  return { signals, vocabulary, borderline };
 }
 function namesLookPossiblyPrivate(names) {
   if (!names.trim())
@@ -13034,6 +13039,9 @@ function detectSensitiveSignals(input, haystack) {
   return { tier: secretTypes.length > 0 ? "S5" : "S4", signals };
 }
 function detectFinancialSignals(haystack) {
+  return [...detectFinancialStructuredSignals(haystack), ...detectFinancialVocabularySignals(haystack)];
+}
+function detectFinancialStructuredSignals(haystack) {
   const signals = [];
   if (findValidIban(haystack))
     signals.push("financial:iban");
@@ -13045,13 +13053,15 @@ function detectFinancialSignals(haystack) {
   if (/\baccount\s*(?:number|no\.?|#)\s*[:#-]?\s*[\dXx*][\dXx* -]{5,}/i.test(haystack)) {
     signals.push("financial:account_number");
   }
+  return signals;
+}
+function detectFinancialVocabularySignals(haystack) {
   const strong = matchTerms(haystack, FINANCIAL_STRONG_TERMS);
   const weak = matchTerms(haystack, FINANCIAL_WEAK_TERMS);
   if (strong.length >= 1 || weak.length >= 2) {
-    for (const term of [...strong, ...weak])
-      signals.push(`financial:vocabulary:${term}`);
+    return [...strong, ...weak].map((term) => `financial:vocabulary:${term}`);
   }
-  return signals;
+  return [];
 }
 function detectHealthSignals(input, haystack) {
   const strong = matchTerms(haystack, HEALTH_STRONG_TERMS);
@@ -13692,11 +13702,12 @@ function contentPass(args) {
     ...args.matchInput.sender ? { sender: args.matchInput.sender } : {},
     ...args.matchInput.path ? { path: args.matchInput.path } : {}
   });
-  if (detection.signals.length > 0) {
+  const canAskSniffer = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
+  if (detection.signals.length > 0 || detection.vocabulary.length > 0 && !canAskSniffer) {
     decided = maxVerdict(decided, {
       tier: "secure",
       decidedBy: "sensitive_detector",
-      reasons: detectorReasons(detection.signals)
+      reasons: detectorReasons([...detection.signals, ...detection.vocabulary])
     });
   }
   const mapMatches = matchSensitivityMapTiers(args.options.sensitivityMap, { text });
@@ -13712,17 +13723,16 @@ function contentPass(args) {
     });
   }
   let pending = false;
-  const askBorderline = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
   const flags = [
     ...metadata.flags,
-    ...askBorderline ? detection.borderline.map((family) => `content:borderline:${family}`) : []
+    ...canAskSniffer ? detection.borderline.map((family) => `content:borderline:${family}`) : []
   ];
   const reasons = [...decided.reasons];
   if (flags.length > 0 && tierRank(decided.tier) < tierRank("secure")) {
     const verdict = args.sniffer.judge({
       pass: "content",
       flags,
-      material: snifferExcerpt(text),
+      material: snifferExcerpt(text, vocabularyTerms(detection.vocabulary)),
       mapRevision: args.mapRevision,
       ...args.subject ? { subject: args.subject } : {}
     });
@@ -13816,8 +13826,37 @@ function snifferNames(signals) {
   ].filter((part) => typeof part === "string" && part.trim().length > 0).map((part) => part.trim()).join(" | ");
   return joined.slice(0, SNIFFER_NAMES_MAX_CHARS);
 }
-function snifferExcerpt(text) {
-  return text.replace(/\s+/g, " ").trim().slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+function snifferExcerpt(text, focusTerms = []) {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (focusTerms.length === 0 || flat.length <= SNIFFER_EXCERPT_MAX_CHARS) {
+    return flat.slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+  }
+  const head = flat.slice(0, SNIFFER_EXCERPT_HEAD_CHARS);
+  const positions = [];
+  for (const term of focusTerms) {
+    const pattern = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    const found = pattern.exec(flat.slice(head.length));
+    if (found)
+      positions.push(head.length + found.index);
+  }
+  const focus = [...new Set(positions)].sort((a, b) => a - b).slice(0, SNIFFER_EXCERPT_MAX_FOCUS);
+  if (focus.length === 0)
+    return flat.slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+  const window2 = Math.floor((SNIFFER_EXCERPT_MAX_CHARS - head.length - SNIFFER_EXCERPT_GAP.length * focus.length) / focus.length);
+  const parts = [head];
+  let cursor = head.length;
+  for (const position of focus) {
+    const start = Math.max(cursor, position - Math.floor(window2 / 2));
+    const end = Math.min(flat.length, start + window2);
+    if (end <= start)
+      continue;
+    parts.push(flat.slice(start, end));
+    cursor = end;
+  }
+  return parts.join(SNIFFER_EXCERPT_GAP).slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+}
+function vocabularyTerms(signals) {
+  return signals.filter((signal) => signal.split(":")[1] === "vocabulary").map((signal) => signal.split(":").slice(2).join(":")).filter((term) => term.length > 0);
 }
 function namesOf(signals) {
   return [
@@ -13831,7 +13870,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-09-23.p2", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, PUBLIC_RETIRED_REASON = "tier:public_retired", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-01.p2", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_sensitivity_map();
   init_engine();
