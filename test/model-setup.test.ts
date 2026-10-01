@@ -180,6 +180,20 @@ describe('ModelSetupService local checks', () => {
     expect(result.cards[0]?.state).toBe('needs_attention');
   });
 
+  test('accepts an unlisted embedding alias only when it returns the expected dimension', async () => {
+    const answer = (dimension: number) => asFetch(async (input) => String(input).endsWith('/models')
+      ? json({ data: [{ id: 'delphi/embedding' }] })
+      : json({ data: [{ embedding: new Array(dimension).fill(0.25) }] }));
+    const ready = new ModelSetupService({
+      config: localEmbeddingConfig(), credentialState: () => 'ready', fetch: answer(2560),
+    });
+    expect((await ready.checkLocalModels()).cards[0]?.state).toBe('ready');
+    const wrong = new ModelSetupService({
+      config: localEmbeddingConfig(), credentialState: () => 'ready', fetch: answer(1024),
+    });
+    expect((await wrong.checkLocalModels()).cards[0]?.state).toBe('needs_attention');
+  });
+
   test('requires a nonempty chat completion', async () => {
     const service = new ModelSetupService({
       config: localConfig(localChat), credentialState: () => 'ready',

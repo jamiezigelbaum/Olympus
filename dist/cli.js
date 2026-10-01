@@ -70714,7 +70714,9 @@ class ModelSetupService {
   }
   async runLocalChecks(targets) {
     for (const target of targets) {
-      if (!await this.modelIsListed(target.baseUrl, target.model, target.apiKey))
+      const listed = await this.modelIsListed(target.baseUrl, target.model, target.apiKey);
+      const embeddingOnly = target.embedding && !target.analyst && target.expectedEmbeddingDimension !== undefined;
+      if (!listed && !embeddingOnly)
         return false;
       if (target.analyst && !await this.chatCompletes(target.baseUrl, target.model, target.apiKey))
         return false;
