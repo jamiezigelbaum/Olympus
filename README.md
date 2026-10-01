@@ -222,7 +222,7 @@ source connectors. Domain-agent imports and other source families are outside
 the v0.4 public roster.
 
 Tokens live in an encrypted local secret store by default, or in an explicitly
-configured OS/1Password secret store when supported, never in plain text.
+configured OS secret store when supported, never in plain text.
 Ingestion, classification, and indexing all run in one supervised local
 worker — `olympus worker install` makes it start on login. All seven declared
 sources sync through the canonical connector-store runtime; v0.4 supports one
