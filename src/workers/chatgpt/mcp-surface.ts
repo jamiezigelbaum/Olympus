@@ -52,9 +52,13 @@ export interface ChatGptSurfaceOptions {
   /** The engine's dashboard view (the `/dashboard.json` object). */
   dashboardView: (signal?: AbortSignal) => Promise<SourceDashboardViewModel>;
   /**
-   * Which Private items match the question: a count, and the hits the private
-   * answer model reads. Only the count leaves the engine; the hits stay in the
-   * private answer job. Defaults to a bounded search of each Private corpus.
+   * Which Private items match the question: a count, and the evidence the
+   * private answer model reads (each item with its own passages; an item
+   * without readable text is never answered from its title). Only the count
+   * leaves the engine; the evidence stays in the private answer job. The
+   * engine supplies the shared EvidencePack's Private candidates
+   * (source-index/analyst-answer.ts searchPrivateEvidence); the default is a
+   * bounded metadata search of each Private corpus, whose hits carry no text.
    * A boolean is accepted (a match of unknown size counts as 1, with no
    * evidence to answer from).
    */
@@ -277,7 +281,7 @@ export async function callChatGptTool(
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const [raw, probed] = await Promise.all([
           options.evidenceSearch({ question, ...(limit ? { limit } : {}) }, signal),
-          probe(question, ctx).catch(() => false as const),
+          probeWithinDeadline(probe, question, ctx),
         ]);
         // A private match goes to the private answer panel only (`_meta`):
         // the job is created as this result is built, so its id is valid
@@ -302,7 +306,7 @@ export async function callChatGptTool(
             include_secure_local_content: false,
             timeoutMs: SOURCE_ANSWER_TIMEOUT_MS,
           }),
-          probe(question, ctx).catch(() => false as const),
+          probeWithinDeadline(probe, question, ctx),
         ]);
         const match = normalizeProbe(probed);
         const pending: PendingPrivateMatch | undefined = match.count > 0
@@ -347,6 +351,23 @@ function normalizeProbe(value: boolean | number | PrivateMatchProbeResult): Priv
   return { count: 0, evidence: [] };
 }
 
+/**
+ * Any probe, bounded: one that fails or outlasts PROBE_TIMEOUT_MS counts as
+ * no match, so a slow Private search never holds up the tool result.
+ */
+function probeWithinDeadline(
+  probe: NonNullable<ChatGptSurfaceOptions['privateMatchProbe']>,
+  question: string,
+  ctx: OperationContext,
+): Promise<boolean | number | PrivateMatchProbeResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), PROBE_TIMEOUT_MS);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  return Promise.race([probe(question, ctx).catch(() => false as const), timeout]).finally(() => clearTimeout(timer));
+}
+
 interface PendingPrivateMatch {
   question: string;
   match: PrivateMatchProbeResult;
@@ -359,7 +380,7 @@ function privateRefresh(
   probe: NonNullable<ChatGptSurfaceOptions['privateMatchProbe']>,
   context: () => OperationContext,
 ): PrivateEvidenceRefresh {
-  return async () => normalizeProbe(await probe(question, context())).evidence;
+  return async () => normalizeProbe(await probeWithinDeadline(probe, question, context())).evidence;
 }
 
 /**

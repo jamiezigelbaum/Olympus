@@ -39,6 +39,7 @@ import {
 } from './index.ts';
 import {
   createAnalystSourceIndexAnswerHandler,
+  searchPrivateEvidence,
   searchReleasedEvidence,
   type AnalystAnswerLanes,
   type SecureLocalAnalystRouteStatus,
@@ -4329,6 +4330,17 @@ export async function main(): Promise<void> {
         }
       }
     : undefined;
+  // Which Private items match, for the private answer panel: the shared
+  // EvidencePack build over Private corpora only, so each item carries its
+  // own passages, read from the local store. The candidates go only to the
+  // private answer job (and the built-in model on this computer); only their
+  // count leaves the engine. The claim-time refresh runs the same search.
+  const chatgptPrivateMatchProbe = sourceAnswerLanes
+    ? async (question: string) => {
+        const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes!, question });
+        return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[] };
+      }
+    : undefined;
   // The dashboard's install progress follows the built-in model's download.
   const chatgptEmbeddingState = () => {
     const builtIn = (['public_safe', 'internal', 'secure_local'] as const)
@@ -4381,6 +4393,7 @@ export async function main(): Promise<void> {
             },
             setup: chatgptSetup,
             ...(chatgptEvidenceSearch ? { evidenceSearch: chatgptEvidenceSearch } : {}),
+            ...(chatgptPrivateMatchProbe ? { privateMatchProbe: chatgptPrivateMatchProbe } : {}),
             answerModelAvailable: chatgptAnswerModelAvailable,
             embedding: chatgptEmbeddingState,
             privateModel: () => {

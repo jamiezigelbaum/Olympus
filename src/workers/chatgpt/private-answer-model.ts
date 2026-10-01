@@ -6,9 +6,12 @@
  * - status: `ready` only once the model is downloaded and verified on this
  *   Mac; `model_downloading` (with its percent) while it installs; otherwise
  *   `no_model`. Reads the install status file; never starts a download.
- * - answerPrivately: the Private search hits become the built-in model's
- *   evidence items (title, passage, locator, source, date), and its answer,
- *   citations and unanswered gaps become the panel's plaintext. Nothing here
+ * - answerPrivately: the Private evidence (each matched item with its own
+ *   passages, read locally) becomes the built-in model's evidence items
+ *   (title, passages, locator, source, date); an item with no readable text
+ *   is left out and reported as unreadable, never answered from its title.
+ *   The answer (without evidence numbers), the cited titles and the
+ *   unanswered gaps become the panel's plaintext. Nothing here
  *   leaves this computer except through the sealed panel payload.
  * - reset: stops the model's server process (it restarts on the next answer).
  */
@@ -50,8 +53,12 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
     },
     async answerPrivately(question, evidence, signal) {
       if (!model) throw new Error('no private answer model');
-      const items = privateEvidenceItems(evidence);
-      if (items.length === 0) throw new Error('no private evidence');
+      const { items, unreadable } = privateEvidence(evidence);
+      if (items.length === 0) {
+        if (unreadable === 0) throw new Error('no private evidence');
+        // Never answer from titles alone: say plainly that nothing was readable.
+        return { answer: unreadableAnswer(unreadable), citations: [], unanswered: [] };
+      }
       const result = await options.answer(question, items, { model, ...(signal ? { signal } : {}) });
       const byId = new Map(items.map((item) => [item.id, item]));
       const citations: PrivateAnswerCitation[] = [];
@@ -67,7 +74,9 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           ...(item?.date ? { date: item.date } : {}),
         });
       }
-      return { answer: result.answer, citations, unanswered: [...result.unanswered] };
+      const unanswered = [...result.unanswered];
+      if (unreadable > 0) unanswered.push(unreadableNote(unreadable));
+      return { answer: withoutEvidenceMarkers(result.answer), citations, unanswered };
     },
     async reset() {
       await model?.stop();
@@ -75,18 +84,32 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
   };
 }
 
-/** Search hits (worker `source_index_search` shape) as the built-in model's evidence items. */
-export function privateEvidenceItems(hits: readonly PrivateEvidenceItem[]): BuiltInEvidenceItem[] {
+/**
+ * Private evidence (the shared EvidencePack's Private candidates, or worker
+ * search hits) as the built-in model's evidence items. An item is read only
+ * from its own text: its passages (`chunks`), or a bounded passage the worker
+ * returned. An item with no readable text is left out and counted as
+ * unreadable, never answered from its title.
+ */
+export function privateEvidence(hits: readonly PrivateEvidenceItem[]): { items: BuiltInEvidenceItem[]; unreadable: number } {
   const items: BuiltInEvidenceItem[] = [];
+  let unreadable = 0;
   hits.forEach((hit, index) => {
-    const sourceItem = record(hit.sourceItem);
     const provenance = record(hit.provenance);
+    const sourceItem = record(hit.sourceItem) ?? record(provenance?.sourceItem);
     const citation = record(provenance?.citation);
     const content = record(hit.internalContent);
     const title = string(citation?.title) ?? string(hit.title);
-    const passage = string(content?.passage) ?? string(hit.excerpt) ?? string(hit.text);
-    const text = (passage ?? title)?.slice(0, MAX_PASSAGE_CHARS);
-    if (!text) return;
+    const chunks = Array.isArray(hit.chunks)
+      ? hit.chunks.filter((chunk): chunk is string => typeof chunk === 'string' && chunk.trim() !== '').map((chunk) => chunk.trim())
+      : [];
+    const passage = (chunks.length > 0 ? chunks.join('\n…\n') : undefined)
+      ?? string(content?.passage) ?? string(hit.excerpt) ?? string(hit.text);
+    const text = passage?.slice(0, MAX_PASSAGE_CHARS);
+    if (!text) {
+      unreadable += 1;
+      return;
+    }
     const id = string(sourceItem?.localItemId) ?? string(sourceItem?.providerItemId) ?? `item-${index + 1}`;
     const locator = string(hit.locator) ?? string(citation?.uri) ?? string(content?.url);
     const source = string(citation?.sourceLabel) ?? string(sourceItem?.provider);
@@ -100,7 +123,35 @@ export function privateEvidenceItems(hits: readonly PrivateEvidenceItem[]): Buil
       ...(date ? { date } : {}),
     });
   });
-  return items;
+  return { items, unreadable };
+}
+
+/** privateEvidence's readable items alone. */
+export function privateEvidenceItems(hits: readonly PrivateEvidenceItem[]): BuiltInEvidenceItem[] {
+  return privateEvidence(hits).items;
+}
+
+/**
+ * The Analyst cites by evidence number ("… [1]."); the panel lists its
+ * sources by title under the answer ("From: …"), so the numbers point at
+ * nothing there and are taken out.
+ */
+export function withoutEvidenceMarkers(answer: string): string {
+  return answer
+    .replace(/\s*\[\d{1,2}(?:\s*[,;–-]\s*\d{1,2})*\]/g, '')
+    .trim();
+}
+
+function unreadableNote(count: number): string {
+  return count === 1
+    ? '1 matching private item has no readable text on this computer, so it was not read.'
+    : `${count} matching private items have no readable text on this computer, so they were not read.`;
+}
+
+function unreadableAnswer(count: number): string {
+  return count === 1
+    ? 'The matching private item has no readable text on this computer, so there is no private answer.'
+    : `None of the ${count} matching private items has readable text on this computer, so there is no private answer.`;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

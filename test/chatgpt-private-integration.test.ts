@@ -34,13 +34,16 @@ import {
   type SealedPrivateAnswer,
 } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs, createPrivateAnswerHandler, isPrivateEligible } from '../src/workers/chatgpt/private-answer-jobs.ts';
-import { createBuiltInPrivateAnswerModel, privateEvidenceItems } from '../src/workers/chatgpt/private-answer-model.ts';
+import { createBuiltInPrivateAnswerModel, privateEvidence, privateEvidenceItems, withoutEvidenceMarkers } from '../src/workers/chatgpt/private-answer-model.ts';
 import { privateAnswerPageHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { CHATGPT_PRIVATE_ANSWER_JOB_ID } from '../src/workers/dashboard/chatgpt/private-answer.ts';
 import { PRIVATE_ANSWER_PATH_PATTERN } from '../connect-relay/shared/private-answer.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
+import { searchPrivateEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
@@ -69,6 +72,30 @@ const PRIVATE_HITS: PrivateEvidenceItem[] = [{
   selected_item: { corpus_id: 'secure_local.email' },
   rawExposed: false,
 }];
+
+const INTEGRAL_PASSAGE = 'SENTINEL_INTEGRAL_7f3a: the integral approach maps experience into four quadrants.';
+
+/** Private candidates as the shared EvidencePack build returns them (source-index/analyst-answer.ts searchPrivateEvidence). */
+const PRIVATE_CANDIDATES: PrivateEvidenceItem[] = [
+  {
+    provenance: {
+      sourceItem: { family: 'file', provider: 'dropbox', accountScope: 'personal', providerItemId: 'f-1', localItemId: 'personal:f-1' },
+      citation: { title: 'Integral approach notes', sourceLabel: 'dropbox', authoredAt: '2020-02-05T13:56:40Z' },
+    },
+    trustTier: 'S4',
+    trustDomain: 'secure_local',
+    chunks: [INTEGRAL_PASSAGE, 'SENTINEL_INTEGRAL_7f3a: each quadrant is a perspective.'],
+  },
+  {
+    provenance: {
+      sourceItem: { family: 'file', provider: 'dropbox', accountScope: 'personal', providerItemId: 'f-2', localItemId: 'personal:f-2' },
+      citation: { title: 'Scanned receipt.pdf', sourceLabel: 'dropbox' },
+    },
+    trustTier: 'S4',
+    trustDomain: 'secure_local',
+    chunks: [],
+  },
+];
 
 /** A built-in model whose completion is canned: the real answerPrivately and Analyst run over it. */
 function stubBuiltInModel(text: string, state: 'ready' | 'downloading' | 'not_started' = 'ready') {
@@ -198,7 +225,9 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
     expect(new TextEncoder().encode(plaintext).byteLength).toBe(PRIVATE_ANSWER_PAD_BUCKETS[0]);
     const opened = JSON.parse(plaintext) as { v: number; answer: string; citations: unknown[]; unanswered?: unknown };
     expect(opened.v).toBe(1);
-    expect(opened.answer).toStartWith('The lease ends on 31 May 2027 [1].');
+    // The panel lists sources by title, so the Analyst's evidence numbers are taken out.
+    expect(opened.answer).toStartWith('The lease ends on 31 May 2027.');
+    expect(opened.answer).not.toContain('[1]');
     expect(opened.citations).toEqual([{ title: 'Lease renewal', source: 'Gmail', date: '2026-04-01' }]);
     expect(opened.unanswered).toBeUndefined();
 
@@ -207,6 +236,95 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
     expect(stub.requests.every((request) => request.localOnly === true)).toBe(true);
     expect(stub.requests[0]!.prompt).toContain(PRIVATE_PASSAGE);
     expect(refreshes).toBe(2);
+  });
+
+  test('Private candidates carry their passages to the built-in model; the tool result carries only the count', async () => {
+    const stub = stubBuiltInModel(JSON.stringify({
+      answer: 'The integral approach maps four quadrants [1].',
+      citations: [{ evidence: 1, claim: 'It maps four quadrants.' }],
+      unanswered: [],
+      sufficient: true,
+    }));
+    const privateModel = createBuiltInPrivateAnswerModel({ model: stub.model, available: () => true, answer: answerPrivately });
+    const jobs = new PrivateAnswerJobs({ model: () => privateModel, installId: () => INSTALL });
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-private-integration-'));
+    const store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
+    const worker = createEmailSourceWorker({});
+    const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
+    const handler = createRemoteMcpHandler({
+      connections: () => store,
+      makeOperationContext: (caller, signal) => createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }),
+      chatgpt: {
+        servesRequest: () => true,
+        privateAnswers: jobs,
+        async privateMatchProbe() {
+          return { count: PRIVATE_CANDIDATES.length, evidence: PRIVATE_CANDIDATES };
+        },
+        async dashboardView() { throw new Error('unused'); },
+        async evidenceSearch() {
+          return { evidence: [], coverage: { searched_corpora: 1, unreadable_items: 0, partially_read_items: 0, unclassified_items: 0 } };
+        },
+      },
+    });
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: handler });
+    cleanups.push(() => {
+      server.stop(true);
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const { token } = store.create('ChatGPT');
+    const client = new Client({ name: 'private-integration-test', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    }) as unknown as Parameters<Client['connect']>[0]);
+    let result: Record<string, unknown>;
+    try {
+      result = await client.callTool({ name: 'olympus_search', arguments: { question: 'What do I have about integral theory?' } }) as Record<string, unknown>;
+    } finally {
+      await client.close();
+    }
+
+    // ChatGPT sees the count (widget-only) and nothing of the items: no passage, no title.
+    const meta = (result._meta as Record<string, unknown>)[PRIVATE_ANSWER_META_KEY] as Record<string, unknown>;
+    expect(meta).toMatchObject({ v: 1, count: 2, state: 'ready' });
+    const whole = JSON.stringify(result);
+    expect(whole).not.toMatch(SENTINEL_PATTERN);
+    expect(whole).not.toContain('Integral approach notes');
+
+    const panel = await generatePanelKeyPair();
+    const collectHandler = createPrivateAnswerHandler({ jobs, isRelayed: () => true });
+    const collect = () => collectHandler(new Request(`http://127.0.0.1/private/${meta.jobId}`, {
+      method: 'POST',
+      headers: { origin: PANEL_ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ v: 1, publicKey: panel.publicKey }),
+    }));
+    let response = await collect();
+    for (let i = 0; i < 50 && response.status === 202; i += 1) {
+      await Bun.sleep(20);
+      response = await collect();
+    }
+    expect(response.status).toBe(200);
+    const sealed = JSON.parse(await response.text()) as SealedPrivateAnswer & { status: string };
+    const opened = JSON.parse(await openPrivateAnswer(String(meta.jobId), panel.privateKey, sealed)) as {
+      answer: string; citations: unknown[]; unanswered?: string[];
+    };
+
+    // The model read the passages, locally; the unreadable item was left out, not answered from its title.
+    const prompt = stub.requests[0]!.prompt;
+    expect(prompt).toContain(INTEGRAL_PASSAGE);
+    expect(prompt).not.toContain('Scanned receipt.pdf');
+    expect(opened.answer).toStartWith('The integral approach maps four quadrants.');
+    expect(opened.citations).toEqual([{ title: 'Integral approach notes', source: 'dropbox', date: '2020-02-05T13:56:40Z' }]);
+    expect(opened.unanswered).toEqual(['1 matching private item has no readable text on this computer, so it was not read.']);
+  });
+
+  test('only unreadable Private items: a plain no-answer, never one built from titles', async () => {
+    const stub = stubBuiltInModel('{}');
+    const privateModel = createBuiltInPrivateAnswerModel({ model: stub.model, available: () => true, answer: answerPrivately });
+    const result = await privateModel.answerPrivately('Any receipts?', [PRIVATE_CANDIDATES[1]!]);
+    expect(stub.requests).toHaveLength(0);
+    expect(result.citations).toEqual([]);
+    expect(result.answer).not.toContain('Scanned receipt.pdf');
   });
 
   test('an ungrounded built-in answer carries its gaps to the panel', async () => {
@@ -232,6 +350,27 @@ describe('the panel model over the built-in model', () => {
     const model = createBuiltInPrivateAnswerModel({ model: ready.model, available: () => true, answer: answerPrivately });
     await model.reset?.();
     expect(ready.stops()).toBe(1);
+  });
+
+  test('Private candidates are read from their passages; an item without text is counted unreadable, never read by title', () => {
+    expect(privateEvidence(PRIVATE_CANDIDATES)).toEqual({
+      items: [{
+        id: 'personal:f-1',
+        text: `${INTEGRAL_PASSAGE}\n…\nSENTINEL_INTEGRAL_7f3a: each quadrant is a perspective.`,
+        title: 'Integral approach notes',
+        source: 'dropbox',
+        date: '2020-02-05T13:56:40Z',
+      }],
+      unreadable: 1,
+    });
+    // A title-only hit (the metadata search's shape) is unreadable too.
+    expect(privateEvidence([{ sourceItem: { providerItemId: 'x' }, provenance: { citation: { title: 'Only a title.pdf' } } }]))
+      .toEqual({ items: [], unreadable: 1 });
+  });
+
+  test('the panel answer drops the Analyst\'s evidence numbers and keeps everything else', () => {
+    expect(withoutEvidenceMarkers('The fee was $25 [1]. It was charged twice [2, 3].')).toBe('The fee was $25. It was charged twice.');
+    expect(withoutEvidenceMarkers('Filed in [2020] under [Taxes].')).toBe('Filed in [2020] under [Taxes].');
   });
 
   test('search hits become evidence items with stable ids; hits without text are skipped', () => {
@@ -318,6 +457,41 @@ describe('claim-time evidence over a real local index', () => {
     expect(seen).toEqual([]);
     expect(await jobs.claim(jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
     expect(atSearch.every(isPrivateEligible)).toBe(true);
+  });
+});
+
+describe('private evidence over a real local index', () => {
+  test('each matched Private item carries its own passages, read locally; re-tiered to Secret, it is gone', async () => {
+    const passage = 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer of the orchard lease.';
+    const specs: FixtureSpec[] = [{ id: 'invoice', name: 'orchard-invoice.txt', text: passage }];
+    const { dir, cleanup } = tempDir();
+    const fixture = openTierFixture(dir, { embed: false });
+    cleanups.push(() => {
+      fixture.close();
+      cleanup();
+    });
+    await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const lanes = () => {
+      const stores = fixture.set.openStores();
+      return {
+        registry: buildSourceIndexCorpusRegistry(stores.map((store) => defineConnectorCorpus({
+          corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain,
+        }))),
+        adapters: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreCorpusAdapter({ store })])),
+        contentProviders: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreContentProvider({ store })])),
+        visibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }]),
+      };
+    };
+
+    const found = await searchPrivateEvidence({ lanes, question: 'orchard invoice' });
+    expect(found.matched).toBe(1);
+    expect(found.candidates.every((candidate) => candidate.trustDomain === 'secure_local')).toBe(true);
+    expect(found.candidates[0]!.chunks.join(' ')).toContain('GB82WEST12345698765432');
+    // The private model reads that text (not the title).
+    expect(privateEvidenceItems(found.candidates as unknown as PrivateEvidenceItem[])[0]!.text).toContain('orchard lease');
+
+    await moveTieredItem({ set: fixture.set, identity: identityOf('invoice'), target: { metadataTier: 'secrets', contentTier: 'secrets' } });
+    expect(await searchPrivateEvidence({ lanes, question: 'orchard invoice' })).toEqual({ matched: 0, candidates: [] });
   });
 });
 

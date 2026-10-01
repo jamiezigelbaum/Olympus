@@ -13,6 +13,8 @@
 
 import { totalmem } from 'node:os';
 import {
+  ANALYST_EVIDENCE_SCAFFOLDING_LABELS,
+  analystPromptBytes,
   createAnalyst,
   runWithAnalystAbortSignal,
   type AnalystModel,
@@ -395,8 +397,17 @@ export interface AnswerPrivatelyOptions {
   /** Defaults to one shared built-in model per process (waits for install). */
   model?: BuiltInAnalystModel;
   maxAnswerChars?: number;
+  /** Ceiling on the main prompt's UTF-8 bytes; the evidence is fitted to it. */
+  maxPromptBytes?: number;
   signal?: AbortSignal;
 }
+
+// The built-in model serves a 12,288-token context. The main prompt (system
+// rules, evidence blocks, coverage) is held to this many UTF-8 bytes so the
+// prompt and the answer both fit, even for text that tokenizes densely.
+const DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES = 28_000;
+// Below this a passage stops carrying a usable sentence of context.
+const MIN_PRIVATE_PASSAGE_BYTES = 600;
 
 export const PRIVATE_ANSWER_NOT_FOUND = 'These private items do not answer this question.';
 
@@ -413,7 +424,10 @@ export async function answerPrivately(
   options: AnswerPrivatelyOptions = {},
 ): Promise<PrivateAnswer> {
   const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
-  const pack = privateEvidencePack(question, evidence);
+  const pack = fitPrivatePack(
+    privateEvidencePack(question, evidence),
+    options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES,
+  );
   const analyst = createAnalyst(model, { auditSuspiciousDrafts: true });
   const run = () => analyst.analyze(pack, {
     localOnly: true,
@@ -423,11 +437,18 @@ export async function answerPrivately(
     ? await runWithAnalystAbortSignal(options.signal, run)
     : await run();
   const byId = new Map(evidence.map((item) => [item.id, item]));
+  const modelId = `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`;
+  const unanswered = result.unanswered.filter((line) => !echoesEvidenceScaffolding(line));
+  // An ungrounded local answer comes back as an escalation proposal. This
+  // path never escalates, so the proposal is dropped and the panel is told
+  // plainly that these items did not answer the question. An answer that
+  // reproduces the evidence blocks' formatting (field labels, provenance
+  // JSON) is a failed answer, not an answer, and is reported the same way.
+  if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
+    return { answer: PRIVATE_ANSWER_NOT_FOUND, citations: [], unanswered, modelId };
+  }
   return {
-    // An ungrounded local answer comes back as an escalation proposal. This
-    // path never escalates, so the proposal is dropped and the panel is told
-    // plainly that these items did not answer the question.
-    answer: result.escalation ? PRIVATE_ANSWER_NOT_FOUND : result.answer,
+    answer: result.answer,
     citations: result.citations.map((citation) => {
       const id = citation.provenance.sourceItem.providerItemId;
       const item = byId.get(id);
@@ -438,9 +459,73 @@ export async function answerPrivately(
         claim: citation.claim,
       };
     }),
-    unanswered: [...result.unanswered],
-    modelId: `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`,
+    unanswered,
+    modelId,
   };
+}
+
+/**
+ * Whether model output reproduces the evidence blocks' scaffolding (their
+ * field labels or provenance JSON keys). Output shape only: no question, no
+ * source and no content is consulted.
+ */
+export function echoesEvidenceScaffolding(text: string): boolean {
+  const normalized = text.toLowerCase().split(/\s+/).join(' ').split(' /').join('/').split('/ ').join('/').split(' :').join(':');
+  return ANALYST_EVIDENCE_SCAFFOLDING_LABELS.some((label) => normalized.includes(label));
+}
+
+/**
+ * The pack, fitted so the main prompt is at most maxPromptBytes: every
+ * candidate keeps an equal share of passage bytes (in pack order, the most
+ * relevant first); only when a share would fall below a usable passage are
+ * trailing candidates left out. Measured on the real prompt, so labels and
+ * escaping count.
+ */
+function fitPrivatePack(pack: EvidencePack, maxPromptBytes: number): EvidencePack {
+  const options = { localOnly: true };
+  if (analystPromptBytes(pack, options) <= maxPromptBytes) return pack;
+  for (let keep = pack.candidates.length; keep >= 1; keep -= 1) {
+    const base = pack.candidates.slice(0, keep);
+    const overhead = analystPromptBytes({ ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: [] })) }, options);
+    if (overhead >= maxPromptBytes) continue;
+    let share = Math.floor((maxPromptBytes - overhead) / keep);
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      if (share < MIN_PRIVATE_PASSAGE_BYTES && keep > 1) break;
+      const fitted = { ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, share) })) };
+      const bytes = analystPromptBytes(fitted, options);
+      if (bytes <= maxPromptBytes) return fitted;
+      // Escaping made passages cost more than their raw bytes; shrink by the observed ratio.
+      share = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
+    }
+  }
+  return { ...pack, candidates: pack.candidates.slice(0, 1).map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, MIN_PRIVATE_PASSAGE_BYTES) })) };
+}
+
+const utf8 = new TextEncoder();
+
+/** Whole chunks while they fit, then the next one cut at a code-point boundary. */
+function clipUtf8(chunks: readonly string[], maxBytes: number): string[] {
+  const kept: string[] = [];
+  let remaining = Math.max(0, Math.floor(maxBytes));
+  for (const chunk of chunks) {
+    if (remaining <= 0) break;
+    const bytes = utf8.encode(chunk).length;
+    if (bytes <= remaining) {
+      kept.push(chunk);
+      remaining -= bytes;
+      continue;
+    }
+    let cut = '';
+    for (const codePoint of chunk) {
+      const size = utf8.encode(codePoint).length;
+      if (size > remaining) break;
+      cut += codePoint;
+      remaining -= size;
+    }
+    if (cut) kept.push(cut);
+    break;
+  }
+  return kept;
 }
 
 export function privateEvidencePack(question: string, evidence: readonly PrivateEvidenceItem[]): EvidencePack {

@@ -2537,3 +2537,61 @@ export async function searchReleasedEvidence(input: {
     },
   };
 }
+
+// --- Private evidence for the private answer panel -------------------------
+// The ChatGPT private answer panel (workers/chatgpt/private-answer-jobs.ts):
+// the same shared EvidencePack build, restricted to Private (secure_local)
+// items, so each matched item arrives with its own bounded, query-relevant
+// passages read from the local store. Nothing here is released: the
+// candidates go only to the built-in private model on this computer, and only
+// their count leaves the engine. No Analyst call, no per-question logic.
+
+export interface PrivateEvidenceResult {
+  // Private items the bounded search matched, readable or not.
+  matched: number;
+  // Every matched Private candidate, with whatever passages its store could
+  // read (an empty `chunks` means unreadable; the consumer must not answer
+  // from its title alone).
+  candidates: EvidenceCandidate[];
+}
+
+const PRIVATE_EVIDENCE_MAX_RESULTS = 12;
+const PRIVATE_EVIDENCE_BYTE_BUDGET = 20_000;
+
+export async function searchPrivateEvidence(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  question: string;
+  maxResults?: number;
+  maxCharsPerCandidate?: number;
+  evidenceByteBudget?: number;
+  laneTimeoutMs?: number;
+}): Promise<PrivateEvidenceResult> {
+  const question = input.question.trim();
+  if (!question) throw new OperationError('invalid_params', 'A question is required.');
+  const maxResults = Math.max(1, Math.min(MAX_EVIDENCE_CANDIDATES, input.maxResults ?? PRIVATE_EVIDENCE_MAX_RESULTS));
+  const request: SourceIndexAnswerRequest = {
+    question,
+    retrieval_mode: 'hybrid',
+    include_internal: false,
+    include_secure_local: true,
+    include_secure_local_content: true,
+    max_results: maxResults,
+  };
+  const lanes = input.lanes(request);
+  const detail = await buildEvidencePackDetailed({
+    question,
+    maxResults,
+    // Private only, and no query leaves this computer.
+    searchContext: { allowedTrustDomains: ['secure_local'], allowCloudQueries: false },
+    registry: lanes.registry,
+    adapters: lanes.adapters,
+    contentProviders: lanes.contentProviders,
+    maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
+    evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,
+    ...(input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}),
+    ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
+  });
+  assertEvidencePackModelEligible(detail.pack);
+  const candidates = detail.pack.candidates.filter((candidate) => candidate.trustDomain === 'secure_local');
+  return { matched: candidates.length, candidates };
+}

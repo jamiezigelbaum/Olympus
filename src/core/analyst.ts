@@ -342,6 +342,28 @@ function buildAnalystAuditPrompt(
   ].join('\n');
 }
 
+// The field labels formatCandidate, formatAuditCandidate and formatCoverage
+// write around each evidence block, and the keys of the provenance JSON they
+// embed. They are prompt scaffolding: model output that reproduces one is
+// echoing the evidence formatting, not answering. Lower case, single-spaced.
+export const ANALYST_EVIDENCE_SCAFFOLDING_LABELS: readonly string[] = [
+  'trust: public_safe/',
+  'trust: internal/',
+  'trust: secure_local/',
+  'local_private_provenance:',
+  'citation_metadata:',
+  'source-instruction flags:',
+  'extracted facts:',
+  'source_data:',
+  'coverage — searched:',
+  '"source_label":',
+  '"conversation_label":',
+  '"author_label":',
+  '"authored_at":',
+  '"updated_at":',
+  '"locator":',
+];
+
 function formatCandidate(
   candidate: EvidenceCandidate,
   number: number,

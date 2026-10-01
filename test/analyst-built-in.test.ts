@@ -16,6 +16,8 @@ import {
   builtInAnalystEnabled,
   builtInPrivateModelStatus,
   createBuiltInAnalystModel,
+  echoesEvidenceScaffolding,
+  PRIVATE_ANSWER_NOT_FOUND,
   privateEvidencePack,
   withBuiltInFallback,
   type BuiltInAnalystModel,
@@ -314,6 +316,51 @@ describe('answerPrivately', () => {
     expect(requests).toHaveLength(0);
     expect(answer.citations).toEqual([]);
     expect(answer.unanswered.length).toBeGreaterThan(0);
+  });
+
+  test('an answer that echoes the evidence blocks\' formatting is reported as not answered', async () => {
+    // The live failure: a small model reproduced the evidence block for its answer.
+    const echo = 'The files contain IntroductiontotheIntegralApproach.pdf [2020-02-05T13:56:40Z] trust: secure_local/S4 '
+      + 'local_private_provenance: {"title":"IntroductiontotheIntegralApproach.pdf","source_label":"dropbox"} source_data: ["x"]';
+    const { model } = stubModel(JSON.stringify({
+      answer: echo,
+      citations: [{ evidence: 1, claim: 'The statement lists a fee.' }],
+      unanswered: ['citation_metadata: {"author":"x"}', 'the tax due date'],
+      sufficient: true,
+    }));
+    const answer = await answerPrivately('What do I have about integral theory?', evidence, { model });
+    expect(answer.answer).toBe(PRIVATE_ANSWER_NOT_FOUND);
+    expect(answer.citations).toEqual([]);
+    expect(answer.unanswered).toEqual(['the tax due date']);
+  });
+
+  test('the scaffolding check reads output shape only', () => {
+    for (const echoed of [
+      'trust: secure_local / S4',
+      'Local_Private_Provenance: {}',
+      'source_data : ["a"]',
+      '{"title":"a","source_label":"dropbox"}',
+      'Coverage — searched: private-answer',
+    ]) expect(echoesEvidenceScaffolding(echoed)).toBe(true);
+    for (const plain of [
+      'The overdraft fee was $25.00, charged on 19 September.',
+      'Integral theory maps experience into four quadrants: interior and exterior, individual and collective.',
+      'I trust: the source says nothing about this.',
+    ]) expect(echoesEvidenceScaffolding(plain)).toBe(false);
+  });
+
+  test('the prompt is fitted to the byte budget, keeping every item with a share of its passages', async () => {
+    const { model, requests } = stubModel(JSON.stringify({ answer: 'Nothing here.', citations: [], unanswered: ['x'], sufficient: false }));
+    const long = Array.from({ length: 8 }, (_, index) => ({
+      id: `doc-${index}`,
+      title: `Document ${index}`,
+      text: `MARKER_${index} ${'lorem ipsum dolor sit amet '.repeat(400)}`,
+    }));
+    await answerPrivately('What do these say?', long, { model, maxPromptBytes: 16_000 });
+    const body = requests[0]!.body.messages as Array<{ content: string }>;
+    const bytes = new TextEncoder().encode(`${body[0]!.content}\n\n${body[1]!.content}`).length;
+    expect(bytes).toBeLessThanOrEqual(16_000);
+    for (let index = 0; index < 8; index += 1) expect(body[1]!.content).toContain(`MARKER_${index}`);
   });
 
   test('every evidence item is Private and local-only', () => {
