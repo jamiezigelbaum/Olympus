@@ -841,6 +841,16 @@ content, and readable text from complete extraction and vector coverage.
 Reproduce any misleading status on synthetic fixtures and fix the product
 without expanding the owner's selected ingestion scope.
 
+### Deferred to the release after 1.0: built-in scan reading (owner, 2026-10-01)
+
+Scanned PDFs and images are read today only when the optional `tesseract` /
+`ocrmypdf` lane is installed, so a fresh Mac leaves them names-only. Next
+version: back the existing OCR extractor (`src/workers/file-extraction/extractors/ocr.ts`)
+with macOS's built-in Vision text recognition (no install, on-device), keeping
+tesseract as the Linux fallback; recognized text flows through the same tier
+classification as any other content. A local vision model for charts and photos
+is a later step. Owner deferred this out of 1.0 to finish the current release.
+
 ### Deferred: high-value email embeddings
 
 Bulk email embedding, mailbox selection/cleanup, and security reclassification
