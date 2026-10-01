@@ -21,6 +21,14 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-01 — This release is Olympus 1.0.** Owner decision: the
+  standalone engine, the ChatGPT plugin, the relay and the Personal / Private
+  / Secret privacy model ship as Olympus 1.0, not as further 0.4 betas. The
+  0.4 beta line ends at beta.11. Test builds are `1.0.0-rc.N`; `1.0.0` is
+  the version submitted to the ChatGPT plugin directory. This plan becomes the
+  v1 plan (file rename and AGENTS.md pointer to follow with the integration
+  merge).
+
 - **2026-10-01 — ChatGPT is the release target; engine on the user's Mac.**
   Owner direction: get Olympus working as a ChatGPT plugin (the 2026-09-29
   plugin platform) with the dashboard inside ChatGPT, built to the final
