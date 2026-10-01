@@ -315,6 +315,15 @@ describe('folder picker', () => {
     expectNoJargon(host);
   });
 
+  test('folders are listed alphabetically, numbers in numeric order', async () => {
+    const host = await openFolders({}, { displayMode: 'fullscreen' });
+    const names = Array.from(doc(host).querySelectorAll('button.fstatus'))
+      .map((node) => String(node.getAttribute('aria-label')).replace(/^Choice for (.*?): .*$/, '$1'));
+    expect(names.length).toBeGreaterThan(1);
+    const sorted = [...names].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+    expect(names).toEqual(sorted);
+  });
+
   test('drilling in lists one level lazily, shows the path and This folder, and Back and Escape go up', async () => {
     const host = await openFolders();
     openFolder(host, 'Tax Returns 2024');
