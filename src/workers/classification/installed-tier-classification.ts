@@ -25,7 +25,7 @@ import {
   resolveSensitivityMapPath,
   type SensitivityMap,
 } from '../../core/sensitivity-map.ts';
-import { CachedTierSniffer, type SnifferLaneIdentity } from './sniffer.ts';
+import { CachedTierSniffer, snifferPromptVersions, type SnifferLaneIdentity } from './sniffer.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
 import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import {
@@ -43,11 +43,23 @@ export interface InstalledTierClassificationOptions {
   env?: Record<string, string | undefined>;
   /** The resolved privacy-safe lane. Absent: no sniffer; flagged items stay pending. */
   lane?: SnifferLaneIdentity;
+  /**
+   * This install has no Public tier (its sovereignty policy defines none:
+   * fresh installs, owner ruling 2026-10-01). Public verdicts become Personal.
+   */
+  retirePublic?: boolean;
+  /**
+   * The owner's own words about privacy (privacy-profile.ts). They key the
+   * sniffer's verdict cache (snifferPromptVersions), so an edit re-asks.
+   */
+  ownerContext?: () => string | undefined;
   now?: () => Date;
 }
 
 export class InstalledTierClassification implements InstalledTierClassificationProvider {
   readonly lane: SnifferLaneIdentity | undefined;
+  readonly retirePublic: boolean;
+  private readonly ownerContext: (() => string | undefined) | undefined;
   private readonly env: Record<string, string | undefined>;
   private readonly now: (() => Date) | undefined;
   private readonly snifferStores = new Map<string, TierSnifferStore>();
@@ -63,6 +75,8 @@ export class InstalledTierClassification implements InstalledTierClassificationP
   constructor(options: InstalledTierClassificationOptions = {}) {
     this.env = options.env ?? process.env;
     this.lane = options.lane;
+    this.retirePublic = options.retirePublic === true;
+    this.ownerContext = options.ownerContext;
     this.now = options.now;
   }
 
@@ -80,7 +94,11 @@ export class InstalledTierClassification implements InstalledTierClassificationP
     let sniffer: TierSniffer | undefined;
     if (this.lane && ledgerPath !== ':memory:') {
       try {
-        sniffer = new CachedTierSniffer(this.snifferStoreForLedger(ledgerPath), this.lane);
+        sniffer = new CachedTierSniffer(
+          this.snifferStoreForLedger(ledgerPath),
+          this.lane,
+          snifferPromptVersions(this.ownerContext?.()).cache,
+        );
       } catch {
         // No sniffer store: flagged items stay pending (held Private).
       }
@@ -89,6 +107,7 @@ export class InstalledTierClassification implements InstalledTierClassificationP
       ...(sensitivityMap ? { sensitivityMap } : {}),
       ...(rules.length > 0 ? { rules } : {}),
       ...(sniffer ? { sniffer } : {}),
+      ...(this.retirePublic ? { retirePublic: true } : {}),
       ...(unavailableReason ? { unavailableReason } : {}),
     };
   }

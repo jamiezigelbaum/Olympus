@@ -561,6 +561,114 @@
         "openai/widgetAccessible": true,
         "openai/visibility": "private"
       }
+    },
+    {
+      "name": "olympus_privacy_get",
+      "title": "Olympus privacy settings",
+      "description": "Read what the user told Olympus is private for them: their own description, and how many folders, labels or senders they marked as always Private (the panel shows which). Use it during setup, or when the user asks about their privacy settings. If nothing is set yet, ask the user in their own words what is private for them and save it with olympus_privacy_set. Takes no arguments. Read-only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "openai/widgetAccessible": true
+      }
+    },
+    {
+      "name": "olympus_privacy_set",
+      "title": "Save Olympus privacy settings",
+      "description": "Save what is private for the user. `description` is the user's answer, in their own words, to \"What's private for you?\" (for example health, money, family matters); Olympus's private classifier on the Mac reads it to keep matching items Private, so they never reach ChatGPT. `rules` is the full list of folders, labels and senders that are always Private; the Olympus panel builds it. Each field given replaces the saved one.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "The user's own words about what is private for them."
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "folder",
+                    "label",
+                    "sender"
+                  ]
+                },
+                "source_id": {
+                  "type": "string",
+                  "enum": [
+                    "gmail.email",
+                    "google_drive.docs",
+                    "dropbox.files"
+                  ]
+                },
+                "key": {
+                  "type": "string",
+                  "maxLength": 1024
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 240
+                },
+                "display": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "kind",
+                "source_id"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 100
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "openai/widgetAccessible": true
+      }
     }
   ],
   "resources": [

@@ -71,6 +71,8 @@ export interface ConnectorStoreTierClassification {
   sensitivityMap?: SensitivityMap;
   rules?: readonly OwnerTierRule[];
   sniffer?: TierSniffer;
+  /** This install has no Public tier: Public verdicts are lifted to Personal. */
+  retirePublic?: boolean;
   /** The inputs cannot be trusted (an invalid rules file): record no decisions. */
   unavailableReason?: string;
 }
@@ -101,10 +103,12 @@ export function resolveStoreTierClassification(
   // Private category: the inputs then carry `unavailableReason`.
   const sensitivityMap = installed.sensitivityMap ?? (installed.unavailableReason ? explicit.sensitivityMap ?? laneMap : undefined);
   const unavailableReason = installed.unavailableReason ?? explicit.unavailableReason;
+  const retirePublic = installed.retirePublic === true || explicit.retirePublic === true;
   return {
     ...(sensitivityMap ? { sensitivityMap } : {}),
     ...(rules.length > 0 ? { rules } : {}),
     ...(sniffer ? { sniffer } : {}),
+    ...(retirePublic ? { retirePublic: true } : {}),
     ...(unavailableReason ? { unavailableReason } : {}),
   };
 }
@@ -192,6 +196,7 @@ export function decideItemTiers(
       ...(options?.rules ? { rules: options.rules } : {}),
       ...(options?.sniffer ? { sniffer: options.sniffer } : {}),
       ...(override ? { override } : {}),
+      ...(options?.retirePublic ? { retirePublic: true } : {}),
     },
   );
 }

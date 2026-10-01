@@ -144,6 +144,14 @@ export interface DashboardViewModelV1 {
     /** Status only in ChatGPT: carries `disabledReason` (models change on the Mac). */
     change?: DashboardFix;
   };
+  /**
+   * The owner's privacy settings (olympus_privacy_get / olympus_privacy_set):
+   * whether they have been set yet, and how many items wait for the privacy
+   * check (held Private until judged). While `configured` is false,
+   * `needsYou` carries `{id: 'privacy:setup'}` whose fix is
+   * `olympus_privacy_get`. Counts only; never a description or a rule.
+   */
+  privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
   generatedAt: string;
 }
 
@@ -335,6 +343,95 @@ export interface ModelSetResult {
   answers?: 'local' | 'venice';
   /** The worker restarts to apply the change; the dashboard reads `installing` briefly. */
   restarting: boolean;
+}
+
+/* ------------------------------------------------------------------ */
+/* Privacy settings (contract v1 addition, 2026-10-01)                 */
+/* ------------------------------------------------------------------ */
+/*
+ * Set once in setup, inside ChatGPT ("In your own words, what's private for
+ * you?"), and editable later from the dashboard; not in the folder picker.
+ * Tiers: Personal (reaches ChatGPT through olympus_search), Private (stays on
+ * the Mac; the private answer panel only) and Secret (detected automatically,
+ * never leaves). Rules name folders, labels or senders that are ALWAYS
+ * Private; the description is the owner's own words, which the private
+ * classifier on the Mac reads.
+ *
+ * Names: a rule's `key`, `value` and `display` travel only in
+ * `_meta[PRIVACY_META_KEY]`, like the picker. `structuredContent` carries
+ * the description (owner-approved: OpenAI may see category words) and counts.
+ */
+
+export const PRIVACY_GET_TOOL_NAME = 'olympus_privacy_get';
+export const PRIVACY_SET_TOOL_NAME = 'olympus_privacy_set';
+/** The `_meta` key carrying the privacy rules to the widget only. */
+export const PRIVACY_META_KEY = 'olympus/privacy';
+
+export type PrivacyRuleKind = 'folder' | 'label' | 'sender';
+
+/** A folder that is always Private: the picker's opaque node key. */
+export interface PrivacyFolderRule {
+  kind: 'folder';
+  source_id: ChatGptFolderSourceId;
+  key: string;
+  /** The folder's name when the UI sent it; only ever in `_meta`. */
+  display?: string;
+}
+
+/** A Gmail label that is always Private: its id, and its name as `value`. */
+export interface PrivacyLabelRule {
+  kind: 'label';
+  source_id: 'gmail.email';
+  key: string;
+  value: string;
+}
+
+/** A sender that is always Private: an address or a whole `@domain`. */
+export interface PrivacySenderRule {
+  kind: 'sender';
+  source_id: 'gmail.email';
+  value: string;
+}
+
+/**
+ * One always-Private rule, as `olympus_privacy_set` takes it and
+ * `olympus_privacy_get` returns it (only in `_meta[PRIVACY_META_KEY]`).
+ * Caps: 100 rules; key 1024 characters; label name and display 200; sender
+ * an address or `@domain` of at most 240.
+ */
+export type PrivacyRuleView = PrivacyFolderRule | PrivacyLabelRule | PrivacySenderRule;
+
+/** `olympus_privacy_get {}` → `_meta[PRIVACY_META_KEY]`; also `olympus_privacy_set`'s. */
+export interface PrivacySettings {
+  /** False until the owner has saved privacy settings once. */
+  configured: boolean;
+  /** The owner's own words; empty until set. At most 2000 characters. */
+  description: string;
+  /** At most 100. */
+  rules: PrivacyRuleView[];
+  /** Items waiting for the privacy check (held Private, keyword-searchable, not embedded). */
+  pendingCount: number;
+}
+
+/** A privacy tool's `structuredContent`: the description and counts, never a rule. */
+export interface PrivacySummary {
+  status: 'current' | 'saved';
+  configured: boolean;
+  description: string;
+  ruleCount: number;
+  pendingCount: number;
+}
+
+/**
+ * `olympus_privacy_set {description?, rules?}`: each field given replaces
+ * the saved one; the other stays. `rules` is the whole list (the UI sends
+ * every rule it shows). Validated and size-capped (description 2000
+ * characters, 100 rules, display 200); `invalid_params` otherwise. Saving
+ * applies the rules to classification at the next sync.
+ */
+export interface PrivacySetInput {
+  description?: string;
+  rules?: PrivacyRuleView[];
 }
 
 /* ------------------------------------------------------------------ */

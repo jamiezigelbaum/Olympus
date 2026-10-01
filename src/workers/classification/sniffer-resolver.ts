@@ -151,6 +151,12 @@ export interface SnifferPassOptions {
   lane: SnifferLane;
   model: AnalystModel;
   promptVersion?: string;
+  /**
+   * The owner's own words about what is private for them, quoted into the
+   * prompt as data. Pass `promptVersion` from `snifferPromptVersions(ownerContext).cache`
+   * with it, so the verdicts are cached under these words.
+   */
+  ownerContext?: string;
   budget?: SnifferCallBudget;
   maxCallsPerPass?: number;
   /** Pending ledger rows read per store per pass. */
@@ -348,7 +354,11 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       // Re-checked at every dispatch: a policy that changed under a running
       // worker still cannot route possibly-private names to a cloud model.
       assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-      const prompt = buildSnifferBatchPrompt(pass, batch.map((group, index) => ({ i: index + 1, material: group[0]!.question.material })));
+      const prompt = buildSnifferBatchPrompt(
+        pass,
+        batch.map((group, index) => ({ i: index + 1, material: group[0]!.question.material })),
+        options.ownerContext,
+      );
       report.calls += 1;
       report.itemsAsked += batch.length;
       report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;

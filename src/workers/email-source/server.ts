@@ -85,6 +85,7 @@ import { defaultConfig, loadConfig, parseLane, parseModelProfile, parseOptionalB
 import { DelphiClient } from '../../core/delphi.ts';
 import {
   describeSovereigntyPolicy,
+  isPublicTierRetired,
   loadSovereigntyEngine,
   type SovereigntyEngine,
   type SovereigntyModelProfile,
@@ -324,7 +325,9 @@ import {
 } from '../source-scope-browser.ts';
 import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-sources.ts';
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
-import { resolveSnifferLane, SnifferLaneRefusedError, type SnifferLane } from '../classification/sniffer-lane.ts';
+import { type SnifferLane } from '../classification/sniffer-lane.ts';
+import { registeredBuiltInPrivateModel, resolveTierSnifferRuntime } from '../classification/built-in-sniffer.ts';
+import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
@@ -1593,18 +1596,27 @@ export async function main(): Promise<void> {
     resolveSecretRefValueSync: (secretRef, env) => resolveSecretRefValueSync(secretRef, { env }),
   });
   // Four-tier classification inputs for every lane: the owner's map, tier
-  // rules and the privacy-safe sniffer. The sniffer only ever runs on a local
-  // model or Venice Private; without one, flagged items stay pending.
-  let snifferLane: SnifferLane | undefined;
-  try {
-    snifferLane = resolveSnifferLane(sovereigntyEngine);
-  } catch (error) {
-    if (!(error instanceof SnifferLaneRefusedError)) throw error;
-    console.warn(`Olympus tier sniffer is off (${error.reason}): flagged items stay pending, held Private.`);
+  // rules, their own words about privacy, and the privacy-safe sniffer. The
+  // sniffer only ever runs on a local model or Venice Private, else on the
+  // built-in private model when this machine has one (it registers itself
+  // with registerBuiltInPrivateModel before this point); without any,
+  // flagged items stay pending and unflagged items are Personal at once.
+  const snifferRuntime = resolveTierSnifferRuntime({
+    engine: sovereigntyEngine,
+    ...(registeredBuiltInPrivateModel() ? { builtIn: registeredBuiltInPrivateModel()! } : {}),
+  });
+  const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
+  if (snifferRuntime.source === 'off') {
+    console.warn(`Olympus tier sniffer is off (${snifferRuntime.reason}): items whose names look private stay pending, held Private; every other item is Personal.`);
   }
+  // A policy with no Public tier (fresh installs): Public verdicts are Personal.
+  const publicTierRetired = isPublicTierRetired(sovereigntyEngine.config);
+  const privacyOwnerWords = (): string | undefined => privacyOwnerContext({ env: process.env });
   const installedTierClassification = configureInstalledTierClassification({
     env: process.env,
     ...(snifferLane ? { lane: { kind: snifferLane.kind, modelId: snifferLane.modelId } } : {}),
+    ...(publicTierRetired ? { retirePublic: true } : {}),
+    ownerContext: privacyOwnerWords,
   });
   // Shared with the answer handler so the sniffer reads the private pool's
   // breakers, and counts answers in flight so it never competes with one.
@@ -4090,9 +4102,25 @@ export async function main(): Promise<void> {
   // picker and model switching through the dashboard's own routes, and
   // retrieval-only search for ChatGPT's model to answer from.
   const { createChatGptHandoffs, createChatGptHandoffHandler, withChatGptHandoffRoutes } = await import('../chatgpt/handoff.ts');
-  const { createChatGptSetupBackend } = await import('../chatgpt/setup-backend.ts');
+  const { createChatGptSetupBackend, readChatGptPrivacySettings } = await import('../chatgpt/setup-backend.ts');
   const chatgptHandoffs = createChatGptHandoffs();
+  // Items held for the privacy check (pending, Private, not embedded), every
+  // tier ledger counted once per corpus. Counts only.
+  const pendingClassificationCount = (): number => {
+    let total = 0;
+    for (const lane of tierLanes) {
+      for (const corpusId of lane.corpusIds) {
+        try {
+          total += lane.ledger.corpusCopyCounts(corpusId).held;
+        } catch {
+          // An unreadable ledger contributes nothing to a count.
+        }
+      }
+    }
+    return total;
+  };
   const chatgptSetup = createChatGptSetupBackend({
+    pendingClassificationCount,
     workerFetch: worker.fetch,
     handoffs: chatgptHandoffs,
     publicUrls: remotePublicUrls,
@@ -4184,6 +4212,10 @@ export async function main(): Promise<void> {
             ...(chatgptEvidenceSearch ? { evidenceSearch: chatgptEvidenceSearch } : {}),
             answerModelAvailable: chatgptAnswerModelAvailable,
             embedding: chatgptEmbeddingState,
+            privacy: () => {
+              const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
+              return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
+            },
           },
         }),
         withWorkerBearerAuth(worker.fetch, { authToken }),
@@ -4197,9 +4229,11 @@ export async function main(): Promise<void> {
 
   // The privacy-safe sniffer's bounded background pass over pending items.
   const snifferEnv = tierSnifferServiceEnv(process.env);
-  const snifferModel = snifferLane && snifferEnv.enabled
-    ? createTierSnifferModel({ lane: snifferLane, olympusConfig, env: process.env, bootSecretResolver })
-    : undefined;
+  const snifferModel = !snifferEnv.enabled || snifferRuntime.source === 'off'
+    ? undefined
+    : snifferRuntime.source === 'built_in'
+      ? snifferRuntime.builtIn.model
+      : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver });
   const tierSniffer = snifferLane && snifferModel
     ? new TierSnifferService({
         installed: installedTierClassification,
@@ -4207,6 +4241,8 @@ export async function main(): Promise<void> {
         model: snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
+        ...(snifferRuntime.source === 'built_in' ? { modelAvailable: () => snifferRuntime.builtIn.available() } : {}),
+        ownerContext: privacyOwnerWords,
         budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),

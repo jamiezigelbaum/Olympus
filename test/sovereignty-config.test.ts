@@ -10,6 +10,7 @@ import {
   SOVEREIGNTY_PRESETS,
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
+  isPublicTierRetired,
   loadSovereigntyEngine,
   loadSovereigntyPreset,
   sovereigntyRoutingSnapshot,
@@ -791,8 +792,11 @@ describe('sovereignty config engine', () => {
 
   test('subscription-first presets put openclaw-infer first for ordinary cloud routes', () => {
     for (const preset of SOVEREIGNTY_PRESETS) {
-      const engine = createSovereigntyEngine(loadSovereigntyPreset(preset));
-      for (const domain of ['internal', 'public_safe'] as const) {
+      const config = loadSovereigntyPreset(preset);
+      const engine = createSovereigntyEngine(config);
+      // A preset without a Public tier (the fresh-install preset) has no public_safe route.
+      const domains = isPublicTierRetired(config) ? ['internal'] as const : ['internal', 'public_safe'] as const;
+      for (const domain of domains) {
         const route = engine.resolveAnalystRoute({ trustDomain: domain });
         expect(route[0]).toMatchObject({
           id: 'cloud-openclaw-infer',

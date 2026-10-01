@@ -11,7 +11,7 @@ import {
   readClassificationLedger,
 } from '../classification-ledger.ts';
 import type { InstalledTierClassification } from './installed-tier-classification.ts';
-import { SNIFFER_PROMPT_VERSION } from './sniffer.ts';
+import { snifferPromptVersions } from './sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
@@ -45,6 +45,14 @@ export interface TierSnifferServiceOptions {
   model: AnalystModel;
   stores: () => readonly TierSnifferServiceStore[];
   classificationLedgerPath: string;
+  /**
+   * The model is not always there (the built-in private model downloads on
+   * first use): while this answers false the pass asks nothing and every
+   * flagged item stays pending. Absent: always available.
+   */
+  modelAvailable?: () => boolean;
+  /** The owner's own words about privacy (privacy-profile.ts), quoted into the prompt. */
+  ownerContext?: () => string | undefined;
   /** Where the day's call count is kept across restarts (owner-only JSON). */
   budgetStatePath?: string;
   intervalMs?: number;
@@ -69,6 +77,7 @@ export interface TierClassificationBacklog {
 export type TierSnifferTick =
   | { state: 'skipped_running' }
   | { state: 'awaiting_owner_approval'; modelId: string; promptVersion: string }
+  | { state: 'model_unavailable'; modelId: string }
   | { state: 'ran'; report: SnifferPassReport }
   | { state: 'failed'; error: string };
 
@@ -219,8 +228,15 @@ export class TierSnifferService {
 
   private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
     const { lane } = this.options;
+    if (this.options.modelAvailable && !this.options.modelAvailable()) {
+      // Nothing is asked and nothing is counted: flagged items wait, pending
+      // and held Private, until the model is there.
+      return { state: 'model_unavailable', modelId: lane.modelId };
+    }
+    const ownerContext = this.options.ownerContext?.();
+    const versions = snifferPromptVersions(ownerContext);
     const ledger = await readClassificationLedger(this.options.classificationLedgerPath);
-    const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION };
+    const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
     if (!isClassifierApproved(ledger.entries, key)) {
       // Until then no question is sent anywhere: flagged items wait, pending
       // and held Private, and their questions stay queued for the approval.
@@ -228,16 +244,16 @@ export class TierSnifferService {
       await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
         recorded_at: (this.options.now?.() ?? new Date()).toISOString(),
         kind: 'classifier_model_decision',
-        what: `The privacy sniffer is configured to use ${lane.kind} model ${lane.modelId} (profile ${lane.profileId}) with prompt ${SNIFFER_PROMPT_VERSION}; it waits for the owner's approval before classifying anything.`,
+        what: `The privacy sniffer is configured to use ${lane.kind} model ${lane.modelId} (profile ${lane.profileId}) with prompt ${versions.approval}; it waits for the owner's approval before classifying anything.`,
         model_id: lane.modelId,
-        prompt_version: SNIFFER_PROMPT_VERSION,
+        prompt_version: versions.approval,
         lane: lane.kind,
         profile_id: lane.profileId,
         approved_by: 'system-automatic',
         status: 'pending',
-        entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${SNIFFER_PROMPT_VERSION}`,
+        entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`,
       });
-      return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION };
+      return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: versions.approval };
     }
     const targets: SnifferTarget[] = [];
     for (const ledgerPath of this.ledgerPaths()) {
@@ -253,6 +269,8 @@ export class TierSnifferService {
       targets,
       lane,
       model: this.options.model,
+      promptVersion: versions.cache,
+      ...(ownerContext ? { ownerContext } : {}),
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass ?? defaultSnifferMaxCallsPerPass(lane.kind),
       ...(this.options.shouldYield ? { shouldYield: this.options.shouldYield } : {}),

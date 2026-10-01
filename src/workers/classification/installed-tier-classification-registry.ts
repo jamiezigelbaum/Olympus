@@ -11,6 +11,8 @@ export interface InstalledStoreTierClassification {
   sensitivityMap?: SensitivityMap;
   rules?: readonly OwnerTierRule[];
   sniffer?: TierSniffer;
+  /** This install has no Public tier: Public verdicts are lifted to Personal. */
+  retirePublic?: boolean;
   /** Set when the inputs cannot be trusted (an invalid rules file): record nothing. */
   unavailableReason?: string;
 }

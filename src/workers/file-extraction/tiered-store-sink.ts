@@ -136,6 +136,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           ...(tierClassification?.sensitivityMap ? { sensitivityMap: tierClassification.sensitivityMap } : {}),
           ...(tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {}),
           ...(override ? { override } : {}),
+          ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),
         },
       );
       // An unusable map or rules file: the content decision is held pending

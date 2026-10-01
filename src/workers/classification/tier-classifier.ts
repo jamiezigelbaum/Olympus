@@ -174,6 +174,26 @@ export interface TierClassificationOptions {
   rules?: readonly OwnerTierRule[];
   override?: ItemTierOverride;
   sniffer?: TierSniffer;
+  /**
+   * This install has no Public tier (a fresh install, owner ruling
+   * 2026-10-01): anything that would be Public is Personal. Every other
+   * step is unchanged; only the final Public verdict is lifted.
+   */
+  retirePublic?: boolean;
+}
+
+/** The reason code recorded when a Public verdict is lifted to Personal on an install without a Public tier. */
+export const PUBLIC_RETIRED_REASON = 'tier:public_retired';
+
+/** A decision with Public lifted to Personal (no Public tier on this install). Pure. */
+export function withPublicRetired<T extends { metadataTier: TierKey; contentTier: TierKey; reasons: string[] }>(decision: T): T {
+  if (decision.metadataTier !== 'public' && decision.contentTier !== 'public') return decision;
+  return {
+    ...decision,
+    metadataTier: decision.metadataTier === 'public' ? 'private' : decision.metadataTier,
+    contentTier: decision.contentTier === 'public' ? 'private' : decision.contentTier,
+    reasons: [...decision.reasons, PUBLIC_RETIRED_REASON],
+  };
 }
 
 export type TierDecisionState = 'pending' | 'current';
@@ -242,6 +262,14 @@ export type TierDecidedBy =
 export function classifyItemTiers(
   input: TierClassificationInput,
   options: TierClassificationOptions = {},
+): TierDecision {
+  const decision = classifyItemTiersWithPublic(input, options);
+  return options.retirePublic ? withPublicRetired(decision) : decision;
+}
+
+function classifyItemTiersWithPublic(
+  input: TierClassificationInput,
+  options: TierClassificationOptions,
 ): TierDecision {
   const signals = input.signals;
   const sniffer = options.sniffer ?? UNDECIDED_TIER_SNIFFER;
@@ -365,7 +393,14 @@ export function classifyContentTier(
     snifferId: sniffer.id,
   };
   if (options.override?.kind === 'tier') {
-    return { ...base, contentTier: options.override.tier, decidedBy: 'override', reasons: [`override:item:${options.override.tier}`], contentPending: false };
+    const tier = options.retirePublic && options.override.tier === 'public' ? 'private' : options.override.tier;
+    return {
+      ...base,
+      contentTier: tier,
+      decidedBy: 'override',
+      reasons: [`override:item:${options.override.tier}`, ...(tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [])],
+      contentPending: false,
+    };
   }
   const text = input.text.trim() ? input.text : undefined;
   const content = contentPass({
@@ -390,11 +425,12 @@ export function classifyContentTier(
     mapRevision: base.mapRevision,
     ...(input.subject ? { subject: input.subject } : {}),
   });
+  const lifted = options.retirePublic === true && content.tier === 'public';
   return {
     ...base,
-    contentTier: content.tier,
+    contentTier: lifted ? 'private' : content.tier,
     decidedBy: content.decidedBy,
-    reasons: content.reasons,
+    reasons: lifted ? [...content.reasons, PUBLIC_RETIRED_REASON] : content.reasons,
     contentPending: content.pending || text === undefined,
   };
 }
@@ -645,10 +681,14 @@ function contentPass(args: {
 
   // [12] Sniffer on a short excerpt, only when pass 1 flagged the item or a
   // detector family came close, and only while the content is below Private.
+  // Without a privacy-safe model to ask (no private lane), only items whose
+  // NAMES were flagged wait (owner ruling 2026-10-01: unflagged items are
+  // Personal at once); a borderline word in the text alone is not a flag.
   let pending = false;
+  const askBorderline = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
   const flags = [
     ...metadata.flags,
-    ...detection.borderline.map((family) => `content:borderline:${family}`),
+    ...(askBorderline ? detection.borderline.map((family) => `content:borderline:${family}`) : []),
   ];
   const reasons = [...decided.reasons];
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {

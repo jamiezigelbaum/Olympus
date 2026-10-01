@@ -434,3 +434,15 @@ Remaining, each with a recommendation:
 9. **Superseded copies** are kept until the owner approves a purge. **Yes.**
 10. **Retire the `public_safe.readwise.library` alias** so the Public Readwise store can use that id. **Yes.**
 11. **In beta 4, any Private evidence** routes the whole answer through Argus; split handling later if needed. **Yes.**
+
+---
+
+## 9. Fresh installs (owner rulings, 2026-10-01)
+
+Scope: new, clean installs only. Existing installs keep their policy and stores exactly as they are.
+
+- **Three tiers.** A fresh install's policy (the `no-sensitive` preset that `olympus engine install` seeds) defines Personal, Private and Secret only: no `public_safe` route and no `public_safe` retrieval policy (`isPublicTierRetired`). The classifier then lifts any Public verdict to Personal (`retirePublic`, reason `tier:public_retired`), so no Public store is ever created. Personal is the tier `olympus_search` releases to ChatGPT.
+- **Only flagged items wait.** Items whose names look possibly private are held pending (Private, keyword-searchable, not embedded) until the sniffer judges them. With no private model at all, a borderline word in the text alone does not hold an item: it is Personal at once.
+- **Sniffer model.** A configured private lane wins; otherwise the built-in private model (`built_in`, an AnalystModel the worker registers with `registerBuiltInPrivateModel`), once downloaded and approved by the owner in the classification ledger like any classifier model.
+- **Privacy profile.** Set once in ChatGPT (`olympus_privacy_set`), editable from the dashboard: the owner's own words (quoted into the sniffer prompt as data; the approved prompt version is `SNIFFER_OWNER_CONTEXT_PROMPT_VERSION`) and always-Private folder, label and sender rules, written as `privacy-*` owner tier rules. Stored owner-only in `~/.olympus/privacy.json`.
+- **Diagnosis that led here.** On the owner's fresh install the two PDFs were routed correctly (Personal, content in `internal.dropbox.files`; `secure_local.dropbox.files` was only the extraction job's lane id). Their text was control-character noise: the launchd agent's PATH hid Homebrew's `pdftotext`, and the inline decoder cannot read composite-font PDFs. Extraction commands now resolve from package-manager directories, and undecodable inline text counts as no text layer.

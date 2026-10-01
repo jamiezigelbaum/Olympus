@@ -2286,6 +2286,7 @@ export class LocalConnectorStore {
           ...(inputs?.sensitivityMap ? { sensitivityMap: inputs.sensitivityMap } : {}),
           ...(inputs?.sniffer ? { sniffer: inputs.sniffer } : {}),
           ...(override ? { override } : {}),
+          ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },
       );
       return ledger.recordContentDecision(item.identity, content) !== undefined;

@@ -304,6 +304,8 @@ describe('routing', () => {
         'olympus_scope_set',
         'olympus_disconnect_source',
         'olympus_model_set',
+        'olympus_privacy_get',
+        'olympus_privacy_set',
       ]);
     for (const tool of list.result.tools) {
       expect(tool.securitySchemes).toEqual(tool.name === 'olympus_dashboard'
