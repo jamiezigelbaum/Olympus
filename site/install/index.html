@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Install Olympus on your Mac</title>
+  <meta name="description" content="How to install the Olympus engine on macOS and connect it to ChatGPT.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M2 27 12.5 9l4.2 7.2L20 11l10 16Z" fill="currentColor"/></svg><span>Olympus</span></a>
+      <nav class="site" aria-label="Main">
+        <ul>
+        <li><a href="/">Home</a></li>
+        <li><a href="/install/" aria-current="page">Install</a></li>
+        <li><a href="/help/mac-offline/">Help</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/">Privacy</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>Install Olympus on your Mac</h1>
+      <p class="lede">Olympus runs on your Mac. ChatGPT can set it up for you from the ChatGPT desktop app, with your approval at each step.</p>
+
+      <h2>Install with ChatGPT (recommended)</h2>
+      <ol class="flow">
+        <li><strong>Add Olympus in ChatGPT.</strong> Find Olympus in ChatGPT's plugin directory and add it.</li>
+        <li><strong>Open the ChatGPT desktop app on your Mac.</strong> Installing needs the desktop app, in a mode that can run commands on your Mac with your approval. On the web or a phone, ChatGPT will ask you to switch to the desktop app.</li>
+        <li><strong>Ask ChatGPT to set up Olympus.</strong> For example: "Set up Olympus on my Mac." ChatGPT shows you the exact install command and what it does, and runs it only after you say yes.</li>
+        <li><strong>Approve ChatGPT on your Mac.</strong> When the install finishes, an Olympus approval page opens on your Mac. Click <strong>Approve</strong>. That click is how Olympus knows the Mac is yours: there is no code to copy and no account to create.</li>
+        <li><strong>Connect your sources.</strong> Open the Olympus dashboard in the ChatGPT sidebar. Start with files and notes on your Mac, then add Gmail, Google Drive or Dropbox if you want, signing in with the accounts you already have. Indexing starts on its own.</li>
+      </ol>
+
+      <h2>What the installer does</h2>
+      <ul>
+        <li>Installs Olympus for your macOS user only. It needs no administrator password.</li>
+        <li>Starts Olympus in the background as a per-user login item (a LaunchAgent), so it is running whenever you are logged in.</li>
+        <li>Downloads a small built-in model used to search your items on the Mac.</li>
+        <li>Opens the approval page. Nothing from your files leaves the Mac during install.</li>
+      </ul>
+
+      <h2>Install manually</h2>
+      <div class="note">
+        <p><strong>Coming soon.</strong> A signed installer for macOS is not available yet. Until it is, there is no supported manual install command, and this section is a placeholder. Please do not run install commands for Olympus from any other source.</p>
+      </div>
+      <pre><code># Coming soon: not available yet
+curl -fsSL https://olympusplugin.ai/install.sh | sh</code></pre>
+
+      <h2>Check that it is running</h2>
+      <p>In Terminal on your Mac:</p>
+      <pre><code>olympus engine status</code></pre>
+      <p>Look for <code>"ok": true</code>. If something is missing, the <code>missing</code> list says what to do next. See also <a href="/help/mac-offline/">what to do when ChatGPT says your Mac is offline</a>.</p>
+
+      <h2>Uninstall</h2>
+      <p>See <a href="/privacy/#controls">Your controls</a> in the privacy policy for how to disconnect ChatGPT, stop Olympus and delete its data from your Mac.</p>
+    </div>
+  </main>
+  <footer class="site">
+    <div class="wrap">
+      <ul>
+        <li><a href="/install/">Install</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/">Privacy</a></li>
+        <li><a href="/terms/">Terms</a></li>
+      </ul>
+      <p>Olympus is published by Open Coordination Unlimited, Inc. Olympus is not made by or affiliated with OpenAI.</p>
+    </div>
+  </footer>
+</body>
+</html>

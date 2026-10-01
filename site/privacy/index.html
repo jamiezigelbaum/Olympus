@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Olympus privacy policy (draft)</title>
+  <meta name="description" content="Draft privacy policy for Olympus. Not yet in effect.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M2 27 12.5 9l4.2 7.2L20 11l10 16Z" fill="currentColor"/></svg><span>Olympus</span></a>
+      <nav class="site" aria-label="Main">
+        <ul>
+        <li><a href="/">Home</a></li>
+        <li><a href="/install/">Install</a></li>
+        <li><a href="/help/mac-offline/">Help</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/" aria-current="page">Privacy</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <div class="draft" role="note">
+        <strong>Draft — not yet in effect.</strong>
+        <p>This privacy policy is a draft for legal review. It does not yet govern your use of Olympus. Items marked <span class="confirm">[CONFIRM]</span> are still being checked.</p>
+      </div>
+
+      <h1>Privacy policy</h1>
+      <p class="meta">Draft of 1 October 2026. Effective date: <span class="confirm">[CONFIRM]</span></p>
+
+      <p>Olympus is a knowledge engine that runs on your Mac and answers questions about your own mail, files and notes, including questions you ask in ChatGPT. It is published by Open Coordination Unlimited, Inc. ("OCU", "we", "us"). This policy explains what data Olympus processes, where, why, who receives it, how long it is kept, and how you control it.</p>
+
+      <p><strong>In short:</strong> your mail, files, notes and the index Olympus builds from them stay on your Mac. We do not have a copy. When you ask a question in ChatGPT, ChatGPT receives the question it sent, plus answers and excerpts built only from items Olympus has tiered Public or Personal, with citations. It never receives Private or Secret items. The Olympus relay that connects ChatGPT to your Mac passes requests through without storing or logging their content.</p>
+
+      <h2 id="where">Where your data is processed</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th scope="col">Place</th><th scope="col">What is processed there</th><th scope="col">Who controls it</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Your Mac</td>
+              <td>Everything Olympus reads from the sources you connect; the search index, built-in model and tier labels it builds; sign-in tokens for the accounts you connect; Olympus settings and logs.</td>
+              <td>You. OCU has no access.</td>
+            </tr>
+            <tr>
+              <td>The Olympus relay (<code>mcp.olympusplugin.ai</code>)</td>
+              <td>Requests between ChatGPT and your Mac, in transit only. See <a href="#relay">The relay</a>.</td>
+              <td>OCU, on a server rented from Hetzner Online GmbH in Germany <span class="confirm">[CONFIRM provider and location wording]</span>.</td>
+            </tr>
+            <tr>
+              <td>ChatGPT (OpenAI)</td>
+              <td>Your conversation, and what Olympus returns to it. See <a href="#chatgpt">What ChatGPT receives</a>.</td>
+              <td>OpenAI, under OpenAI's own terms and privacy policy.</td>
+            </tr>
+            <tr>
+              <td>Accounts you connect (for example Google or Dropbox)</td>
+              <td>Your Mac reads your items directly from these services using access you grant.</td>
+              <td>Those providers, under your agreement with them.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="tiers">The four tiers</h2>
+      <p>Olympus labels every item, one by one, as Public, Personal, Private or Secret. Item names and titles are labeled separately from their contents, and are Personal by default.</p>
+      <ul>
+        <li><strong>Public</strong> and <strong>Personal</strong> items may be used to answer questions in ChatGPT.</li>
+        <li><strong>Private</strong> items (for example health, money, legal and identity matters) are never sent to ChatGPT, not even as summaries. They can be answered only on your Mac with a local model, or by Venice if you choose to set it up (see <a href="#third-parties">Third parties</a>).</li>
+        <li><strong>Secret</strong> items (for example passwords, recovery codes and private keys) are removed from the index and are never given to any model. Olympus keeps only a record that a Secret item exists.</li>
+      </ul>
+      <p>Labeling is automatic and can be wrong. Olympus is designed to err towards the more protective tier when it is unsure <span class="confirm">[CONFIRM: matches shipped classifier defaults]</span>.</p>
+
+      <h2 id="categories">Categories of data</h2>
+      <h3>Processed only on your Mac</h3>
+      <ul>
+        <li><strong>Content from sources you connect:</strong> files and notes on your Mac, and, if you connect them, mail and documents from accounts such as Gmail, Google Drive and Dropbox. This can include any information those items contain.</li>
+        <li><strong>Derived data:</strong> the search index, text extracted from documents, vector representations made by the built-in model, tier labels and their reasons.</li>
+        <li><strong>Credentials:</strong> the sign-in tokens that let Olympus read the accounts you connect, and the keys and tokens that link your Mac to ChatGPT.</li>
+        <li><strong>Settings and logs:</strong> your Olympus settings and local log files. Olympus's logs are designed not to contain message content or tokens.</li>
+      </ul>
+
+      <h3 id="chatgpt">What ChatGPT (OpenAI) receives</h3>
+      <ul>
+        <li>The questions ChatGPT sends to Olympus on your behalf.</li>
+        <li>Answers, and excerpts of evidence, built only from Public and Personal items.</li>
+        <li>Citations for those items: source name, and title, date and link where available.</li>
+        <li>When the only relevant items are Private: one fixed sentence saying the answer stays on your Mac. No titles, counts or content.</li>
+        <li>Status shown in the Olympus dashboard: which kinds of sources are connected, indexing progress, and anything that needs your attention. It never includes Private or Secret items or folder names.</li>
+      </ul>
+      <p>What OpenAI does with your ChatGPT conversations, including this material, is governed by OpenAI's terms and privacy policy and your ChatGPT settings, not by this policy.</p>
+
+      <h3 id="relay">What the relay processes</h3>
+      <p>ChatGPT reaches your Mac through the relay at <code>mcp.olympusplugin.ai</code>. Your Mac keeps an encrypted, outgoing connection open to the relay, and the relay forwards ChatGPT's requests along it.</p>
+      <ul>
+        <li><strong>In transit:</strong> the relay ends the encrypted connection from ChatGPT (TLS), so request and response contents pass through its memory while being forwarded. It does not store them.</li>
+        <li><strong>Not logged:</strong> request and response bodies, tokens and credentials, query strings, and caller IP addresses are not logged. The web server in front of the relay keeps no access log.</li>
+        <li><strong>Logged:</strong> short operational events (for example "session ready" or "request refused") with a time and a short one-way hash of your install's identifier.</li>
+        <li><strong>Stored:</strong> a registry entry for each install: a random install identifier, the install's public key, and timestamps. It holds no name, email, IP address, account or token.</li>
+        <li><strong>In memory only:</strong> IP addresses and counters used to limit abuse, and which installs are online.</li>
+        <li>The relay does not create, check or store the tokens ChatGPT uses. Your Mac does.</li>
+      </ul>
+
+      <h3>When you are not using Olympus with ChatGPT</h3>
+      <p>Our website, olympusplugin.ai, uses no cookies, analytics or trackers, loads nothing from other sites, and keeps no access log <span class="confirm">[CONFIRM hosting log settings at launch]</span>.</p>
+
+      <h2 id="purposes">Why we process data</h2>
+      <ul>
+        <li>To answer your questions from your own sources, as you ask.</li>
+        <li>To connect ChatGPT to your Mac, and only to your Mac, once you approve it there.</li>
+        <li>To keep the relay secure and available: rate limits, abuse prevention, and fixing faults.</li>
+        <li>To respond when you contact support.</li>
+      </ul>
+      <p>We do not sell your data, use it for advertising, build profiles of you, or use your content to train models. <span class="confirm">[CONFIRM legal bases for processing, if a GDPR basis statement is required]</span></p>
+
+      <h2 id="third-parties">Third parties and recipients</h2>
+      <ul>
+        <li><strong>OpenAI</strong> provides ChatGPT, which you use to ask Olympus questions. It receives what is described in <a href="#chatgpt">What ChatGPT receives</a>.</li>
+        <li><strong>Google and Dropbox</strong> (and other sources you choose) are reached directly from your Mac through their official APIs, with access you grant using your own accounts. Olympus asks for read access <span class="confirm">[CONFIRM exact scopes]</span>. You can withdraw that access in your account settings with those providers at any time. <span class="confirm">[CONFIRM: Google API Services User Data Policy / Limited Use disclosure, if required for the scopes used]</span></li>
+        <li><strong>Venice (optional).</strong> If you choose to connect a Venice account, Olympus may send the text of Private items relevant to a question to Venice to produce an answer, or to build search vectors. It does this only if you set it up. Venice's handling is governed by its own terms <span class="confirm">[CONFIRM Venice retention and model category wording]</span>.</li>
+        <li><strong>Other providers you configure yourself</strong>, for example an embedding provider, receive only what that setting sends <span class="confirm">[CONFIRM which optional providers the ChatGPT edition offers]</span>.</li>
+        <li><strong>Hosting:</strong> the relay and website run on a server rented from Hetzner Online GmbH <span class="confirm">[CONFIRM]</span>. Email to support is handled by our email provider <span class="confirm">[CONFIRM provider]</span>.</li>
+        <li><strong>Legal requests:</strong> we may disclose the limited data we hold (see <a href="#relay">relay</a>) where the law requires it. We cannot disclose your content: we do not have it.</li>
+      </ul>
+
+      <h2 id="retention">Retention</h2>
+      <ul>
+        <li><strong>On your Mac:</strong> until you delete it. Uninstalling Olympus stops it but keeps its data until you delete that too (see <a href="#controls">Your controls</a>).</li>
+        <li><strong>Answers in progress:</strong> a pending answer is held on your Mac for about 15 minutes after it is ready, so ChatGPT can collect it.</li>
+        <li><strong>Relay registry:</strong> until the install is removed. An install that has not connected for 90 days is removed automatically.</li>
+        <li><strong>Relay event logs:</strong> <span class="confirm">[CONFIRM retention period for system logs on the relay server]</span>.</li>
+        <li><strong>Support email:</strong> <span class="confirm">[CONFIRM]</span>.</li>
+        <li><strong>OpenAI and the providers you connect</strong> keep data according to their own policies.</li>
+      </ul>
+
+      <h2 id="controls">Your controls</h2>
+      <ul>
+        <li><strong>Choose sources:</strong> connect and disconnect sources in the Olympus dashboard.</li>
+        <li><strong>Disconnect ChatGPT:</strong> remove Olympus in ChatGPT, or revoke ChatGPT's access on your Mac from the Olympus dashboard or with <code>olympus connections list</code> and <code>olympus connections revoke &lt;id&gt;</code>. After revoking, ChatGPT cannot reach your Mac until you approve it again on the Mac.</li>
+        <li><strong>Revoke account access:</strong> remove Olympus's access in your Google or Dropbox account settings.</li>
+        <li><strong>Stop Olympus:</strong> <code>olympus engine uninstall</code> stops Olympus and removes its login item. It keeps your settings and data.</li>
+        <li><strong>Export your data:</strong> <code>olympus data export --output &lt;folder&gt;</code>.</li>
+        <li><strong>Delete your data:</strong> <code>olympus data delete --all</code> deletes the index and data Olympus stored on your Mac (add <code>--dry-run</code> first to see what it will remove). This cannot be undone.</li>
+        <li><strong>Relay registry:</strong> ask us to remove your install's registry entry by emailing support; otherwise it is removed after 90 days without a connection.</li>
+      </ul>
+      <p>Depending on where you live, you may have rights to access, correct, delete or object to processing of personal data we hold, and to complain to a regulator. Because your content stays on your Mac, the data we hold about you is limited to what is described above. To exercise a right, email us. <span class="confirm">[CONFIRM jurisdiction-specific rights text: GDPR, UK GDPR, CCPA/CPRA]</span></p>
+
+      <h2 id="sensitive">Sensitive information</h2>
+      <p>Your own sources may contain sensitive information, such as health or financial records, government identifiers, or passwords. Olympus does not ask for this information and OCU does not collect it. Olympus is designed to label it Private or Secret so it is not sent to ChatGPT. Please do not paste such information into ChatGPT yourself.</p>
+
+      <h2 id="security">Security</h2>
+      <p>Connections are encrypted in transit. ChatGPT must be approved on your Mac before it can reach it, and only ChatGPT's published client is accepted. The relay cannot issue tokens or approve new connections. No system is perfectly secure; if we learn of a breach affecting you, we will tell you as the law requires.</p>
+
+      <h2 id="children">Children</h2>
+      <p>Olympus is not intended for children under 13, and we do not knowingly process data from children under 13. Use of Olympus in ChatGPT is also subject to OpenAI's age requirements <span class="confirm">[CONFIRM: whether to set 18+ given personal mail and finance data; ChatGPT plugin guidelines require suitability for ages 13–17]</span>. If you believe a child under 13 has used Olympus, contact us.</p>
+
+      <h2 id="transfers">International transfers</h2>
+      <p>The relay runs in Germany <span class="confirm">[CONFIRM]</span>. Requests from ChatGPT pass through it from wherever OpenAI processes them. <span class="confirm">[CONFIRM transfer mechanism wording]</span></p>
+
+      <h2 id="changes">Changes</h2>
+      <p>We will post changes on this page with a new date, and for material changes we will give notice in the Olympus dashboard or by other reasonable means before they take effect.</p>
+
+      <h2 id="contact">Contact</h2>
+      <p>Open Coordination Unlimited, Inc.<br>
+      <span class="confirm">[CONFIRM postal address]</span><br>
+      <a href="mailto:support@olympusplugin.ai">support@olympusplugin.ai</a></p>
+    </div>
+  </main>
+  <footer class="site">
+    <div class="wrap">
+      <ul>
+        <li><a href="/install/">Install</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/">Privacy</a></li>
+        <li><a href="/terms/">Terms</a></li>
+      </ul>
+      <p>Olympus is published by Open Coordination Unlimited, Inc. Olympus is not made by or affiliated with OpenAI.</p>
+    </div>
+  </footer>
+</body>
+</html>

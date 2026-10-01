@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChatGPT says your Mac is offline - Olympus help</title>
+  <meta name="description" content="What to do when ChatGPT says Olympus cannot reach your Mac.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M2 27 12.5 9l4.2 7.2L20 11l10 16Z" fill="currentColor"/></svg><span>Olympus</span></a>
+      <nav class="site" aria-label="Main">
+        <ul>
+        <li><a href="/">Home</a></li>
+        <li><a href="/install/">Install</a></li>
+        <li><a href="/help/mac-offline/" aria-current="page">Help</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/">Privacy</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>ChatGPT says your Mac is offline</h1>
+      <p class="lede">Olympus answers from your Mac, so your Mac has to be awake, online and running Olympus. When it is not, ChatGPT shows "Your Mac is offline" and answers pause. Nothing is lost; answers resume when the Mac is back.</p>
+
+      <h2>1. Wake your Mac</h2>
+      <ul>
+        <li>Open the lid or press a key, and log in.</li>
+        <li>Check the Mac is connected to the internet.</li>
+        <li>If your Mac often sleeps while you are away, you can keep it awake while plugged in: in System Settings, open <strong>Battery</strong> (or <strong>Energy</strong>) and turn on the option that prevents automatic sleeping when the display is off.</li>
+      </ul>
+
+      <h2>2. Check Olympus is running</h2>
+      <p>Open Terminal on your Mac and run:</p>
+      <pre><code>olympus engine status</code></pre>
+      <ul>
+        <li><code>"ok": true</code> means the engine is running and answering on your Mac.</li>
+        <li>Under <code>relay</code>, the <code>state</code> shows whether your Mac is linked to the Olympus relay.</li>
+        <li>If <code>missing</code> lists anything, follow what it says. For example, "The engine agent is installed but not loaded" means running <code>olympus engine install</code> again.</li>
+      </ul>
+      <p>If the engine is installed but stuck, restart it:</p>
+      <pre><code>olympus engine restart</code></pre>
+      <p>To see recent log lines (they contain no message content or tokens):</p>
+      <pre><code>olympus engine logs --lines 50</code></pre>
+
+      <h2>3. Try again in ChatGPT</h2>
+      <p>Ask your question again, or open the Olympus dashboard in the ChatGPT sidebar. It shows whether your Mac is connected and when it was last seen.</p>
+
+      <h2>Still offline?</h2>
+      <ul>
+        <li>A VPN, firewall or network filter on the Mac may block the outgoing connection to <code>mcp.olympusplugin.ai</code>. Olympus needs only an outgoing HTTPS connection; it opens no ports on your Mac.</li>
+        <li>If you have just uninstalled and reinstalled Olympus, you may need to approve ChatGPT again on your Mac.</li>
+        <li>Otherwise, <a href="/support/">contact support</a> and include the output of <code>olympus engine status</code>. Check it first: it contains file paths on your Mac, but no message content.</li>
+      </ul>
+    </div>
+  </main>
+  <footer class="site">
+    <div class="wrap">
+      <ul>
+        <li><a href="/install/">Install</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/">Privacy</a></li>
+        <li><a href="/terms/">Terms</a></li>
+      </ul>
+      <p>Olympus is published by Open Coordination Unlimited, Inc. Olympus is not made by or affiliated with OpenAI.</p>
+    </div>
+  </footer>
+</body>
+</html>
