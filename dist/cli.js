@@ -105327,7 +105327,7 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     needsYou.push({
       id: "model:embedding",
       sentence: embedding.kind === "built_in" ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.embedding[embedding.failedReason ?? "unknown"] : DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention,
-      fix: embedding.kind === "built_in" ? retryFix("embedding") : checkAgainFix()
+      fix: embedding.kind === "built_in" ? retryFix("embedding") : checkAgainFix(onMacHelp("search"))
     });
   }
   const answers = answersFromModelSetup(view.model_setup) ?? builtInAnswers(options.privateModel);
@@ -105336,7 +105336,7 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     needsYou.push({
       id: "model:answers",
       sentence: answers.kind === "built_in" ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.answers[options.privateModel?.failedReason ?? "unknown"] : DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention,
-      fix: answers.kind === "built_in" ? retryFix("answers") : checkAgainFix()
+      fix: answers.kind === "built_in" ? retryFix("answers") : checkAgainFix(onMacHelp("answers"))
     });
   }
   if (options.privacy && !options.privacy.configured) {
@@ -105363,7 +105363,8 @@ function buildChatGptDashboardViewModel(view, options = {}) {
         label: DASHBOARD_CHATGPT_SETUP_LABELS.changeModels,
         tool: DASHBOARD_TOOL_NAME,
         args: {},
-        disabledReason: DASHBOARD_CHATGPT_VOCABULARY.changeModelsOnMac
+        disabledReason: DASHBOARD_CHATGPT_VOCABULARY.changeModelsOnMac,
+        href: onMacHelp("models")
       }
     },
     ...options.privacy ? {
@@ -105434,7 +105435,7 @@ function attentionItem(definition, card, degraded, connecting, progress) {
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
   const reauth = card.connection.state === "reauth_required" || progress?.stalledReason === "waiting_for_credentials" || card.connection.state !== "connected" && card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card);
   const reconnect = reauth ? reconnectFix(definition) : undefined;
-  const fix = reconnect ?? (scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : checkAgainFix());
+  const fix = reconnect ?? (reauth ? checkAgainFix(onMacHelp("reconnect")) : undefined) ?? (scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 function connectingFor(definition, card, now) {
@@ -105488,6 +105489,11 @@ function measuredSourceProgress(card, scrubbed, embedding, status, now) {
     if (phase.id === "embedding")
       counts.indexing = entry;
   }
+  const embeddingApplies = !phases.some((phase) => phase.id === "embedding" && phase.not_applicable === true);
+  if (counts.indexing)
+    counts.searchable = counts.indexing;
+  else if (counts.reading)
+    counts.searchable = embeddingApplies ? { done: 0, total: counts.reading.total } : counts.reading;
   const embeddingBehind = (scrubbed.embedding_backlog?.missing_chunks ?? 0) > 0 || scrubbed.embedding_backlog?.refresh_needed === true;
   const open6 = phases.find((phase) => phase.state !== "done" && !(phase.unmeasured === true && !embeddingBehind));
   if (!open6) {
@@ -105533,8 +105539,11 @@ function stalledReason(input) {
     return "provider_unavailable";
   return;
 }
-function checkAgainFix() {
-  return { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {} };
+function checkAgainFix(href) {
+  return { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {}, ...href ? { href } : {} };
+}
+function onMacHelp(section) {
+  return `${ON_MAC_HELP_URL}#${section}`;
 }
 function retryFix(model) {
   return { label: DASHBOARD_CHATGPT_PICKER_COPY.tryAgain, tool: MODEL_RETRY_TOOL_NAME, args: { model } };
@@ -105545,7 +105554,13 @@ function oauthSource(definition) {
 }
 function connectFix(definition) {
   const source = oauthSource(definition);
-  return source ? { label: DASHBOARD_CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : { label: DASHBOARD_CHATGPT_SETUP_LABELS.connect, tool: DASHBOARD_TOOL_NAME, args: {}, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac };
+  return source ? { label: DASHBOARD_CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : {
+    label: DASHBOARD_CHATGPT_SETUP_LABELS.connect,
+    tool: DASHBOARD_TOOL_NAME,
+    args: {},
+    disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac,
+    href: onMacHelp("connect")
+  };
 }
 function scopePending(card) {
   return card.scope_selection?.connected === true && card.scope_selection.status === "scope_pending";
@@ -105627,6 +105642,7 @@ function overallProgress(rows) {
   const listing = { done: 0, any: false };
   const reading = { done: 0, total: 0, any: false };
   const indexing = { done: 0, total: 0, any: false };
+  const searchable = { done: 0, total: 0 };
   let ownDone = 0;
   let ownTotal = 0;
   for (const { card, progress, counts } of open6) {
@@ -105644,6 +105660,10 @@ function overallProgress(rows) {
       indexing.done += counts.indexing.done;
       indexing.total += counts.indexing.total;
     }
+    if (counts.searchable) {
+      searchable.done += Math.min(counts.searchable.done, counts.searchable.total);
+      searchable.total += counts.searchable.total;
+    }
     ownTotal += progress.total;
     ownDone += progress.total > 0 ? Math.min(progress.done, progress.total) : 0;
     if (card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || progress.stage === "listing")
@@ -105660,7 +105680,7 @@ function overallProgress(rows) {
     details.push({ stage: STAGE_DETAIL.reading, unit, done: reading.done, total: reading.total });
   if (indexing.any)
     details.push({ stage: STAGE_DETAIL.indexing, unit, done: indexing.done, total: indexing.total });
-  const [done, total] = reading.total > 0 ? [reading.done, reading.total] : [ownDone, ownTotal];
+  const [done, total] = searchable.total > 0 ? [searchable.done, searchable.total] : [ownDone, ownTotal];
   return {
     unit,
     phase: initial ? "initial" : "refresh",
@@ -105789,7 +105809,7 @@ function isoOrUndefined(value) {
 function isoOrNow(value, now) {
   return isoOrUndefined(value) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, FIXABLE_STALLS, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE, PRIVATE_MODEL_INSTALLING;
+var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, FIXABLE_STALLS, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE, ON_MAC_HELP_URL = "https://olympusplugin.ai/help/on-your-mac/", PRIVATE_MODEL_INSTALLING;
 var init_dashboard_view_model = __esm(() => {
   init_phases();
   init_source_dashboard();
@@ -107287,14 +107307,14 @@ function modelRetryToolResult(result) {
 function privacyToolResult(settings, status, confirmation) {
   const copy = copyPrivacySettings(settings);
   const summary = {
-    status: status === "saved" ? "saved" : "current",
+    status: status === "saved" || status === "conflict" ? status : "current",
     configured: copy.configured,
     description: copy.description,
     ruleCount: copy.rules.length,
     pendingCount: copy.pendingCount
   };
   const parts = [
-    summary.status === "saved" ? "Saved what is private for the owner." : summary.configured ? "The owner has set what is private for them." : "The owner has not said yet what is private for them."
+    summary.status === "saved" ? "Saved what is private for the owner." : summary.status === "conflict" ? "Not saved: the privacy settings changed since they were shown. The Olympus panel shows the current ones to save again." : summary.configured ? "The owner has set what is private for them." : "The owner has not said yet what is private for them."
   ];
   if (summary.ruleCount > 0)
     parts.push(`${summary.ruleCount} folder, label or sender rule${summary.ruleCount === 1 ? "" : "s"} keep items Private; they are shown to the owner in the Olympus panel.`);
@@ -107323,7 +107343,8 @@ function copyPrivacySettings(settings) {
       const display = text(rule.display);
       return [{ kind: "folder", source_id: sourceId, key: opaque(rule.key), ...display ? { display } : {} }];
     }),
-    pendingCount: whole(settings.pendingCount)
+    pendingCount: whole(settings.pendingCount),
+    ...typeof settings.revision === "string" && settings.revision ? { revision: opaque(settings.revision).slice(0, 64) } : {}
   };
 }
 function scopeSummary(list) {
@@ -107378,6 +107399,8 @@ function copyScopeList(list) {
         ...finite2(node.file_count) ? { file_count: whole(node.file_count) } : {}
       })),
       ...list.next_cursor ? { next_cursor: opaque(list.next_cursor) } : {},
+      ...list.next_cursor && finite2(list.remaining) ? { remaining: whole(list.remaining) } : {},
+      ...list.truncated === true ? { truncated: true } : {},
       selections: (list.selections ?? []).slice(0, MAX_SCOPE_NODES).map(copySelection),
       whole_account_selected: list.whole_account_selected === true
     };
@@ -107735,9 +107758,12 @@ async function callSetupTool(name, args, backend) {
         return privacyToolResult(visible, "current", issuePrivacyConfirmation(backend));
       }
       case PRIVACY_SET_TOOL_NAME: {
-        const { confirmation, ...fields } = args;
+        const { confirmation, revision, ...fields } = args;
         if (confirmation !== undefined && typeof confirmation !== "string")
           throw new ChatGptSurfaceError("invalid_params");
+        if (revision !== undefined && (typeof revision !== "string" || !revision || revision.length > 64)) {
+          throw new ChatGptSurfaceError("invalid_params");
+        }
         let update;
         try {
           update = parsePrivacyProfileInput(fields);
@@ -107745,6 +107771,11 @@ async function callSetupTool(name, args, backend) {
           throw new ChatGptSurfaceError("invalid_params");
         }
         const secrets = secretLocations(backend);
+        if (revision !== undefined) {
+          const current = backend.privacySettings();
+          if (current.revision !== revision)
+            return privacyToolResult(visiblePrivacy(current, secrets), "conflict");
+        }
         const confirmed = confirmation !== undefined && privacyConfirmationValid(backend, confirmation);
         if (!confirmed && lowersPrivacy(update, visiblePrivacy(backend.privacySettings(), secrets))) {
           throw new ChatGptSurfaceError("privacy_owner_only");
@@ -107846,13 +107877,14 @@ async function browseWholeLevel(backend, sourceId, parentKey) {
   }
   const unique2 = new Map(nodes.map((node) => [node.key, node]));
   const { next_cursor: _providerCursor, ...rest } = first;
-  return { ...rest, nodes: [...unique2.values()] };
+  const truncated = Boolean(cursor) && !seen.has(cursor);
+  return { browse: { ...rest, nodes: [...unique2.values()] }, truncated };
 }
 function compareFolders(a, b) {
   return FOLDER_COLLATOR.compare(a.name, b.name) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 }
-function sortedFolderPage(browse, secrets, parentKey, after, ancestorKeys = []) {
-  const list = folderList(browse, secrets, ancestorKeys);
+function sortedFolderPage(level, secrets, parentKey, after, ancestorKeys = []) {
+  const list = folderList(level.browse, secrets, ancestorKeys);
   const sorted = [...list.nodes].sort(compareFolders);
   const rest = after ? sorted.filter((node) => compareFolders(node, after) > 0) : sorted;
   const page = rest.slice(0, SCOPE_LIST_PAGE_SIZE);
@@ -107861,7 +107893,8 @@ function sortedFolderPage(browse, secrets, parentKey, after, ancestorKeys = []) 
   return {
     ...withoutCursor,
     nodes: page,
-    ...rest.length > page.length && last ? { next_cursor: encodeSortedCursor(parentKey, last) } : {}
+    ...rest.length > page.length && last ? { next_cursor: encodeSortedCursor(parentKey, last), remaining: rest.length - page.length } : {},
+    ...level.truncated ? { truncated: true } : {}
   };
 }
 function encodeSortedCursor(parentKey, last) {
@@ -107923,18 +107956,28 @@ function folderList(browse, secrets, ancestorKeys = []) {
     account_generation: browse.account_generation,
     scope_revision: browse.scope_revision,
     status: browse.status,
-    nodes: browse.nodes.filter((node) => !isSecretFolder(secrets, node.key, node.parent_key ? [...ancestorKeys, node.parent_key] : ancestorKeys)).map((node) => ({
-      key: node.key,
-      ...node.parent_key ? { parent_key: node.parent_key } : {},
-      name: node.name,
-      kind: "folder",
-      has_children: node.has_children,
-      selectable: node.selectable
-    })),
+    nodes: browse.nodes.filter((node) => !isSecretFolder(secrets, node.key, node.parent_key ? [...ancestorKeys, node.parent_key] : ancestorKeys)).map((node) => {
+      const measured = node;
+      const sizeBytes = measurement(measured.size_bytes);
+      const fileCount = measurement(measured.file_count);
+      return {
+        key: node.key,
+        ...node.parent_key ? { parent_key: node.parent_key } : {},
+        name: node.name,
+        kind: "folder",
+        has_children: node.has_children,
+        selectable: node.selectable,
+        ...sizeBytes !== undefined ? { size_bytes: sizeBytes } : {},
+        ...fileCount !== undefined ? { file_count: fileCount } : {}
+      };
+    }),
     ...browse.next_cursor ? { next_cursor: browse.next_cursor } : {},
     selections: browse.selections.filter((selection) => !isSecretFolder(secrets, selection.key, selection.ancestor_keys)).map((selection) => ({ ...selection })),
     whole_account_selected: browse.whole_account_selected
   };
+}
+function measurement(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
 }
 function mailList(browse, secrets) {
   return {
@@ -108222,7 +108265,8 @@ var init_setup_tools = __esm(() => {
       properties: {
         description: { type: "string", maxLength: 2000, description: "The user's own words about what is private for them." },
         rules: { type: "array", items: PRIVACY_RULE_SCHEMA, maxItems: 100 },
-        confirmation: { type: "string", maxLength: 128, description: "The panel's confirmation from olympus_privacy_get." }
+        confirmation: { type: "string", maxLength: 128, description: "The panel's confirmation from olympus_privacy_get." },
+        revision: { type: "string", maxLength: 64, description: "The revision from olympus_privacy_get; a save against changed settings is refused." }
       },
       additionalProperties: false
     },
@@ -111517,8 +111561,10 @@ var init_handoff = __esm(() => {
 var exports_setup_backend = {};
 __export(exports_setup_backend, {
   readChatGptPrivacySettings: () => readChatGptPrivacySettings,
+  privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
+import { createHash as createHash58 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -111535,8 +111581,15 @@ function readChatGptPrivacySettings(env, pendingCount) {
     configured: profile !== undefined,
     description: profile?.description ?? "",
     rules: (profile?.rules ?? []).flatMap(privacyRuleView),
-    pendingCount
+    pendingCount,
+    revision: privacyRevision(profile)
   };
+}
+function privacyRevision(profile) {
+  if (!profile)
+    return "prv1.unset";
+  const digest2 = createHash58("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  return `prv1.${digest2.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;

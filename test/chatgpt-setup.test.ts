@@ -919,8 +919,10 @@ describe('privacy settings (olympus_privacy_get / olympus_privacy_set)', () => {
       expect(privacyMeta(b)).toMatchObject({ revision: afterA, rules: [{ kind: 'folder', key: '/health' }] });
       expect((await call(client, 'olympus_privacy_get', {})).structuredContent).toMatchObject({ ruleCount: 1 });
       // Saving again from the current settings succeeds; reads keep a stable revision.
-      expect(privacyMeta(await call(client, 'olympus_privacy_get', {})).revision).toBe(afterA);
-      const retried = await call(client, 'olympus_privacy_set', { revision: afterA, description: 'Health.' });
+      const fresh = privacyMeta(await call(client, 'olympus_privacy_get', {}));
+      expect(fresh.revision).toBe(afterA);
+      // Changing the description lowers protection: it needs the panel's confirmation too.
+      const retried = await call(client, 'olympus_privacy_set', { revision: afterA, confirmation: fresh.confirmation as string, description: 'Health.' });
       expect(retried.structuredContent).toMatchObject({ status: 'saved', description: 'Health.', ruleCount: 1 });
       // A malformed revision is invalid input.
       expect((await call(client, 'olympus_privacy_set', { revision: 7, description: 'x' })).isError).toBe(true);

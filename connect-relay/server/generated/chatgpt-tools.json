@@ -733,6 +733,11 @@
             "type": "string",
             "maxLength": 128,
             "description": "The panel's confirmation from olympus_privacy_get."
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "The revision from olympus_privacy_get; a save against changed settings is refused."
           }
         },
         "additionalProperties": false
