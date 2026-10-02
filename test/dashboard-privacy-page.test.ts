@@ -25,7 +25,7 @@ import { renderDashboardHtmlRoute } from '../src/workers/dashboard/index.ts';
 import { renderDashboardPrivacyPage } from '../src/workers/dashboard/pages/privacy.ts';
 import { standaloneDashboardControllerScript } from '../src/workers/dashboard/components.ts';
 import { createEmailSourceWorker, type DashboardPrivacyOutcome } from '../src/workers/email-source/index.ts';
-import { lowersPrivacy, privacyRuleIdentity, privacyRuleProblem } from '../src/workers/dashboard/shared-privacy.ts';
+import { lowersPrivacy, privacyLogic, privacyRuleIdentity } from '../src/workers/dashboard/shared-privacy.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 
 const NOW = DASHBOARD_PREVIEW_NOW;
@@ -113,13 +113,14 @@ describe('the privacy rules both editors share', () => {
     expect(lowersPrivacy({ description: 'health and money' }, current as never)).toBe(true);
   });
 
-  test('each kind of rule has its own shape, checked the same way everywhere', () => {
-    expect(privacyRuleProblem({ kind: 'sender', source_id: 'gmail.email', value: '@clinic.example' })).toBeUndefined();
-    expect(privacyRuleProblem({ kind: 'sender', source_id: 'gmail.email', value: 'nope' })).toBeDefined();
-    expect(privacyRuleProblem({ kind: 'folder', source_id: 'dropbox.files', key: 'no-slash' })).toBeDefined();
-    expect(privacyRuleProblem({ kind: 'folder', source_id: 'google_drive.docs', key: 'opaque-id' })).toBeUndefined();
-    expect(privacyRuleProblem({ kind: 'label', source_id: 'gmail.email', key: 'L1' })).toBeDefined();
-    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules: [{ kind: 'folder', source_id: 'dropbox.files', key: 'x' }] })).toThrow('path');
+  test('the Gateway refuses a rule without its kind\'s shape, by the editors\' own rule', () => {
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules: [{ kind: 'label', source_id: 'gmail.email', key: 'L1' }] }))
+      .toThrow('shape of its kind');
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules: [{ kind: 'folder', source_id: 'gmail.email', key: '/x' }] }))
+      .toThrow('shape of its kind');
+    // A folder saved without its name is a valid rule.
+    expect(parseDashboardControlParams({ action: 'save_privacy', rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/x' }] }))
+      .toEqual({ action: 'save_privacy', rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/x' }] });
   });
 });
 
@@ -325,6 +326,7 @@ describe('the Privacy editor in the browser', () => {
       signal: abort.signal,
       signature: 'x',
       pollIntervalMs: 0,
+      privacyLogic,
     });
     const click = (selector: string) => (root.querySelector(selector) as HTMLElement).click();
     const submit = async () => {
@@ -344,8 +346,8 @@ describe('the Privacy editor in the browser', () => {
   test('an additive save goes straight out with the revision and no confirmation, every saved rule kept byte for byte', async () => {
     const sent: OlympusDashboardControlParams[] = [];
     const { root, reads, controller, click, submit, abort } = mount(async (params) => { sent.push(params); return ok(); });
-    // A rule saved without its name shows a name from its key and stays nameless.
-    expect(root.textContent).toContain('2025');
+    // A rule saved without its name shows its account, as the ChatGPT panel does, and stays nameless.
+    expect(root.textContent).toContain('A folder in Dropbox');
     click('[data-privacy-add="sender"]');
     const field = root.querySelector('[data-privacy-sender]') as HTMLInputElement;
     field.value = 'not an address';
@@ -377,7 +379,7 @@ describe('the Privacy editor in the browser', () => {
     await submit();
     expect(sent).toEqual([]);
     expect(root.querySelector('[data-privacy-confirm]')!.textContent).toContain('This removes protection from Lawyer.');
-    // Keep editing: nothing is sent, and undoing the removal needs no confirmation.
+    // Cancel: nothing is sent, and undoing the removal needs no confirmation.
     click('[data-privacy-confirm-no]');
     expect(root.querySelector('[data-privacy-confirm]')).toBeNull();
     (row('Lawyer').querySelector('[data-privacy-remove]') as HTMLElement).click();
@@ -398,21 +400,22 @@ describe('the Privacy editor in the browser', () => {
     await submit();
     expect(sent).toEqual([]);
     expect(root.querySelector('[data-privacy-confirm]')!.textContent)
-      .toContain('This changes your own words, which Olympus reads to keep items private.');
+      .toContain('This changes your description, which decides what Olympus keeps private.');
     click('[data-privacy-confirm-yes]');
     await settle();
     expect(sent[0]).toMatchObject({ description: 'My health and money', confirm: true, revision: 'rev-1' });
     abort.abort();
   });
 
-  test('a conflict keeps the draft, and applying it again asks about what it would now remove', async () => {
+  test('a conflict keeps the draft and shows what is saved now; applying again replays the draft onto it', async () => {
     const sent: OlympusDashboardControlParams[] = [];
+    const elsewhere = { kind: 'sender', source_id: 'gmail.email', value: 'new@elsewhere.example' };
     let answer: OlympusDashboardControlResult = {
       status: 409,
       body: {
         ok: false,
         error: { code: 'conflict', message: 'changed' },
-        settings: { ...BASE_SETTINGS, revision: 'rev-2', rules: [...BASE_SETTINGS.rules, { kind: 'sender', source_id: 'gmail.email', value: 'new@elsewhere.example' }] },
+        settings: { ...BASE_SETTINGS, revision: 'rev-2', rules: [...BASE_SETTINGS.rules, elsewhere] },
       },
     };
     const { root, reads, click, submit, abort } = mount(async (params) => { sent.push(params); return answer; });
@@ -422,22 +425,48 @@ describe('the Privacy editor in the browser', () => {
     await submit();
     expect(sent).toHaveLength(1);
     const conflict = root.querySelector('[data-privacy-conflict]')!;
-    expect(conflict.textContent).toContain('These privacy settings were changed somewhere else. Your changes are still here.');
-    expect(conflict.textContent).toContain('Apply my changes again');
-    expect(conflict.textContent).toContain('Discard my changes');
+    expect(conflict.textContent).toContain('Your changes weren\'t saved because the privacy settings changed elsewhere.');
+    expect(conflict.textContent).toContain('What is saved now:');
+    expect(conflict.textContent).toContain('new@elsewhere.example · Sender');
     // The draft is untouched and the poll holds off.
     expect(root.textContent).toContain('me@here.example');
     expect(reads).toEqual([]);
-    // Applying again measures against what is saved now: it would drop the
-    // rule added elsewhere, so it asks first, then sends the new revision.
+    // Replayed onto what is saved now: the rule added elsewhere stays, mine is
+    // added again, nothing is removed, so it saves at once with the new revision.
+    answer = { status: 200, body: { ok: true, settings: {} } };
+    click('[data-privacy-apply-again]');
+    await settle();
+    expect(root.querySelector('[data-privacy-confirm]')).toBeNull();
+    expect(sent[1]).toEqual({
+      action: 'save_privacy',
+      description: 'My health',
+      rules: [...BASE_SETTINGS.rules, elsewhere, { kind: 'sender', source_id: 'gmail.email', value: 'me@here.example' }],
+      revision: 'rev-2',
+    } as OlympusDashboardControlParams);
+    abort.abort();
+  });
+
+  test('after a conflict, a replayed removal still asks first, then saves against the new revision', async () => {
+    const sent: OlympusDashboardControlParams[] = [];
+    let answer: OlympusDashboardControlResult = {
+      status: 409,
+      body: { ok: false, error: { code: 'conflict', message: 'changed' }, settings: { ...BASE_SETTINGS, revision: 'rev-2' } },
+    };
+    const { root, click, submit, row, abort } = mount(async (params) => { sent.push(params); return answer; });
+    (row('Lawyer').querySelector('[data-privacy-remove]') as HTMLElement).click();
+    await submit();
+    click('[data-privacy-confirm-yes]');
+    await settle();
+    expect(sent).toHaveLength(1);
     answer = { status: 200, body: { ok: true, settings: {} } };
     click('[data-privacy-apply-again]');
     await settle();
     expect(sent).toHaveLength(1);
-    expect(root.querySelector('[data-privacy-confirm]')!.textContent).toContain('This removes protection from new@elsewhere.example.');
+    expect(root.querySelector('[data-privacy-confirm]')!.textContent).toContain('This removes protection from Lawyer.');
     click('[data-privacy-confirm-yes]');
     await settle();
     expect(sent[1]).toMatchObject({ revision: 'rev-2', confirm: true });
+    expect((sent[1] as { rules: unknown[] }).rules).toHaveLength(3);
     abort.abort();
   });
 

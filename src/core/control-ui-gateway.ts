@@ -17,7 +17,10 @@ import {
 } from '../control-ui-contract.ts';
 import type { OlympusConfig } from './config.ts';
 import { workerAuthTokenFromConfig } from './worker-auth.ts';
-import { privacyRuleProblem } from '../workers/dashboard/shared-privacy-rules.ts';
+import { PRIVACY_FOLDER_SOURCE_NAMES, privacyLogic } from '../workers/dashboard/shared-privacy-logic.ts';
+
+/** The privacy rules both editors use: a rule must have its kind's shape before it reaches the engine. */
+const PRIVACY_RULES = privacyLogic({ mailSourceId: 'gmail.email', folderSources: { ...PRIVACY_FOLDER_SOURCE_NAMES } });
 import {
   createGatewayCallbackPeerHeader,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
@@ -359,8 +362,9 @@ export function parseDashboardControlParams(value: unknown): OlympusDashboardCon
           ...(ruleValue ? { value: ruleValue } : {}),
           ...(display ? { display } : {}),
         };
-        const problem = privacyRuleProblem(parsed);
-        if (problem) throw new DashboardGatewayInvalidRequestError(problem);
+        if (!PRIVACY_RULES.validRule(parsed)) {
+          throw new DashboardGatewayInvalidRequestError('A privacy rule does not have the shape of its kind.');
+        }
         return parsed;
       });
     }

@@ -19,6 +19,7 @@ import {
 } from '../vocabulary.ts';
 import { DASHBOARD_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
 import { chatgptDashboardClient, type ChatGptDashboardClientConfig } from './client.ts';
+import { privacyLogic } from '../shared-privacy-logic.ts';
 import {
   CHATGPT_CONNECT_HOST,
   CHATGPT_CONNECT_POLL_CAP_MS,
@@ -321,11 +322,20 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     '</head>',
     '<body>',
     '<div id="app"></div>',
-    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config)}, ${chatgptPickerProgram.toString()}, ${chatgptPrivacyProgram.toString()});</script>`,
+    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config)}, ${chatgptPickerProgram.toString()}, ${privacyProgramSource()});</script>`,
     '</body>',
     '</html>',
     '',
   ].join('\n');
+}
+
+/**
+ * The privacy program with the rules it shares with the local editor
+ * (shared-privacy-logic.ts) inlined beside it: the client calls it with the
+ * kit alone.
+ */
+function privacyProgramSource(): string {
+  return `function (kit) { return (${chatgptPrivacyProgram.toString()})(kit, ${privacyLogic.toString()}); }`;
 }
 
 /** JSON that cannot close the script element it sits in. */

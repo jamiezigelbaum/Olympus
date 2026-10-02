@@ -10,6 +10,7 @@ import type {
   OlympusSourceDispositionState,
   OlympusPrivacyRule,
 } from '../control-ui-contract.ts';
+import type { PrivacyLogic, PrivacyLogicConfig } from '../workers/dashboard/shared-privacy-logic.ts';
 import type { DASHBOARD_PICKER_COPY } from '../workers/dashboard/vocabulary.ts';
 
 export interface OlympusDashboardTransport {
@@ -41,6 +42,12 @@ export interface OlympusBrowserControllerOptions {
   authority?: 'gateway' | 'worker-session';
   /** Native boundary hook; standalone markup is produced in-process. */
   replaceHtml?: (root: HTMLElement | ShadowRoot, html: string) => void;
+  /**
+   * The privacy rules shared with ChatGPT's privacy panel
+   * (shared-privacy-logic.ts privacyLogic), for the Privacy editor. Passed in,
+   * not imported: this controller is serialized into the standalone page.
+   */
+  privacyLogic?: (config: PrivacyLogicConfig) => PrivacyLogic;
 }
 
 export interface OlympusBrowserController {
@@ -825,8 +832,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   // text, never as markup. An edited list holds the poll off until it is
   // saved or discarded, like a typed field does.
   type PrivacyRule = { kind: string; source_id: string; key?: string; value?: string; display?: string };
-  const PRIVACY_EMAIL = /^[^\s@<>"(),;:]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
-  const PRIVACY_DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+  type PrivacyViewRule = ReturnType<PrivacyLogic['viewRule']>;
 
   function privacyCopy(form: HTMLFormElement): Record<string, string> {
     try { return JSON.parse(form.dataset.copy || '{}') as Record<string, string>; } catch { return {}; }
@@ -838,69 +844,105 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     return out;
   }
 
-  function privacyFolderSources(form: HTMLFormElement): Array<{ id: string; label: string }> {
+  function privacyJson<T>(value: string | undefined, fallback: T): T {
     try {
-      const list = JSON.parse(form.dataset.folderSources || '[]') as Array<{ id: string; label: string }>;
-      return Array.isArray(list) ? list.filter((entry) => entry && typeof entry.id === 'string') : [];
+      const parsed = JSON.parse(value || '') as T;
+      return parsed ?? fallback;
     } catch {
-      return [];
+      return fallback;
     }
   }
 
-  function privacyRuleOf(row: Element): PrivacyRule | undefined {
-    try {
-      const rule = JSON.parse(row.getAttribute('data-privacy-rule') || '') as PrivacyRule;
-      return rule && typeof rule.kind === 'string' && typeof rule.source_id === 'string' ? rule : undefined;
-    } catch {
-      return undefined;
-    }
+  function privacyFolderSources(form: HTMLFormElement): Array<{ id: string; label: string }> {
+    const list = privacyJson<Array<{ id: string; label: string }>>(form.dataset.folderSources, []);
+    return Array.isArray(list) ? list.filter((entry) => entry && typeof entry.id === 'string') : [];
+  }
+
+  /** Every folder source's name, connected or not: a saved rule may name either. */
+  function privacySourceNames(form: HTMLFormElement): Record<string, string> {
+    const names = privacyJson<Record<string, string>>(form.dataset.sourceNames, {});
+    return names && typeof names === 'object' ? names : {};
   }
 
   /**
-   * What makes two rules the same rule, as the engine sees it
-   * (shared-privacy.ts privacyRuleIdentity): a folder or label by its key, a
-   * sender by its trimmed, lowercased value.
+   * The rules this editor shares with ChatGPT's privacy panel
+   * (shared-privacy-logic.ts), handed in by the page: this controller is
+   * serialized into the standalone page and cannot import it.
    */
-  function privacyIdentity(rule: PrivacyRule): string {
-    const matched = rule.kind === 'sender' ? (rule.value || '').trim().toLowerCase() : rule.key || '';
-    return `${rule.kind}\u0000${rule.source_id}\u0000${matched}`;
+  function privacyLogicFor(form: HTMLFormElement): PrivacyLogic | undefined {
+    return options.privacyLogic
+      ? options.privacyLogic({ mailSourceId: 'gmail.email', folderSources: privacySourceNames(form) })
+      : undefined;
   }
 
-  function privacyKept(form: HTMLFormElement): PrivacyRule[] {
-    return Array.from(form.querySelectorAll('[data-privacy-rule]'))
-      .filter((row) => !row.hasAttribute('data-removed'))
-      .map(privacyRuleOf)
-      .filter((rule): rule is PrivacyRule => rule !== undefined);
+  function privacyDisplay(form: HTMLFormElement, logic: PrivacyLogic, rule: PrivacyRule): string {
+    const names = privacySourceNames(form);
+    return logic.displayOf(rule, privacyFill(privacyCopy(form).folderUnnamed || '', { source: names[rule.source_id] || rule.source_id }));
   }
 
-  function privacyWords(form: HTMLFormElement, rule: PrivacyRule): { name: string; kind: string } {
+  function privacyKindText(form: HTMLFormElement, rule: PrivacyRule): string {
     const copy = privacyCopy(form);
-    if (rule.kind === 'sender') return { name: rule.value || '', kind: copy.kindSender || '' };
-    if (rule.kind === 'label') return { name: rule.value || '', kind: copy.kindLabel || '' };
-    const source = privacyFolderSources(form).find((entry) => entry.id === rule.source_id);
-    return { name: rule.display || rule.key || '', kind: privacyFill(copy.kindFolder || '', { source: source ? source.label : rule.source_id }) };
+    if (rule.kind === 'sender') return copy.kindSender || '';
+    if (rule.kind === 'label') return copy.kindLabel || '';
+    const names = privacySourceNames(form);
+    return privacyFill(copy.kindFolder || '', { source: names[rule.source_id] || rule.source_id });
+  }
+
+  /** The editor's rules as view rules, read off the rows: saved, removed, and exactly what the engine sent. */
+  function privacyViewRules(form: HTMLFormElement): PrivacyViewRule[] {
+    return Array.from(form.querySelectorAll<HTMLElement>('[data-privacy-rule]')).flatMap((row) => {
+      const rule = privacyJson<PrivacyRule | null>(row.getAttribute('data-privacy-rule') || undefined, null);
+      if (!rule || typeof rule.kind !== 'string' || typeof rule.source_id !== 'string') return [];
+      const saved = row.hasAttribute('data-privacy-saved');
+      const view: PrivacyViewRule = {
+        kind: rule.kind,
+        source_id: rule.source_id,
+        display: row.querySelector('.sline.strong')?.textContent || '',
+        removed: row.hasAttribute('data-removed'),
+        saved,
+        ...(typeof rule.key === 'string' ? { key: rule.key } : {}),
+        ...(typeof rule.value === 'string' ? { value: rule.value } : {}),
+        ...(saved ? { raw: rule as Record<string, unknown> } : {}),
+      };
+      return [view];
+    });
+  }
+
+  function privacyKept(form: HTMLFormElement): PrivacyViewRule[] {
+    return privacyViewRules(form).filter((rule) => !rule.removed);
+  }
+
+  /** The whole rule list a save sends: every kept rule, and every saved rule the page cannot show. */
+  function privacyRulesOut(form: HTMLFormElement, logic: PrivacyLogic): Array<Record<string, unknown>> {
+    const hidden = privacyJson<Array<Record<string, unknown>>>(form.dataset.hidden, []);
+    return privacyKept(form).map((rule) => logic.ruleOut(rule)).concat(Array.isArray(hidden) ? hidden : []);
   }
 
   function setPrivacyDirty(form: HTMLFormElement): void {
     form.dataset.dirty = 'true';
+    // Any change closes an open confirmation step: what it named may no longer be true.
+    form.querySelectorAll('[data-privacy-confirm]').forEach((node) => node.remove());
     const empty = form.querySelector<HTMLElement>('[data-privacy-empty]');
     if (empty) empty.hidden = privacyKept(form).length > 0;
   }
 
-  function privacyRow(form: HTMLFormElement, rule: PrivacyRule): HTMLElement {
-    const words = privacyWords(form, rule);
+  /** One rule as a row, the shape the page renders: a saved one keeps exactly what the engine sent. */
+  function privacyRow(form: HTMLFormElement, logic: PrivacyLogic, rule: PrivacyViewRule | PrivacyRule): HTMLElement {
+    const view = rule as PrivacyViewRule;
+    const display = typeof view.display === 'string' && view.display ? view.display : privacyDisplay(form, logic, rule);
     const copy = privacyCopy(form);
     const row = document.createElement('div');
     row.className = 'srow nodot prule';
-    row.setAttribute('data-privacy-rule', JSON.stringify(rule));
+    row.setAttribute('data-privacy-rule', JSON.stringify(view.saved && view.raw ? view.raw : logic.ruleOut({ ...rule, display })));
+    if (view.saved) row.setAttribute('data-privacy-saved', '');
     const main = document.createElement('div');
     main.className = 'smain';
     const name = document.createElement('p');
     name.className = 'sline strong';
-    name.textContent = words.name;
+    name.textContent = display;
     const kind = document.createElement('p');
     kind.className = 'sline';
-    kind.textContent = words.kind;
+    kind.textContent = privacyKindText(form, rule);
     main.append(name, kind);
     const actions = document.createElement('div');
     actions.className = 'sact';
@@ -908,43 +950,50 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     remove.type = 'button';
     remove.className = 'btn';
     remove.setAttribute('data-privacy-remove', '');
-    remove.setAttribute('aria-label', privacyFill(copy.removeFor || '', { name: words.name }));
+    remove.setAttribute('aria-label', privacyFill(copy.removeFor || '', { name: display }));
     remove.textContent = copy.remove || 'Remove';
     actions.append(remove);
     row.append(main, actions);
+    if (view.removed) markPrivacyRemoved(form, row, true);
     return row;
   }
 
-  /** Adds a rule unless it is already on the list; false when it was. */
+  /** Adds a rule, or brings back the same rule if it was removed; false when it is already kept. */
   function addPrivacyRule(form: HTMLFormElement, rule: PrivacyRule): boolean {
-    const identity = privacyIdentity(rule);
-    const rows = Array.from(form.querySelectorAll('[data-privacy-rule]'));
-    const existing = rows.find((row) => {
-      const current = privacyRuleOf(row);
-      return current !== undefined && privacyIdentity(current) === identity;
+    const logic = privacyLogicFor(form);
+    if (!logic) return false;
+    const identity = logic.identity(rule);
+    const existing = Array.from(form.querySelectorAll<HTMLElement>('[data-privacy-rule]')).find((row) => {
+      const current = privacyJson<PrivacyRule | null>(row.getAttribute('data-privacy-rule') || undefined, null);
+      return current !== null && logic.identity(current) === identity;
     });
     if (existing) {
       if (!existing.hasAttribute('data-removed')) return false;
-      togglePrivacyRemoved(form, existing as HTMLElement);
+      togglePrivacyRemoved(form, existing);
       return true;
     }
-    form.querySelector('[data-privacy-rules]')?.append(privacyRow(form, rule));
+    form.querySelector('[data-privacy-rules]')?.append(privacyRow(form, logic, rule));
     setPrivacyDirty(form);
     return true;
   }
 
-  function togglePrivacyRemoved(form: HTMLFormElement, row: HTMLElement): void {
+  function markPrivacyRemoved(form: HTMLFormElement, row: HTMLElement, removed: boolean): void {
     const copy = privacyCopy(form);
-    const rule = privacyRuleOf(row);
-    const name = rule ? privacyWords(form, rule).name : '';
+    const name = row.querySelector('.sline.strong')?.textContent || '';
     const button = row.querySelector<HTMLButtonElement>('[data-privacy-remove]');
-    const removed = !row.hasAttribute('data-removed');
     row.toggleAttribute('data-removed', removed);
     row.classList.toggle('removed', removed);
     if (button) {
       button.textContent = removed ? copy.undo || 'Undo' : copy.remove || 'Remove';
-      button.setAttribute('aria-label', removed ? `${copy.undo || 'Undo'}: ${name}` : privacyFill(copy.removeFor || '', { name }));
+      button.setAttribute('aria-label', removed ? privacyFill(copy.undoFor || '', { name }) : privacyFill(copy.removeFor || '', { name }));
     }
+  }
+
+  function togglePrivacyRemoved(form: HTMLFormElement, row: HTMLElement): void {
+    const copy = privacyCopy(form);
+    const name = row.querySelector('.sline.strong')?.textContent || '';
+    const removed = !row.hasAttribute('data-removed');
+    markPrivacyRemoved(form, row, removed);
     setPrivacyDirty(form);
     say(form, removed ? privacyFill(copy.removed || '', { name }) : '');
   }
@@ -1017,7 +1066,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       inside.textContent = copy.folderOpen || 'Open';
       actions.append(inside);
     }
-    const already = privacyKept(form).some((current) => privacyIdentity(current) === privacyIdentity(rule));
+    const logic = privacyLogicFor(form);
+    const already = !!logic && privacyKept(form).some((current) => logic.identity(current) === logic.identity(rule));
     const make = document.createElement('button');
     make.type = 'button';
     make.className = 'btn';
@@ -1152,8 +1202,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const panel = privacyPanel(form, 'sender');
     const field = panel?.querySelector<HTMLInputElement>('[data-privacy-sender]');
     if (!panel || !field) return;
-    const value = field.value.trim().toLowerCase();
-    if (!PRIVACY_EMAIL.test(value) && !PRIVACY_DOMAIN.test(value)) {
+    const value = privacyLogicFor(form)?.senderValue(field.value) || '';
+    if (!value) {
       panelSay(panel, copy.senderInvalid || '');
       field.focus();
       return;
@@ -1167,42 +1217,24 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     field.focus();
   }
 
-  type PrivacyBaseline = { description: string; rules: Array<PrivacyRule & { name?: string }> };
-
-  /** What the engine held when the page was read (or at the last conflict). */
-  function privacyBaseline(form: HTMLFormElement): PrivacyBaseline {
-    try {
-      const saved = JSON.parse(form.dataset.saved || '{}') as Partial<PrivacyBaseline>;
-      return {
-        description: typeof saved.description === 'string' ? saved.description : '',
-        rules: Array.isArray(saved.rules) ? saved.rules.filter((rule) => rule && typeof rule.kind === 'string') : [],
-      };
-    } catch {
-      return { description: '', rules: [] };
-    }
+  /** The description as saved when the page was read (or at the last conflict). */
+  function privacySavedDescription(form: HTMLFormElement): string {
+    return form.dataset.savedDescription || '';
   }
 
-  /**
-   * What a save of the draft would lower: the saved rules it no longer keeps
-   * (by name) and whether the owner's words changed. Recomputed every time it
-   * is asked, so the confirmation always matches what is dispatched.
-   */
-  function privacyLowering(form: HTMLFormElement): { removed: string[]; description: boolean } {
-    const baseline = privacyBaseline(form);
-    const kept = new Set(privacyKept(form).map(privacyIdentity));
-    const removed = baseline.rules.filter((rule) => !kept.has(privacyIdentity(rule)))
-      .map((rule) => rule.name || privacyWords(form, rule).name);
+  /** What a save of the draft would lower, decided again each time it is asked. */
+  function privacyLowering(form: HTMLFormElement, logic: PrivacyLogic): { removed: string[]; description: boolean } {
     const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
-    const description = field !== null && field.value.trim() !== baseline.description.trim();
-    return { removed, description };
+    const change = logic.lowering(privacyViewRules(form), field ? field.value : privacySavedDescription(form), privacySavedDescription(form));
+    return { removed: change.removed.map((rule: PrivacyViewRule) => rule.display), description: change.described };
   }
 
   function clearPrivacyPrompts(form: HTMLFormElement): void {
     form.querySelectorAll('[data-privacy-confirm],[data-privacy-conflict]').forEach((node) => node.remove());
   }
 
-  /** A sentence and two buttons, in the save footer, in place of a dialog. */
-  function privacyPrompt(form: HTMLFormElement, kind: 'confirm' | 'conflict', lines: string[], buttons: Array<[string, string]>): void {
+  /** A sentence (or a short list) and two buttons, in the save footer, in place of a dialog. */
+  function privacyPrompt(form: HTMLFormElement, kind: 'confirm' | 'conflict', lines: string[], items: string[], buttons: Array<[string, string]>): void {
     clearPrivacyPrompts(form);
     const box = document.createElement('div');
     box.className = 'pprompt';
@@ -1212,6 +1244,15 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const text = document.createElement('p');
       text.textContent = line;
       box.append(text);
+    }
+    if (items.length > 0) {
+      const list = document.createElement('ul');
+      for (const item of items) {
+        const entry = document.createElement('li');
+        entry.textContent = item;
+        list.append(entry);
+      }
+      box.append(list);
     }
     const row = document.createElement('div');
     row.className = 'pbuttons';
@@ -1234,26 +1275,76 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const lines: string[] = [];
     if (lowering.removed.length > 0) lines.push(privacyFill(copy.confirmRemoves || '', { list: lowering.removed.join(', ') }));
     if (lowering.description) lines.push(copy.confirmDescription || '');
-    privacyPrompt(form, 'confirm', lines, [
+    privacyPrompt(form, 'confirm', lines, [], [
       ['data-privacy-confirm-yes', copy.confirm || 'Confirm'],
-      ['data-privacy-confirm-no', copy.keepEditing || 'Keep editing'],
+      ['data-privacy-confirm-no', copy.cancel || 'Cancel'],
     ]);
+  }
+
+  /** Settings changed somewhere else: the draft stays; what is saved now is shown beside it. */
+  function showPrivacyConflict(form: HTMLFormElement, logic: PrivacyLogic, current: { description?: unknown; rules?: unknown }): void {
+    const copy = privacyCopy(form);
+    const description = typeof current.description === 'string' ? current.description.trim() : '';
+    const rules = Array.isArray(current.rules) ? (current.rules as PrivacyRule[]).filter((rule) => logic.validRule(rule)) : [];
+    const items = [description ? privacyFill(copy.conflictDescription || '', { text: description }) : copy.conflictNoDescription || ''];
+    if (rules.length === 0) items.push(copy.rulesEmpty || '');
+    for (const rule of rules) items.push(`${privacyDisplay(form, logic, rule)} · ${privacyKindText(form, rule)}`);
+    privacyPrompt(form, 'conflict', [copy.conflict || '', copy.conflictNow || ''], items, [
+      ['data-privacy-apply-again', copy.applyAgain || 'Apply my changes again'],
+      ['data-privacy-discard-mine', copy.discardMine || 'Discard my changes'],
+    ]);
+  }
+
+  /**
+   * The person's changes, replayed onto the settings saved elsewhere
+   * (shared-privacy-logic.ts replay), then saved: asking first if they lower
+   * protection against what is saved now.
+   */
+  function privacyApplyAgain(form: HTMLFormElement): void {
+    const logic = privacyLogicFor(form);
+    const current = privacyJson<{ description?: unknown; rules?: unknown; revision?: unknown } | null>(form.dataset.server, null);
+    if (!logic || !current) return;
+    const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+    const draft = {
+      rules: privacyViewRules(form),
+      description: field ? field.value : privacySavedDescription(form),
+      savedDescription: privacySavedDescription(form),
+    };
+    const saved = Array.isArray(current.rules) ? current.rules as PrivacyRule[] : [];
+    const fresh = saved.filter((rule) => logic.validRule(rule)).map((rule) => logic.viewRule(rule, privacyDisplay(form, logic, rule)));
+    const replayed = logic.replay(draft, fresh);
+    const description = typeof current.description === 'string' ? current.description : '';
+    form.dataset.revision = typeof current.revision === 'string' ? current.revision : '';
+    form.dataset.savedDescription = description;
+    form.dataset.hidden = JSON.stringify(saved.filter((rule) => !logic.validRule(rule)));
+    delete form.dataset.server;
+    const list = form.querySelector('[data-privacy-rules]');
+    if (list) list.replaceChildren(...replayed.rules.map((rule: PrivacyViewRule) => privacyRow(form, logic, rule)));
+    if (field) {
+      field.defaultValue = description;
+      field.value = replayed.description !== null ? replayed.description : description;
+    }
+    setPrivacyDirty(form);
+    clearPrivacyPrompts(form);
+    void savePrivacy(form);
   }
 
   /**
    * Save the whole list, as ChatGPT's privacy panel does: a save that lowers
    * protection first asks, in place, and only then carries the owner's
-   * confirmation; every save carries the revision it was edited against, and
-   * a conflict keeps the draft with the choice to apply it again or drop it.
+   * confirmation (decided again from the draft at that moment); every save
+   * carries the revision it was edited against; a conflict keeps the draft.
    */
   async function savePrivacy(form: HTMLFormElement, confirmed = false): Promise<void> {
     const copy = privacyCopy(form);
+    const logic = privacyLogicFor(form);
+    if (!logic) return;
     if (!canWrite && !csrfToken) {
       say(form, 'Your OpenClaw connection has read-only access.');
       return;
     }
-    if (pendingForms.has(form)) return;
-    const lowering = privacyLowering(form);
+    if (pendingForms.has(form) || form.dataset.server) return;
+    const lowering = privacyLowering(form, logic);
     const lowers = lowering.removed.length > 0 || lowering.description;
     if (lowers && !confirmed) {
       showPrivacyConfirm(form, lowering);
@@ -1262,7 +1353,6 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     clearPrivacyPrompts(form);
     const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
     const description = field ? field.value.trim() : undefined;
-    const rules = privacyKept(form);
     const revision = form.dataset.revision || '';
     setFormPending(form, true, copy.saving || 'Saving…');
     let result: OlympusDashboardControlResult;
@@ -1270,7 +1360,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       result = await options.transport.control({
         action: 'save_privacy',
         ...(description !== undefined ? { description } : {}),
-        rules: rules as OlympusPrivacyRule[],
+        rules: privacyRulesOut(form, logic) as unknown as OlympusPrivacyRule[],
+        // Always the revision the view was built from: a save over changed settings is refused.
         ...(revision ? { revision } : {}),
         // Only a save that lowers protection carries the confirmation.
         ...(lowers ? { confirm: true } : {}),
@@ -1294,27 +1385,17 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     const error = result.body.error && typeof result.body.error === 'object' ? result.body.error as Record<string, unknown> : {};
     if (result.status === 409 && error.code === 'conflict') {
-      // Changed somewhere else: the draft stays; the baseline moves to what
-      // the engine holds now, so applying again asks again if it must.
       const current = result.body.settings && typeof result.body.settings === 'object'
         ? result.body.settings as { description?: unknown; rules?: unknown; revision?: unknown }
         : {};
-      const saved = Array.isArray(current.rules) ? current.rules as PrivacyRule[] : [];
-      form.dataset.revision = typeof current.revision === 'string' ? current.revision : '';
-      form.dataset.saved = JSON.stringify({
-        description: typeof current.description === 'string' ? current.description : '',
-        rules: saved.map((rule) => ({ ...rule, name: privacyWords(form, rule).name })),
-      });
+      form.dataset.server = JSON.stringify(current);
       form.dataset.dirty = 'true';
       say(form, '');
-      privacyPrompt(form, 'conflict', [copy.conflict || ''], [
-        ['data-privacy-apply-again', copy.applyAgain || 'Apply my changes again'],
-        ['data-privacy-discard-mine', copy.discardMine || 'Discard my changes'],
-      ]);
+      showPrivacyConflict(form, logic, current);
       return;
     }
     if (result.status === 409 && error.code === 'privacy_owner_only') {
-      showPrivacyConfirm(form, privacyLowering(form));
+      showPrivacyConfirm(form, privacyLowering(form, logic));
       return;
     }
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
@@ -1365,11 +1446,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return true;
     }
     if (target.closest('[data-privacy-apply-again]')) {
-      void savePrivacy(form);
+      privacyApplyAgain(form);
       return true;
     }
     if (target.closest('[data-privacy-discard-mine]')) {
       delete form.dataset.dirty;
+      delete form.dataset.server;
       clearPrivacyPrompts(form);
       const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
       if (field) field.value = field.defaultValue;

@@ -22,6 +22,7 @@ import type {
 import type { EmbeddingRuntimeFacts } from './embedding-runtime.ts';
 import { dashboardSourceProgress, type DashboardPhaseId } from './phases.ts';
 import { DASHBOARD_STATUS_COLORS, DASHBOARD_THEME_CSS } from './theme.ts';
+import { privacyLogic } from './shared-privacy-logic.ts';
 import { dashboardActionLabel, type DashboardStatus } from './vocabulary.ts';
 
 export function escapeHtml(value: string): string {
@@ -1424,6 +1425,8 @@ export function standaloneDashboardControllerScript(
         signature: config.signature,
         pollIntervalMs: config.intervalMs,
         csrfToken: csrfToken,
+        // The privacy rules shared with ChatGPT's panel, inlined beside the controller.
+        privacyLogic: ${privacyLogic.toString().replaceAll('</script', '<\\/script')},
       });
       window.addEventListener('pagehide', function () { controller.dispose(); abort.abort(); }, { once: true });
     })();

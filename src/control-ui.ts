@@ -12,6 +12,7 @@ import {
   type OlympusBrowserController,
 } from './control-ui/browser-controller.ts';
 import { OLYMPUS_CONTROL_UI_CSS } from './control-ui/styles.ts';
+import { privacyLogic } from './workers/dashboard/shared-privacy-logic.ts';
 
 type ControlUiPageTarget = {
   id: string;
@@ -200,6 +201,7 @@ function createDashboardPage() {
             returnUrl: context.host.navigation.pageHref(targetFor(route)),
             canWrite: result.can_write,
             authority: 'gateway',
+            privacyLogic,
             replaceHtml(nextRoot, html) {
               setInertBody(nextRoot, html);
               rewriteInternalLinks(nextRoot, context.host);

@@ -30,7 +30,7 @@ import { DASHBOARD_NAV_CSS, renderDashboardNav } from '../nav.ts';
 import { DASHBOARD_PRIVACY_CSS, DASHBOARD_SOURCE_ROWS_CSS } from '../static-styles.ts';
 import { DASHBOARD_LOCAL_PRIVACY_COPY as W, dashboardCheckedLabel, dashboardIsConnectedSource } from '../vocabulary.ts';
 import { dashboardControlsAvailable, fill, setupHref } from '../source-rows.ts';
-import { PRIVACY_FOLDER_SOURCE_NAMES, privacyRuleWords as sharedPrivacyRuleWords } from '../shared-privacy-rules.ts';
+import { PRIVACY_FOLDER_SOURCE_NAMES, privacyLogic } from '../shared-privacy-logic.ts';
 import type { DashboardPageOptions } from './home.ts';
 
 /** Folder sources a private folder can come from, with their names. */
@@ -79,7 +79,8 @@ function renderPrivacyBody(view: SourceDashboardViewModel, options: DashboardPag
   const folderSources = Object.keys(FOLDER_SOURCES).filter((id) => connected(view, id));
   const gmail = connected(view, MAIL_SOURCE_ID);
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
-  const rules = settings.rules.map((rule) => privacyRuleRow(rule, canEdit)).join('');
+  const shown = settings.rules.filter((rule) => LOGIC.validRule(rule));
+  const rules = shown.map((rule) => privacyRuleRow(rule, canEdit)).join('');
   const pending = Math.max(0, Math.floor(settings.pendingCount));
   const pendingLine = pending > 0
     ? fill(pending === 1 ? W.pending.one : W.pending.many, { n: pending.toLocaleString('en-US') })
@@ -101,13 +102,16 @@ function renderPrivacyBody(view: SourceDashboardViewModel, options: DashboardPag
     // What the engine holds now, so a save can tell what it would remove and
     // send back the revision it was edited against (compare-and-swap).
     + ` data-revision="${escapeHtml(settings.revision ?? '')}"`
-    + ` data-saved="${escapeHtml(JSON.stringify(savedBaseline(settings)))}">`
+    + ` data-saved-description="${escapeHtml(settings.description)}"`
+    + ` data-source-names="${escapeHtml(JSON.stringify(FOLDER_SOURCES))}"`
+    // Saved rules the page cannot show (not in the engine's shape): sent back unchanged.
+    + ` data-hidden="${escapeHtml(JSON.stringify(settings.rules.filter((rule) => !LOGIC.validRule(rule))))}">`
     + `<label class="plabel" for="privacy-description">${escapeHtml(W.descriptionLabel)}</label>`
     + `<textarea class="ptext" id="privacy-description" name="description" maxlength="2000" rows="5"`
     + ` placeholder="${escapeHtml(W.descriptionPlaceholder)}"${canEdit ? '' : ' readonly'}>${escapeHtml(settings.description)}</textarea>`
     + `<div class="sect">${escapeHtml(W.rulesTitle)}</div>`
     + `<div class="srows" data-privacy-rules>${rules}</div>`
-    + `<p class="foot pempty" data-privacy-empty${settings.rules.length > 0 ? ' hidden' : ''}>${escapeHtml(W.rulesEmpty)}</p>`
+    + `<p class="foot pempty" data-privacy-empty${shown.length > 0 ? ' hidden' : ''}>${escapeHtml(W.rulesEmpty)}</p>`
     + `<div class="padd">${folderButton}${labelButton}`
     + `<button type="button" class="btn" data-privacy-add="sender"${disabled}>${escapeHtml(W.addSender)}</button></div>`
     + senderPanel()
@@ -142,27 +146,21 @@ function connected(view: SourceDashboardViewModel, sourceId: string): boolean {
     && source.connection.state !== 'awaiting_consent' && source.connection.state !== 'reauth_required';
 }
 
-/** A rule's name and what kind of place it is, in the editor's words (shared-privacy.ts). */
-export function privacyRuleWords(rule: PrivacyRuleView): { name: string; kind: string } {
-  return sharedPrivacyRuleWords(rule, W);
-}
+/** The rules this editor shares with ChatGPT's privacy panel. */
+const LOGIC = privacyLogic({ mailSourceId: MAIL_SOURCE_ID, folderSources: { ...PRIVACY_FOLDER_SOURCE_NAMES } });
 
-/**
- * The saved settings a save is measured against: the description and each
- * rule with its name, for the confirm step's "This removes protection from…".
- */
-function savedBaseline(settings: PrivacySettings): { description: string; rules: Array<PrivacyRuleView & { name: string }> } {
-  return {
-    description: settings.description,
-    rules: settings.rules.map((rule) => ({ ...rule, name: privacyRuleWords(rule).name })),
-  };
+/** A rule's name and what kind of place it is, in the ChatGPT panel's words (shared-privacy-logic.ts). */
+export function privacyRuleWords(rule: PrivacyRuleView): { name: string; kind: string } {
+  const source = FOLDER_SOURCES[rule.source_id] ?? rule.source_id;
+  const kind = rule.kind === 'sender' ? W.kindSender : rule.kind === 'label' ? W.kindLabel : fill(W.kindFolder, { source });
+  return { name: LOGIC.displayOf(rule, fill(W.folderUnnamed, { source })), kind };
 }
 
 /** One always-private rule as a row; the rule itself rides along for the save. */
 function privacyRuleRow(rule: PrivacyRuleView, canEdit: boolean): string {
   const words = privacyRuleWords(rule);
   const data = JSON.stringify(rule);
-  return `<div class="srow nodot prule" data-privacy-rule="${escapeHtml(data)}">`
+  return `<div class="srow nodot prule" data-privacy-rule="${escapeHtml(data)}" data-privacy-saved>`
     + `<div class="smain"><p class="sline strong">${escapeHtml(words.name)}</p><p class="sline">${escapeHtml(words.kind)}</p></div>`
     + `<div class="sact"><button type="button" class="btn" data-privacy-remove`
     + ` aria-label="${escapeHtml(fill(W.removeFor, { name: words.name }))}"${canEdit ? '' : ' disabled aria-disabled="true"'}>${escapeHtml(W.remove)}</button></div>`
@@ -200,10 +198,15 @@ const CLIENT_COPY = {
   confirmRemoves: W.confirmRemoves,
   confirmDescription: W.confirmDescription,
   confirm: W.confirm,
-  keepEditing: W.keepEditing,
   conflict: W.conflict,
+  conflictNow: W.conflictNow,
+  conflictDescription: W.conflictDescription,
+  conflictNoDescription: W.conflictNoDescription,
   applyAgain: W.applyAgain,
   discardMine: W.discardMine,
+  folderUnnamed: W.folderUnnamed,
+  undoFor: W.undoFor,
+  rulesEmpty: W.rulesEmpty,
 } as const;
 
 export type DashboardPrivacyClientCopy = typeof CLIENT_COPY;

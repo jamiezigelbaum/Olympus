@@ -20,6 +20,7 @@
 import type { DASHBOARD_CHATGPT_PRIVACY_COPY } from '../vocabulary.ts';
 import type { ChatGptPicker } from './picker.ts';
 import { PRIVACY_GET_TOOL_NAME, PRIVACY_META_KEY, PRIVACY_SET_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
+import type { privacyLogic } from '../shared-privacy-logic.ts';
 
 /** The privacy tools: get {} and set {description?, rules?}; both answer with the settings in `_meta`. */
 export const CHATGPT_PRIVACY_TOOLS = { get: PRIVACY_GET_TOOL_NAME, set: PRIVACY_SET_TOOL_NAME } as const;
@@ -87,15 +88,18 @@ export interface ChatGptPrivacy {
   view(): HTMLElement;
 }
 
-export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
+/**
+ * `makeLogic` is shared-privacy-logic.ts privacyLogic: the rules this panel
+ * shares with the local Privacy editor. The page inlines it beside this
+ * program (page.ts), since neither may import at run time.
+ */
+export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof privacyLogic): ChatGptPrivacy {
   const T = kit.config.tools;
   const W = kit.config.copy;
   const el = kit.el;
   const add = kit.add;
   const fill = kit.fill;
-  const KINDS = ['folder', 'label', 'sender'];
-  const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  const DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+  const L = makeLogic({ mailSourceId: kit.config.mailSourceId, folderSources: kit.config.folderSources });
 
   let s: Any = null;
   let session = 0;
@@ -140,37 +144,19 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     return data;
   }
 
-  const text = (value: Any) => typeof value === 'string' && value.trim() !== '';
-
-  /**
-   * One rule exactly as the engine serializes it (dashboard-contract.ts
-   * PrivacyRuleView, response-builder.ts copyPrivacySettings): a sender is
-   * {gmail.email, value}; a label {gmail.email, key, value}; a folder
-   * {dropbox.files | google_drive.docs, key, display?}. `display` is only
-   * ever a folder's, and optional.
-   */
+  /** One rule exactly as the engine serializes it (shared-privacy-logic.ts). */
   function validRule(rule: Any): boolean {
-    if (!rule || typeof rule !== 'object' || KINDS.indexOf(rule.kind) < 0) return false;
-    if (rule.kind === 'sender') return rule.source_id === kit.config.mailSourceId && text(rule.value);
-    if (rule.kind === 'label') return rule.source_id === kit.config.mailSourceId && text(rule.key) && text(rule.value);
-    return Object.prototype.hasOwnProperty.call(kit.config.folderSources, rule.source_id) && text(rule.key)
-      && (rule.display === undefined || typeof rule.display === 'string');
+    return L.validRule(rule);
   }
 
   /** What the page prints for a rule: the sender, the label's name, the folder's name or "A folder in Dropbox". */
   function displayOf(rule: Any): string {
-    if (rule.kind === 'sender' || rule.kind === 'label') return String(rule.value);
-    return text(rule.display) ? String(rule.display) : fill(W.folderUnnamed, { source: sourceLabel(rule.source_id) });
+    return L.displayOf(rule, fill(W.folderUnnamed, { source: sourceLabel(rule.source_id) }));
   }
 
   /** A loaded rule for the view: `raw` is what the engine sent, saved back unchanged unless removed. */
   function viewRule(rule: Any): Any {
-    const raw: Any = {};
-    for (const field of Object.keys(rule)) raw[field] = rule[field];
-    const copy: Any = { kind: rule.kind, source_id: rule.source_id, display: displayOf(rule), removed: false, saved: true, raw };
-    if (typeof rule.key === 'string') copy.key = rule.key;
-    if (typeof rule.value === 'string') copy.value = rule.value;
-    return copy;
+    return L.viewRule(rule, displayOf(rule));
   }
 
   /**
@@ -220,34 +206,18 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     });
   }
 
-  /**
-   * A rule's identity as the engine matches it (privacy-profile.ts
-   * privacyRuleId): a folder or label by its key, a sender by its address,
-   * trimmed and lower-cased. A label's name can change; it is the same rule.
-   */
+  /** A rule's identity as the engine matches it: a folder or label by key, a sender by trimmed lower-cased address. */
   function identity(rule: Any): string {
-    const matched = rule.kind === 'sender'
-      ? (typeof rule.value === 'string' ? rule.value.trim().toLowerCase() : '')
-      : (typeof rule.key === 'string' ? rule.key.trim() : '');
-    return rule.kind + '\n' + rule.source_id + '\n' + matched;
+    return L.identity(rule);
   }
 
   function kept(): Any[] {
     return s.rules.filter((rule: Any) => !rule.removed);
   }
 
-  /**
-   * Exactly what the save sends: a loaded rule as the engine sent it; a new
-   * one in the contract's shape (a folder with its name as `display`, which
-   * the contract keeps for the panel). No local flags.
-   */
+  /** Exactly what the save sends for a rule (shared-privacy-logic.ts). */
   function ruleOut(rule: Any): ChatGptPrivacyRuleOut {
-    if (rule.raw) return rule.raw;
-    const out: Any = { kind: rule.kind, source_id: rule.source_id };
-    if (typeof rule.key === 'string') out.key = rule.key;
-    if (typeof rule.value === 'string') out.value = rule.value;
-    if (rule.kind === 'folder' && text(rule.display)) out.display = rule.display;
-    return out;
+    return L.ruleOut(rule) as unknown as ChatGptPrivacyRuleOut;
   }
 
   /** The whole rule list a save sends: every kept rule, and every loaded rule the page cannot show. */
@@ -262,24 +232,17 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
   }
 
   function addRule(rule: Any): void {
-    const id = identity(rule);
-    const existing = s.rules.filter((other: Any) => identity(other) === id)[0];
-    if (existing) existing.removed = false;
-    else s.rules.push(rule);
+    L.addTo(s.rules, rule);
     changed();
     s.saveError = '';
   }
 
   /** Saved rules this save would drop, and whether it changes the saved description: both lower protection. */
   function lowering(): { removed: Any[]; described: boolean } {
-    return {
-      removed: s.rules.filter((rule: Any) => rule.saved && rule.removed),
-      described: s.description.trim() !== s.savedDescription,
-    };
+    return L.lowering(s.rules, s.description, s.savedDescription);
   }
   function lowers(): boolean {
-    const change = lowering();
-    return change.removed.length > 0 || change.described;
+    return L.lowers(s.rules, s.description, s.savedDescription);
   }
 
   /** Save: a save that lowers protection first asks inline, then carries the owner's confirmation. */
@@ -356,14 +319,13 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
   function applyAgain(): void {
     const server = s.server;
     if (!server) return;
-    const removed: Record<string, boolean> = {};
-    for (const rule of s.rules) if (rule.saved && rule.removed) removed[identity(rule)] = true;
-    const added = s.rules.filter((rule: Any) => !rule.saved && !rule.removed);
-    const described = s.description.trim() !== s.savedDescription ? s.description : null;
+    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
     take(server);
-    for (const rule of s.rules) if (removed[identity(rule)]) rule.removed = true;
-    for (const rule of added) addRule(rule);
-    if (described !== null) s.description = described;
+    const replayed = L.replay(draft, s.rules);
+    s.rules = replayed.rules;
+    s.confirmStep = false;
+    s.saveError = '';
+    if (replayed.description !== null) s.description = replayed.description;
     s.edited = true;
     save();
     if (!s.saving && !s.confirmStep) kit.render('privacy:save');
@@ -538,8 +500,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
   }
 
   function submitSender(): void {
-    const value = String(s.sender || '').trim().toLowerCase();
-    if (!EMAIL.test(value) && !DOMAIN.test(value)) {
+    const value = L.senderValue(s.sender);
+    if (!value) {
       s.senderError = W.senderInvalid;
       kit.render('privacy:sender');
       return;

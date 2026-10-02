@@ -1,24 +1,18 @@
 /**
- * The pure rules both privacy editors share: the ChatGPT engine's
- * olympus_privacy_set (chatgpt/setup-tools.ts) and the local Privacy editor
- * (pages/privacy.ts and its save route). One definition of what makes two
- * rules the same rule, of what lowers the owner's protection, of what a valid
- * rule of each kind is, and of how a rule is named on screen, so the two
- * surfaces cannot disagree about any of them.
+ * The engine side of the privacy rules both editors share: what
+ * olympus_privacy_set (chatgpt/setup-tools.ts) and the local save route treat
+ * as lowering protection, by the backend's own rule identity, and which rules
+ * sit on Secrets locations. The editors' own rules (shape, names, identity,
+ * the lowering diff, replay after a conflict) are shared-privacy-logic.ts.
  *
  * Pure: values in, values out. Nothing here reads or writes the profile.
  */
 import type { PrivacySettings } from '../chatgpt/dashboard-contract.ts';
 import { isSecretFolder, isSecretLabel, isSecretSender, type SecretLocations } from '../chatgpt/scope-privacy.ts';
 import { privacyRuleId } from '../classification/privacy-profile.ts';
-import type { PrivacyRuleLike } from './shared-privacy-rules.ts';
+import type { PrivacyRuleLike } from './shared-privacy-logic.ts';
 
-export {
-  PRIVACY_FOLDER_SOURCE_NAMES,
-  privacyRuleProblem,
-  privacyRuleWords,
-  type PrivacyRuleLike,
-} from './shared-privacy-rules.ts';
+export { PRIVACY_FOLDER_SOURCE_NAMES, privacyLogic, type PrivacyRuleLike } from './shared-privacy-logic.ts';
 
 /**
  * The backend's identity for a rule (classification/privacy-profile.ts
