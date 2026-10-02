@@ -19,8 +19,9 @@
  * the grant when the run ends. Tokens are never printed or stored.
  *
  * Exit status: 0 all checks passed; 1 a check failed (private content in tool
- * output, panel failure, a private answer slower than 120 s summary / 190 s
- * full); 2 the run could not start (token, relay, arguments).
+ * output, panel failure, a private answer slower than the panel waits: 120 s
+ * summary, its full-detail cap for full); 2 the run could not start (token,
+ * relay, arguments).
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -36,12 +37,17 @@ import {
   PRIVATE_MATCH_PANEL_NOTE,
   PRIVATE_MATCH_PANEL_SETUP_NOTE,
 } from '../src/workers/chatgpt/response-builder.ts';
+import {
+  CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS,
+  CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
+} from '../src/workers/dashboard/chatgpt/private-answer.ts';
 
-export const SUMMARY_BUDGET_MS = 120_000;
-export const FULL_BUDGET_MS = 190_000;
-/** The panel's own poll caps (src/workers/dashboard/chatgpt/private-answer.ts). */
-export const PANEL_POLL_CAP_MS = 2 * 60_000;
-export const PANEL_FULL_POLL_CAP_MS = 190_000;
+/** The panel's own poll caps, read from the panel itself so the smoke waits exactly as long as it does. */
+export const PANEL_POLL_CAP_MS = CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS;
+export const PANEL_FULL_POLL_CAP_MS = CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS;
+/** A private answer slower than the panel waits is one the owner never sees. */
+export const SUMMARY_BUDGET_MS = PANEL_POLL_CAP_MS;
+export const FULL_BUDGET_MS = PANEL_FULL_POLL_CAP_MS;
 const TOOL_TIMEOUT_MS = 180_000;
 const SMOKE_CLIENT_NAME = 'Olympus live smoke';
 const SMOKE_REDIRECT_URI = 'http://127.0.0.1:53682/olympus-live-smoke/callback';
@@ -308,8 +314,8 @@ export function readPanelPlaintext(plaintext: string): PanelAnswer | undefined {
  * Acts as the panel (src/workers/dashboard/chatgpt/private-answer.ts collect):
  * one ECDH P-256 key per job, a CORS preflight like the browser's, then POST
  * `{v:1, publicKey}` with the same key until `ready`/`failed`, honoring
- * Retry-After (default 2 s, at most 30 s) and the panel's poll cap (2 min, or
- * 190 s for a full-detail job).
+ * Retry-After (default 2 s, at most 30 s) and the panel's poll cap
+ * (PANEL_POLL_CAP_MS, or PANEL_FULL_POLL_CAP_MS for a full-detail job).
  */
 export async function collectPrivateAnswer(options: PanelOptions): Promise<PanelOutcome> {
   const doFetch = options.fetch ?? fetch;

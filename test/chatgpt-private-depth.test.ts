@@ -83,7 +83,7 @@ describe('reading leading items in depth', () => {
       hit('near', 'other report.pdf', 'near text'),
       hit('far', 'far report.pdf', 'far text'),
     ];
-    const whole: Record<string, string> = { bw1: longText('bw1', 5).slice(0, 4_000), bw2: longText('bw2', 9) };
+    const whole: Record<string, string> = { bw1: longText('bw1', 5).slice(0, 3_000), bw2: longText('bw2', 9) };
     let seen: { items: readonly BuiltInEvidenceItem[]; options: AnswerPrivatelyOptions } | undefined;
     const readRequests: Array<{ id: string; maxChars: number }> = [];
     const panel = panelWith(async (_q, items, options) => {
@@ -105,11 +105,11 @@ describe('reading leading items in depth', () => {
     expect(seen!.items.map((item) => item.id)).toEqual(['bw1', 'bw2']);
     expect(seen!.options.maxPromptBytes).toBe(PANEL_ANSWER_LIMITS.deepPromptBytes);
     expect(seen!.options.maxAnswerChars).toBe(PANEL_ANSWER_LIMITS.deepAnswerChars);
-    // bw1 (4,000) is read whole; bw2 gets the rest of the budget, re-read at that size.
+    // bw1 (3,000) is read whole; bw2 gets the rest of the budget, re-read at that size.
     expect(seen!.items[0]!.text).toBe(whole.bw1!);
-    expect(seen!.items[1]!.text.length).toBe(PANEL_ANSWER_LIMITS.deepEvidenceChars - 4_000);
+    expect(seen!.items[1]!.text.length).toBe(PANEL_ANSWER_LIMITS.deepEvidenceChars - 3_000);
     expect(readRequests.filter((request) => request.id === 'bw2').map((request) => request.maxChars))
-      .toEqual([PANEL_ANSWER_LIMITS.deepEvidenceChars, PANEL_ANSWER_LIMITS.deepEvidenceChars - 4_000]);
+      .toEqual([PANEL_ANSWER_LIMITS.deepEvidenceChars, PANEL_ANSWER_LIMITS.deepEvidenceChars - 3_000]);
     expect(result.citations).toEqual([
       { title: 'blood work 1.pdf', source: 'fixture', url: 'https://www.dropbox.com/home/Labs?preview=bw1', localPath: '/Users/x/Dropbox/Labs/bw1' },
       { title: 'blood work 2.pdf', source: 'fixture', url: 'https://www.dropbox.com/home/Labs?preview=bw2', localPath: '/Users/x/Dropbox/Labs/bw2' },
@@ -301,6 +301,63 @@ describe('detail: chosen by ChatGPT\'s model through the tool argument', () => {
     await Bun.sleep(150);
     expect((await jobs.claim(summary, key)).body.status).toBe('failed');
     expect((await jobs.claim(full, key2)).body.status).toBe('pending');
-    expect(PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS).toBe(180_000);
+    expect(PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS).toBe(240_000);
+  });
+});
+
+describe('full detail fits its deadline on a busy Mac', () => {
+  // 2026-10-02 live: 10,000 characters of evidence and a 3,700-character
+  // answer budget took 179.4 s of a 180 s deadline (prefill 64 s for 3,920
+  // tokens, 2.8 tokens/s). Smaller budgets, and a longer deadline.
+  test('about 7k characters of evidence, an answer of about 1.5k characters, 240 s', () => {
+    expect(PANEL_ANSWER_LIMITS.deepEvidenceChars).toBe(7_000);
+    const answer = (analystResponseSchema(PANEL_ANSWER_LIMITS.deepAnswerChars).properties as Record<string, { maxLength?: number }>).answer!;
+    expect(answer.maxLength).toBeGreaterThanOrEqual(1_400);
+    expect(answer.maxLength).toBeLessThanOrEqual(1_500);
+    // The prompt holds the evidence and the instructions around it.
+    expect(PANEL_ANSWER_LIMITS.deepPromptBytes).toBeGreaterThan(PANEL_ANSWER_LIMITS.deepEvidenceChars + 4_000);
+    expect(PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS).toBe(240_000);
+  });
+});
+
+describe('a private match probe that is slow or fails', () => {
+  const INSTALL = 'a'.repeat(32);
+  const QUESTION = 'SENTINEL_QUESTION_5d1e what did my report show';
+
+  function options(probe: NonNullable<ChatGptSurfaceOptions['privateMatchProbe']>, lines: string[]): ChatGptSurfaceOptions {
+    const model: PrivateAnswerModel = { status: () => ({ state: 'ready' }), answerPrivately: async () => ({ answer: 'a', citations: [] }) };
+    return {
+      dashboardView: async () => ({}) as never,
+      evidenceSearch: async () => ({ evidence: [], coverage: {} }),
+      privateMatchProbe: probe,
+      privateMatchProbeTimeoutMs: 30,
+      privateMatchProbeLog: (line) => lines.push(line),
+      privateAnswers: new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 }),
+    };
+  }
+
+  test('a probe past its deadline: no panel, and one counts-only line that says it timed out', async () => {
+    const lines: string[] = [];
+    const result = await callChatGptTool(SEARCH_TOOL.name, { question: QUESTION }, {} as OperationContext, options(() => new Promise(() => {}), lines));
+    expect(result.isError).not.toBe(true);
+    expect((result._meta as Record<string, unknown> | undefined)?.[PRIVATE_ANSWER_META_KEY]).toBeUndefined();
+    expect(lines).toEqual(['[chatgpt] private match probe timed_out stage=search timeout_ms=30']);
+  });
+
+  test('a probe that fails: no panel, and one line that says it failed, without the question', async () => {
+    const lines: string[] = [];
+    const result = await callChatGptTool(SEARCH_TOOL.name, { question: QUESTION }, {} as OperationContext, options(async () => {
+      throw new Error(`boom ${QUESTION}`);
+    }, lines));
+    expect((result._meta as Record<string, unknown> | undefined)?.[PRIVATE_ANSWER_META_KEY]).toBeUndefined();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^\[chatgpt\] private match probe failed stage=search elapsed_ms=\d+$/);
+  });
+
+  test('a probe in time logs nothing', async () => {
+    const lines: string[] = [];
+    const result = await callChatGptTool(SEARCH_TOOL.name, { question: QUESTION }, {} as OperationContext, options(async () => ({ count: 1, evidence: [{ title: 'e', trust_domain: 'secure_local' }] }), lines));
+    expect((result._meta as Record<string, Record<string, unknown>>)[PRIVATE_ANSWER_META_KEY]).toMatchObject({ count: 1, state: 'ready' });
+    expect(lines).toEqual([]);
   });
 });

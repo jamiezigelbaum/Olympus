@@ -63,6 +63,10 @@ export interface ChatGptSurfaceOptions {
    * evidence to answer from).
    */
   privateMatchProbe?: (question: string, ctx: OperationContext) => Promise<boolean | number | PrivateMatchProbeResult>;
+  /** How long a private match probe may take (default PROBE_TIMEOUT_MS). */
+  privateMatchProbeTimeoutMs?: number;
+  /** Where a probe that timed out or failed is noted (default: stderr). One counts-only line, no question. */
+  privateMatchProbeLog?: (line: string) => void;
   /** One-time private answer jobs for the private answer panel; without it a match reports `no_model`. */
   privateAnswers?: PrivateAnswerJobs;
   /** The built-in embedding model's state, when the embeddings lane reports one. */
@@ -309,14 +313,14 @@ export async function callChatGptTool(
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const [raw, probed] = await Promise.all([
           options.evidenceSearch({ question, ...(limit ? { limit } : {}) }, signal),
-          probeWithinDeadline(probe, question, ctx),
+          probeWithinDeadline(probe, question, ctx, options, 'search'),
         ]);
         // A private match goes to the private answer panel only (`_meta`):
         // the job is created as this result is built, so its id is valid
         // only once ChatGPT can see it.
         const match = normalizeProbe(probed);
         const privateMatch = match.count > 0
-          ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx), detail }, options)
+          ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail }, options)
           : undefined;
         return searchToolResult(raw, privateMatch ? { privateMatch } : {});
       }
@@ -335,11 +339,11 @@ export async function callChatGptTool(
             include_secure_local_content: false,
             timeoutMs: SOURCE_ANSWER_TIMEOUT_MS,
           }),
-          probeWithinDeadline(probe, question, ctx),
+          probeWithinDeadline(probe, question, ctx, options, 'search'),
         ]);
         const match = normalizeProbe(probed);
         const pending: PendingPrivateMatch | undefined = match.count > 0
-          ? { question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx), detail }
+          ? { question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail }
           : undefined;
         const jobId = pendingJobId(raw);
         if (jobId) {
@@ -383,20 +387,41 @@ function normalizeProbe(value: boolean | number | PrivateMatchProbeResult): Priv
 
 /**
  * Any probe, bounded: one that fails or outlasts PROBE_TIMEOUT_MS counts as
- * no match, so a slow Private search never holds up the tool result.
+ * no match, so a slow Private search never holds up the tool result. Either
+ * leaves one counts-only line (no question, no evidence), so a missing panel
+ * can be told apart from a question that matched nothing Private.
  */
 function probeWithinDeadline(
   probe: NonNullable<ChatGptSurfaceOptions['privateMatchProbe']>,
   question: string,
   ctx: OperationContext,
+  options: Pick<ChatGptSurfaceOptions, 'privateMatchProbeTimeoutMs' | 'privateMatchProbeLog'> = {},
+  stage: 'search' | 'refresh' = 'search',
 ): Promise<boolean | number | PrivateMatchProbeResult> {
+  const timeoutMs = options.privateMatchProbeTimeoutMs ?? PROBE_TIMEOUT_MS;
+  const log = options.privateMatchProbeLog ?? defaultProbeLog;
+  const startedAt = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<false>((resolve) => {
-    timer = setTimeout(() => resolve(false), PROBE_TIMEOUT_MS);
+    timer = setTimeout(() => {
+      log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
+      resolve(false);
+    }, timeoutMs);
     (timer as { unref?: () => void }).unref?.();
   });
-  return Promise.race([probe(question, ctx).catch(() => false as const), timeout]).finally(() => clearTimeout(timer));
+  const probed = probe(question, ctx).then(
+    (value) => value,
+    () => {
+      log(`[chatgpt] private match probe failed stage=${stage} elapsed_ms=${Date.now() - startedAt}`);
+      return false as const;
+    },
+  );
+  return Promise.race([probed, timeout]).finally(() => clearTimeout(timer));
 }
+
+const defaultProbeLog = (line: string) => {
+  console.warn(line);
+};
 
 interface PendingPrivateMatch {
   question: string;
@@ -425,8 +450,9 @@ function privateRefresh(
   question: string,
   probe: NonNullable<ChatGptSurfaceOptions['privateMatchProbe']>,
   context: () => OperationContext,
+  options: Pick<ChatGptSurfaceOptions, 'privateMatchProbeTimeoutMs' | 'privateMatchProbeLog'>,
 ): PrivateEvidenceRefresh {
-  return async () => normalizeProbe(await probeWithinDeadline(probe, question, context())).evidence;
+  return async () => normalizeProbe(await probeWithinDeadline(probe, question, context(), options, 'refresh')).evidence;
 }
 
 /**

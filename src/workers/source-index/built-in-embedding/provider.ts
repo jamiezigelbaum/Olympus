@@ -87,7 +87,9 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   private loading: Promise<LoadedModel> | undefined;
   private loaded: LoadedModel | undefined;
   private lastFailure: { atMs: number; error: Error } | undefined;
-  private queue: Promise<unknown> | undefined;
+  /** One forward pass runs at a time; these wait for the slot, queries first. */
+  private slotBusy = false;
+  private readonly waiting: { query: Array<() => void>; document: Array<() => void> } = { query: [], document: [] };
 
   constructor(options: BuiltInSourceEmbeddingProviderOptions = {}) {
     this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
@@ -135,6 +137,15 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     await this.load();
   }
 
+  /**
+   * Loads the model and runs one short query through it, so the first
+   * question after a start does not pay for the runtime's first-run setup.
+   */
+  async warm(): Promise<void> {
+    await this.load();
+    await this.embed([{ text: 'warm up' }], { taskType: 'RETRIEVAL_QUERY' });
+  }
+
   /** The owner asked to try a failed install again: no back-off wait. */
   async retry(): Promise<void> {
     if (!this.loading) this.lastFailure = undefined;
@@ -153,7 +164,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       }
     }
     const model = this.loaded ?? await this.load();
-    return this.serialized(() => this.embedLoaded(model, inputs, options.taskType));
+    return this.embedLoaded(model, inputs, options.taskType);
   }
 
   private load(): Promise<LoadedModel> {
@@ -205,12 +216,27 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     }
   }
 
-  /** One forward pass at a time per process, so the thread cap is the CPU cap. */
-  private serialized<T>(run: () => Promise<T>): Promise<T> {
-    const previous = this.queue ?? Promise.resolve();
-    const next = previous.then(run, run);
-    this.queue = next.catch(() => undefined);
-    return next;
+  /**
+   * One forward pass at a time per process, so the thread cap is the CPU cap.
+   * A question's pass goes before every waiting document pass: a search never
+   * waits behind a whole indexing batch (32 documents of several windows
+   * each), only behind the one pass already running. Indexing right after a
+   * start once held a ChatGPT question's Private search past its deadline.
+   */
+  private async withSlot<T>(taskType: SourceEmbeddingTaskType, run: () => Promise<T>): Promise<T> {
+    if (this.slotBusy) {
+      await new Promise<void>((resolve) => this.waiting[taskType === 'RETRIEVAL_QUERY' ? 'query' : 'document'].push(resolve));
+    } else {
+      this.slotBusy = true;
+    }
+    try {
+      return await run();
+    } finally {
+      const next = this.waiting.query.shift() ?? this.waiting.document.shift();
+      // The slot passes straight to the next pass; it is free only when none waits.
+      if (next) next();
+      else this.slotBusy = false;
+    }
   }
 
   private async embedLoaded(
@@ -236,7 +262,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
 
     const sums = inputs.map(() => new Float64Array(this.dimension));
     for (const batch of planBatches(windows)) {
-      const vectors = await this.forward(model, batch);
+      const vectors = await this.withSlot(taskType, () => this.forward(model, batch));
       batch.forEach((window, row) => {
         const vector = vectors[row]!;
         const weight = window.ids.length - 2;

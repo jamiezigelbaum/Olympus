@@ -6,6 +6,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   collectPrivateAnswer,
   findPrivateLeaks,
+  PANEL_FULL_POLL_CAP_MS,
   parseSmokeArgs,
   privateNoteKind,
   readPanelPlaintext,
@@ -14,6 +15,7 @@ import {
   type ToolResultLike,
 } from '../scripts/chatgpt-live-smoke.ts';
 import { PRIVATE_ANSWER_META_KEY } from '../src/workers/chatgpt/private-answer-contract.ts';
+import { CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS } from '../src/workers/dashboard/chatgpt/private-answer.ts';
 import { importPanelPublicKey, sealPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PRIVATE_MATCH_PANEL_FULL_NOTE, PRIVATE_MATCH_PANEL_NOTE } from '../src/workers/chatgpt/response-builder.ts';
 
@@ -101,15 +103,16 @@ describe('panel collection', () => {
     expect(outcome.ok ? 'ok' : outcome.status).toBe('cors');
   });
 
-  test('stops at the panel cap: 2 min summary, 190 s full', async () => {
+  test('stops at the panel cap: 2 min summary, the panel\'s full-detail cap for full', async () => {
     const pending = [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }];
     const summary = await collectPrivateAnswer({ relay: RELAY, jobId: JOB, origin: ORIGIN, full: false, fetch: fakeRelay(pending).fetchImpl, ...clock() });
     expect(summary.ok ? 'ok' : summary.status).toBe('slow');
     expect(summary.claimMs).toBeLessThanOrEqual(120_000);
     expect(summary.claimMs).toBeGreaterThan(115_000);
     const full = await collectPrivateAnswer({ relay: RELAY, jobId: JOB, origin: ORIGIN, full: true, fetch: fakeRelay(pending).fetchImpl, ...clock() });
-    expect(full.claimMs).toBeGreaterThan(180_000);
-    expect(full.claimMs).toBeLessThanOrEqual(190_000);
+    expect(full.claimMs).toBeGreaterThan(PANEL_FULL_POLL_CAP_MS - 10_000);
+    expect(full.claimMs).toBeLessThanOrEqual(PANEL_FULL_POLL_CAP_MS);
+    expect(PANEL_FULL_POLL_CAP_MS).toBe(CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS);
   });
 
   test('reads only a v1 plaintext', () => {

@@ -114,6 +114,7 @@ import {
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
+import { BUILT_IN_EMBEDDING_MODEL } from '../source-index/built-in-embedding/manifest.ts';
 import type {
   SourceIndexCorpusSearchAdapter,
   SourceIndexCorpusSearchRequest,
@@ -156,6 +157,10 @@ const EMBEDDING_BATCH_SIZE = 32;
 const MAX_SELECTED_EMBED_ITEM_IDS = 25_000;
 const MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100;
 const MIN_VECTOR_SCORE = 0.18;
+// The most query concepts a keyword match must contain (see searchItemsDetailed).
+const MAX_REQUIRED_CONCEPTS = 3;
+// Or the share of the query's concept weight (IDF) a keyword match must carry.
+const RARE_CONCEPT_WEIGHT_SHARE = 0.6;
 const READ_RESULT_PROJECTION_LOCATOR_URI = Symbol('connector-store-result-projection-locator-uri');
 // Below this bar, semantic similarity is treated as no evidence. Calibrated
 // against the live corpus (gemini-embedding-2, 2026-07-25: off-domain
@@ -174,6 +179,25 @@ export const DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62;
 const CALIBRATED_CONTENT_PREFERENCE_BARS: ReadonlyMap<string, number> = new Map([
   ['gemini-embedding-2', DEFAULT_SEMANTIC_RELEVANCE_BAR],
 ]);
+// Relevance bars that also gate the vector lane when the adapter sets none:
+// a vector row below its model's bar is no evidence at all (not merely no
+// content preference), so it neither enters fusion nor counts as a match. The
+// built-in model's nearest neighbours are everything with text: without a
+// bar, every question "matched" every embedded item, so a corpus that held
+// any text always answered (2026-10-02: every ChatGPT question reported 12
+// Private matches). Calibrated 2026-10-02 on the owner's corpus copies (the
+// built-in Arctic Embed M v1.5): off-topic questions peak at 0.39 best-cosine
+// against the Private items and 0.37 against the Personal ones, while true
+// positives and paraphrases start at 0.40 (most at 0.43 to 0.56; the weaker
+// true positives are lexical matches, which stand on their own merit).
+const CALIBRATED_SEMANTIC_RELEVANCE_BARS: ReadonlyMap<string, number> = new Map([
+  [BUILT_IN_EMBEDDING_MODEL.modelId, 0.4],
+]);
+
+/** The relevance bar that gates a model's vector lane: the adapter's own, else the model's calibrated one. */
+function semanticRelevanceBarFor(modelId: string, adapterBar?: number): number | undefined {
+  return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
+}
 
 // Media types that name a container rather than a document, for every source
 // that stores its folders as items: the IANA/freedesktop directory type
@@ -1380,6 +1404,16 @@ export interface ConnectorStoreSearchRow {
 
 export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
   bestCosine: number;
+}
+
+/**
+ * How much of a keyword query each row matched: the query's distinct
+ * concepts (a term with its synonyms is one concept) and, per row (by local
+ * item id), how many of them the item's name or text contains.
+ */
+export interface ConnectorStoreConceptCoverage {
+  total: number;
+  matched: ReadonlyMap<string, number>;
 }
 
 export interface ConnectorStoreCurrentEmbeddingRow {
@@ -8372,11 +8406,11 @@ export class LocalConnectorStore {
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
     ftsOptions: { prefix?: boolean; contentOnly?: boolean } = {},
-  ): { rows: ConnectorStoreSearchRow[]; saturated: boolean } {
+  ): { rows: ConnectorStoreSearchRow[]; saturated: boolean; concepts: ConnectorStoreConceptCoverage } {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
     const terms = toFtsQuery(query, ftsOptions);
-    if (!terms) return { rows: [], saturated: false };
+    if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = sourceIndexFtsTermGroups(query);
     const minimumSignal = groups.length >= 2;
@@ -8419,13 +8453,23 @@ export class LocalConnectorStore {
     // single concept is lexical noise, not evidence (live incident
     // 2026-07-25: a bookmark was cited for a four-concept question on the
     // strength of the lone word "schedule"). Distinct concept groups —
-    // raw token plus synonyms — must match at least twice.
+    // raw token plus synonyms — must all match, or three of them for a
+    // longer question (a long question is not held to every word). A
+    // candidate that matches fewer still counts when the concepts it matches
+    // carry most of the question's weight: a concept few items in this store
+    // contain says more than one most of them do (inverse document
+    // frequency). So a file named for the one rare word of "AI sycophancy" is
+    // found without "AI", while two common words of a question are noise:
+    // "June 2026 blood work" matched a diet guide on "blood" and "work", and
+    // "omega-3 level" matched every guide that says "3" and "level".
+    const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
     let selected = rows;
+    const matchedGroups = new Map<number, number>();
+    const matchedGroupIndexes = new Map<number, number[]>();
     if (minimumSignal && rows.length > 0) {
       const pks = rows.map((row) => row.item_pk);
       const placeholders = pks.map(() => '?').join(', ');
-      const matchedGroups = new Map<number, number>();
-      for (const group of groups) {
+      for (const [groupIndex, group] of groups.entries()) {
         const hits = this.db.query(`
           SELECT DISTINCT connector_store_fts.item_pk
           FROM connector_store_fts
@@ -8436,9 +8480,17 @@ export class LocalConnectorStore {
         `).all(sourceIndexFtsGroupQuery(group), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
         for (const hit of hits) {
           matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
+          matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
         }
       }
-      selected = rows.filter((row) => (matchedGroups.get(row.item_pk) ?? 0) >= 2);
+      const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
+      const weights = rows.every(enough) ? undefined : this.conceptWeights(groups);
+      selected = rows.filter((row) => {
+        if (enough(row)) return true;
+        if (!weights) return false;
+        const matched = (matchedGroupIndexes.get(row.item_pk) ?? []).reduce((sum, index) => sum + weights.of[index]!, 0);
+        return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
+      });
     }
     selected = this.tierVisibleRows(
       selected,
@@ -8453,8 +8505,9 @@ export class LocalConnectorStore {
       (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
     );
     const spanTerms = queryTermsForSpan(query);
+    const kept = selected.slice(0, limit);
     return {
-      rows: selected.slice(0, limit).map((row) => {
+      rows: kept.map((row) => {
         const base = searchRowFromItemRow(row);
         const chunk = row.chunk_pk === null || row.chunk_pk === undefined
           ? undefined
@@ -8462,7 +8515,33 @@ export class LocalConnectorStore {
         return chunk ? { ...base, chunk } : base;
       }),
       saturated: rows.length >= fetchLimit || selected.length > limit,
+      // How many of the query's concepts each row matched (in its name or its
+      // text). A single-concept query has nothing to count: every row matched it.
+      concepts: {
+        total: groups.length,
+        matched: new Map(kept.map((row) => [
+          row.local_item_id,
+          minimumSignal ? (matchedGroups.get(row.item_pk) ?? 0) : groups.length,
+        ])),
+      },
     };
+  }
+
+  /**
+   * Each query concept's weight in this store: its inverse document frequency,
+   * ln((items + 1) / (items containing it + 0.5)). A concept no item contains
+   * weighs the most, so the question's missing words still count against a
+   * partial match.
+   */
+  private conceptWeights(groups: ReadonlyArray<readonly string[]>): { of: number[]; total: number } {
+    const items = (this.db.query('SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0').get() as { count: number }).count;
+    const of = groups.map((group) => {
+      const { count } = this.db.query(
+        'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
+      ).get(sourceIndexFtsGroupQuery(group)) as { count: number };
+      return Math.max(0, Math.log((items + 1) / (count + 0.5)));
+    });
+    return { of, total: of.reduce((sum, weight) => sum + weight, 0) };
   }
 
   /**
@@ -9216,19 +9295,22 @@ export function createConnectorStoreCorpusAdapter(
           rawExposed: false,
         };
       }
+      const lanes = [
+        { name: 'keyword', items: rows },
+        { name: 'recency', items: recencyRows },
+      ];
       const fused = fuseRankedCandidateLanes({
-        lanes: [
-          { name: 'keyword', items: rows },
-          { name: 'recency', items: recencyRows },
-        ],
+        lanes,
         getId: (row) => row.sourceItem.localItemId,
-        limit: Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS)),
+        limit: allCandidates(lanes),
         tieBreaker: connectorStoreCandidateComparator(lexicalContentPreference),
       });
+      const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) =>
+        candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(candidate.item.sourceItem.localItemId);
       const hits = withPinnedNewestChatHits({
         store,
         recencyRows,
-        hits: contentFirstCandidates(fused).map((candidate) => connectorStoreHitFromRow(
+        hits: rankedCandidates(fused, request.maxResults, complete).map((candidate) => connectorStoreHitFromRow(
           store,
           candidate.item,
           candidate.score,
@@ -9422,36 +9504,44 @@ async function hybridConnectorStoreSearch(
   // common-token FTS saturation gives off-domain questions nonzero keyword
   // rows, so a keyword-empty arming condition never fires on exactly the
   // questions the bar exists for).
-  const gateArmed = semanticRelevanceBar !== undefined;
+  const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
+  const gateArmed = relevanceBar !== undefined;
   const vectorRows = gateArmed
-    ? scoredVectorRows.filter((row) => row.bestCosine >= semanticRelevanceBar)
+    ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar)
     : scoredVectorRows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
   const recencyRows = chatRecencyLaneRows(store, accountScope, filters);
-  const contentBar = semanticRelevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
-  const contentPreference = connectorStoreContentPreference(new Set(contentBar === undefined
+  const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
+  const vettedVectorItemIds = new Set(contentBar === undefined
     ? []
     : vectorRows
       .filter((row) => row.bestCosine >= contentBar)
-      .map((row) => row.sourceItem.localItemId)));
+      .map((row) => row.sourceItem.localItemId));
+  const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
 
+  const lanes = [
+    { name: 'keyword', items: keywordRows },
+    { name: 'vector', items: vectorRows },
+    ...(recencyRows.length > 0 ? [{ name: 'recency', items: recencyRows }] : []),
+  ];
   const fused = fuseRankedCandidateLanes({
-    lanes: [
-      { name: 'keyword', items: keywordRows },
-      { name: 'vector', items: vectorRows },
-      ...(recencyRows.length > 0 ? [{ name: 'recency', items: recencyRows }] : []),
-    ],
+    lanes,
     getId: (row) => row.sourceItem.localItemId,
-    limit: maxResults,
+    limit: allCandidates(lanes),
     tieBreaker: connectorStoreCandidateComparator(contentPreference),
   });
+  const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => {
+    const id = candidate.item.sourceItem.localItemId;
+    return (candidate.laneRanks.has('vector') && vettedVectorItemIds.has(id))
+      || (candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(id));
+  };
   const hits = withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: contentFirstCandidates(fused, contentPreference).map((candidate) => connectorStoreHitFromRow(
+    hits: rankedCandidates(fused, maxResults, complete, contentPreference).map((candidate) => connectorStoreHitFromRow(
       store,
       candidate.item,
       candidate.score,
@@ -9570,13 +9660,23 @@ function connectorStoreKeywordLaneRows(
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
   ftsOptions: { prefix?: boolean } = {},
-): { rows: ConnectorStoreSearchRow[]; matchCount: SourceIndexCorpusMatchCount; matchedItemIds: ReadonlySet<string> } {
+): {
+  rows: ConnectorStoreSearchRow[];
+  matchCount: SourceIndexCorpusMatchCount;
+  matchedItemIds: ReadonlySet<string>;
+  completeItemIds: ReadonlySet<string>;
+} {
   const plain = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions);
   const rows = plain.rows;
   const content = rows.every(connectorStoreRowHasContent)
-    ? { rows: [], saturated: false }
+    ? { rows: [], saturated: false, concepts: plain.concepts }
     : store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true });
   const contentRows = content.rows;
+  // Rows that match every concept of the question, in their name or text.
+  const complete = new Set<string>();
+  for (const concepts of [plain.concepts, content.concepts]) {
+    for (const [id, matched] of concepts.matched) if (matched >= concepts.total) complete.add(id);
+  }
   const seen = new Set<string>();
   const merged: ConnectorStoreSearchRow[] = [];
   for (const row of [
@@ -9588,14 +9688,21 @@ function connectorStoreKeywordLaneRows(
     seen.add(row.sourceItem.localItemId);
     merged.push(row);
   }
+  // Content first only among equals: a readable item that matches part of
+  // the question does not outrank a name that matches all of it.
+  const ordered = [
+    ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
+    ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
+  ];
   return {
-    rows: merged.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
+    rows: ordered.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
     matchCount: {
       matchedItems: merged.length,
       contentMatchedItems: merged.filter(connectorStoreRowHasContent).length,
       saturated: plain.saturated || content.saturated,
     },
     matchedItemIds: seen,
+    completeItemIds: complete,
   };
 }
 
@@ -9626,16 +9733,28 @@ function connectorStoreContentPreference(vettedVectorItemIds: ReadonlySet<string
 
 const lexicalContentPreference: ContentPreference = connectorStoreContentPreference(new Set());
 
-// Fusion decides which candidates make the cut; within it, a title-only or
-// metadata-only item never outranks one the Analyst can actually read.
-function contentFirstCandidates(
+// The final order and cut over fusion's order. A candidate that matches the
+// whole question (every concept of it in its name or text, or a vetted vector
+// hit) comes before one that matches only part of it; within each, a
+// title-only or metadata-only item never outranks one the Analyst can
+// actually read. So a readable document never buries the file named for the
+// question just because it shares one of the question's words, and a name
+// never buries a document that answers the question as fully.
+function rankedCandidates(
   candidates: readonly FusedRankedCandidate<ConnectorStoreSearchRow>[],
+  limit: number,
+  complete: (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => boolean,
   hasContent: ContentPreference = lexicalContentPreference,
 ): FusedRankedCandidate<ConnectorStoreSearchRow>[] {
-  return [
-    ...candidates.filter(hasContent),
-    ...candidates.filter((candidate) => !hasContent(candidate)),
-  ];
+  const tiers: FusedRankedCandidate<ConnectorStoreSearchRow>[][] = [[], [], [], []];
+  for (const candidate of candidates) {
+    tiers[(complete(candidate) ? 0 : 2) + (hasContent(candidate) ? 0 : 1)]!.push(candidate);
+  }
+  return tiers.flat().slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
+}
+
+function allCandidates(lanes: ReadonlyArray<{ items: readonly unknown[] }>): number {
+  return Math.max(1, lanes.reduce((total, lane) => total + lane.items.length, 0));
 }
 
 // RRF tie-breaker: a content-preferred candidate first (a vetted vector hit on

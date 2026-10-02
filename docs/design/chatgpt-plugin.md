@@ -347,6 +347,29 @@ instead. It is still counted (`coverage.content_private_items`), which is
 what lets the no-panel note say Private items matched. This is a
 presentation rule for evidence, not a change to what tier a name has.
 
+**What counts as a match** (2026-10-02). A Private match is a Private item
+the shared retrieval would hand an Analyst as evidence, under the same
+relevance floor as every other search: query words that carry no topic
+("what do I have about", "files", "show") are not search terms; a keyword
+match must contain every concept of the question (three of a longer one),
+or concepts that carry most of its weight (rare words count more than
+common ones); and a vector match must clear its model's calibrated bar (the
+built-in model's is 0.40 best-cosine, calibrated on the owner's corpus
+copies: off-topic questions peak at 0.39). Before this, the built-in
+model's nearest neighbours and words like "do" and "about" made every
+non-empty Private corpus match every question (live smoke: every question
+reported 12 Private matches and the panel answered "these private items do
+not answer this question"). With no item above the floor there is no panel
+and no note. Within the floor, an item matching the whole question ranks
+before one matching part of it, and a readable item before a name only
+among equals (a Personal "integral theory" search had seven diet guides,
+matched on "do", "have" and "about", above every file named for the
+topic). A probe that times out (20 s) or fails leaves one counts-only line
+(`[chatgpt] private match probe timed_out stage=search timeout_ms=20000`),
+and the built-in embedding model is loaded and warmed at start and runs a
+question's forward pass before any waiting indexing pass, so a search no
+longer waits behind indexing after a restart.
+
 With the panel `ready`, the note steers ChatGPT to a short reply along the
 lines of "Olympus is preparing your answer privately on your Mac; it'll
 appear in the panel above, visible only to you (it can take up to a
@@ -474,15 +497,19 @@ percent when known; counts only, no job).
        within 5,000 characters (results pages rather than page headers;
        otherwise the search-time passages), under the 11,000-byte prompt and
        1,000-character answer budget. Fast, like the panel before.
-     - *Full.* The items read are re-read whole, when they fit 10,000
+     - *Full.* The items read are re-read whole, when they fit 7,000
        characters together (layout whitespace compacted), else the shorter
        whole and the rest at an equal share of the remainder, for their best
-       passages; the prompt ceiling is 14,500 bytes (about 4.5k tokens) and
-       the answer about 2,000 characters. Its analysis and claim deadline is
-       180 s (`PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS`) instead of 100 s.
-       Owner report: "can you give me all the details from that lab please?"
-       reached the panel as four thin slices of four items and was answered
-       "the provided evidence does not contain the details".
+       passages; the prompt ceiling is 11,500 bytes and the answer about
+       1,500 characters. Its analysis and claim deadline is 240 s
+       (`PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS`) instead of 100 s; the
+       panel must wait a little longer (250 s,
+       `CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS`, owned by the panel). Owner report: "can you
+       give me all the details from that lab please?" reached the panel as
+       four thin slices of four items and was answered "the provided evidence
+       does not contain the details". Live 2026-10-02: 10,000 characters and
+       a 2,000-character answer took 179.4 s of the then 180 s deadline on a
+       loaded Mac (prefill 64 s for 3,920 tokens, 2.8 tokens/s).
      The Analyst instruction allows a longer answer only when the question
      asks for details, all results or a full list (one generic sentence).
    - **Sources.** Only the items the answer cites are its sources. Each
@@ -684,7 +711,8 @@ What it does, in order:
    origin (`codex-sandbox://mcp-app-<hex>.web-sandbox.oaiusercontent.com`;
    `--origin` overrides), one ECDH P-256 key for every poll, `Retry-After`
    honored (2 s default, 30 s at most), and the panel's caps (2 min, or
-   190 s for `detail: "full"`). It decrypts the answer and prints it with
+   its full-detail cap for `detail: "full"`, both read from the panel's
+   module). It decrypts the answer and prints it with
    its cited titles, gaps and timing (search time, claim to settled, and
    search to ready). `--quiet` prints only the answer's length and the
    cited titles, for runs where medical or other private content should
@@ -698,7 +726,8 @@ What it does, in order:
    `v, count, state, jobId, percent, detail`. A decimal value shared with a
    private answer is a warning only. It also fails on a panel failure
    (claimed, failed, gone, offline, CORS refusal, poll cap) and on a
-   private answer slower than 120 s (summary) or 190 s (full) from the
+   private answer slower than the panel waits (120 s summary, the panel's
+   full-detail cap for full) from the
    search. `--expect-private` also fails when a question gets no ready
    panel job. Exit 2 means the run could not start (token, relay or
    arguments).

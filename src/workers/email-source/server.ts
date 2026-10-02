@@ -1832,11 +1832,13 @@ export async function main(): Promise<void> {
   const sourceIndexEmbeddingProvider = internalPolicyEmbeddingProvider
     ?? (envPolicyFallback ? createSourceIndexEmbeddingProviderFromEnv() : undefined);
   // The built-in model downloads once, on first use. Start that at boot so a
-  // new install shows "installing" right away instead of at its first index.
+  // new install shows "installing" right away instead of at its first index,
+  // and run one query through it so the first question after a start is not
+  // the one that waits for the model to load and warm up.
   // Never under the test runner: a test must not fetch model weights.
   if (process.env.NODE_ENV !== 'test') {
     for (const provider of new Set([internalPolicyEmbeddingProvider, secureLocalPolicyEmbeddingProvider])) {
-      if (provider instanceof BuiltInSourceEmbeddingProvider) void provider.prepare().catch(() => undefined);
+      if (provider instanceof BuiltInSourceEmbeddingProvider) void provider.warm().catch(() => undefined);
     }
   }
   const readwiseEmbeddingProvider = envPolicyFallback

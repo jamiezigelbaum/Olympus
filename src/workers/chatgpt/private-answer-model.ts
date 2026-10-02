@@ -145,9 +145,14 @@ export const PANEL_ANSWER_LIMITS: Readonly<PanelAnswerLimits> = {
   maxLeadingItems: 2,
   leadGap: 0.01,
   leadingEvidenceChars: 5_000,
-  deepEvidenceChars: 10_000,
-  deepPromptBytes: 14_500,
-  deepAnswerChars: 3_700,
+  // Full detail on a small local model is bounded by prefill and generation
+  // speed: on a loaded Mac 10k characters of evidence and a 3.7k answer budget
+  // took 179 s. About 7k characters of the item's text and an answer of about
+  // 1.5k characters (the answer field is 55% of the budget) keep it well
+  // inside its deadline.
+  deepEvidenceChars: 7_000,
+  deepPromptBytes: 11_500,
+  deepAnswerChars: 2_700,
 };
 
 export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerModelOptions): PrivateAnswerModel {
