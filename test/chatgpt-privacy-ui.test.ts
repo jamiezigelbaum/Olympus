@@ -225,6 +225,18 @@ describe('the Privacy screen', () => {
     expectNamesOnlyInPrivacy(host);
   });
 
+  test('says plainly what ChatGPT sees: under the description box, and under the always-private rules', async () => {
+    const { host } = await openPrivacy({ description: DESCRIPTION, rules: SAVED_RULES });
+    expect(W.descriptionShared).toBe('ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.');
+    const field = host.doc.querySelector('label.field')!;
+    const note = field.nextElementSibling!;
+    expect(note.textContent).toBe(W.descriptionShared);
+    expect(host.doc.querySelector('textarea')!.getAttribute('aria-describedby')).toBe(note.id);
+    const rules = Array.from(host.doc.querySelectorAll('section.fsection')).find((node) => node.querySelector('h2')?.textContent === W.rulesTitle)!;
+    expect(rules.lastElementChild!.textContent).toBe(W.namesShared);
+    expect(W.namesShared).toContain('shown to ChatGPT');
+  });
+
   test('no waiting line when nothing is waiting; one item reads in the singular', async () => {
     const none = await openPrivacy();
     expect(none.host.text()).not.toContain('waiting to be checked');

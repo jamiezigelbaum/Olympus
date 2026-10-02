@@ -399,11 +399,15 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     area.value = s.description;
     area.disabled = s.saving;
     area.setAttribute('data-key', 'privacy:description');
+    area.setAttribute('aria-describedby', 'privacy-description-shared');
     area.addEventListener('input', () => {
       s.description = area.value;
       s.edited = true;
     });
     add(page, add(field, area));
+    const shared = el('p', 'reason field-note', W.descriptionShared);
+    shared.id = 'privacy-description-shared';
+    add(page, shared);
 
     const rules = add(el('section', 'fsection'), el('h2', '', W.rulesTitle));
     if (s.rules.length) {
@@ -419,6 +423,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
       kit.button(W.addSender, 'privacy:add:sender', s.saving ? null : addSender, 'plain')));
     if (!folders) add(rules, el('p', 'reason', W.needFolderSource));
     if (!gmail) add(rules, el('p', 'reason', W.needGmail));
+    add(rules, el('p', 'reason', W.namesShared));
     add(page, rules);
 
     const footer = el('section', 'picker-footer');

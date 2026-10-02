@@ -1366,8 +1366,12 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   tryAgain: 'Try again',
   descriptionLabel: 'In your own words',
   descriptionPlaceholder: 'For example: my health and therapy, money and taxes, anything about my kids, my divorce',
+  /** Under the description box: the description is saved through ChatGPT, so it sees it. */
+  descriptionShared: 'ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.',
   rulesTitle: 'Always private (optional)',
   rulesEmpty: 'No folders, labels or senders yet.',
+  /** Under the always-private rules: their names travel through ChatGPT to be listed and saved. */
+  namesShared: 'Folder and label names and senders you add here are shown to ChatGPT.',
   kindFolder: 'Folder in {source}',
   kindLabel: 'Gmail label',
   kindSender: 'Sender',
