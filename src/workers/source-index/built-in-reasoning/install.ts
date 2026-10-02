@@ -18,6 +18,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  statfsSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -39,7 +40,17 @@ export type BuiltInReasoningFailureReason =
   | 'download_failed'
   | 'checksum_mismatch'
   | 'disk_write_failed'
+  | 'insufficient_space'
   | 'runtime_load_failed';
+
+/** Set on an `insufficient_space` failure: what the download needs and what the disk has. */
+export interface BuiltInReasoningSpaceShortfall {
+  /** Free bytes needed before the download (re)starts: what is left to fetch plus headroom. */
+  bytesNeeded: number;
+  bytesFree: number;
+  /** No new attempt (not even a disk check) before this time. */
+  retryAfter: string;
+}
 
 export interface BuiltInReasoningStatus {
   state: BuiltInReasoningState;
@@ -50,7 +61,7 @@ export interface BuiltInReasoningStatus {
   bytesDone: number;
   bytesTotal: number;
   updatedAt: string;
-  failure?: { reason: BuiltInReasoningFailureReason; message: string };
+  failure?: { reason: BuiltInReasoningFailureReason; message: string } & Partial<BuiltInReasoningSpaceShortfall>;
 }
 
 export type BuiltInReasoningProgressListener = (status: BuiltInReasoningStatus) => void;
@@ -88,11 +99,33 @@ export interface BuiltInReasoningInstallerOptions {
   verifyTimeoutMs?: number;
   /** One line per install stage; defaults to the worker log. */
   log?: (line: string) => void;
+  /** Free bytes on the volume holding `path`; defaults to statfs. */
+  freeBytes?: (path: string) => number | undefined;
+  /** Free space the download must leave on the disk. */
+  spaceHeadroomBytes?: number;
+  /** After the disk ran out of space, how long before the next attempt. */
+  spaceBackoffMs?: number;
+  /** How often the install lock holder refreshes its lock. */
+  lockRefreshMs?: number;
+  /** Writes one downloaded chunk (tests simulate a full disk with it). */
+  writeChunk?: (fd: number, chunk: Uint8Array) => void;
 }
 
 export const BUILT_IN_REASONING_DIR_ENV = 'OLYMPUS_BUILT_IN_REASONING_DIR';
+/**
+ * A lock whose holder has not refreshed it for this long is abandoned even if
+ * its PID is alive (the PID was reused, or the holder is wedged). A holder
+ * that is still installing refreshes it every LOCK_REFRESH_MS, so a slow
+ * multi-hour download keeps its lock.
+ */
 const STALE_LOCK_MS = 60 * 60_000;
+const LOCK_REFRESH_MS = 30_000;
 const LOCK_POLL_MS = 1_000;
+/** Free space a model download must leave behind, so it never fills the disk. */
+export const BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+/** Runtime archives are unpacked next to themselves; budget a few times their size. */
+const RUNTIME_UNPACK_FACTOR = 4;
+const SPACE_BACKOFF_MS = 15 * 60_000;
 const PROGRESS_WRITE_INTERVAL_MS = 500;
 /** No byte for this long and a download is abandoned; the partial file is kept and resumes on retry. */
 const DOWNLOAD_STALL_MS = 2 * 60_000;
@@ -105,11 +138,13 @@ const SERVER_BINARY = 'llama-server';
 
 export class BuiltInReasoningInstallError extends Error {
   readonly reason: BuiltInReasoningFailureReason;
+  readonly shortfall: BuiltInReasoningSpaceShortfall | undefined;
 
-  constructor(reason: BuiltInReasoningFailureReason, message: string) {
+  constructor(reason: BuiltInReasoningFailureReason, message: string, shortfall?: BuiltInReasoningSpaceShortfall) {
     super(message);
     this.name = 'BuiltInReasoningInstallError';
     this.reason = reason;
+    this.shortfall = shortfall;
   }
 }
 
@@ -219,20 +254,46 @@ export async function installBuiltInReasoning(
       return installed();
     }
 
-    await stage('install', () => withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
+    // The disk ran out during an earlier attempt: wait out the backoff
+    // instead of re-downloading into a disk that just filled up.
+    const now = (options.now ?? (() => new Date()))();
+    const previous = readBuiltInReasoningStatus(model, options.env);
+    if (previous.state === 'failed' && previous.failure?.reason === 'insufficient_space'
+      && previous.failure.retryAfter && Date.parse(previous.failure.retryAfter) > now.getTime()) {
+      throw new BuiltInReasoningInstallError('insufficient_space', previous.failure.message, {
+        bytesNeeded: previous.failure.bytesNeeded ?? 0,
+        bytesFree: previous.failure.bytesFree ?? 0,
+        retryAfter: previous.failure.retryAfter,
+      });
+    }
+
+    const space = {
+      freeBytes: options.freeBytes ?? volumeFreeBytes,
+      headroomBytes: options.spaceHeadroomBytes ?? BUILT_IN_REASONING_SPACE_HEADROOM_BYTES,
+      backoffMs: options.spaceBackoffMs ?? SPACE_BACKOFF_MS,
+      now: () => (options.now ?? (() => new Date()))(),
+      write: options.writeChunk ?? ((fd: number, chunk: Uint8Array) => { writeSync(fd, chunk); }),
+    };
+    await stage('install', () => withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, options.lockRefreshMs ?? LOCK_REFRESH_MS, async () => {
       if (existsSync(modelPath) && runtimeInstalled(paths.runtimeDir, archive)) return;
       const fetchImpl = options.fetchImpl ?? fetch;
       const needModel = !existsSync(modelPath);
       const needRuntime = !runtimeInstalled(paths.runtimeDir, archive);
+      // Before any byte is fetched or any partial file is re-hashed: is there
+      // room for what is left, plus headroom?
+      const partialBytes = needModel ? fileSize(`${modelPath}.partial`) : 0;
+      assertSpaceFor(paths.root, space,
+        (needModel ? Math.max(0, model.file.bytes - partialBytes) : 0)
+        + (needRuntime ? archive.bytes * RUNTIME_UNPACK_FACTOR : 0));
       reporter.begin((needModel ? model.file.bytes : 0) + (needRuntime ? archive.bytes : 0));
       if (needRuntime) {
         await stage('runtime', () => installRuntime(fetchImpl, paths.runtimeDir, archive, reporter,
-          options.extractArchive ?? extractWithTar, timing.downloadStallMs));
+          options.extractArchive ?? extractWithTar, timing.downloadStallMs, space));
       }
       if (needModel) {
         ensureDirectory(paths.modelDir);
         await stage('download', () => downloadVerified(fetchImpl, model.file.url, modelPath, model.file.bytes, model.file.sha256,
-          reporter, `Downloading the built-in private model (${model.displayName})`, timing.downloadStallMs));
+          reporter, `Downloading the built-in private model (${model.displayName})`, timing.downloadStallMs, space));
       }
     }));
     await stage('verify', () => verifyModelFile(modelPath, model, reporter, timing.verifyTimeoutMs));
@@ -245,9 +306,62 @@ export async function installBuiltInReasoning(
     const failure = error instanceof BuiltInReasoningInstallError
       ? error
       : new BuiltInReasoningInstallError('disk_write_failed', error instanceof Error ? error.message : String(error));
-    reporter.fail(failure.reason, failure.message);
+    reporter.fail(failure.reason, failure.message, failure.shortfall);
     throw failure;
   }
+}
+
+interface SpacePolicy {
+  freeBytes: (path: string) => number | undefined;
+  headroomBytes: number;
+  backoffMs: number;
+  now: () => Date;
+  write: (fd: number, chunk: Uint8Array) => void;
+}
+
+/** Free bytes for an unprivileged user on the volume holding `path`, or undefined when unknown. */
+function volumeFreeBytes(path: string): number | undefined {
+  try {
+    const stats = statfsSync(path);
+    return Number(stats.bavail) * Number(stats.bsize);
+  } catch {
+    return undefined;
+  }
+}
+
+function fileSize(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
+}
+
+function spaceShortfallError(space: SpacePolicy, bytesNeeded: number, bytesFree: number, cause?: string): BuiltInReasoningInstallError {
+  const retryAfter = new Date(space.now().getTime() + space.backoffMs).toISOString();
+  return new BuiltInReasoningInstallError(
+    'insufficient_space',
+    `Not enough free disk space for the built-in private model: it needs ${formatGb(bytesNeeded)} free and the disk has ${formatGb(bytesFree)}${cause ? ` (${cause})` : ''}. Free up space; Olympus tries again after ${retryAfter}.`,
+    { bytesNeeded, bytesFree, retryAfter },
+  );
+}
+
+/** Throws `insufficient_space` unless `bytes` plus headroom fit. An unknown free size does not block. */
+function assertSpaceFor(dir: string, space: SpacePolicy, bytes: number): void {
+  if (bytes <= 0) return;
+  const free = space.freeBytes(dir);
+  if (free === undefined) return;
+  const needed = bytes + space.headroomBytes;
+  if (free < needed) throw spaceShortfallError(space, needed, free);
+}
+
+function isNoSpaceError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'ENOSPC' || code === 'EDQUOT' || /ENOSPC|no space left/i.test(String(error));
+}
+
+function formatGb(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
 
 /** Marks the lane loading, ready or failed once the server is (being) started. */
@@ -327,17 +441,22 @@ async function installRuntime(
   reporter: ProgressReporter,
   extract: (archivePath: string, targetDir: string) => void,
   stallMs: number,
+  space: SpacePolicy,
 ): Promise<void> {
   const staging = `${runtimeDir}.staging-${randomUUID()}`;
   ensureDirectory(staging);
   try {
     const archivePath = join(staging, archive.name);
     await downloadVerified(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter,
-      'Downloading the built-in model server', stallMs);
+      'Downloading the built-in model server', stallMs, space);
     reporter.set('verifying', 'Unpacking the built-in model server');
     try {
       extract(archivePath, staging);
     } catch (error) {
+      if (isNoSpaceError(error)) {
+        throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes,
+          space.freeBytes(dirname(runtimeDir)) ?? 0, 'the disk filled up while unpacking');
+      }
       throw new BuiltInReasoningInstallError(
         'runtime_load_failed',
         `The built-in model server could not be unpacked (${error instanceof Error ? error.message : String(error)}).`,
@@ -415,6 +534,7 @@ async function downloadVerified(
   reporter: ProgressReporter,
   label: string,
   stallMs: number,
+  space: SpacePolicy,
 ): Promise<void> {
   // One writer holds the install lock, so a fixed partial name is safe and lets
   // a multi-gigabyte download resume after a restart instead of starting over.
@@ -466,7 +586,7 @@ async function downloadVerified(
     rmSync(partial, { force: true });
     await response.body?.cancel().catch(() => undefined);
     reporter.advance(-received, label);
-    return downloadVerified(fetchImpl, url, target, expectedBytes, expectedSha256, reporter, label, stallMs);
+    return downloadVerified(fetchImpl, url, target, expectedBytes, expectedSha256, reporter, label, stallMs, space);
   }
   if (!response.ok || !response.body) {
     disarmStall();
@@ -481,6 +601,12 @@ async function downloadVerified(
   try {
     fd = openSync(partial, received > 0 ? 'a' : 'w', 0o644);
   } catch (error) {
+    disarmStall();
+    await response.body.cancel().catch(() => undefined);
+    if (isNoSpaceError(error)) {
+      rmSync(partial, { force: true });
+      throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname(target)) ?? 0, 'the disk is full');
+    }
     throw new BuiltInReasoningInstallError('disk_write_failed', `Could not write ${partial}: ${String(error)}`);
   }
   try {
@@ -502,8 +628,20 @@ async function downloadVerified(
       }
       hash.update(value);
       try {
-        writeSync(fd, value);
+        space.write(fd, value);
       } catch (error) {
+        await reader.cancel().catch(() => undefined);
+        if (isNoSpaceError(error)) {
+          // A partial that filled the disk is not worth resuming: delete it
+          // so the disk has its space back, and wait out the backoff.
+          try {
+            closeSync(fd);
+          } catch {
+            // closed below
+          }
+          rmSync(partial, { force: true });
+          throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname(target)) ?? 0, 'the disk filled up during the download');
+        }
         throw new BuiltInReasoningInstallError('disk_write_failed', `Could not write the download: ${String(error)}`);
       }
       reporter.advance(value.byteLength, label);
@@ -585,50 +723,84 @@ async function sha256File(path: string, timeoutMs: number, onProgress?: (bytesDo
 // ---------------------------------------------------------------------------
 // Cross-process install lock
 
-async function withInstallLock(lockPath: string, waitMs: number, run: () => Promise<void>): Promise<void> {
+async function withInstallLock(lockPath: string, waitMs: number, refreshMs: number, run: () => Promise<void>): Promise<void> {
   const deadline = Date.now() + waitMs;
+  const token = randomUUID();
   for (;;) {
-    if (tryAcquireLock(lockPath)) break;
+    if (tryAcquireLock(lockPath, token)) break;
     if (Date.now() > deadline) {
       throw new BuiltInReasoningInstallError('download_failed', 'Another Olympus process is still installing the built-in private model.');
     }
     await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
   }
+  // The holder keeps its lock fresh for as long as it installs, however long
+  // the download takes; only an unrefreshed lock can go stale.
+  const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
+  refresh.unref?.();
   try {
     await run();
   } finally {
-    rmSync(lockPath, { force: true });
+    clearInterval(refresh);
+    if (lockHolder(lockPath)?.token === token) rmSync(lockPath, { force: true });
   }
 }
 
-function tryAcquireLock(lockPath: string): boolean {
+interface LockHolder {
+  pid?: number;
+  at?: number;
+  token?: string;
+}
+
+function lockHolder(lockPath: string): LockHolder | undefined {
+  try {
+    return JSON.parse(readFileSync(lockPath, 'utf8')) as LockHolder;
+  } catch {
+    return undefined;
+  }
+}
+
+function refreshLock(lockPath: string, token: string): void {
+  if (lockHolder(lockPath)?.token !== token) return;
+  try {
+    const temporary = `${lockPath}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 0o600 });
+    renameSync(temporary, lockPath);
+  } catch {
+    // The next refresh tries again; an hour of failures would let another process take over.
+  }
+}
+
+function tryAcquireLock(lockPath: string, token: string): boolean {
   try {
     const fd = openSync(lockPath, 'wx', 0o600);
-    writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now(), token }));
     closeSync(fd);
     return true;
   } catch {
     if (lockIsStale(lockPath)) {
       rmSync(lockPath, { force: true });
-      return tryAcquireLock(lockPath);
+      return tryAcquireLock(lockPath, token);
     }
     return false;
   }
 }
 
+/**
+ * Stale: the holder process is gone, or the lock has not been refreshed for
+ * STALE_LOCK_MS (a reused PID or a wedged holder). A live holder refreshes it,
+ * so its lock is never taken however long its download runs.
+ */
 function lockIsStale(lockPath: string): boolean {
   try {
-    const holder = JSON.parse(readFileSync(lockPath, 'utf8')) as { pid?: number; at?: number };
-    if (typeof holder.at === 'number' && Date.now() - holder.at > STALE_LOCK_MS) return true;
+    const holder = JSON.parse(readFileSync(lockPath, 'utf8')) as LockHolder;
     if (typeof holder.pid === 'number' && holder.pid !== process.pid) {
       try {
         process.kill(holder.pid, 0);
-        return false;
       } catch (error) {
-        return (error as NodeJS.ErrnoException).code === 'ESRCH';
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true;
       }
     }
-    return false;
+    return typeof holder.at === 'number' && Date.now() - holder.at > STALE_LOCK_MS;
   } catch {
     try {
       return Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS;
@@ -708,12 +880,14 @@ class ProgressReporter {
     this.emit(true);
   }
 
-  fail(reason: BuiltInReasoningFailureReason, message: string): void {
+  fail(reason: BuiltInReasoningFailureReason, message: string, shortfall?: BuiltInReasoningSpaceShortfall): void {
     this.status = {
       ...this.status,
       state: 'failed',
-      label: 'The built-in private model could not be installed',
-      failure: { reason, message },
+      label: reason === 'insufficient_space'
+        ? 'Waiting for free disk space to download the built-in private model'
+        : 'The built-in private model could not be installed',
+      failure: { reason, message, ...(shortfall ?? {}) },
     };
     this.emit(true);
   }

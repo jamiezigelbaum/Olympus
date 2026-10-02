@@ -184,7 +184,7 @@ export interface DataDeleteResult {
 export interface DataDeleteCustody {
   requirement: 'source_disconnected' | 'worker_inactive';
   ready: boolean;
-  observed: 'disconnected' | 'connected' | WorkerServiceState | 'unknown_registry' | 'relay_running';
+  observed: 'disconnected' | 'connected' | WorkerServiceState | 'unknown_registry' | 'relay_running' | 'engine_loaded';
   next_action?: string;
 }
 
@@ -646,6 +646,11 @@ export function deleteOlympusDataWithCustody(options: {
   workerState?: WorkerServiceState;
   /** A remote-access relay child is running (it would recreate its keys and keep forwarding). */
   relayRunning?: boolean;
+  /**
+   * The standalone engine's LaunchAgent is loaded. Running or not, launchd
+   * keeps it alive and would start its worker again mid-delete.
+   */
+  engineLoaded?: boolean;
 } & LifecyclePathContext): DataDeleteWithCustodyResult {
   const custody = dataDeleteCustody(options);
   if (options.dryRun !== true && !custody.ready) {
@@ -655,7 +660,9 @@ export function deleteOlympusDataWithCustody(options: {
         ? `Disconnect ${options.sourceId} before deleting its local data.`
         : custody.observed === 'relay_running'
           ? 'Turn remote access off before deleting local data: the relay process is still running.'
-          : 'Stop or uninstall the Olympus worker before deleting local data.',
+          : custody.observed === 'engine_loaded'
+            ? 'Stop the Olympus engine before deleting local data: launchd would start it again.'
+            : 'Stop or uninstall the Olympus worker before deleting local data.',
       custody.next_action,
     );
   }
@@ -671,6 +678,7 @@ export function dataDeleteCustody(options: {
   connectedRegistry?: ConnectedHandleRegistry;
   workerState?: WorkerServiceState;
   relayRunning?: boolean;
+  engineLoaded?: boolean;
 }): DataDeleteCustody {
   if (options.all === true && options.sourceId) {
     throw new OperationError('invalid_params', 'Use either --all or --source, not both.');
@@ -711,6 +719,14 @@ export function dataDeleteCustody(options: {
         };
   }
 
+  if (options.engineLoaded === true) {
+    return {
+      requirement: 'worker_inactive',
+      ready: false,
+      observed: 'engine_loaded',
+      next_action: 'Run olympus engine stop (it stays stopped until olympus engine start), check olympus engine status, then retry.',
+    };
+  }
   const workerState = options.workerState;
   const ready = workerState === 'inactive' || workerState === 'missing';
   // Like the worker, the remote-access relay child must be down: it holds its

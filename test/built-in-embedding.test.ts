@@ -248,6 +248,33 @@ describe('built-in embedding installer', () => {
     expect(unsupported.reason).toBe('unsupported_platform');
   });
 
+  test('a download that stops sending fails within the stall limit and leaves no partial file', async () => {
+    const dir = temporaryDir();
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };
+    const served = servedAssets();
+    const stalled = (async () => {
+      let sent = false;
+      // A few bytes, then silence: the connection never closes.
+      return new Response(new ReadableStream({
+        pull(controller) {
+          if (sent) return new Promise<void>(() => undefined);
+          sent = true;
+          controller.enqueue(new Uint8Array([1, 2, 3]));
+        },
+      }));
+    }) as unknown as typeof fetch;
+    const started = Date.now();
+    const error = await installBuiltInEmbedding({
+      env, model: served.model, skipRuntime: true, fetchImpl: stalled, downloadStallMs: 50,
+    }).catch((caught: unknown) => caught);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(error).toMatchObject({ reason: 'download_failed' });
+    expect((error as Error).message).toContain('interrupted');
+    expect(readdirSync(join(dir, served.model.modelId)).filter((name) => name.includes('.partial'))).toEqual([]);
+    expect(existsSync(join(dir, 'install.lock'))).toBe(false);
+    expect(readBuiltInEmbeddingStatus(env, served.model).state).toBe('failed');
+  });
+
   test('a corrupted file on disk is caught at load and removed', async () => {
     const dir = temporaryDir();
     const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };

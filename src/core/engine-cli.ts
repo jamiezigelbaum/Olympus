@@ -1,5 +1,5 @@
 /**
- * `olympus engine install|uninstall|status|restart|logs`: the standalone
+ * `olympus engine install|uninstall|status|start|stop|restart|rollback|logs`: the standalone
  * macOS engine's command surface. Mechanics live in engine-service.ts; this
  * file parses arguments and assembles the status report.
  */
@@ -18,6 +18,9 @@ import {
   readEngineLogs,
   redactLogLine,
   restartEngine,
+  rollbackEngine,
+  startEngine,
+  stopEngine,
   uninstallEngine,
   type EngineExec,
 } from './engine-service.ts';
@@ -26,10 +29,13 @@ import { OperationError } from './operation-error.ts';
 import { readRemoteAccessStatus, relayProcessRunning, remoteAccessDirForCli, resolveRemoteAccessMode } from './remote-access.ts';
 
 export const ENGINE_CLI_USAGE = {
-  'engine install': 'olympus engine install [--from-checkout <path>] [--bun <path>] [--dry-run]',
+  'engine install': 'olympus engine install [--from-checkout <path>] [--bun <path>] [--restart] [--dry-run]',
   'engine uninstall': 'olympus engine uninstall',
   'engine status': 'olympus engine status',
+  'engine start': 'olympus engine start',
+  'engine stop': 'olympus engine stop',
   'engine restart': 'olympus engine restart',
+  'engine rollback': 'olympus engine rollback',
   'engine logs': 'olympus engine logs [--lines <n>] [--follow]',
 } as const;
 
@@ -70,6 +76,18 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
   if (command === 'restart') {
     expectNoArgs('restart', rest);
     return restartEngine(service);
+  }
+  if (command === 'stop') {
+    expectNoArgs('stop', rest);
+    return stopEngine(service);
+  }
+  if (command === 'start') {
+    expectNoArgs('start', rest);
+    return startEngine(service);
+  }
+  if (command === 'rollback') {
+    expectNoArgs('rollback', rest);
+    return rollbackEngine(service);
   }
   if (command === 'status') {
     expectNoArgs('status', rest);
@@ -182,11 +200,12 @@ async function followEngineLogs(homeDir: string, lines: number): Promise<void> {
   await new Promise<void>((resolve) => child.once('exit', () => resolve()));
 }
 
-export function parseInstallArgs(args: string[]): { fromCheckout?: string; bunBin?: string; dryRun?: boolean } {
-  const options: { fromCheckout?: string; bunBin?: string; dryRun?: boolean } = {};
+export function parseInstallArgs(args: string[]): { fromCheckout?: string; bunBin?: string; dryRun?: boolean; restart?: boolean } {
+  const options: { fromCheckout?: string; bunBin?: string; dryRun?: boolean; restart?: boolean } = {};
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (arg === '--dry-run') options.dryRun = true;
+    else if (arg === '--restart') options.restart = true;
     else if (arg === '--from-checkout' || arg === '--bun') {
       const value = args[index + 1];
       if (!value || value.startsWith('--')) throw new OperationError('invalid_params', `${arg} needs a path.`);

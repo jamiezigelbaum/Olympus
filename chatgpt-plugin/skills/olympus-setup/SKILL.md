@@ -41,6 +41,10 @@ Say, in plain words:
 - It starts Olympus in the background (a per-user LaunchAgent) and opens an
   approval page on this Mac.
 - Nothing from the user's files leaves the Mac during install.
+- It downloads a built-in search model (about 225 MB) and, on a Mac with
+  Apple silicon, a private answer model that stays on the Mac (about 1.3 GB
+  with 8 GB of memory, about 2.7 GB with 16 GB or more). The private model
+  waits while the disk has less than its size plus 2 GB free.
 
 Ask: "Run this now?" Run it only after a clear yes. Never run it without that
 answer, and never change the command.

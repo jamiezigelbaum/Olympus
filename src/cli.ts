@@ -113,7 +113,7 @@ import {
 } from './core/remote-connections.ts';
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
-import { inspectEngine } from './core/engine-service.ts';
+import { engineDataCustody, inspectEngine } from './core/engine-service.ts';
 import {
   readRemoteAccessStatus,
   relayProcessRunning,
@@ -1140,7 +1140,7 @@ function printHelp(): void {
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
   console.log(`  ${ENGINE_CLI_USAGE['engine install']}`);
-  console.log('  olympus engine uninstall|status|restart|logs');
+  console.log('  olympus engine uninstall|status|start|stop|restart|rollback|logs');
   console.log('  olympus dashboard [--read-only] [--no-open]');
   console.log('  olympus dashboard token');
   console.log('  olympus doctor');
@@ -2346,16 +2346,20 @@ function parseConnectOptions(args: string[]): {
 }
 
 /** The supervised worker state delete custody reads, or `unknown` if unreadable. */
-function observedWorkerServiceState(): WorkerServiceState {
-  // The standalone engine supervises its own worker; a running engine is an
-  // active worker whatever the legacy worker unit says.
+function observedWorkerServiceState(): { workerState: WorkerServiceState; engineLoaded: boolean } {
+  // The standalone engine supervises its own worker. Loaded at all (running,
+  // or between launchd's restarts), it holds the worker whatever the legacy
+  // worker unit says.
   if (process.platform === 'darwin') {
-    const engine = inspectEngine();
-    if (engine.state === 'running') return 'active';
-    if (engine.state === 'unknown' && engine.installed) return 'unknown';
+    const custody = engineDataCustody(inspectEngine());
+    if (custody === 'loaded') return { workerState: 'active', engineLoaded: true };
+    if (custody === 'unknown') return { workerState: 'unknown', engineLoaded: false };
   }
   const lifecycleStatus = runWorkerLifecycle('status');
-  return lifecycleStatus.action === 'status' ? lifecycleStatus.service.state : 'unknown';
+  return {
+    workerState: lifecycleStatus.action === 'status' ? lifecycleStatus.service.state : 'unknown',
+    engineLoaded: false,
+  };
 }
 
 async function runDataCommand(args: string[]): Promise<unknown> {
@@ -2381,7 +2385,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
     // with no public capability falls through to the worker-inactive
     // requirement, which is unsatisfiable unless the observed state is passed
     // in — the delete was refused at every worker state without it.
-    const workerState = observedWorkerServiceState();
+    const { workerState, engineLoaded } = observedWorkerServiceState();
     if (options.sourceId) {
       const sourceId = options.sourceId;
       const registryPath = handleRegistryPathFromEnv(process.env, true)!;
@@ -2391,6 +2395,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
           dryRun: options.dryRun,
           connectedRegistry: readConnectedHandleRegistry(registryPath),
           workerState,
+          engineLoaded,
         })
       );
     }
@@ -2398,6 +2403,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
       all: options.all,
       dryRun: options.dryRun,
       workerState,
+      engineLoaded,
       relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env)),
     });
   }

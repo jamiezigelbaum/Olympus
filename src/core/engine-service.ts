@@ -16,18 +16,21 @@
  * openclaw.json, so the services read it with the same parser either way.
  */
 import { spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
-import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { homedir, platform as osPlatform } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import {
+  assertManagedPathParentsSync,
   ensurePrivateDirectoryTreeSync,
   ensurePrivateRootDirectorySync,
   removeFileDurablySync,
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
+import { engineChildrenPath, reapRecordedEngineChildren, type EngineChildReapDeps, type EngineChildReapResult } from './engine-children.ts';
 import { OperationError } from './operation-error.ts';
 import { olympusPackageRoot } from './package-root.ts';
+import { olympusDataDir, remoteAccessDir } from './remote-access.ts';
 import { loadSovereigntyPreset, writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
 import { workerAuthTokenFromSetupEnv } from './worker-auth.ts';
 import { ensureManagedWorkerEnvironment, workerServicePaths } from './worker-service.ts';
@@ -36,6 +39,14 @@ export const ENGINE_LABEL = 'ai.olympusplugin.engine';
 /** The one public relay host for standalone (ChatGPT) installs. */
 export const STANDALONE_RELAY_HOST = 'mcp.olympusplugin.ai';
 export const ENGINE_RUN_COMMAND = '__engine-run';
+/**
+ * The build launchd runs, in the agent's environment: the package version and
+ * a digest of the bundled entrypoints. An upgrade keeps every path the same,
+ * so without this the plist would not change and launchd would keep the old
+ * host running, now supervising children from the new files.
+ */
+export const ENGINE_BUILD_ENV = 'OLYMPUS_ENGINE_BUILD';
+const BUILD_DIGEST_FILES = ['cli.js', 'index.js', 'embedding-drain.js'] as const;
 const ENGINE_THROTTLE_SECONDS = 30;
 const PACKAGE_NAMES = new Set(['olympus', 'olympus-source-checkout']);
 
@@ -56,12 +67,28 @@ export interface EnginePaths {
   /** The owner's privacy and model policy, seeded on first install. */
   sovereigntyPath: string;
   appSupportDir: string;
+  /** Where scripts/install-macos.sh unpacks the package, and the one it replaced. */
+  appDir: string;
+  previousAppDir: string;
+  /** The Bun the installer fetched when none was installed. */
+  runtimeDir: string;
   workerEnvPath: string;
+  /** The running host's status file (core/engine-host.ts). */
+  statusPath: string;
+  /** Process groups the host started (core/engine-children.ts). */
+  childrenPath: string;
+  /** Downloaded built-in models. */
+  modelsDir: string;
+  /** This Mac's relay registration and keys. */
+  remoteAccessDir: string;
 }
 
 export function enginePaths(homeDir: string): EnginePaths {
   const home = absolute(homeDir, 'home directory');
   const logDir = join(home, 'Library', 'Logs', 'Olympus');
+  const appSupportDir = join(home, 'Library', 'Application Support', 'Olympus');
+  // The agent runs with HOME only (no XDG_DATA_HOME), so its data root is the default one.
+  const dataEnv = { HOME: home };
   return {
     label: ENGINE_LABEL,
     plistPath: join(home, 'Library', 'LaunchAgents', `${ENGINE_LABEL}.plist`),
@@ -70,9 +97,20 @@ export function enginePaths(homeDir: string): EnginePaths {
     errorLogPath: join(logDir, 'engine.err'),
     configPath: join(home, '.olympus', 'engine.json'),
     sovereigntyPath: join(home, '.olympus', 'sovereignty.json'),
-    appSupportDir: join(home, 'Library', 'Application Support', 'Olympus'),
+    appSupportDir,
+    appDir: join(appSupportDir, 'app'),
+    previousAppDir: join(appSupportDir, 'app.previous'),
+    runtimeDir: join(appSupportDir, 'runtime'),
     workerEnvPath: join(home, '.config', 'olympus', 'worker.env'),
+    statusPath: engineStatusPath(dataEnv),
+    childrenPath: engineChildrenPath(dataEnv),
+    modelsDir: join(olympusDataDir(dataEnv), 'models'),
+    remoteAccessDir: remoteAccessDir(dataEnv),
   };
+}
+
+export function engineStatusPath(env: Record<string, string | undefined> = process.env): string {
+  return join(olympusDataDir(env), 'engine', 'status.json');
 }
 
 /** What launchd runs: an absolute Bun and the packaged CLI entrypoint. */
@@ -81,6 +119,30 @@ export interface EngineProgram {
   entryPath: string;
   workingDirectory: string;
   source: 'checkout' | 'package';
+  /** `<version>+<digest>`; see ENGINE_BUILD_ENV. */
+  build?: string;
+}
+
+/** `<package version>+<first 16 hex of a SHA-256 over the bundled entrypoints>`. */
+export function engineBuildIdentity(packageRoot: string): string {
+  let version = 'unknown';
+  try {
+    const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as { version?: unknown };
+    if (typeof manifest.version === 'string' && /^[0-9A-Za-z.+-]{1,64}$/.test(manifest.version)) version = manifest.version;
+  } catch {
+    // An unreadable manifest still gets a digest.
+  }
+  const hash = createHash('sha256');
+  for (const name of BUILD_DIGEST_FILES) {
+    try {
+      const bytes = readFileSync(join(packageRoot, 'dist', name));
+      hash.update(`${name}\0${bytes.length}\0`);
+      hash.update(bytes);
+    } catch {
+      hash.update(`${name}\0absent\0`);
+    }
+  }
+  return `${version}+${hash.digest('hex').slice(0, 16)}`;
 }
 
 export function resolveEngineProgram(options: {
@@ -94,7 +156,7 @@ export function resolveEngineProgram(options: {
     assertOlympusPackage(root, '--from-checkout');
     const entryPath = join(root, 'dist', 'cli.js');
     assertFile(entryPath, `${entryPath} is missing; run bun run build in the checkout first.`);
-    return { runtimePath, entryPath, workingDirectory: root, source: 'checkout' };
+    return { runtimePath, entryPath, workingDirectory: root, source: 'checkout', build: engineBuildIdentity(root) };
   }
   let root: string;
   try {
@@ -104,7 +166,7 @@ export function resolveEngineProgram(options: {
   }
   const entryPath = join(root, 'dist', 'cli.js');
   assertFile(entryPath, `The installed Olympus package has no ${entryPath}.`);
-  return { runtimePath, entryPath, workingDirectory: root, source: 'package' };
+  return { runtimePath, entryPath, workingDirectory: root, source: 'package', build: engineBuildIdentity(root) };
 }
 
 export function renderEnginePlist(input: { paths: EnginePaths; program: EngineProgram; homeDir: string }): string {
@@ -134,7 +196,9 @@ export function renderEnginePlist(input: { paths: EnginePaths; program: EnginePr
     <key>PATH</key>
     <string>${xml(path)}</string>
     <key>OLYMPUS_ENGINE_HOST</key>
-    <string>1</string>
+    <string>1</string>${program.build ? `
+    <key>${ENGINE_BUILD_ENV}</key>
+    <string>${xml(program.build)}</string>` : ''}
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -223,6 +287,18 @@ export interface EngineInstallOptions extends EngineServiceOptions {
   bunBin?: string;
   cwd?: string;
   dryRun?: boolean;
+  /** Restart a loaded engine even when nothing changed (the installer passes it after an upgrade). */
+  restart?: boolean;
+  /** Where to look for an OpenClaw config; defaults to process.env. */
+  env?: Record<string, string | undefined>;
+}
+
+export interface EngineSovereigntyPlan {
+  /** `seeded`: the preset was written. `present`: a policy file exists. `skipped`: another host's policy is in place. */
+  action: 'seeded' | 'present' | 'skipped' | 'would_seed';
+  path: string;
+  preset?: SovereigntyPresetName;
+  reason?: string;
 }
 
 export interface EngineInstallResult {
@@ -237,10 +313,15 @@ export interface EngineInstallResult {
   wrote_plist: boolean;
   wrote_config: boolean;
   wrote_worker_env: boolean;
-  /** The preset seeded into a missing sovereignty.json; absent when one existed. */
+  /** The preset seeded into a missing sovereignty.json; absent when one existed or seeding was skipped. */
   seeded_sovereignty?: SovereigntyPresetName;
-  /** `bootstrapped` (was not loaded), `reloaded` (plist changed), `unchanged`, or `dry_run`. */
-  action: 'bootstrapped' | 'reloaded' | 'unchanged' | 'dry_run';
+  sovereignty: EngineSovereigntyPlan;
+  /**
+   * `bootstrapped` (was not loaded), `reloaded` (plist changed), `restarted`
+   * (same plist, but the running host is another build or a restart was
+   * asked for), `unchanged`, or `dry_run`.
+   */
+  action: 'bootstrapped' | 'reloaded' | 'restarted' | 'unchanged' | 'dry_run';
   warnings: string[];
   plist: string;
 }
@@ -256,6 +337,9 @@ export function installEngine(options: EngineInstallOptions = {}): EngineInstall
   });
   const plist = renderEnginePlist({ paths, program, homeDir });
   const warnings = engineConflictWarnings(homeDir);
+  const sovereigntyBlocker = existsSync(paths.sovereigntyPath)
+    ? undefined
+    : engineSovereigntySeedBlocker({ homeDir, workerEnvPath: paths.workerEnvPath, env: options.env ?? process.env });
   const base = {
     ok: true as const,
     label: paths.label,
@@ -269,15 +353,39 @@ export function installEngine(options: EngineInstallOptions = {}): EngineInstall
     plist,
   };
   if (options.dryRun) {
-    return { ...base, wrote_plist: false, wrote_config: false, wrote_worker_env: false, action: 'dry_run' };
+    return {
+      ...base,
+      wrote_plist: false,
+      wrote_config: false,
+      wrote_worker_env: false,
+      sovereignty: existsSync(paths.sovereigntyPath)
+        ? { action: 'present', path: paths.sovereigntyPath }
+        : sovereigntyBlocker
+          ? { action: 'skipped', path: paths.sovereigntyPath, reason: sovereigntyBlocker }
+          : { action: 'would_seed', path: paths.sovereigntyPath, preset: STANDALONE_SOVEREIGNTY_PRESET },
+      action: 'dry_run',
+    };
   }
 
+  // Every path is checked before the first write, so an unusable layout
+  // (a symlinked ~/.config, a directory where the plist goes) fails with
+  // nothing half-written.
+  preflightEnginePaths(homeDir, paths);
   ensurePrivateRootDirectorySync(homeDir);
   ensurePrivateDirectoryTreeSync(homeDir, dirname(paths.plistPath));
   ensurePrivateDirectoryTreeSync(homeDir, paths.logDir);
   ensurePrivateDirectoryTreeSync(homeDir, dirname(paths.configPath));
   const config = reconcileEngineConfig(paths.configPath);
-  const seededSovereignty = seedEngineSovereignty(paths.sovereigntyPath);
+  let sovereignty: EngineSovereigntyPlan;
+  if (sovereigntyBlocker) {
+    sovereignty = { action: 'skipped', path: paths.sovereigntyPath, reason: sovereigntyBlocker };
+    warnings.push(`${paths.sovereigntyPath} was not created: ${sovereigntyBlocker} The engine's worker uses that policy too; run olympus sovereignty init --preset ${STANDALONE_SOVEREIGNTY_PRESET} to choose this install's policy explicitly.`);
+  } else {
+    const seeded = seedEngineSovereignty(paths.sovereigntyPath);
+    sovereignty = seeded
+      ? { action: 'seeded', path: paths.sovereigntyPath, preset: seeded }
+      : { action: 'present', path: paths.sovereigntyPath };
+  }
   const workerEnv = ensureManagedWorkerEnvironment({
     homeDir,
     envPath: paths.workerEnvPath,
@@ -296,8 +404,13 @@ export function installEngine(options: EngineInstallOptions = {}): EngineInstall
     action = 'reloaded';
   } else if (!loaded) {
     action = 'bootstrapped';
+  } else if (options.restart || runningBuildDiffers(paths.statusPath, program.build)) {
+    // Same plist, but the host launchd is running is another build (or the
+    // caller just swapped the package): restart it in place.
+    mustSucceed(exec('launchctl', ['kickstart', '-k', target]), 'restart the engine agent');
+    action = 'restarted';
   }
-  if (action !== 'unchanged') {
+  if (action === 'bootstrapped' || action === 'reloaded') {
     // A label an owner once disabled refuses bootstrap; enabling is idempotent.
     exec('launchctl', ['enable', target]);
     mustSucceed(exec('launchctl', ['bootstrap', guiDomain(options.uid), paths.plistPath]), 'load the engine agent');
@@ -307,9 +420,60 @@ export function installEngine(options: EngineInstallOptions = {}): EngineInstall
     wrote_plist: wrotePlist,
     wrote_config: config.wrote,
     wrote_worker_env: workerEnv.wrote,
-    ...(seededSovereignty ? { seeded_sovereignty: seededSovereignty } : {}),
+    ...(sovereignty.action === 'seeded' && sovereignty.preset ? { seeded_sovereignty: sovereignty.preset } : {}),
+    sovereignty,
     action,
   };
+}
+
+/**
+ * Refuse, before anything is written, a layout the install would refuse
+ * halfway: a symlink or file in a managed directory chain, or a non-regular
+ * file where a managed file goes. Symlinked directories are refused rather
+ * than followed: these files hold the worker's bearer token and the owner's
+ * policy, and the custody rules that guard them are shared with the worker
+ * installer.
+ */
+export function preflightEnginePaths(homeDir: string, paths: EnginePaths = enginePaths(homeDir)): void {
+  const managed: Array<[string, string]> = [
+    [paths.plistPath, 'LaunchAgent'],
+    [paths.logPath, 'engine log'],
+    [paths.configPath, 'engine config'],
+    [paths.sovereigntyPath, 'privacy policy'],
+    [paths.workerEnvPath, 'worker environment'],
+  ];
+  for (const [path, label] of managed) {
+    try {
+      assertManagedPathParentsSync(homeDir, path, label);
+    } catch (error) {
+      throw new OperationError(
+        'config_error',
+        `Olympus cannot install here: ${error instanceof Error ? error.message : String(error)}`,
+        `Olympus keeps ${label} files in real directories it can lock down. Replace the symbolic link or file at that path with a directory (or remove it), then run olympus engine install again. Nothing was changed.`,
+      );
+    }
+    if (!existsSync(path)) continue;
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new OperationError(
+        'config_error',
+        `Olympus cannot install here: ${path} is not a regular file.`,
+        'Remove it by hand, then run olympus engine install again. Nothing was changed.',
+      );
+    }
+  }
+}
+
+function runningBuildDiffers(statusPath: string, build: string | undefined): boolean {
+  if (!build) return false;
+  try {
+    const status = JSON.parse(readFileSync(statusPath, 'utf8')) as { schema?: unknown; state?: unknown; build?: unknown };
+    if (status?.schema !== 'olympus.engine.status.v1' || status.state !== 'running') return false;
+    // A host from before build identities wrote none: it is another build.
+    return status.build !== build;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -327,16 +491,92 @@ export function seedEngineSovereignty(path: string): SovereigntyPresetName | und
   return STANDALONE_SOVEREIGNTY_PRESET;
 }
 
+/**
+ * Environment names the env-bridge policy (sovereignty.ts
+ * buildEnvBridgeSovereigntyConfig) or an explicit policy path reads. A worker
+ * environment that sets any of them already has a policy without
+ * sovereignty.json, and a seeded file would silently replace it.
+ */
+const ENV_POLICY_KEY = /^\s*(?:export\s+)?(OLYMPUS_SOVEREIGNTY_CONFIG(?:_PATH)?|OLYMPUS_ARGUS_[A-Z_]+|OLYMPUS_SOURCE_INDEX_(?:CLOUD_ANALYST|VENICE|GEMINI|EMBEDDING)_[A-Z_]+|VENICE_API_KEY|API_KEY_VENICE|Venice-API-Key|GEMINI_API_KEY)=/m;
+
+/**
+ * Why seeding sovereignty.json would change a policy someone already has, or
+ * undefined when nothing else hosts Olympus here. sovereignty.json is read by
+ * every worker on this Mac, including one an OpenClaw Gateway or the legacy
+ * worker LaunchAgent runs, so it is only seeded on a Mac where the engine is
+ * the only host and no environment policy exists.
+ */
+export function engineSovereigntySeedBlocker(input: {
+  homeDir: string;
+  workerEnvPath: string;
+  env?: Record<string, string | undefined>;
+}): string | undefined {
+  try {
+    if (existsSync(input.workerEnvPath)) {
+      const key = ENV_POLICY_KEY.exec(readFileSync(input.workerEnvPath, 'utf8'))?.[1];
+      if (key) return `${input.workerEnvPath} already sets ${key}, which chooses this worker's models and privacy routes.`;
+    }
+  } catch {
+    return `${input.workerEnvPath} could not be read to check for an existing policy.`;
+  }
+  const legacy = workerServicePaths('darwin', input.homeDir).unitPath;
+  if (existsSync(legacy)) return `the worker LaunchAgent from olympus worker install (${legacy}) already runs Olympus with its own environment.`;
+  const openclawConfig = openClawConfigPath(input.homeDir, input.env ?? process.env);
+  if (existsSync(openclawConfig)) {
+    let text: string;
+    try {
+      text = readFileSync(openclawConfig, 'utf8');
+    } catch {
+      return `${openclawConfig} could not be read to check for an OpenClaw-hosted Olympus.`;
+    }
+    if (openClawConfigHasOlympus(text)) return `OpenClaw is configured to run Olympus (${openclawConfig}).`;
+  }
+  return undefined;
+}
+
+function openClawConfigPath(homeDir: string, env: Record<string, string | undefined>): string {
+  const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
+  if (explicit && isAbsolute(explicit)) return explicit;
+  const stateDir = env.OPENCLAW_STATE_DIR?.trim();
+  return join(stateDir && isAbsolute(stateDir) ? stateDir : join(homeDir, '.openclaw'), 'openclaw.json');
+}
+
+function openClawConfigHasOlympus(text: string): boolean {
+  try {
+    const parsed = JSON.parse(text) as { plugins?: { entries?: Record<string, unknown> } };
+    return Boolean(parsed?.plugins?.entries && Object.hasOwn(parsed.plugins.entries, 'olympus'));
+  } catch {
+    // openclaw.json may be JSON5; when it cannot be parsed, any mention of an
+    // olympus key counts as an Olympus entry (skipping the seed is the safe side).
+    return /["']?\bolympus\b["']?\s*:/.test(text);
+  }
+}
+
+export interface EngineKeptItem {
+  path: string;
+  what: string;
+  /** Size on disk, for the large ones. */
+  bytes?: number;
+}
+
 export interface EngineUninstallResult {
   ok: true;
   plist_path: string;
   unloaded: boolean;
   removed_plist: boolean;
-  kept: string[];
+  /** Child process groups a dead host had left running, stopped now. */
+  stopped_leftover_processes: number;
+  kept: EngineKeptItem[];
+  next: string;
 }
 
-/** Unload and remove the agent. Config, worker.env and data stay; `olympus data delete --all` removes data. */
-export function uninstallEngine(options: EngineServiceOptions = {}): EngineUninstallResult {
+/**
+ * Unload and remove the agent. Everything else stays, and `kept` says what and
+ * where: config, policy, worker environment, logs, the app and runtime the
+ * installer unpacked, downloaded models, and this Mac's relay registration.
+ * `olympus data delete --all` removes data.
+ */
+export function uninstallEngine(options: EngineServiceOptions & { reap?: EngineChildReapDeps } = {}): EngineUninstallResult {
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
   const paths = enginePaths(homeDir);
@@ -352,13 +592,213 @@ export function uninstallEngine(options: EngineServiceOptions = {}): EngineUnins
     }
     removed = removeFileDurablySync(paths.plistPath);
   }
+  const reaped = reapRecordedEngineChildren(paths.childrenPath, options.reap);
   return {
     ok: true,
     plist_path: paths.plistPath,
     unloaded: loaded,
     removed_plist: removed,
-    kept: [paths.configPath, paths.workerEnvPath, paths.logDir],
+    stopped_leftover_processes: reaped.stopped.length,
+    kept: engineKeptItems(paths),
+    next: 'To remove Olympus data too (indexes, models, relay keys), run olympus data delete --all. Remove the app and runtime folders by hand if you want them gone.',
   };
+}
+
+function engineKeptItems(paths: EnginePaths): EngineKeptItem[] {
+  const candidates: EngineKeptItem[] = [
+    { path: paths.configPath, what: 'engine settings' },
+    { path: paths.sovereigntyPath, what: 'privacy policy (sovereignty.json)' },
+    { path: paths.workerEnvPath, what: 'worker environment, including its access token' },
+    { path: paths.logDir, what: 'engine logs' },
+    { path: paths.appDir, what: 'the Olympus app the installer unpacked' },
+    { path: paths.previousAppDir, what: 'the previous Olympus app (rollback copy)' },
+    { path: paths.runtimeDir, what: 'the Bun runtime the installer downloaded' },
+    { path: paths.modelsDir, what: 'downloaded built-in models', bytes: directoryBytes(paths.modelsDir) },
+    { path: paths.remoteAccessDir, what: "this Mac's relay registration and keys; ChatGPT stays linked until you disconnect it or delete this data" },
+  ];
+  return candidates.filter((item) => existsSync(item.path));
+}
+
+/** Bytes under `path` (no symlinks followed); bounded so a huge tree cannot stall uninstall. */
+function directoryBytes(path: string, budget = { entries: 20_000 }): number {
+  let total = 0;
+  let entries: string[];
+  try {
+    entries = readdirSync(path);
+  } catch {
+    return 0;
+  }
+  for (const name of entries) {
+    if (--budget.entries < 0) break;
+    const child = join(path, name);
+    try {
+      const stat = lstatSync(child);
+      if (stat.isDirectory()) total += directoryBytes(child, budget);
+      else if (stat.isFile()) total += stat.size;
+    } catch {
+      // Skip what disappears or cannot be read.
+    }
+  }
+  return total;
+}
+
+export interface EngineStopResult {
+  ok: true;
+  stopped: boolean;
+  /** Child process groups a dead host had left running, stopped now. */
+  stopped_leftover_processes: number;
+  next: string;
+}
+
+/**
+ * Stop the engine and keep it stopped: unload it from launchd (bootout) and
+ * disable the label so the next login does not start it either. The plist,
+ * config and data stay. `olympus engine start` (or `olympus engine install`)
+ * enables and loads it again.
+ */
+export function stopEngine(options: EngineServiceOptions & { reap?: EngineChildReapDeps } = {}): EngineStopResult {
+  assertDarwin(options.platform);
+  const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
+  const paths = enginePaths(homeDir);
+  const exec = options.exec ?? defaultExec;
+  const target = serviceTarget(options.uid);
+  const loaded = launchctlLoaded(exec, target);
+  if (loaded) mustSucceed(exec('launchctl', ['bootout', target]), 'stop the engine agent');
+  mustSucceed(exec('launchctl', ['disable', target]), 'keep the engine agent from starting at login');
+  const reaped: EngineChildReapResult = reapRecordedEngineChildren(paths.childrenPath, options.reap);
+  return {
+    ok: true,
+    stopped: loaded,
+    stopped_leftover_processes: reaped.stopped.length,
+    next: 'Olympus stays stopped, also after a restart of the Mac, until you run olympus engine start.',
+  };
+}
+
+/** Enable and load an installed engine that `olympus engine stop` stopped. */
+export function startEngine(options: EngineServiceOptions = {}): { ok: true; action: 'started' | 'already_running' } {
+  assertDarwin(options.platform);
+  const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
+  const paths = enginePaths(homeDir);
+  if (!existsSync(paths.plistPath)) {
+    throw new OperationError('config_error', 'The engine is not installed.', 'Run olympus engine install.');
+  }
+  const exec = options.exec ?? defaultExec;
+  const target = serviceTarget(options.uid);
+  mustSucceed(exec('launchctl', ['enable', target]), 'enable the engine agent');
+  if (launchctlLoaded(exec, target)) return { ok: true, action: 'already_running' };
+  mustSucceed(exec('launchctl', ['bootstrap', guiDomain(options.uid), paths.plistPath]), 'load the engine agent');
+  return { ok: true, action: 'started' };
+}
+
+export interface EngineRollbackResult {
+  ok: true;
+  /** The build now running, and the one kept as app.previous (rolling back again returns to it). */
+  running_build: string;
+  previous_build: string;
+  app_dir: string;
+  previous_app_dir: string;
+  action: EngineInstallResult['action'];
+}
+
+/**
+ * Swap the installed app with the one the last upgrade replaced
+ * (app.previous), then reload the agent so launchd runs it. Running it again
+ * swaps back. Only for an engine scripts/install-macos.sh installed: the
+ * agent must run app/dist/cli.js. A checkout install has no previous copy to
+ * return to; reinstall from the checkout you want instead.
+ */
+export function rollbackEngine(options: EngineServiceOptions & { bunBin?: string } = {}): EngineRollbackResult {
+  assertDarwin(options.platform);
+  const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
+  const paths = enginePaths(homeDir);
+  const installed = installedProgram(paths.plistPath);
+  const appEntry = join(paths.appDir, 'dist', 'cli.js');
+  if (!installed) {
+    throw new OperationError('config_error', 'The engine is not installed, so there is nothing to roll back.', 'Run the Olympus installer.');
+  }
+  if (installed.entryPath !== appEntry) {
+    throw new OperationError(
+      'config_error',
+      `This engine runs ${installed.entryPath}, not the installed app, so it has no previous version to return to.`,
+      'Reinstall from the checkout or package you want with olympus engine install.',
+    );
+  }
+  assertOlympusPackage(paths.previousAppDir, 'The previous app');
+  assertFile(join(paths.previousAppDir, 'dist', 'cli.js'), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
+  const bunBin = options.bunBin ?? installed.runtimePath;
+
+  swapAppDirectories(paths);
+  const reinstall = (): EngineInstallResult => installEngine({
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    ...(options.exec ? { exec: options.exec } : {}),
+    ...(options.uid !== undefined ? { uid: options.uid } : {}),
+    ...(options.platform ? { platform: options.platform } : {}),
+    fromCheckout: paths.appDir,
+    bunBin,
+    restart: true,
+  });
+  let result: EngineInstallResult;
+  try {
+    result = reinstall();
+  } catch (error) {
+    // Put the version that was running back, and its agent with it.
+    swapAppDirectories(paths);
+    try {
+      reinstall();
+    } catch {
+      // The original failure is the one to report.
+    }
+    throw error;
+  }
+  return {
+    ok: true,
+    running_build: result.program.build ?? engineBuildIdentity(paths.appDir),
+    previous_build: engineBuildIdentity(paths.previousAppDir),
+    app_dir: paths.appDir,
+    previous_app_dir: paths.previousAppDir,
+    action: result.action,
+  };
+}
+
+/**
+ * Exchange app/ and app.previous/ with three renames, undone in reverse if
+ * one fails, so app/ is never missing for longer than one rename and never lost.
+ */
+function swapAppDirectories(paths: EnginePaths): void {
+  const parking = `${paths.appDir}.rollback-${process.pid}-${randomBytes(4).toString('hex')}`;
+  renameSync(paths.appDir, parking);
+  try {
+    renameSync(paths.previousAppDir, paths.appDir);
+  } catch (error) {
+    renameSync(parking, paths.appDir);
+    throw error;
+  }
+  try {
+    renameSync(parking, paths.previousAppDir);
+  } catch (error) {
+    renameSync(paths.appDir, paths.previousAppDir);
+    renameSync(parking, paths.appDir);
+    throw error;
+  }
+}
+
+/** The runtime and entrypoint the installed plist runs, or undefined when there is none. */
+export function installedProgram(plistPath: string): { runtimePath: string; entryPath: string } | undefined {
+  let text: string;
+  try {
+    const stat = lstatSync(plistPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+    text = readFileSync(plistPath, 'utf8');
+  } catch {
+    return undefined;
+  }
+  const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1];
+  if (!block) return undefined;
+  const strings = [...block.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => unxml(match[1]!));
+  const runtimePath = strings[0];
+  const entryPath = strings.find((value, index) => index > 0 && !value.startsWith('--'));
+  if (!runtimePath || !entryPath) return undefined;
+  return { runtimePath, entryPath };
 }
 
 export type EngineAgentState = 'running' | 'loaded' | 'not_loaded' | 'unknown';
@@ -416,6 +856,17 @@ export function inspectEngine(options: EngineServiceOptions = {}): EngineInspect
       ? `Running (pid ${parsed.pid ?? 'unknown'}).`
       : `Loaded, not running${parsed.lastExitCode !== null ? ` (last exit code ${parsed.lastExitCode})` : ''}; see olympus engine logs.`,
   };
+}
+
+/**
+ * What the engine means for deleting Olympus data. `loaded`: launchd has the
+ * agent (running, or waiting to restart it), so its worker is or will be up.
+ * `unknown`: installed, but launchctl could not say. `none`: not loaded.
+ */
+export function engineDataCustody(inspection: Pick<EngineInspection, 'state' | 'installed'>): 'loaded' | 'unknown' | 'none' {
+  if (inspection.state === 'running' || inspection.state === 'loaded') return 'loaded';
+  if (inspection.state === 'unknown' && inspection.installed) return 'unknown';
+  return 'none';
 }
 
 export function restartEngine(options: EngineServiceOptions = {}): { ok: true; command: string[] } {
@@ -603,6 +1054,15 @@ function objectAt(parent: Record<string, unknown>, key: string): Record<string, 
   const created: Record<string, unknown> = {};
   parent[key] = created;
   return created;
+}
+
+function unxml(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
 }
 
 function xml(value: string): string {

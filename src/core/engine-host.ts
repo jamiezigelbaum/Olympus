@@ -15,12 +15,20 @@
  */
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { configFromPluginConfig } from './config.ts';
-import { enginePaths, readEngineConfig } from './engine-service.ts';
+import {
+  engineChildrenPath,
+  engineChildrenRecorder,
+  reapRecordedEngineChildren,
+  type EngineChildReapDeps,
+} from './engine-children.ts';
+import { ENGINE_BUILD_ENV, enginePaths, engineStatusPath, readEngineConfig } from './engine-service.ts';
 import { createNativeEmbeddingDrainService } from './native-embedding-drain-service.ts';
 import {
   backgroundNativeProcessService,
+  setNativeProcessChildObserver,
   setNativeProcessChildStdio,
   type NativeProcessServiceContext,
   type NativeProcessServiceDefinition,
@@ -46,13 +54,13 @@ export interface EngineStatusFile {
   started_at: string;
   updated_at: string;
   state: 'running' | 'stopping' | 'stopped';
+  /** The build launchd started (OLYMPUS_ENGINE_BUILD); install compares it to restart a stale host. */
+  build: string | null;
   remote_mode: string;
   services: Record<string, EngineServiceHealth>;
 }
 
-export function engineStatusPath(env: Record<string, string | undefined> = process.env): string {
-  return join(olympusDataDir(env), 'engine', 'status.json');
-}
+export { engineStatusPath } from './engine-service.ts';
 
 export interface EngineHostOptions {
   moduleUrl: string;
@@ -63,6 +71,8 @@ export interface EngineHostOptions {
   log?: (line: string) => void;
   exit?: (code: number) => void;
   installSignalHandlers?: boolean;
+  /** Test seam for the stale child-group cleanup that runs before any service starts. */
+  reap?: EngineChildReapDeps;
 }
 
 export interface EngineHostHandle {
@@ -117,6 +127,21 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   // the children write there too instead of nowhere.
   setNativeProcessChildStdio('inherit');
 
+  // A previous host that died without stopping its children (they run in
+  // their own process groups) left them holding the worker port and the data
+  // root: stop the ones that are provably ours before starting new ones, then
+  // record each group this host starts.
+  const dataEnv = { ...env, HOME: homeDir };
+  const childrenPath = engineChildrenPath(dataEnv);
+  const reaped = reapRecordedEngineChildren(childrenPath, options.reap);
+  if (reaped.stopped.length > 0) {
+    log(`engine: stopped ${reaped.stopped.length} process group(s) a previous engine left running (${reaped.stopped.map((child) => child.service).join(', ')}).`);
+  }
+  setNativeProcessChildObserver(engineChildrenRecorder({
+    path: childrenPath,
+    markers: engineChildMarkers(options.moduleUrl, dataEnv),
+  }));
+
   const now = () => new Date().toISOString();
   const status: EngineStatusFile = {
     schema: ENGINE_STATUS_SCHEMA,
@@ -124,10 +149,11 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     started_at: now(),
     updated_at: now(),
     state: 'running',
+    build: env[ENGINE_BUILD_ENV]?.trim() || null,
     remote_mode: remoteMode,
     services: {},
   };
-  const statusPath = engineStatusPath({ ...env, HOME: homeDir });
+  const statusPath = engineStatusPath(dataEnv);
   const writeStatus = () => {
     status.updated_at = now();
     try {
@@ -189,6 +215,7 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
       }
       status.state = 'stopped';
       writeStatus();
+      setNativeProcessChildObserver(undefined);
       log('engine: stopped.');
     })();
     return stopping;
@@ -200,6 +227,22 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     process.once('SIGINT', onSignal);
   }
   return { stop, status: () => structuredClone(status) };
+}
+
+/**
+ * Command-line fragments that prove a process belongs to this install: the
+ * packaged cli.js every child runs, and the models directory the built-in
+ * model server is started from.
+ */
+export function engineChildMarkers(moduleUrl: string, env: Record<string, string | undefined>): string[] {
+  const markers: string[] = [];
+  try {
+    markers.push(fileURLToPath(new URL('./cli.js', moduleUrl)));
+  } catch {
+    // A non-file module URL (tests) has no cli.js marker.
+  }
+  markers.push(join(olympusDataDir(env), 'models'));
+  return markers;
 }
 
 /** `olympus __engine-run`: start the host and stay up until launchd stops it. */

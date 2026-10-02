@@ -9,6 +9,7 @@ export function modelInstallFailedReason(failure: { reason?: string; message?: s
   if (!failure) return 'unknown';
   if (failure.reason === 'download_failed') return 'network';
   if (failure.reason === 'checksum_mismatch') return 'checksum';
+  if (failure.reason === 'insufficient_space') return 'disk_full';
   if (failure.reason === 'disk_write_failed' && /ENOSPC|no space left/i.test(failure.message ?? '')) return 'disk_full';
   return 'unknown';
 }

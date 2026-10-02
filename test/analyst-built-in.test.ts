@@ -41,6 +41,7 @@ import {
   builtInReasoningThreads,
   createLlamaServerHandle,
   llamaServerArguments,
+  llamaServerEnvironment,
   type LlamaServerHandle,
   type LlamaServerLaunch,
 } from '../src/workers/source-index/built-in-reasoning/server.ts';
@@ -58,6 +59,14 @@ function tempDir(): string {
 afterEach(() => {
   for (const dir of temporaryDirectories.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+async function waitFor(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
@@ -98,6 +107,51 @@ describe('model choice', () => {
 });
 
 describe('llama-server launch', () => {
+  test('the model server gets an allow-listed environment and a per-start alias, never the worker\'s secrets', () => {
+    const env = llamaServerEnvironment({
+      PATH: '/usr/bin:/bin',
+      HOME: '/Users/me',
+      TMPDIR: '/var/folders/x/T/',
+      LANG: 'en_US.UTF-8',
+      OLYMPUS_WORKER_AUTH_TOKEN: 'secret',
+      VENICE_API_KEY: 'secret',
+      OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY: 'secret',
+      DYLD_INSERT_LIBRARIES: '/tmp/evil.dylib',
+    }, 'olympus-abc');
+    expect(env).toEqual({
+      PATH: '/usr/bin:/bin',
+      HOME: '/Users/me',
+      TMPDIR: '/var/folders/x/T/',
+      LANG: 'en_US.UTF-8',
+      LLAMA_ARG_HOST: '127.0.0.1',
+      LLAMA_ARG_ALIAS: 'olympus-abc',
+    });
+  });
+
+  test('a different process answering on the port is never trusted with a request', async () => {
+    const dir = tempDir();
+    const script = join(dir, 'llama-server');
+    // A squatter: answers /health and /v1/models, but cannot know the alias.
+    writeFileSync(script, `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+const at = (flag) => args[args.indexOf(flag) + 1];
+Bun.serve({ hostname: '127.0.0.1', port: Number(at('--port')), fetch(request) {
+  const url = new URL(request.url);
+  if (url.pathname === '/health') return new Response('{}');
+  if (url.pathname === '/v1/models') return Response.json({ data: [{ id: 'someone-else' }] });
+  return new Response('stolen', { status: 200 });
+} });
+`);
+    chmodSync(script, 0o755);
+    const handle = createLlamaServerHandle({ serverPath: script, modelPath: '/m.gguf', contextTokens: 1, gpu: false, threads: 1, idleShutdownSeconds: 0, startupTimeoutMs: 15_000 });
+    try {
+      await expect(handle.ensureRunning()).rejects.toThrow('taken by another process');
+      expect(handle.pid).toBeUndefined();
+    } finally {
+      await handle.stop();
+    }
+  }, 30_000);
+
   const launch: LlamaServerLaunch = {
     serverPath: '/opt/llama/llama-server',
     modelPath: '/models/m.gguf',
@@ -140,15 +194,21 @@ const args = process.argv.slice(2);
 const at = (flag) => args[args.indexOf(flag) + 1];
 if (at('--host') !== '127.0.0.1') process.exit(3);
 const token = (await Bun.file(at('--api-key-file')).text()).trim();
+// Only the allow-listed environment reaches the model server.
+if (process.env.OLYMPUS_WORKER_AUTH_TOKEN || process.env.VENICE_API_KEY) process.exit(4);
 Bun.serve({ hostname: '127.0.0.1', port: Number(at('--port')), fetch(request) {
   const url = new URL(request.url);
   if (url.pathname === '/health') return new Response('{}');
   if (request.headers.get('authorization') !== 'Bearer ' + token) return new Response('no', { status: 401 });
+  if (url.pathname === '/v1/models') return Response.json({ object: 'list', data: [{ id: process.env.LLAMA_ARG_ALIAS, object: 'model' }] });
   return Response.json({ choices: [{ message: { content: '{"answer":"ok","citations":[],"unanswered":[],"sufficient":true}' } }] });
 } });
 `);
     chmodSync(script, 0o755);
-    const handle = createLlamaServerHandle({ ...launch, serverPath: script, gpu: false, idleShutdownSeconds: 1, startupTimeoutMs: 15_000 });
+    const handle = createLlamaServerHandle(
+      { ...launch, serverPath: script, gpu: false, idleShutdownSeconds: 1, startupTimeoutMs: 15_000 },
+      { env: { ...process.env, OLYMPUS_WORKER_AUTH_TOKEN: 'worker-secret', VENICE_API_KEY: 'venice-secret' } },
+    );
     try {
       const endpoint = await handle.ensureRunning();
       expect(endpoint.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
@@ -586,6 +646,140 @@ describe('installer', () => {
     expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
     expect(requests.at(-1)).toBe('bytes=1000-');
     expect(readBuiltInReasoningStatus(model, env).state).toBe('ready');
+  });
+
+  test('a disk without room for the model plus 2 GB headroom gets no download, and a status saying how much is needed', async () => {
+    const dir = tempDir();
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    const { model, runtime } = specs();
+    const { fetchImpl, requests } = server();
+    const free = 2 * GIB; // less than 2 GB headroom + the model
+    const failure = await installBuiltInReasoning({
+      model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, log: () => undefined,
+      freeBytes: () => free,
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ reason: 'insufficient_space' });
+    expect(requests).toHaveLength(0);
+    const status = readBuiltInReasoningStatus(model, env);
+    expect(status.state).toBe('failed');
+    expect(status.label).toContain('free disk space');
+    expect(status.failure).toMatchObject({ reason: 'insufficient_space', bytesFree: free });
+    expect(status.failure!.bytesNeeded).toBe(modelBytes.length + 4 * runtimeBytes.length + 2 * GIB);
+    expect(Date.parse(status.failure!.retryAfter!)).toBeGreaterThan(Date.now());
+    const { modelInstallFailedReason } = await import('../src/core/model-install-failure.ts');
+    expect(modelInstallFailedReason(status.failure)).toBe('disk_full');
+  });
+
+  test('a disk that fills up mid-download loses the partial file and waits out a backoff before trying again', async () => {
+    const dir = tempDir();
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    const { model, runtime } = specs();
+    let now = new Date('2026-10-02T12:00:00Z');
+    let writes = 0;
+    const fullDisk = (fd: number, chunk: Uint8Array): void => {
+      writes += 1;
+      if (chunk.length === modelBytes.length || writes > 1) {
+        throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+      }
+      writeFileSync(fd, chunk);
+    };
+    const base = {
+      model, runtime, env, platform: 'darwin-arm64', extractArchive, log: () => undefined,
+      freeBytes: () => 100 * GIB, now: () => now, spaceBackoffMs: 15 * 60_000,
+    };
+    const first = server();
+    const failure = await installBuiltInReasoning({ ...base, fetchImpl: first.fetchImpl, writeChunk: fullDisk }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ reason: 'insufficient_space' });
+    expect(existsSync(join(dir, 'test-model', 'test.gguf.partial'))).toBe(false);
+    expect(readBuiltInReasoningStatus(model, env).failure).toMatchObject({
+      reason: 'insufficient_space',
+      retryAfter: '2026-10-02T12:15:00.000Z',
+    });
+
+    // Inside the backoff: no request at all, the same status.
+    now = new Date('2026-10-02T12:10:00Z');
+    const waiting = server();
+    await expect(installBuiltInReasoning({ ...base, fetchImpl: waiting.fetchImpl })).rejects.toMatchObject({ reason: 'insufficient_space' });
+    expect(waiting.requests).toHaveLength(0);
+
+    // After it, with room again, the download starts over and finishes.
+    now = new Date('2026-10-02T12:16:00Z');
+    const later = server();
+    const installed = await installBuiltInReasoning({ ...base, fetchImpl: later.fetchImpl });
+    expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
+    expect(later.requests.find((request) => request.url.endsWith('test.gguf'))?.range).toBeNull();
+    expect(readBuiltInReasoningStatus(model, env).state).toBe('ready');
+  });
+
+  test('a resumed download only needs room for the bytes still missing', async () => {
+    const dir = tempDir();
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    const { model, runtime } = specs();
+    const { fetchImpl } = server({ failModelAfter: 3_000 });
+    const options = { model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, log: () => undefined };
+    await expect(installBuiltInReasoning(options)).rejects.toThrow('interrupted');
+    const seen: number[] = [];
+    const installed = await installBuiltInReasoning({
+      ...options,
+      freeBytes: () => {
+        seen.push(1);
+        return 2 * GIB + (modelBytes.length - 3_000);
+      },
+    });
+    expect(seen.length).toBeGreaterThan(0);
+    expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
+  });
+
+  test('the install lock holder keeps its lock fresh, so a long download is never taken over', async () => {
+    const dir = tempDir();
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    const { model, runtime } = specs();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('llama.tar.gz')) return new Response(runtimeBytes);
+      let sent = false;
+      return new Response(new ReadableStream({
+        async pull(controller) {
+          if (sent) {
+            controller.close();
+            return;
+          }
+          sent = true;
+          await gate;
+          controller.enqueue(modelBytes);
+        },
+      }));
+    }) as typeof fetch;
+    const lockPath = join(dir, 'install.lock');
+    const holder = installBuiltInReasoning({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, log: () => undefined, lockRefreshMs: 20 });
+    await waitFor(() => existsSync(lockPath));
+    const firstAt = JSON.parse(readFileSync(lockPath, 'utf8')).at as number;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const refreshed = JSON.parse(readFileSync(lockPath, 'utf8')) as { pid: number; at: number };
+    expect(refreshed.pid).toBe(process.pid);
+    expect(refreshed.at).toBeGreaterThan(firstAt);
+    // Another installer waits for the live holder instead of taking the lock.
+    await expect(installBuiltInReasoning({
+      model, runtime, env, platform: 'darwin-arm64', fetchImpl: server().fetchImpl, extractArchive, log: () => undefined, lockWaitMs: 50,
+    })).rejects.toThrow('still installing');
+    release();
+    await holder;
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  test('a lock left by a process that is gone is taken over at once', async () => {
+    const dir = tempDir();
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    const { model, runtime } = specs();
+    const gone = Bun.spawn(['true']);
+    await gone.exited;
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'install.lock'), JSON.stringify({ pid: gone.pid, at: Date.now() }));
+    const installed = await installBuiltInReasoning({
+      model, runtime, env, platform: 'darwin-arm64', fetchImpl: server().fetchImpl, extractArchive, log: () => undefined, lockWaitMs: 50,
+    });
+    expect(existsSync(installed.modelPath)).toBe(true);
   });
 
   test('an unsupported platform fails with a reason the dashboard can show', async () => {

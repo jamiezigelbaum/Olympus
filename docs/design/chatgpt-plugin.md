@@ -257,7 +257,10 @@ contract (`src/workers/chatgpt/dashboard-contract.ts`).
   `source_answer` is listed only when an answer model is set up on the Mac.
   A fresh install is keyless: `olympus engine install` seeds the
   `no-sensitive` preset (built-in embeddings for every tier, nothing to
-  supply) when `~/.olympus/sovereignty.json` is absent.
+  supply) when `~/.olympus/sovereignty.json` is absent and nothing else on
+  the Mac already chooses a policy (an Olympus entry in openclaw.json, the
+  legacy worker LaunchAgent, or policy variables in worker.env); otherwise it
+  skips the seed and says why, since every worker on the Mac reads that file.
 - **Connect** (`olympus_connect_source`): Gmail, Google Drive and Dropbox
   through Olympus's publisher apps. The engine starts the dashboard's own
   OAuth with the relay hand-back and returns a one-time link

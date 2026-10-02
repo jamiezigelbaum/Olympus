@@ -3,6 +3,13 @@
 // 0600 file (never argv), at low scheduling priority with a capped CPU thread
 // count so the Mac stays usable, and shut down after an idle period so the
 // model's memory comes back. One process per model per Olympus process.
+//
+// The port is picked free and then handed to the child, so another process
+// could take it in between. The child therefore also gets a random per-start
+// model alias through its environment (not argv, which other users can read),
+// and nothing is sent to the port until an authenticated /v1/models answer
+// carries that alias: a squatter cannot know it. The child's environment is a
+// short allow-list, never the worker's (which holds tokens and keys).
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -47,6 +54,23 @@ export class LlamaServerStartError extends Error {
 }
 
 const HEALTH_POLL_MS = 250;
+/** The only parent variables the model server gets. */
+const LLAMA_SERVER_ENV_ALLOWLIST = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL'] as const;
+
+/** The model server's whole environment: a short allow-list plus its own settings. */
+export function llamaServerEnvironment(
+  parent: Record<string, string | undefined>,
+  alias: string,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of LLAMA_SERVER_ENV_ALLOWLIST) {
+    const value = parent[name];
+    if (value !== undefined) env[name] = value;
+  }
+  env.LLAMA_ARG_HOST = '127.0.0.1';
+  env.LLAMA_ARG_ALIAS = alias;
+  return env;
+}
 
 /**
  * Threads for the built-in model: half the machine's logical cores, at most
@@ -88,6 +112,8 @@ export function createLlamaServerHandle(
   options: {
     spawnImpl?: typeof spawn;
     fetchImpl?: typeof fetch;
+    /** The parent environment the allow-list reads; defaults to process.env. */
+    env?: Record<string, string | undefined>;
   } = {},
 ): LlamaServerHandle {
   const spawnImpl = options.spawnImpl ?? spawn;
@@ -125,12 +151,13 @@ export function createLlamaServerHandle(
   const start = async (signal?: AbortSignal): Promise<LlamaServerEndpoint> => {
     const port = await freeLoopbackPort();
     const token = randomBytes(24).toString('base64url');
+    const alias = `olympus-${randomBytes(12).toString('hex')}`;
     tokenDir = mkdtempSync(join(tmpdir(), 'olympus-built-in-model-'));
     const tokenFile = join(tokenDir, 'token');
     writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
     const spawned = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
       stdio: ['ignore', 'ignore', 'pipe'],
-      env: { ...process.env, LLAMA_ARG_HOST: '127.0.0.1' },
+      env: llamaServerEnvironment(options.env ?? process.env, alias),
       detached: false,
     });
     child = spawned;
@@ -168,7 +195,13 @@ export function createLlamaServerHandle(
           `The built-in model server exited while starting.${stderrTail ? ` ${lastLine(stderrTail)}` : ''}`,
         );
       }
-      if (await healthy(fetchImpl, baseUrl)) break;
+      if (await healthy(fetchImpl, baseUrl)) {
+        if (await servesAlias(fetchImpl, baseUrl, token, alias)) break;
+        // Something answers on the port but it is not this child: another
+        // process took the port before the child could bind it.
+        killChild();
+        throw new LlamaServerStartError('The built-in model server\'s port was taken by another process; it will start again on a new port.');
+      }
       if (Date.now() > deadline) {
         killChild();
         throw new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`);
@@ -210,6 +243,28 @@ async function healthy(fetchImpl: typeof fetch, baseUrl: string): Promise<boolea
     const response = await fetchImpl(`${baseUrl}/health`, { signal: AbortSignal.timeout(2_000) });
     await response.body?.cancel().catch(() => undefined);
     return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the server on `baseUrl` is the child started with `alias`. The
+ * alias reaches the child through its environment only, so a different
+ * process on the port cannot echo it.
+ */
+async function servesAlias(fetchImpl: typeof fetch, baseUrl: string, token: string, alias: string): Promise<boolean> {
+  try {
+    const response = await fetchImpl(`${baseUrl}/v1/models`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return false;
+    }
+    const text = await response.text();
+    return text.length <= 1_000_000 && text.includes(alias);
   } catch {
     return false;
   }
