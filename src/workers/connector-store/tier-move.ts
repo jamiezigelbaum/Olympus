@@ -140,13 +140,27 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     || (copy.state === 'superseded' && copy.supersededByGeneration === moveGeneration));
   if (sources.length === 0) throw new Error('The item has no copy to move from.');
   const raise = placementIsRaise(sources, placement.copies);
+  const exports = new Map<string, ConnectorStoreItemCopy | undefined>();
+  const exportFrom = (copy: Pick<TierCopy, 'corpusId'>): ConnectorStoreItemCopy | undefined => {
+    if (!exports.has(copy.corpusId)) {
+      const domain = set.domainForCorpus(copy.corpusId);
+      exports.set(copy.corpusId, domain ? set.store(domain)?.exportItemCopy(identity) : undefined);
+    }
+    return exports.get(copy.corpusId);
+  };
   // Staging a destination rewrites that store's row. A copy kept there as
   // superseded (an earlier move's) would be lost before any approved purge:
-  // refuse instead, and leave the item where it is.
+  // refuse instead, and leave the item where it is. A kept copy holding the
+  // very text the move would write loses nothing (the store keeps identical
+  // chunks and their vectors in place), so a move back to the store an
+  // earlier move left (a held item judged Personal, then held again) proceeds.
   const kept = ledger.copies(identity);
   for (const planned of placement.copies) {
     if (sources.some((source) => source.corpusId === planned.corpusId)) continue;
-    if (kept.some((copy) => copy.corpusId === planned.corpusId && copy.state === 'superseded')) {
+    const keptHere = kept.find((copy) => copy.corpusId === planned.corpusId && copy.state === 'superseded');
+    if (!keptHere) continue;
+    const source = copyServingLayer(sources, 'content') ?? sources[0]!;
+    if (!sameText(exportFrom(keptHere), exportFrom(source))) {
       throw new TierMoveRefusedError('The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.');
     }
   }
@@ -162,14 +176,6 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
 
   // 2. Write what each destination lacks, from the source stores.
   const destinations: TierMoveDestination[] = [];
-  const exports = new Map<string, ConnectorStoreItemCopy | undefined>();
-  const exportFrom = (copy: TierCopy): ConnectorStoreItemCopy | undefined => {
-    if (!exports.has(copy.corpusId)) {
-      const domain = set.domainForCorpus(copy.corpusId);
-      exports.set(copy.corpusId, domain ? set.store(domain)?.exportItemCopy(identity) : undefined);
-    }
-    return exports.get(copy.corpusId);
-  };
   for (const planned of placement.copies) {
     const kept = sources.find((source) => source.corpusId === planned.corpusId);
     if (kept && layersCover(kept.layers, planned.layers)) {
@@ -321,6 +327,18 @@ async function moveToSecrets(options: TierMoveOptions, expectedGeneration: numbe
     secretsChunks: settled.chunks,
     secretsDisposition: settled.disposition,
   };
+}
+
+/** Whether a kept copy holds exactly the source's text, chunk for chunk (what `importItemCopy` keeps in place). */
+function sameText(kept: ConnectorStoreItemCopy | undefined, source: ConnectorStoreItemCopy | undefined): boolean {
+  if (!kept || !source || kept.chunks.length !== source.chunks.length) return false;
+  return kept.chunks.every((chunk, index) => {
+    const other = source.chunks[index]!;
+    return chunk.chunkIndex === other.chunkIndex
+      && chunk.boundedText === other.boundedText
+      && chunk.contentHash === other.contentHash
+      && chunk.embeddingInputHash === other.embeddingInputHash;
+  });
 }
 
 function layersCover(held: TierCopyLayers, wanted: TierCopyLayers): boolean {

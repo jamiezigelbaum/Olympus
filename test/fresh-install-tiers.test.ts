@@ -41,7 +41,7 @@ import {
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
 import { BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON, TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
-import { classifyItemTiers, TIER_CLASSIFIER_VERSION } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, TIER_CLASSIFIER_VERSION, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
 import { loadSovereigntyEngine } from '../src/core/sovereignty.ts';
 import {
   createConnectorStoreContentProvider,
@@ -342,6 +342,8 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     autoApproveBuiltIn?: boolean;
     localEmbeddingsOnly?: boolean;
     lane?: typeof BUILT_IN_SNIFFER_LANE;
+    now?: () => Date;
+    staleAfterMs?: number;
   } = {}) {
     const service = new TierSnifferService({
       installed: install.installed,
@@ -352,10 +354,12 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
       modelAvailable: () => builtIn.available(),
       ownerContext: options.ownerWords ?? (() => undefined),
       autoApproveBuiltIn: options.autoApproveBuiltIn ?? true,
+      ...(options.now ? { now: options.now } : {}),
       autoMoves: {
         localEmbeddingsOnly: () => options.localEmbeddingsOnly ?? true,
         embeddingLedgerPath: join(root, 'embedding-ledger.jsonl'),
         maxPerPass: 5,
+        ...(options.staleAfterMs !== undefined ? { staleAfterMs: options.staleAfterMs } : {}),
       },
     });
     closers.push(() => service.stop());
@@ -513,6 +517,137 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     expect(tick).not.toHaveProperty('rejudged');
     expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', decidedBy: 'default' });
     expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
+  });
+
+  test('a held item judged Personal, then held again, moves back into the store that kept its copy (no stuck move)', async () => {
+    // The live 2026-10-01 case: the Personal move left the held copy kept
+    // (superseded) in the Private store; a new prompt version re-held the
+    // item, hiding its Personal copy, and the move back was refused for that
+    // kept copy on every pass. The item stayed `moving` and unsearchable.
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    const service = snifferFor(install, builtIn);
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', autoMoves: { moved: 2, failed: 0 } });
+    const garden = identity('id:garden');
+    const settled = install.lane.ledger.getCurrent(garden)!;
+    expect(settled).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(install.lane.ledger.copies(garden).find((copy) => copy.corpusId === SECURE_CORPUS)).toMatchObject({ state: 'superseded' });
+
+    // A re-judgment (a new classifier version) re-holds the text question:
+    // a raise back to the store that kept its copy, hidden at once.
+    const reheld: TierDecision = {
+      metadataTier: 'private',
+      contentTier: 'private',
+      decidedBy: 'sniffer',
+      reasons: ['metadata:default:personal', `content:sniffer:${BUILT_IN_SNIFFER_LANE.kind}:rejudge:undecided`],
+      state: 'pending',
+      contentRead: true,
+      metadataPending: false,
+      contentPending: true,
+      metadataForced: false,
+      metadataFlagged: false,
+      engineVersion: settled.engineVersion,
+      mapRevision: settled.mapRevision,
+      snifferId: 'none',
+    };
+    const queued = install.lane.ledger.recordRoutedPlacement(garden, reheld, install.lane.set.placementFor(reheld));
+    expect(queued).toMatchObject({ outcome: 'queued_move', raise: true });
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
+    // The move completes (it was refused on every pass before).
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', autoMoves: { failed: 0 } });
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'pending', contentPending: true });
+    expect(install.lane.ledger.copies(garden).find((copy) => copy.layers !== 'metadata' && copy.state === 'current'))
+      .toMatchObject({ corpusId: SECURE_CORPUS, embedHold: true });
+
+    // Personal again: back to the Personal store, whose kept copy is the
+    // same text. Searchable again, never left mid-move.
+    const personal: TierDecision = {
+      ...reheld,
+      reasons: settled.reasons,
+      state: 'current',
+      contentPending: false,
+    };
+    expect(install.lane.ledger.recordRoutedPlacement(garden, personal, install.lane.set.placementFor(personal)))
+      .toMatchObject({ outcome: 'queued_move', raise: false });
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', autoMoves: { failed: 0 } });
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+    expect(install.lane.ledger.listMoving()).toEqual([]);
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
+  });
+
+  test('a move interrupted between stage and flip resumes on the next tick', async () => {
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    const service = snifferFor(install, builtIn);
+    await service.runOnce();
+    const garden = identity('id:garden');
+    const record = install.lane.ledger.getCurrent(garden)!;
+    expect(record).toMatchObject({ state: 'current', contentTier: 'private' });
+    // A crash after a raise hid the source and staged the destination.
+    install.lane.ledger.stageMove(garden, {
+      expectedGeneration: record.generation,
+      target: { metadataTier: 'private', contentTier: 'secure' },
+      destination: [{ corpusId: SECURE_CORPUS, trustDomain: 'secure_local', layers: 'both' }],
+      hideSource: true,
+    });
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', autoMoves: { failed: 0 } });
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(install.lane.ledger.copies(garden).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId))
+      .toContain(SECURE_CORPUS);
+  });
+
+  test('a move that keeps failing past the bound: a lateral one is given up, a raise stays hidden and queued', async () => {
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    let clock = Date.now();
+    const service = snifferFor(install, builtIn, { now: () => new Date(clock), staleAfterMs: 60 * 60_000 });
+    await service.runOnce();
+    const ledger = install.lane.ledger;
+    const garden = identity('id:garden');
+    const bank = identity('id:bank');
+    for (let pass = 0; pass < 3 && ledger.getCurrent(bank)!.state !== 'current'; pass += 1) await service.runOnce();
+    expect(ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'private' });
+
+    // Garden: a lateral move queued (nothing hidden). Bank: a raise staged
+    // (its Personal copy hidden). Then both sources lose their store rows,
+    // so neither move can ever complete.
+    const gardenBefore = ledger.getCurrent(garden)!;
+    ledger.beginMove(garden, { metadataTier: 'private', contentTier: 'private' }, gardenBefore.generation);
+    const bankBefore = ledger.getCurrent(bank)!;
+    ledger.stageMove(bank, {
+      expectedGeneration: bankBefore.generation,
+      target: { metadataTier: 'private', contentTier: 'secure' },
+      destination: [{ corpusId: SECURE_CORPUS, trustDomain: 'secure_local', layers: 'both' }],
+      hideSource: true,
+    });
+    const internal = install.lane.internal.current()!;
+    for (const id of ['id:garden', 'id:bank']) {
+      internal.tombstoneCopy(
+        { ...identity(id), family: 'file', localItemId: `personal:${id}` },
+        { connectorId: 'test' },
+      );
+    }
+
+    // Within the bound: retried, both left queued.
+    clock += 10 * 60_000;
+    expect(await service.runOnce()).toMatchObject({ autoMoves: { moved: 0, failed: 2 } });
+    expect(ledger.getCurrent(garden)).toMatchObject({ state: 'moving' });
+    expect(ledger.getCurrent(bank)).toMatchObject({ state: 'moving' });
+
+    // Past the bound (measured from when each move was queued).
+    clock += 2 * 60 * 60_000;
+    const settled = await service.runOnce();
+    expect(settled).toMatchObject({ autoMoves: { failed: 2, abandoned: 1, staleRaises: 1 } });
+    // The lateral move is given up: back at its tiers, its copy current.
+    expect(ledger.getCurrent(garden)).toMatchObject({
+      state: 'current', generation: gardenBefore.generation, targetContentTier: null, contentTier: 'private',
+    });
+    expect(ledger.copies(garden).some((copy) => copy.state === 'current')).toBe(true);
+    // The raise is never rolled back to the lower placement.
+    expect(ledger.getCurrent(bank)).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
+    expect(ledger.copies(bank).some((copy) => copy.state === 'current')).toBe(false);
   });
 });
 
