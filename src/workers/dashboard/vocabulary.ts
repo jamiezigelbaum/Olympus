@@ -1105,9 +1105,15 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
  * beside every other control while the state holds.
  */
 export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
-  not_installed: {
-    title: 'Olympus isn\'t on your Mac yet',
-    disabledReason: 'Install Olympus first',
+  /**
+   * No Olympus link for this ChatGPT account. The relay cannot tell an owner
+   * who has not linked yet from one with no install, so the page offers
+   * Connect first and the install link beside it.
+   */
+  not_connected: {
+    title: 'Olympus isn\'t connected to ChatGPT yet',
+    disabledReason: 'Connect Olympus first',
+    install: 'Not installed yet?',
   },
   /** Linked to this ChatGPT account, first-run setup (models, first index) not finished. */
   installing: {
@@ -1125,7 +1131,8 @@ export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
   },
   /** Labels for `connection.action.id`; `help` is shown as text when the action has no link. */
   actions: {
-    install: { label: 'Install on your Mac', help: 'In ChatGPT on your Mac, ask: Install Olympus on my Mac.' },
+    /** Re-reads the dashboard, whose result carries ChatGPT's own connect prompt. */
+    connect: { label: 'Connect Olympus', help: '' },
     open_olympus: { label: 'Open Olympus on your Mac', help: 'Open Olympus on your Mac, then check again here.' },
     wake_mac: {
       label: 'How to keep it available',
@@ -1220,6 +1227,10 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   },
   linkExpires: 'link expires in {n} min',
   linkExpired: 'link expired',
+  /** Beside a control whose fix only the Mac can make: the fix's olympusplugin.ai help page. */
+  howOnMac: 'How to fix this on your Mac',
+  /** Under "Set up on your Mac": the help page those sources' fixes name. */
+  howConnectOnMac: 'How to connect these on your Mac',
 } as const;
 
 /**
@@ -1272,6 +1283,9 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
   insideFolder: 'A folder inside {name}',
   noFolders: 'No folders here.',
   loadMore: 'Load more folders',
+  loadMoreCount: { one: 'Load 1 more folder', many: 'Load {n} more folders' },
+  /** The level has more folders than Olympus reads at once; some are not listed. */
+  truncated: 'This folder has more folders than Olympus can list here, so this list is incomplete.',
   states: { ingest: 'Fully indexed', metadata_only: 'Names only', exclude: 'Skipped' },
   statesLower: { ingest: 'fully indexed', metadata_only: 'names only', exclude: 'skipped' },
   notIncluded: 'Not included',
@@ -1395,6 +1409,11 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   cancel: 'Cancel',
   saveFailed: 'Olympus could not save. Your changes are still here. Try again.',
   saved: 'Privacy saved.',
+  /** The inline step before a save that lowers protection; {list} names the removed rules. */
+  confirmRemove: 'This removes protection from {list}.',
+  confirmDescription: 'This changes your description, which decides what Olympus keeps private.',
+  confirm: 'Confirm',
+  conflict: 'Your privacy settings were changed somewhere else, so this view has been refreshed. Check it and save again.',
   discardPrompt: 'Discard your changes?',
   discard: 'Discard changes',
   keep: 'Keep editing',

@@ -210,21 +210,36 @@ describe('vocabulary', () => {
 });
 
 describe('connection states', () => {
-  test('not installed: one banner, Install on your Mac, everything else disabled with a reason', () => {
-    const host = mount();
-    host.push({ structuredContent: model({ connection: { state: 'not_installed', action: { id: 'install' } }, sources: SOURCES }) });
-    expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.not_installed.title);
-    const install = host.button('Install on your Mac');
-    expect(install.disabled).toBe(false);
-    expect(install.className).toContain('primary');
+  test('not connected: Connect Olympus re-reads the dashboard, Not installed yet? opens the install page, everything else waits', async () => {
+    const host = mount({ openai: {} });
+    const data = model({ connection: { state: 'not_connected', action: { id: 'connect' }, installHref: 'https://olympusplugin.ai/install/' }, sources: SOURCES });
+    host.push({ structuredContent: data });
+    expect(host.text()).toContain("Olympus isn't connected to ChatGPT yet");
+    const connect = host.button('Connect Olympus');
+    expect(connect.disabled).toBe(false);
+    expect(connect.className).toContain('primary');
+    const install = host.button('Not installed yet?');
+    expect(install.className).not.toContain('primary');
+    for (const other of host.buttons().filter((node) => node !== connect && node !== install)) expect(other.disabled).toBe(true);
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.not_connected.disabledReason);
     install.click();
-    // No link: the help is selectable text, never the clipboard.
-    expect(host.text()).toContain('Install Olympus on my Mac.');
-    for (const other of host.buttons().filter((node) => node !== host.button('Install on your Mac'))) {
-      expect(other.disabled).toBe(true);
-    }
-    expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.not_installed.disabledReason);
+    expect(host.calls).toContainEqual(['openExternal', { href: 'https://olympusplugin.ai/install/' }]);
+    connect.click();
+    expect(host.toolCalls().at(-1)).toEqual({ name: 'olympus_dashboard', arguments: {} });
+    expect(host.button('Working…').disabled).toBe(true);
+    host.respond('tools/call', { structuredContent: data });
+    await sleep(0);
+    expect(host.button('Connect Olympus').disabled).toBe(false);
+    expect(host.text()).not.toMatch(/install on your mac/i);
     expectNoJargon(host);
+  });
+
+  test('an old relay\'s not_installed reads as not connected; an install link off olympusplugin.ai is not offered', () => {
+    const host = mount();
+    host.push({ structuredContent: model({ connection: { state: 'not_installed', installHref: 'https://evil.example/install' } as any }) });
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.not_connected.title);
+    expect(host.button('Connect Olympus').disabled).toBe(false);
+    expect(host.buttons().some((node) => node.textContent === 'Not installed yet?')).toBe(false);
   });
 
   test('installing: progress label and percent, no button', () => {
@@ -295,6 +310,43 @@ describe('connection states', () => {
 });
 
 describe('ready page', () => {
+  test('a fix only the Mac can make links its help page beside the control: How to fix this on your Mac', () => {
+    const help = (section: string) => `https://olympusplugin.ai/help/on-your-mac/#${section}`;
+    const host = mount({ openai: {} });
+    host.push({ structuredContent: model({
+      needsYou: [{ id: 'search', sentence: 'Search has stopped working on your Mac.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {}, href: help('search') } }],
+      sources: [{ id: 'x.posts', label: 'X', group: 'cloud', status: 'Off', primary: { label: 'Connect', tool: 'olympus_dashboard', args: {}, disabledReason: 'Connect sources in Olympus on your Mac.', href: help('connect') } }],
+      models: {
+        embedding: { kind: 'built_in', state: 'ready' },
+        change: { label: 'Change', tool: 'olympus_dashboard', args: {}, disabledReason: 'Change models in Olympus on your Mac.', href: help('models') },
+      },
+    }) });
+    const links = host.buttons().filter((node) => node.className === 'btn link');
+    expect(links.map((node) => node.textContent)).toEqual([DASHBOARD_CHATGPT_PAGE_COPY.howOnMac, DASHBOARD_CHATGPT_PAGE_COPY.howConnectOnMac, DASHBOARD_CHATGPT_PAGE_COPY.howOnMac]);
+    // Check again still runs its tool; the link sits beside it.
+    expect(host.button('Check again').disabled).toBe(false);
+    links[0]!.click();
+    links[1]!.click();
+    links[2]!.click();
+    expect(host.calls.filter(([name]) => name === 'openExternal').map(([, args]) => args)).toEqual([
+      { href: help('search') }, { href: help('connect') }, { href: help('models') },
+    ]);
+  });
+
+  test('a fix with only a help page is that link; pages off olympusplugin.ai are never linked', () => {
+    const host = mount({ openai: {} });
+    host.push({ structuredContent: model({
+      needsYou: [
+        { id: 'a', sentence: 'Answers have stopped working on your Mac.', fix: { label: 'Open', href: 'https://olympusplugin.ai/help/on-your-mac/#answers' } },
+        { id: 'b', sentence: 'Something else.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {}, href: 'https://evil.example/help' } },
+        { id: 'c', sentence: 'Plain http.', fix: { label: 'Open', href: 'http://olympusplugin.ai/help' } },
+      ],
+    }) });
+    expect(host.buttons().filter((node) => node.textContent === DASHBOARD_CHATGPT_PAGE_COPY.howOnMac)).toHaveLength(1);
+    host.button(DASHBOARD_CHATGPT_PAGE_COPY.howOnMac).click();
+    expect(host.calls.filter(([name]) => name === 'openExternal')).toEqual([['openExternal', { href: 'https://olympusplugin.ai/help/on-your-mac/#answers' }]]);
+  });
+
   test('blocker, needs-you, sources, progress and models in that order', () => {
     const host = mount();
     host.push({
@@ -648,7 +700,7 @@ describe('host integration', () => {
 
 describe('inline card', () => {
   const fixtures: Array<[string, DashboardViewModelV1]> = [
-    ['not installed', model({ connection: { state: 'not_installed', action: { id: 'install' } }, sources: SOURCES })],
+    ['not connected', model({ connection: { state: 'not_connected', action: { id: 'connect' }, installHref: 'https://olympusplugin.ai/install/' }, sources: SOURCES })],
     ['mac offline', model({ connection: { state: 'mac_offline', action: { id: 'wake_mac', href: 'https://olympusplugin.ai/a' } }, progress: PROGRESS })],
     ['blocker', model({ blocker: { id: 'b', sentence: 'Search has stopped working on your Mac.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {} } }, needsYou: [{ id: 'n', sentence: 'Gmail — signed out', fix: { label: 'Reconnect', disabledReason: 'x' } }], sources: SOURCES, progress: PROGRESS })],
     ['needs you', model({ needsYou: [{ id: 'n', sentence: 'Gmail — signed out', fix: { label: 'Disconnect', tool: 't', destructive: true } }], sources: SOURCES })],

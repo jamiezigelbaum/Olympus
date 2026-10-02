@@ -157,6 +157,8 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.08)}
 .btn.danger{border-color:var(--danger);color:var(--danger)}
+.btn.link{border-color:transparent;background:none;color:var(--muted);padding:0.375rem 0.5rem}
+.btn.link:hover:not(:disabled){color:var(--text)}
 .btn:disabled{cursor:not-allowed;color:var(--muted);background:var(--surface);border-style:dashed}
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 summary{cursor:pointer;border-radius:0.375rem}

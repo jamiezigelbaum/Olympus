@@ -78,7 +78,7 @@ export function chatgptDashboardClient(
   const root = doc.getElementById('app') as HTMLElement;
   const P = config.page;
   const C = config.connection;
-  const GLOBAL_STATES = ['not_installed', 'installing', 'mac_offline', 'relay_unavailable'];
+  const GLOBAL_STATES = ['not_connected', 'installing', 'mac_offline', 'relay_unavailable'];
 
   const state: {
     data: Any;
@@ -405,7 +405,32 @@ export function chatgptDashboardClient(
   // ---- state helpers -----------------------------------------------------
   function connectionState(): string {
     if (state.relayDown) return 'relay_unavailable';
-    return state.data ? String(state.data.connection.state) : '';
+    const current = state.data ? String(state.data.connection.state) : '';
+    // Nothing produces not_installed any more; an old relay's reads as not connected.
+    return current === 'not_installed' ? 'not_connected' : current;
+  }
+
+  /** A fix's help page, when it is an https page on olympusplugin.ai (the only domain the host opens for us), else ''. */
+  function helpHref(href: Any): string {
+    if (typeof href !== 'string' || !href) return '';
+    let parsed: URL;
+    try {
+      parsed = new URL(href);
+    } catch {
+      return '';
+    }
+    const host = parsed.hostname;
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return '';
+    return host === 'olympusplugin.ai' || host === 'www.olympusplugin.ai' ? parsed.href : '';
+  }
+
+  /** "How to fix this on your Mac": the fix's help page, beside its control (not on the inline card). */
+  function howLink(fix: Any, key: string): HTMLElement | null {
+    const href = helpHref(fix && fix.href);
+    if (!href || compact()) return null;
+    const link = button(P.howOnMac, key + ':how', () => openLink(href), 'plain');
+    link.className = 'btn link';
+    return link;
   }
   function globalReason(): string {
     const current = connectionState();
@@ -423,6 +448,8 @@ export function chatgptDashboardClient(
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
       add(wrap, button(fix.label, key, null, style), el('span', 'reason', blocked || String(fix.disabledReason)));
+      // A repair only the Mac can make still says how, unless the whole page is waiting.
+      if (!blocked) add(wrap, howLink(fix, key));
       return wrap;
     }
     if (state.busy === key) {
@@ -444,7 +471,10 @@ export function chatgptDashboardClient(
         picker!.start(fix, source ? source.id : '', source ? source.label : '', key);
       };
     } else if (typeof fix.tool === 'string' && fix.tool) action = () => callTool(fix.tool, fix.args || {}, key);
-    else if (typeof fix.href === 'string' && fix.href) action = () => openLink(fix.href);
+    else if (helpHref(fix.href)) {
+      // No tool, only a help page: the control is the link to it.
+      return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
+    }
     if (fix.destructive && action) {
       if (!allowConfirm) return wrap;
       if (state.confirming === key) {
@@ -467,7 +497,7 @@ export function chatgptDashboardClient(
         render(key + ':no');
       }, 'plain'), errorNote(failure));
     }
-    return add(wrap, button(fix.label, key, action, style), errorNote(failure));
+    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key) : null, errorNote(failure));
   }
 
   function errorNote(text: string): HTMLElement | null {
@@ -501,6 +531,14 @@ export function chatgptDashboardClient(
       add(actions, state.busy === 'refresh'
         ? button(P.working, 'refresh', null, 'main')
         : button(C.actions.retry.label, 'refresh', refresh, 'main'));
+    } else if (current === 'not_connected') {
+      // Connect re-reads the dashboard: its result carries ChatGPT's own connect prompt.
+      add(actions, state.busy === 'connection-action'
+        ? button(P.working, 'connection-action', null, 'main')
+        : button(C.actions.connect.label, 'connection-action', () => callTool(config.toolName, {}, 'connection-action'), 'main'));
+      // The inline card keeps to Connect and Open Olympus; the install link waits for the full page.
+      const install = compact() ? '' : helpHref(conn.installHref);
+      if (install) add(actions, button(C.not_connected.install, 'connection-install', () => openLink(install), 'plain'));
     } else if (current !== 'installing' && conn.action && (C.actions as Any)[conn.action.id]) {
       const words = (C.actions as Any)[conn.action.id];
       const href = conn.action.href;
@@ -758,6 +796,12 @@ export function chatgptDashboardClient(
     }
     if (onMac.length) {
       add(section, el('h3', '', P.sourcesOnMac), el('p', 'muted mac-help', P.sourcesOnMacHelp));
+      const how = onMac.map((source) => helpHref(source.primary && source.primary.href)).filter((href) => !!href)[0];
+      if (how && !globalReason()) {
+        const link = button(P.howConnectOnMac, 'mac-only:how', () => openLink(how), 'plain');
+        link.className = 'btn link';
+        add(section, link);
+      }
       const rows = el('ul', 'rows mac-only');
       for (const source of onMac) add(rows, add(el('li', 'row source mac'), el('span', 'source-name', String(source.label || source.id || ''))));
       add(section, rows);
