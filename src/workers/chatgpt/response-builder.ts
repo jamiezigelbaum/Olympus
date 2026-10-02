@@ -730,14 +730,18 @@ export function privacyToolResult(
 ): ChatGptToolResult {
   const copy = copyPrivacySettings(settings);
   const summary: PrivacySummary = {
-    status: status === 'saved' ? 'saved' : 'current',
+    status: status === 'saved' || status === 'conflict' ? status : 'current',
     configured: copy.configured,
     description: copy.description,
     ruleCount: copy.rules.length,
     pendingCount: copy.pendingCount,
   };
   const parts = [
-    summary.status === 'saved' ? 'Saved what is private for the owner.' : (summary.configured ? 'The owner has set what is private for them.' : 'The owner has not said yet what is private for them.'),
+    summary.status === 'saved'
+      ? 'Saved what is private for the owner.'
+      : summary.status === 'conflict'
+        ? 'Not saved: the privacy settings changed since they were shown. The Olympus panel shows the current ones to save again.'
+        : (summary.configured ? 'The owner has set what is private for them.' : 'The owner has not said yet what is private for them.'),
   ];
   if (summary.ruleCount > 0) parts.push(`${summary.ruleCount} folder, label or sender rule${summary.ruleCount === 1 ? '' : 's'} keep items Private; they are shown to the owner in the Olympus panel.`);
   if (summary.pendingCount > 0) parts.push(`${summary.pendingCount} item${summary.pendingCount === 1 ? ' waits' : 's wait'} for the privacy check on the Mac.`);
@@ -768,6 +772,7 @@ function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
       return [{ kind: 'folder', source_id: sourceId, key: opaque(rule.key), ...(display ? { display } : {}) }];
     }),
     pendingCount: whole(settings.pendingCount),
+    ...(typeof settings.revision === 'string' && settings.revision ? { revision: opaque(settings.revision).slice(0, 64) } : {}),
   };
 }
 

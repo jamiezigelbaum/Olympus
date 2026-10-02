@@ -468,11 +468,19 @@ export interface PrivacySettings {
    * sees it.
    */
   confirmation?: string;
+  /**
+   * Opaque compare-and-swap token over the saved settings (description and
+   * every rule, Secrets-location rules included). Send it back as
+   * `olympus_privacy_set {revision}`; a save against an older one is refused
+   * with status `conflict` and the current settings.
+   */
+  revision?: string;
 }
 
 /** A privacy tool's `structuredContent`: the description and counts, never a rule. */
 export interface PrivacySummary {
-  status: 'current' | 'saved';
+  /** `conflict`: not saved, the settings changed since `revision`; `_meta` carries the current ones. */
+  status: 'current' | 'saved' | 'conflict';
   configured: boolean;
   description: string;
   ruleCount: number;
@@ -491,11 +499,17 @@ export interface PrivacySummary {
  * (`privacy_owner_only`) unless it carries `confirmation` from a recent
  * olympus_privacy_get (30 minutes, spent by the save). Adding rules needs
  * no confirmation.
+ *
+ * With `revision`, the save happens only if the settings still match it
+ * (compare-and-swap, like `olympus_scope_set`'s `scope_revision`): two open
+ * panels cannot silently overwrite each other's always-Private rules.
  */
 export interface PrivacySetInput {
   description?: string;
   rules?: PrivacyRuleView[];
   confirmation?: string;
+  /** The `revision` the panel was showing; optional for now, checked when given. */
+  revision?: string;
 }
 
 /* ------------------------------------------------------------------ */

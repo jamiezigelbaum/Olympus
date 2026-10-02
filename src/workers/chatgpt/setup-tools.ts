@@ -321,6 +321,7 @@ export const PRIVACY_SET_TOOL: ToolDefinition = {
       description: { type: 'string', maxLength: 2000, description: 'The user\'s own words about what is private for them.' },
       rules: { type: 'array', items: PRIVACY_RULE_SCHEMA, maxItems: 100 },
       confirmation: { type: 'string', maxLength: 128, description: 'The panel\'s confirmation from olympus_privacy_get.' },
+      revision: { type: 'string', maxLength: 64, description: 'The revision from olympus_privacy_get; a save against changed settings is refused.' },
     },
     additionalProperties: false,
   },
@@ -402,8 +403,11 @@ export async function callSetupTool(
         return privacyToolResult(visible, 'current', issuePrivacyConfirmation(backend));
       }
       case PRIVACY_SET_TOOL_NAME: {
-        const { confirmation, ...fields } = args;
+        const { confirmation, revision, ...fields } = args;
         if (confirmation !== undefined && typeof confirmation !== 'string') throw new ChatGptSurfaceError('invalid_params');
+        if (revision !== undefined && (typeof revision !== 'string' || !revision || revision.length > 64)) {
+          throw new ChatGptSurfaceError('invalid_params');
+        }
         let update: ReturnType<typeof parsePrivacyProfileInput>;
         try {
           update = parsePrivacyProfileInput(fields);
@@ -411,6 +415,11 @@ export async function callSetupTool(
           throw new ChatGptSurfaceError('invalid_params');
         }
         const secrets = secretLocations(backend);
+        // Compare-and-swap: read and write run with no await between them.
+        if (revision !== undefined) {
+          const current = backend.privacySettings();
+          if (current.revision !== revision) return privacyToolResult(visiblePrivacy(current, secrets), 'conflict');
+        }
         // Lowering protection is the owner's alone: only with the panel's confirmation.
         const confirmed = confirmation !== undefined && privacyConfirmationValid(backend, confirmation);
         if (!confirmed && lowersPrivacy(update, visiblePrivacy(backend.privacySettings(), secrets))) {

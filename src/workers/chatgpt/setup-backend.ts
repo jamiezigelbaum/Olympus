@@ -6,6 +6,7 @@
  * Model switching writes the owner's sovereignty policy through the same
  * validator and writer `olympus sovereignty init` uses.
  */
+import { createHash } from 'node:crypto';
 import { mailScopeDraftView } from '../../core/mail-source-scope.ts';
 import type { RemotePublicUrls } from '../../core/remote-public-url.ts';
 import {
@@ -83,7 +84,19 @@ export function readChatGptPrivacySettings(
     description: profile?.description ?? '',
     rules: (profile?.rules ?? []).flatMap(privacyRuleView),
     pendingCount,
+    revision: privacyRevision(profile),
   };
+}
+
+/**
+ * The privacy settings' compare-and-swap token: a digest of what a save
+ * replaces (the description and every saved rule), so any change by any
+ * writer moves it, and an unchanged profile keeps it across reads.
+ */
+export function privacyRevision(profile: { description: string; rules: readonly PrivacyRule[] } | undefined): string {
+  if (!profile) return 'prv1.unset';
+  const digest = createHash('sha256').update(JSON.stringify({ d: profile.description, r: profile.rules })).digest('hex');
+  return `prv1.${digest.slice(0, 32)}`;
 }
 
 export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): ChatGptSetupBackend {

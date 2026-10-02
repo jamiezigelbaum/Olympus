@@ -873,6 +873,7 @@ describe('privacy settings (olympus_privacy_get / olympus_privacy_set)', () => {
           { kind: 'sender', source_id: 'gmail.email', value: sender },
         ],
         pendingCount: 2,
+        revision: expect.stringMatching(/^prv1\.[0-9a-f]{32}$/),
       });
 
       // The rules become always-Private owner tier rules; names stay out of that file.
@@ -891,6 +892,38 @@ describe('privacy settings (olympus_privacy_get / olympus_privacy_set)', () => {
       expect((described.structuredContent as Record<string, unknown>).ruleCount).toBe(3);
       const got = await call(client, 'olympus_privacy_get', {});
       expect(got.structuredContent).toMatchObject({ status: 'current', configured: true, description: 'Health and money.', ruleCount: 3 });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('a save carrying an old revision is refused with the current settings; a fresh one saves', async () => {
+    const client = await connectClient();
+    try {
+      const first = await call(client, 'olympus_privacy_get', {});
+      const unset = privacyMeta(first).revision as string;
+      expect(unset).toBe('prv1.unset');
+      // Panel A saves a rule against what it was shown.
+      const a = await call(client, 'olympus_privacy_set', {
+        revision: unset,
+        rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/health', display: 'Health' }],
+      });
+      expect(a.structuredContent).toMatchObject({ status: 'saved', ruleCount: 1 });
+      const afterA = privacyMeta(a).revision as string;
+      expect(afterA).not.toBe(unset);
+      // Panel B, still showing the unset settings, would drop A's rule: refused, nothing written.
+      const b = await call(client, 'olympus_privacy_set', { revision: unset, rules: [] });
+      expect(b.isError).toBeFalsy();
+      expect(b.structuredContent).toMatchObject({ status: 'conflict', ruleCount: 1 });
+      expect(b.content[0]!.text).toContain('Not saved');
+      expect(privacyMeta(b)).toMatchObject({ revision: afterA, rules: [{ kind: 'folder', key: '/health' }] });
+      expect((await call(client, 'olympus_privacy_get', {})).structuredContent).toMatchObject({ ruleCount: 1 });
+      // Saving again from the current settings succeeds; reads keep a stable revision.
+      expect(privacyMeta(await call(client, 'olympus_privacy_get', {})).revision).toBe(afterA);
+      const retried = await call(client, 'olympus_privacy_set', { revision: afterA, description: 'Health.' });
+      expect(retried.structuredContent).toMatchObject({ status: 'saved', description: 'Health.', ruleCount: 1 });
+      // A malformed revision is invalid input.
+      expect((await call(client, 'olympus_privacy_set', { revision: 7, description: 'x' })).isError).toBe(true);
     } finally {
       await client.close();
     }
