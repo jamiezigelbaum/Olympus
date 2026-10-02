@@ -561,6 +561,73 @@ context, and never transits OpenAI's servers.
 - The panel builds a fetch URL only from a job id of the exact routable
   `oly2p.` shape.
 
+## Live smoke (added 2026-10-02)
+
+`scripts/chatgpt-live-smoke.ts` checks what ChatGPT sees, end to end, on a
+live install, so an operator can verify ChatGPT-visible behavior without
+screenshots from the owner. It is read-only: it calls tools and collects
+panel answers; it restarts nothing and changes no settings.
+
+```sh
+bun scripts/chatgpt-live-smoke.ts --question "What ayurveda files do I have?"
+bun scripts/chatgpt-live-smoke.ts --quiet --expect-private \
+  --question "What did my June 2026 blood work show? Use Olympus." \
+  --follow-up "Give me all the details from the June 2026 blood work lab." \
+  --follow-up-detail full
+```
+
+What it does, in order:
+
+1. **Token, the local operator's way.** No new auth path. In relay mode the
+   engine already lets a local development client register (loopback
+   redirect URIs only) and be approved only by a direct loopback visit
+   (`remote-oauth/handler.ts`: a relayed request carries `x-olympus-relay`
+   and is refused; being at the Mac is the proof of ownership). The script
+   registers one public client, "Olympus live smoke", once (its id, not a
+   secret, is kept in `~/.olympus/live-smoke-client.json`, mode 0600),
+   approves it at `http://127.0.0.1:8010/connect/authorize`, and exchanges
+   the code with PKCE at the relay's public token endpoint, as ChatGPT
+   does. It revokes the grant when the run ends (the access token would
+   expire in an hour anyway); `olympus connections list` shows each run as
+   a revoked "Olympus live smoke" row. Tokens are never printed or stored.
+   `--engine` must be a loopback address. It cannot run from another
+   machine, and nothing about remote approval changes.
+2. **Tools as ChatGPT calls them.** Over `https://mcp.olympusplugin.ai/mcp`
+   (the relay marks the request, so the engine serves the ChatGPT
+   surface): `tools/list`, `olympus_dashboard` (skip with
+   `--no-dashboard`) and `olympus_search {question, detail?}`. For each
+   result it prints the model-visible text verbatim, which fixed Private
+   note it carries, the `structuredContent` and `_meta` keys, and the
+   panel `_meta` with the job id redacted to its install part. `--quiet`
+   prints the text's length instead of the text.
+3. **The panel.** When `_meta["olympus/privateAnswer"]` is `ready`, the
+   script does what the panel does: a CORS preflight and then
+   `POST /private/<job id>` with `Origin` set to a ChatGPT desktop sandbox
+   origin (`codex-sandbox://mcp-app-<hex>.web-sandbox.oaiusercontent.com`;
+   `--origin` overrides), one ECDH P-256 key for every poll, `Retry-After`
+   honored (2 s default, 30 s at most), and the panel's caps (2 min, or
+   190 s for `detail: "full"`). It decrypts the answer and prints it with
+   its cited titles, gaps and timing (search time, claim to settled, and
+   search to ready). `--quiet` prints only the answer's length and the
+   cited titles, for runs where medical or other private content should
+   not scroll by.
+4. **Checks; exit 1 on any failure.** Every tool result is checked
+   against every private answer the run decrypted: no run of six
+   consecutive words of a private answer (not also in the question), no
+   open token from inside the sealed plaintext, no key material field
+   (`publicKey`, `macPublicKey`, `ciphertext`, `iv`), no job id in the text
+   or `structuredContent`, and no panel `_meta` field outside
+   `v, count, state, jobId, percent, detail`. A decimal value shared with a
+   private answer is a warning only. It also fails on a panel failure
+   (claimed, failed, gone, offline, CORS refusal, poll cap) and on a
+   private answer slower than 120 s (summary) or 190 s (full) from the
+   search. `--expect-private` also fails when a question gets no ready
+   panel job. Exit 2 means the run could not start (token, relay or
+   arguments).
+
+`test/chatgpt-live-smoke.test.ts` covers the offline parts: the panel's
+claim, poll and decrypt loop against a fake relay, and the leak checks.
+
 ## Build sequence (today)
 
 1. **Relay v2 + client v2 + engine OAuth** (critical path, critical-class).
