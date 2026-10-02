@@ -1413,7 +1413,15 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   confirmRemove: 'This removes protection from {list}.',
   confirmDescription: 'This changes your description, which decides what Olympus keeps private.',
   confirm: 'Confirm',
-  conflict: 'Your privacy settings were changed somewhere else, so this view has been refreshed. Check it and save again.',
+  /** A save refused because the settings changed elsewhere: the draft stays until the person picks. */
+  conflict: 'Your changes weren\'t saved because the privacy settings changed elsewhere.',
+  conflictNow: 'What is saved now:',
+  conflictDescription: 'Your description: {text}',
+  conflictNoDescription: 'No description',
+  applyAgain: 'Apply my changes again',
+  discardMine: 'Discard my changes',
+  /** A folder rule saved without its name. */
+  folderUnnamed: 'A folder in {source}',
   discardPrompt: 'Discard your changes?',
   discard: 'Discard changes',
   keep: 'Keep editing',
