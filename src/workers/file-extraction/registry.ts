@@ -29,8 +29,10 @@ import type {
 import {
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS,
   OCR_EXTRACTOR_KIND,
+  createImageOcr,
   createOcrExtractor,
   createPdfOcr,
+  type OcrEngineOptions,
 } from './extractors/ocr.ts';
 import {
   REMOTE_VLM_EXTRACTOR_KINDS,
@@ -105,6 +107,18 @@ export type ExtractionHealthProbeMap = ReadonlyMap<string, () => Promise<void>>;
 export function createDefaultExtractorRegistry(
   config: ExtractorRegistryConfig = {},
 ): ExtractorRegistry {
+  const ocrEngine: OcrEngineOptions = {
+    ...(config.ocr?.engine !== undefined ? { preference: config.ocr.engine } : {}),
+    ...(config.ocr?.maxPages !== undefined ? { maxPages: config.ocr.maxPages } : {}),
+    ...(config.ocr?.platform !== undefined ? { platform: config.ocr.platform } : {}),
+  };
+  const ocrShared = {
+    engine: ocrEngine,
+    ...(config.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config.ocr.ocrTimeoutMs } : {}),
+    ...(config.text?.maxBoundedTextChars !== undefined
+      ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
+      : {}),
+  };
   const extractors: Extractor[] = [
     createTranscriptionExtractor({
       ...(config.transcription?.command !== undefined ? { command: config.transcription.command } : {}),
@@ -120,20 +134,12 @@ export function createDefaultExtractorRegistry(
         ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
         : {}),
       // A PDF with no text layer is a scan; the text lane reads it by OCR
-      // rather than leaving it for an escalation nothing ever requests.
-      pdfOcr: createPdfOcr({
-        ...(config.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config.ocr.ocrTimeoutMs } : {}),
-        ...(config.text?.maxBoundedTextChars !== undefined
-          ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
-          : {}),
-      }),
+      // rather than leaving it for an escalation nothing ever requests. On a
+      // Mac the same holds for an image: the built-in engine reads its text.
+      pdfOcr: createPdfOcr(ocrShared),
+      imageOcr: createImageOcr(ocrShared),
     }),
-    createOcrExtractor({
-      ...(config.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config.ocr.ocrTimeoutMs } : {}),
-      ...(config.text?.maxBoundedTextChars !== undefined
-        ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
-        : {}),
-    }),
+    createOcrExtractor(ocrShared),
     createVlmPdfExtractor({
       ...(config.vlmPdf?.client ? { client: config.vlmPdf.client } : {}),
       ...(config.vlmPdf?.prompt !== undefined ? { prompt: config.vlmPdf.prompt } : {}),

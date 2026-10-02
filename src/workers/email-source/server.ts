@@ -25,6 +25,7 @@ import {
 import { createExtractionReadinessLedger } from '../file-extraction/readiness-ledger.ts';
 import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts';
 import { OpenAICompatibleVlmClient } from '../file-extraction/extractors/openai-compatible-client.ts';
+import { parseOcrEnginePreference } from '../file-extraction/extractors/apple-vision-ocr.ts';
 import {
   createEmailSourceWorker,
   dashboardSourceSyncNotSupportedError,
@@ -1928,6 +1929,13 @@ export async function main(): Promise<void> {
     process.env.OLYMPUS_FILE_EXTRACTION_OCR_TIMEOUT_SECONDS,
     'OLYMPUS_FILE_EXTRACTION_OCR_TIMEOUT_SECONDS',
   );
+  // `auto` reads scans with the Mac's built-in Vision engine and with
+  // tesseract elsewhere; `tesseract` keeps the installed commands on a Mac.
+  const fileExtractionOcrEngine = parseOcrEnginePreference(process.env.OLYMPUS_FILE_EXTRACTION_OCR_ENGINE);
+  const fileExtractionOcrMaxPages = parseOptionalPositiveInteger(
+    process.env.OLYMPUS_FILE_EXTRACTION_OCR_MAX_PAGES,
+    'OLYMPUS_FILE_EXTRACTION_OCR_MAX_PAGES',
+  );
   const fileExtractionMaxBoundedTextChars = parseOptionalPositiveInteger(
     process.env.OLYMPUS_FILE_EXTRACTION_MAX_BOUNDED_TEXT_CHARS,
     'OLYMPUS_FILE_EXTRACTION_MAX_BOUNDED_TEXT_CHARS',
@@ -2615,9 +2623,12 @@ export async function main(): Promise<void> {
           }
         : {}),
       ...(fileExtractionOcrTimeoutMs !== undefined || fileExtractionPdfRenderTimeoutMs !== undefined
+        || fileExtractionOcrEngine !== undefined || fileExtractionOcrMaxPages !== undefined
         ? {
             ocr: {
               ...(fileExtractionOcrTimeoutMs !== undefined ? { ocrTimeoutMs: fileExtractionOcrTimeoutMs } : {}),
+              ...(fileExtractionOcrEngine !== undefined ? { engine: fileExtractionOcrEngine } : {}),
+              ...(fileExtractionOcrMaxPages !== undefined ? { maxPages: fileExtractionOcrMaxPages } : {}),
               ...(fileExtractionPdfRenderTimeoutMs !== undefined
                 ? { pdfRenderTimeoutMs: fileExtractionPdfRenderTimeoutMs }
                 : {}),

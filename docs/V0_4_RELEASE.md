@@ -150,6 +150,12 @@ testers have exercised the normal product journey without custom engineering.
   hosted-relay parts of `design/hosted-agent-compatibility.md`. The OpenClaw
   outcome below stays valid for existing OpenClaw installs.
 
+- **2026-10-02 — Built-in scan reading is in 1.0.** Owner decision: the
+  item deferred on 2026-10-01 is pulled into this release. On a Mac, scanned
+  PDFs and images are read on-device with the system's own Vision text
+  recognition, with nothing to install; tesseract stays the engine elsewhere.
+  Scope, bounds and proof: [built-in scan reading](#built-in-scan-reading-in-10-owner-2026-10-02).
+
 - **2026-10-01 — Built-in embeddings are the default for new installs.**
   Owner approval: a small model runs inside Olympus with zero setup and
   nothing leaving the machine; other providers stay opt-in. Embedding custody
@@ -948,15 +954,39 @@ content, and readable text from complete extraction and vector coverage.
 Reproduce any misleading status on synthetic fixtures and fix the product
 without expanding the owner's selected ingestion scope.
 
-### Deferred to the release after 1.0: built-in scan reading (owner, 2026-10-01)
+### Built-in scan reading (in 1.0, owner 2026-10-02)
 
-Scanned PDFs and images are read today only when the optional `tesseract` /
-`ocrmypdf` lane is installed, so a fresh Mac leaves them names-only. Next
-version: back the existing OCR extractor (`src/workers/file-extraction/extractors/ocr.ts`)
-with macOS's built-in Vision text recognition (no install, on-device), keeping
-tesseract as the Linux fallback; recognized text flows through the same tier
-classification as any other content. A local vision model for charts and photos
-is a later step. Owner deferred this out of 1.0 to finish the current release.
+Deferred on 2026-10-01, pulled into 1.0 on 2026-10-02. A fresh Mac used to
+leave scanned PDFs and images names-only because the OCR lane needed
+`ocrmypdf` / `tesseract` from Homebrew. Now:
+
+- The existing OCR lane (`local_ocr_tesseract`; the kind keeps its name for
+  stored jobs and tooling) has a built-in engine on macOS: the packaged
+  `scripts/macos-vision-ocr.js` runs under the system's `/usr/bin/osascript`,
+  renders PDF pages with PDFKit and reads them with Vision's accurate text
+  recognizer and automatic language detection. No install, no Xcode, no
+  network, no privacy prompt.
+- Routing: a PDF whose text layer is empty (or undecodable) and any image the
+  text lane meets are read by it. Tesseract remains the engine on Linux, when
+  the owner sets `OLYMPUS_FILE_EXTRACTION_OCR_ENGINE=tesseract`, or when Vision
+  cannot run on a Mac. Off macOS, images in the text lane stay names-only as
+  before.
+- Recognized text is ordinary extracted text: the same bounds, job outcomes and
+  per-item tier classification (map and local sniffer) as any other file.
+- Design, bounds and failure classes:
+  [`design/built-in-scan-reading.md`](design/built-in-scan-reading.md).
+
+Proof (2026-10-02, owner's Mac, macOS 26.5, copies of real files outside the
+live store): all 20 PDFs the Mac could not read text from (scans, plus text
+layers the built-in decoder cannot decode) and all 3 images from the health
+and resource folders were read — 190 pages in about 195 seconds. Timings are
+in the design note.
+
+Not in this step: on-device transcription of audio and video. The Speech
+framework needs a speech-recognition privacy permission that a background
+`osascript` cannot ask for without an unexplained system prompt, so it stays
+off; audio keeps the configured transcription command. A local vision model
+for charts and photos remains a later step.
 
 ### Deferred: high-value email embeddings
 

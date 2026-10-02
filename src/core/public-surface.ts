@@ -256,6 +256,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'dist/control-ui/index.js',
   'scripts/telegram-pair.py',
   'scripts/telegram-telethon-reader.py',
+  'scripts/macos-vision-ocr.js',
   'config/systemd/user/olympus-whisper-transcribe.sh',
   'tools/whatsapp-bridge/main.go',
   'tools/whatsapp-bridge/go.mod',
