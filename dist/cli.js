@@ -47948,7 +47948,13 @@ var init_vocabulary = __esm(() => {
     confirmRemove: "This removes protection from {list}.",
     confirmDescription: "This changes your description, which decides what Olympus keeps private.",
     confirm: "Confirm",
-    conflict: "Your privacy settings were changed somewhere else, so this view has been refreshed. Check it and save again.",
+    conflict: "Your changes weren't saved because the privacy settings changed elsewhere.",
+    conflictNow: "What is saved now:",
+    conflictDescription: "Your description: {text}",
+    conflictNoDescription: "No description",
+    applyAgain: "Apply my changes again",
+    discardMine: "Discard my changes",
+    folderUnnamed: "A folder in {source}",
     discardPrompt: "Discard your changes?",
     discard: "Discard changes",
     keep: "Keep editing",
@@ -105532,7 +105538,8 @@ function chatgptPrivacyProgram(kit) {
       confirmation: "",
       confirmedAt: 0,
       confirmStep: false,
-      notice: "",
+      hidden: [],
+      server: null,
       edited: false,
       saving: false,
       saveError: "",
@@ -105560,8 +105567,31 @@ function chatgptPrivacyProgram(kit) {
       return null;
     return data;
   }
+  const text = (value) => typeof value === "string" && value.trim() !== "";
   function validRule(rule) {
-    return !!rule && KINDS.indexOf(rule.kind) >= 0 && typeof rule.source_id === "string" && !!rule.source_id && typeof rule.display === "string" && (typeof rule.key === "string" || typeof rule.value === "string");
+    if (!rule || typeof rule !== "object" || KINDS.indexOf(rule.kind) < 0)
+      return false;
+    if (rule.kind === "sender")
+      return rule.source_id === kit.config.mailSourceId && text(rule.value);
+    if (rule.kind === "label")
+      return rule.source_id === kit.config.mailSourceId && text(rule.key) && text(rule.value);
+    return Object.prototype.hasOwnProperty.call(kit.config.folderSources, rule.source_id) && text(rule.key) && (rule.display === undefined || typeof rule.display === "string");
+  }
+  function displayOf(rule) {
+    if (rule.kind === "sender" || rule.kind === "label")
+      return String(rule.value);
+    return text(rule.display) ? String(rule.display) : fill(W.folderUnnamed, { source: sourceLabel3(rule.source_id) });
+  }
+  function viewRule(rule) {
+    const raw = {};
+    for (const field of Object.keys(rule))
+      raw[field] = rule[field];
+    const copy = { kind: rule.kind, source_id: rule.source_id, display: displayOf(rule), removed: false, saved: true, raw };
+    if (typeof rule.key === "string")
+      copy.key = rule.key;
+    if (typeof rule.value === "string")
+      copy.value = rule.value;
+    return copy;
   }
   function take(data) {
     s.description = typeof data.description === "string" ? data.description : "";
@@ -105569,14 +105599,9 @@ function chatgptPrivacyProgram(kit) {
     s.revision = typeof data.revision === "string" ? data.revision : "";
     s.edited = false;
     s.confirmStep = false;
-    s.rules = data.rules.filter(validRule).map((rule) => {
-      const copy = { kind: rule.kind, source_id: rule.source_id, display: rule.display, removed: false, saved: true };
-      if (typeof rule.key === "string")
-        copy.key = rule.key;
-      if (typeof rule.value === "string")
-        copy.value = rule.value;
-      return copy;
-    });
+    s.rules = data.rules.filter(validRule).map(viewRule);
+    s.hidden = data.rules.filter((rule) => !validRule(rule));
+    s.server = null;
     s.pendingCount = typeof data.pendingCount === "number" && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
     if (typeof data.confirmation === "string" && data.confirmation) {
       s.confirmation = data.confirmation;
@@ -105619,12 +105644,23 @@ function chatgptPrivacyProgram(kit) {
     return s.rules.filter((rule) => !rule.removed);
   }
   function ruleOut(rule) {
+    if (rule.raw)
+      return rule.raw;
     const out = { kind: rule.kind, source_id: rule.source_id };
     if (typeof rule.key === "string")
       out.key = rule.key;
     if (typeof rule.value === "string")
       out.value = rule.value;
+    if (rule.kind === "folder" && text(rule.display))
+      out.display = rule.display;
     return out;
+  }
+  function rulesOut() {
+    return kept().map(ruleOut).concat(s.hidden);
+  }
+  function changed() {
+    s.edited = true;
+    s.confirmStep = false;
   }
   function addRule(rule) {
     const id = identity(rule);
@@ -105633,7 +105669,7 @@ function chatgptPrivacyProgram(kit) {
       existing.removed = false;
     else
       s.rules.push(rule);
-    s.edited = true;
+    changed();
     s.saveError = "";
   }
   function lowering() {
@@ -105647,7 +105683,7 @@ function chatgptPrivacyProgram(kit) {
     return change.removed.length > 0 || change.described;
   }
   function save() {
-    if (!s || !s.loaded || s.saving)
+    if (!s || !s.loaded || s.saving || s.server)
       return;
     if (lowers()) {
       s.confirmStep = true;
@@ -105663,7 +105699,7 @@ function chatgptPrivacyProgram(kit) {
       renewConfirmation(() => send(true, true));
       return;
     }
-    const args = { description: s.description.trim(), rules: kept().map(ruleOut) };
+    const args = { description: s.description.trim(), rules: rulesOut() };
     if (s.revision)
       args.revision = s.revision;
     if (confirmed)
@@ -105704,10 +105740,55 @@ function chatgptPrivacyProgram(kit) {
     });
   }
   function conflict(data) {
-    take(data);
-    s.notice = W.conflict;
+    s.server = data;
+    s.confirmStep = false;
     s.saveError = "";
+    kit.render("privacy:conflict:apply");
+  }
+  function applyAgain() {
+    const server = s.server;
+    if (!server)
+      return;
+    const removed = {};
+    for (const rule of s.rules)
+      if (rule.saved && rule.removed)
+        removed[identity(rule)] = true;
+    const added = s.rules.filter((rule) => !rule.saved && !rule.removed);
+    const described = s.description.trim() !== s.savedDescription ? s.description : null;
+    take(server);
+    for (const rule of s.rules)
+      if (removed[identity(rule)])
+        rule.removed = true;
+    for (const rule of added)
+      addRule(rule);
+    if (described !== null)
+      s.description = described;
+    s.edited = true;
+    save();
+    if (!s.saving && !s.confirmStep)
+      kit.render("privacy:save");
+  }
+  function discardMine() {
+    const server = s.server;
+    if (!server)
+      return;
+    take(server);
     kit.render("privacy:description");
+  }
+  function conflictBox() {
+    const box = el("div", "confirm-box");
+    box.setAttribute("role", "alert");
+    add(box, el("p", "strong", W.conflict), el("p", "", W.conflictNow));
+    const list = el("ul", "plain");
+    const description = typeof s.server.description === "string" ? s.server.description.trim() : "";
+    add(list, el("li", "", description ? fill(W.conflictDescription, { text: description }) : W.conflictNoDescription));
+    const rules = s.server.rules.filter(validRule);
+    if (!rules.length)
+      add(list, el("li", "", W.rulesEmpty));
+    for (const rule of rules)
+      add(list, el("li", "", displayOf(rule) + " · " + kindText(rule)));
+    add(box, list, add(el("div", "actions"), kit.button(W.applyAgain, "privacy:conflict:apply", applyAgain, "main"), kit.button(W.discardMine, "privacy:conflict:discard", discardMine, "plain")));
+    return box;
   }
   function renewConfirmation(then) {
     s.saving = true;
@@ -105747,7 +105828,7 @@ function chatgptPrivacyProgram(kit) {
     }
     if (change.described)
       add(box, el("p", change.removed.length ? "" : "strong", W.confirmDescription));
-    add(box, add(el("div", "actions"), kit.button(W.confirm, "privacy:confirm:yes", () => send(true, false), "danger"), kit.button(W.cancel, "privacy:confirm:no", () => {
+    add(box, add(el("div", "actions"), kit.button(W.confirm, "privacy:confirm:yes", () => send(lowers(), false), "danger"), kit.button(W.cancel, "privacy:confirm:no", () => {
       s.confirmStep = false;
       kit.render("privacy:save");
     }, "plain")));
@@ -105870,7 +105951,7 @@ function chatgptPrivacyProgram(kit) {
       add(li, el("p", "fname leaf muted", fill(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, "privacy:rule:" + index, s.saving ? null : () => {
         rule.removed = false;
-        s.edited = true;
+        changed();
         kit.render("privacy:rule:" + index);
       }, "plain");
       undo.setAttribute("aria-label", fill(W.undoFor, { name: rule.display }));
@@ -105879,7 +105960,7 @@ function chatgptPrivacyProgram(kit) {
     add(li, add(el("p", "fname leaf two-line"), el("span", "two-top", rule.display), el("span", "two-bottom", kindText(rule))));
     const remove = kit.button(W.remove, "privacy:rule:" + index, s.saving ? null : () => {
       rule.removed = true;
-      s.edited = true;
+      changed();
       s.saveError = "";
       kit.render("privacy:rule:" + index);
     }, "plain");
@@ -105889,11 +105970,8 @@ function chatgptPrivacyProgram(kit) {
   function mainView(page) {
     add(page, el("h1", "", W.title));
     add(page, el("p", "muted intro", W.intro));
-    if (s.notice) {
-      const notice = el("p", "notice", s.notice);
-      notice.setAttribute("role", "status");
-      add(page, notice);
-    }
+    if (s.server)
+      add(page, conflictBox());
     if (s.error) {
       const error2 = el("div", "banner");
       error2.setAttribute("role", "alert");
@@ -105919,7 +105997,10 @@ function chatgptPrivacyProgram(kit) {
     area.setAttribute("aria-describedby", "privacy-description-shared");
     area.addEventListener("input", () => {
       s.description = area.value;
-      s.edited = true;
+      const open6 = s.confirmStep;
+      changed();
+      if (open6)
+        kit.render("privacy:description");
     });
     add(page, add(field, area));
     const shared = el("p", "reason field-note", W.descriptionShared);
@@ -105955,7 +106036,7 @@ function chatgptPrivacyProgram(kit) {
       busy.setAttribute("aria-busy", "true");
       add(row, busy);
     } else
-      add(row, kit.button(W.save, "privacy:save", save, "main"));
+      add(row, kit.button(W.save, "privacy:save", s.server ? null : save, "main"));
     add(row, kit.button(W.cancel, "privacy:cancel", s.saving ? null : backOut, "plain"));
     const wrap = add(el("div", "save"), row);
     if (s.saveError) {
