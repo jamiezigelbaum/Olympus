@@ -172,7 +172,7 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   // doing something. It outranks the unknown fallback too — an expired
   // credential still needs them whatever else on the card has drifted — so the
   // marker rides along rather than swallowing the word.
-  if (degradationForSource(source, input.degradedCredentials)) {
+  if (dashboardDegradationForSource(source, input.degradedCredentials)) {
     return {
       status: 'Needs you',
       mappedUnknown: unknownValue !== undefined,
@@ -376,7 +376,7 @@ export function dashboardAttentionLine(
   source: DashboardSourceCard,
   options?: DashboardVocabularyOptions,
 ): string {
-  const degradation = degradationForSource(source, options?.degradedCredentials);
+  const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
     return clause ? `can't sign in · ${clause}` : `can't sign in`;
@@ -423,21 +423,6 @@ export function dashboardAttentionLine(
   if (source.queue_health.needs_attention > 0) return 'some items could not be read';
   if ((source.queue_health.retrying_tasks ?? 0) > 0) return 'a sync is retrying on its own';
   return '';
-}
-
-/**
- * True when the card names a sign-in problem the owner must act on: the
- * provider refused the last sign-in, the credential is degraded, or the
- * connection needs a fresh sign-in. Unfinished work does not resolve any of
- * them, so they need the owner whatever the progress says.
- */
-export function dashboardCredentialAttention(
-  source: DashboardSourceCard,
-  options?: DashboardVocabularyOptions,
-): boolean {
-  return source.connection.provider_refusal !== undefined
-    || source.connection.state === 'reauth_required'
-    || degradationForSource(source, options?.degradedCredentials) !== undefined;
 }
 
 /** The row word for a connection the owner has to sign back into. */
@@ -1047,7 +1032,13 @@ function degradationClause(degradation: WorkerCredentialDegradation): string {
  * like 'email' and 'file' that several cards share, and a shared name would
  * light up every one of them.
  */
-function degradationForSource(
+/**
+ * The worker credential degradation that names this source, if any: matched by
+ * label, provider, source id or its family prefix, case- and punctuation-blind.
+ * The one match both dashboards make (shared-status.ts reads it too); the name
+ * is matched, never printed.
+ */
+export function dashboardDegradationForSource(
   source: DashboardSourceCard,
   degraded: readonly WorkerCredentialDegradation[] | undefined,
 ): WorkerCredentialDegradation | undefined {
@@ -1133,18 +1124,19 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
  * ChatGPT has no How to fix sheet, and its owner signs in through Olympus's own
  * apps (no app settings of their own to fix), so every refusal points at the
  * row's Reconnect. `line` is the reason half after "<Source> — "; `sentence`
- * stands alone. The local dashboard keeps its own words
- * (dashboardProviderRefusalLine).
+ * stands alone. A declined sign-in already reads as a retry on both
+ * dashboards, so it keeps the shared words. The local dashboard keeps its own
+ * words for the rest (dashboardProviderRefusalLine).
  */
 export const DASHBOARD_CHATGPT_REFUSAL_COPY = {
   line: {
-    address: 'sign-in didn\'t go through · try Reconnect',
-    declined: 'sign-in was declined · try Reconnect',
-    unfinished: 'didn\'t finish signing in · try Reconnect',
+    address: 'sign-in didn\'t go through — try Reconnect',
+    declined: 'sign-in was declined — connect again to retry',
+    unfinished: 'didn\'t finish signing in — try Reconnect',
   },
   sentence: {
     address: (source: string) => `${source} sign-in didn't go through. Try Reconnect.`,
-    declined: (source: string) => `${source} sign-in was declined. Try Reconnect.`,
+    declined: (source: string) => `${source} sign-in was declined. Connect again to retry.`,
     unfinished: (source: string) => `${source} didn't finish signing in. Try Reconnect.`,
   },
 } as const;

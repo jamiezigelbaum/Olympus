@@ -14,7 +14,11 @@
  * leaves the engine.
  */
 import type { ModelSetupView } from '../../core/model-setup.ts';
-import { dashboardHonestStatus } from '../dashboard/shared-status.ts';
+import {
+  dashboardCredentialProblem as credentialProblem,
+  dashboardHonestStatus,
+  dashboardRefusedFirstConnect as refusedFirstConnect,
+} from '../dashboard/shared-status.ts';
 import { dashboardSourceProgress, type DashboardPhase } from '../dashboard/phases.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import {
@@ -175,7 +179,7 @@ export function buildChatGptDashboardViewModel(
     // A credential problem (a provider refusal, a degraded or expired sign-in)
     // is Needs you whatever the progress or indexing state: its fix is the
     // owner's, never the engine's.
-    let status: DashboardStatus = connecting || credentials ? 'Needs you' : honestStatus(vocabularyStatus, progress);
+    let status: DashboardStatus = connecting || credentials ? 'Needs you' : dashboardHonestStatus(vocabularyStatus, progress);
     // A source working normally (a stage unfinished, nothing stalled) offers
     // no action: the only fix this page had for it was "Check again", a
     // button over work that needs nothing (owner fresh-install test,
@@ -312,7 +316,7 @@ function sourceEntry(
     ? CONNECTING_DETAIL
     : inFlight
       ? STAGE_DETAIL[progress.stage as Exclude<SourceProgress['stage'], 'done'>]
-      : dashboardSubLine(card, degraded ? { degradedCredentials: degraded } : undefined);
+      : dashboardSubLine(card, { surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}) });
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
   const reconnect = credentialProblem(card, degraded) || progress?.stalledReason === 'waiting_for_credentials'
     ? reconnectFix(definition)
@@ -359,7 +363,7 @@ function attentionItem(
   if (connecting) {
     return { id: `source:${definition.source_id}`, sentence: `${definition.label} — ${CONNECTING_REASON}`, fix: connecting.fix };
   }
-  const reason = dashboardAttentionLine(card, degraded ? { degradedCredentials: degraded } : undefined);
+  const reason = dashboardAttentionLine(card, { surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}) });
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
   const reauth = credentialProblem(card, degraded) || progress?.stalledReason === 'waiting_for_credentials';
   const reconnect = reauth ? reconnectFix(definition) : undefined;
@@ -395,66 +399,17 @@ function connectingFor(
   };
 }
 
-/**
- * The source's sign-in is the owner's to fix: the provider refused the last
- * consent attempt, a worker credential for it is degraded, the connection
- * needs reauthentication, or a source holding data has lost its connection.
- * Read off the SCRUBBED card, so a refusal is only its presence and a fixed
- * code, never the provider's words.
- */
-function credentialProblem(
-  card: DashboardSourceCard,
-  degraded: readonly WorkerCredentialDegradation[] | undefined,
-): boolean {
-  return card.connection.provider_refusal !== undefined
-    || degradationMatches(card, degraded)
-    || card.connection.state === 'reauth_required'
-    || (card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card));
-}
-
-/** A refused connect on a source never connected: nothing behind it to measure. */
-function refusedFirstConnect(card: DashboardSourceCard): boolean {
-  return card.connection.provider_refusal !== undefined
-    && (card.connection.state === 'not_connected' || card.connection.state === 'needs_setup')
-    && card.coverage.indexed_items === 0;
-}
-
-/**
- * Whether a worker credential degradation names this source. The same match
- * vocabulary.ts makes for its status word (label, provider, source id or its
- * family prefix, compared case- and punctuation-blind); the name is matched,
- * never printed.
- */
-function degradationMatches(
-  card: DashboardSourceCard,
-  degraded: readonly WorkerCredentialDegradation[] | undefined,
-): boolean {
-  if (!degraded || degraded.length === 0) return false;
-  const candidates = new Set([
-    normalizeName(card.label),
-    normalizeName(card.provider),
-    normalizeName(card.source_id),
-    normalizeName(card.source_id.split('.')[0] ?? ''),
-  ]);
-  candidates.delete('');
-  return degraded.some((entry) => candidates.has(normalizeName(entry.display_name)));
-}
-
-function normalizeName(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
-}
-
 function reconnectFix(definition: DashboardSupportedSourceDefinition): DashboardFix | undefined {
   const source = oauthSource(definition);
   return source ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : undefined;
 }
 
 /**
- * The status word, held to the progress bar. Shared with the local pages
- * (dashboard/shared-status.ts, holistic review 2026-10-02 item 9), so both
- * surfaces read the same word for the same engine state.
+ * The status word (dashboardHonestStatus), the credential predicate
+ * (dashboardCredentialProblem) and the refused-first-connect test are shared
+ * with the local pages (dashboard/shared-status.ts, holistic review 2026-10-02
+ * item 9), so both surfaces read the same word for the same engine state.
  */
-const honestStatus = dashboardHonestStatus;
 export { dashboardHonestStatus };
 
 const STAGE_FOR_PHASE: Readonly<Record<DashboardPhase['id'], Exclude<SourceProgress['stage'], 'done'>>> = {

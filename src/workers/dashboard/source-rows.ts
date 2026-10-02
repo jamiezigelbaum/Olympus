@@ -36,7 +36,6 @@ import {
   DASHBOARD_SIGNED_OUT,
   dashboardAttentionLine,
   dashboardCount,
-  dashboardCredentialAttention,
   dashboardEtaWords,
   dashboardProviderRefusalDetail,
   dashboardProviderRefusalSentence,
@@ -59,7 +58,7 @@ import {
 } from './components.ts';
 import { dashboardSyncNowAction } from './attention.ts';
 import { renderModelSetup } from './model-setup.ts';
-import { dashboardHonestStatus } from './shared-status.ts';
+import { dashboardCredentialProblem, dashboardHonestStatus } from './shared-status.ts';
 
 /** The built-in models' installs, read by the worker before the render. */
 export interface DashboardModelInstalls {
@@ -140,7 +139,7 @@ export function dashboardSourceStates(view: SourceDashboardViewModel, options: D
     // A refused sign-in or a credential problem needs the owner whatever the
     // progress says (Codex review, 2026-10-02): the row shows that sentence
     // and its reconnect, not a stage line over work that cannot finish.
-    const credential = !connecting && dashboardCredentialAttention(source, degraded ? { degradedCredentials: degraded } : {});
+    const credential = !connecting && dashboardCredentialProblem(source, degraded);
     const progress = !connecting && !credential && entry?.progress && (entry.progress.stage !== 'done' || entry.progress.stalled)
       ? entry.progress
       : undefined;
@@ -353,7 +352,7 @@ export function dashboardReconnectAction(
     const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view, action));
     return { action: { label, kind: 'none', sheet: sheetId, ...blocked }, sheet };
   }
-  if (action.kind === 'none' && dashboardCredentialAttention(source, options?.degradedCredentials ? { degradedCredentials: options.degradedCredentials } : {})) {
+  if (action.kind === 'none' && dashboardCredentialProblem(source, options?.degradedCredentials)) {
     // A connected source whose sign-in was refused or lapsed carries no
     // connect action of its own; its repair is the source's own connect
     // route, worded as Reconnect.

@@ -229,7 +229,7 @@ describe('a sign-in problem needs the owner whatever the progress says (Codex re
   test('each surface words a refusal for its own fix: the local sheet\'s How to fix and app settings, ChatGPT\'s Reconnect', () => {
     const cases = [
       { code: 'redirect_uri_mismatch', local: 'fix it in your Google Drive app settings', chatgpt: 'Google Drive sign-in didn\'t go through. Try Reconnect.' },
-      { code: 'access_denied', local: 'sign-in was declined — connect again to retry', chatgpt: 'Google Drive sign-in was declined. Try Reconnect.' },
+      { code: 'access_denied', local: 'sign-in was declined — connect again to retry', chatgpt: 'Google Drive sign-in was declined. Connect again to retry.' },
       { code: 'temporarily_unavailable', local: 'see How to fix', chatgpt: 'Google Drive didn\'t finish signing in. Try Reconnect.' },
       { code: '', local: 'see How to fix', chatgpt: 'Google Drive didn\'t finish signing in. Try Reconnect.' },
     ];
@@ -246,11 +246,25 @@ describe('a sign-in problem needs the owner whatever the progress says (Codex re
       const sentence = dashboardProviderRefusalSentence(drive, { surface: 'chatgpt' });
       expect(sentence).toBe(chatgpt);
       for (const words of [line, sentence]) {
-        expect(words).toContain('Reconnect');
+        expect(words).toMatch(code === 'access_denied' ? /connect again to retry/i : /try Reconnect/i);
         expect(words).not.toContain('How to fix');
         expect(words).not.toContain('app settings');
-        expect(words).not.toContain('connect again');
       }
+    }
+  });
+
+  test('the ChatGPT view model asks for its own refusal words; the local Home keeps the local ones', () => {
+    for (const [code, chatgpt, local] of [
+      ['redirect_uri_mismatch', 'Google Drive — sign-in didn\'t go through — try Reconnect', 'app settings'],
+      ['temporarily_unavailable', 'Google Drive — didn\'t finish signing in — try Reconnect', 'How to fix'],
+    ] as const) {
+      const view = withDrive((drive) => {
+        drive.connection = { ...drive.connection, provider_refusal: { code, reason: '' } };
+      });
+      const item = buildChatGptDashboardViewModel(view, { now: NOW }).needsYou.find((entry) => entry.id === 'source:google_drive.docs')!;
+      expect(item.sentence).toBe(chatgpt);
+      expect(item.fix).toMatchObject({ label: 'Reconnect', tool: 'olympus_connect_source' });
+      expect(rowFor(render(view, 'home'), 'google_drive.docs')).toContain(local);
     }
   });
 
