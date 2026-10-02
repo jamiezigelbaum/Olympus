@@ -105602,6 +105602,8 @@ function copyPrivateMatch(match) {
       out.state = "no_model";
     } else {
       out.jobId = match.jobId;
+      if (match.detail === "full")
+        out.detail = "full";
     }
   }
   if (state === "model_downloading" && finite2(match.percent))
@@ -105973,7 +105975,7 @@ var init_response_builder = __esm(() => {
   SOURCE_STAGES = new Set(["listing", "reading", "indexing", "done"]);
   STALLED_REASONS = new Set(["waiting_for_credentials", "scope_pending", "provider_unavailable", "model_downloading"]);
   PENDING_TEXT = "Olympus is still preparing this answer on the Mac. Call source_answer_result with this job_id " + "(repeat while it says working). Do not ask the question again.";
-  PRIVATE_MATCH_PANEL_NOTE = "Some items matching this question are marked Private in Olympus. " + "Olympus is answering from them on the user's Mac and showing that answer only to the user, " + "in the private answer panel above. You can't see it; point the user to the panel " + "and don't suggest changing folder settings for those items. " + "Don't ask the user to upload, attach or paste those files: Olympus already has them. " + "Follow-up questions about them are answered privately in the panel the same way: " + "search Olympus again with the follow-up as a complete question (name the item, its date or subject).";
+  PRIVATE_MATCH_PANEL_NOTE = "Some items matching this question are marked Private in Olympus. " + "Olympus is answering from them on the user's Mac and showing that answer only to the user, " + "in the private answer panel above. You can't see it; point the user to the panel " + "and don't suggest changing folder settings for those items. " + "Don't ask the user to upload, attach or paste those files: Olympus already has them. " + "Follow-up questions about them are answered privately in the panel the same way: " + "search Olympus again with the follow-up as a complete question (name the item, its date or subject), " + "and set the detail argument to full when the user asks for all the details, the full results or every value.";
   PRIVATE_MATCH_PANEL_SETUP_NOTE = "Some items matching this question are marked Private in Olympus. " + "Their contents stay on the user's Mac and are never shown to you; the private answer panel above " + "tells the user how to get an answer from them there. Don't suggest changing folder settings for those items.";
   PRIVATE_MATCH_NOTE = "Some items matching this question are marked Private in Olympus. " + "Their contents stay on the user's Mac and are never shown to you. " + "Don't suggest changing folder settings for those items.";
   PANEL_STATES = new Set(["ready", "no_model", "model_downloading"]);
@@ -106649,6 +106651,7 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
         const limit = typeof args.limit === "number" && Number.isInteger(args.limit) && args.limit >= 1 && args.limit <= 48 ? args.limit : undefined;
         if (args.limit !== undefined && limit === undefined)
           throw new ChatGptSurfaceError("invalid_params");
+        const detail = detailArgument(args.detail);
         if (!options.evidenceSearch)
           throw new ChatGptSurfaceError("unavailable");
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
@@ -106657,7 +106660,7 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
           probeWithinDeadline(probe, question, ctx)
         ]);
         const match = normalizeProbe(probed);
-        const privateMatch = match.count > 0 ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx) }, options) : undefined;
+        const privateMatch = match.count > 0 ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx), detail }, options) : undefined;
         return searchToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       case SOURCE_ANSWER_TOOL.name: {
@@ -106666,6 +106669,7 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
         const question = typeof args.question === "string" ? args.question.trim() : "";
         if (!question)
           throw new ChatGptSurfaceError("invalid_params");
+        const detail = detailArgument(args.detail);
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const [raw, probed] = await Promise.all([
           runOperation(SOURCE_ANSWER_TOOL.name, ctx, {
@@ -106677,7 +106681,7 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
           probeWithinDeadline(probe, question, ctx)
         ]);
         const match = normalizeProbe(probed);
-        const pending = match.count > 0 ? { question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx) } : undefined;
+        const pending = match.count > 0 ? { question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx), detail } : undefined;
         const jobId = pendingJobId(raw);
         if (jobId) {
           rememberPrivateMatch(jobId, pending);
@@ -106725,6 +106729,13 @@ function probeWithinDeadline(probe, question, ctx) {
   });
   return Promise.race([probe(question, ctx).catch(() => false), timeout]).finally(() => clearTimeout(timer));
 }
+function detailArgument(value) {
+  if (value === undefined || value === "summary")
+    return "summary";
+  if (value === "full")
+    return "full";
+  throw new ChatGptSurfaceError("invalid_params");
+}
 function privateCaller(ctx) {
   const id = ctx.caller?.connectionId;
   return id ? `${ctx.caller?.surface ?? "remote"}:${id}` : undefined;
@@ -106733,11 +106744,11 @@ function privateRefresh(question, probe, context) {
   return async () => normalizeProbe(await probeWithinDeadline(probe, question, context())).evidence;
 }
 function beginPrivateAnswer(pending, options) {
-  const { question, match, refresh, caller } = pending;
+  const { question, match, refresh, caller, detail } = pending;
   if (!options.privateAnswers)
     return { count: match.count, panelState: "no_model" };
   try {
-    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence, refresh, ...caller ? { caller } : {} });
+    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence, refresh, detail, ...caller ? { caller } : {} });
   } catch {
     return { count: match.count, panelState: "no_model" };
   }
@@ -106849,7 +106860,7 @@ function createChatGptMcpServer(makeOperationContext, options, makeDetachedConte
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
   return server;
 }
-var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ANSWER_TOOLS, CHATGPT_TOOLS, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
+var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ANSWER_TOOLS, CHATGPT_TOOLS, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
   init_server2();
   init_types2();
@@ -106880,6 +106891,15 @@ var init_mcp_surface = __esm(() => {
     securitySchemes: OAUTH2_OPTIONAL,
     _meta: dashboardToolMeta()
   };
+  DETAIL_PROPERTY = {
+    type: "string",
+    enum: ["summary", "full"],
+    description: [
+      "How much of the matching items the private answer reads. Leave it out (summary) for ordinary questions: faster.",
+      'Use "full" when the user asks for all the details, the full results, every value, the whole document or',
+      "similar, including a follow-up asking for more about something already answered; it is slower."
+    ].join(" ")
+  };
   SOURCE_ANSWER_TOOL = {
     name: "source_answer",
     title: "Ask Olympus",
@@ -106897,7 +106917,8 @@ var init_mcp_surface = __esm(() => {
     inputSchema: {
       type: "object",
       properties: {
-        question: { type: "string", description: "The user's question, in their own words, with any names, dates or places they gave." }
+        question: { type: "string", description: "The user's question, in their own words, with any names, dates or places they gave." },
+        detail: DETAIL_PROPERTY
       },
       required: ["question"],
       additionalProperties: false
@@ -106953,7 +106974,8 @@ var init_mcp_surface = __esm(() => {
       type: "object",
       properties: {
         question: { type: "string", description: "The user's question, in their own words, with any names, dates or places they gave." },
-        limit: { type: "integer", minimum: 1, maximum: 48, description: "How many items to return (default 24)." }
+        limit: { type: "integer", minimum: 1, maximum: 48, description: "How many items to return (default 24)." },
+        detail: DETAIL_PROPERTY
       },
       required: ["question"],
       additionalProperties: false
@@ -108088,6 +108110,7 @@ __export(exports_private_answer_jobs, {
   createPrivateAnswerHandler: () => createPrivateAnswerHandler,
   PrivateAnswerJobs: () => PrivateAnswerJobs,
   PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS: () => PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS,
+  PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS,
   PRIVATE_ANSWER_DEDUPE_MS: () => PRIVATE_ANSWER_DEDUPE_MS,
   PRIVATE_ANSWER_CLAIM_HOLD_MS: () => PRIVATE_ANSWER_CLAIM_HOLD_MS,
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
@@ -108175,6 +108198,7 @@ class PrivateAnswerJobs {
   resetTimeoutMs;
   claimRate;
   analysisTimeoutMs;
+  fullAnalysisTimeoutMs;
   dedupeMs;
   precomputeWindowMs;
   audit;
@@ -108200,6 +108224,7 @@ class PrivateAnswerJobs {
     this.resetTimeoutMs = options.resetTimeoutMs ?? 30000;
     this.claimRate = options.claimRate ?? { capacity: 60, refillPerSecond: 10 };
     this.analysisTimeoutMs = options.analysisTimeoutMs ?? PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS;
+    this.fullAnalysisTimeoutMs = options.fullAnalysisTimeoutMs ?? PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS;
     this.dedupeMs = options.dedupeMs ?? PRIVATE_ANSWER_DEDUPE_MS;
     this.precomputeWindowMs = options.precomputeWindowMs ?? PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS;
     this.audit = options.audit ?? defaultAudit;
@@ -108245,6 +108270,7 @@ class PrivateAnswerJobs {
       createdAt: at,
       expiresAt: at + this.ttlMs,
       caller: input.caller,
+      detail: input.detail === "full" ? "full" : "summary",
       question: input.question.slice(0, MAX_QUESTION_CHARS),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
       refresh: input.refresh,
@@ -108257,7 +108283,7 @@ class PrivateAnswerJobs {
     this.jobs.set(id, job);
     if (this.options.precompute !== false)
       this.precompute(job);
-    return { count: count2, panelState: "ready", jobId: id };
+    return { count: count2, panelState: "ready", jobId: id, ...job.detail === "full" ? { detail: "full" } : {} };
   }
   async claim(jobId, publicKey) {
     this.sweep();
@@ -108353,7 +108379,7 @@ class PrivateAnswerJobs {
     const evidence = (job.evidence ?? []).filter(isPrivateEligible);
     if (evidence.length === 0 || job.question === undefined)
       return;
-    const analysis = this.analysisFor(job.question, evidence, undefined);
+    const analysis = this.analysisFor(job.question, job.detail, evidence, undefined);
     this.attach(job, analysis);
     if (job.caller !== undefined) {
       for (const other of this.jobs.values()) {
@@ -108364,8 +108390,8 @@ class PrivateAnswerJobs {
     }
     this.pump();
   }
-  analysisFor(question, evidence, claimedAt, fresh2 = false) {
-    const key = questionKey(question);
+  analysisFor(question, detail, evidence, claimedAt, fresh2 = false) {
+    const key = `${detail}\x00${questionKey(question)}`;
     const at = this.now();
     const existing = this.shared.get(key);
     if (!fresh2 && existing && existing.state !== "failed" && existing.createdAt + this.dedupeMs > at)
@@ -108378,6 +108404,7 @@ class PrivateAnswerJobs {
     });
     const analysis = {
       key,
+      detail,
       createdAt: at,
       claimedAt,
       question,
@@ -108511,7 +108538,7 @@ class PrivateAnswerJobs {
       abort.abort();
       this.resetInBackground();
       free();
-    }, this.analysisTimeoutMs);
+    }, this.timeoutFor(analysis.detail));
     deadlineTimer.unref?.();
     const question = analysis.question ?? "";
     const evidence = analysis.evidence ?? [];
@@ -108533,7 +108560,7 @@ class PrivateAnswerJobs {
           modelCall: (call) => {
             analysis.stats.calls.push(call);
           }
-        });
+        }, { detail: analysis.detail });
         return { result, used };
       } finally {
         analysis.stats.modelMs = this.now() - modelStarted;
@@ -108605,7 +108632,7 @@ class PrivateAnswerJobs {
       abort.abort();
       if (hung)
         this.resetInBackground();
-    }, this.analysisTimeoutMs);
+    }, this.timeoutFor(job.detail));
     deadlineTimer.unref?.();
     abort.signal.addEventListener("abort", () => settle({ kind: "failed" }, "aborted"), { once: true });
     const stopped = new Promise((resolve10) => {
@@ -108648,7 +108675,7 @@ class PrivateAnswerJobs {
         let analysis = job.analysis;
         const precomputed = analysis !== undefined;
         if (!analysis) {
-          analysis = this.analysisFor(question, evidence, claimedAt, true);
+          analysis = this.analysisFor(question, job.detail, evidence, claimedAt, true);
           this.attach(job, analysis);
         } else if (analysis.state === "queued" || analysis.state === "running") {
           analysis.claimedAt ??= claimedAt;
@@ -108679,6 +108706,9 @@ class PrivateAnswerJobs {
       settle({ kind: "failed" }, "error");
     });
     return done;
+  }
+  timeoutFor(detail) {
+    return detail === "full" ? Math.max(this.analysisTimeoutMs, this.fullAnalysisTimeoutMs) : this.analysisTimeoutMs;
   }
   beginActivity() {
     try {
@@ -108927,7 +108957,7 @@ async function boundedText(request, max) {
 }
 var AnalysisStop, defaultLog = (line) => {
   console.log(line);
-}, MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_UNANSWERED = 10, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_URL_CHARS = 2048, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, UNSAFE_CHARS2, defaultAudit = (event) => {
+}, MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_UNANSWERED = 10, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_URL_CHARS = 2048, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 180000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, UNSAFE_CHARS2, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
 };
 var init_private_answer_jobs = __esm(() => {
@@ -108981,7 +109011,8 @@ function createBuiltInPrivateAnswerModel(options) {
       }
       return { state: "no_model" };
     },
-    async answerPrivately(question, evidence, signal, observe) {
+    async answerPrivately(question, evidence, signal, observe, request) {
+      const full = request?.detail === "full";
       if (!model)
         throw new Error("no private answer model");
       const read = privateEvidence(evidence, limits.maxPassageChars);
@@ -108989,8 +109020,8 @@ function createBuiltInPrivateAnswerModel(options) {
       const selection = await panelSelection(question, read, limits, options.relevance, signal);
       const picked = selection.items;
       let items = picked.map((index) => read.items[index]);
-      if (selection.leading && options.readItem) {
-        items = await readInDepth(question, items, picked.map((index) => evidence[read.sources[index]]), limits.deepEvidenceChars, options.readItem, signal);
+      if (options.readItem && (full || selection.leading)) {
+        items = await readInDepth(question, items, picked.map((index) => evidence[read.sources[index]]), full ? limits.deepEvidenceChars : limits.leadingEvidenceChars, options.readItem, signal);
       }
       try {
         observe?.evidence?.({
@@ -109007,8 +109038,8 @@ function createBuiltInPrivateAnswerModel(options) {
       }
       const result = await options.answer(question, items, {
         model,
-        maxPromptBytes: selection.leading ? limits.deepPromptBytes : limits.maxPromptBytes,
-        maxAnswerChars: selection.leading ? limits.deepAnswerChars : limits.maxAnswerChars,
+        maxPromptBytes: full ? limits.deepPromptBytes : limits.maxPromptBytes,
+        maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
         audit: limits.audit,
         evidenceFormat: "compact",
         ...observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {},
@@ -109226,6 +109257,7 @@ var init_private_answer_model = __esm(() => {
     audit: false,
     maxLeadingItems: 2,
     leadGap: 0.01,
+    leadingEvidenceChars: 5000,
     deepEvidenceChars: 1e4,
     deepPromptBytes: 14500,
     deepAnswerChars: 3700

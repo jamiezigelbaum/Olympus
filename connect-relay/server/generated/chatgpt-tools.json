@@ -53,6 +53,14 @@
             "minimum": 1,
             "maximum": 48,
             "description": "How many items to return (default 24)."
+          },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "summary",
+              "full"
+            ],
+            "description": "How much of the matching items the private answer reads. Leave it out (summary) for ordinary questions: faster. Use \"full\" when the user asks for all the details, the full results, every value, the whole document or similar, including a follow-up asking for more about something already answered; it is slower."
           }
         },
         "required": [
@@ -109,6 +117,14 @@
           "question": {
             "type": "string",
             "description": "The user's question, in their own words, with any names, dates or places they gave."
+          },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "summary",
+              "full"
+            ],
+            "description": "How much of the matching items the private answer reads. Leave it out (summary) for ordinary questions: faster. Use \"full\" when the user asks for all the details, the full results, every value, the whole document or similar, including a follow-up asking for more about something already answered; it is slower."
           }
         },
         "required": [
