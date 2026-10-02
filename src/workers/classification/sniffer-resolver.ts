@@ -36,6 +36,7 @@ import {
   snifferId,
   snifferMaterialCarriesSecret,
   snifferMaterialLooksLikeInjection,
+  cachedSnifferVerdictHolds,
   snifferReasonCode,
   snifferTierKey,
 } from './sniffer.ts';
@@ -250,7 +251,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     if (applied?.outcome === 'stale_map') {
       // The map changed while this was being asked: re-ask under the new one.
       const row = item.target.ledger.getCurrent(item.question);
-      if (row) item.target.sniffer.rekey(item.question, item.question.pass, row.mapRevision);
+      const rejudge = item.question.pass === 'content' ? item.target.ledger.rejudgeQuestion(item.question) : undefined;
+      if (row) item.target.sniffer.rekey(item.question, item.question.pass, rejudge?.decision.mapRevision ?? row.mapRevision);
       report.staleRekeyed += 1;
       return;
     }
@@ -281,13 +283,25 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     return row !== undefined && row.state === 'moving' && row.decidedBy !== 'override'
       && openPasses(row).includes(question.pass);
   };
+  // A re-judge question (tier-rejudge.ts) is open on a row that stays
+  // `current` where it was: the item was visible all along, and the answer
+  // settles the decision the re-judge kept beside the row, under that
+  // decision's map revision.
   const stillOpen = (target: SnifferTarget, question: SnifferQuestion): boolean => {
     const row = target.ledger.getCurrent(question);
-    const open = row !== undefined && row.state === 'pending' && row.decidedBy !== 'override'
-      && openPasses(row).includes(question.pass);
-    if (open && row.mapRevision !== question.mapRevision) {
-      target.sniffer.rekey(question, question.pass, row.mapRevision);
-      question.mapRevision = row.mapRevision;
+    if (row === undefined || row.decidedBy === 'override') return false;
+    let expectedMap = row.mapRevision;
+    let open = row.state === 'pending' && openPasses(row).includes(question.pass);
+    if (!open && question.pass === 'content' && row.state === 'current') {
+      const rejudge = target.ledger.rejudgeQuestion(question);
+      if (rejudge) {
+        open = true;
+        expectedMap = rejudge.decision.mapRevision;
+      }
+    }
+    if (open && expectedMap !== question.mapRevision) {
+      target.sniffer.rekey(question, question.pass, expectedMap);
+      question.mapRevision = expectedMap;
       question.attempts = 0;
       report.staleRekeyed += 1;
     }
@@ -325,7 +339,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         continue;
       }
       const cached = target.sniffer.getVerdict(keyOf(question));
-      if (cached) {
+      if (cached && cachedSnifferVerdictHolds(cached)) {
         apply({ target, question }, cached);
         report.cacheHits += 1;
         continue;

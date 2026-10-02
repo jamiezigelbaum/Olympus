@@ -126,7 +126,10 @@ describe('dashboard view-model producer', () => {
       tool: DASHBOARD_TOOL_NAME,
       args: {},
       disabledReason: 'Change models in Olympus on your Mac.',
+      // Review 2026-10-02 #16: the repair is named, not only refused.
+      href: 'https://olympusplugin.ai/help/on-your-mac/#models',
     });
+    expect(copyDashboardViewModel(vm).models.change!.href).toBe('https://olympusplugin.ai/help/on-your-mac/#models');
     expect(vm.needsYou).toEqual([]);
     expect(vm.progress).toBeUndefined();
     expect(vm.generatedAt).toBe(NOW.toISOString());
@@ -153,8 +156,9 @@ describe('dashboard view-model producer', () => {
     expect(vm.progress).toEqual({
       unit: 'files',
       phase: 'initial',
-      percent: 25,
-      itemsLeft: 150,
+      // Searchable (indexed) items, not items read: 20 of 200.
+      percent: 10,
+      itemsLeft: 180,
       etaSeconds: 5400,
       stalled: false,
       details: [
@@ -185,12 +189,28 @@ describe('dashboard view-model producer', () => {
     // Honesty rule: never Fresh, never "synced …", while a stage is unfinished.
     expect(dropbox.status).toBe('Working');
     expect(dropbox.detail).toBe('Reading');
-    expect(vm.progress).toMatchObject({ unit: 'files', percent: 75, itemsLeft: 50, stalled: false });
+    // The headline counts searchable items (indexed), not items read.
+    expect(vm.progress).toMatchObject({ unit: 'files', percent: 60, itemsLeft: 80, stalled: false });
     expect(vm.progress!.details).toEqual([
       { stage: 'Reading', unit: 'files', done: 150, total: 200 },
       { stage: 'Indexing', unit: 'files', done: 120, total: 200 },
     ]);
     expect(copyDashboardViewModel(vm)).toEqual(vm);
+  });
+
+  test('everything read but nothing indexed is not complete: completion counts searchable items', () => {
+    // Review 2026-10-02 #8 probe: 100 readable files, 0 indexed read as 100%, 0 left.
+    const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
+      family: 'file',
+      connection: { state: 'synced', label: 'synced less than 1 hour ago' },
+      coverage: { indexed_items: 100, content_ready_items: 100, embedded_items: 0, embedded_files: 0 },
+      queue_health: { label: 'Working now', waiting: 10, active: 1 },
+      answer_readiness: { state: 'syncing', label: 'Syncing now' },
+      last_sync_at: NOW.toISOString(),
+      movement: { extraction_at: NOW.toISOString() } as never,
+    })]), { now: NOW });
+    expect(vm.sources[0]!.progress).toMatchObject({ stage: 'indexing', done: 0, total: 100 });
+    expect(vm.progress).toMatchObject({ unit: 'files', percent: 0, itemsLeft: 100 });
   });
 
   test('a source working normally offers no action: no "Check again" while a stage runs', () => {
@@ -352,6 +372,11 @@ describe('dashboard view-model producer', () => {
       expect(fix.args).toBeDefined();
       expect(fix.label).not.toBe('Open Olympus on your Mac');
     }
+    // A repair only the Mac can make names its help section beside the control.
+    const help = 'https://olympusplugin.ai/help/on-your-mac/';
+    expect(vm.sources.find((source) => source.id === 'x.bookmarks')!.primary!.href).toBe(`${help}#connect`);
+    expect(vm.needsYou.find((item) => item.id === 'source:readwise.library')!.fix.href).toBe(`${help}#reconnect`);
+    expect(vm.needsYou.find((item) => item.id === 'source:gmail.email')!.fix.href).toBeUndefined();
     expect(copyDashboardViewModel(vm)).toEqual(vm);
   });
 
@@ -393,6 +418,10 @@ describe('dashboard view-model producer', () => {
     // A custom model that stopped is not an install: it keeps the generic sentence.
     const custom = buildChatGptDashboardViewModel(view([card('gmail.email')]), { now: NOW, embedding: { kind: 'custom', state: 'failed' } });
     expect(custom.needsYou.find((item) => item.id === 'model:embedding')!.sentence).toBe('Search has stopped working on your Mac.');
+    // Check again, plus the help section naming the repair on the Mac.
+    expect(custom.needsYou.find((item) => item.id === 'model:embedding')!.fix).toEqual({
+      label: 'Check again', tool: 'olympus_dashboard', args: {}, href: 'https://olympusplugin.ai/help/on-your-mac/#search',
+    });
   });
 
   test('cards off the product roster and model lanes never appear', () => {
@@ -559,6 +588,7 @@ let dashboardMode: 'ok' | 'throw';
 let privateContextUsed: boolean;
 let privateProbe: boolean;
 let servesChatGpt: boolean;
+let readOnlySurface: boolean;
 let answerRequests: Array<Record<string, unknown>>;
 
 beforeEach(() => {
@@ -569,6 +599,7 @@ beforeEach(() => {
   privateContextUsed = false;
   privateProbe = true;
   servesChatGpt = true;
+  readOnlySurface = false;
   answerRequests = [];
   const worker = createEmailSourceWorker({
     sourceAnswer: {
@@ -592,6 +623,7 @@ beforeEach(() => {
     }),
     chatgpt: {
       servesRequest: () => servesChatGpt,
+      readOnlyFor: () => readOnlySurface,
       async privateMatchProbe() { return privateProbe; },
       async dashboardView() {
         if (dashboardMode === 'throw') throw new Error(S('DASHBOARD_ERROR'));
@@ -653,7 +685,8 @@ describe('ChatGPT MCP surface over the remote handler', () => {
           expect(tool.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
         } else {
           expect(tool.annotations?.readOnlyHint).toBe(false);
-          expect(tool.annotations?.destructiveHint).toBe(tool.name === 'olympus_disconnect_source');
+          // Disconnecting, and a privacy save (which can remove protection), are destructive.
+          expect(tool.annotations?.destructiveHint).toBe(tool.name === 'olympus_disconnect_source' || tool.name === 'olympus_privacy_set');
         }
       }
       const dashboard = tools.find((tool) => tool.name === DASHBOARD_TOOL_NAME)!;
@@ -823,6 +856,31 @@ describe('ChatGPT MCP surface over the remote handler', () => {
       const result = await client.callTool({ name: 'source_answer', arguments: { question: 'budget?' } });
       // The fixture's Gmail item is tiered Private, so it still triggers the sentence.
       expect((result.structuredContent as { notes?: string[] }).notes).toEqual(['Some matching items are private and stay on your Mac.']);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('a read-only grant (demo sign-in) lists and runs only the read-only tools', async () => {
+    readOnlySurface = true;
+    const client = await connectClient();
+    try {
+      const { tools } = await client.listTools();
+      expect(tools.map((tool) => tool.name)).toEqual([
+        DASHBOARD_TOOL_NAME,
+        'olympus_search',
+        'source_index_status',
+        'source_answer',
+        'source_answer_result',
+        'olympus_scope_list',
+        'olympus_privacy_get',
+      ]);
+      for (const name of ['olympus_connect_source', 'olympus_scope_set', 'olympus_disconnect_source', 'olympus_model_set', 'olympus_privacy_set']) {
+        const result = await client.callTool({ name, arguments: {} });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toEqual({ error: 'unknown_tool' });
+      }
+      expect((await client.callTool({ name: DASHBOARD_TOOL_NAME, arguments: {} })).isError).toBeFalsy();
     } finally {
       await client.close();
     }

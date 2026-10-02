@@ -3542,9 +3542,9 @@ var init_manifest = __esm(() => {
 // src/core/sovereignty.ts
 import { chmodSync, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync9, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { dirname as dirname7, join as join10 } from "node:path";
+import { dirname as dirname8, join as join11 } from "node:path";
 function defaultSovereigntyConfigPath() {
-  return join10(homedir6(), ".olympus", "sovereignty.json");
+  return join11(homedir6(), ".olympus", "sovereignty.json");
 }
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
@@ -4290,7 +4290,7 @@ var init_publisher_oauth_client = __esm(() => {
 // src/workers/credential-broker/index.ts
 import { createHash as createHash3 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
-import { dirname as dirname10 } from "node:path";
+import { dirname as dirname11 } from "node:path";
 function isCredentialProvider(value) {
   return typeof value === "string" && CREDENTIAL_PROVIDERS.includes(value);
 }
@@ -4357,7 +4357,7 @@ class JsonCredentialOAuth2StateStore {
       }
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir2(dirname10(this.path), { recursive: true });
+        await mkdir2(dirname11(this.path), { recursive: true });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -4369,7 +4369,7 @@ class JsonCredentialOAuth2StateStore {
         return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir2(dirname10(this.path), { recursive: true });
+        await mkdir2(dirname11(this.path), { recursive: true });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -5992,9 +5992,9 @@ var init_credential_broker = __esm(() => {
 // src/workers/credential-broker/connected-handles.ts
 import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync11 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { dirname as dirname11, join as join13 } from "node:path";
+import { dirname as dirname12, join as join14 } from "node:path";
 function defaultHandleRegistryPath() {
-  return join13(homedir8(), ".config", "olympus", "handles.json");
+  return join14(homedir8(), ".config", "olympus", "handles.json");
 }
 function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
@@ -6031,7 +6031,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   return { registry, preservedUnknownHandles };
 }
 function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync6(dirname11(path), { recursive: true });
+  mkdirSync6(dirname12(path), { recursive: true });
   writePrivateFileAtomicSync(path, JSON.stringify({
     version: 1,
     handles: [
@@ -7945,7 +7945,6 @@ var init_engine = __esm(() => {
   ]);
   CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
 });
-
 // src/workers/classification/tier-classifier.ts
 var UNDECIDED_TIER_SNIFFER;
 var init_tier_classifier = __esm(() => {
@@ -7974,31 +7973,151 @@ var SOURCE_INDEX_FTS5_TOKENIZER = "tokenize = 'porter unicode61'", FTS_QUERY_STO
 var init_fts = __esm(() => {
   FTS_QUERY_STOPWORDS = new Set([
     "a",
+    "about",
+    "after",
+    "again",
+    "all",
+    "also",
+    "am",
     "an",
     "and",
+    "any",
+    "anything",
     "are",
+    "article",
+    "articles",
     "as",
     "at",
+    "be",
+    "been",
+    "before",
+    "being",
+    "but",
     "by",
+    "can",
+    "could",
+    "detail",
+    "details",
+    "did",
+    "do",
+    "doc",
+    "docs",
+    "document",
+    "documents",
+    "does",
+    "doing",
+    "done",
+    "each",
+    "file",
+    "files",
+    "find",
     "for",
+    "found",
     "from",
+    "get",
+    "give",
+    "got",
+    "had",
+    "happen",
+    "happened",
+    "has",
+    "have",
+    "having",
+    "he",
+    "her",
+    "here",
+    "him",
+    "his",
+    "how",
+    "i",
+    "if",
     "in",
+    "into",
     "is",
     "it",
+    "item",
+    "items",
+    "its",
+    "just",
+    "keep",
+    "kept",
+    "know",
+    "let",
+    "look",
+    "many",
     "me",
+    "might",
+    "more",
+    "most",
+    "much",
+    "must",
     "my",
+    "need",
+    "no",
+    "not",
+    "now",
     "of",
     "on",
     "or",
+    "our",
+    "out",
+    "paper",
+    "papers",
+    "please",
+    "read",
+    "remember",
+    "said",
+    "save",
+    "saved",
+    "say",
+    "says",
+    "see",
+    "she",
+    "should",
+    "show",
+    "so",
+    "some",
+    "something",
+    "stuff",
+    "such",
+    "tell",
+    "than",
+    "that",
     "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "thing",
+    "things",
+    "this",
+    "those",
     "to",
+    "use",
+    "using",
+    "very",
+    "want",
     "was",
+    "we",
     "were",
     "what",
     "when",
     "where",
+    "which",
+    "while",
     "who",
-    "with"
+    "whom",
+    "whose",
+    "why",
+    "with",
+    "would",
+    "write",
+    "written",
+    "wrote",
+    "you",
+    "your"
   ]);
   SOURCE_INDEX_SYNONYMS = Object.freeze({
     amount: ["balance", "credit", "deposit"],
@@ -8150,7 +8269,7 @@ var init_embeddings = __esm(() => {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS;
+var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -8165,10 +8284,14 @@ var init_local_index = __esm(() => {
   init_corpus();
   init_file_lease();
   init_embeddings();
+  init_manifest();
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
+  ]);
+  CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
+    [BUILT_IN_EMBEDDING_MODEL.modelId, 0.4]
   ]);
   CONTAINER_MIME_TYPES = Object.freeze([
     "inode/directory",
@@ -8322,6 +8445,24 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
+// src/workers/connector-store/tier-names-only-settle.ts
+var init_tier_names_only_settle = __esm(() => {
+  init_tier_ledger();
+});
+
+// src/workers/connector-store/tier-rejudge.ts
+var init_tier_rejudge = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+});
+
+// src/workers/connector-store/tier-rules-sweep.ts
+var init_tier_rules_sweep = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
   init_types();
@@ -8330,6 +8471,8 @@ var init_tiered_store_set = __esm(() => {
   init_tier_ledger();
   init_local_index();
   init_tier_placement();
+  init_tier_names_only_settle();
+  init_tier_rules_sweep();
 });
 
 // src/workers/readwise/live-sync.ts
@@ -9013,7 +9156,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -9059,7 +9202,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join15(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join16(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -9397,10 +9540,10 @@ var init_public_source_capabilities = __esm(() => {
 
 // src/workers/source-dashboard.ts
 import { homedir as homedir10 } from "node:os";
-import { dirname as dirname13, join as join16 } from "node:path";
+import { dirname as dirname14, join as join17 } from "node:path";
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join16(homedir10(), ".local", "share");
-  return join16(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir10(), ".local", "share");
+  return join17(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
 var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
@@ -10125,6 +10268,14 @@ var DEFAULT_READINESS_POLL_MS = 100;
 var DEFAULT_STOP_GRACE_MS = 2000;
 var DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
 var childStdio = "ignore";
+var childObserver;
+function notifyChildObserver(event, serviceId, pid) {
+  if (!childObserver || !pid || process.platform === "win32")
+    return;
+  try {
+    childObserver[event](serviceId, pid);
+  } catch {}
+}
 function backgroundNativeProcessService(service) {
   return {
     ...service,
@@ -10231,6 +10382,7 @@ function createNativeProcessService(options) {
     });
     lifetime.child = child;
     lifetime.childReady = false;
+    notifyChildObserver("spawned", options.id, child.pid);
     let spawnFailed = false;
     child.once("exit", (code, signal) => {
       if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
@@ -10300,6 +10452,7 @@ function createNativeProcessService(options) {
       if (requestedGeneration !== generation)
         return;
       const lifetime = {
+        serviceId: options.id,
         generation: requestedGeneration,
         context,
         child: undefined,
@@ -10413,6 +10566,7 @@ async function terminateChild(lifetime, graceMs, expectedChild) {
   lifetime.cleanupPromise = cleanup;
   try {
     await cleanup;
+    notifyChildObserver("stopped", lifetime.serviceId, child.pid);
     if (lifetime.child === child)
       lifetime.child = undefined;
   } finally {
@@ -13490,7 +13644,7 @@ import { isAbsolute as relayIsAbsolute } from "node:path";
 import { fileURLToPath as relayFileURLToPath } from "node:url";
 
 // src/core/remote-access.ts
-import { randomBytes as raRandomBytes } from "node:crypto";
+import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
 import {
   chmodSync as raChmodSync,
   lstatSync as raLstatSync,
@@ -13498,6 +13652,7 @@ import {
   readFileSync as raReadFileSync,
   renameSync as raRenameSync,
   statSync as raStatSync,
+  unlinkSync as raUnlinkSync,
   writeFileSync as raWriteFileSync
 } from "node:fs";
 import { homedir as raHomedir } from "node:os";
@@ -14076,20 +14231,29 @@ function constantTimeStringEqual(actual, expected) {
 init_config();
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync13, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname14, join as join17 } from "node:path";
+import { dirname as dirname15, join as join18 } from "node:path";
 import { homedir as homedir11 } from "node:os";
 
 // src/core/engine-service.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
 init_atomic_file();
-init_operation_error();
-import { existsSync as existsSync6, lstatSync as lstatSync2, readFileSync as readFileSync10, statSync as statSync8 } from "node:fs";
+import { existsSync as existsSync6, lstatSync as lstatSync2, readdirSync, readFileSync as readFileSync10, renameSync as renameSync2, statSync as statSync8 } from "node:fs";
 import { homedir as homedir7, platform as osPlatform } from "node:os";
-import { basename as basename3, dirname as dirname9, isAbsolute as isAbsolute10, join as join12, resolve as resolvePath } from "node:path";
+import { basename as basename3, dirname as dirname10, isAbsolute as isAbsolute10, join as join13, resolve as resolvePath } from "node:path";
+
+// src/core/engine-children.ts
+init_atomic_file();
+import { dirname as dirname7, join as join10 } from "node:path";
+function engineChildrenPath(env = process.env) {
+  return join10(olympusDataDir(env), "engine", "children.json");
+}
+
+// src/core/engine-service.ts
+init_operation_error();
 init_sovereignty();
 
 // src/core/worker-service.ts
-import { basename as basename2, dirname as dirname8, isAbsolute as isAbsolute9, join as join11, relative as relative2, sep as sep2 } from "node:path";
+import { basename as basename2, dirname as dirname9, isAbsolute as isAbsolute9, join as join12, relative as relative2, sep as sep2 } from "node:path";
 init_atomic_file();
 init_openclaw_executable();
 init_operation_error();
@@ -14097,22 +14261,22 @@ var WORKER_LOG_TAIL_BYTES = 64 * 1024;
 function workerServicePaths(platform2, homeDir) {
   homeDir = validatedAbsolutePath(homeDir, "home directory");
   if (platform2 === "darwin") {
-    const logDir = join11(homeDir, "Library", "Logs", "Olympus");
+    const logDir = join12(homeDir, "Library", "Logs", "Olympus");
     return {
       label: "com.openclaw.olympus.worker",
-      unitPath: join11(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
-      envPath: join11(homeDir, ".config", "olympus", "worker.env"),
-      logPath: join11(logDir, "worker.log"),
-      errorLogPath: join11(logDir, "worker.err")
+      unitPath: join12(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
+      envPath: join12(homeDir, ".config", "olympus", "worker.env"),
+      logPath: join12(logDir, "worker.log"),
+      errorLogPath: join12(logDir, "worker.err")
     };
   }
-  const stateDir = join11(homeDir, ".local", "state", "olympus", "worker");
+  const stateDir = join12(homeDir, ".local", "state", "olympus", "worker");
   return {
     label: "olympus-worker",
-    unitPath: join11(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
-    envPath: join11(homeDir, ".config", "olympus", "worker.env"),
-    logPath: join11(stateDir, "worker.log"),
-    errorLogPath: join11(stateDir, "worker.err")
+    unitPath: join12(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
+    envPath: join12(homeDir, ".config", "olympus", "worker.env"),
+    logPath: join12(stateDir, "worker.log"),
+    errorLogPath: join12(stateDir, "worker.err")
   };
 }
 function validatedAbsolutePath(value, label) {
@@ -14127,18 +14291,30 @@ var ENGINE_LABEL = "ai.olympusplugin.engine";
 var PACKAGE_NAMES = new Set(["olympus", "olympus-source-checkout"]);
 function enginePaths(homeDir) {
   const home = absolute(homeDir, "home directory");
-  const logDir = join12(home, "Library", "Logs", "Olympus");
+  const logDir = join13(home, "Library", "Logs", "Olympus");
+  const appSupportDir = join13(home, "Library", "Application Support", "Olympus");
+  const dataEnv = { HOME: home };
   return {
     label: ENGINE_LABEL,
-    plistPath: join12(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
+    plistPath: join13(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
     logDir,
-    logPath: join12(logDir, "engine.log"),
-    errorLogPath: join12(logDir, "engine.err"),
-    configPath: join12(home, ".olympus", "engine.json"),
-    sovereigntyPath: join12(home, ".olympus", "sovereignty.json"),
-    appSupportDir: join12(home, "Library", "Application Support", "Olympus"),
-    workerEnvPath: join12(home, ".config", "olympus", "worker.env")
+    logPath: join13(logDir, "engine.log"),
+    errorLogPath: join13(logDir, "engine.err"),
+    configPath: join13(home, ".olympus", "engine.json"),
+    sovereigntyPath: join13(home, ".olympus", "sovereignty.json"),
+    appSupportDir,
+    appDir: join13(appSupportDir, "app"),
+    previousAppDir: join13(appSupportDir, "app.previous"),
+    runtimeDir: join13(appSupportDir, "runtime"),
+    workerEnvPath: join13(home, ".config", "olympus", "worker.env"),
+    statusPath: engineStatusPath(dataEnv),
+    childrenPath: engineChildrenPath(dataEnv),
+    modelsDir: join13(olympusDataDir(dataEnv), "models"),
+    remoteAccessDir: remoteAccessDir(dataEnv)
   };
+}
+function engineStatusPath(env = process.env) {
+  return join13(olympusDataDir(env), "engine", "status.json");
 }
 function inspectEngine(options = {}) {
   const homeDir = absolute(options.homeDir ?? homedir7(), "home directory");
@@ -14539,7 +14715,7 @@ init_connected_handles();
 // src/core/connect.ts
 import { mkdirSync as mkdirSync7, readFileSync as readFileSync12, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { dirname as dirname12, join as join14 } from "node:path";
+import { dirname as dirname13, join as join15 } from "node:path";
 init_secret_store();
 init_http_timeout();
 init_oauth_relay();
@@ -14571,7 +14747,7 @@ var KNOWN_OAUTH_ERROR_CODES = new Set([
   "redirect_uri_mismatch"
 ]);
 function defaultDetachedOAuthStateDir() {
-  return join14(homedir9(), ".olympus", "pending-oauth");
+  return join15(homedir9(), ".olympus", "pending-oauth");
 }
 function readDetachedOAuthState(path) {
   try {
@@ -14735,7 +14911,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join17(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join18(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -15617,7 +15793,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join17(dirname14(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join18(dirname15(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -15661,7 +15837,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync8(dirname14(path), { recursive: true });
+  mkdirSync8(dirname15(path), { recursive: true });
   writeFileSync5(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -15875,7 +16051,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync10(join17(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync10(join18(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync3(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });

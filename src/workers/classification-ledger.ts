@@ -28,11 +28,16 @@ export const CLASSIFICATION_LEDGER_PATH_ENV = 'OLYMPUS_CLASSIFICATION_LEDGER_PAT
 /**
  * The embedding ledger's closed approval vocabulary, with its one approving
  * value spelled `owner`: this module ships in the public CLI, which names no
- * installation's owner. `owner` is the ONLY value that means approved, in
- * advance; the other two mean nobody approved.
+ * installation's owner. `owner` is the ONLY value that means the owner
+ * approved, in advance; `system-automatic` and `unattributed-historical`
+ * mean nobody approved. `built_in_default` is the owner's standing default
+ * for the built-in local model (owner default 2026-10-01), written by the
+ * sniffer service, never by the owner: it approves only when the caller asks
+ * for that default (`isClassifierApproved(..., { builtInDefault: true })`).
  */
-export type ClassificationLedgerApprovedBy = 'owner' | 'system-automatic' | 'unattributed-historical';
+export type ClassificationLedgerApprovedBy = 'owner' | 'built_in_default' | 'system-automatic' | 'unattributed-historical';
 export const CLASSIFICATION_LEDGER_OWNER_APPROVAL: ClassificationLedgerApprovedBy = 'owner';
+export const CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL: ClassificationLedgerApprovedBy = 'built_in_default';
 
 export type ClassificationLedgerKind =
   /** A classifier model and prompt version were chosen (or asked for). */
@@ -147,13 +152,43 @@ export interface ClassifierApprovalKey {
 export function isClassifierApproved(
   entries: readonly ClassificationLedgerEntry[],
   key: ClassifierApprovalKey,
+  options: {
+    /**
+     * Also count a `built_in_default` approval of this exact key (the
+     * built-in local model's standing default), unless the owner revoked the
+     * model since (`builtInDefaultRevoked`).
+     */
+    builtInDefault?: boolean;
+  } = {},
 ): boolean {
+  const defaultCounts = options.builtInDefault === true && !builtInDefaultRevoked(entries, key);
   for (const entry of entries) {
     if (entry.model_id !== key.modelId || entry.prompt_version !== key.promptVersion
       || entry.lane !== key.lane || entry.profile_id !== key.profileId) continue;
-    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL) continue;
-    if (entry.kind === 'classifier_model_revoked') return false;
+    const owner = entry.approved_by === CLASSIFICATION_LEDGER_OWNER_APPROVAL;
+    const builtInDefault = defaultCounts && entry.approved_by === CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL;
+    if (!owner && !builtInDefault) continue;
+    if (owner && entry.kind === 'classifier_model_revoked') return false;
     if (entry.kind === 'classifier_model_decision' && entry.status === 'complete') return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the owner's newest word on this lane, profile and model, under ANY
+ * prompt version, is a revocation: the built-in default then approves no
+ * prompt version (new owner words included) until the owner approves the
+ * model again. Owner-signed entries only.
+ */
+export function builtInDefaultRevoked(
+  entries: readonly ClassificationLedgerEntry[],
+  key: Omit<ClassifierApprovalKey, 'promptVersion'>,
+): boolean {
+  for (const entry of entries) {
+    if (entry.model_id !== key.modelId || entry.lane !== key.lane || entry.profile_id !== key.profileId) continue;
+    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL) continue;
+    if (entry.kind === 'classifier_model_revoked') return true;
+    if (entry.kind === 'classifier_model_decision' && entry.status === 'complete') return false;
   }
   return false;
 }
@@ -164,7 +199,7 @@ export function isClassificationLedgerEntry(value: unknown): value is Classifica
   if (typeof record.recorded_at !== 'string' || record.recorded_at.trim() === '') return false;
   if (typeof record.what !== 'string' || record.what.trim() === '') return false;
   if (!['classifier_model_decision', 'classifier_model_revoked', 'note'].includes(record.kind as string)) return false;
-  if (!['owner', 'system-automatic', 'unattributed-historical'].includes(record.approved_by as string)) return false;
+  if (!['owner', 'built_in_default', 'system-automatic', 'unattributed-historical'].includes(record.approved_by as string)) return false;
   if (!['pending', 'complete', 'n/a'].includes(record.status as string)) return false;
   for (const key of ['model_id', 'prompt_version', 'lane', 'profile_id', 'why', 'entry_id'] as const) {
     if (record[key] !== undefined && typeof record[key] !== 'string') return false;

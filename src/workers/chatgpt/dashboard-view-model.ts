@@ -200,7 +200,7 @@ export function buildChatGptDashboardViewModel(
       sentence: embedding.kind === 'built_in'
         ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.embedding[embedding.failedReason ?? 'unknown']
         : DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention,
-      fix: embedding.kind === 'built_in' ? retryFix('embedding') : checkAgainFix(),
+      fix: embedding.kind === 'built_in' ? retryFix('embedding') : checkAgainFix(onMacHelp('search')),
     });
   }
   const answers = answersFromModelSetup(view.model_setup) ?? builtInAnswers(options.privateModel);
@@ -213,7 +213,7 @@ export function buildChatGptDashboardViewModel(
       sentence: answers.kind === 'built_in'
         ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.answers[options.privateModel?.failedReason ?? 'unknown']
         : DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention,
-      fix: answers.kind === 'built_in' ? retryFix('answers') : checkAgainFix(),
+      fix: answers.kind === 'built_in' ? retryFix('answers') : checkAgainFix(onMacHelp('answers')),
     });
   }
 
@@ -246,6 +246,7 @@ export function buildChatGptDashboardViewModel(
         tool: DASHBOARD_TOOL_NAME,
         args: {},
         disabledReason: DASHBOARD_CHATGPT_VOCABULARY.changeModelsOnMac,
+        href: onMacHelp('models'),
       },
     },
     ...(options.privacy
@@ -354,7 +355,9 @@ function attentionItem(
     || progress?.stalledReason === 'waiting_for_credentials'
     || (card.connection.state !== 'connected' && card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card));
   const reconnect = reauth ? reconnectFix(definition) : undefined;
+  // A source ChatGPT cannot sign in again (X, Readwise) is reconnected on the Mac.
   const fix = reconnect
+    ?? (reauth ? checkAgainFix(onMacHelp('reconnect')) : undefined)
     ?? (scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
@@ -413,6 +416,13 @@ interface StageCounts {
   found: number;
   reading?: { done: number; total: number };
   indexing?: { done: number; total: number };
+  /**
+   * Items a question can find now, over the in-scope population: indexed
+   * (embedded) items, or read items for a keyword-only source whose
+   * embedding stage does not apply. Zero when the store publishes no
+   * per-item embedding count: unknown is never claimed as searchable.
+   */
+  searchable?: { done: number; total: number };
 }
 
 interface MeasuredSourceProgress {
@@ -458,6 +468,9 @@ function measuredSourceProgress(
     if (phase.id === 'extraction') counts.reading = entry;
     if (phase.id === 'embedding') counts.indexing = entry;
   }
+  const embeddingApplies = !phases.some((phase) => phase.id === 'embedding' && phase.not_applicable === true);
+  if (counts.indexing) counts.searchable = counts.indexing;
+  else if (counts.reading) counts.searchable = embeddingApplies ? { done: 0, total: counts.reading.total } : counts.reading;
   // An embedding row whose store publishes no per-item count is finished when
   // the chunk backlog says nothing is missing; otherwise it is still indexing.
   const embeddingBehind = (scrubbed.embedding_backlog?.missing_chunks ?? 0) > 0
@@ -513,8 +526,19 @@ function stalledReason(input: {
   return undefined;
 }
 
-function checkAgainFix(): DashboardFix {
-  return { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {} };
+function checkAgainFix(href?: string): DashboardFix {
+  return { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {}, ...(href ? { href } : {}) };
+}
+
+/**
+ * The help page naming a repair that only the Mac can make (a key, a pairing,
+ * a model server). A Fix carries it as `href` beside its own control, so the
+ * panel can link "how" next to Check again or a disabled control.
+ */
+export const ON_MAC_HELP_URL = 'https://olympusplugin.ai/help/on-your-mac/';
+
+function onMacHelp(section: 'connect' | 'reconnect' | 'answers' | 'search' | 'models'): string {
+  return `${ON_MAC_HELP_URL}#${section}`;
 }
 
 /** Starts a failed built-in install again. */
@@ -537,7 +561,13 @@ function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFi
   const source = oauthSource(definition);
   return source
     ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
-    : { label: CHATGPT_SETUP_LABELS.connect, tool: DASHBOARD_TOOL_NAME, args: {}, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac };
+    : {
+        label: CHATGPT_SETUP_LABELS.connect,
+        tool: DASHBOARD_TOOL_NAME,
+        args: {},
+        disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac,
+        href: onMacHelp('connect'),
+      };
 }
 
 function scopePending(card: DashboardSourceCard): boolean {
@@ -637,8 +667,10 @@ function unitFor(card: DashboardSourceCard): Unit {
  * One progress block over every connected source that is not done. Each
  * stage's row sums that stage's counts across those sources (listing: items
  * found so far, no total until a first listing finishes). The headline
- * percentage is reading's when anything has a known in-scope total, else the
- * sum of the sources' own stage counts. Absent once every source is done.
+ * percentage and items left count what is searchable (indexed, or read for a
+ * keyword-only source) when anything has a known in-scope total, else the
+ * sum of the sources' own stage counts: read but not yet indexed is not done.
+ * Absent once every source is done.
  */
 function overallProgress(
   rows: ReadonlyArray<{ card: DashboardSourceCard; progress?: SourceProgress | undefined; counts?: StageCounts | undefined }>,
@@ -653,6 +685,7 @@ function overallProgress(
   const listing = { done: 0, any: false };
   const reading = { done: 0, total: 0, any: false };
   const indexing = { done: 0, total: 0, any: false };
+  const searchable = { done: 0, total: 0 };
   let ownDone = 0;
   let ownTotal = 0;
   for (const { card, progress, counts } of open) {
@@ -670,6 +703,10 @@ function overallProgress(
       indexing.done += counts.indexing.done;
       indexing.total += counts.indexing.total;
     }
+    if (counts.searchable) {
+      searchable.done += Math.min(counts.searchable.done, counts.searchable.total);
+      searchable.total += counts.searchable.total;
+    }
     ownTotal += progress.total;
     ownDone += progress.total > 0 ? Math.min(progress.done, progress.total) : 0;
     if (card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || progress.stage === 'listing') initial = true;
@@ -682,7 +719,7 @@ function overallProgress(
   if (listing.any) details.push({ stage: STAGE_DETAIL.listing, unit, done: listing.done, total: 0 });
   if (reading.any) details.push({ stage: STAGE_DETAIL.reading, unit, done: reading.done, total: reading.total });
   if (indexing.any) details.push({ stage: STAGE_DETAIL.indexing, unit, done: indexing.done, total: indexing.total });
-  const [done, total] = reading.total > 0 ? [reading.done, reading.total] : [ownDone, ownTotal];
+  const [done, total] = searchable.total > 0 ? [searchable.done, searchable.total] : [ownDone, ownTotal];
   return {
     unit,
     phase: initial ? 'initial' : 'refresh',

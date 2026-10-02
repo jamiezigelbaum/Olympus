@@ -486,15 +486,67 @@ function isValidIban(candidate: string): boolean {
   return remainder === 1;
 }
 
-// Card numbers: WHOLE separated digit runs only (a 20-digit run never yields a
-// 16-digit "card"), 13-19 digits, must pass Luhn. Non-Luhn runs (order ids,
-// tracking numbers) do not fire.
+// Card numbers (design 2.2, step 10). A Luhn check alone is a 1-in-10 coin
+// toss on any digit run, so a candidate must also LOOK like a card:
+//
+// - a whole number: never the fraction of a decimal ("111.32059161437502"),
+//   never part of a longer number or of a grid of digit groups;
+// - grouped the way cards are printed (4-4-4-4, 4-4-4-4-3, 4-4-4-1..3,
+//   Amex 4-6-5, Diners 4-6-4, one separator throughout), or one unbroken run;
+// - an issuer prefix with a length that issuer uses (Visa, Mastercard, Amex,
+//   Discover, Diners, JCB, UnionPay, Maestro);
+// - and passes Luhn.
+//
+// An unbroken run carries no printed shape, so it also needs card context
+// nearby (card, visa, expiry, cvv, an MM/YY date) or must stand on its own:
+// a number in a column of numbers (a spreadsheet, a table) without card
+// words around it is data, not a card. 2026-10-02: a calorie spreadsheet
+// went Private on the digits of a formula result.
+const CARD_GROUPED = /(?<![\d.,]|\d[ -])(\d{4}([ -])(?:\d{4}\2\d{4}\2\d{4}(?:\2\d{3})?|\d{4}\2\d{4}\2\d{1,3}|\d{6}\2\d{4,5}))(?!\d|[.,]\d|\2\d)/g;
+const CARD_UNBROKEN = /(?<![\d.,]|\d[ -])\d{13,19}(?!\d|[.,]\d)/g;
+const CARD_CONTEXT = /\b(?:cards?|card ?(?:no|number|#)|visa|master ?card|amex|american express|discover|diners|jcb|maestro|union ?pay|credit|debit|cardholder|exp|expiry|expires|expiration|valid thru|cvv2?|cvc2?|csc|security code)\b|\b(?:0[1-9]|1[0-2]) ?\/ ?(?:\d{2}|20\d{2})\b/i;
+/** Characters either side of an unbroken run read for context and density. */
+const CARD_WINDOW = 60;
+/** Other digits in that window that make a run part of a numeric table. */
+const CARD_DENSE_DIGITS = 8;
+
 function findLuhnCardNumber(haystack: string): boolean {
-  const runs = haystack.matchAll(/\d(?:[ -]?\d)*/g);
-  for (const run of runs) {
-    const digits = run[0].replace(/[ -]/g, '');
-    if (digits.length >= 13 && digits.length <= 19 && passesLuhn(digits)) return true;
+  for (const match of haystack.matchAll(CARD_GROUPED)) {
+    if (isCardNumber(match[1]!.replace(/[ -]/g, ''))) return true;
   }
+  for (const match of haystack.matchAll(CARD_UNBROKEN)) {
+    const digits = match[0];
+    if (!isCardNumber(digits)) continue;
+    const before = haystack.slice(Math.max(0, match.index! - CARD_WINDOW), match.index!);
+    const after = haystack.slice(match.index! + digits.length, match.index! + digits.length + CARD_WINDOW);
+    if (CARD_CONTEXT.test(before) || CARD_CONTEXT.test(after)) return true;
+    const otherDigits = (before + after).replace(/\D/g, '').length;
+    if (otherDigits < CARD_DENSE_DIGITS) return true;
+  }
+  return false;
+}
+
+/** An issuer prefix with a length that issuer uses, and a valid Luhn check digit. */
+function isCardNumber(digits: string): boolean {
+  return cardIssuerAccepts(digits) && passesLuhn(digits);
+}
+
+function cardIssuerAccepts(digits: string): boolean {
+  const length = digits.length;
+  const two = Number(digits.slice(0, 2));
+  const three = Number(digits.slice(0, 3));
+  const four = Number(digits.slice(0, 4));
+  const six = Number(digits.slice(0, 6));
+  if (digits[0] === '4') return length === 13 || length === 16 || length === 19; // Visa
+  if ((two >= 51 && two <= 55) || (four >= 2221 && four <= 2720)) return length === 16; // Mastercard
+  if (two === 34 || two === 37) return length === 15; // Amex
+  if (four === 6011 || two === 65 || (three >= 644 && three <= 649) || (six >= 622126 && six <= 622925)) {
+    return length >= 16 && length <= 19; // Discover
+  }
+  if ((three >= 300 && three <= 305) || two === 36 || two === 38 || two === 39) return length >= 14 && length <= 19; // Diners
+  if (four >= 3528 && four <= 3589) return length >= 16 && length <= 19; // JCB
+  if (two === 62) return length >= 16 && length <= 19; // UnionPay
+  if (two === 50 || (two >= 56 && two <= 69)) return length >= 13 && length <= 19; // Maestro
   return false;
 }
 

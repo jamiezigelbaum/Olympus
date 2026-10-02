@@ -147,6 +147,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
       return copy;
     });
     s.pendingCount = typeof data.pendingCount === 'number' && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
+    s.confirmation = typeof data.confirmation === 'string' ? data.confirmation : '';
   }
 
   function load(): void {
@@ -202,7 +203,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
   function save(): void {
     if (!s || !s.loaded || s.saving) return;
     const rules = kept();
-    const args = { description: s.description.trim(), rules: rules.map(ruleOut) };
+    const args: Any = { description: s.description.trim(), rules: rules.map(ruleOut) };
+    // The owner's confirmation from olympus_privacy_get: removals and new words need it.
+    if (s.confirmation) args.confirmation = s.confirmation;
     s.saving = true;
     s.saveError = '';
     kit.render('privacy:save');

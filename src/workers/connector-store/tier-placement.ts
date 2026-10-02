@@ -182,6 +182,7 @@ export function decideItemTiers(
   text: string | undefined,
   options: ConnectorStoreTierClassification | undefined,
   ledger: TierLedger | undefined,
+  extra: { namesOnly?: boolean } = {},
 ): TierDecision {
   const override = ledger?.getOverride(item.identity);
   return classifyItemTiers(
@@ -189,6 +190,7 @@ export function decideItemTiers(
       signals: connector.classificationSignals(item),
       provider: item.identity.provider,
       ...(text !== undefined ? { text } : {}),
+      ...(extra.namesOnly ? { namesOnly: true } : {}),
       subject: item.identity,
     },
     {

@@ -16,6 +16,7 @@ import { AUTHENTICATED_RESPONSE_HEADER, mintCredential } from '../shared/tokens.
 import { createOAuthRelayNonce, signOAuthRelayState } from '../../src/core/oauth-relay.ts';
 import type { RelayLimits } from '../server/limits.ts';
 import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
+import { NOT_CONNECTED_MESSAGE } from '../server/relay-mcp.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
 import generatedDashboard from '../server/generated/chatgpt-dashboard.json';
 import generatedSurface from '../server/generated/chatgpt-tools.json';
@@ -24,6 +25,11 @@ import generatedPrivateAnswer from '../server/generated/chatgpt-private-answer.j
 setDefaultTimeout(15_000);
 
 const PUBLIC_HOST = 'mcp.olympus.test';
+/** The account-linking challenge every tool sends a caller without a token. */
+const LINKING_CHALLENGE = [
+  `Bearer resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp", error="invalid_token", `
+    + 'error_description="Connect Olympus on your Mac to use this tool."',
+];
 
 interface WorkerRecord {
   method: string;
@@ -281,7 +287,7 @@ describe('routing', () => {
     expect((await fetch(`${relay.url}/dashboard`)).status).toBe(404);
   });
 
-  test('a caller with no token gets the relay\'s not-installed surface and never reaches an engine', async () => {
+  test('a caller with no token gets the relay\'s not-connected surface and never reaches an engine', async () => {
     const relay = await makeRelay();
     const worker = fakeWorker('A');
     cleanups.push(worker.stop);
@@ -289,6 +295,7 @@ describe('routing', () => {
     const anonymous = (body: string) => fetch(`${relay.url}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
     const init = await (await anonymous(rpc('initialize', { protocolVersion: '2025-11-25' }))).json();
     expect(init.result.protocolVersion).toBe('2025-11-25');
+    expect(init.result.instructions).toBe(NOT_CONNECTED_MESSAGE);
     const list = await (await anonymous(rpc('tools/list'))).json();
     // The engine's full ChatGPT tool set, so ChatGPT's model can pick an
     // answer tool and so start linking.
@@ -338,11 +345,14 @@ describe('routing', () => {
     const dashboard = await (await anonymous(rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }))).json();
     expect(dashboard.result.structuredContent).toMatchObject({
       v: 1,
-      connection: { state: 'not_installed', action: { id: 'install', href: 'https://olympusplugin.ai/install/' } },
+      connection: { state: 'not_connected', action: { id: 'connect' }, installHref: 'https://olympusplugin.ai/install/' },
       needsYou: [],
       sources: [],
     });
-    expect(dashboard.result._meta).toEqual(generatedSurface.tools[0]!._meta);
+    expect(dashboard.result.content).toEqual([{ type: 'text', text: NOT_CONNECTED_MESSAGE }]);
+    // The tool's own UI metadata, plus the same linking challenge the
+    // protected tools send, so ChatGPT offers Connect beside the dashboard.
+    expect(dashboard.result._meta).toEqual({ ...generatedSurface.tools[0]!._meta, 'mcp/www_authenticate': LINKING_CHALLENGE });
     expect(dashboard.result.isError).toBeUndefined();
     // Every oauth2 tool, called without a token: the documented linking
     // trigger (isError + _meta["mcp/www_authenticate"]) on an HTTP 200.
@@ -351,10 +361,7 @@ describe('routing', () => {
       expect(call.status).toBe(200);
       const engineTool = await call.json();
       expect(engineTool.result.isError).toBe(true);
-      expect(engineTool.result._meta['mcp/www_authenticate']).toEqual([
-        `Bearer resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp", error="invalid_token", `
-          + 'error_description="Connect Olympus on your Mac to use this tool."',
-      ]);
+      expect(engineTool.result._meta['mcp/www_authenticate']).toEqual(LINKING_CHALLENGE);
     }
     expect((await fetch(`${relay.url}/mcp`)).status).toBe(405);
     expect(worker.requests).toHaveLength(0);
@@ -562,16 +569,16 @@ describe('private answer collection', () => {
     expect(workerA.requests[0]!.headers['x-olympus-relay']).toBe(a.secret);
     expect(workerA.requests[0]!.headers.origin).toBe(PANEL);
     expect(workerB.requests).toHaveLength(0);
-    // The relay's own origin is the panel's dedicated domain.
-    expect((await collect(relay, jobId, { origin: `https://${PUBLIC_HOST}` })).status).toBe(200);
 
-    for (const origin of ['https://evil.example', 'null', '', 'https://x.y.web-sandbox.oaiusercontent.com']) {
+    // The relay's own origin only names the panel (`_meta.ui.domain`); ChatGPT
+    // never serves it from there, and install answers on it are sandboxed.
+    for (const origin of [`https://${PUBLIC_HOST}`, 'https://evil.example', 'null', '', 'https://x.y.web-sandbox.oaiusercontent.com']) {
       const refused = await collect(relay, jobId, { origin });
       expect(refused.status, origin).toBe(403);
       expect(refused.headers.get('access-control-allow-origin')).toBeNull();
     }
     expect((await collect(relay, jobId, { method: 'GET' })).status).toBe(405);
-    expect(workerA.requests).toHaveLength(2);
+    expect(workerA.requests).toHaveLength(1);
 
     // Wrong shapes and unknown installs never reach any engine.
     expect((await collect(relay, 'nope')).status).toBe(404);
@@ -582,7 +589,7 @@ describe('private answer collection', () => {
     expect(await unknown.json()).toEqual({ status: 'gone' });
     expect(unknown.headers.get('access-control-allow-origin')).toBe(PANEL);
     expect((await collect(relay, jobId, { body: 'x'.repeat(600) })).status).toBe(413);
-    expect(workerA.requests).toHaveLength(2);
+    expect(workerA.requests).toHaveLength(1);
     expect(workerB.requests).toHaveLength(0);
 
     const logs = logLines.join('\n');
@@ -753,7 +760,7 @@ describe('sessions and revocation', () => {
       const message = JSON.parse(String(event.data));
       messages.push(message.type === 'error' ? message.code : message.type);
       if (message.type === 'challenge') {
-        socket.send(JSON.stringify({ type: 'hello', v: PROTOCOL_VERSION, installId: victim.installId, sig: signInstallMessage(impostorKey, 'hello', message.nonce, victim.installId) }));
+        socket.send(JSON.stringify({ type: 'hello', v: PROTOCOL_VERSION, installId: victim.installId, sig: signInstallMessage(impostorKey, 'hello', message.nonce, victim.installId, PUBLIC_HOST) }));
       }
     });
     await closed;
@@ -777,7 +784,7 @@ describe('sessions and revocation', () => {
           v: PROTOCOL_VERSION,
           installId: other,
           publicKey: base64url(spkiOf(publicKey)),
-          sig: signInstallMessage(privateKey, 'register', message.nonce, other),
+          sig: signInstallMessage(privateKey, 'register', message.nonce, other, PUBLIC_HOST),
         }));
       }
     });

@@ -3,6 +3,10 @@
 Install Olympus, connect the sources you want it to answer from, and verify a
 cited answer.
 
+This is the OpenClaw path. **Using ChatGPT?** Follow
+[Olympus for ChatGPT](../README.md#olympus-for-chatgpt) instead: it needs only
+a Mac and ChatGPT, with no OpenClaw and no API keys.
+
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
 on macOS or Linux. An agent with terminal access can obtain the pilot package
@@ -618,9 +622,10 @@ To let other agents ask Olympus (Claude, ChatGPT, Grok, Muse, or Claude Code
 and Codex on this computer), open the dashboard's Setup page and press
 **Connect an agent** — see the README's "Connect other agents" section. Agents
 in the cloud also need remote access: press **Turn on remote access** in the
-same Agents section, read and accept the Let's Encrypt subscriber agreement it
-shows, and Olympus connects through the Olympus relay with no account or tunnel
-to set up. (Advanced: a tunnel of your own goes in `remote.publicBaseUrl`.)
+same Agents section, and Olympus connects through the Olympus relay
+(`mcp.olympusplugin.ai`) with no account, tunnel or certificate agreement to
+set up. ChatGPT itself uses the Olympus plugin instead: see the README's
+[Olympus for ChatGPT](../README.md#olympus-for-chatgpt). (Advanced: a tunnel of your own goes in `remote.publicBaseUrl`.)
 
 ## Anytime
 

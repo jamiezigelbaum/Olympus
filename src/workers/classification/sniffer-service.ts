@@ -6,11 +6,11 @@
 
 import type { AnalystModel } from '../../core/analyst.ts';
 import {
-  CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+  CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL,
   appendClassificationLedgerEntryOnce,
+  builtInDefaultRevoked,
   isClassifierApproved,
   readClassificationLedger,
-  type ClassificationLedgerEntry,
 } from '../classification-ledger.ts';
 import { moveTieredItem } from '../connector-store/tier-move.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
@@ -32,8 +32,22 @@ import { TierSnifferStore } from './sniffer-store.ts';
 import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
-import { DEFAULT_TIER_REJUDGE_PER_PASS, rejudgeRoutedItems, type TierRejudgeReport } from '../connector-store/tier-rejudge.ts';
-import { TierLedger, tierLedgerPathForStore, type TierLedgerIdentity } from './tier-ledger.ts';
+import {
+  DEFAULT_TIER_REJUDGE_PER_PASS,
+  emptyTierRejudgeReport,
+  rejudgeRoutedItems,
+  type TierRejudgeReport,
+} from '../connector-store/tier-rejudge.ts';
+import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
+import { sweepOwnerRuleRaises } from '../connector-store/tier-rules-sweep.ts';
+import {
+  TierLedger,
+  TierLedgerRaiseAbandonRefusedError,
+  tierLedgerIdentityKey,
+  tierLedgerPathForStore,
+  type TierLedgerIdentity,
+  type TierLedgerRecord,
+} from './tier-ledger.ts';
 
 export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60_000;
 
@@ -59,6 +73,13 @@ export interface TierSnifferServiceOptions {
    * flagged item stays pending. Absent: always available.
    */
   modelAvailable?: () => boolean;
+  /**
+   * Start the model's first-time download when none has started (never
+   * blocks; the built-in private model's `startIfIdle`). Called on a tick the
+   * model is not available, so a fresh install's held items are judged once
+   * the download finishes instead of waiting for an answer to start it.
+   */
+  startModel?: () => void;
   /** The owner's own words about privacy (privacy-profile.ts), quoted into the prompt. */
   ownerContext?: () => string | undefined;
   /** Where the day's call count is kept across restarts (owner-only JSON). */
@@ -79,19 +100,24 @@ export interface TierSnifferServiceOptions {
   /**
    * The built-in private model is approved by default (owner default
    * 2026-10-01): with this set and the lane exactly the built-in model's
-   * (local, profile and model `built_in`), the owner approval for the current
-   * prompt version is written to the classification ledger automatically,
-   * again whenever the prompt version changes (new owner words). An owner
-   * revocation of that version is respected. Any other lane, remote ones
-   * included, still waits for the owner's own approval.
+   * (local, profile and model `built_in`), an approval for the current prompt
+   * version is written to the classification ledger automatically, marked
+   * `built_in_default` (never `owner`: the owner did not sign it), again
+   * whenever the prompt version changes (new owner words). An owner
+   * revocation of the built-in model, of ANY prompt version, stops that until
+   * the owner approves it again. Any other lane, remote ones included, still
+   * waits for the owner's own approval.
    */
   autoApproveBuiltIn?: boolean;
   /**
    * Routed items re-judged per set per tick after the classifier or the
    * sniffer's prompt changed (tier-rejudge.ts). 0 turns it off. Default
-   * DEFAULT_TIER_REJUDGE_PER_PASS.
+   * DEFAULT_TIER_REJUDGE_PER_PASS. A set whose sniffer queue already holds
+   * `rejudgeMaxOpenQuestions` questions is not re-judged that tick, so
+   * re-judging never outruns the answers.
    */
   rejudgePerPass?: number;
+  rejudgeMaxOpenQuestions?: number;
   /**
    * Automatic tier moves (owner approval 2026-10-01): queued moves (a held
    * item the sniffer judged Personal after all queues one) are carried out
@@ -105,10 +131,20 @@ export interface TierSnifferServiceOptions {
     /** The embedding ledger each automatic move is recorded in. */
     embeddingLedgerPath: string;
     maxPerPass?: number;
+    /**
+     * How long a queued move may keep failing (from its first failed
+     * attempt in this process) before it is given up
+     * (`TierLedger.abandonMove`): a lateral or lower move is abandoned, so the
+     * item is no longer held mid-move; a raise is never rolled back to the
+     * lower placement (that would expose what the newer decision hides), it
+     * stays queued and is counted as stale. Default DEFAULT_STALE_MOVE_MS.
+     */
+    staleAfterMs?: number;
   };
 }
 
 export const DEFAULT_AUTO_MOVES_PER_PASS = 25;
+export const DEFAULT_STALE_MOVE_MS = 60 * 60_000;
 export const BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = 'built-in local model, nothing leaves the Mac (owner default 2026-10-01)';
 
 export interface TierAutoMoveReport {
@@ -116,6 +152,10 @@ export interface TierAutoMoveReport {
   failed: number;
   /** Queued moves left for the owner-approved migration (a store not on the built-in embedding model). */
   notEligible: number;
+  /** Failed moves older than the stale bound that were given up: the item is back where it was. */
+  abandoned?: number;
+  /** Failed raises older than the stale bound: kept hidden and queued, never rolled back. */
+  staleRaises?: number;
 }
 
 export interface TierClassificationBacklog {
@@ -140,6 +180,8 @@ export class TierSnifferService {
   private readonly budget: SnifferCallBudget;
   private timer: ReturnType<typeof setInterval> | undefined;
   private running = false;
+  /** When each queued move (ledger, item, generation) first failed in this process. */
+  private readonly moveFailures = new Map<string, number>();
   private abort: AbortController | undefined;
   private lastTick: TierSnifferTick | undefined;
   private stopped = false;
@@ -284,17 +326,27 @@ export class TierSnifferService {
 
   private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
     const { lane } = this.options;
+    // Owner rules that raise, and names-only folders, apply to stored items
+    // whatever the model's state: no model is asked.
+    this.settleStoredItems();
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       // Nothing is asked and nothing is counted: flagged items wait, pending
-      // and held Private, until the model is there.
+      // and held Private, until the model is there. A model whose download
+      // never started is started here, so they never wait forever.
+      try {
+        this.options.startModel?.();
+      } catch {
+        // Starting is best effort; the next tick tries again.
+      }
       return { state: 'model_unavailable', modelId: lane.modelId };
     }
     const ownerContext = this.options.ownerContext?.();
     const versions = snifferPromptVersions(ownerContext);
     const ledger = await readClassificationLedger(this.options.classificationLedgerPath);
     const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
-    if (!isClassifierApproved(ledger.entries, key) && this.options.autoApproveBuiltIn && isBuiltInLane(lane)
-      && !ownerRevoked(ledger.entries, key)) {
+    const builtInDefault = this.options.autoApproveBuiltIn === true && isBuiltInLane(lane);
+    if (builtInDefault && !isClassifierApproved(ledger.entries, key, { builtInDefault: true })
+      && !builtInDefaultRevoked(ledger.entries, key)) {
       await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
         recorded_at: (this.options.now?.() ?? new Date()).toISOString(),
         kind: 'classifier_model_decision',
@@ -304,13 +356,13 @@ export class TierSnifferService {
         prompt_version: versions.approval,
         lane: lane.kind,
         profile_id: lane.profileId,
-        approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+        approved_by: CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL,
         status: 'complete',
         entry_id: `sniffer-default-approval:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`,
       });
     }
-    const approved = this.options.autoApproveBuiltIn && isBuiltInLane(lane)
-      ? isClassifierApproved((await readClassificationLedger(this.options.classificationLedgerPath)).entries, key)
+    const approved = builtInDefault
+      ? isClassifierApproved((await readClassificationLedger(this.options.classificationLedgerPath)).entries, key, { builtInDefault: true })
       : isClassifierApproved(ledger.entries, key);
     if (!approved) {
       // Until then no question is sent anywhere: flagged items wait, pending
@@ -376,17 +428,58 @@ export class TierSnifferService {
     }
   }
 
-  /** Re-judges a page of each set's routed items decided under older inputs; never throws. */
-  private rejudge(): TierRejudgeReport {
-    const total: TierRejudgeReport = { seen: 0, updated: 0, movesQueued: 0, held: 0, skipped: 0, failed: 0 };
-    const perPass = this.options.rejudgePerPass ?? DEFAULT_TIER_REJUDGE_PER_PASS;
-    if (perPass <= 0) return total;
+  /**
+   * Settles each set's stored items a bounded page per tick: newly added
+   * raising owner rules raise what they match (tier-rules-sweep.ts), and
+   * items a names-only folder covers stop waiting for text
+   * (tier-names-only-settle.ts). Never throws.
+   */
+  private settleStoredItems(): void {
     for (const ledgerPath of this.ledgerPaths()) {
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
       try {
+        const report = sweepOwnerRuleRaises({ set });
+        if (report.raised > 0 || report.secrets > 0) {
+          this.options.log?.(
+            `Olympus tier rules: ${report.raised} stored item(s) raised by a new owner rule (hidden first)`
+            + `${report.secrets ? `, ${report.secrets} made Secrets` : ''}.`,
+          );
+        }
+      } catch {
+        // A set that cannot be read keeps its placements this tick.
+      }
+      try {
+        const settled = settleNamesOnlyItems({ set });
+        if (settled.settled > 0) {
+          this.options.log?.(`Olympus tier names-only: ${settled.settled} stored item(s) settled on their names.`);
+        }
+      } catch {
+        // Left pending this tick.
+      }
+    }
+  }
+
+  /** Re-judges a page of each set's routed items decided under older inputs; never throws. */
+  private rejudge(): TierRejudgeReport {
+    const total = emptyTierRejudgeReport();
+    const perPass = this.options.rejudgePerPass ?? DEFAULT_TIER_REJUDGE_PER_PASS;
+    if (perPass <= 0) return total;
+    const maxOpen = Math.max(0, this.options.rejudgeMaxOpenQuestions ?? 2 * perPass);
+    for (const ledgerPath of this.ledgerPaths()) {
+      const set = tierSetForLedger(ledgerPath);
+      if (!set) continue;
+      try {
+        // Questions already waiting: re-judging more than the sniffer can
+        // answer only grows the queue.
+        if (this.options.installed.snifferStoreForLedger(ledgerPath).counts().questions >= maxOpen) continue;
         const after = this.rejudgeCursors.get(ledgerPath);
-        const { report, next } = rejudgeRoutedItems({ set, limit: perPass, ...(after ? { after } : {}) });
+        const { report, next } = rejudgeRoutedItems({
+          set,
+          limit: perPass,
+          ...(after ? { after } : {}),
+          autoMoves: this.autoMovesFor(set),
+        });
         if (next) this.rejudgeCursors.set(ledgerPath, next);
         else this.rejudgeCursors.delete(ledgerPath);
         for (const key of Object.keys(total) as Array<keyof TierRejudgeReport>) total[key] += report[key];
@@ -394,13 +487,25 @@ export class TierSnifferService {
         // A set that cannot be read keeps its recorded decisions this tick.
       }
     }
-    if (total.updated > 0 || total.movesQueued > 0) {
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0) {
       this.options.log?.(
-        `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued} item(s) under the current classifier `
-        + `(${total.held} held for the privacy check, ${total.movesQueued} tier move(s) queued).`,
+        `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier `
+        + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued`
+        + `${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ''}).`,
       );
     }
     return total;
+  }
+
+  /** Whether this set's queued moves run automatically (see `autoMoves`). */
+  private autoMovesFor(set: TieredStoreSet): boolean {
+    const options = this.options.autoMoves;
+    if (!options) return false;
+    try {
+      return options.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly(set);
+    } catch {
+      return false;
+    }
   }
 
   /** Carries out queued moves the sniffer's verdicts made, bounded per pass. */
@@ -409,6 +514,8 @@ export class TierSnifferService {
     signal: AbortSignal,
   ): Promise<TierAutoMoveReport> {
     const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0 };
+    const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
+    const now = (this.options.now ?? (() => new Date()))().getTime();
     let budget = Math.max(0, options.maxPerPass ?? DEFAULT_AUTO_MOVES_PER_PASS);
     for (const ledgerPath of this.ledgerPaths()) {
       if (budget === 0 || signal.aborted) break;
@@ -426,13 +533,9 @@ export class TierSnifferService {
       for (const record of queued) {
         if (budget === 0 || signal.aborted || this.answering()) break;
         budget -= 1;
+        const identity = recordIdentity(record);
+        const failureKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}\u0000${record.generation}`;
         try {
-          const identity = {
-            provider: record.provider,
-            accountScope: record.accountScope,
-            providerItemId: record.providerItemId,
-            ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
-          };
           // A raise (a re-judged item now held) hid its copies first: they
           // are the move's sources all the same.
           const source = set.ledger.copies(identity).find((copy) => copy.state === 'current'
@@ -444,20 +547,72 @@ export class TierSnifferService {
             identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
             target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
             embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: 'system-automatic', why: AUTO_MOVE_WHY },
+            // Every embedding here is the built-in local model: an older
+            // superseded copy this item's own earlier move left in the
+            // destination costs nothing to replace, and keeping it would
+            // strand the item mid-move (hidden, on a raise).
+            replaceOwnSupersededCopy: true,
           });
           report.moved += 1;
+          this.moveFailures.delete(failureKey);
         } catch {
           // The move stays queued (held, never shown twice); the next pass or
           // the owner-approved migration picks it up.
           report.failed += 1;
+          // To the back of the queue: a move that keeps failing never holds
+          // the head of a page while moves behind it could land.
+          try {
+            set.ledger.recordMoveFailure(identity, { expectedGeneration: record.generation });
+          } catch {
+            // Counting is best effort.
+          }
+          const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
+          this.moveFailures.set(failureKey, firstFailedAt);
+          if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set, record, report)) {
+            this.moveFailures.delete(failureKey);
+          }
         }
       }
     }
     if (report.moved > 0 || report.failed > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} left queued.`);
+      this.options.log?.(
+        `Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed`
+        + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ''}`
+        + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ''}.`,
+      );
     }
     return report;
   }
+
+  /**
+   * A move that kept failing past the stale bound. A lateral or lower move
+   * hid nothing: it is abandoned, the item leaves `moving` at its tiers and
+   * its copies serve as before. A raise hid its source for privacy: putting
+   * that back would serve the item below its newest decision, so it stays
+   * hidden and queued for a later pass or the owner-approved migration.
+   */
+  private settleStaleMove(set: TieredStoreSet, record: TierLedgerRecord, report: TierAutoMoveReport): boolean {
+    try {
+      // The ledger refuses a raise inside the same transaction that would
+      // undo it, so no concurrent hide-first stage can slip in between.
+      set.ledger.abandonMove(recordIdentity(record), { expectedGeneration: record.generation });
+      report.abandoned = (report.abandoned ?? 0) + 1;
+      return true;
+    } catch (error) {
+      if (error instanceof TierLedgerRaiseAbandonRefusedError) report.staleRaises = (report.staleRaises ?? 0) + 1;
+      // Otherwise left queued; the next pass looks again.
+      return false;
+    }
+  }
+}
+
+function recordIdentity(record: TierLedgerRecord): TierLedgerIdentity {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
+  };
 }
 
 const AUTO_MOVE_WHY = 'Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).';
@@ -466,18 +621,6 @@ function isBuiltInLane(lane: SnifferLane): boolean {
   return lane.kind === BUILT_IN_SNIFFER_LANE.kind
     && lane.profileId === BUILT_IN_SNIFFER_LANE.profileId
     && lane.modelId === BUILT_IN_SNIFFER_LANE.modelId;
-}
-
-/** Whether the newest owner-signed entry for this exact key is a revocation. */
-function ownerRevoked(entries: readonly ClassificationLedgerEntry[], key: { lane: string; profileId: string; modelId: string; promptVersion: string }): boolean {
-  for (const entry of entries) {
-    if (entry.model_id !== key.modelId || entry.prompt_version !== key.promptVersion
-      || entry.lane !== key.lane || entry.profile_id !== key.profileId) continue;
-    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL) continue;
-    if (entry.kind === 'classifier_model_revoked') return true;
-    if (entry.kind === 'classifier_model_decision' && entry.status === 'complete') return false;
-  }
-  return false;
 }
 
 /** Every open store of the set embeds (if at all) with the built-in local model only. */

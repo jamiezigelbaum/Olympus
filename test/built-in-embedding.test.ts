@@ -248,6 +248,33 @@ describe('built-in embedding installer', () => {
     expect(unsupported.reason).toBe('unsupported_platform');
   });
 
+  test('a download that stops sending fails within the stall limit and leaves no partial file', async () => {
+    const dir = temporaryDir();
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };
+    const served = servedAssets();
+    const stalled = (async () => {
+      let sent = false;
+      // A few bytes, then silence: the connection never closes.
+      return new Response(new ReadableStream({
+        pull(controller) {
+          if (sent) return new Promise<void>(() => undefined);
+          sent = true;
+          controller.enqueue(new Uint8Array([1, 2, 3]));
+        },
+      }));
+    }) as unknown as typeof fetch;
+    const started = Date.now();
+    const error = await installBuiltInEmbedding({
+      env, model: served.model, skipRuntime: true, fetchImpl: stalled, downloadStallMs: 50,
+    }).catch((caught: unknown) => caught);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(error).toMatchObject({ reason: 'download_failed' });
+    expect((error as Error).message).toContain('interrupted');
+    expect(readdirSync(join(dir, served.model.modelId)).filter((name) => name.includes('.partial'))).toEqual([]);
+    expect(existsSync(join(dir, 'install.lock'))).toBe(false);
+    expect(readBuiltInEmbeddingStatus(env, served.model).state).toBe('failed');
+  });
+
   test('a corrupted file on disk is caught at load and removed', async () => {
     const dir = temporaryDir();
     const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };
@@ -270,12 +297,13 @@ describe('built-in embedding installer', () => {
 // Provider
 
 /** A stand-in model: the [CLS] vector encodes the window's ids. */
-function stubRuntime(log: EmbeddingBatch[]): EmbeddingRuntime {
+function stubRuntime(log: EmbeddingBatch[], delayMs = 0): EmbeddingRuntime {
   return {
     async createSession() {
       return {
         async run(batch) {
           log.push(batch);
+          if (delayMs > 0) await Bun.sleep(delayMs);
           const hidden = 4;
           const data = new Float32Array(batch.batchSize * batch.sequenceLength * hidden);
           for (let row = 0; row < batch.batchSize; row += 1) {
@@ -298,7 +326,7 @@ function stubRuntime(log: EmbeddingBatch[]): EmbeddingRuntime {
   };
 }
 
-function stubProvider(options: { status?: number; threads?: number } = {}) {
+function stubProvider(options: { status?: number; threads?: number; delayMs?: number } = {}) {
   const dir = temporaryDir();
   const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };
   const served = servedAssets(options.status ? { status: options.status } : {});
@@ -306,7 +334,7 @@ function stubProvider(options: { status?: number; threads?: number } = {}) {
   const provider = new BuiltInSourceEmbeddingProvider({
     env,
     model: served.model,
-    runtime: () => stubRuntime(batches),
+    runtime: () => stubRuntime(batches, options.delayMs ?? 0),
     installerOptions: { fetchImpl: served.fetchImpl, skipRuntime: true },
     ...(options.threads ? { threads: options.threads } : {}),
   });
@@ -397,6 +425,32 @@ describe('built-in embedding provider', () => {
     // The owner's retry skips the back-off and tries again at once.
     await provider.retry().catch(() => undefined);
     expect(served.requests.length).toBeGreaterThan(attempts);
+  });
+
+  test('a question\'s pass runs before the waiting passes of an indexing batch', async () => {
+    const { provider, batches } = stubProvider({ delayMs: 15 });
+    await provider.embed([{ text: 'warm up' }], { taskType: 'RETRIEVAL_DOCUMENT' });
+    batches.length = 0;
+    // 70 documents: three forward passes of at most 32 rows.
+    const indexing = provider.embed(
+      Array.from({ length: 70 }, (_, index) => ({ text: index % 2 ? 'a b c' : 'hello world the flight to san' })),
+      { taskType: 'RETRIEVAL_DOCUMENT' },
+    );
+    await Bun.sleep(5);
+    const question = provider.embed([{ text: 'a b' }], { taskType: 'RETRIEVAL_QUERY' });
+    const [vectors, [queryVector]] = await Promise.all([indexing, question]);
+    expect(vectors).toHaveLength(70);
+    expect(queryVector).toHaveLength(4);
+    // The question waited only for the pass already running, not for the batch.
+    expect(batches.map((batch) => batch.batchSize)).toEqual([32, 1, 32, 6]);
+  });
+
+  test('warm loads the model and runs one question through it', async () => {
+    const { provider, batches, env, served } = stubProvider();
+    await provider.warm();
+    expect(readBuiltInEmbeddingStatus(env, served.model).state).toBe('ready');
+    expect(batches).toHaveLength(1);
+    expect(batches[0]!.batchSize).toBe(1);
   });
 
   test('batches stay inside the padded-token budget', async () => {

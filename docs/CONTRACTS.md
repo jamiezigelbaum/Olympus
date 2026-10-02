@@ -316,6 +316,34 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-02 (no version change): background re-judging and owner-rule
+  sweeps (tier classification review fixes). A re-judge of a stored item
+  never hides it pending the sniffer's answer: the item stays where it is
+  and only a Private verdict raises it (hidden first); with automatic moves
+  off (an embedding other than the built-in local model) a raise is queued
+  with the item visible, as the owner-approved migration's proposal. A
+  secret a re-judge finds in stored text is hidden at once and handed to the
+  one Secrets policy. A newly saved raising owner rule (always Private,
+  Secrets) is applied to items already stored, hidden first. Automatic moves
+  may replace a superseded copy their own item's earlier move left in the
+  destination, and a failing move goes to the back of the queue. Items a
+  names-only folder covers that were left pending on unread text before
+  classifier p4 are settled on their names without a re-list. The tier
+  ledger gains schema 4 (additive: `move_attempts`, `rejudged_key`,
+  `rejudge_json`), and the classification ledger's approval vocabulary gains
+  `built_in_default` (the built-in model's standing default, never counted
+  as an owner approval unless the caller asks for that default). None of
+  this is reachable from the three contract types; the fingerprint is
+  unchanged (design: per-item four-tier classification §2.2 and §9).
+- 2026-10-01 (no version change): tier classifier `2026-10-01.p3`. With a
+  privacy-safe model configured, EVERY item whose text was read is judged by
+  it, with the item's names, before it may be Personal (held pending
+  meanwhile); without one, only items whose names were flagged wait. Routed
+  items decided under an older classifier version or sniffer prompt are
+  re-judged in the background (`tier-rejudge.ts`). A classification-semantics
+  change inside the shared classifier: the three contract types and the
+  fingerprint are unchanged; no stored data migrates (design: per-item
+  four-tier classification §2.2 step [12]).
 - 2026-10-01 (no version change): tier classifier `2026-10-01.p2`.
   Vocabulary-only sensitive detector hits (financial and health words, the
   health origin hint) no longer final-decide Private when a privacy-safe

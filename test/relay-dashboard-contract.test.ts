@@ -10,7 +10,7 @@ import {
   DASHBOARD_RESOURCE_URI as RELAY_RESOURCE_URI,
   DASHBOARD_TOOL_NAME as RELAY_TOOL_NAME,
   INSTALL_URL,
-  notInstalledDashboard,
+  notConnectedDashboard,
   offlineDashboard,
   type RelayDashboardViewModel,
 } from '../connect-relay/shared/dashboard-contract.ts';
@@ -20,7 +20,6 @@ import {
   DASHBOARD_TOOL_NAME,
   type DashboardViewModelV1,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
-import { DASHBOARD_RESOURCE_VERSIONED_URI } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
 
 // Compile-time: the relay's shape is assignable to the contract. A contract
@@ -32,9 +31,8 @@ describe('the relay dashboard copy follows the contract', () => {
     expect(RELAY_TOOL_NAME).toBe(DASHBOARD_TOOL_NAME);
     expect(RELAY_RESOURCE_URI).toBe(DASHBOARD_RESOURCE_URI);
     expect(DASHBOARD_TOOL.name).toBe(DASHBOARD_TOOL_NAME);
-    // The relay advertises the engine's content-versioned URI (`<base>?v=<hash>`),
-    // so ChatGPT fetches the same page version from either.
-    expect(DASHBOARD_TOOL._meta?.['openai/outputTemplate']).toBe(DASHBOARD_RESOURCE_VERSIONED_URI);
+    // The engine advertises a content-versioned URI: `<base>?v=<12 hex>`.
+    expect(String(DASHBOARD_TOOL._meta?.['openai/outputTemplate'])).toMatch(new RegExp(`^${DASHBOARD_RESOURCE_URI.replace(/[/:]/g, '\\$&')}(\\?v=[0-9a-f]{12})?$`));
   });
 
   test('both relay states produce contract values with exactly the contract keys', () => {
@@ -54,10 +52,23 @@ describe('the relay dashboard copy follows the contract', () => {
     });
     expect(assignable(offlineDashboard(undefined, now)).connection)
       .toEqual({ state: 'mac_offline', action: { id: 'wake_mac', href: 'https://olympusplugin.ai/help/mac-offline/' } });
-    const notInstalled = assignable(notInstalledDashboard(INSTALL_URL, now));
-    expect(notInstalled.connection).toEqual({ state: 'not_installed', action: { id: 'install', href: 'https://olympusplugin.ai/install/' } });
+    const notConnected = assignable(notConnectedDashboard(INSTALL_URL, now));
+    expect(notConnected.connection).toEqual({
+      state: 'not_connected',
+      action: { id: 'connect' },
+      installHref: 'https://olympusplugin.ai/install/',
+    });
     // Both survive the engine's allowlisted response builder unchanged.
     expect(copyDashboardViewModel(offline)).toEqual(offline);
-    expect(copyDashboardViewModel(notInstalled)).toEqual(notInstalled);
+    expect(copyDashboardViewModel(notConnected)).toEqual(notConnected);
+  });
+
+  test('the builder keeps installHref only for not_connected and only on the Olympus site', () => {
+    const now = Date.parse('2026-10-01T12:00:00.000Z');
+    const base = notConnectedDashboard(INSTALL_URL, now) as DashboardViewModelV1;
+    const foreign = copyDashboardViewModel({ ...base, connection: { ...base.connection, installHref: 'https://example.com/install/' } });
+    expect(foreign.connection).toEqual({ state: 'not_connected', action: { id: 'connect' } });
+    const otherState = copyDashboardViewModel({ ...base, connection: { ...base.connection, state: 'mac_offline' } });
+    expect(otherState.connection.installHref).toBeUndefined();
   });
 });

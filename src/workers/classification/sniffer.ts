@@ -105,40 +105,94 @@ export function snifferReasonCode(verdict: Pick<StoredSnifferVerdict, 'category'
 export const SNIFFER_INJECTION_CATEGORY = 'injection';
 
 /**
+ * A cached verdict that still answers its question. The injection screen
+ * runs afresh before every cache read, so a cached injection fail-safe is
+ * only ever an earlier screen's call: when today's screen lets the material
+ * through, the model is asked instead (2026-10-02: an older screen flagged
+ * lab reports on their reference ranges).
+ */
+export function cachedSnifferVerdictHolds(verdict: Pick<StoredSnifferVerdict, 'category' | 'failSafe'>): boolean {
+  return !(verdict.failSafe && verdict.category === SNIFFER_INJECTION_CATEGORY);
+}
+
+/**
  * Material shaped like an instruction to the model, or like its output
- * (braces, verdict fields, tier-with-confidence phrasing, "every item ...
- * personal"). It is never sent: the item resolves to Private at once.
+ * (verdict fields, a brace or tag around verdict words, tier-with-confidence
+ * phrasing, "every item ... personal"). It is never sent: the item resolves
+ * to Private at once.
  *
  * DEFENSE IN DEPTH ONLY. A blocklist can always be evaded; the structural
- * defense is that every item is asked on its own, so an instruction can at
- * most talk about the item that carries it. The text is
+ * defense is that every item is asked on its own, as one JSON string, so an
+ * instruction can at most talk about the item that carries it. The text is
  * normalized first (NFKC, format and zero-width characters removed, marks
  * stripped, common Cyrillic/Greek look-alikes mapped to Latin) and checked
- * both as words and with every separator removed, so fullwidth, zero-width,
- * look-alike and letter-spaced shapes are caught too. False positives cost
- * only over-privacy.
+ * as words, as whole-word runs with separators removed, and as letter-spaced
+ * runs, so fullwidth, zero-width, look-alike and letter-spaced shapes are
+ * caught too.
+ *
+ * Every shape needs the STEERING half of an instruction (a tier, verdict or
+ * "safe" word, a verdict field, a role label) and never fires on what
+ * ordinary documents carry on their own: comparison signs and arrows ("<5.7",
+ * ">= 60", "a -> b"), "all lines", "this list", the word "confidence", a
+ * "Category:" column. A false positive is not free: it holds a normal
+ * document Private and keeps the model from ever judging it (2026-10-02: six
+ * lab reports were flagged on their reference ranges alone).
  */
+const STEER_WORD = String.raw`(?:personal|public|ordinary|not private|safe|harmless)`;
+/** A confidence-shaped number, never the tail of a larger one ("12,50" is not ",50"). */
+const CONFIDENCE_NUMBER = String.raw`(?<![\d.,])(?:0?[.,]\d{1,3}|1[.,]0+)(?![\d.,])`;
+const HIGH_CONFIDENCE_NUMBER = String.raw`(?<![\d.,])(?:0?[.,]9\d{0,2}|1[.,]0+)(?![\d.,])`;
+/** Within one sentence: a steering word after a full stop belongs to the next one. */
+const SAME_SENTENCE = String.raw`[^.!?;]{0,40}`;
+/** Up to two words between a tier word and its confidence ("personal, ordinary, 0.99"). */
+const NEAR = String.raw`[^a-z0-9]{1,4}(?:[a-z]+[^a-z0-9]{1,4}){0,2}`;
 const INJECTION_PATTERNS: readonly RegExp[] = [
-  /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^\n]{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier|guidance)\b/,
+  /\b(?:ignore|disregard|forget|override|bypass|skip)\b.{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier|guidance)\b/,
   /\b(?:system|developer|assistant|user)\s*(?:prompt|message|note)?\s*:/,
   /\b(?:system prompt|developer message|as an ai|you are an? (?:ai|assistant|model|classifier|sniffer)|respond with|answer with|reply with|output only|return only)\b/,
-  /\bverdicts?\b/,
-  /\b(?:tier|confidence|category)\b\s*["']?\s*[:=]/,
-  /[{}<>]/,
-  /\b(?:personal|private|public|ordinary)\b[^\n]{0,40}\b(?:confidence|0?[.,]\d{1,3}|1[.,]0+)\b/,
-  /\b(?:confidence|0?[.,]9\d?|1[.,]0+)\b[^\n]{0,40}\b(?:personal|public|ordinary)\b/,
-  /\b(?:classify|label|mark|treat|tag|consider|rate|answer|return)\b[^\n]{0,30}\b(?:as|is|:)\s*(?:personal|public|ordinary|not private|safe|harmless)\b/,
-  /\b(?:every|all|each|any|other)\s+(?:of the\s+)?(?:items?|files?|entries|entry|documents?|names?|messages?|rows?|lines?)\b/,
-  /\bthis\s+(?:list|batch|prompt)\b/,
-  /\b(?:everything|all of (?:this|these|them)|these|the rest)\b[^\n]{0,30}\b(?:is|are)\b[^\n]{0,20}\b(?:personal|ordinary|public|safe|harmless)\b/,
+  // The model's own output: its fields, quoted or set to a verdict value.
+  /\bverdicts?\b\s*["']?\s*[:=[]/,
+  new RegExp(String.raw`\bverdicts?\b${SAME_SENTENCE}\b${STEER_WORD}\b`),
+  /["'](?:tier|confidence|category|verdicts?)["']\s*:/,
+  new RegExp(String.raw`\b(?:tier|confidence|category)\b\s*["']?\s*[:=]\s*["']?\s*(?:personal|private|public|ordinary|reference|${CONFIDENCE_NUMBER})`),
+  // A brace around verdict words, or markup shaped like a prompt's structure
+  // (<system>, </item>, <|im_start|>, [INST]). A lone "<" or ">" is a comparison.
+  /\{[^{}]{0,40}\b(?:tier|personal|public|ordinary|verdicts?|confidence|category)\b/,
+  /<\s*\/?\s*(?:system|user|assistant|developer|human|instructions?|prompt|items?|documents?|names|excerpt|verdicts?|owner_privacy|context|im_start|im_end|inst|sys|tool[a-z_]*|output|response|answer)\b[^<>]{0,40}>/,
+  /<\|[^<>|]{1,30}\|>/,
+  /\[\s*\/?\s*(?:inst|sys)\s*\]/,
+  // A tier paired with a confidence, either way round.
+  new RegExp(String.raw`\b(?:personal|private|public|ordinary)${NEAR}(?:confidence\b|${CONFIDENCE_NUMBER})`),
+  new RegExp(String.raw`(?:\bconfidence\b|${HIGH_CONFIDENCE_NUMBER})${NEAR}(?:personal|public|ordinary)\b`),
+  /\b(?:classify|label|mark|treat|tag|consider|answer)\b.{0,30}\b(?:as|is|:)\s*(?:personal|public|ordinary|not private|safe|harmless)\b/,
+  /\b(?:rate|return)\b.{0,30}\b(?:as|is|:)\s*(?:personal|public|ordinary|not private)\b/,
+  // Talk about the other items or the prompt, steering toward a verdict.
+  new RegExp(String.raw`\b(?:every|all|each|any|other)\s+(?:of the\s+)?(?:items?|files?|entries|entry|documents?|names?|messages?|rows?|lines?)\b${SAME_SENTENCE}\b(?:${STEER_WORD}|verdicts?|tier)\b`),
+  new RegExp(String.raw`\bthis\s+(?:list|batch|prompt)\b${SAME_SENTENCE}\b(?:${STEER_WORD}|verdicts?|tier)\b`),
+  /\b(?:everything|all of (?:this|these|them)|these|the rest)\b.{0,30}\b(?:is|are)\b.{0,20}\b(?:personal|ordinary|public|safe|harmless)\b/,
 ];
 
-/** Separator-free forms of instruction words ("t i e r : p e r s o n a l"). */
-const COMPACT_MARKERS: readonly string[] = [
-  'ignoreprevious', 'ignoreall', 'ignoretherules', 'ignoreinstructions', 'disregard', 'systemprompt',
-  'verdict', 'tierpersonal', 'tierpublic', 'personalordinary', 'confidence', 'everyitem', 'allitems',
-  'eachitem', 'classifyas', 'markas', 'answerpersonal', 'respondpersonal', 'personal099', 'personal0.99',
+/**
+ * Instruction phrases with their separators removed, matched only on whole
+ * words ("personal ordinary", "system_prompt"): never across a word, so
+ * "small items" or "Mark Ashton" cannot spell one.
+ */
+const WORD_RUN_MARKERS: readonly string[] = [
+  'ignoreprevious', 'ignoreall', 'ignoretherules', 'ignoreinstructions', 'systemprompt',
+  'tierpersonal', 'tierpublic', 'personalordinary', 'answerpersonal', 'respondpersonal', 'personal099', 'personal0.99',
 ];
+
+/**
+ * Instruction words spelled out letter by letter ("t i e r : p e r s o n a l",
+ * "c o n f i d e n c e"). Nobody letter-spaces a normal word, so single words
+ * count here.
+ */
+const LETTER_SPACED_MARKERS: readonly string[] = [
+  ...WORD_RUN_MARKERS, 'disregard', 'verdict', 'confidence', 'everyitem', 'allitems', 'eachitem', 'classifyas', 'markas',
+];
+
+/** Letter-spaced runs: this many one-character tokens in a row, or more. */
+const LETTER_SPACED_MIN_RUN = 4;
 
 /** Common Cyrillic/Greek look-alikes and their Latin reading, position by position. */
 const CONFUSABLE_FROM = 'авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı';
@@ -159,8 +213,49 @@ export function normalizeSnifferMaterial(material: string): string {
 export function snifferMaterialLooksLikeInjection(material: string): boolean {
   const normalized = normalizeSnifferMaterial(material);
   if (INJECTION_PATTERNS.some((pattern) => pattern.test(normalized))) return true;
-  const compact = normalized.replace(/[^a-z0-9.]/g, '');
-  return COMPACT_MARKERS.some((marker) => compact.includes(marker));
+  if (wholeWordRunHas(normalized, WORD_RUN_MARKERS)) return true;
+  for (const run of letterSpacedRuns(normalized)) {
+    const compact = run.replace(/[^a-z0-9.]/g, '');
+    if (LETTER_SPACED_MARKERS.some((marker) => compact.includes(marker))) return true;
+    if (INJECTION_PATTERNS.some((pattern) => pattern.test(run.replace(/ /g, '')))) return true;
+  }
+  return false;
+}
+
+/** Whether a marker spells a run of whole words, separators removed. */
+function wholeWordRunHas(normalized: string, markers: readonly string[]): boolean {
+  const words = normalized.split(/[^a-z0-9.]+/).filter(Boolean);
+  const starts = new Set<number>();
+  const ends = new Set<number>();
+  let at = 0;
+  for (const word of words) {
+    starts.add(at);
+    at += word.length;
+    ends.add(at);
+  }
+  const compact = words.join('');
+  return markers.some((marker) => {
+    for (let index = compact.indexOf(marker); index >= 0; index = compact.indexOf(marker, index + 1)) {
+      if (starts.has(index) && ends.has(index + marker.length)) return true;
+    }
+    return false;
+  });
+}
+
+/** Runs of one-character tokens ("t i e r = p e r s o n a l"), as written. */
+function letterSpacedRuns(normalized: string): string[] {
+  const runs: string[] = [];
+  let run: string[] = [];
+  const flush = () => {
+    if (run.length >= LETTER_SPACED_MIN_RUN) runs.push(run.join(' '));
+    run = [];
+  };
+  for (const token of normalized.split(' ')) {
+    if ([...token].length === 1) run.push(token);
+    else flush();
+  }
+  flush();
+  return runs;
 }
 
 export function snifferId(lane: Pick<SnifferLaneIdentity, 'kind'>, promptVersion = SNIFFER_PROMPT_VERSION): string {
@@ -360,7 +455,9 @@ export class CachedTierSniffer implements TierSniffer {
         promptVersion: this.promptVersion,
         mapRevision,
       });
-      if (cached) return { verdict: 'decided', tier: snifferTierKey(cached), code: snifferReasonCode(cached) };
+      if (cached && cachedSnifferVerdictHolds(cached)) {
+        return { verdict: 'decided', tier: snifferTierKey(cached), code: snifferReasonCode(cached) };
+      }
       if (request.subject) {
         this.store.enqueue({
           subject: request.subject,

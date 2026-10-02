@@ -39,6 +39,7 @@ import {
   namesLookPossiblyPrivate,
 } from './engine.ts';
 import { ownerSenderRuleMatches } from '../../core/sender-rules.ts';
+import { pathPrefixMatches } from '../../core/location-rules.ts';
 
 export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // 2026-10-01.p2: vocabulary-only detector hits go to the privacy-safe model
@@ -46,7 +47,13 @@ export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // 2026-10-01.p3: when a model can be asked, EVERY item whose text was read is
 // judged by it (with the item's names) before it may be Personal; a routed
 // item decided under an older version is judged again (tier-rejudge.ts).
-export const TIER_CLASSIFIER_VERSION = '2026-10-01.p3';
+// 2026-10-02.p4: the card detector needs a card's shape (whole number, card
+// grouping, issuer prefix and length, and for an unbroken run card words
+// nearby or no numeric table around it), and the sniffer's injection screen
+// needs the steering half of an instruction (comparison signs, "all lines"
+// and "confidence" alone no longer count). Items decided under p3 are judged
+// again, so a document either rule misfired on gets a real verdict.
+export const TIER_CLASSIFIER_VERSION = '2026-10-02.p4';
 
 export type TierKey = SourceClassificationTier;
 
@@ -186,6 +193,13 @@ export interface TierClassificationInput {
   provider?: string;
   /** Full extracted text for pass 2. Absent means pass 2 has nothing to read. */
   text?: string;
+  /**
+   * The owner keeps this item's content unread (a names-only disposition):
+   * its text never arrives, so pass 2 never runs (design 2.2: pass 2 is only
+   * for items approved for full ingestion). The names decide both layers and
+   * nothing waits on the text, so the item is never left pending forever.
+   */
+  namesOnly?: boolean;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
 }
@@ -342,6 +356,7 @@ function classifyItemTiersWithPublic(
   const content = contentPass({
     signals,
     text,
+    ...(input.namesOnly ? { namesOnly: true } : {}),
     matchInput,
     names: snifferNames(signals),
     metadata,
@@ -353,7 +368,10 @@ function classifyItemTiersWithPublic(
   });
 
   const contentRead = text !== undefined || metadata.tier === 'secrets';
-  const contentPending = content.pending || !contentRead;
+  // Unread text keeps the content decision open, unless the owner chose that
+  // it is never read: then the names are the whole decision.
+  const namesOnly = input.namesOnly === true && text === undefined;
+  const contentPending = content.pending || (!contentRead && !namesOnly);
   return {
     ...base,
     metadataTier: metadata.tier,
@@ -666,6 +684,8 @@ function metadataPass(args: {
 function contentPass(args: {
   signals: SourceClassificationSignals;
   text: string | undefined;
+  /** The owner keeps the content unread (TierClassificationInput.namesOnly). */
+  namesOnly?: boolean;
   matchInput: MapMatchInput;
   /** The item's names (title, folder path, sender), bounded: they travel with the excerpt. */
   names: string;
@@ -686,8 +706,10 @@ function contentPass(args: {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
-      reasons: ['content:unread'],
-      pending: metadata.pending,
+      reasons: [args.namesOnly ? 'content:names_only' : 'content:unread'],
+      // Names only: the content IS the names' tier, and a names verdict
+      // settles both; nothing is left open on the text.
+      pending: args.namesOnly ? false : metadata.pending,
     };
   }
 
@@ -891,7 +913,7 @@ export function ownerRuleMatches(
   if (!value) return false;
   switch (rule.match.kind) {
     case 'pathPrefix':
-      return (signals.path ?? '').trim().toLowerCase().startsWith(value);
+      return pathPrefixMatches(signals.path, value);
     case 'folderKey':
     case 'chat':
       return (signals.folderKeys ?? []).some((key) => key.trim().toLowerCase() === value);

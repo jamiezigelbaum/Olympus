@@ -16,21 +16,24 @@ Robin Vale rents a flat at 14 Larch Court with their partner Priya. This
 autumn they are renewing the lease, renovating the kitchen, planning a trip
 to Lisbon, hosting a book club and running a library workshop. Robin also has
 a clinic visit, blood test results, a bank overdraft notice and tax notes:
-these are the Private items, there to show that Olympus withholds them from
-ChatGPT.
+these are the Private items, there to show that Olympus keeps their contents
+out of ChatGPT and answers from them only in the private answer panel.
 
 ## Files and intended tiers
 
 Olympus decides each item's tier itself. The "intended" column is what the
 demo is built to show; check it on the demo engine before submission
-(`chatgpt-plugin/SUBMISSION.md`, pre-submission checklist).
+(`chatgpt-plugin/SUBMISSION.md`, pre-submission checklist). The demo engine
+is a fresh install, so it has three tiers (Personal, Private, Secret): the
+newsletter and the bylaws are general reference material, which a fresh
+install keeps as Personal (there is no Public tier).
 
 | File | Kind | Intended tier | Used by test case |
 |---|---|---|---|
 | `mail/001-sam-lease-renewal.eml` | mail | Personal | P1 |
 | `mail/002-sam-lease-followup.eml` | mail | Personal | P1 |
 | `mail/003-dentist-appointment.eml` | mail | Personal | P2 |
-| `mail/004-garden-newsletter.eml` | mail | Public | - |
+| `mail/004-garden-newsletter.eml` | mail | Personal (reference) | - |
 | `mail/005-priya-budget.eml` | mail | Personal | P3 |
 | `mail/006-contractor-quote.eml` | mail | Personal | P3 |
 | `mail/007-flight-confirmation.eml` | mail | Personal | - |
@@ -49,7 +52,7 @@ demo is built to show; check it on the demo engine before submission
 | `docs/lease-summary.md` | document | Personal | P1 |
 | `docs/kitchen-renovation-plan.md` | document | Personal | P3 |
 | `docs/household-budget-2026.csv` | document | Personal | - |
-| `docs/garden-bylaws.md` | document | Public | - |
+| `docs/garden-bylaws.md` | document | Personal (reference) | - |
 | `docs/insurance-claim.md` | document | Private (health, money) | - |
 | `docs/tax-notes-2025.md` | document | Private (money) | - |
 

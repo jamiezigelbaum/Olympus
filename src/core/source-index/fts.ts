@@ -18,33 +18,42 @@ export interface SourceIndexFtsMigrationResult {
 }
 
 const TOKEN_PATTERN = /[\p{L}\p{N}_]+/gu;
+// Words that carry no topic: function words, the scaffolding of a request
+// ("what do I have about", "what did I save", "show me") and nouns that name
+// an item's kind rather than its subject ("files", "papers"). Each is in
+// nearly every readable document, so as a query term it matches everything
+// with text and nothing in particular: "What do I have about integral
+// theory?" matched every readable file on "do", "have" and "about" and ranked
+// them above the files named for the topic. Words that are also common
+// subjects (a "will", the month "May", "US") stay searchable.
 const FTS_QUERY_STOPWORDS = new Set([
-  'a',
-  'an',
-  'and',
-  'are',
-  'as',
-  'at',
-  'by',
-  'for',
-  'from',
-  'in',
-  'is',
-  'it',
-  'me',
-  'my',
-  'of',
-  'on',
-  'or',
-  'the',
-  'to',
-  'was',
-  'were',
-  'what',
-  'when',
-  'where',
-  'who',
-  'with',
+  'a', 'about', 'after', 'again', 'all', 'also', 'am', 'an', 'and', 'any', 'anything', 'are', 'article', 'articles',
+  'as', 'at',
+  'be', 'been', 'before', 'being', 'but', 'by',
+  'can', 'could',
+  'detail', 'details', 'did', 'do', 'doc', 'docs', 'document', 'documents', 'does', 'doing', 'done',
+  'each',
+  'file', 'files', 'find', 'for', 'found', 'from',
+  'get', 'give', 'got',
+  'had', 'happen', 'happened', 'has', 'have', 'having', 'he', 'her', 'here', 'him', 'his', 'how',
+  'i', 'if', 'in', 'into', 'is', 'it', 'item', 'items', 'its',
+  'just',
+  'keep', 'kept', 'know',
+  'let', 'look',
+  'many', 'me', 'might', 'more', 'most', 'much', 'must', 'my',
+  'need', 'no', 'not', 'now',
+  'of', 'on', 'or', 'our', 'out',
+  'paper', 'papers',
+  'please',
+  'read', 'remember',
+  'said', 'save', 'saved', 'say', 'says', 'see', 'she', 'should', 'show', 'so', 'some', 'something', 'stuff', 'such',
+  'tell', 'than', 'that', 'the', 'their', 'them', 'then', 'there', 'these', 'they', 'thing', 'things', 'this',
+  'those', 'to',
+  'use', 'using',
+  'very',
+  'want', 'was', 'we', 'were', 'what', 'when', 'where', 'which', 'while', 'who', 'whom', 'whose', 'why', 'with',
+  'would', 'write', 'written', 'wrote',
+  'you', 'your',
 ]);
 
 const SOURCE_INDEX_SYNONYMS: Readonly<Record<string, readonly string[]>> = Object.freeze({

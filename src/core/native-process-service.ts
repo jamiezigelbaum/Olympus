@@ -19,6 +19,32 @@ export function setNativeProcessChildStdio(mode: NativeProcessChildStdio): void 
   childStdio = mode;
 }
 
+/**
+ * Told when the kernel starts a child process group and when it has stopped
+ * that whole group. The standalone engine host records the groups so a host
+ * that died without stopping them can clean them up at its next start
+ * (core/engine-children.ts). Process-wide for the same reason as the stdio
+ * mode; the OpenClaw Gateway sets none.
+ */
+export interface NativeProcessChildObserver {
+  spawned(serviceId: string, processGroupId: number): void;
+  stopped(serviceId: string, processGroupId: number): void;
+}
+let childObserver: NativeProcessChildObserver | undefined;
+
+export function setNativeProcessChildObserver(observer: NativeProcessChildObserver | undefined): void {
+  childObserver = observer;
+}
+
+function notifyChildObserver(event: 'spawned' | 'stopped', serviceId: string, pid: number | undefined): void {
+  if (!childObserver || !pid || process.platform === 'win32') return;
+  try {
+    childObserver[event](serviceId, pid);
+  } catch {
+    // Advisory bookkeeping never changes supervision.
+  }
+}
+
 export interface NativeProcessServiceHealth {
   reportFailure(error: Error): void;
   clearFailure(): void;
@@ -134,6 +160,7 @@ export function backgroundNativeProcessService(
 }
 
 interface ServiceLifetime<TSettings extends NativeProcessStartSettings> {
+  serviceId: string;
   generation: number;
   context: NativeProcessServiceContext;
   child: ChildProcess | undefined;
@@ -276,6 +303,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     });
     lifetime.child = child;
     lifetime.childReady = false;
+    notifyChildObserver('spawned', options.id, child.pid);
     let spawnFailed = false;
 
     child.once('exit', (code, signal) => {
@@ -351,6 +379,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       await stopCurrent();
       if (requestedGeneration !== generation) return;
       const lifetime: ServiceLifetime<TSettings> = {
+        serviceId: options.id,
         generation: requestedGeneration,
         context,
         child: undefined,
@@ -482,6 +511,7 @@ async function terminateChild<TSettings extends NativeProcessStartSettings>(
   lifetime.cleanupPromise = cleanup;
   try {
     await cleanup;
+    notifyChildObserver('stopped', lifetime.serviceId, child.pid);
     if (lifetime.child === child) lifetime.child = undefined;
   } finally {
     if (lifetime.cleanupPromise === cleanup) lifetime.cleanupPromise = undefined;

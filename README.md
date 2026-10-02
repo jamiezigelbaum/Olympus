@@ -6,7 +6,7 @@
 
 **Your whole digital life, searchable by your AI — on your privacy terms.**
 
-*A sovereignty-aware source brain for [OpenClaw](https://openclaw.ai) agents.*
+*A private knowledge engine on your Mac for ChatGPT, and a sovereignty-aware source brain for [OpenClaw](https://openclaw.ai) agents.*
 
 [![version](https://img.shields.io/badge/version-0.4.0-534AB7)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-0F6E56)](LICENSE)
@@ -14,7 +14,7 @@
 [![openclaw](https://img.shields.io/badge/OpenClaw-2026.7.1%2B-378ADD)](https://openclaw.ai)
 [![runtime](https://img.shields.io/badge/runtime-Bun%20%2B%20TypeScript-B45309)](https://bun.sh)
 
-[Quickstart](docs/QUICKSTART.md) · [Release status](docs/V0_4_RELEASE.md) · [Source capabilities](docs/SOURCE_CAPABILITIES.md) · [How it works](#how-it-works) ·
+[Olympus for ChatGPT](#olympus-for-chatgpt) · [OpenClaw quickstart](docs/QUICKSTART.md) · [Release status](docs/V0_4_RELEASE.md) · [Source capabilities](docs/SOURCE_CAPABILITIES.md) · [How it works](#how-it-works) ·
 [Sources](#supported-sources) · [Security model](#the-security-model) ·
 [Commands](#command-reference)
 
@@ -22,14 +22,16 @@
 
 ---
 
-> **🤖 Installing this as an AI agent?** Stop and read
+> **🤖 Installing this as an AI agent for OpenClaw?** Stop and read
 > **[INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md)** before running any
 > command — it is the step-by-step runbook you must follow, including
 > exactly what to tell your operator after each step (your install report
 > must end with the Step 1→2 invitation, never a bare status line). Managed
 > `git:`, `clawhub:`, and `npm-pack:` installs intentionally hide their internal
 > package path; use the installed `olympus` CLI and this packaged runbook rather
-> than searching OpenClaw's managed storage.
+> than searching OpenClaw's managed storage. **Setting up Olympus for ChatGPT
+> instead?** Follow [Olympus for ChatGPT](#olympus-for-chatgpt) and the
+> plugin's own setup skill, not this runbook.
 
 ---
 
@@ -53,10 +55,142 @@ agent › Three commitments: the tax documents to Maria by Friday
 Your agent saw a bounded, cited, policy-gated answer. It never saw your
 mailbox.
 
+## Olympus for ChatGPT
+
+Olympus 1.0 is a ChatGPT plugin. The Olympus engine runs on your Mac and
+keeps your index there; ChatGPT asks it questions through one secure
+connection that you approve on the Mac. You need a Mac and ChatGPT. You do
+not need OpenClaw, Tailscale, an API key or a new account.
+
+> The Mac installer is not available yet: whether it is a script or a signed
+> `.pkg` is still open in the
+> [release plan](docs/V0_4_RELEASE.md#olympus-10-chatgpt). Until it ships,
+> step 1 is for testers who already have the engine on their Mac, and
+> ChatGPT's setup skill says so instead of running any install command.
+
+### 1. Add Olympus and install the engine on your Mac
+
+1. Open the ChatGPT desktop app on your Mac.
+2. Add **Olympus** from ChatGPT's plugin directory.
+3. Install the engine. When the installer ships, it installs Olympus for
+   your macOS user only (no administrator password), runs it in the
+   background as a login item (a LaunchAgent), and downloads its built-in
+   models once. Testers set it up from the build they were given; ask
+   *"Set up Olympus on my Mac"* and ChatGPT checks whether it is there.
+
+### 2. Approve ChatGPT on your Mac
+
+The first time ChatGPT connects to Olympus, an Olympus page opens in your
+Mac's browser asking to connect ChatGPT. Click **Approve**. That click, on your own Mac, is how
+Olympus knows the Mac is yours: there is no code to copy and no account to
+create. To check on it later, run `olympus engine status` in Terminal.
+
+### 3. Connect Dropbox and choose folders
+
+Open the **Olympus** dashboard in ChatGPT's sidebar (or ask *"Show my
+Olympus dashboard"*). Choose **Connect** next to Dropbox and sign in with
+your own Dropbox account; the sign-in link works once, for 10 minutes, from
+any device. Gmail and Google Drive connect the same way.
+
+Then pick folders. For each folder choose:
+
+- **Full**: Olympus reads the files and can answer from what they say.
+- **Names only**: Olympus keeps the file names and details such as dates,
+  not what the files say.
+- **Skip**: Olympus leaves the folder alone.
+
+A folder follows its parent's choice unless you change it; **Mixed** means
+some folders inside it are set differently. Choose **Save and start**, and
+indexing begins on your Mac.
+
+### 4. Tell Olympus what's private
+
+Olympus sorts every item, one by one, into one of three tiers:
+
+- **Personal**: everyday mail, notes and files. ChatGPT can see the parts
+  that answer your question, and cites them.
+- **Private**: things you keep to yourself, such as health, money or family
+  matters. What they say is never sent to ChatGPT. Olympus answers from
+  them on your Mac, in the private answer panel (below).
+- **Secret**: passwords, recovery codes and keys. No model ever reads them,
+  and Olympus never answers from them.
+
+Olympus decides on your Mac. Once its built-in private model is ready, it
+checks every item it reads before treating it as Personal. In the dashboard,
+**Privacy** asks *"What's private for you?"*: answer in your own words. You
+can also mark folders, Gmail labels or senders as always Private.
+
+### 5. Ask
+
+Ask in ChatGPT the way you normally would: *"What did Sam say about the
+lease?"* ChatGPT searches Olympus and answers from your Personal items, with
+citations.
+
+### The private answer panel
+
+When some of the items that match your question are Private, a small Olympus
+panel appears on its own under ChatGPT's reply: **Private answer from your
+Mac**, marked **Not sent to ChatGPT**.
+
+- Your Mac writes the answer with its built-in private model (Qwen3.5 4B)
+  and sends it to the panel sealed, so only the panel can open it. It goes
+  around the ChatGPT conversation, not through it, and the Olympus relay
+  cannot read it.
+- It usually arrives within a minute. Ask for *"all the details"* and
+  Olympus reads the whole documents instead; that can take a few minutes.
+- **Sources** (closed at first) lists the items the answer used. Click one to
+  open it on your Mac, or in Dropbox on the web if it is not on this Mac
+  (ChatGPT opens that web link for you, so it sees the address).
+- **Hide** folds the answer away and **Show** brings it back. An answer
+  expires after 10 minutes; ask again for a new one.
+- Ask follow-up questions in the chat as usual; each private answer appears
+  in a new panel.
+
+Your Mac needs to be awake and online. The panel runs inside ChatGPT's page,
+so it relies on the panel code ChatGPT loads; the
+[design](docs/design/chatgpt-plugin.md#who-can-read-the-answer) states that
+limit plainly.
+
+### What ChatGPT can and can't see
+
+ChatGPT **can** see:
+
+- The parts of your Personal items that answer a question: excerpts, titles,
+  dates and links.
+- File names, including the names of some Private items. A file's name can be
+  Personal while what it says is Private, so its name may show up in ChatGPT;
+  its contents never do.
+- That some items matching a question are Private: ChatGPT's model learns
+  just that, with no titles and no content.
+- Status: which sources are connected, how far indexing has got, and what
+  needs you. The folder picker shows your folder names inside ChatGPT so you
+  can choose; they pass through ChatGPT to reach the picker, but ChatGPT's
+  model is not given them.
+
+ChatGPT **can't** see:
+
+- What your Private items say, or the private answers made from them.
+- Your Secret items, ever.
+- Folders you skip, or what the files in Names-only folders say.
+- API keys or passwords: you never enter one in ChatGPT. Optional extras such
+  as a Venice account are set up on your Mac.
+
+The relay at `mcp.olympusplugin.ai` passes ChatGPT's requests to your Mac. It
+stores and logs no questions, answers or tokens, but like any HTTPS service
+it handles them in transit. Full details: the
+[ChatGPT design](docs/design/chatgpt-plugin.md) and the
+[trust model](docs/TRUST_MODEL.md).
+
+To stop Olympus, run `olympus engine uninstall` (it keeps your settings and
+data); `olympus data delete --all` deletes what Olympus stored on your Mac.
+
+The rest of this README covers Olympus with OpenClaw, which stays supported
+and optional.
+
 ## How it works
 
-Every item you ingest is judged on its own as Public, Personal, Private, or
-Secrets (internally S0-S5): its names are Personal unless something raises
+Every item you ingest is judged on its own as Personal, Private, or Secrets
+(plus Public where the posture keeps it; internally S0-S5): its names are Personal unless something raises
 them, and its content is raised to Private or Secrets on evidence. Each tier
 has its own index and routes only to the model lanes your sovereignty policy
 allows:
@@ -91,9 +225,12 @@ flowchart LR
     CLOUD & PRIVATE & LOCAL --> AGENT
 ```
 
-Olympus uses four tiers: **Public**, **Personal** (ordinary personal and work
-content), **Private** (sensitive material), and **Secrets** (never model input).
-See the [tier mapping](docs/TRUST_MODEL.md#product-tier-names) for the unchanged
+Olympus uses **Personal** (ordinary personal and work content), **Private**
+(sensitive material), and **Secrets** (never model input). A ChatGPT
+install, and any install on the `no-sensitive` posture, has no Public tier:
+anything that would have been Public is Personal. The other OpenClaw
+postures, and installs made before 1.0, keep a **Public** tier too. See the
+[tier mapping](docs/TRUST_MODEL.md#product-tier-names) for the unchanged
 storage identifiers.
 
 Four postures, chosen (and changeable) in setup — a config file, not a code
@@ -122,7 +259,10 @@ Some rules are not configurable, by design: secure content never routes to
 ordinary cloud models, secrets are denied to every lane, and an
 exhausted policy chain refuses rather than silently downgrading.
 
-## Get started
+## Get started with OpenClaw
+
+Using ChatGPT? See [Olympus for ChatGPT](#olympus-for-chatgpt) instead; none
+of this section is needed.
 
 **You need** OpenClaw `2026.7.1+` on a Node release OpenClaw itself supports
 (`>=24.16.0 <25` or `>=26.1.0` for OpenClaw 2026.9.5; check
@@ -320,8 +460,9 @@ Open the dashboard's **Setup** page and press **Connect an agent**. Pick the
 agent you use and follow its steps; every address and snippet has a copy
 button.
 
-- **ChatGPT**: add `https://mcp.olympusplugin.ai/mcp` as a connector, then
-  approve it with one click on the page that opens on this computer.
+- **ChatGPT**: add the Olympus plugin in ChatGPT (see
+  [Olympus for ChatGPT](#olympus-for-chatgpt)), then approve it with one
+  click on the page that opens on this computer.
 - **Muse** and the **Grok API**: paste the address, then press **Create key**
   and give the agent the key. The key is shown once.
 - **Claude Code** and **Codex** on this computer: copy the prompt (or the

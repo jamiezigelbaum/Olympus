@@ -170,6 +170,26 @@ describe('1. every claimed job settles within its deadline', () => {
   });
 });
 
+describe('1b. a shared analysis logs no negative wait', () => {
+  test('a later search of the same question shares the ready answer: search_to_ready_ms is 0, never negative', async () => {
+    const clock = { now: 1_000 };
+    const { jobs, lines } = harness(async () => ({ answer: 'x', citations: [] }), { precompute: true, now: () => clock.now });
+    jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE });
+    await Bun.sleep(20);
+    // The first search's analysis is ready; the same question is asked again later.
+    clock.now = 61_000;
+    const later = jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE }).jobId!;
+    const panel = await generatePanelKeyPair();
+    await jobs.claim(later, panel.publicKey);
+    await Bun.sleep(20);
+    expect((await jobs.claim(later, panel.publicKey)).body.status).toBe('ready');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('precomputed=yes');
+    expect(lines[0]).toContain(' search_to_ready_ms=0 ');
+    expect(lines[0]).not.toMatch(/=-\d/);
+  });
+});
+
 describe('2. the sniffer yields to a private answer', () => {
   const LANE: SnifferLane = {
     kind: 'local',

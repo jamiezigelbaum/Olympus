@@ -115,8 +115,8 @@ const FIX_HREF_HOST = 'olympusplugin.ai';
 /** Every hand-off link: the relay's own host, the plugin's one redirect domain. */
 const HANDOFF_URL = /^https:\/\/mcp\.olympusplugin\.ai\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
 
-const CONNECTION_STATES = new Set<ConnectionState>(['not_installed', 'installing', 'ready', 'mac_offline', 'relay_unavailable']);
-const CONNECTION_ACTIONS = new Set(['install', 'open_olympus', 'wake_mac', 'retry']);
+const CONNECTION_STATES = new Set<ConnectionState>(['not_connected', 'not_installed', 'installing', 'ready', 'mac_offline', 'relay_unavailable']);
+const CONNECTION_ACTIONS = new Set(['connect', 'install', 'open_olympus', 'wake_mac', 'retry']);
 const STATUSES = new Set(['Fresh', 'Working', 'Waiting', 'Needs you', 'Failing', 'Off']);
 const UNITS = new Set(['files', 'messages', 'items']);
 const EMBEDDING_STATES = new Set(['downloading', 'verifying', 'ready', 'failed']);
@@ -146,6 +146,10 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
   if (view.connection.action && CONNECTION_ACTIONS.has(view.connection.action.id)) {
     const href = safeHref(view.connection.action.href);
     connection.action = { id: view.connection.action.id, ...(href ? { href } : {}) };
+  }
+  if (state === 'not_connected') {
+    const installHref = safeHref(view.connection.installHref);
+    if (installHref) connection.installHref = installHref;
   }
   if (state === 'installing' && view.connection.progress) {
     connection.progress = {
@@ -722,24 +726,33 @@ export function modelRetryToolResult(result: ModelRetryResult): ChatGptToolResul
  * names, keys, senders) go only to `_meta`, like the picker; the model sees
  * the owner's description (owner-approved) and counts.
  */
-export function privacyToolResult(settings: PrivacySettings, status: PrivacySummary['status']): ChatGptToolResult {
+export function privacyToolResult(
+  settings: PrivacySettings,
+  status: PrivacySummary['status'],
+  /** olympus_privacy_get's panel confirmation (dashboard-contract.ts PrivacySetInput); `_meta` only. */
+  confirmation?: string,
+): ChatGptToolResult {
   const copy = copyPrivacySettings(settings);
   const summary: PrivacySummary = {
-    status: status === 'saved' ? 'saved' : 'current',
+    status: status === 'saved' || status === 'conflict' ? status : 'current',
     configured: copy.configured,
     description: copy.description,
     ruleCount: copy.rules.length,
     pendingCount: copy.pendingCount,
   };
   const parts = [
-    summary.status === 'saved' ? 'Saved what is private for the owner.' : (summary.configured ? 'The owner has set what is private for them.' : 'The owner has not said yet what is private for them.'),
+    summary.status === 'saved'
+      ? 'Saved what is private for the owner.'
+      : summary.status === 'conflict'
+        ? 'Not saved: the privacy settings changed since they were shown. The Olympus panel shows the current ones to save again.'
+        : (summary.configured ? 'The owner has set what is private for them.' : 'The owner has not said yet what is private for them.'),
   ];
   if (summary.ruleCount > 0) parts.push(`${summary.ruleCount} folder, label or sender rule${summary.ruleCount === 1 ? '' : 's'} keep items Private; they are shown to the owner in the Olympus panel.`);
   if (summary.pendingCount > 0) parts.push(`${summary.pendingCount} item${summary.pendingCount === 1 ? ' waits' : 's wait'} for the privacy check on the Mac.`);
   return {
     content: [{ type: 'text', text: parts.join(' ') }],
     structuredContent: summary as unknown as Record<string, unknown>,
-    _meta: { [PRIVACY_META_KEY]: copy },
+    _meta: { [PRIVACY_META_KEY]: confirmation ? { ...copy, confirmation } : copy },
   };
 }
 
@@ -763,6 +776,7 @@ function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
       return [{ kind: 'folder', source_id: sourceId, key: opaque(rule.key), ...(display ? { display } : {}) }];
     }),
     pendingCount: whole(settings.pendingCount),
+    ...(typeof settings.revision === 'string' && settings.revision ? { revision: opaque(settings.revision).slice(0, 64) } : {}),
   };
 }
 
@@ -823,6 +837,8 @@ function copyScopeList(list: ScopeList): ScopeList {
         ...(finite(node.file_count) ? { file_count: whole(node.file_count) } : {}),
       })),
       ...(list.next_cursor ? { next_cursor: opaque(list.next_cursor) } : {}),
+      ...(list.next_cursor && finite(list.remaining) ? { remaining: whole(list.remaining) } : {}),
+      ...(list.truncated === true ? { truncated: true as const } : {}),
       selections: (list.selections ?? []).slice(0, MAX_SCOPE_NODES).map(copySelection),
       whole_account_selected: list.whole_account_selected === true,
     };
@@ -895,6 +911,7 @@ type SurfaceOnlyErrorCode =
   | 'not_linked'
   | 'picker_unavailable'
   | 'confirm_whole_account'
+  | 'privacy_owner_only'
   | 'embedding_change_needs_approval'
   | 'model_not_configured'
   | 'sign_in_failed'
@@ -932,6 +949,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   disconnect_incomplete: 'Olympus couldn\'t finish disconnecting this source. Try again.',
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',
   confirm_whole_account: 'Choosing the whole account needs the owner\'s confirmation in the Olympus panel.',
+  privacy_owner_only: 'Only the owner can remove a privacy rule or change what they said is private, in the Olympus panel.',
   embedding_change_needs_approval: 'Changing the search model re-indexes every source and needs the owner\'s approval on the Mac.',
   model_not_configured: 'That model is not set up on the Mac. Set it up in Olympus on the Mac first.',
   unknown_tool: 'Olympus does not have that tool.',

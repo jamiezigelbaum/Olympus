@@ -15,7 +15,7 @@
       "interface": {
         "displayName": "Olympus",
         "shortDescription": "Ask your own mail and files",
-        "longDescription": "Olympus is a private knowledge engine that runs on your Mac. It indexes the sources you choose, starting with local files and notes and then accounts you already have such as Gmail, Google Drive and Dropbox, and answers your questions in ChatGPT with citations. Your index stays on your Mac; ChatGPT reaches it through one secure connection you approve on the Mac. The Olympus dashboard in the ChatGPT sidebar shows what is connected, how far indexing has got and anything that needs you.",
+        "longDescription": "Olympus is a private knowledge engine that runs on your Mac. It indexes the sources you choose: Dropbox, Gmail and Google Drive, connected with accounts you already have, and sources such as X bookmarks, Readwise, Telegram and WhatsApp, set up on your Mac. It answers your questions in ChatGPT with citations. Your index stays on your Mac; ChatGPT reaches it through one secure connection you approve on the Mac. The Olympus dashboard in the ChatGPT sidebar shows what is connected, how far indexing has got and anything that needs you.",
         "developerName": "OCU Inc.",
         "category": "Productivity",
         "capabilities": ["Read"],

@@ -1,25 +1,30 @@
 /**
  * The ChatGPT dashboard view-model, version 1: `structuredContent` of the
  * `olympus_dashboard` tool, rendered by `ui://olympus/dashboard`. The engine
- * produces every state except `mac_offline` and `not_installed` (the relay
+ * produces every state except `mac_offline` and `not_connected` (the relay
  * answers those) and `relay_unavailable` (the UI derives it when a tool call
  * fails). See docs/design/chatgpt-plugin.md.
  *
- * Copy: the UI owns the wording of the five connection states (the relay
- * renders two of them without vocabulary.ts). Every other sentence comes from
+ * `not_connected` is a caller with no Olympus token: the relay cannot tell an
+ * owner who installed Olympus but has not linked ChatGPT from one who has no
+ * install, so it offers Connect and carries the install link beside it.
+ * `not_installed` stays in the union for UI compatibility; nothing produces it.
+ *
+ * Copy: the UI owns the wording of the connection states (the relay renders
+ * two of them without vocabulary.ts). Every other sentence comes from
  * src/workers/dashboard/vocabulary.ts, which the dashboard lane owns. Nothing
  * tiered Private or Secret is ever included, folder names included: every
  * value passes the allowlisted response builder before it leaves the engine
  * (structuredContent, _meta, errors alike).
  *
  * Not states here, by design: OAuth revoked (ChatGPT itself shows reconnect on
- * 401); installed but not linked (shown on the Mac, where linking happens).
+ * 401).
  * Stale status is derived by the UI from `generatedAt`. Multiple Macs per
  * ChatGPT account is v2.
  */
 import type { DashboardStatus } from '../dashboard/vocabulary.ts';
 
-export type ConnectionState = 'not_installed' | 'installing' | 'ready' | 'mac_offline' | 'relay_unavailable';
+export type ConnectionState = 'not_connected' | 'not_installed' | 'installing' | 'ready' | 'mac_offline' | 'relay_unavailable';
 
 export interface DashboardFix {
   label: string;
@@ -30,7 +35,12 @@ export interface DashboardFix {
    */
   tool?: string;
   args?: Record<string, unknown>;
-  /** olympusplugin.ai only: openExternal needs the plugin's redirect domains. */
+  /**
+   * olympusplugin.ai only: openExternal needs the plugin's redirect domains.
+   * Beside a tool, it is the help page naming a repair only the Mac can make
+   * (help/on-your-mac/#connect, #reconnect, #answers, #search, #models): the
+   * UI links it next to the control ("How to fix this on your Mac").
+   */
   href?: string;
   /** Shown on a disabled control. */
   disabledReason?: string;
@@ -111,7 +121,13 @@ export interface DashboardViewModelV1 {
     state: ConnectionState;
     /** ISO time; `mac_offline` only. */
     lastSeenAt?: string;
-    action?: { id: 'install' | 'open_olympus' | 'wake_mac' | 'retry'; href?: string };
+    /**
+     * `connect` (`not_connected` only) has no href: the dashboard result
+     * carries `_meta["mcp/www_authenticate"]`, ChatGPT's own linking trigger.
+     */
+    action?: { id: 'connect' | 'install' | 'open_olympus' | 'wake_mac' | 'retry'; href?: string };
+    /** `not_connected` only: where to install Olympus when it is not on the Mac yet. */
+    installHref?: string;
     /** `installing` only: model download, first index. */
     progress?: { percent: number; label: string };
   };
@@ -126,6 +142,7 @@ export interface DashboardViewModelV1 {
     /** What is being counted, and whether this is the first build or a refresh. */
     unit: 'files' | 'messages' | 'items';
     phase: 'initial' | 'refresh';
+    /** Searchable (indexed) items over the in-scope total: read but unindexed is not done. */
     percent: number;
     itemsLeft: number;
     /** Only once a rate has been measured. */
@@ -262,7 +279,10 @@ export interface ScopeFolderNode {
   kind: 'folder';
   has_children: boolean;
   selectable: boolean;
-  /** Not offered by the providers' folder listings today; reserved. */
+  /**
+   * Forwarded from the provider's listing when it reports them (the Dropbox
+   * and Drive folder listings do not today); absent otherwise.
+   */
   size_bytes?: number;
   file_count?: number;
 }
@@ -281,6 +301,14 @@ export interface FolderScopeList {
   status: 'scope_pending' | 'approved';
   nodes: ScopeFolderNode[];
   next_cursor?: string;
+  /** With `next_cursor`: how many more folders follow this page ("N more"). */
+  remaining?: number;
+  /**
+   * The level holds more folders than Olympus reads at once, so some are not
+   * listed at all (not on this page or any later one); `remaining` counts
+   * only the folders that were read.
+   */
+  truncated?: true;
   selections: ScopeSelection[];
   whole_account_selected: boolean;
 }
@@ -450,11 +478,25 @@ export interface PrivacySettings {
   rules: PrivacyRuleView[];
   /** Items waiting for the privacy check (held Private, keyword-searchable, not embedded). */
   pendingCount: number;
+  /**
+   * olympus_privacy_get only: the panel's confirmation for a save that
+   * lowers protection (see PrivacySetInput). In `_meta`, so the model never
+   * sees it.
+   */
+  confirmation?: string;
+  /**
+   * Opaque compare-and-swap token over the saved settings (description and
+   * every rule, Secrets-location rules included). Send it back as
+   * `olympus_privacy_set {revision}`; a save against an older one is refused
+   * with status `conflict` and the current settings.
+   */
+  revision?: string;
 }
 
 /** A privacy tool's `structuredContent`: the description and counts, never a rule. */
 export interface PrivacySummary {
-  status: 'current' | 'saved';
+  /** `conflict`: not saved, the settings changed since `revision`; `_meta` carries the current ones. */
+  status: 'current' | 'saved' | 'conflict';
   configured: boolean;
   description: string;
   ruleCount: number;
@@ -467,10 +509,23 @@ export interface PrivacySummary {
  * every rule it shows). Validated and size-capped (description 2000
  * characters, 100 rules, display 200); `invalid_params` otherwise. Saving
  * applies the rules to classification at the next sync.
+ *
+ * Owner-only (review P-1, 2026-10-02): the tool is hidden from the model, and
+ * a save that removes a saved rule or changes the description is refused
+ * (`privacy_owner_only`) unless it carries `confirmation` from a recent
+ * olympus_privacy_get (30 minutes, spent by the save). Adding rules needs
+ * no confirmation.
+ *
+ * With `revision`, the save happens only if the settings still match it
+ * (compare-and-swap, like `olympus_scope_set`'s `scope_revision`): two open
+ * panels cannot silently overwrite each other's always-Private rules.
  */
 export interface PrivacySetInput {
   description?: string;
   rules?: PrivacyRuleView[];
+  confirmation?: string;
+  /** The `revision` the panel was showing; optional for now, checked when given. */
+  revision?: string;
 }
 
 /* ------------------------------------------------------------------ */

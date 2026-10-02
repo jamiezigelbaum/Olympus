@@ -9,6 +9,7 @@ import type {
   OlympusDashboardControlParams,
   OlympusDashboardReadParams,
   OlympusDashboardReadResult,
+  OlympusFolderScopeNode,
   OlympusFolderScopeSourceId,
 } from '../src/control-ui-contract.ts';
 import { renderDashboardControlUi } from '../src/workers/dashboard/index.ts';
@@ -17,6 +18,7 @@ import {
   type SourceDispositionsView,
 } from '../src/workers/source-dispositions.ts';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from './dashboard-preview.ts';
+import { FIRST_RUN_RESOURCES, FIRST_RUN_RESOURCES_KEY, FIRST_RUN_ROOT } from '../test/fixtures/chatgpt-picker-first-run.ts';
 
 const PORT = Number(process.env.CONTROL_UI_PREVIEW_PORT ?? 8931);
 const ROOT = join(import.meta.dir, '..');
@@ -110,6 +112,19 @@ export function buildDispositionsPreviewView(): SourceDispositionsView {
   };
 }
 
+/**
+ * The folder picker's browse in this harness: a real first run (45 top-level
+ * folders, nothing chosen, 30 inside 3 Resources), the same layout the
+ * ChatGPT picker was reviewed against. Only the contract's fields are
+ * passed on: the local browse carries no folder sizes or file counts.
+ */
+export function previewFolderLevel(parentKey?: string): OlympusFolderScopeNode[] {
+  const level = !parentKey ? FIRST_RUN_ROOT : parentKey === FIRST_RUN_RESOURCES_KEY ? FIRST_RUN_RESOURCES : [];
+  return level.map(({ key, name, has_children, selectable }) => ({
+    key, name, kind: 'folder', has_children, selectable, ...(parentKey ? { parent_key: parentKey } : {}),
+  }));
+}
+
 /** The preview's read handler; tests render the same pages through it. */
 export function readResult(params: OlympusDashboardReadParams, canWrite: boolean, setupState = SETUP_STATE) {
   if (params.view === 'dispositions') {
@@ -120,17 +135,8 @@ export function readResult(params: OlympusDashboardReadParams, canWrite: boolean
       view.folder_scopes = ['google_drive.docs', 'dropbox.files'].map((id) => ({ source_id: id as OlympusFolderScopeSourceId, disposition_source_id: id, label: id === 'dropbox.files' ? 'Dropbox' : 'Google Drive', connected: id === 'dropbox.files', status: 'scope_pending' as const, account_generation: 'preview-account', scope_revision: 'preview-revision' }));
       const result: OlympusDashboardReadResult = renderSourceDispositionsControlUi(view, canWrite, source);
       if (params.action === 'browse_folder_scope' && canWrite) {
-        const root = !params.parent_key;
         result.scope_browser = { source_id: source, account_generation: 'preview-account', scope_revision: 'preview-revision', status: 'scope_pending', selections: [], whole_account_selected: false,
-          nodes: root ? [
-            { key: 'preview-areas', name: '2 Areas', kind: 'folder', has_children: true, selectable: true },
-            { key: 'preview-projects', name: 'Projects', kind: 'folder', has_children: true, selectable: true },
-            { key: 'preview-archive', name: 'Archive', kind: 'folder', has_children: false, selectable: true },
-          ] : [
-            { key: 'preview-finances', parent_key: params.parent_key!, name: 'Finances', kind: 'folder', has_children: false, selectable: true },
-            { key: 'preview-health', parent_key: params.parent_key!, name: 'Health', kind: 'folder', has_children: false, selectable: true },
-          ],
-        };
+          nodes: previewFolderLevel(params.parent_key) };
       }
       return result;
     }

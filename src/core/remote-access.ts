@@ -25,7 +25,7 @@
  */
 // Distinct local names keep the bundler from renumbering the bundle's other
 // `node:*` bindings, so the committed dist/ diff stays the size of the change.
-import { randomBytes as raRandomBytes } from 'node:crypto';
+import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from 'node:crypto';
 import {
   chmodSync as raChmodSync,
   lstatSync as raLstatSync,
@@ -33,6 +33,7 @@ import {
   readFileSync as raReadFileSync,
   renameSync as raRenameSync,
   statSync as raStatSync,
+  unlinkSync as raUnlinkSync,
   writeFileSync as raWriteFileSync,
 } from 'node:fs';
 import { homedir as raHomedir } from 'node:os';
@@ -322,9 +323,78 @@ export function demoInstallMarked(dir: string): boolean {
   return text !== undefined && text.split('\n', 1)[0]!.trim() === DEMO_INSTALL_MARKER_TEXT;
 }
 
-/** Whether a request came through the relay (it carries the relay child's marker, whatever its value). */
-export function isRelayedRequest(request: Request): boolean {
+/**
+ * Whether a request carries the relay marker at all, whatever its value. Only
+ * for refusing what a direct loopback visit alone may do (OAuth approval):
+ * a forged marker then fails closed. Never a reason to grant anything.
+ */
+export function carriesRelayMarker(request: Request): boolean {
   return request.headers.has(RELAYED_REQUEST_HEADER);
+}
+
+/**
+ * The relay child's per-boot secret (remote-relay-runtime.ts), written 0600
+ * in the 0700 remote-access directory so the worker, another process, can
+ * check the marker's value. Removed when the child stops.
+ */
+export const RELAY_SECRET_FILE = 'relay-secret';
+const RELAY_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+export function writeRelaySecret(dir: string, secret: string): void {
+  if (!RELAY_SECRET_PATTERN.test(secret)) throw new Error('relay secret must be 32 random bytes, base64url');
+  ensureRemoteAccessDir(dir);
+  writePrivateText(raJoin(dir, RELAY_SECRET_FILE), `${secret}\n`);
+}
+
+/** Removes the secret file if it still holds this child's secret (a newer child's stays). */
+export function clearRelaySecret(dir: string, secret: string): void {
+  const path = raJoin(dir, RELAY_SECRET_FILE);
+  if (readPrivateFile(path)?.trim() !== secret) return;
+  try {
+    raUnlinkSync(path);
+  } catch {
+    // Already gone.
+  }
+}
+
+/**
+ * A relayed-request check for one remote-access directory: the marker must
+ * equal the relay child's current secret (constant-time). No secret file, or
+ * one not owned by this user, means nothing is relayed.
+ */
+export function createRelayedRequestCheck(options: { dir?: () => string; now?: () => number } = {}): (request: Request) => boolean {
+  const read = cachedFileReader(
+    () => raJoin(options.dir ? options.dir() : remoteAccessDir(process.env), RELAY_SECRET_FILE),
+    (text) => {
+      const secret = text.trim();
+      return RELAY_SECRET_PATTERN.test(secret) ? Buffer.from(secret, 'utf8') : undefined;
+    },
+    // Statted on each marked request: a restarted child's new secret is seen at once.
+    0,
+    options.now ?? Date.now,
+  );
+  return (request) => {
+    const value = request.headers.get(RELAYED_REQUEST_HEADER);
+    if (!value) return false;
+    const secret = read();
+    if (!secret) return false;
+    const given = Buffer.from(value, 'utf8');
+    return given.length === secret.length && raTimingSafeEqual(given, secret);
+  };
+}
+
+let defaultRelayedCheck: ((request: Request) => boolean) | undefined;
+
+/**
+ * Whether a request came through this Mac's relay child: its marker equals
+ * the child's per-boot secret (review finding, 2026-10-02: presence alone let
+ * any local caller with a credential select the ChatGPT surface and
+ * `/private`). Reads the secret from this process's remote-access directory.
+ */
+export function isRelayedRequest(request: Request): boolean {
+  if (!request.headers.has(RELAYED_REQUEST_HEADER)) return false;
+  defaultRelayedCheck ??= createRelayedRequestCheck();
+  return defaultRelayedCheck(request);
 }
 
 // ---------------------------------------------------------------------------

@@ -13,11 +13,15 @@
  * - the data directory carries the demo marker (core/remote-access.ts
  *   `demoInstallMarked`), which no real install has.
  *
- * Attempts are rate limited across all callers (relayed requests carry no
- * caller address), and five wrong passwords end an approval page.
+ * Wrong attempts are rate limited across all callers (relayed requests carry
+ * no caller address; a right one gives its token back, so reviewers signing
+ * in correctly never lock each other out), and five wrong passwords end an
+ * approval page. A demo grant gets the read-only ChatGPT surface
+ * (`isDemoGrant`).
  */
 import { timingSafeEqual } from 'node:crypto';
 import type { OlympusConfig } from '../../core/config.ts';
+import { pinnedClient } from './pinned-clients.ts';
 
 export interface DemoConsentSettings {
   readonly username: string;
@@ -53,18 +57,44 @@ export async function verifyDemoSignIn(settings: DemoConsentSettings, username: 
   return userOk && passwordOk;
 }
 
-/** A token bucket over all demo sign-in attempts. */
-export function demoSignInLimiter(now: () => number): { take(): boolean } {
+/**
+ * A token bucket over all demo sign-in attempts. Each attempt takes a token
+ * before its password check (so concurrent guesses cannot all pass) and a
+ * right sign-in refunds it: only wrong sign-ins spend the budget.
+ */
+export function demoSignInLimiter(now: () => number): { take(): boolean; refund(): void } {
   let tokens = DEMO_SIGN_IN_BURST;
   let last = now();
+  const refill = () => {
+    const at = now();
+    tokens = Math.min(DEMO_SIGN_IN_BURST, tokens + ((at - last) / DEMO_SIGN_IN_WINDOW_MS) * DEMO_SIGN_IN_BURST);
+    last = at;
+  };
   return {
     take() {
-      const at = now();
-      tokens = Math.min(DEMO_SIGN_IN_BURST, tokens + ((at - last) / DEMO_SIGN_IN_WINDOW_MS) * DEMO_SIGN_IN_BURST);
-      last = at;
+      refill();
       if (tokens < 1) return false;
       tokens -= 1;
       return true;
     },
+    refund() {
+      refill();
+      tokens = Math.min(DEMO_SIGN_IN_BURST, tokens + 1);
+    },
   };
+}
+
+/** A demo grant's connection name: the pinned client's name, marked. */
+export function demoGrantDisplayName(clientName: string): string {
+  return `${clientName} (demo sign-in)`;
+}
+
+/**
+ * Whether a connection is a grant made through demo sign-in: a pinned
+ * client's grant carrying the demo name. A pinned client's ordinary grant is
+ * named by the pin alone, so only the demo path makes this name for one.
+ */
+export function isDemoGrant(connection: { clientId?: string | null; displayName: string }): boolean {
+  const pinned = connection.clientId ? pinnedClient(connection.clientId) : undefined;
+  return pinned !== undefined && connection.displayName === demoGrantDisplayName(pinned.clientName);
 }

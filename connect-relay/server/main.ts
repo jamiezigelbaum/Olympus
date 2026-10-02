@@ -6,7 +6,7 @@
  *   RELAY_LISTEN_HOST     default 127.0.0.1 (Caddy proxies to it)
  *   RELAY_LISTEN_PORT     default 8787
  *   RELAY_ENGINE_PORT     the engine worker's loopback port for the authorize bridge (default 8010)
- *   RELAY_INSTALL_URL     where "Install Olympus" leads (authorize bridge, not-installed dashboard)
+ *   RELAY_INSTALL_URL     where "Install Olympus" leads (authorize bridge, not-connected dashboard)
  *   RELAY_DEMO_INSTALL_ID the demo install reviewers sign in to (unset: no demo)
  *   RELAY_OPENAI_APPS_CHALLENGE / RELAY_OPENAI_APPS_CHALLENGE_FILE
  *                         OpenAI's domain verification token (unset: 404)

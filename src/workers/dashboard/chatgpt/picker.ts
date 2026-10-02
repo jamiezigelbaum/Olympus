@@ -388,6 +388,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const cursor = append ? (parentKey ? p.cursors.get(parentKey) : p.rootCursor) : '';
     const args: Any = { source_id: p.id };
     if (parentKey) args.parent_key = parentKey;
+    // The trail above it, so the engine can refuse a level inside a Secrets folder.
+    if (parentKey && (p.ancestors.get(parentKey) || []).length) args.ancestor_keys = p.ancestors.get(parentKey).slice(0, 64);
     if (cursor) args.cursor = cursor;
     p.loading = parentKey || 'root';
     p.error = '';

@@ -35,6 +35,13 @@ export interface BuiltInPrivateModel {
    * against any item.
    */
   available(): boolean;
+  /**
+   * Start the first-time download when none has started yet (never blocks,
+   * never restarts a failed one). The sniffer service calls it while the
+   * model is unavailable, so items held for the model on a fresh install are
+   * not held forever waiting for something else to start the download.
+   */
+  startIfIdle?(): void;
 }
 
 let registered: BuiltInPrivateModel | undefined;

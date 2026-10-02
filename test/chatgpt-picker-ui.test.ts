@@ -584,8 +584,9 @@ describe('folder picker', () => {
     await host.settle();
     expect(host.toolCalls(T.scopeList).slice(-3)).toEqual([
       { source_id: 'dropbox.files', parent_key: 'k-a' },
-      { source_id: 'dropbox.files', parent_key: 'k-a2' },
-      { source_id: 'dropbox.files', parent_key: 'k-deep' },
+      // Deeper levels name the trail above them, so the engine can refuse a level inside a Secrets folder.
+      { source_id: 'dropbox.files', parent_key: 'k-a2', ancestor_keys: ['k-a'] },
+      { source_id: 'dropbox.files', parent_key: 'k-deep', ancestor_keys: ['k-a', 'k-a2'] },
     ]);
     expect(doc(host).querySelector('.fpath')!.textContent).toBe('… / Divorce / Old Letters');
     expect(thisShows(host)).toEqual({ pressed: 'metadata_only', inherited: '' });

@@ -6,7 +6,9 @@
      - Google Limited Use statement (scopes taken from the code: gmail/drive/calendar read-only)
      - Venice retention deferred to Venice's own terms
      - Support email handled by an unnamed email service provider
-     Owner-decided: entity and address (Wyoming), minimum age 13, under-18 parental permission. -->
+     Owner-decided: entity and address (Wyoming), minimum age 13, under-18 parental permission.
+     Updated 2026-10-02 to match the product: three tiers (no Public tier), the private answer
+     panel's data flow, and Private item names that may be Personal. -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -43,11 +45,11 @@
       </div>
 
       <h1>Privacy policy</h1>
-      <p class="meta">Draft of 1 October 2026. Effective date: not yet set.</p>
+      <p class="meta">Draft of 2 October 2026. Effective date: not yet set.</p>
 
       <p>Olympus is a knowledge engine that runs on your Mac and answers questions about your own mail, files and notes, including questions you ask in ChatGPT. It is published by Open Coordination Unlimited, Inc. ("OCU", "we", "us"). This policy explains what data Olympus processes, where, why, who receives it, how long it is kept, and how you control it.</p>
 
-      <p><strong>In short:</strong> your mail, files, notes and the index Olympus builds from them stay on your Mac. We do not have a copy. When you ask a question in ChatGPT, ChatGPT receives the question it sent, plus answers and excerpts built only from items Olympus has tiered Public or Personal, with citations. It never receives Private or Secret items. The Olympus relay that connects ChatGPT to your Mac passes requests through without storing or logging their content.</p>
+      <p><strong>In short:</strong> your mail, files, notes and the index Olympus builds from them stay on your Mac. We do not have a copy. When you ask a question in ChatGPT, ChatGPT receives the question it sent, plus excerpts built only from items Olympus has tiered Personal, with citations. It never receives the contents of Private or Secret items. Answers from Private items are shown only to you, in an Olympus panel inside ChatGPT, sealed so that neither ChatGPT's conversation nor our relay can read them. The Olympus relay that connects ChatGPT to your Mac passes requests through without storing or logging their content.</p>
 
       <h2 id="where">Where your data is processed</h2>
       <div class="table-scroll">
@@ -80,11 +82,11 @@
         </table>
       </div>
 
-      <h2 id="tiers">The four tiers</h2>
-      <p>Olympus labels every item, one by one, as Public, Personal, Private or Secret. Item names and titles are labeled separately from their contents, and are Personal by default.</p>
+      <h2 id="tiers">The three tiers</h2>
+      <p>Olympus labels every item, one by one, as Personal, Private or Secret. Item names and titles are labeled separately from their contents, and are Personal by default, so the name of a Private item may be visible in ChatGPT even though its contents are not.</p>
       <ul>
-        <li><strong>Public</strong> and <strong>Personal</strong> items may be used to answer questions in ChatGPT.</li>
-        <li><strong>Private</strong> items (for example health, money, legal and identity matters) are never sent to ChatGPT, not even as summaries. They can be answered only on your Mac with a local model, or by Venice if you choose to set it up (see <a href="#third-parties">Third parties</a>).</li>
+        <li><strong>Personal</strong> items may be used to answer questions in ChatGPT.</li>
+        <li><strong>Private</strong> items (for example health, money, legal and identity matters, and whatever you tell Olympus is private for you) are never sent to ChatGPT, not even as summaries. They are answered on your Mac, by the private model built into Olympus or by Venice if you choose to set it up (see <a href="#third-parties">Third parties</a>), and the answer is shown only to you in the private answer panel (see <a href="#private-panel">The private answer panel</a>).</li>
         <li><strong>Secret</strong> items (for example passwords, recovery codes and private keys) are removed from the index and are never given to any model. Olympus keeps only a record that a Secret item exists.</li>
       </ul>
       <p>Labeling is automatic and can be wrong. Olympus is designed to err towards the more protective tier when it is unsure.</p>
@@ -92,7 +94,7 @@
       <h2 id="categories">Categories of data</h2>
       <h3>Processed only on your Mac</h3>
       <ul>
-        <li><strong>Content from sources you connect:</strong> files and notes on your Mac, and, if you connect them, mail and documents from accounts such as Gmail, Google Drive and Dropbox. This can include any information those items contain.</li>
+        <li><strong>Content from sources you connect:</strong> mail, documents and files from accounts you connect, such as Gmail, Google Drive and Dropbox, and from other sources you set up on your Mac, such as X bookmarks, Readwise, Telegram or WhatsApp. This can include any information those items contain.</li>
         <li><strong>Derived data:</strong> the search index, text extracted from documents, vector representations made by the built-in model, tier labels and their reasons.</li>
         <li><strong>Credentials:</strong> the sign-in tokens that let Olympus read the accounts you connect, and the keys and tokens that link your Mac to ChatGPT.</li>
         <li><strong>Settings and logs:</strong> your Olympus settings and local log files. Olympus's logs are designed not to contain message content or tokens.</li>
@@ -101,11 +103,17 @@
       <h3 id="chatgpt">What ChatGPT (OpenAI) receives</h3>
       <ul>
         <li>The questions ChatGPT sends to Olympus on your behalf.</li>
-        <li>Answers, and excerpts of evidence, built only from Public and Personal items.</li>
+        <li>Answers, and excerpts of evidence, built only from Personal items.</li>
         <li>Citations for those items: source name, and title, date and link where available.</li>
-        <li>When the only relevant items are Private: one fixed sentence saying the answer stays on your Mac. No titles, counts or content.</li>
-        <li>Status shown in the Olympus dashboard: which kinds of sources are connected, indexing progress, and anything that needs your attention. It never includes Private or Secret items or folder names.</li>
+        <li>Item names that are Personal, which can include the name of an item whose contents are Private.</li>
+        <li>When some items matching a question are Private: a fixed note to ChatGPT's model saying so, with no titles or content. Alongside it, for the private answer panel only (not ChatGPT's model), how many Private items matched and a one-time identifier for the private answer.</li>
+        <li>Status shown in the Olympus dashboard: which kinds of sources are connected, indexing progress, and anything that needs your attention. It never includes Private or Secret items.</li>
+        <li>When you use the folder picker: the names of the folders you browse, shown to you in the picker but not given to ChatGPT's model. Locations you keep Secret are left out.</li>
+        <li>When you open a cited source that is not on your Mac: its web address, which ChatGPT opens for you.</li>
       </ul>
+
+      <h3 id="private-panel">The private answer panel</h3>
+      <p>When Private items match a question, an Olympus panel inside ChatGPT shows you an answer from them, marked "Not sent to ChatGPT". Your Mac writes the answer and seals it with a key that only that panel holds; the panel fetches it from your Mac through the relay, not through ChatGPT's conversation. ChatGPT's model never receives it, and the relay sees only sealed data. The panel's code is served inside ChatGPT, so this protection also relies on that code as ChatGPT delivers it. A private answer is kept on your Mac, in memory, for at most 10 minutes.</p>
       <p>What OpenAI does with your ChatGPT conversations, including this material, is governed by OpenAI's terms and privacy policy and your ChatGPT settings, not by this policy.</p>
 
       <h3 id="relay">What the relay processes</h3>
@@ -117,6 +125,7 @@
         <li><strong>Stored:</strong> a registry entry for each install: a random install identifier, the install's public key, and timestamps. It holds no name, email, IP address, account or token.</li>
         <li><strong>In memory only:</strong> IP addresses and counters used to limit abuse, and which installs are online.</li>
         <li>The relay does not create, check or store the tokens ChatGPT uses. Your Mac does.</li>
+        <li><strong>Private answers:</strong> the relay forwards the panel's request and your Mac's sealed reply. It cannot read the answer, and it logs neither the answer nor its identifier.</li>
       </ul>
 
       <h3>When you are not using Olympus with ChatGPT</h3>

@@ -43,8 +43,9 @@ import {
   createRemoteMcpHandler,
   withRemoteMcpRoute,
 } from '../src/workers/remote-mcp.ts';
-import { CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI } from '../src/workers/remote-oauth/pinned-clients.ts';
-import { DEMO_SIGN_IN_BURST, resolveDemoConsent, type DemoConsentSettings } from '../src/workers/remote-oauth/demo-consent.ts';
+import { CHATGPT_CLIENT_ID, CHATGPT_CODEX_CLIENT_ID, CHATGPT_REDIRECT_URI, isChatGptGrant } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { DEMO_SIGN_IN_BURST, isDemoGrant, resolveDemoConsent, type DemoConsentSettings } from '../src/workers/remote-oauth/demo-consent.ts';
+import { withRequestPeer } from '../src/core/request-peer.ts';
 import { demoInstallMarked, DEMO_INSTALL_MARKER_FILE, DEMO_INSTALL_MARKER_TEXT } from '../src/core/remote-access.ts';
 import { authorizationServerMetadata, createRemoteOAuthHandler, withRemoteOAuthRoutes } from '../src/workers/remote-oauth/handler.ts';
 import type {
@@ -110,6 +111,8 @@ interface AssembleOptions {
   installId?: string;
   registrationBurst?: number;
   demoConsent?: () => DemoConsentSettings | undefined;
+  /** The request's network peer, instead of what the test server recorded. */
+  peerAddress?: (request: Request) => string | undefined;
 }
 
 function assemble(options: AssembleOptions = {}): void {
@@ -145,6 +148,7 @@ function assemble(options: AssembleOptions = {}): void {
       now: () => clock,
       sleep: async (ms) => { sleeps.push(ms); },
       ...(options.demoConsent ? { demoConsent: options.demoConsent } : {}),
+      ...(options.peerAddress ? { peerAddress: options.peerAddress } : {}),
       ...(options.registrationBurst !== undefined ? { registrationBurst: options.registrationBurst } : {}),
     }),
     withRemoteOpenApiRoutes(
@@ -164,7 +168,8 @@ beforeEach(() => {
   store = openRemoteConnectionStore(dbPath, { now: () => new Date(clock) });
   ledger = [];
   sleeps = [];
-  server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => handle(request) });
+  // As the worker serves it: each request's peer is recorded for the relay-mode approval check.
+  server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: withRequestPeer((request) => handle(request)) });
   base = `http://127.0.0.1:${server.port}`;
   assemble();
 });
@@ -234,7 +239,7 @@ async function openConsent(authorizationUrl: string | URL): Promise<ConsentForm>
 function submitConsent(
   form: Pick<ConsentForm, 'requestId' | 'csrf' | 'cookie'>,
   fields: Record<string, string>,
-  headers: Record<string, string> = { Origin: base, 'Sec-Fetch-Site': 'same-origin' },
+  headers: Record<string, string> = { Origin: base, 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'navigate' },
 ): Promise<Response> {
   return fetch(`${base}/connect/authorize`, {
     method: 'POST',
@@ -457,9 +462,54 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
     expect(publicHost.status).toBe(403);
     // A page opened directly cannot be approved through the relay either.
     const page = await openConsent(relayAuthorizeUrl());
-    const viaRelay = await submitConsent(page, { action: 'approve' }, { Origin: base, 'Sec-Fetch-Site': 'same-origin', 'x-olympus-relay': 'x' });
+    const viaRelay = await submitConsent(page, { action: 'approve' }, { Origin: base, 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'navigate', 'x-olympus-relay': 'x' });
     expect(viaRelay.status).toBe(403);
     expect((await submitConsent(page, { action: 'approve' })).status).toBe(303);
+  });
+
+  test('approval needs a loopback peer, and a browser navigation from the page', async () => {
+    // A caller on the network (the worker bound to a LAN address) with a loopback Host: refused.
+    assemble({ publicBaseUrl: RELAY_ORIGIN, installId: INSTALL_ID, peerAddress: () => '192.168.1.20' });
+    const lan = await fetch(relayAuthorizeUrl(), { redirect: 'manual' });
+    expect(lan.status).toBe(403);
+    expect(await lan.text()).toContain('Approve on the Mac where Olympus runs');
+    // No recorded peer counts as remote.
+    assemble({ publicBaseUrl: RELAY_ORIGIN, installId: INSTALL_ID, peerAddress: () => undefined });
+    expect((await fetch(relayAuthorizeUrl(), { redirect: 'manual' })).status).toBe(403);
+    // IPv6 and IPv4-mapped loopback peers are this Mac.
+    for (const peer of ['::1', '::ffff:127.0.0.1', '127.0.0.1']) {
+      assemble({ publicBaseUrl: RELAY_ORIGIN, installId: INSTALL_ID, peerAddress: () => peer });
+      expect((await fetch(relayAuthorizeUrl(), { redirect: 'manual' })).status, peer).toBe(200);
+    }
+
+    // A script that scrapes the page and posts the form without a browser's navigation headers: refused.
+    assemble({ publicBaseUrl: RELAY_ORIGIN, installId: INSTALL_ID });
+    const page = await openConsent(relayAuthorizeUrl());
+    expect(page.response.status).toBe(200);
+    for (const headers of [{}, { Origin: base }, { 'Sec-Fetch-Site': 'same-origin' }, { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'cors' }, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate' }]) {
+      const scripted = await submitConsent(page, { action: 'approve' }, headers);
+      expect(scripted.status, JSON.stringify(headers)).toBe(403);
+    }
+    expect((await submitConsent(page, { action: 'approve' })).status).toBe(303);
+  });
+
+  test('the desktop client returning to a loopback port is warned about on the relay page too', async () => {
+    const page = await openConsent(relayAuthorizeUrl({ client_id: CHATGPT_CODEX_CLIENT_ID, redirect_uri: 'http://127.0.0.1:51234/callback' }));
+    expect(page.response.status).toBe(200);
+    expect(page.html).toContain('a program on a computer rather than a website');
+    expect((await openConsent(relayAuthorizeUrl())).html).not.toContain('a program on a computer rather than a website');
+  });
+
+  test('only pinned ChatGPT grants count as ChatGPT; the owner\'s grant is not a demo grant', () => {
+    expect(isChatGptGrant({ clientId: CHATGPT_CLIENT_ID })).toBe(true);
+    expect(isChatGptGrant({ clientId: CHATGPT_CODEX_CLIENT_ID })).toBe(true);
+    expect(isChatGptGrant({ clientId: 'olympus_client_x' })).toBe(false);
+    expect(isChatGptGrant({ clientId: null })).toBe(false);
+    expect(isChatGptGrant({})).toBe(false);
+    expect(isDemoGrant({ clientId: CHATGPT_CLIENT_ID, displayName: 'ChatGPT' })).toBe(false);
+    expect(isDemoGrant({ clientId: CHATGPT_CLIENT_ID, displayName: 'ChatGPT (demo sign-in)' })).toBe(true);
+    // A bearer connection the owner named like a demo grant is not one.
+    expect(isDemoGrant({ clientId: null, displayName: 'ChatGPT (demo sign-in)' })).toBe(false);
   });
 
   test('a token naming another install, or minted elsewhere, opens nothing here', async () => {
@@ -536,6 +586,25 @@ describe('demo installs: reviewer sign-in through the relay', () => {
     expect(callback.origin + callback.pathname).toBe(CHATGPT_REDIRECT_URI);
     expect(callback.searchParams.get('iss')).toBe(RELAY_ORIGIN);
     expect(credentialInstallId('code', callback.searchParams.get('code'))).toBe(INSTALL_ID);
+  });
+
+  test('a demo sign-in grant is named as one, so it gets the read-only ChatGPT surface', async () => {
+    const verifier = 'v'.repeat(50);
+    const challenge = new Bun.CryptoHasher('sha256').update(verifier).digest('base64url');
+    const page = await openDemo(demoUrl({ code_challenge: challenge }));
+    const approved = await signIn(page, { action: 'approve', username: 'reviewer', password: DEMO_PASSWORD });
+    const code = new URL(approved.headers.get('location')!).searchParams.get('code')!;
+    expect((await exchange(CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, code, verifier)).status).toBe(200);
+    const [grant] = store.list();
+    expect(grant).toMatchObject({ kind: 'oauth', displayName: 'ChatGPT (demo sign-in)', clientId: CHATGPT_CLIENT_ID });
+    expect(isDemoGrant(grant!)).toBe(true);
+  });
+
+  test('right sign-ins never spend the shared attempt budget', async () => {
+    for (let i = 0; i < DEMO_SIGN_IN_BURST + 3; i += 1) {
+      const response = await signIn(await openDemo(), { action: 'approve', username: 'reviewer', password: DEMO_PASSWORD });
+      expect(response.status, `sign-in ${i + 1}`).toBe(303);
+    }
   });
 
   test('wrong credentials, a foreign origin, a wrong token or an owner page are refused; five wrong end the page', async () => {

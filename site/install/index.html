@@ -29,31 +29,28 @@
   <main id="main">
     <div class="wrap">
       <h1>Install Olympus on your Mac</h1>
-      <p class="lede">Olympus runs on your Mac. ChatGPT can set it up for you from the ChatGPT desktop app, with your approval at each step.</p>
+      <p class="lede">Olympus runs on your Mac and answers your questions in ChatGPT.</p>
 
-      <h2>Install with ChatGPT (recommended)</h2>
+      <div class="note">
+        <p><strong>Not available yet.</strong> The Olympus installer for macOS is still being finished, so there is no supported install command yet. Please do not run install commands for Olympus from any other source. If you ask ChatGPT to set up Olympus before then, it will tell you the same.</p>
+      </div>
+
+      <h2>How it will work</h2>
       <ol class="flow">
         <li><strong>Add Olympus in ChatGPT.</strong> Find Olympus in ChatGPT's plugin directory and add it.</li>
-        <li><strong>Open the ChatGPT desktop app on your Mac.</strong> Installing needs the desktop app, in a mode that can run commands on your Mac with your approval. On the web or a phone, ChatGPT will ask you to switch to the desktop app.</li>
-        <li><strong>Ask ChatGPT to set up Olympus.</strong> For example: "Set up Olympus on my Mac." ChatGPT shows you the exact install command and what it does, and runs it only after you say yes.</li>
-        <li><strong>Approve ChatGPT on your Mac.</strong> When the install finishes, an Olympus approval page opens on your Mac. Click <strong>Approve</strong>. That click is how Olympus knows the Mac is yours: there is no code to copy and no account to create.</li>
-        <li><strong>Connect your sources.</strong> Open the Olympus dashboard in the ChatGPT sidebar. Start with files and notes on your Mac, then add Gmail, Google Drive or Dropbox if you want, signing in with the accounts you already have. Indexing starts on its own.</li>
+        <li><strong>Install Olympus on your Mac.</strong> Olympus installs for your macOS user only, with your approval.</li>
+        <li><strong>Approve ChatGPT on your Mac.</strong> When ChatGPT first connects to Olympus, an Olympus approval page opens in your Mac's browser. Click <strong>Approve</strong>. That click is how Olympus knows the Mac is yours: there is no code to copy and no account to create.</li>
+        <li><strong>Connect your sources.</strong> Open the Olympus dashboard in the ChatGPT sidebar and connect Dropbox, Gmail or Google Drive, signing in with the accounts you already have. Other sources the dashboard lists, such as X bookmarks or Readwise, are <a href="/help/on-your-mac/#connect">connected on your Mac</a>. Indexing starts on its own.</li>
       </ol>
 
-      <h2>What the installer does</h2>
+      <h2>What the installer will do</h2>
       <ul>
-        <li>Installs Olympus for your macOS user only. It needs no administrator password.</li>
-        <li>Starts Olympus in the background as a per-user login item (a LaunchAgent), so it is running whenever you are logged in.</li>
-        <li>Downloads a small built-in model used to search your items on the Mac.</li>
-        <li>Opens the approval page. Nothing from your files leaves the Mac during install.</li>
+        <li>Install Olympus for your macOS user only. It needs no administrator password.</li>
+        <li>Start Olympus in the background as a per-user login item (a LaunchAgent), so it is running whenever you are logged in.</li>
+        <li>Download a built-in model used to search your items on the Mac (about 225 MB).</li>
+        <li>On a Mac with Apple silicon, also download a private answer model that stays on the Mac: about 1.3 GB with 8 GB of memory, about 2.7 GB with 16 GB or more. It downloads only while the disk has room for it plus 2 GB to spare.</li>
+        <li>Send nothing from your files off the Mac during install.</li>
       </ul>
-
-      <h2>Install manually</h2>
-      <div class="note">
-        <p><strong>Coming soon.</strong> A signed installer for macOS is not available yet. Until it is, there is no supported manual install command, and this section is a placeholder. Please do not run install commands for Olympus from any other source.</p>
-      </div>
-      <pre><code># Coming soon: not available yet
-curl -fsSL https://olympusplugin.ai/install.sh | sh</code></pre>
 
       <h2>Check that it is running</h2>
       <p>In Terminal on your Mac:</p>

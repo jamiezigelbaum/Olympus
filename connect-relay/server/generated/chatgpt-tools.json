@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=9197ddb3135a"
+          "resourceUri": "ui://olympus/dashboard?v=87a1f56a3107"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=9197ddb3135a",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=87a1f56a3107",
         "openai/ui": {
           "entrypoints": [
             {
@@ -246,6 +246,14 @@
           "parent_key": {
             "type": "string",
             "maxLength": 4096
+          },
+          "ancestor_keys": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "maxItems": 64
           },
           "cursor": {
             "type": "string",
@@ -640,7 +648,7 @@
     {
       "name": "olympus_privacy_get",
       "title": "Olympus privacy settings",
-      "description": "Read what the user told Olympus is private for them: their own description, and how many folders, labels or senders they marked as always Private (the panel shows which). Use it during setup, or when the user asks about their privacy settings. If nothing is set yet, ask the user in their own words what is private for them and save it with olympus_privacy_set. Takes no arguments. Read-only.",
+      "description": "Read what the user told Olympus is private for them: their own description, and how many folders, labels or senders they marked as always Private (the panel shows which). Use it during setup, or when the user asks about their privacy settings. Only the owner changes these settings, in the Olympus panel: if nothing is set yet, suggest they open the Olympus panel and choose Set up privacy. Takes no arguments. Read-only.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -670,7 +678,7 @@
     {
       "name": "olympus_privacy_set",
       "title": "Save Olympus privacy settings",
-      "description": "Save what is private for the user. `description` is the user's answer, in their own words, to \"What's private for you?\" (for example health, money, family matters); Olympus's private classifier on the Mac reads it to keep matching items Private, so they never reach ChatGPT. `rules` is the full list of folders, labels and senders that are always Private; the Olympus panel builds it. Each field given replaces the saved one.",
+      "description": "Save what is private for the user. `description` is the user's answer, in their own words, to \"What's private for you?\" (for example health, money, family matters); Olympus's private classifier on the Mac reads it to keep matching items Private, so they never reach ChatGPT. `rules` is the full list of folders, labels and senders that are always Private; the Olympus panel builds it. Each field given replaces the saved one. Only the Olympus panel calls this: removing a rule or changing the description needs the panel's confirmation.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -720,13 +728,23 @@
               "additionalProperties": false
             },
             "maxItems": 100
+          },
+          "confirmation": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "The panel's confirmation from olympus_privacy_get."
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "The revision from olympus_privacy_get; a save against changed settings is refused."
           }
         },
         "additionalProperties": false
       },
       "annotations": {
         "readOnlyHint": false,
-        "destructiveHint": false,
+        "destructiveHint": true,
         "openWorldHint": false
       },
       "securitySchemes": [
@@ -738,17 +756,17 @@
       "_meta": {
         "ui": {
           "visibility": [
-            "model",
             "app"
           ]
         },
-        "openai/widgetAccessible": true
+        "openai/widgetAccessible": true,
+        "openai/visibility": "private"
       }
     }
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=9197ddb3135a",
+      "uri": "ui://olympus/dashboard?v=87a1f56a3107",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },

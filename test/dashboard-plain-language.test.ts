@@ -6,7 +6,7 @@ import type { ModelSetupView } from '../src/core/model-setup.ts';
 import { renderDashboardHtmlRoute } from '../src/workers/dashboard/index.ts';
 import { dashboardIndexingProgress } from '../src/workers/dashboard/pages/background.ts';
 import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.ts';
-import { dashboardEtaWords, dashboardIndexingLine } from '../src/workers/dashboard/vocabulary.ts';
+import { DASHBOARD_PICKER_COPY, dashboardEtaWords, dashboardIndexingLine } from '../src/workers/dashboard/vocabulary.ts';
 
 /**
  * Owner-facing pages speak the owner's language (dashboard UX review,
@@ -66,10 +66,23 @@ describe('owner-facing dashboard pages carry no implementation jargon outside De
       const page = readResult(params, true);
       expect(jargonIn(page.body)).toEqual([]);
       // The picker's choices name what happens to a folder, in the review's words.
-      expect(page.body).toContain('Names only<span>Searchable by name and date</span>');
+      if ('source_id' in params) {
+        // The folder picker: one Full | Names only | Skip control per row.
+        expect(page.body).toContain('<span class="seg-long">Names only</span>');
+        expect(page.body).toContain('Everything in Dropbox');
+      } else {
+        expect(page.body).toContain('Names only<span>Searchable by name and date</span>');
+      }
       expect(page.body).not.toContain('Metadata only');
     });
   }
+
+  test('the folder picker\'s words, which the browser renders from the page, carry no jargon', () => {
+    const words = (value: unknown): string[] => typeof value === 'string' ? [value]
+      : Array.isArray(value) ? value.flatMap(words)
+        : value && typeof value === 'object' ? Object.values(value).flatMap(words) : [];
+    expect(jargonIn(words(DASHBOARD_PICKER_COPY).map((line) => `<p>${line}</p>`).join(''))).toEqual([]);
+  });
 
   test('the check itself catches jargon outside Details and ignores it inside', () => {
     expect(jargonIn('<p>Embeddings 98% done</p>')).toEqual(['Embeddings 98% done']);

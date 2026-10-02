@@ -109,6 +109,8 @@ beforeEach(() => {
   const fetch = withRemoteMcpRoute(
     createRemoteMcpHandler({
       connections: () => store,
+      // The relay child's per-boot secret, as the worker reads it from its 0600 file.
+      isRelayed: (request) => request.headers.get('x-olympus-relay') === 'per-boot-secret',
       makeOperationContext: (caller, signal) => createInProcessOperationContext({
         config: defaultConfig(),
         sourceIndexReadEnabled: true,
@@ -215,6 +217,10 @@ describe('remote MCP over loopback with a connection token', () => {
     const relayed = await mcpInitialize(`Bearer ${token}`, { 'x-olympus-relay': 'per-boot-secret' });
     expect(relayed.status).toBe(200);
     expect(relayed.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBe('1');
+    // A marker without the secret is a direct caller.
+    const forged = await mcpInitialize(`Bearer ${token}`, { 'x-olympus-relay': 'forged' });
+    expect(forged.status).toBe(200);
+    expect(forged.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
     store.revoke(connection.id);
     const revoked = await mcpInitialize(`Bearer ${token}`, { 'x-olympus-relay': 'per-boot-secret' });
     expect(revoked.status).toBe(401);

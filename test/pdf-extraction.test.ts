@@ -161,6 +161,7 @@ describe('PDF extraction: scans', () => {
           await writeFile(sidecar, 'SCANNED RECEIPT 7731\nHarbor Supply Company\n');
           return { stdout: '', stderr: '' };
         },
+        engine: { preference: 'tesseract' },
       }),
     }).extract(extractorInput({ bytes: SCANNED_PDF, mimeType: PDF }));
     expect(calls).toEqual(['ocrmypdf']);
@@ -177,6 +178,7 @@ describe('PDF extraction: scans', () => {
         commandRunner: async (request) => {
           throw new ExtractionCommandError({ command: request.command, exitCode: 8, stdout: '', stderr: 'encrypted' });
         },
+        engine: { preference: 'tesseract' },
       }),
     }).extract(extractorInput({ bytes: SCANNED_PDF, mimeType: PDF }));
     expect(result).toEqual({ status: 'failed_terminal', errorKind: 'ocrmypdf_pdf_encrypted' });

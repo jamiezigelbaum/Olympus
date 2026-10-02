@@ -8,16 +8,24 @@
  * ignored here on purpose: matching it wrongly would show a Secrets location,
  * matching every source can only hide more. An unreadable rules file fails
  * closed (the caller refuses the picker rather than guessing).
+ *
+ * Matching is the classifier's own (core/location-rules.ts and
+ * core/sender-rules.ts): case-insensitive, on folder boundaries, and
+ * parent-aware when a folder's ancestor keys are given.
  */
+import { locationKeyMatches, normalizeLocationPath, pathPrefixMatches } from '../../core/location-rules.ts';
+import { ownerSenderRuleMatches } from '../../core/sender-rules.ts';
 import { loadOwnerTierRules } from '../classification/tier-rules.ts';
 import type { OwnerTierRule } from '../classification/tier-classifier.ts';
 
 export interface SecretLocations {
+  /** Lowercased. */
   folderKeys: ReadonlySet<string>;
   /** Lowercased, without a trailing slash. */
   pathPrefixes: readonly string[];
+  /** Lowercased. */
   labelIds: ReadonlySet<string>;
-  /** Lowercased addresses or `@domain` suffixes. */
+  /** Lowercased sender rules: addresses, `@domain` suffixes or fragments. */
   senders: readonly string[];
 }
 
@@ -37,9 +45,9 @@ export function secretLocationsFromRules(rules: readonly OwnerTierRule[]): Secre
     if (rule.tier !== 'secrets') continue;
     const value = rule.match.value;
     switch (rule.match.kind) {
-      case 'folderKey': folderKeys.add(value); break;
-      case 'pathPrefix': pathPrefixes.push(normalizePath(value)); break;
-      case 'label': labelIds.add(value); break;
+      case 'folderKey': folderKeys.add(value.trim().toLowerCase()); break;
+      case 'pathPrefix': if (value.trim()) pathPrefixes.push(normalizeLocationPath(value)); break;
+      case 'label': labelIds.add(value.trim().toLowerCase()); break;
       case 'sender': senders.push(value.trim().toLowerCase()); break;
       default: break;
     }
@@ -54,21 +62,19 @@ export function loadSecretLocations(env: Record<string, string | undefined> = pr
 
 /** A folder (by key and its ancestors' keys) that is or sits under a Secrets location. */
 export function isSecretFolder(locations: SecretLocations, key: string, ancestorKeys: readonly string[] = []): boolean {
-  if (locations.folderKeys.has(key) || ancestorKeys.some((ancestor) => locations.folderKeys.has(ancestor))) return true;
+  const keys = [key, ...ancestorKeys];
+  for (const folderKey of locations.folderKeys) if (locationKeyMatches(keys, folderKey)) return true;
   if (!key.startsWith('/')) return false;
-  const path = normalizePath(key);
-  return locations.pathPrefixes.some((prefix) => prefix === '' || path === prefix || path.startsWith(`${prefix}/`));
+  // A path prefix written as `/` stored as '' and matches every path.
+  return locations.pathPrefixes.some((prefix) => pathPrefixMatches(key, prefix === '' ? '/' : prefix));
 }
 
 export function isSecretLabel(locations: SecretLocations, labelId: string): boolean {
-  return locations.labelIds.has(labelId);
+  for (const label of locations.labelIds) if (locationKeyMatches([labelId], label)) return true;
+  return false;
 }
 
 export function isSecretSender(locations: SecretLocations, sender: string): boolean {
-  const value = sender.trim().toLowerCase();
-  return locations.senders.some((rule) => (rule.startsWith('@') ? value.endsWith(rule) : value === rule));
-}
-
-function normalizePath(value: string): string {
-  return value.trim().toLowerCase().replace(/\/+$/, '');
+  // Secrets always raises the tier, so a bare fragment matches by substring, as in the classifier.
+  return locations.senders.some((rule) => ownerSenderRuleMatches(sender, rule, true));
 }

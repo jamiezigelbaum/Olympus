@@ -25,6 +25,7 @@ import {
 import { createExtractionReadinessLedger } from '../file-extraction/readiness-ledger.ts';
 import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts';
 import { OpenAICompatibleVlmClient } from '../file-extraction/extractors/openai-compatible-client.ts';
+import { parseOcrEnginePreference } from '../file-extraction/extractors/apple-vision-ocr.ts';
 import {
   createEmailSourceWorker,
   dashboardSourceSyncNotSupportedError,
@@ -1122,7 +1123,7 @@ function createWorkerBuiltInAnalystModel(env: Record<string, string | undefined>
  */
 function createWorkerSharedBuiltInModel(
   env: Record<string, string | undefined>,
-): { model: BuiltInAnalystModel; available: () => boolean } | undefined {
+): { model: BuiltInAnalystModel; available: () => boolean; startIfIdle: () => void } | undefined {
   const base = createWorkerBuiltInAnalystModel(env);
   if (!base) return undefined;
   let prepared = false;
@@ -1148,7 +1149,12 @@ function createWorkerSharedBuiltInModel(
   // be trusted and stay there forever. prepare() re-verifies the pinned
   // checksums, resumes or restarts a download, and ends ready or failed.
   if (base.status().state !== 'not_started') void model.prepare();
-  return { model, available: () => prepared && installedOnDisk() };
+  // A fresh install's first download, started by the tier sniffer when it
+  // has items waiting for this model (prepare() is shared and deduplicated).
+  const startIfIdle = (): void => {
+    if (base.status().state === 'not_started') void model.prepare();
+  };
+  return { model, available: () => prepared && installedOnDisk(), startIfIdle };
 }
 
 /**
@@ -1707,7 +1713,7 @@ export async function main(): Promise<void> {
   // sniffer before its runtime is resolved below.
   const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env);
   registerBuiltInPrivateModel(workerBuiltInModel
-    ? { model: workerBuiltInModel.model, available: workerBuiltInModel.available }
+    ? { model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle }
     : undefined);
   // Four-tier classification inputs for every lane: the owner's map, tier
   // rules, their own words about privacy, and the privacy-safe sniffer. The
@@ -1826,11 +1832,13 @@ export async function main(): Promise<void> {
   const sourceIndexEmbeddingProvider = internalPolicyEmbeddingProvider
     ?? (envPolicyFallback ? createSourceIndexEmbeddingProviderFromEnv() : undefined);
   // The built-in model downloads once, on first use. Start that at boot so a
-  // new install shows "installing" right away instead of at its first index.
+  // new install shows "installing" right away instead of at its first index,
+  // and run one query through it so the first question after a start is not
+  // the one that waits for the model to load and warm up.
   // Never under the test runner: a test must not fetch model weights.
   if (process.env.NODE_ENV !== 'test') {
     for (const provider of new Set([internalPolicyEmbeddingProvider, secureLocalPolicyEmbeddingProvider])) {
-      if (provider instanceof BuiltInSourceEmbeddingProvider) void provider.prepare().catch(() => undefined);
+      if (provider instanceof BuiltInSourceEmbeddingProvider) void provider.warm().catch(() => undefined);
     }
   }
   const readwiseEmbeddingProvider = envPolicyFallback
@@ -1927,6 +1935,13 @@ export async function main(): Promise<void> {
   const fileExtractionOcrTimeoutMs = parseOptionalTimeoutSecondsOrNone(
     process.env.OLYMPUS_FILE_EXTRACTION_OCR_TIMEOUT_SECONDS,
     'OLYMPUS_FILE_EXTRACTION_OCR_TIMEOUT_SECONDS',
+  );
+  // `auto` reads scans with the Mac's built-in Vision engine and with
+  // tesseract elsewhere; `tesseract` keeps the installed commands on a Mac.
+  const fileExtractionOcrEngine = parseOcrEnginePreference(process.env.OLYMPUS_FILE_EXTRACTION_OCR_ENGINE);
+  const fileExtractionOcrMaxPages = parseOptionalPositiveInteger(
+    process.env.OLYMPUS_FILE_EXTRACTION_OCR_MAX_PAGES,
+    'OLYMPUS_FILE_EXTRACTION_OCR_MAX_PAGES',
   );
   const fileExtractionMaxBoundedTextChars = parseOptionalPositiveInteger(
     process.env.OLYMPUS_FILE_EXTRACTION_MAX_BOUNDED_TEXT_CHARS,
@@ -2615,9 +2630,12 @@ export async function main(): Promise<void> {
           }
         : {}),
       ...(fileExtractionOcrTimeoutMs !== undefined || fileExtractionPdfRenderTimeoutMs !== undefined
+        || fileExtractionOcrEngine !== undefined || fileExtractionOcrMaxPages !== undefined
         ? {
             ocr: {
               ...(fileExtractionOcrTimeoutMs !== undefined ? { ocrTimeoutMs: fileExtractionOcrTimeoutMs } : {}),
+              ...(fileExtractionOcrEngine !== undefined ? { engine: fileExtractionOcrEngine } : {}),
+              ...(fileExtractionOcrMaxPages !== undefined ? { maxPages: fileExtractionOcrMaxPages } : {}),
               ...(fileExtractionPdfRenderTimeoutMs !== undefined
                 ? { pdfRenderTimeoutMs: fileExtractionPdfRenderTimeoutMs }
                 : {}),
@@ -4178,7 +4196,10 @@ export async function main(): Promise<void> {
   } = await import('../remote-mcp.ts');
   const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
   const { resolveRemotePublicUrls } = await import('../../core/remote-public-url.ts');
-  const { createRemotePublicUrlSource, isRelayedRequest } = await import('../../core/remote-access.ts');
+  const { carriesRelayMarker, createRemotePublicUrlSource, isRelayedRequest } = await import('../../core/remote-access.ts');
+  const { withRequestPeer } = await import('../../core/request-peer.ts');
+  const { isChatGptGrant } = await import('../remote-oauth/pinned-clients.ts');
+  const { isDemoGrant } = await import('../remote-oauth/demo-consent.ts');
   const { createRemoteOAuthHandler, withRemoteOAuthRoutes } = await import('../remote-oauth/handler.ts');
   const { resolveDemoConsent } = await import('../remote-oauth/demo-consent.ts');
   // OAuth for hosted agents is on only with a public base URL: a manual
@@ -4202,9 +4223,10 @@ export async function main(): Promise<void> {
   // The panel's remote-access line: the address this worker serves right now,
   // explained by the relay status `olympus connections status` prints.
   const { demoInstallMarked, readRemoteAccessStatus, remoteAccessDir, remoteAccessStatusView, resolveRemoteAccessUrls } = await import('../../core/remote-access.ts');
-  // Seam for the standalone engine (its host detection lands separately):
-  // which commands the owner is told to run.
-  const remoteAccessHostKind: 'openclaw' | 'standalone' = 'openclaw';
+  // Which commands the owner is told to run: the standalone engine's
+  // LaunchAgent sets OLYMPUS_ENGINE_HOST=1 (engine-service.ts); otherwise the
+  // OpenClaw Gateway runs this worker.
+  const remoteAccessHostKind: 'openclaw' | 'standalone' = process.env.OLYMPUS_ENGINE_HOST === '1' ? 'standalone' : 'openclaw';
   dashboardRemoteAccess = () => {
     let status: ReturnType<typeof remoteAccessStatusView> | undefined;
     try {
@@ -4224,9 +4246,17 @@ export async function main(): Promise<void> {
   // own config write.
   if (authToken) {
     dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      // Under OpenClaw the Gateway writes; the standalone engine's writer
-      // (its own config file and restart) is wired with its host detection.
-      setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
+      // Under OpenClaw the Gateway writes. The standalone engine has no
+      // config writer yet: it says how to change engine.json instead of
+      // calling a Gateway that is not there.
+      setEnabled: remoteAccessHostKind === 'standalone'
+        ? async (enabled: boolean) => ({
+            ok: false as const,
+            status: 501,
+            code: 'config_write_unsupported',
+            message: `Set "remote": {"enabled": ${enabled}} in ~/.olympus/engine.json, then run: olympus engine restart`,
+          })
+        : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
     });
   }
   // Slow source_answer calls from remote agents hand off to in-memory jobs
@@ -4252,7 +4282,7 @@ export async function main(): Promise<void> {
   const { PrivateAnswerJobs, createPrivateAnswerHandler, withPrivateAnswerRoute } = await import('../chatgpt/private-answer-jobs.ts');
   const { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } = await import('../chatgpt/private-answer-model.ts');
   const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
-  const { createDropboxOpenTargets } = await import('../dropbox-files/open-target.ts');
+  const { createDropboxOpenTargets, localDropboxRoots, localOpenArguments } = await import('../dropbox-files/open-target.ts');
   // Where each cited source opens, by the connector that holds it: the
   // provider's own resolver turns the item's locator into a web address and,
   // when the file is synced to this Mac, its local path (kept here; the
@@ -4288,11 +4318,18 @@ export async function main(): Promise<void> {
     // ready/failed, the sniffer stays off the shared model.
     activity: answerActivity,
     // The panel's "open on this Mac": macOS `open`, on a path this engine
-    // resolved for a cited source (never a path from the request).
+    // resolved for a cited source (never a path from the request), checked
+    // again now: no symlink, still inside a Dropbox folder, and only a
+    // document type opens; anything else is revealed in Finder.
     ...(process.platform === 'darwin'
       ? {
           openFile: (path: string) => new Promise<void>((resolve, reject) => {
-            execFile('/usr/bin/open', [path], { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+            const args = localOpenArguments(path, localDropboxRoots());
+            if (!args) {
+              reject(new Error('open refused'));
+              return;
+            }
+            execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
           }),
         }
       : {}),
@@ -4383,11 +4420,13 @@ export async function main(): Promise<void> {
   };
   const chatgptEvidenceSearch = sourceAnswerLanes
     ? async (input: { question: string; limit?: number }) => {
-        return answerActivity.run(() => searchReleasedEvidence({
+        // Not an answer: it never uses the private model, so it never
+        // preempts the sniffer (answerActivity is for the private pool).
+        return searchReleasedEvidence({
           lanes: sourceAnswerLanes!,
           question: input.question,
           ...(input.limit ? { maxResults: input.limit } : {}),
-        }));
+        });
       }
     : undefined;
   // Which Private items match, for the private answer panel: the shared
@@ -4420,14 +4459,17 @@ export async function main(): Promise<void> {
     // `/go/<id>` sign-in links answer their stored redirect once
     // (workers/chatgpt/handoff.ts); `/private/<id>` is the private answer
     // panel's one-time sealed collection (workers/chatgpt/private-answer-jobs.ts).
-    fetch: withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
+    // Each request's peer address is recorded for the routes that check it
+    // (relay-mode OAuth approval: core/request-peer.ts).
+    fetch: withRequestPeer(withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
       jobs: privateAnswers,
       isRelayed: isRelayedRequest,
       extraOrigins: () => [DASHBOARD_UI_DOMAIN],
     }), withRemoteOAuthRoutes(
       createRemoteOAuthHandler({
         publicUrls: remotePublicUrls,
-        isRelayed: isRelayedRequest,
+        // Any marker, verified or not, refuses approval (fails closed).
+        isRelayed: carriesRelayMarker,
         // Demo installs only: inert without remote.demoConsent AND the demo marker.
         demoConsent: () => resolveDemoConsent(olympusConfig.remote, () => demoInstallMarked(remoteAccessDir(process.env))),
         connections: () => remoteConnections({ create: true })!,
@@ -4436,12 +4478,15 @@ export async function main(): Promise<void> {
         createRemoteMcpHandler({
           ...remoteAgentOptions,
           // Relayed requests get the ChatGPT surface (docs/design/chatgpt-plugin.md):
-          // the hosted relay is the ChatGPT path, and only the relay's local
-          // endpoint can present the per-install relay secret. Direct and
-          // bearer connections keep the remote operation surface. The
-          // dashboard tool reads the view `/dashboard.json` serves, in-process.
+          // the hosted relay is the ChatGPT path, and the relay marker must
+          // carry the relay child's per-boot secret (isRelayedRequest), from
+          // an OAuth grant to a pinned ChatGPT client. Direct, bearer and
+          // self-registered connections keep the remote operation surface; a
+          // demo sign-in grant gets the read-only tools. The dashboard tool
+          // reads the view `/dashboard.json` serves, in-process.
           chatgpt: {
-            servesRequest: isRelayedRequest,
+            servesRequest: (request: Request, connection: { clientId?: string | null }) => isRelayedRequest(request) && isChatGptGrant(connection),
+            readOnlyFor: isDemoGrant,
             privateAnswers,
             dashboardView: async (signal?: AbortSignal) => {
               const response = await worker.fetch(new Request(
@@ -4476,7 +4521,7 @@ export async function main(): Promise<void> {
         }),
         withWorkerBearerAuth(worker.fetch, { authToken }),
       )),
-    ))),
+    )))),
   });
   sourceScheduler?.start();
   await reconcileCaptures();
@@ -4497,7 +4542,7 @@ export async function main(): Promise<void> {
         model: snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
-        ...(snifferRuntime.source === 'built_in' ? { modelAvailable: () => snifferRuntime.builtIn.available() } : {}),
+        ...(snifferRuntime.source === 'built_in' ? { modelAvailable: () => snifferRuntime.builtIn.available(), startModel: () => snifferRuntime.builtIn.startIfIdle?.() } : {}),
         ownerContext: privacyOwnerWords,
         budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,

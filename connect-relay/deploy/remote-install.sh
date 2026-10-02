@@ -27,6 +27,9 @@ install -m 0644 "$SRC/BUILD_SHA" "/opt/olympus-relay/olympus-relay-${SHORT}.sha"
 ln -sfn "/opt/olympus-relay/olympus-relay-${SHORT}" /usr/local/bin/olympus-relay
 
 install -m 0644 "$SRC/olympus-relay.service" /etc/systemd/system/olympus-relay.service
+# Caddy's admin socket directory (/run/caddy, see the Caddyfile's `admin`).
+install -d -m 0755 /etc/systemd/system/caddy.service.d
+install -m 0644 "$SRC/caddy-admin.conf" /etc/systemd/system/caddy.service.d/olympus-admin.conf
 # The static site: its Caddy blocks, and a directory the deploy user publishes into.
 install -m 0644 "$SRC/olympus-site.caddy" /etc/caddy/olympus-site.caddy
 install -d -m 0755 -o "${SUDO_USER:-relayadmin}" /srv/olympus-site
@@ -37,6 +40,9 @@ mv /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
 systemctl daemon-reload
 systemctl enable olympus-relay.service >/dev/null
 systemctl restart olympus-relay.service
+# A reload reaches the running Caddy over the admin address in the NEW
+# config; the first deploy that moves admin from TCP to the Unix socket finds
+# no socket yet, so it falls back to a restart (which also creates /run/caddy).
 systemctl reload caddy || systemctl restart caddy
 
 for attempt in 1 2 3 4 5 6 7 8 9 10; do

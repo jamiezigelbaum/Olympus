@@ -1001,7 +1001,7 @@ describe('tier migration review fixes', () => {
     expect(replanned.supersededPlans).toContain(plan.planId);
   });
 
-  test('the move primitive refuses to overwrite a superseded copy kept in its destination', async () => {
+  test('the move primitive refuses to overwrite a superseded copy kept in its destination, unless it holds the same text', async () => {
     const context = await rehearsal();
     const read = lanes(context, 'read');
     read.lanes[1]!.set.ledger.setOverride(identityOf('rehearsal-library', 'launch'), { kind: 'tier', tier: 'public' });
@@ -1012,16 +1012,58 @@ describe('tier migration review fixes', () => {
       planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
       selector: 'source:rehearsal.library',
     });
-    // Launch is now Public; its Personal copy is kept, superseded. Moving it
-    // back to Personal would overwrite that kept copy: refused.
+    // Launch is now Public; its Personal copy is kept, superseded. When that
+    // kept copy holds other text than the Public one, moving back to Personal
+    // would overwrite it: refused.
     const set = write.lanes[1]!.set;
     const launch = identityOf('rehearsal-library', 'launch');
-    await expect(moveTieredItem({
+    const kept = new Database(context.library.internal);
+    const launchChunks = `item_pk IN (SELECT item_pk FROM items WHERE provider_item_id = '${launch.providerItemId}')`;
+    const original = kept.query(`SELECT chunk_pk, content_hash FROM chunks WHERE ${launchChunks}`).all() as Array<{ chunk_pk: number; content_hash: string }>;
+    expect(original.length).toBeGreaterThan(0);
+    kept.query(`UPDATE chunks SET content_hash = 'an older text' WHERE ${launchChunks}`).run();
+    const move = () => moveTieredItem({
       set,
       identity: { ...launch, family: 'readwise', localItemId: `${ACCOUNT}:launch` },
       target: { metadataTier: 'private', contentTier: 'private' },
-    })).rejects.toThrow(TierMoveRefusedError);
+    });
+    await expect(move()).rejects.toThrow(TierMoveRefusedError);
     expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.public_safe]);
+    expect(set.ledger.getCurrent(launch)).toMatchObject({ state: 'current', contentTier: 'public' });
+
+    // The same text as the source: the store keeps it in place, nothing is
+    // lost, and the move back proceeds.
+    for (const row of original) kept.query('UPDATE chunks SET content_hash = ? WHERE chunk_pk = ?').run(row.content_hash, row.chunk_pk);
+    closeSqliteStore(kept);
+    await expect(move()).resolves.toMatchObject({ outcome: 'moved' });
+    expect(set.ledger.getCurrent(launch)).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.internal]);
+  });
+
+  test('the migration moves an item back into a store whose kept copy holds the same text', async () => {
+    const context = await rehearsal();
+    const launch = identityOf('rehearsal-library', 'launch');
+    const migrate = async (tier: 'public' | 'private') => {
+      const read = lanes(context, 'read');
+      const ledger = read.lanes[1]!.set.ledger;
+      ledger.setOverride(launch, { kind: 'tier', tier });
+      // A routed item moves when its re-decision queues the move.
+      const record = ledger.getCurrent(launch);
+      if (record?.routed && record.contentTier !== tier) ledger.beginMove(launch, { metadataTier: tier, contentTier: tier }, record.generation);
+      const plan = await planTierMigration({ lanes: read.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths });
+      await approveTierMigration({ planId: plan.planId, lanes: read.lanes, inputs: context.inputs, paths: context.paths });
+      const write = lanes(context, 'write');
+      return runTierMigration({
+        planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+        selector: 'source:rehearsal.library',
+      });
+    };
+    await migrate('public');
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.public_safe]);
+    // Its Personal copy is kept, superseded, with the same text: nothing to
+    // lose, so the move back is not skipped.
+    expect(await migrate('private')).toMatchObject({ moved: 1, skipped: 0 });
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.internal]);
   });
 });
 

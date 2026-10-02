@@ -5,13 +5,13 @@
 // that is not on this Mac carries its https web address instead.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PrivateAnswerModel, PrivateAnswerPlaintextV1 } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs, createPrivateAnswerHandler } from '../src/workers/chatgpt/private-answer-jobs.ts';
-import { createDropboxOpenTargets, dropboxPreviewUrl, localDropboxRoots } from '../src/workers/dropbox-files/open-target.ts';
+import { createDropboxOpenTargets, dropboxPreviewUrl, localDropboxRoots, localOpenArguments } from '../src/workers/dropbox-files/open-target.ts';
 
 const INSTALL = 'a'.repeat(32);
 const PANEL_ORIGIN = 'https://olympus.web-sandbox.oaiusercontent.com';
@@ -213,6 +213,65 @@ describe('the /private/<id>/open endpoint', () => {
     expect(await jobs.open(jobId, token)).toMatchObject({ status: 410 });
     const failing = await sealedJob([], { openFile: async () => { throw new Error('no'); } });
     expect(await failing.jobs.open(failing.jobId, failing.token)).toMatchObject({ status: 200, body: { status: 'failed' } });
+  });
+
+  test('a file swapped for a symlink since the answer was sealed is gone, never followed', async () => {
+    const opened: string[] = [];
+    const { jobs, jobId, token, file } = await sealedJob(opened);
+    const elsewhere = join(tempDir(), 'payload.command');
+    writeFileSync(elsewhere, '#!/bin/sh\n');
+    rmSync(file);
+    symlinkSync(elsewhere, file);
+    expect(await jobs.open(jobId, token)).toMatchObject({ status: 410 });
+    expect(opened).toEqual([]);
+  });
+});
+
+describe('opening a local file on the Mac', () => {
+  function dropbox(): { root: string; file(name: string): string } {
+    const root = realpathSync.native(tempDir());
+    return {
+      root,
+      file(name: string) {
+        const path = join(root, name);
+        writeFileSync(path, 'x');
+        return path;
+      },
+    };
+  }
+
+  test('documents, images, audio and video open; anything else is revealed in Finder', () => {
+    const { root, file } = dropbox();
+    for (const name of ['Lab results.pdf', 'scan.JPG', 'notes.md', 'notes.txt', 'letter.rtf', 'budget.xlsx', 'deck.pptx', 'memo.docx', 'book.epub', 'call.m4a', 'clip.mov', 'data.csv', 'photo.heic']) {
+      const path = file(name);
+      expect(localOpenArguments(path, [root]), name).toEqual([path]);
+    }
+    // Things LaunchServices would run or act on: revealed, never opened.
+    for (const name of ['June lab results.command', 'x.terminal', 'x.tool', 'x.webloc', 'x.inetloc', 'x.fileloc', 'x.scpt', 'x.sh', 'x.app', 'x.pkg', 'x.dmg', 'noextension', 'x.pdf.command']) {
+      const path = file(name);
+      expect(localOpenArguments(path, [root]), name).toEqual(['-R', path]);
+    }
+  });
+
+  test('a symlink, a path through a symlinked folder, a folder, a missing file or one outside the Dropbox folder is refused', () => {
+    const { root, file } = dropbox();
+    const target = file('real.pdf');
+    const link = join(root, 'link.pdf');
+    symlinkSync(target, link);
+    expect(localOpenArguments(link, [root])).toBeUndefined();
+    mkdirSync(join(root, 'Folder'));
+    expect(localOpenArguments(join(root, 'Folder'), [root])).toBeUndefined();
+    symlinkSync(join(root, 'Folder'), join(root, 'Alias'));
+    writeFileSync(join(root, 'Folder', 'in.pdf'), 'x');
+    expect(localOpenArguments(join(root, 'Alias', 'in.pdf'), [root])).toBeUndefined();
+    expect(localOpenArguments(join(root, 'Folder', 'in.pdf'), [root])).toEqual([join(root, 'Folder', 'in.pdf')]);
+    expect(localOpenArguments(join(root, 'missing.pdf'), [root])).toBeUndefined();
+    const other = dropbox();
+    expect(localOpenArguments(other.file('elsewhere.pdf'), [root])).toBeUndefined();
+    // A sibling whose name only starts like the root is outside it.
+    expect(localOpenArguments(target, [`${root.slice(0, -2)}`])).toBeUndefined();
+    expect(localOpenArguments('relative.pdf', [root])).toBeUndefined();
+    expect(localOpenArguments(target, [])).toBeUndefined();
   });
 });
 

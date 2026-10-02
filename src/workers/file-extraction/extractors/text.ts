@@ -103,6 +103,12 @@ export interface TextExtractorOptions {
    */
   pdfOcr?: PdfOcr;
   /**
+   * Reads an image's text by OCR. Injected by the registry like `pdfOcr`;
+   * answers undefined where no zero-install engine exists, which leaves the
+   * image names-only as before.
+   */
+  imageOcr?: ImageOcr;
+  /**
    * Emit a media descriptor for an image instead of declining it.
    *
    * The production lane decided this per job by testing the requested kind
@@ -118,6 +124,8 @@ export type PdfOcr = (input: {
   mimeType: string;
   sizeBytes: number;
 }) => Promise<ExtractorOutput | undefined>;
+
+export type ImageOcr = PdfOcr;
 
 interface DerivedSlice {
   derivation: ExtractionDerivation;
@@ -145,6 +153,7 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
   const pdfTextTimeoutMs = options.pdfTextTimeoutMs ?? DEFAULT_PDF_TEXT_TIMEOUT_MS;
   const imageMediaDescriptor = options.imageMediaDescriptor ?? false;
   const pdfOcr = options.pdfOcr;
+  const imageOcr = options.imageOcr;
   return {
     kind,
     version,
@@ -186,6 +195,8 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
         });
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
+        const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
+        if (ocrOutput) return ocrOutput;
         if (!imageMediaDescriptor) {
           return { status: 'metadata_only' };
         }

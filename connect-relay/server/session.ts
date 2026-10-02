@@ -24,26 +24,8 @@ import {
   type RelayToClientMessage,
   type RequestMessage,
 } from '../shared/protocol.ts';
-import { AUTHENTICATED_RESPONSE_HEADER } from '../shared/tokens.ts';
 import { QueueBudget, type RelayLimits } from './limits.ts';
-
-/** Response headers an install may set on the public response; everything else is dropped. */
-const RESPONSE_HEADER_ALLOWLIST = new Set([
-  'content-type',
-  'cache-control',
-  'pragma',
-  'mcp-session-id',
-  'www-authenticate',
-  'retry-after',
-  'allow',
-  // The demo sign-in page: its redirect back to ChatGPT, and its page policy.
-  'location',
-  'content-security-policy',
-  'x-frame-options',
-  'x-content-type-options',
-  'referrer-policy',
-  'cross-origin-opener-policy',
-]);
+import { BODYLESS_STATUSES, DEFAULT_RESPONSE_POLICY, checkResponseHead, type ResponsePolicy } from './response-policy.ts';
 
 export interface SessionSocket {
   send(data: string | Uint8Array): number;
@@ -57,8 +39,17 @@ export interface ForwardRequest {
   readonly body: Uint8Array;
   /** Aborts when the public caller goes away. */
   readonly signal: AbortSignal;
+  /** What the install may answer on this route (response-policy.ts); API answers when unset. */
+  readonly policy?: ResponsePolicy;
   /** The install's response head arrived: its status, and whether it carried the engine's authenticated marker. */
   readonly onHead?: (status: number, authenticated: boolean) => void;
+  /** The install's head was refused (a fixed reason code); the caller gets a 502. */
+  readonly onRefused?: (reason: string) => void;
+  /**
+   * Charges `bytes` of response body about to go to the public caller; false
+   * cuts the stream off (the relay's egress budgets).
+   */
+  readonly chargeEgress?: (bytes: number) => boolean;
   /**
    * Called exactly once, when the stream is over on both sides: delivered to
    * the public caller in full, cut off, cancelled, or finished without a body.
@@ -102,9 +93,6 @@ interface Stream {
 }
 
 type Timer = ReturnType<typeof setTimeout>;
-
-/** Statuses whose response never carries a body. */
-const BODYLESS_STATUSES = new Set([204, 205, 304]);
 
 export class InstallSession {
   private readonly streams = new Map<number, Stream>();
@@ -232,6 +220,10 @@ export class InstallSession {
       this.cancelStream(stream);
       return 'ok';
     }
+    if (stream.request.chargeEgress && !stream.request.chargeEgress(payload.byteLength)) {
+      this.cancelStream(stream);
+      return 'ok';
+    }
     this.armIdle(stream);
     if (stream.waiting && stream.controller) {
       // The caller is reading: hand the chunk straight over.
@@ -289,16 +281,21 @@ export class InstallSession {
   }
 
   private startBody(stream: Stream, status: number, wireHeaders: Array<[string, string]>): void {
+    const bodyless = BODYLESS_STATUSES.has(status) || stream.request.method === 'HEAD';
+    // Checked before anything reaches the caller: a refused head (a header
+    // the platform would reject, a content type or redirect the route does
+    // not allow) fails the stream with a 502 and stops the install's side.
+    const checked = checkResponseHead(stream.request.policy ?? DEFAULT_RESPONSE_POLICY, status, wireHeaders, bodyless);
+    if (!checked.ok) {
+      stream.request.onRefused?.(checked.reason);
+      this.cancelStream(stream);
+      return;
+    }
     clearTimeout(stream.timers.head);
     stream.headSent = true;
-    const headers = new Headers();
-    let authenticated = false;
-    for (const [name, value] of wireHeaders) {
-      if (name === AUTHENTICATED_RESPONSE_HEADER) authenticated = value === '1';
-      else if (RESPONSE_HEADER_ALLOWLIST.has(name)) headers.append(name, value);
-    }
+    const { headers, authenticated } = checked;
     stream.request.onHead?.(status, authenticated);
-    if (BODYLESS_STATUSES.has(status) || stream.request.method === 'HEAD') {
+    if (bodyless) {
       // No body will ever be read: the mux stream is complete now. Any body
       // frames or `end` the install still sends find no stream and are dropped.
       stream.ended = true;

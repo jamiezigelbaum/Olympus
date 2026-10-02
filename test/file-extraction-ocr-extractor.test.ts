@@ -27,6 +27,10 @@ import {
 
 const PDF_MIME = 'application/pdf';
 
+// These cases pin the tesseract engine; the built-in macOS engine has its own
+// suite (file-extraction-apple-vision-ocr.test.ts).
+const TESSERACT = { preference: 'tesseract' } as const;
+
 function sidecarArg(request: ExtractionCommandRunRequest): string {
   const index = request.args.indexOf('--sidecar');
   const path = request.args[index + 1];
@@ -69,7 +73,7 @@ describe('ocr extractor: registry surface', () => {
 describe('ocr extractor: PDF lane', () => {
   test('indexes the sidecar transcript with the rasterized-pdf warnings', async () => {
     const { runner, calls } = sidecarWritingRunner('Scanned invoice\n\n\n\ntotal 42');
-    const result = await createOcrExtractor({ commandRunner: runner }).extract(extractorInput({
+    const result = await createOcrExtractor({ commandRunner: runner, engine: TESSERACT }).extract(extractorInput({
       bytes: pdfImageOnly(),
       mimeType: PDF_MIME,
     }));
@@ -96,7 +100,7 @@ describe('ocr extractor: PDF lane', () => {
 
   test('an empty sidecar becomes a metadata-only media descriptor', async () => {
     const { runner } = sidecarWritingRunner('   \n  ');
-    const result = await createOcrExtractor({ commandRunner: runner }).extract(extractorInput({
+    const result = await createOcrExtractor({ commandRunner: runner, engine: TESSERACT }).extract(extractorInput({
       bytes: pdfImageOnly(),
       mimeType: PDF_MIME,
       sizeBytes: 900,
@@ -117,7 +121,7 @@ describe('ocr extractor: PDF lane', () => {
         stderr: 'This PDF is encrypted.',
       });
     };
-    const result = await createOcrExtractor({ commandRunner: runner }).extract(extractorInput({
+    const result = await createOcrExtractor({ commandRunner: runner, engine: TESSERACT }).extract(extractorInput({
       bytes: pdfImageOnly(),
       mimeType: PDF_MIME,
       ref: { name: 'Statement.pdf' },
@@ -138,7 +142,7 @@ describe('ocr extractor: PDF lane', () => {
         stderr: 'temporary resource shortage',
       });
     };
-    const result = await createOcrExtractor({ commandRunner: runner }).extract(extractorInput({
+    const result = await createOcrExtractor({ commandRunner: runner, engine: TESSERACT }).extract(extractorInput({
       bytes: pdfImageOnly(),
       mimeType: PDF_MIME,
     }));
@@ -151,7 +155,7 @@ describe('ocr extractor: PDF lane', () => {
     const runner: ExtractionCommandRunner = async () => {
       throw new ExtractionCommandTimeoutError({ command: 'ocrmypdf', timeoutMs: 10 });
     };
-    const result = await createOcrExtractor({ commandRunner: runner }).extract(extractorInput({
+    const result = await createOcrExtractor({ commandRunner: runner, engine: TESSERACT }).extract(extractorInput({
       bytes: pdfImageOnly(),
       mimeType: PDF_MIME,
     }));
@@ -168,7 +172,7 @@ describe('ocr extractor: image lane', () => {
       calls.push(request);
       return { stdout: 'Handwritten note', stderr: '' };
     };
-    const result = await createOcrExtractor({ commandRunner: runner }).extract(extractorInput({
+    const result = await createOcrExtractor({ commandRunner: runner, engine: TESSERACT }).extract(extractorInput({
       bytes: textBytes('pretend jpeg'),
       mimeType: 'image/jpeg',
     }));
@@ -189,7 +193,7 @@ describe('ocr extractor: image lane', () => {
 
   test('empty OCR output becomes a metadata-only media descriptor', async () => {
     const runner: ExtractionCommandRunner = async () => ({ stdout: '\n\n', stderr: '' });
-    const result = await createOcrExtractor({ commandRunner: runner }).extract(extractorInput({
+    const result = await createOcrExtractor({ commandRunner: runner, engine: TESSERACT }).extract(extractorInput({
       bytes: textBytes('pretend png'),
       mimeType: 'image/png',
     }));
@@ -214,7 +218,7 @@ describe('ocr extractor: non-OCR fallback', () => {
       invoked = true;
       return { stdout: '', stderr: '' };
     };
-    const result = await createOcrExtractor({ commandRunner: runner }).extract(extractorInput({
+    const result = await createOcrExtractor({ commandRunner: runner, engine: TESSERACT }).extract(extractorInput({
       bytes: textBytes('Plain text still gets read.'),
       mimeType: 'text/plain',
     }));

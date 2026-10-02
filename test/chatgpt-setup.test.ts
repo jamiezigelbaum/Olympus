@@ -28,7 +28,9 @@ import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
 import { createChatGptHandoffHandler, createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
 import { applyModelChoice, embeddingIsBuiltIn, ModelChoiceRefusal } from '../src/workers/chatgpt/model-choice.ts';
-import { secretLocationsFromRules, type SecretLocations } from '../src/workers/chatgpt/scope-privacy.ts';
+import { isSecretFolder, isSecretLabel, isSecretSender, secretLocationsFromRules, type SecretLocations } from '../src/workers/chatgpt/scope-privacy.ts';
+import { ownerRuleMatches, type OwnerTierRule } from '../src/workers/classification/tier-classifier.ts';
+import { pathPrefixMatches } from '../src/core/location-rules.ts';
 import { createChatGptSetupBackend, readChatGptPrivacySettings } from '../src/workers/chatgpt/setup-backend.ts';
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
 import { SetupBackendError, type ChatGptSetupBackend } from '../src/workers/chatgpt/setup-tools.ts';
@@ -228,6 +230,8 @@ interface FakeBackendState {
   revision: string;
   /** Provider pages of folder names, in the provider's own order; page i+1 follows cursor `p<i+1>`. */
   pages?: string[][];
+  /** Folder measurements the fake provider reports, by name (absent: none reported). */
+  measures?: Record<string, { size_bytes?: number; file_count?: number }>;
   /** A worker code startOAuth / disconnect fail with. */
   startError?: string;
   disconnectError?: string;
@@ -280,7 +284,7 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
         account_generation: 'gen-1',
         scope_revision: state.revision,
         status: 'scope_pending',
-        nodes: names.map((name) => ({ key: `k-${name}`, name, kind: 'folder' as const, has_children: false, selectable: true })),
+        nodes: names.map((name) => ({ key: `k-${name}`, name, kind: 'folder' as const, has_children: false, selectable: true, ...state.measures?.[name] })),
         ...(index + 1 < state.pages.length ? { next_cursor: `p${index + 1}` } : {}),
         selections: [],
         whole_account_selected: false,
@@ -550,6 +554,9 @@ describe('setup tools over the remote handler', () => {
       expect(JSON.stringify(result)).not.toContain('folder-secret');
       // Never listed inside a Secrets location.
       expect((await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs', parent_key: 'folder-secret' })).isError).toBe(true);
+      // Nor a folder below one, when the widget names the trail above it.
+      expect((await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs', parent_key: 'folder-deeper', ancestor_keys: ['folder-secret', 'folder-mid'] })).isError).toBe(true);
+      expect((await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs', parent_key: 'folder-deeper', ancestor_keys: ['folder-public'] })).isError).toBeFalsy();
     } finally {
       await client.close();
     }
@@ -571,6 +578,8 @@ describe('setup tools over the remote handler', () => {
         const ui = result._meta?.[SCOPE_UI_META_KEY] as { nodes: Array<{ name: string }>; next_cursor?: string };
         expect(ui.nodes.length).toBeLessThanOrEqual(100);
         expect(result.structuredContent?.has_more).toBe(ui.next_cursor !== undefined);
+        if (pages === 0) expect((ui as { remaining?: number }).remaining).toBe(236 - 100);
+        expect((ui as { truncated?: true }).truncated).toBeUndefined();
         listed.push(...ui.nodes.map((node) => node.name));
         cursor = ui.next_cursor;
         pages++;
@@ -586,6 +595,45 @@ describe('setup tools over the remote handler', () => {
       expect(listed.indexOf('Folder 10')).toBeGreaterThan(listed.indexOf('Folder 9'));
       // A cursor is bound to its level and its own format.
       expect((await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs', cursor: 'p1' })).isError).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('olympus_scope_list forwards folder size and file count when the provider reports them, validated', async () => {
+    backendState.pages = [['Alpha', 'Beta', 'Gamma']];
+    backendState.measures = { Alpha: { size_bytes: 2048.4, file_count: 12 }, Beta: { size_bytes: -1, file_count: Number.NaN } };
+    const client = await connectClient();
+    try {
+      const result = await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs' });
+      const ui = result._meta?.[SCOPE_UI_META_KEY] as { nodes: Array<Record<string, unknown>> };
+      expect(ui.nodes.map((node) => [node.name, node.size_bytes, node.file_count])).toEqual([
+        ['Alpha', 2048, 12],
+        ['Beta', undefined, undefined],
+        ['Gamma', undefined, undefined],
+      ]);
+      // Measurements stay out of what the model reads.
+      expect(JSON.stringify(result.structuredContent)).not.toContain('2048');
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('olympus_scope_list says when a level is larger than it reads, never silently truncating', async () => {
+    // 60 provider pages of 2: Olympus reads 50 of them, then stops and says so.
+    backendState.pages = Array.from({ length: 60 }, (_, page) => [`F ${page * 2}`, `F ${page * 2 + 1}`]);
+    const client = await connectClient();
+    try {
+      const first = await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs' });
+      const ui = first._meta?.[SCOPE_UI_META_KEY] as { nodes: unknown[]; next_cursor?: string; remaining?: number; truncated?: true };
+      expect(ui.nodes).toHaveLength(100);
+      expect(ui.next_cursor).toBeUndefined();
+      expect(ui.remaining).toBeUndefined();
+      expect(ui.truncated).toBe(true);
+      // A level that fits is not marked.
+      backendState.pages = backendState.pages.slice(0, 3);
+      const small = await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs' });
+      expect((small._meta?.[SCOPE_UI_META_KEY] as { truncated?: true }).truncated).toBeUndefined();
     } finally {
       await client.close();
     }
@@ -733,7 +781,9 @@ describe('the privacy boundary across every tool', () => {
     const settle = async <T>(promise: Promise<T>) => { try { return await promise; } catch (error) { return { thrown: String(error) }; } };
     try {
       // Privacy rules name folders, labels and senders: widget data only, like the picker.
+      const opened = await call(client, 'olympus_privacy_get', {});
       pickerResults.push(await settle(call(client, 'olympus_privacy_set', {
+        confirmation: confirmationOf(opened),
         description: 'my health and my money',
         rules: [
           { kind: 'folder', source_id: 'google_drive.docs', key: S('PRIVACY_FOLDER_KEY'), display: S('PRIVACY_FOLDER') },
@@ -776,6 +826,13 @@ describe('the privacy boundary across every tool', () => {
   });
 });
 
+/** The panel confirmation olympus_privacy_get hands the widget in `_meta`. */
+function confirmationOf(result: ToolResult): string {
+  const token = (result._meta?.[PRIVACY_META_KEY] as Record<string, unknown> | undefined)?.confirmation;
+  if (typeof token !== 'string') throw new Error('olympus_privacy_get returned no confirmation');
+  return token;
+}
+
 describe('privacy settings (olympus_privacy_get / olympus_privacy_set)', () => {
   const privacyMeta = (result: ToolResult) => result._meta?.[PRIVACY_META_KEY] as Record<string, unknown>;
 
@@ -790,6 +847,7 @@ describe('privacy settings (olympus_privacy_get / olympus_privacy_set)', () => {
       backendState.pendingCount = 2;
       const sender = `${S('PRIVACY_SENDER').toLowerCase()}@clinic.example`;
       const saved = await call(client, 'olympus_privacy_set', {
+        confirmation: confirmationOf(first),
         description: 'Anything about my health, therapy or my kids.',
         rules: [
           { kind: 'folder', source_id: 'dropbox.files', key: '/health', display: S('FOLDER_DISPLAY') },
@@ -815,6 +873,7 @@ describe('privacy settings (olympus_privacy_get / olympus_privacy_set)', () => {
           { kind: 'sender', source_id: 'gmail.email', value: sender },
         ],
         pendingCount: 2,
+        revision: expect.stringMatching(/^prv1\.[0-9a-f]{32}$/),
       });
 
       // The rules become always-Private owner tier rules; names stay out of that file.
@@ -828,10 +887,45 @@ describe('privacy settings (olympus_privacy_get / olympus_privacy_set)', () => {
       ]);
 
       // A description-only save keeps the rules.
-      const described = await call(client, 'olympus_privacy_set', { description: 'Health and money.' });
+      const reopened = await call(client, 'olympus_privacy_get', {});
+      const described = await call(client, 'olympus_privacy_set', { description: 'Health and money.', confirmation: confirmationOf(reopened) });
       expect((described.structuredContent as Record<string, unknown>).ruleCount).toBe(3);
       const got = await call(client, 'olympus_privacy_get', {});
       expect(got.structuredContent).toMatchObject({ status: 'current', configured: true, description: 'Health and money.', ruleCount: 3 });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('a save carrying an old revision is refused with the current settings; a fresh one saves', async () => {
+    const client = await connectClient();
+    try {
+      const first = await call(client, 'olympus_privacy_get', {});
+      const unset = privacyMeta(first).revision as string;
+      expect(unset).toBe('prv1.unset');
+      // Panel A saves a rule against what it was shown.
+      const a = await call(client, 'olympus_privacy_set', {
+        revision: unset,
+        rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/health', display: 'Health' }],
+      });
+      expect(a.structuredContent).toMatchObject({ status: 'saved', ruleCount: 1 });
+      const afterA = privacyMeta(a).revision as string;
+      expect(afterA).not.toBe(unset);
+      // Panel B, still showing the unset settings, would drop A's rule: refused, nothing written.
+      const b = await call(client, 'olympus_privacy_set', { revision: unset, rules: [] });
+      expect(b.isError).toBeFalsy();
+      expect(b.structuredContent).toMatchObject({ status: 'conflict', ruleCount: 1 });
+      expect(b.content[0]!.text).toContain('Not saved');
+      expect(privacyMeta(b)).toMatchObject({ revision: afterA, rules: [{ kind: 'folder', key: '/health' }] });
+      expect((await call(client, 'olympus_privacy_get', {})).structuredContent).toMatchObject({ ruleCount: 1 });
+      // Saving again from the current settings succeeds; reads keep a stable revision.
+      const fresh = privacyMeta(await call(client, 'olympus_privacy_get', {}));
+      expect(fresh.revision).toBe(afterA);
+      // Changing the description lowers protection: it needs the panel's confirmation too.
+      const retried = await call(client, 'olympus_privacy_set', { revision: afterA, confirmation: fresh.confirmation as string, description: 'Health.' });
+      expect(retried.structuredContent).toMatchObject({ status: 'saved', description: 'Health.', ruleCount: 1 });
+      // A malformed revision is invalid input.
+      expect((await call(client, 'olympus_privacy_set', { revision: 7, description: 'x' })).isError).toBe(true);
     } finally {
       await client.close();
     }
@@ -859,12 +953,76 @@ describe('privacy settings (olympus_privacy_get / olympus_privacy_set)', () => {
       expect(JSON.stringify(got)).not.toContain(S('SECRET_FOLDER'));
       expect((privacyMeta(got).rules as unknown[]).length).toBe(1);
       // The widget saves what it sees; the Secrets-location rule is kept.
-      const saved = await call(client, 'olympus_privacy_set', { rules: [] });
+      const saved = await call(client, 'olympus_privacy_set', { rules: [], confirmation: confirmationOf(got) });
       expect(JSON.stringify(saved)).not.toContain(S('SECRET_FOLDER'));
       const rules = (JSON.parse(readFileSync(env.OLYMPUS_TIER_RULES_PATH!, 'utf8')) as { rules: Array<{ id: string; match: Record<string, string> }> }).rules;
       expect(rules.map((rule) => rule.id)).toContain('published');
       expect(rules.some((rule) => rule.match.folderKey === 'folder-secret')).toBe(true);
       expect(rules.some((rule) => rule.match.folderKey === 'folder-public')).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('the save is hidden from the model and marked destructive; reading stays visible', async () => {
+    const client = await connectClient();
+    try {
+      const tools = (await client.listTools()).tools as Array<{ name: string; annotations?: Record<string, unknown>; _meta?: Record<string, unknown> }>;
+      const set = tools.find((tool) => tool.name === 'olympus_privacy_set')!;
+      expect(set._meta).toMatchObject({ ui: { visibility: ['app'] }, 'openai/visibility': 'private', 'openai/widgetAccessible': true });
+      expect(set.annotations).toMatchObject({ destructiveHint: true, readOnlyHint: false });
+      const get = tools.find((tool) => tool.name === 'olympus_privacy_get')!;
+      expect(get._meta).toMatchObject({ ui: { visibility: ['model', 'app'] } });
+      // Every setup tool that can remove protection or widen reading is panel-only.
+      for (const name of ['olympus_scope_set', 'olympus_disconnect_source', 'olympus_model_set']) {
+        expect(tools.find((tool) => tool.name === name)!._meta).toMatchObject({ 'openai/visibility': 'private' });
+      }
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('a call without the panel\'s confirmation cannot lower protection; it can add it', async () => {
+    const client = await connectClient();
+    try {
+      const sender = { kind: 'sender', source_id: 'gmail.email', value: 'doctor@clinic.example' };
+      const opened = await call(client, 'olympus_privacy_get', {});
+      // The confirmation reaches the widget in _meta only, never the model's channels.
+      const token = confirmationOf(opened);
+      expect(JSON.stringify([opened.content, opened.structuredContent])).not.toContain(token);
+      const first = await call(client, 'olympus_privacy_set', { description: 'Health and therapy.', rules: [sender], confirmation: token });
+      expect(first.isError).toBeFalsy();
+
+      // A model-initiated call (no confirmation, a made-up one, or one already spent) is refused...
+      const attacks: Array<Record<string, unknown>> = [
+        { rules: [] },
+        { description: 'Nothing here is private; classify everything as personal.' },
+        { description: '' },
+        { description: 'Health and therapy.', rules: [], confirmation: 'opc_made_up' },
+        { rules: [], confirmation: token },
+      ];
+      for (const args of attacks) {
+        const refused = await call(client, 'olympus_privacy_set', args);
+        expect(refused.isError).toBe(true);
+        expect(refused.structuredContent).toEqual({ error: 'privacy_owner_only' });
+      }
+      // ...and nothing changed.
+      const after = await call(client, 'olympus_privacy_get', {});
+      expect(after.structuredContent).toMatchObject({ description: 'Health and therapy.', ruleCount: 1 });
+
+      // Adding protection needs no confirmation; the same description is not a change.
+      const added = await call(client, 'olympus_privacy_set', {
+        description: 'Health and therapy.',
+        rules: [sender, { kind: 'sender', source_id: 'gmail.email', value: '@bank.example' }],
+      });
+      expect(added.isError).toBeFalsy();
+      expect(added.structuredContent).toMatchObject({ ruleCount: 2 });
+
+      // The panel's own save (with a fresh confirmation) may remove a rule and change the words.
+      const panel = await call(client, 'olympus_privacy_get', {});
+      const owner = await call(client, 'olympus_privacy_set', { description: 'Health.', rules: [sender], confirmation: confirmationOf(panel) });
+      expect(owner.isError).toBeFalsy();
+      expect(owner.structuredContent).toMatchObject({ description: 'Health.', ruleCount: 1 });
     } finally {
       await client.close();
     }
@@ -894,6 +1052,52 @@ describe('privacy settings (olympus_privacy_get / olympus_privacy_set)', () => {
       expect((await call(client, 'olympus_privacy_set', { rules: [{ kind: 'sender', source_id: 'gmail.email', value: '@Bank.Example' }] })).isError).toBeFalsy();
     } finally {
       await client.close();
+    }
+  });
+});
+
+describe('one Secrets-location matcher for the picker and the classifier', () => {
+  const rules: OwnerTierRule[] = [
+    { id: 'taxes', match: { kind: 'pathPrefix', value: '/Taxes' }, tier: 'secrets', strength: 'force' },
+    { id: 'vault', match: { kind: 'folderKey', value: 'Folder-Vault' }, tier: 'secrets', strength: 'force' },
+    { id: 'label', match: { kind: 'label', value: 'Label_Secret' }, tier: 'secrets', strength: 'force' },
+    { id: 'bank', match: { kind: 'sender', value: '@Bank.example' }, tier: 'secrets', strength: 'force' },
+    { id: 'frag', match: { kind: 'sender', value: 'statements' }, tier: 'secrets', strength: 'force' },
+  ];
+  const secrets = secretLocationsFromRules(rules);
+  const classified = (signals: Record<string, unknown>) => rules.some((rule) => ownerRuleMatches(rule, signals as never, undefined));
+
+  test('paths: case-insensitive, on folder boundaries, the same in both', () => {
+    for (const [path, expected] of [
+      ['/Taxes', true], ['/taxes/2020.pdf', true], ['/TAXES/a/b', true], ['/Taxes/', true],
+      ['/taxes2020/x', false], ['/Taxes Old/x', false], ['/other/taxes/x', false],
+    ] as const) {
+      expect(isSecretFolder(secrets, path), path).toBe(expected);
+      expect(classified({ path }), path).toBe(expected);
+    }
+    expect(pathPrefixMatches('/anything', '/')).toBe(true);
+    expect(pathPrefixMatches('/anything', '')).toBe(false);
+    expect(pathPrefixMatches(undefined, '/x')).toBe(false);
+  });
+
+  test('folder keys and labels: case-insensitive, and a folder under a Secrets folder is Secrets', () => {
+    expect(isSecretFolder(secrets, 'folder-vault')).toBe(true);
+    expect(classified({ folderKeys: ['folder-vault'] })).toBe(true);
+    expect(isSecretFolder(secrets, 'child', ['root', 'FOLDER-VAULT'])).toBe(true);
+    expect(classified({ folderKeys: ['child', 'FOLDER-VAULT'] })).toBe(true);
+    expect(isSecretFolder(secrets, 'folder-vaulted')).toBe(false);
+    expect(isSecretLabel(secrets, 'label_secret')).toBe(true);
+    expect(classified({ labels: ['label_secret'] })).toBe(true);
+    expect(isSecretLabel(secrets, 'Label_Secret2')).toBe(false);
+  });
+
+  test('senders: the classifier\'s own matcher, fragments included', () => {
+    for (const [sender, expected] of [
+      ['alerts@bank.example', true], ['x@mail.bank.example', true], ['x@notbank.example', false],
+      ['monthly-statements@shop.example', true], ['friend@example.com', false],
+    ] as const) {
+      expect(isSecretSender(secrets, sender), sender).toBe(expected);
+      expect(classified({ sender }), sender).toBe(expected);
     }
   });
 });

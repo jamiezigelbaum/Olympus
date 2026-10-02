@@ -7,7 +7,14 @@
 # in that version (caddyconfig/httpcaddyfile/serveroptions.go and
 # modules/caddyhttp/requestbody at tag v2.6.2). A newer Caddy needs no change.
 {
-	admin localhost:2019
+	# The admin API on a Unix socket only the caddy user (and root) can reach,
+	# never on TCP: a TCP localhost:2019 endpoint is open to every local
+	# process, the relay's included. /run/caddy is created by the systemd
+	# drop-in deploy/caddy-admin.conf. `systemctl reload caddy` (caddy
+	# reload) reads this address from the config and speaks to the socket
+	# (Caddy 2.6.2 cmd/commandfuncs.go AdminAPIRequest; admin.go accepts the
+	# empty Host it sends).
+	admin unix//run/caddy/admin.sock
 	servers {
 		timeouts {
 			# Slow or never-finished request headers are dropped here.

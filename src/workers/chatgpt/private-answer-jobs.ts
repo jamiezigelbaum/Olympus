@@ -57,7 +57,7 @@
  * dropped with it.
  */
 import { randomBytes } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { lstatSync } from 'node:fs';
 import {
   PRIVATE_ANSWER_MAX_REQUEST_BYTES,
   isPanelOrigin,
@@ -280,10 +280,12 @@ const PENDING_RETRY_SECONDS = 2;
 export const PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 100_000;
 /**
  * A `detail: "full"` job reads its leading items whole and writes a longer
- * answer, which a busy Mac can take well past the summary bound to finish.
- * The job's `_meta` says `detail: "full"`, so the panel can wait this long.
+ * answer, which a busy Mac can take well past the summary bound to finish
+ * (2026-10-02: 179.4 s of a 180 s bound, prefill 64 s and 2.8 tokens/s on a
+ * loaded Mac). The job's `_meta` says `detail: "full"`, so the panel waits
+ * a little longer than this (CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS).
  */
-export const PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 180_000;
+export const PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240_000;
 /** An identical question asked again within this long reuses the answer. */
 export const PRIVATE_ANSWER_DEDUPE_MS = 3 * 60_000;
 /** An unclaimed job's precompute not started within this long of its search is abandoned. */
@@ -308,7 +310,8 @@ export function isPrivateEligible(item: PrivateEvidenceItem): boolean {
   if (domain !== undefined && domain !== 'secure_local') return false;
   for (const key of ['trust_tier', 'trustTier', 'tier', 'content_tier', 'contentTier', 'metadata_tier', 'metadataTier']) {
     const tier = item[key];
-    if (typeof tier === 'string' && /secret/i.test(tier)) return false;
+    // Secret by name, or by trust tier: S5 is Secrets (sensitivity-map.ts USER_FACING_TIER_MAPPING).
+    if (typeof tier === 'string' && (/secret/i.test(tier) || tier.trim().toUpperCase() === 'S5')) return false;
   }
   return true;
 }
@@ -521,9 +524,10 @@ export class PrivateAnswerJobs {
     const path = job.opens?.get(token);
     if (!path || !this.options.openFile) return gone();
     if (!this.takeOpen(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: 5 };
+    // The final path as it is now: a regular file, never a symlink swapped in since the token was minted.
     let isFile = false;
     try {
-      isFile = statSync(path).isFile();
+      isFile = lstatSync(path).isFile();
     } catch {
       isFile = false;
     }
@@ -846,7 +850,9 @@ export class PrivateAnswerJobs {
       if (analysis.startedAt !== undefined) {
         timing.queuedMs = Math.max(0, analysis.startedAt - Math.max(analysis.createdAt, analysis.claimedAt ?? analysis.createdAt));
       }
-      if (analysis.readyAt !== undefined) timing.searchToReadyMs = analysis.readyAt - job.createdAt;
+      // A shared (deduplicated) analysis can be ready before this job's own
+      // search: its answer was there when this search began.
+      if (analysis.readyAt !== undefined) timing.searchToReadyMs = Math.max(0, analysis.readyAt - job.createdAt);
     };
     const run = async () => {
       const cached = job.evidence ?? [];

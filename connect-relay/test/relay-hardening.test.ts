@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RelayClient, type RelayClientStatus } from '../client/relay-client.ts';
 import { loadOrCreateIdentity, type InstallIdentity } from '../client/identity.ts';
-import { PROTOCOL_VERSION, base64url, decodeBodyFrame, encodeBodyFrame, signInstallMessage } from '../shared/protocol.ts';
+import { base64url, decodeBodyFrame, encodeBodyFrame, installAuthMessage } from '../shared/protocol.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, mintCredential } from '../shared/tokens.ts';
 import { DEFAULT_LIMITS, QueueBudget, type RelayLimits } from '../server/limits.ts';
 import { FileInstallRegistry, MemoryInstallRegistry, type LogEntry } from '../server/registry.ts';
@@ -84,13 +84,8 @@ async function rogueInstall(
     if (typeof event.data !== 'string') return;
     const message = JSON.parse(event.data);
     if (message.type === 'challenge') {
-      socket.send(JSON.stringify({
-        type: 'register',
-        v: PROTOCOL_VERSION,
-        installId: identity.installId,
-        publicKey: identity.publicKeySpki,
-        sig: signInstallMessage(identity.privateKey, 'register', message.nonce, identity.installId),
-      }));
+      void installAuthMessage({ kind: 'register', identity, nonce: message.nonce, powBits: message.pow, relayHost: PUBLIC_HOST })
+        .then((auth) => socket.send(JSON.stringify(auth)));
     } else if (message.type === 'ready') {
       ready = true;
     } else if (message.type === 'request') {
@@ -609,16 +604,18 @@ describe('R1: every refusal and timed-out upload ends its transport', () => {
       uploadTimeoutMs: 300,
       uploadIdleTimeoutMs: 250,
       maxRequestBodyBytes: 64 * 1024,
-      maxUploadBufferedBytes: 16 * 1024,
+      maxUploadBufferedBytes: 1024 * 1024,
     };
     const relay = await makeRelay({ ...common, publicRequestsPerIp: { capacity: 1000, refillPerSecond: 0 } });
     const throttled = await makeRelay({ ...common, publicRequestsPerIp: { capacity: 0, refillPerSecond: 0 } });
+    // A relay whose upload byte budget the bytes actually sent exceed.
+    const small = await makeRelay({ ...common, maxUploadBufferedBytes: 16 * 1024, publicRequestsPerIp: { capacity: 1000, refillPerSecond: 0 } });
     const fabricated = `Bearer ${mintCredential('access', loadOrCreateIdentity(tempDir()).installId)}`;
     const cases = {
       unknownId: heldUpload(relay.port, '/mcp', { Authorization: fabricated }, 8_000, 10),
       rateLimited: heldUpload(throttled.port, '/mcp', {}, 8_000, 10),
       oversized: heldUpload(relay.port, '/mcp', {}, 1024 * 1024, 10),
-      byteBudget: heldUpload(relay.port, '/mcp', {}, 32 * 1024, 10),
+      byteBudget: heldUpload(small.port, '/mcp', {}, 32 * 1024, 20 * 1024),
       uploadTimeout: heldUpload(relay.port, '/mcp', {}, 8_000, 10),
     };
     const all = Object.values(cases);
@@ -634,6 +631,7 @@ describe('R1: every refusal and timed-out upload ends its transport', () => {
     for (const c of all) expect(c.state.closedAfterMs).toBeLessThan(6_500);
     expect(relay.status()).toMatchObject({ uploading: 0, inFlight: 0 });
     expect(throttled.status()).toMatchObject({ uploading: 0, inFlight: 0 });
+    expect(small.status()).toMatchObject({ uploading: 0, inFlight: 0 });
   });
 
   test('long quiet answers, quiet SSE streams and install sessions outlive the connection idle limit', async () => {
@@ -779,5 +777,19 @@ describe('the public edge', () => {
     expect(minutes * 60_000).toBeGreaterThan(DEFAULT_LIMITS.responseHeadTimeoutMs + DEFAULT_LIMITS.responseTotalTimeoutMs);
     expect(caddyfile).toMatch(/^\s*read_header 10s$/m);
     expect(caddyfile).toMatch(/^\s*max_size 2MB$/m);
+  });
+
+  test('Caddy\'s admin API listens only on a Unix socket, whose directory the deploy creates', () => {
+    const caddyfile = readFileSync(new URL('../deploy/Caddyfile', import.meta.url), 'utf8');
+    const admin = caddyfile.split('\n').filter((line) => /^\s*admin\b/.test(line));
+    expect(admin).toEqual(['\tadmin unix//run/caddy/admin.sock']);
+    expect(caddyfile.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n')).not.toContain('2019');
+    const dropIn = readFileSync(new URL('../deploy/caddy-admin.conf', import.meta.url), 'utf8');
+    expect(dropIn).toMatch(/^RuntimeDirectory=caddy$/m);
+    const install = readFileSync(new URL('../deploy/remote-install.sh', import.meta.url), 'utf8');
+    expect(install).toContain('/etc/systemd/system/caddy.service.d/olympus-admin.conf');
+    expect(install.indexOf('olympus-admin.conf')).toBeLessThan(install.indexOf('systemctl daemon-reload'));
+    const deploy = readFileSync(new URL('../deploy/deploy.sh', import.meta.url), 'utf8');
+    expect(deploy).toContain('"$DEPLOY_DIR/caddy-admin.conf"');
   });
 });

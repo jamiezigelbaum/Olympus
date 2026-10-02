@@ -45,6 +45,16 @@ values unchanged. The finer S1/S2/S3 levels below all display as Personal.
 Venice's own **Private** model category is a provider classification, distinct
 from Olympus's Private data tier.
 
+**No Public tier on fresh installs (owner ruling, 2026-10-01).** A policy that
+defines neither a `public_safe` route nor a `public_safe` retrieval policy has
+no Public tier (`isPublicTierRetired`). Every ChatGPT install (seeded with the
+`no-sensitive` preset by `olympus engine install`) and every install on that
+preset is such a policy: it shows **Personal → Private → Secrets** (Secret in
+ChatGPT copy), and the classifier lifts any Public verdict to Personal
+(reason `tier:public_retired`). Policies that define Public, including the
+other OpenClaw presets and every install made before the ruling, keep it
+unchanged.
+
 ## Sensitivity Tiers
 
 ### S0 Public
