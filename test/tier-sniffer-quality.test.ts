@@ -14,11 +14,16 @@
 //   pending forever on text that will never arrive.
 
 import { describe, expect, test } from 'bun:test';
+import type { AnalystModel } from '../src/core/analyst.ts';
+import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import { detectSensitiveContent } from '../src/workers/classification/engine.ts';
 import {
   CachedTierSniffer,
+  SNIFFER_INJECTION_CATEGORY,
+  SNIFFER_PROMPT_VERSION,
   snifferMaterialLooksLikeInjection,
 } from '../src/workers/classification/sniffer.ts';
+import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import {
   classifyContentTier,
@@ -116,6 +121,42 @@ describe('the injection screen needs the steering half of an instruction', () =>
       expect(decision).toMatchObject({ contentTier: 'private', contentPending: true });
       expect(store.listQuestions({ pass: 'content' }).map((question) => question.providerItemId)).toEqual(['lab-1']);
     } finally {
+      store.close();
+    }
+  });
+
+  test('an injection fail-safe an older screen cached does not answer for material today\'s screen lets through', async () => {
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    try {
+      const lane = { kind: 'local' as const, modelId: 'built_in' };
+      const sniffer = new CachedTierSniffer(store, lane);
+      const subject = { provider: 'fixture', accountScope: 'personal', providerItemId: 'lab-1' };
+      const listed = () => classifyItemTiers({ signals: { title: 'blood work.pdf' }, text: LAB_REPORT, subject }, { sniffer });
+      expect(listed()).toMatchObject({ state: 'pending', contentPending: true });
+      const question = store.listQuestions({ pass: 'content' })[0]!;
+      // What the resolver cached for this material under the older screen.
+      store.putVerdict(
+        { materialHash: question.materialHash, modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: question.mapRevision },
+        { tier: 'private', category: SNIFFER_INJECTION_CATEGORY, confidence: 0, failSafe: true },
+      );
+      // The sync-time sniffer does not answer from it: the item waits for the model.
+      const decision = listed();
+      expect(decision).toMatchObject({ state: 'pending', contentPending: true });
+      ledger.recordDecision(subject, decision);
+      const asked: string[] = [];
+      const model: AnalystModel = {
+        async complete(request) {
+          asked.push(request.prompt);
+          return { text: '{"verdicts":[{"i":1,"tier":"private","category":"health","confidence":0.99}]}', modelId: 'built_in' };
+        },
+      };
+      await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: BUILT_IN_SNIFFER_LANE, model });
+      expect(asked).toHaveLength(1);
+      expect(ledger.getCurrent(subject)?.reasons.some((reason) => reason.endsWith(':health:0.99'))).toBe(true);
+      expect(ledger.getCurrent(subject)?.reasons.some((reason) => reason.includes('injection'))).toBe(false);
+    } finally {
+      ledger.close();
       store.close();
     }
   });

@@ -36,6 +36,7 @@ import {
   snifferId,
   snifferMaterialCarriesSecret,
   snifferMaterialLooksLikeInjection,
+  cachedSnifferVerdictHolds,
   snifferReasonCode,
   snifferTierKey,
 } from './sniffer.ts';
@@ -325,7 +326,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         continue;
       }
       const cached = target.sniffer.getVerdict(keyOf(question));
-      if (cached) {
+      if (cached && cachedSnifferVerdictHolds(cached)) {
         apply({ target, question }, cached);
         report.cacheHits += 1;
         continue;

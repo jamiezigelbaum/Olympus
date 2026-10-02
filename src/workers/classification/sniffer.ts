@@ -105,6 +105,17 @@ export function snifferReasonCode(verdict: Pick<StoredSnifferVerdict, 'category'
 export const SNIFFER_INJECTION_CATEGORY = 'injection';
 
 /**
+ * A cached verdict that still answers its question. The injection screen
+ * runs afresh before every cache read, so a cached injection fail-safe is
+ * only ever an earlier screen's call: when today's screen lets the material
+ * through, the model is asked instead (2026-10-02: an older screen flagged
+ * lab reports on their reference ranges).
+ */
+export function cachedSnifferVerdictHolds(verdict: Pick<StoredSnifferVerdict, 'category' | 'failSafe'>): boolean {
+  return !(verdict.failSafe && verdict.category === SNIFFER_INJECTION_CATEGORY);
+}
+
+/**
  * Material shaped like an instruction to the model, or like its output
  * (verdict fields, a brace or tag around verdict words, tier-with-confidence
  * phrasing, "every item ... personal"). It is never sent: the item resolves
@@ -444,7 +455,9 @@ export class CachedTierSniffer implements TierSniffer {
         promptVersion: this.promptVersion,
         mapRevision,
       });
-      if (cached) return { verdict: 'decided', tier: snifferTierKey(cached), code: snifferReasonCode(cached) };
+      if (cached && cachedSnifferVerdictHolds(cached)) {
+        return { verdict: 'decided', tier: snifferTierKey(cached), code: snifferReasonCode(cached) };
+      }
       if (request.subject) {
         this.store.enqueue({
           subject: request.subject,
