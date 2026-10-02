@@ -1,11 +1,118 @@
-# Olympus 0.4 release plan
+# Olympus release plan: 1.0 (ChatGPT) and the 0.4 line
 
 Status: active
 
 Owner: Olympus product owner
-Planning authority: this document defines v0.4 scope, sequence, and completion. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
+Planning authority: this document defines release scope, sequence, and completion: Olympus 1.0 first, then the 0.4 record. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
 
-## Outcome
+## Olympus 1.0 (ChatGPT)
+
+Status: active, 2026-10-02. Owner decision 2026-10-01 (Decisions, below):
+this release ships as **Olympus 1.0, the ChatGPT plugin release**, published
+by OCU Inc. (Open Coordination Unlimited, Inc.). This section is the current
+plan. The 0.4 sections after it stay as the record of the OpenClaw line,
+whose outcome still holds for existing OpenClaw installs. Design and
+protocol: [`design/chatgpt-plugin.md`](design/chatgpt-plugin.md). User-facing
+path: [README, "Olympus for ChatGPT"](../README.md#olympus-for-chatgpt).
+
+**Outcome.** A person who has only ChatGPT and a Mac adds Olympus in ChatGPT,
+installs the engine on their Mac with ChatGPT's help, connects Dropbox, Gmail
+or Google Drive with accounts they already have, says what is private for
+them, and asks questions in ChatGPT. Personal items are answered in the chat
+with citations; Private items are answered only in the private answer panel;
+Secret items are never answered from. No API key is ever entered in ChatGPT,
+nothing else needs installing (no Tailscale, no OpenClaw), and the only new
+account they may ever create is an optional Venice account.
+
+### Delivered (branch `claude/chatgpt-plugin`)
+
+- **Standalone engine on the Mac.** `olympus engine
+  install|status|restart|logs|uninstall` runs and supervises the worker as a
+  per-user LaunchAgent, with no OpenClaw. A fresh install is keyless: it
+  seeds the `no-sensitive` preset with the built-in models.
+- **Relay v2** at one fixed host, `mcp.olympusplugin.ai` (Hetzner
+  `olympus-relay-1`, Caddy TLS): one WSS session per install, per-request
+  routing, static OAuth metadata, the authorize bridge, a Mac-offline
+  fallback, abuse limits and durable revocation. Relay v1 (per-install
+  hostnames, DNS-01, the Let's Encrypt agreement and `olympus connections
+  terms`) is deleted.
+- **Engine OAuth.** Consent only on the Mac's loopback page (one click, no
+  pairing code, no account); ChatGPT's client is pinned; codes and tokens
+  carry a routable install prefix.
+- **ChatGPT tools.** `olympus_search` is the primary answer tool (Olympus
+  retrieves, ChatGPT reasons under the one generic Analyst instruction);
+  `source_answer` and `source_answer_result` are listed only when an answer
+  model is set up on the Mac; `source_index_status`; setup tools for
+  connecting sources, folders and mail, disconnecting, model choice and
+  privacy. Mixed auth: the dashboard works before the engine exists.
+- **Dashboard inside ChatGPT** (`ui://olympus/dashboard`, in the sidebar):
+  sources, indexing progress, what needs the user, models and privacy. A
+  folder picker with Full / Names only / Skip (and Mixed) and a Gmail mail
+  picker. Gmail, Drive and Dropbox connect through Olympus's publisher apps
+  and a one-time relay link that works from any device.
+- **No keys through ChatGPT.** Venice and Readwise are configured on the Mac
+  only; ChatGPT can only switch between models already set up there.
+- **Three tiers for new installs: Personal / Private / Secret.** Public is
+  retired on fresh installs (a Public verdict is lifted to Personal); older
+  policies keep their Public tier. "What's private for you?" in the user's
+  own words, plus always-Private folder, label and sender rules. With a
+  private model available, every read item is checked by it before it may be
+  Personal.
+- **Built-in models.** A built-in embedding model is the default for every
+  tier (zero setup, nothing leaves the Mac). The built-in private model is
+  Qwen3.5 4B (Q4_K_M), used for the privacy check and for private answers
+  ([benchmark](design/private-model-benchmark.md)).
+- **Private answer panel.** Shows itself under ChatGPT's reply when Private
+  items match. The answer is prepared on the Mac (started at search time),
+  sealed to the panel's own key and fetched through the relay, never through
+  ChatGPT; badge "Not sent to ChatGPT"; a summary by default and a full read
+  when the user asks for all the details; a collapsed Sources list whose items
+  open on the Mac (or in Dropbox on the web). ChatGPT's model learns only that
+  some matching items are Private. A Private item's name may still be visible
+  to ChatGPT; its contents never are.
+- **Site and submission kit.** olympusplugin.ai home, install, Mac-offline
+  help, support, and draft privacy and terms pages (`site/`);
+  [`chatgpt-plugin/SUBMISSION.md`](../chatgpt-plugin/SUBMISSION.md) with
+  synthetic reviewer data in `chatgpt-plugin/demo-data/`.
+- **Proven end to end** in ChatGPT developer mode on the owner's Mac through
+  `https://mcp.olympusplugin.ai/mcp`: cited answers, the sidebar dashboard,
+  and private answers in the panel.
+
+### Remaining to ship 1.0
+
+Each item names its owner and the precondition that gates it. Nothing here
+waits for a calendar slot.
+
+| # | Item | Owner | Precondition |
+|---|---|---|---|
+| 1 | **Olympus logo.** Replace `chatgpt-plugin/assets/icon.png` (a temporary placeholder; not the OCU mark) and set `logo`, `composerIcon` and `brandColor` in `chatgpt-plugin/plugin.json`. | Owner makes the artwork; any session wires it in | The artwork |
+| 2 | **Mac install command.** The setup skill and `site/install/` show a placeholder `install.sh` command that does not exist yet. Ship the real command (or the signed `.pkg`), or remove the placeholder; the directory's skill scan rejects instructions to run unreviewed commands. | Owner decides script vs signed `.pkg` for 1.0; a session builds it | Owner decision |
+| 3 | **Integration PR** `claude/chatgpt-plugin` → `main` (squash) with a critical-review receipt, since the branch touches critical paths. Rename this plan to the v1 plan in the same merge and update every link to it, AGENTS.md included. | A session opens it and gets the independent review; **the owner runs the receipt** from his login | Required exact-head CI green; independent review |
+| 4 | **`1.0.0-rc.1`**: set `package.json` and `plugin.json` to it together (test enforced), build, then a fresh-install test on a clean Mac user: add the plugin → install the engine → approve on the Mac → connect Dropbox → choose folders → ask a Personal and a Private question. | A session; the owner drives ChatGPT | Item 3 merged; item 2 for a true fresh install |
+| 5 | **ChatGPT directory submission** under OCU Inc., per the [kit](../chatgpt-plugin/SUBMISSION.md): 5a-5e below. | Owner submits | 5a-5e |
+| 5a | Domain verification: the challenge token from platform.openai.com, served by the relay at `/.well-known/openai-apps-challenge` (relay config). | Owner gets the token; a session sets the relay config | Owner starts the submission |
+| 5b | Reviewer demo engine with synthetic data only (`demo-data/`, the demo marker, `remote.demoConsent`, credentials in 1Password); settle how its `.eml` files are ingested; confirm each intended tier on it. | A session | Item 4 |
+| 5c | Legal review of the privacy policy and terms drafts, then remove their Draft banners. | Owner, with counsel | None |
+| 5d | Listing text (long description, capabilities) moved from the kit into `plugin.json`; the panel's CORS origins confirmed against a live panel; the 5 positive and 3 negative test cases pass on the demo engine from a fresh ChatGPT account, desktop and mobile. | A session | 5b |
+| 5e | Demo video, recorded last from the tested build. | Owner | 5a-5d done |
+
+### Deferred to after 1.0
+
+- **Built-in scan reading** with macOS Vision OCR (filed below: "Deferred to
+  the release after 1.0: built-in scan reading").
+- **Delphi as a configured private lane** for the owner's own install.
+- **Signed `.pkg` installer and installer skill**, if 1.0 ships a script
+  (design: "Later").
+- **MCP Events** (design: "Later").
+- **Dead Let's Encrypt agreement UI.** The browser dashboard still carries
+  the relay-v1 terms panel, which nothing triggers since relay v2
+  (`needsTerms`, `LETS_ENCRYPT_REPOSITORY_URL` in
+  `src/workers/agent-connections.ts`); delete it with the dashboard lane.
+- **Hosted agents beyond ChatGPT** (Claude, Grok, Muse) stay out of scope.
+- **Authenticating the Mac's key to the panel.** A compromised relay could
+  swap keys (a residual risk stated in the design); accepted for 1.0.
+
+## Outcome (0.4, OpenClaw)
 
 Release Olympus as a testable plugin to the product owner and a fluid cohort of
 technically sophisticated OpenClaw beta testers so they can:
