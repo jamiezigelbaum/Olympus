@@ -22889,6 +22889,8 @@ var LLAMA_SERVER_RUNTIME = {
 
 // src/workers/source-index/built-in-reasoning/install.ts
 var STALE_LOCK_MS = 60 * 60000;
+var BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+var SPACE_BACKOFF_MS = 15 * 60000;
 var DOWNLOAD_STALL_MS = 2 * 60000;
 var VERIFY_TIMEOUT_MS = 15 * 60000;
 var EXTRACT_TIMEOUT_MS = 5 * 60000;
@@ -23201,6 +23203,7 @@ var BUILT_IN_EMBEDDING_DIR_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DIR";
 var STALE_LOCK_MS2 = 30 * 60000;
 var LOCK_POLL_MS = 1000;
 var PROGRESS_WRITE_INTERVAL_MS = 500;
+var DOWNLOAD_STALL_MS2 = 2 * 60000;
 
 class BuiltInEmbeddingInstallError extends Error {
   reason;
@@ -23270,6 +23273,7 @@ async function installBuiltInEmbedding(options = {}) {
       if (installComplete(paths, modelFiles, runtimePackages))
         return;
       const fetchImpl = options.fetchImpl ?? fetch;
+      const stallMs = options.downloadStallMs ?? DOWNLOAD_STALL_MS2;
       const pending = [
         ...modelFiles.filter((file) => !existsSync9(join17(paths.modelDir, file.name)))
       ];
@@ -23281,10 +23285,10 @@ async function installBuiltInEmbedding(options = {}) {
         await downloadVerified(fetchImpl, file.url, join17(paths.modelDir, file.name), file.bytes, {
           kind: "sha256",
           expected: file.sha256
-        }, reporter, labelFor(file));
+        }, reporter, labelFor(file), stallMs);
       }
       if (pendingPackages.length > 0) {
-        await installRuntime(fetchImpl, paths.runtimeDir, pendingPackages, platform2, reporter);
+        await installRuntime(fetchImpl, paths.runtimeDir, pendingPackages, platform2, reporter, stallMs);
       }
     });
     await verifyModelFiles(paths.modelDir, modelFiles, reporter);
@@ -23340,7 +23344,7 @@ function runtimeInstalled(runtimeDir, packages) {
     return false;
   }
 }
-async function installRuntime(fetchImpl, runtimeDir, packages, platform2, reporter) {
+async function installRuntime(fetchImpl, runtimeDir, packages, platform2, reporter, stallMs) {
   const staging = `${runtimeDir}.staging-${randomUUID5()}`;
   ensureDirectory(staging);
   try {
@@ -23349,7 +23353,7 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform2, report
       await downloadVerified(fetchImpl, pack.url, archivePath, pack.bytes, {
         kind: "integrity",
         expected: pack.integrity
-      }, reporter, "Downloading the search runtime");
+      }, reporter, "Downloading the search runtime", stallMs);
       reporter.set("verifying", "Unpacking the search runtime");
       const archive = readFileSync9(archivePath);
       const files = readTarGz(archive, (path) => runtimeEntryWanted(pack.name, path, platform2));
@@ -23385,18 +23389,33 @@ function runtimeEntryWanted(packageName, path, platform2) {
     return false;
   return path === "package/package.json" || path.startsWith("package/dist/") || path.startsWith(`package/bin/napi-v6/${os}/${arch}/`) || path === "package/LICENSE" || path === "package/ThirdPartyNotices.txt";
 }
-async function downloadVerified(fetchImpl, url, target, expectedBytes, expected, reporter, label) {
+async function downloadVerified(fetchImpl, url, target, expectedBytes, expected, reporter, label, stallMs) {
   const partial = `${target}.partial-${process.pid}-${randomUUID5()}`;
   const algorithm = expected.kind === "sha256" ? "sha256" : integrityAlgorithm(expected.expected);
   const hash = createHash13(algorithm);
   let received = 0;
   let response;
+  const controller = new AbortController;
+  let stallTimer;
+  const armStall = () => {
+    if (stallTimer)
+      clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
+  };
+  const disarmStall = () => {
+    if (stallTimer)
+      clearTimeout(stallTimer);
+    stallTimer = undefined;
+  };
+  armStall();
   try {
-    response = await fetchImpl(url, { redirect: "follow" });
+    response = await fetchImpl(url, { redirect: "follow", signal: controller.signal });
   } catch (error) {
+    disarmStall();
     throw new BuiltInEmbeddingInstallError("download_failed", `Could not reach the download server for the built-in search model (${error instanceof Error ? error.message : String(error)}).`);
   }
   if (!response.ok || !response.body) {
+    disarmStall();
     await response.body?.cancel().catch(() => {
       return;
     });
@@ -23407,12 +23426,23 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
   try {
     fd = openSync4(partial, "w", 420);
   } catch (error) {
+    disarmStall();
+    await response.body.cancel().catch(() => {
+      return;
+    });
     throw new BuiltInEmbeddingInstallError("disk_write_failed", `Could not write ${partial}: ${String(error)}`);
   }
   try {
     const reader = response.body.getReader();
+    const aborted = new Promise((_resolve, reject) => {
+      controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+    });
+    aborted.catch(() => {
+      return;
+    });
     for (;; ) {
-      const { done, value } = await reader.read();
+      armStall();
+      const { done, value } = await Promise.race([reader.read(), aborted]);
       if (done)
         break;
       received += value.byteLength;
@@ -23431,12 +23461,14 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
       reporter.advance(value.byteLength, label);
     }
   } catch (error) {
+    disarmStall();
     closeSync4(fd);
     rmSync3(partial, { force: true });
     if (error instanceof BuiltInEmbeddingInstallError)
       throw error;
     throw new BuiltInEmbeddingInstallError("download_failed", `The built-in search model download was interrupted (${error instanceof Error ? error.message : String(error)}).`);
   }
+  disarmStall();
   closeSync4(fd);
   const digest = expected.kind === "sha256" ? hash.digest("hex") : `${algorithm}-${hash.digest("base64")}`;
   if (received !== expectedBytes || digest !== expected.expected) {
