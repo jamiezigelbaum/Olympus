@@ -13,6 +13,7 @@ import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } f
 import { createModelKeyReload } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { readWorkerSetupEnv } from '../../core/worker-auth.ts';
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
@@ -39,6 +40,7 @@ import {
 } from './index.ts';
 import {
   createAnalystSourceIndexAnswerHandler,
+  readPrivateEvidenceItem,
   searchPrivateEvidence,
   searchReleasedEvidence,
   type AnalystAnswerLanes,
@@ -4250,6 +4252,14 @@ export async function main(): Promise<void> {
   const { PrivateAnswerJobs, createPrivateAnswerHandler, withPrivateAnswerRoute } = await import('../chatgpt/private-answer-jobs.ts');
   const { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } = await import('../chatgpt/private-answer-model.ts');
   const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
+  const { createDropboxOpenTargets } = await import('../dropbox-files/open-target.ts');
+  // Where each cited source opens, by the connector that holds it: the
+  // provider's own resolver turns the item's locator into a web address and,
+  // when the file is synced to this Mac, its local path (kept here; the
+  // panel gets a one-time open token for it).
+  const sourceOpenTargets: Record<string, (locator: string) => { url?: string; localPath?: string } | undefined> = {
+    dropbox: createDropboxOpenTargets(),
+  };
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: workerBuiltInModel?.model,
     available: () => workerBuiltInModel?.available() ?? false,
@@ -4259,6 +4269,17 @@ export async function main(): Promise<void> {
     relevance: embeddingPanelRelevance(() => (
       secureLocalPolicyEmbeddingProvider?.backend === 'local' ? secureLocalPolicyEmbeddingProvider : undefined
     )),
+    // An item that clearly leads is read again, in depth, from its own store.
+    ...(sourceAnswerLanes
+      ? { readItem: (item, request) => readPrivateEvidenceItem({ lanes: sourceAnswerLanes!, item, ...request }) }
+      : {}),
+    sourceLinks: (item) => {
+      const provenance = item.provenance as { sourceItem?: { provider?: unknown }; citation?: { uri?: unknown } } | undefined;
+      const provider = provenance?.sourceItem?.provider;
+      const locator = provenance?.citation?.uri;
+      if (typeof provider !== 'string' || typeof locator !== 'string') return undefined;
+      return Object.hasOwn(sourceOpenTargets, provider) ? sourceOpenTargets[provider]!(locator) : undefined;
+    },
   });
   const privateAnswers = new PrivateAnswerJobs({
     model: () => privateAnswerModel,
@@ -4266,6 +4287,15 @@ export async function main(): Promise<void> {
     // While an analysis runs (from the search) and from a claim to
     // ready/failed, the sniffer stays off the shared model.
     activity: answerActivity,
+    // The panel's "open on this Mac": macOS `open`, on a path this engine
+    // resolved for a cited source (never a path from the request).
+    ...(process.platform === 'darwin'
+      ? {
+          openFile: (path: string) => new Promise<void>((resolve, reject) => {
+            execFile('/usr/bin/open', [path], { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+          }),
+        }
+      : {}),
   });
   const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30_000);
   privateAnswerSweep.unref?.();

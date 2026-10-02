@@ -590,6 +590,47 @@ describe('private answer collection', () => {
     expect(logs).not.toContain(a.identity.installId);
   });
 
+  test('a source-open request (/private/<job id>/open) is routed and answers CORS like the collection', async () => {
+    logLines.length = 0;
+    const relay = await makeRelay();
+    const workerA = fakeWorker('A');
+    const workerB = fakeWorker('B');
+    cleanups.push(workerA.stop, workerB.stop);
+    const a = await connectInstall(relay, workerA);
+    await connectInstall(relay, workerB);
+    const jobId = mintCredential('private', a.identity.installId);
+    const openPath = `${relay.url}/private/${jobId}/open`;
+    const preflight = await fetch(openPath, {
+      method: 'OPTIONS',
+      headers: { origin: PANEL, 'access-control-request-method': 'POST', 'access-control-request-headers': 'content-type' },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(preflight.headers.get('access-control-allow-methods')).toContain('POST');
+    expect(preflight.headers.get('access-control-allow-headers')).toBe('content-type');
+    expect((await fetch(openPath, { method: 'OPTIONS', headers: { origin: 'https://evil.example' } })).status).toBe(403);
+
+    const open = (origin: string) => fetch(openPath, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ v: 1, open: 'A'.repeat(43) }),
+    });
+    const response = await open(PANEL);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(await response.json()).toMatchObject({ worker: 'A', path: `/private/${jobId}/open` });
+    expect(workerB.requests).toHaveLength(0);
+    const refused = await open('https://evil.example');
+    expect(refused.status).toBe(403);
+    expect(refused.headers.get('access-control-allow-origin')).toBeNull();
+    // Nothing else under the job path reaches an engine.
+    for (const suffix of ['/open/', '/open/x', '/opened', '/open?x=1']) {
+      expect((await fetch(`${relay.url}/private/${jobId}${suffix}`, { method: 'POST', headers: { origin: PANEL }, body: '{}' })).status, suffix).toBe(404);
+    }
+    expect(workerA.requests).toHaveLength(1);
+    expect(logLines.join('\n')).not.toContain(jobId.split('.')[2]!);
+  });
+
   test('an offline Mac answers mac_offline, with CORS, so the panel can say so', async () => {
     const relay = await makeRelay();
     const worker = fakeWorker('A');

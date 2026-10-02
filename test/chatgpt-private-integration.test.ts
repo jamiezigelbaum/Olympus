@@ -403,7 +403,8 @@ describe('sealing and the panel page', () => {
     // The panel's job id pattern is exactly the relay's routable path shape
     // (test/chatgpt-private-answer-ui.test.ts drives the page itself).
     const pattern = CHATGPT_PRIVATE_ANSWER_JOB_ID;
-    expect(PRIVATE_ANSWER_PATH_PATTERN.source).toBe(`^\\/private\\/${pattern.source.slice(1)}`);
+    // (The relay also routes the same path plus `/open`, the source-open request.)
+    expect(PRIVATE_ANSWER_PATH_PATTERN.source).toBe(`^\\/private\\/${pattern.source.slice(1, -1)}(?:\\/open)?$`);
     expect(html).toContain(JSON.stringify(pattern.source));
     expect(pattern.test(`oly2p.${INSTALL}.${'A'.repeat(43)}`)).toBe(true);
     for (const bad of [`oly2p.${INSTALL}.${'A'.repeat(43)}/../mcp`, `oly2.${INSTALL}.${'A'.repeat(43)}`, '../../mcp', `oly2p.${INSTALL}.x?y=1`]) {

@@ -507,6 +507,11 @@ describe('the response builder', () => {
       expect(note).not.toContain(SECRET_ANSWER);
       expect(note.toLowerCase()).toContain("don't suggest changing folder settings");
     }
+    // 2026-10-02 live: ChatGPT asked the user to "attach the June report or
+    // paste its text". The panel note says not to, and that a follow-up is
+    // answered in the panel the same way, from a self-contained search.
+    expect(PRIVATE_MATCH_PANEL_NOTE).toContain("Don't ask the user to upload, attach or paste those files");
+    expect(PRIVATE_MATCH_PANEL_NOTE).toContain('Follow-up questions about them are answered privately in the panel the same way');
   });
 
   test('the resource declares the relay as its one connect domain', () => {

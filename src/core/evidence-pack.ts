@@ -66,6 +66,12 @@ export interface LocalContentRequest {
   trustDomain: SourceTrustDomain;
   maxChars?: number;
   query?: string;
+  /**
+   * For an item longer than `maxChars`: at most this many of its passages
+   * (the provider's own small default otherwise). A caller reading one item
+   * in depth raises it so the budget is filled with the item's text.
+   */
+  maxPassages?: number;
 }
 
 export interface LocalContentBlock {

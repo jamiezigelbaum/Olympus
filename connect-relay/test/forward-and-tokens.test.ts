@@ -57,7 +57,15 @@ describe('the forwarded surface', () => {
     expect(credentialInstallId('private', jobId)).toBe(INSTALL);
     expect(credentialInstallId('access', jobId)).toBeUndefined();
     expect(forwardPath(`/private/${jobId}`, undefined, 'POST')).toBe(`/private/${jobId}`);
+    // A source-open request by the same panel: exactly `<job path>/open`.
+    expect(forwardPath(`/private/${jobId}/open`, undefined, 'POST')).toBe(`/private/${jobId}/open`);
     for (const [path, method] of [
+      [`/private/${jobId}/open`, 'GET'],
+      [`/private/${jobId}/open?path=/etc/passwd`, 'POST'],
+      [`/private/${jobId}/open/`, 'POST'],
+      [`/private/${jobId}/open/x`, 'POST'],
+      [`/private/${jobId}/opens`, 'POST'],
+      [`/private/${jobId}/../open`, 'POST'],
       [`/private/${jobId}`, 'GET'],
       [`/private/${jobId}`, 'DELETE'],
       [`/private/${jobId}?x=1`, 'POST'],

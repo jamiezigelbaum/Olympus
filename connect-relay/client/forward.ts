@@ -32,8 +32,9 @@ const BROWSER_GET_PATHS: readonly RegExp[] = [
   /^\/oauth\/callback\/(gmail|google-drive|dropbox)$/,
 ];
 /**
- * The private answer panel's one-time collection, POST only and exactly
- * `/private/oly2p.<installId>.<secret>` with no query
+ * The private answer panel's one-time collection and its source-open
+ * request, POST only and exactly `/private/oly2p.<installId>.<secret>` or
+ * that path plus `/open`, with no query
  * (src/workers/chatgpt/private-answer-jobs.ts). Nothing else under the prefix.
  */
 const POST_PATH_PATTERNS: readonly RegExp[] = [PRIVATE_ANSWER_PATH_PATTERN];

@@ -13,10 +13,15 @@
  *   The model reads only the few most relevant items: ranked by how close
  *   each item's name and text are to the question (local embeddings, when
  *   this computer has them), cut at a relevance floor below the best, in a
- *   compact rendering that puts each item's name and date first.
- *   The answer (without evidence numbers), the cited titles and the
- *   unanswered gaps become the panel's plaintext. Nothing here
- *   leaves this computer except through the sealed panel payload.
+ *   compact rendering that puts each item's name and date first. When one
+ *   or two items clearly lead the rest, only they are read, in depth (their
+ *   whole text, re-read from the store, within a larger prompt), with room
+ *   for a longer answer, so "all the details" of an item are there to give.
+ *   The answer (without evidence numbers), the cited items (title, and where
+ *   each opens) and the unanswered gaps become the panel's plaintext.
+ *   Nothing here leaves this computer except through the sealed panel
+ *   payload; a source's local path stays here (the panel gets a one-time
+ *   open token for it, private-answer-jobs.ts).
  * - reset: stops the model's server process (it restarts on the next answer).
  */
 import type {
@@ -26,7 +31,7 @@ import type {
   PrivateEvidenceItem as BuiltInEvidenceItem,
 } from '../../core/analyst-built-in.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
-import type { PrivateAnswerCitation, PrivateAnswerModel, PrivateEvidenceItem } from './private-answer-contract.ts';
+import type { PrivateAnswerModel, PrivateAnswerSourceCitation, PrivateEvidenceItem } from './private-answer-contract.ts';
 
 export interface BuiltInPrivateAnswerModelOptions {
   /** The worker's one built-in model instance (shared with the sniffer and the answer pool). */
@@ -44,6 +49,34 @@ export interface BuiltInPrivateAnswerModelOptions {
    * their retrieval order.
    */
   relevance?: PanelRelevance;
+  /**
+   * Re-reads one evidence item's own text, up to `maxChars`, with its
+   * passages chosen for `question` (the whole item when it fits), from the
+   * store on this computer. The panel reads an item that clearly leads in
+   * depth through it. Without it (or when it fails), the search-time
+   * passages are read.
+   */
+  readItem?: PanelItemReader;
+  /**
+   * Where one evidence item can be opened: its web address and, when the
+   * file is on this computer, its local path (kept on this computer: the
+   * panel gets a one-time open token for it, never the path). Undefined
+   * when the item has neither.
+   */
+  sourceLinks?: (item: PrivateEvidenceItem) => PrivateSourceLinks | undefined;
+}
+
+export type PanelItemReader = (
+  item: PrivateEvidenceItem,
+  request: { question: string; maxChars: number },
+  signal?: AbortSignal,
+) => Promise<readonly string[] | undefined>;
+
+export interface PrivateSourceLinks {
+  /** An https address that opens the item in its service. */
+  url?: string;
+  /** The item's file on this computer. Never leaves this computer. */
+  localPath?: string;
 }
 
 export type PanelRelevance = (
@@ -74,6 +107,27 @@ export interface PanelAnswerLimits {
   /** The answer's character budget (bounds generation). */
   maxAnswerChars: number;
   audit: boolean;
+  /**
+   * At most this many items can lead (0 turns leading off). When the top
+   * one or two items clearly lead the rest by relevance, the panel reads
+   * only them, in depth: their whole text (or their best passages, when
+   * longer) within `deepEvidenceChars`, a larger prompt and a longer answer.
+   * A request for every detail of an item then reads all of it, instead of
+   * four thin slices of four items.
+   */
+  maxLeadingItems: number;
+  /**
+   * The top k items lead when the drop from the k-th to the next item is at
+   * least this, and at least the spread among the k (so the k are close
+   * together and clearly apart from the rest).
+   */
+  leadGap: number;
+  /** Characters of item text read in depth, shared by the leading items. */
+  deepEvidenceChars: number;
+  /** The prompt ceiling when reading in depth (about 6k tokens). */
+  deepPromptBytes: number;
+  /** The answer budget when reading in depth (the answer field takes about half). */
+  deepAnswerChars: number;
 }
 
 export const PANEL_ANSWER_LIMITS: Readonly<PanelAnswerLimits> = {
@@ -83,6 +137,11 @@ export const PANEL_ANSWER_LIMITS: Readonly<PanelAnswerLimits> = {
   maxPromptBytes: 11_000,
   maxAnswerChars: 1_000,
   audit: false,
+  maxLeadingItems: 2,
+  leadGap: 0.01,
+  deepEvidenceChars: 10_000,
+  deepPromptBytes: 14_500,
+  deepAnswerChars: 3_700,
 };
 
 export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerModelOptions): PrivateAnswerModel {
@@ -107,8 +166,19 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       if (!model) throw new Error('no private answer model');
       const read = privateEvidence(evidence, limits.maxPassageChars);
       const unreadable = read.unreadable;
-      const picked = await panelItems(question, read, limits, options.relevance, signal);
-      const items = picked.map((index) => read.items[index]!);
+      const selection = await panelSelection(question, read, limits, options.relevance, signal);
+      const picked = selection.items;
+      let items = picked.map((index) => read.items[index]!);
+      if (selection.leading && options.readItem) {
+        items = await readInDepth(
+          question,
+          items,
+          picked.map((index) => evidence[read.sources[index]!]!),
+          limits.deepEvidenceChars,
+          options.readItem,
+          signal,
+        );
+      }
       try {
         observe?.evidence?.({
           items: items.length,
@@ -126,25 +196,35 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       }
       const result = await options.answer(question, items, {
         model,
-        maxPromptBytes: limits.maxPromptBytes,
-        maxAnswerChars: limits.maxAnswerChars,
+        maxPromptBytes: selection.leading ? limits.deepPromptBytes : limits.maxPromptBytes,
+        maxAnswerChars: selection.leading ? limits.deepAnswerChars : limits.maxAnswerChars,
         audit: limits.audit,
         evidenceFormat: 'compact',
         ...(observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {}),
         ...(signal ? { signal } : {}),
       });
-      const byId = new Map(items.map((item) => [item.id, item]));
-      const citations: PrivateAnswerCitation[] = [];
+      const byId = new Map(items.map((item, position) => [item.id, { item, hit: evidence[read.sources[picked[position]!]!] }]));
+      const citations: PrivateAnswerSourceCitation[] = [];
       const seen = new Set<string>();
+      // Only the items the answer cites are its sources.
       for (const citation of result.citations) {
         if (seen.has(citation.id)) continue;
         seen.add(citation.id);
-        const item = byId.get(citation.id);
+        const entry = byId.get(citation.id);
+        const item = entry?.item;
         const title = citation.title ?? item?.title;
+        let links: PrivateSourceLinks | undefined;
+        try {
+          links = entry?.hit && options.sourceLinks ? options.sourceLinks(entry.hit) : undefined;
+        } catch {
+          links = undefined;
+        }
         citations.push({
           ...(title ? { title } : {}),
           ...(item?.source ? { source: item.source } : {}),
           ...(item?.date ? { date: item.date } : {}),
+          ...(links?.url ? { url: links.url } : {}),
+          ...(links?.localPath ? { localPath: links.localPath } : {}),
         });
       }
       const unanswered = [...result.unanswered];
@@ -215,13 +295,31 @@ export function privateEvidence(
 export async function panelItems(
   question: string,
   read: { items: readonly BuiltInEvidenceItem[] },
-  limits: Pick<PanelAnswerLimits, 'maxItems' | 'relevanceMargin'>,
+  limits: Pick<PanelAnswerLimits, 'maxItems' | 'relevanceMargin'> & Partial<Pick<PanelAnswerLimits, 'maxLeadingItems' | 'leadGap'>>,
   relevance?: PanelRelevance,
   signal?: AbortSignal,
 ): Promise<number[]> {
+  return (await panelSelection(question, read, limits, relevance, signal)).items;
+}
+
+/**
+ * panelItems, and whether the picked items lead: one or two items (at most
+ * `maxLeadingItems`) clearly ahead of every other item by relevance
+ * (leadingCount), or the only readable item. Leading items are read alone,
+ * in depth; an item merely within the relevance floor of them is left out.
+ */
+export async function panelSelection(
+  question: string,
+  read: { items: readonly BuiltInEvidenceItem[] },
+  limits: Pick<PanelAnswerLimits, 'maxItems' | 'relevanceMargin'> & Partial<Pick<PanelAnswerLimits, 'maxLeadingItems' | 'leadGap'>>,
+  relevance?: PanelRelevance,
+  signal?: AbortSignal,
+): Promise<{ items: number[]; leading: boolean }> {
   const max = Math.max(1, limits.maxItems);
+  const maxLeading = Math.max(0, Math.floor(limits.maxLeadingItems ?? 0));
   const order = read.items.map((_, index) => index);
-  if (order.length === 0) return [];
+  if (order.length === 0) return { items: [], leading: false };
+  if (order.length === 1) return { items: order, leading: maxLeading > 0 };
   let scores: readonly number[] | undefined;
   if (relevance && order.length > 1) {
     try {
@@ -231,11 +329,76 @@ export async function panelItems(
     }
   }
   if (!scores || scores.length !== order.length || scores.some((score) => !Number.isFinite(score))) {
-    return order.slice(0, max);
+    return { items: order.slice(0, max), leading: false };
   }
   const ranked = [...order].sort((a, b) => (scores![b]! - scores![a]!) || (a - b));
   const floor = scores[ranked[0]!]! - Math.max(0, limits.relevanceMargin);
-  return ranked.filter((index) => scores![index]! >= floor).slice(0, max);
+  const picked = ranked.filter((index) => scores![index]! >= floor).slice(0, max);
+  const leading = leadingCount(ranked.map((index) => scores![index]!), Math.min(maxLeading, picked.length), limits.leadGap ?? 0);
+  return leading > 0 ? { items: picked.slice(0, leading), leading: true } : { items: picked, leading: false };
+}
+
+/**
+ * How many of the top items lead, from scores sorted best first: the k (1 to
+ * maxLeading) whose drop to the next score is largest, counting only a k
+ * whose drop is at least `gap` and at least the spread among the k. 0 when
+ * none leads. Scores only: no question, source or content is consulted.
+ */
+export function leadingCount(sorted: readonly number[], maxLeading: number, gap: number): number {
+  let best = 0;
+  let bestDrop = Number.NEGATIVE_INFINITY;
+  for (let k = 1; k <= Math.min(maxLeading, sorted.length); k += 1) {
+    const drop = k < sorted.length ? sorted[k - 1]! - sorted[k]! : Number.POSITIVE_INFINITY;
+    const spread = sorted[0]! - sorted[k - 1]!;
+    if (drop >= gap && drop >= spread && drop > bestDrop) {
+      best = k;
+      bestDrop = drop;
+    }
+  }
+  return best;
+}
+
+/**
+ * The leading items' text, re-read in depth: each item's whole text when
+ * all of them fit `budget` characters; otherwise the shorter ones whole and
+ * the rest an equal share of what is left, each re-read for its best
+ * passages at that size. An item whose re-read fails or comes back shorter
+ * keeps its search-time passages.
+ */
+async function readInDepth(
+  question: string,
+  items: readonly BuiltInEvidenceItem[],
+  hits: readonly PrivateEvidenceItem[],
+  budget: number,
+  readItem: PanelItemReader,
+  signal?: AbortSignal,
+): Promise<BuiltInEvidenceItem[]> {
+  const read = async (index: number, maxChars: number): Promise<string | undefined> => {
+    try {
+      const chunks = await readItem(hits[index]!, { question, maxChars }, signal);
+      const text = (chunks ?? []).map((chunk) => chunk.trim()).filter(Boolean).join('\n…\n');
+      return text ? text.slice(0, maxChars) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const whole = await Promise.all(items.map((_, index) => read(index, budget)));
+  const sizes = whole.map((text, index) => text?.length ?? items[index]!.text.length);
+  // Fair shares: the shorter items whole, the rest split what is left.
+  const share = new Array<number>(items.length).fill(0);
+  const byLength = sizes.map((size, index) => ({ size, index })).sort((a, b) => a.size - b.size);
+  let remaining = budget;
+  byLength.forEach(({ size, index }, position) => {
+    const fair = Math.floor(remaining / (byLength.length - position));
+    share[index] = Math.min(size, fair);
+    remaining -= share[index]!;
+  });
+  return Promise.all(items.map(async (item, index) => {
+    const full = whole[index];
+    if (!full) return item;
+    const text = full.length <= share[index]! ? full : (await read(index, share[index]!)) ?? full.slice(0, share[index]!);
+    return text.length > item.text.length ? { ...item, text } : item;
+  }));
 }
 
 /** How much an item's name counts against its name plus passages in its relevance. */

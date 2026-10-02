@@ -236,7 +236,12 @@ every result. ChatGPT's model gets Public and Personal evidence as before and
 **one bit** about a private match: a fixed note that some matching items are
 Private and that Olympus answers from them only to the user, in the panel
 (owner decision, Jamie, 2026-10-02, superseding the 2026-10-01 "nothing"
-rule). Without it, the model saw only Personal titles and coverage gaps for
+rule). The note also tells the model not to ask the user to upload, attach
+or paste those files, and that a follow-up is answered privately in the
+panel the same way, from a search with the follow-up as a complete question
+(the panel sees only the search's question, not the conversation; owner
+report 2026-10-02: ChatGPT asked the user to "attach the June report or
+paste its text"). Without it, the model saw only Personal titles and coverage gaps for
 those items, told the user Olympus "returned only its title", and sent them
 to switch folders to Full, while the answer sat in the panel. The note has
 no count, no title and no content (review 2026-10-01 still holds: a
@@ -343,6 +348,38 @@ percent when known; counts only, no job).
      reports from other months first by retrieval, and the small model
      answered from them; by name similarity the right files led with a clear
      margin, and the prompt shrank from about 3,700 to about 1,600 tokens.
+   - **Leading items read in depth (2026-10-02).** When the top one or two
+     items clearly lead (the drop from the k-th to the next item is at least
+     0.01 and at least the spread among the k; or only one item is
+     readable), the model reads only them, in depth: each is read again from
+     its local store, whole when the leading items fit 11,000 characters
+     together (layout whitespace compacted), otherwise the shorter ones whole
+     and the rest re-read for their best passages at an equal share of the
+     remainder; the prompt ceiling is about 5k tokens (15,500 bytes) and the
+     answer may run to about 2,500 characters. An item that is merely within
+     the 0.04 floor of leading items is left out. Owner report: the
+     follow-up "can you give me all the details from that lab please?"
+     reached the panel as four thin slices of four items and was answered
+     "the provided evidence does not contain the details"; the first answer
+     also listed an unrelated report as a source and missed values that sat
+     on later pages. The Analyst instruction allows a longer answer only
+     when the question asks for details, all results or a full list (one
+     generic sentence; no question is parsed).
+   - **Sources.** Only the items the answer cites are its sources. Each
+     carries its title and, when it can, where it opens
+     (`citations[].open`): `{kind:"mac", token}` when the file is synced to
+     this Mac (a Dropbox file found under the Dropbox folder recorded in
+     `~/.dropbox/info.json`, `~/Library/CloudStorage/Dropbox*` or
+     `~/Dropbox`), else `{kind:"web", url}` (for Dropbox,
+     `https://www.dropbox.com/home<folder>?preview=<name>`). The panel lists
+     them under a collapsed "Sources" toggle, not in every reply.
+   - **Gaps.** The `unanswered` lines are whole sentences: the schema bounds
+     the list (3 entries) with room for a sentence each, an entry the
+     grammar cut at its bound is dropped, an entry whose specific words
+     (names, numbers, dates) all appear in the answer is dropped as a
+     restatement, and there are none when the model calls its answer
+     complete. Owner report: "Specific arsenic value for June 2026 is" (cut
+     at the old 40-character bound) beside an answer that gave it.
    - **Timing log.** Each settled claim logs one content-free line:
      `[private-answer] outcome=… precomputed=yes|no wait_at_claim_ms=…
      search_to_ready_ms=… queued_ms=… refresh_ms=… matched=… items=…
@@ -371,7 +408,25 @@ percent when known; counts only, no job).
    relay, or anyone who saw it) gets the same sealed bytes, which only the
    panel's private key opens, so a replay cannot consume or destroy the
    answer. A model failure answers `200 failed`, also idempotently.
-7. **Expiry.** Ten minutes after creation the job is deleted; then, as for
+7. **Open a source on the Mac.** A source with `open: {kind:"mac", token}`
+   opens with `POST https://mcp.olympusplugin.ai/private/<job id>/open` and
+   body `{"v":1,"open":"<token>"}`; the engine runs macOS `open` on the file
+   it mapped that token to and answers **204**. The token is 32 random bytes
+   minted for this job when its answer is sealed (a shared analysis gives
+   each job its own tokens), mapped to a path that stays in the engine's
+   memory, and dropped with the job. No path is ever read from a request:
+   an unknown token, another job's token, an expired job or another install
+   all answer **410 `gone`**; a malformed body **400**; opens are rate
+   limited per job (4 burst, one per 5 s) and across jobs (10 burst, one
+   per 5 s), **429**. A file removed since is `gone`; a failed `open`
+   answers `200 failed`. Security: the tokens exist only inside the
+   panel-encrypted plaintext, so OpenAI (which sees the job id) and the
+   relay (which sees only ciphertext) cannot trigger an open; the relay
+   learns a token only when the panel uses it, and could at most repeat an
+   open the owner just asked for, within the rate limit and the job's life,
+   never open anything else. Opening a file on the Mac shows it to whoever
+   is at the Mac, which is the owner's own action.
+8. **Expiry.** Ten minutes after creation the job is deleted; then, as for
    unknown and wrong-install ids, every request gets **410 `gone`** (one
    answer for all, so the endpoint is no oracle). Pending polls by the
    claiming key are rate limited per job (429 with Retry-After) and never
@@ -380,12 +435,13 @@ percent when known; counts only, no job).
 Wire statuses (`connect-relay/shared/private-answer.ts`): `ready`, `failed`,
 `pending` (202), `claimed` (409), `gone` (410), `invalid` (400/405/413),
 `forbidden` (403), `rate_limited` (429), `mac_offline` (503, from the
-relay), `busy` (503).
+relay), `busy` (503), and `opened` (204, no body, `/open` only).
 
 ### Relay
 
-- `/private/<id>` is routed by the install prefix of the job id, like
-  `/mcp` by its token; exactly that path shape, POST only, no query string,
+- `/private/<id>` and `/private/<id>/open` are routed by the install prefix
+  of the job id, like `/mcp` by its token; exactly those path shapes, POST
+  only, no query string,
   a 512-byte body cap, and a per-address rate limit (`privateFetchesPerIp`,
   30 burst, 1/s) on top of the per-install admission lanes.
 - CORS is answered by the relay, for ChatGPT widget origins only:
@@ -399,8 +455,10 @@ relay), `busy` (503).
 - Mac offline: the relay answers `503 mac_offline` (with CORS) and the panel
   says the Mac is offline. The relay's offline MCP fallback serves the panel
   resource too, from the generated relay assets.
-- The install's relay client forwards exactly `POST /private/oly2p.…`; the
-  engine serves it only to relayed requests from an allowed Origin.
+- The install's relay client forwards exactly `POST /private/oly2p.…` and
+  `POST /private/oly2p.…/open`; the engine serves them only to relayed
+  requests from an allowed Origin. CORS and preflight for `/open` are the
+  same as for the collection.
 
 ### Who can read the answer
 

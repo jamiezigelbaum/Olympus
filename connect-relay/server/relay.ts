@@ -21,6 +21,11 @@
  *   panel collecting one sealed answer, routed by the install the job id
  *   names; only ChatGPT widget origins pass CORS. The relay forwards
  *   ciphertext it holds no key for (shared/private-answer.ts).
+ *   `POST /private/<job id>/open` (same CORS, same routing) asks the Mac to
+ *   open one of that answer's sources, by a token only the decrypted answer
+ *   carries; the relay learns a token only when the panel uses it, so it
+ *   could at most repeat an open the owner just asked for (rate limited,
+ *   until the job expires), never open anything else.
  *
  * The relay mints, validates and stores no token: the install does. A caller
  * with no token, and an authorized request for an install that is registered
@@ -556,7 +561,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   };
 
   /**
-   * `/private/<job id>`: the private answer panel's one-time collection. CORS
+   * `/private/<job id>` (and `/private/<job id>/open`, a source-open request
+   * by a token from the sealed answer): the private answer panel. CORS
    * is answered here, for ChatGPT widget origins only; the POST is routed by
    * the install its job id names, never logged beyond that install's tag, and
    * capped at a tiny body. The relay sees the panel's public key and the

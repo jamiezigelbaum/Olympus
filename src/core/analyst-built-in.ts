@@ -15,6 +15,7 @@ import { totalmem } from 'node:os';
 import {
   ANALYST_EVIDENCE_SCAFFOLDING_LABELS,
   analystPromptBytes,
+  analystSchemaGapChars,
   createAnalyst,
   runWithAnalystAbortSignal,
   type AnalystEvidenceFormat,
@@ -475,7 +476,10 @@ export async function answerPrivately(
     options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES,
     options.evidenceFormat ?? 'full',
   );
-  const analyst = createAnalyst(options.onModelCall ? timedModel(model, options.onModelCall) : model, {
+  // Whether the model called its own answer complete ("sufficient"): the
+  // AnalystResult does not carry it, and the panel shows no gaps then.
+  const verdict: { sufficient: boolean | undefined } = { sufficient: undefined };
+  const analyst = createAnalyst(withVerdict(options.onModelCall ? timedModel(model, options.onModelCall) : model, verdict), {
     auditSuspiciousDrafts: options.audit ?? true,
     boundedResponseSchema: true,
     ...(options.evidenceFormat ? { evidenceFormat: options.evidenceFormat } : {}),
@@ -490,16 +494,18 @@ export async function answerPrivately(
   const byId = new Map(evidence.map((item) => [item.id, item]));
   const modelId = `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`;
   const unanswered = result.unanswered.filter((line) => !echoesEvidenceScaffolding(line));
+  const gapChars = analystSchemaGapChars(options.maxAnswerChars ?? DEFAULT_PRIVATE_ANSWER_CHARS);
   // An ungrounded local answer comes back as an escalation proposal. This
   // path never escalates, so the proposal is dropped and the panel is told
   // plainly that these items did not answer the question. An answer that
   // reproduces the evidence blocks' formatting (field labels, provenance
   // JSON) is a failed answer, not an answer, and is reported the same way.
   if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
-    return { answer: PRIVATE_ANSWER_NOT_FOUND, citations: [], unanswered, modelId };
+    return { answer: PRIVATE_ANSWER_NOT_FOUND, citations: [], unanswered: cleanUnanswered(unanswered, '', { maxChars: gapChars, complete: false }), modelId };
   }
   return {
     answer: result.answer,
+    unanswered: cleanUnanswered(unanswered, result.answer, { maxChars: gapChars, complete: verdict.sufficient === true }),
     citations: result.citations.map((citation) => {
       const id = citation.provenance.sourceItem.providerItemId;
       const item = byId.get(id);
@@ -510,10 +516,104 @@ export async function answerPrivately(
         claim: citation.claim,
       };
     }),
-    unanswered,
     modelId,
   };
 }
+
+// The Analyst's default answer budget (analyst.ts), which sizes the schema's gaps when no budget is given.
+const DEFAULT_PRIVATE_ANSWER_CHARS = 1_600;
+
+/** The model, recording whether its last reply called the answer complete (`"sufficient": true`). */
+function withVerdict(model: AnalystModel, verdict: { sufficient: boolean | undefined }): AnalystModel {
+  return {
+    async complete(request) {
+      const completion = await model.complete(request);
+      verdict.sufficient = replySufficient(completion.text);
+      return completion;
+    },
+  };
+}
+
+function replySufficient(text: string): boolean | undefined {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return undefined;
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1)) as unknown;
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    const sufficient = (parsed as Record<string, unknown>).sufficient;
+    return typeof sufficient === 'boolean' ? sufficient : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The gaps worth showing beside an answer, each a complete statement of
+ * something the answer does not give:
+ * - none when the model called its answer complete;
+ * - an entry that reached the schema's per-entry bound was cut off by the
+ *   grammar mid-sentence, so it is dropped rather than shown half-said;
+ * - an entry whose every specific word (names, numbers, dates; not the
+ *   generic words a gap is phrased in) is in the answer restates what the
+ *   answer already gives, so it is dropped, as is one with no specific word;
+ * - repeats are dropped.
+ * Text shape only: no question, source or kind of document is consulted.
+ */
+export function cleanUnanswered(
+  gaps: readonly string[],
+  answer: string,
+  options: { maxChars: number; complete: boolean },
+): string[] {
+  if (options.complete) return [];
+  const answered = new Set(specificTerms(answer).map(termStem));
+  const answerText = answer.toLowerCase();
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of gaps) {
+    const gap = raw.trim();
+    if (!gap || gap.length >= options.maxChars - 1) continue;
+    const terms = specificTerms(gap);
+    if (terms.length === 0) continue;
+    if (terms.every((term) => answered.has(termStem(term)) || answerText.includes(term))) continue;
+    const key = gap.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(gap);
+  }
+  return out;
+}
+
+/** Lowercase words of a text that say something specific: not stop words, not a gap's generic phrasing. */
+function specificTerms(text: string): string[] {
+  return (text.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}.,/-]*[\p{L}\p{N}]|[\p{L}\p{N}]/gu) ?? [])
+    .filter((word) => /\p{N}/u.test(word) || (word.length >= 3 && !GAP_GENERIC_WORDS.has(word)));
+}
+
+function termStem(word: string): string {
+  return word.length > 4 && word.endsWith('es') ? word.slice(0, -2)
+    : word.length > 3 && word.endsWith('s') ? word.slice(0, -1)
+      : word;
+}
+
+// English function words and the words a gap is phrased in ("the specific
+// value is not provided in the evidence"), none of which names a thing.
+const GAP_GENERIC_WORDS = new Set([
+  'the', 'and', 'for', 'are', 'was', 'were', 'with', 'from', 'that', 'this', 'these', 'those', 'not', 'any', 'all',
+  'its', 'their', 'there', 'which', 'what', 'when', 'where', 'who', 'whom', 'how', 'why', 'does', 'did', 'has', 'have',
+  'had', 'been', 'being', 'into', 'about', 'than', 'then', 'also', 'such', 'other', 'only', 'more', 'most', 'some',
+  'can', 'could', 'would', 'should', 'may', 'might', 'will', 'shall', 'but', 'nor', 'yet', 'per', 'via', 'each',
+  'your', 'you', 'user', 'his', 'her', 'our', 'they', 'them', 'one', 'out', 'over', 'under', 'between', 'within',
+  'specific', 'exact', 'precise', 'actual', 'value', 'values', 'level', 'levels', 'number', 'numbers', 'amount',
+  'detail', 'details', 'detailed', 'information', 'info', 'result', 'results', 'data', 'figure', 'figures',
+  'provided', 'provide', 'evidence', 'found', 'find', 'missing', 'available', 'unavailable', 'mentioned', 'mention',
+  'listed', 'list', 'given', 'give', 'stated', 'state', 'states', 'shown', 'show', 'shows', 'included', 'include',
+  'includes', 'contain', 'contains', 'contained', 'reported', 'report', 'reports', 'document', 'documents', 'item',
+  'items', 'text', 'source', 'sources', 'record', 'records', 'file', 'files', 'full', 'complete', 'entire', 'whole',
+  'unknown', 'unclear', 'unspecified', 'specified', 'answer', 'question', 'none', 'no',
+  // The reply's own field names, which a small model sometimes lists as a gap.
+  'citations', 'citation', 'unanswered', 'sufficient', 'insufficient', 'claim', 'claims',
+]);
 
 /** The model, reporting each call's stage (the first is the answer, any later one the audit) and cost. */
 function timedModel(model: AnalystModel, report: (call: PrivateModelCallTiming) => void): AnalystModel {

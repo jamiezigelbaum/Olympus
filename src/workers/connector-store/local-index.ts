@@ -9837,6 +9837,7 @@ export function createConnectorStoreContentProvider(
       const vector = await queryVector(request.query);
       const content = store.localContent(localItemId, request.maxChars, {
         ...(request.query?.trim() ? { query: request.query } : {}),
+        ...(request.maxPassages !== undefined ? { maxPassages: request.maxPassages } : {}),
         ...(anchorChunkIndex !== undefined ? { anchorChunkIndex } : {}),
         ...(anchorLane === 'keyword' || anchorLane === 'semantic' ? { anchorLane } : {}),
         ...(vector && embeddingProvider ? { queryVector: vector, queryVectorModelId: embeddingProvider.modelId } : {}),
@@ -10775,6 +10776,8 @@ export interface ConnectorStorePassageFocus {
    */
   queryVector?: readonly number[];
   queryVectorModelId?: string;
+  /** At most this many passages (MAX_PASSAGES_PER_CANDIDATE by default). */
+  maxPassages?: number;
 }
 
 // At most this many passages from one item, so a long document contributes
@@ -10824,7 +10827,7 @@ function selectEvidencePassages(
     const picked = [
       ...(anchor !== undefined ? [anchor] : []),
       ...scored.map((entry) => entry.index),
-    ].slice(0, MAX_PASSAGES_PER_CANDIDATE);
+    ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
     const bounded = boundedSourceIndexChunks(
       picked.sort((left, right) => left - right).map((index) => chunks[index]!),
       maxChars,

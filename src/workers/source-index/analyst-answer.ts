@@ -2571,11 +2571,15 @@ export interface PrivateEvidenceResult {
   matched: number;
   // Every matched Private candidate, with whatever passages its store could
   // read (an empty `chunks` means unreadable; the consumer must not answer
-  // from its title alone).
-  candidates: EvidenceCandidate[];
+  // from its title alone). Each names the Private corpus it came from, so
+  // readPrivateEvidenceItem can read it again in depth.
+  candidates: PrivateEvidenceCandidate[];
 }
 
+export type PrivateEvidenceCandidate = EvidenceCandidate & { corpusId: string };
+
 const PRIVATE_EVIDENCE_MAX_RESULTS = 12;
+const PRIVATE_DEPTH_MAX_PASSAGES = 24;
 const PRIVATE_EVIDENCE_BYTE_BUDGET = 20_000;
 
 export async function searchPrivateEvidence(input: {
@@ -2612,6 +2616,48 @@ export async function searchPrivateEvidence(input: {
     ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
   });
   assertEvidencePackModelEligible(detail.pack);
-  const candidates = detail.pack.candidates.filter((candidate) => candidate.trustDomain === 'secure_local');
+  const candidates = detail.pack.candidates
+    .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
+    .filter((candidate) => candidate.trustDomain === 'secure_local' && candidate.corpusId !== '');
   return { matched: candidates.length, candidates };
+}
+
+/**
+ * One Private evidence item's own text, read again from its local store with
+ * a larger budget: the whole item when it fits `maxChars`, else its passages
+ * most relevant to `question` (the store's own selection, the same as at
+ * search time). The private answer panel reads an item that clearly leads in
+ * depth through this. Private (secure_local) corpora only, through the same
+ * content provider, so the store's tier visibility applies as at search time;
+ * undefined when the item is not readable there.
+ */
+export async function readPrivateEvidenceItem(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  item: Readonly<Record<string, unknown>>;
+  question: string;
+  maxChars: number;
+}): Promise<readonly string[] | undefined> {
+  const corpusId = typeof input.item.corpusId === 'string' ? input.item.corpusId : undefined;
+  const provenance = input.item.provenance as SourceIndexProvenance | undefined;
+  if (!corpusId || !provenance?.sourceItem || input.item.trustDomain !== 'secure_local') return undefined;
+  const lanes = input.lanes({
+    question: input.question,
+    retrieval_mode: 'hybrid',
+    include_internal: false,
+    include_secure_local: true,
+    include_secure_local_content: true,
+  });
+  if (lanes.registry.get(corpusId)?.trustDomain !== 'secure_local') return undefined;
+  const provider = lanes.contentProviders[corpusId];
+  if (!provider) return undefined;
+  const content = await provider.fetchLocalContent({
+    provenance,
+    trustDomain: 'secure_local',
+    maxChars: Math.max(1, Math.floor(input.maxChars)),
+    query: input.question,
+    // In depth: as many of the item's passages as the budget holds.
+    maxPassages: PRIVATE_DEPTH_MAX_PASSAGES,
+  });
+  if (!content || content.namesOnly || content.contentPrivate) return undefined;
+  return content.chunks;
 }

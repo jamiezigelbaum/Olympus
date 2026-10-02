@@ -24,7 +24,7 @@ import {
 } from '../src/workers/connector-store/index.ts';
 import { privateEvidence } from '../src/workers/chatgpt/private-answer-model.ts';
 import type { PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
-import { searchPrivateEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { readPrivateEvidenceItem, searchPrivateEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import type { AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
 
 const ACCOUNT = 'personal';
@@ -111,6 +111,41 @@ describe('private evidence passages', () => {
       });
       const report2 = found.candidates.find((candidate) => candidate.provenance.citation?.title === '2026-06-29 blood work 2.pdf');
       expect(report2?.chunks.join(' ')).toContain('Triglycerides 88 mg/dL');
+    });
+  });
+});
+
+describe('reading one Private item in depth', () => {
+  test('a leading report is read again whole: every results page, not its first passages', async () => {
+    await withStore(async (store) => {
+      // A thin search-time share (many items matched): about a page.
+      const found = await searchPrivateEvidence({ lanes: lanesFor(store), question: QUESTION, maxCharsPerCandidate: 400 });
+      const report = found.candidates.find((candidate) => candidate.provenance.citation?.title === '2026-06-29 blood work 2.pdf')!;
+      expect(report.corpusId).toBe(CORPUS_ID);
+      expect(report.chunks.join(' ')).not.toContain('Vitamin D 38 ng/mL (30-100) p3');
+      const deep = await readPrivateEvidenceItem({
+        lanes: lanesFor(store),
+        item: report as unknown as Record<string, unknown>,
+        question: 'can you give me all the details from that lab please?',
+        maxChars: 13_000,
+      });
+      const text = (deep ?? []).join('\n');
+      for (const page of ['p1', 'p2', 'p3']) {
+        for (const value of ['Total cholesterol 182', 'Triglycerides 88', 'Vitamin D 38']) expect(text).toContain(`${value}`);
+        expect(text).toContain(`Vitamin D 38 ng/mL (30-100) ${page}`);
+      }
+    });
+  });
+
+  test('only a Private corpus item it can name is read; anything else is undefined', async () => {
+    await withStore(async (store) => {
+      const found = await searchPrivateEvidence({ lanes: lanesFor(store), question: QUESTION, maxCharsPerCandidate: LIVE_ITEM_SHARE });
+      const item = found.candidates[0]! as unknown as Record<string, unknown>;
+      const read = (patch: Record<string, unknown>) => readPrivateEvidenceItem({ lanes: lanesFor(store), item: { ...item, ...patch }, question: QUESTION, maxChars: 5_000 });
+      expect(await read({ corpusId: undefined })).toBeUndefined();
+      expect(await read({ corpusId: 'internal.other.files' })).toBeUndefined();
+      expect(await read({ trustDomain: 'internal' })).toBeUndefined();
+      expect(await read({})).toBeDefined();
     });
   });
 });

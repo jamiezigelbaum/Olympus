@@ -57,11 +57,12 @@
  * dropped with it.
  */
 import { randomBytes } from 'node:crypto';
+import { statSync } from 'node:fs';
 import {
   PRIVATE_ANSWER_MAX_REQUEST_BYTES,
   isPanelOrigin,
   privateAnswerInstallId,
-  privateAnswerJobId,
+  privateAnswerRoute,
   type PrivateAnswerWireStatus,
 } from '../../../connect-relay/shared/private-answer.ts';
 import {
@@ -127,6 +128,16 @@ export interface PrivateAnswerJobsOptions {
   activity?: { begin(): void; end(): void };
   /** The per-claim stage timing line (default: stdout). Counts and milliseconds only. */
   log?: (line: string) => void;
+  /**
+   * Opens a source's local file on this computer (macOS `open`). Without
+   * it, sources carry no open token. Called only with a path this engine
+   * resolved for an item the answer cites, never one from a request.
+   */
+  openFile?: (path: string) => Promise<void>;
+  /** Open requests per job (burst, refill per second). */
+  openRate?: { capacity: number; refillPerSecond: number };
+  /** Open requests across all jobs (burst, refill per second). */
+  openRateGlobal?: { capacity: number; refillPerSecond: number };
 }
 
 /** One claim's stage costs, logged once it settles. No id, question, evidence or answer. */
@@ -205,7 +216,7 @@ interface Analysis {
   question: string | undefined;
   evidence: readonly PrivateEvidenceItem[] | undefined;
   state: 'queued' | 'running' | 'done' | 'failed';
-  result: { plaintext: PrivateAnswerPlaintextV1; usedKeys: readonly string[] | undefined } | undefined;
+  result: { plaintext: PrivateAnswerPlaintextV1; localPaths: readonly (string | undefined)[]; usedKeys: readonly string[] | undefined } | undefined;
   failReason: AnalysisTiming['reason'] | undefined;
   startedAt: number | undefined;
   readyAt: number | undefined;
@@ -230,6 +241,14 @@ interface Job {
   pollRefilledAt: number;
   outcome?: { kind: 'sealed'; sealed: SealedPrivateAnswer } | { kind: 'failed' } | undefined;
   claimAbort?: AbortController;
+  /**
+   * This job's source-open capabilities: token → local file, minted when
+   * its answer is sealed (the tokens ride inside the sealed plaintext only)
+   * and dropped with the job.
+   */
+  opens?: Map<string, string> | undefined;
+  openTokens: number;
+  openRefilledAt: number;
 }
 
 export interface ClaimResponse {
@@ -243,6 +262,9 @@ const MAX_CITATIONS = 20;
 const MAX_UNANSWERED = 10;
 const MAX_CITATION_TEXT = 300;
 const MAX_QUESTION_CHARS = 4_000;
+const MAX_URL_CHARS = 2_048;
+/** A source-open token: 32 random bytes, base64url. */
+const OPEN_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const MAX_EVIDENCE_ITEMS = 50;
 const PENDING_RETRY_SECONDS = 2;
 /**
@@ -327,6 +349,10 @@ export class PrivateAnswerJobs {
   private readonly audit: (event: PrivateAnswerAuditEvent) => void;
   private tokens: number;
   private refilledAt: number;
+  private openTokens: number;
+  private openRefilledAt: number;
+  private readonly openRate: { capacity: number; refillPerSecond: number };
+  private readonly openRateGlobal: { capacity: number; refillPerSecond: number };
   /** A deadline's background reset, bounded by resetTimeoutMs; the next analysis waits for it. */
   private resetting: Promise<void> | undefined;
   private readonly options: PrivateAnswerJobsOptions;
@@ -350,6 +376,10 @@ export class PrivateAnswerJobs {
     this.audit = options.audit ?? defaultAudit;
     this.tokens = this.claimRate.capacity;
     this.refilledAt = this.now();
+    this.openRate = options.openRate ?? { capacity: 4, refillPerSecond: 0.2 };
+    this.openRateGlobal = options.openRateGlobal ?? { capacity: 10, refillPerSecond: 0.2 };
+    this.openTokens = this.openRateGlobal.capacity;
+    this.openRefilledAt = this.now();
   }
 
   get size(): number {
@@ -411,6 +441,8 @@ export class PrivateAnswerJobs {
       analysis: undefined,
       pollTokens: this.pollRate.capacity,
       pollRefilledAt: at,
+      openTokens: this.openRate.capacity,
+      openRefilledAt: at,
     };
     this.jobs.set(id, job);
     if (this.options.precompute !== false) this.precompute(job);
@@ -458,6 +490,36 @@ export class PrivateAnswerJobs {
     return { status: 200, body: { status: 'ready', v: 1, ...outcome.sealed } };
   }
 
+  /**
+   * One panel source-open request: `token` is a capability from this job's
+   * sealed answer. It opens the local file this engine mapped it to, and
+   * nothing else: no path is read from the request. Unknown, expired and
+   * wrong-install jobs, and tokens this job never minted, all answer 410.
+   * Rate limited per job and across jobs.
+   */
+  async open(jobId: string, token: unknown): Promise<ClaimResponse> {
+    this.sweep();
+    const job = this.jobs.get(jobId);
+    if (!job || privateAnswerInstallId(jobId) !== this.options.installId()) return gone();
+    if (typeof token !== 'string' || !OPEN_TOKEN_PATTERN.test(token)) return { status: 400, body: { status: 'invalid' } };
+    const path = job.opens?.get(token);
+    if (!path || !this.options.openFile) return gone();
+    if (!this.takeOpen(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: 5 };
+    let isFile = false;
+    try {
+      isFile = statSync(path).isFile();
+    } catch {
+      isFile = false;
+    }
+    if (!isFile) return gone();
+    try {
+      await this.options.openFile(path);
+    } catch {
+      return { status: 200, body: { status: 'failed' } };
+    }
+    return { status: 204, body: { status: 'opened' } };
+  }
+
   /** Drops expired jobs (cancelling analyses no live job needs) and forgets shared answers past the dedupe window. */
   sweep(at = this.now()): void {
     for (const [id, job] of this.jobs) if (job.expiresAt <= at) this.drop(id);
@@ -475,6 +537,7 @@ export class PrivateAnswerJobs {
     job.evidence = undefined;
     job.refresh = undefined;
     job.outcome = undefined;
+    job.opens = undefined;
     this.jobs.delete(id);
   }
 
@@ -684,7 +747,7 @@ export class PrivateAnswerJobs {
         this.finish(analysis, 'failed', 'aborted');
         return;
       }
-      analysis.result = { plaintext: plaintextOf(done.result), usedKeys: usedKeys(evidence, done.used) };
+      analysis.result = { ...preparedAnswer(done.result), usedKeys: usedKeys(evidence, done.used) };
       this.finish(analysis, 'done');
     } catch (error) {
       if (!timedOut) this.finish(analysis, 'failed', error instanceof AnalysisStop ? error.reason : 'error');
@@ -800,7 +863,8 @@ export class PrivateAnswerJobs {
         if (result && (!precomputed || stillEligible(result.usedKeys, current))) {
           timing.precomputed = precomputed;
           timing.waitAtClaimMs = this.now() - claimedAt;
-          const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(result.plaintext)));
+          const plaintext = this.withOpenTokens(job, result.plaintext, result.localPaths);
+          const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(plaintext)));
           settle({ kind: 'sealed', sealed });
           return;
         }
@@ -873,6 +937,38 @@ export class PrivateAnswerJobs {
     return true;
   }
 
+  /**
+   * The plaintext this job seals: each source with a local file opens on
+   * the Mac (`open: {kind:'mac', token}`, a fresh random token mapped to
+   * that file for this job only; a shared analysis gives every job its own
+   * tokens); any other keeps its web address, if it has one.
+   */
+  private withOpenTokens(job: Job, plaintext: PrivateAnswerPlaintextV1, localPaths: readonly (string | undefined)[]): PrivateAnswerPlaintextV1 {
+    if (!this.options.openFile) return plaintext;
+    const opens = new Map<string, string>();
+    const citations = plaintext.citations.map((citation, index) => {
+      const path = localPaths[index];
+      if (!path) return citation;
+      const token = randomBytes(32).toString('base64url');
+      opens.set(token, path);
+      return { ...citation, open: { kind: 'mac' as const, token } };
+    });
+    job.opens = opens.size > 0 ? opens : undefined;
+    return { ...plaintext, citations };
+  }
+
+  private takeOpen(job: Job): boolean {
+    const at = this.now();
+    this.openTokens = Math.min(this.openRateGlobal.capacity, this.openTokens + ((at - this.openRefilledAt) / 1000) * this.openRateGlobal.refillPerSecond);
+    this.openRefilledAt = at;
+    job.openTokens = Math.min(this.openRate.capacity, job.openTokens + ((at - job.openRefilledAt) / 1000) * this.openRate.refillPerSecond);
+    job.openRefilledAt = at;
+    if (this.openTokens < 1 || job.openTokens < 1) return false;
+    this.openTokens -= 1;
+    job.openTokens -= 1;
+    return true;
+  }
+
   private takeToken(): boolean {
     const at = this.now();
     this.tokens = Math.min(this.claimRate.capacity, this.tokens + ((at - this.refilledAt) / 1000) * this.claimRate.refillPerSecond);
@@ -923,7 +1019,19 @@ function clean(value: unknown, max: number): string | undefined {
 
 /** The decrypted payload, field by field: text only, bounded. */
 export function plaintextOf(result: { answer: unknown; citations?: unknown; unanswered?: unknown }): PrivateAnswerPlaintextV1 {
+  return preparedAnswer(result).plaintext;
+}
+
+/**
+ * The payload before its open tokens, and each source's local file (index
+ * aligned with `plaintext.citations`), which stays on this computer.
+ */
+function preparedAnswer(result: { answer: unknown; citations?: unknown; unanswered?: unknown }): {
+  plaintext: PrivateAnswerPlaintextV1;
+  localPaths: (string | undefined)[];
+} {
   const citations: PrivateAnswerCitation[] = [];
+  const localPaths: (string | undefined)[] = [];
   for (const value of Array.isArray(result.citations) ? result.citations : []) {
     if (citations.length >= MAX_CITATIONS) break;
     if (typeof value !== 'object' || value === null) continue;
@@ -932,10 +1040,15 @@ export function plaintextOf(result: { answer: unknown; citations?: unknown; unan
     const title = clean(record.title, MAX_CITATION_TEXT);
     const source = clean(record.source, MAX_CITATION_TEXT);
     const date = clean(record.date, 32);
+    const url = httpsUrl(record.url);
     if (title) citation.title = title;
     if (source) citation.source = source;
     if (date) citation.date = date;
-    if (Object.keys(citation).length > 0) citations.push(citation);
+    if (url) citation.open = { kind: 'web', url };
+    if (Object.keys(citation).length > 0) {
+      citations.push(citation);
+      localPaths.push(typeof record.localPath === 'string' && record.localPath.startsWith('/') ? record.localPath : undefined);
+    }
   }
   const unanswered: string[] = [];
   for (const value of Array.isArray(result.unanswered) ? result.unanswered : []) {
@@ -944,11 +1057,25 @@ export function plaintextOf(result: { answer: unknown; citations?: unknown; unan
     if (line) unanswered.push(line);
   }
   return {
-    v: 1,
-    answer: (typeof result.answer === 'string' ? result.answer : '').replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER_CHARS),
-    citations,
-    ...(unanswered.length > 0 ? { unanswered } : {}),
+    plaintext: {
+      v: 1,
+      answer: (typeof result.answer === 'string' ? result.answer : '').replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER_CHARS),
+      citations,
+      ...(unanswered.length > 0 ? { unanswered } : {}),
+    },
+    localPaths,
   };
+}
+
+/** An https URL, bounded, or undefined: the panel renders it as a link. */
+function httpsUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > MAX_URL_CHARS || value.replace(UNSAFE_CHARS, '') !== value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -977,8 +1104,9 @@ export function withPrivateAnswerRoute(
 export function createPrivateAnswerHandler(options: PrivateAnswerHandlerOptions): (request: Request) => Promise<Response> {
   return async (request) => {
     const url = new URL(request.url);
-    const jobId = url.search ? undefined : privateAnswerJobId(url.pathname);
-    if (!options.isRelayed(request) || !jobId) return reply({ status: 404, body: { status: 'gone' } });
+    const route = url.search ? undefined : privateAnswerRoute(url.pathname);
+    const jobId = route?.jobId;
+    if (!options.isRelayed(request) || !route || !jobId) return reply({ status: 404, body: { status: 'gone' } });
     if (request.method !== 'POST') return reply({ status: 405, body: { status: 'invalid' } }, { Allow: 'POST' });
     if (!isPanelOrigin(request.headers.get('origin'), options.extraOrigins?.() ?? [])) {
       return reply({ status: 403, body: { status: 'forbidden' } });
@@ -993,11 +1121,13 @@ export function createPrivateAnswerHandler(options: PrivateAnswerHandlerOptions)
     }
     const record = typeof body === 'object' && body !== null && !Array.isArray(body) ? body as Record<string, unknown> : undefined;
     if (!record || record.v !== 1) return reply({ status: 400, body: { status: 'invalid' } });
+    if (route.action === 'open') return reply(await options.jobs.open(jobId, record.open));
     return reply(await options.jobs.claim(jobId, record.publicKey));
   };
 }
 
 function reply(claim: ClaimResponse, extra: Record<string, string> = {}): Response {
+  if (claim.status === 204) return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store', ...extra } });
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Cache-Control': 'no-store',

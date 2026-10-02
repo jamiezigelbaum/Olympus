@@ -324,15 +324,21 @@ export interface AnswerResultOptions {
 }
 
 /**
- * The one sentence the model gets about a Private match. Fixed text: no
+ * The one note the model gets about a Private match. Fixed text: no
  * count, no title, no content. It tells the model the answer is the user's,
  * in the panel, so it neither reports "only a title" nor sends the user to
- * change folder settings for items that are Private on purpose.
+ * change folder settings for items that are Private on purpose, nor asks the
+ * user to upload or paste the files; and that a follow-up is answered in the
+ * panel the same way, from a self-contained search (the panel sees only the
+ * search's question, not the conversation).
  */
 export const PRIVATE_MATCH_PANEL_NOTE = 'Some items matching this question are marked Private in Olympus. '
   + 'Olympus is answering from them on the user\'s Mac and showing that answer only to the user, '
   + 'in the private answer panel above. You can\'t see it; point the user to the panel '
-  + 'and don\'t suggest changing folder settings for those items.';
+  + 'and don\'t suggest changing folder settings for those items. '
+  + 'Don\'t ask the user to upload, attach or paste those files: Olympus already has them. '
+  + 'Follow-up questions about them are answered privately in the panel the same way: '
+  + 'search Olympus again with the follow-up as a complete question (name the item, its date or subject).';
 /** The same bit while the panel cannot answer yet (no private model, or it is still downloading). */
 export const PRIVATE_MATCH_PANEL_SETUP_NOTE = 'Some items matching this question are marked Private in Olympus. '
   + 'Their contents stay on the user\'s Mac and are never shown to you; the private answer panel above '

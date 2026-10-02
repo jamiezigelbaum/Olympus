@@ -16,6 +16,9 @@
  *   `{"v":1,"publicKey":"<base64url raw P-256 point>"}`; responses carry
  *   `status` (connect-relay/shared/private-answer.ts PrivateAnswerWireStatus).
  * - Plaintext of a `ready` response, after decryption: PrivateAnswerPlaintextV1.
+ * - Open a source on the Mac: `POST <relayOrigin>/private/<jobId>/open` with
+ *   `{"v":1,"open":"<token from a citation>"}` → 204 (opened), 410 `gone`
+ *   (unknown/expired job or token), 429 `rate_limited`, 403 `forbidden`.
  */
 
 export const PRIVATE_ANSWER_RESOURCE_URI = 'ui://olympus/private-answer';
@@ -50,18 +53,42 @@ export interface PrivateMatchSummary {
   percent?: number;
 }
 
+/** One source of a private answer, as the panel decrypts it. */
 export interface PrivateAnswerCitation {
   title?: string;
   source?: string;
   date?: string;
+  /** How the panel opens this source, when it can. */
+  open?: PrivateAnswerOpenTarget;
+}
+
+/**
+ * - `mac`: the item's file is on the owner's Mac. `token` is a capability
+ *   that opens it there: the panel POSTs `{"v":1,"open":"<token>"}` to
+ *   `<relayOrigin>/private/<jobId>/open` (204 when opened). Random, minted
+ *   for this job only, expires with it; it names no path.
+ * - `web`: an https address that opens the item in its service (for a
+ *   Dropbox file, its Dropbox web preview), when it is not on this Mac.
+ */
+export type PrivateAnswerOpenTarget = { kind: 'mac'; token: string } | { kind: 'web'; url: string };
+
+/** A source as the private model returns it: the local path never enters the plaintext. */
+export interface PrivateAnswerSourceCitation {
+  title?: string;
+  source?: string;
+  date?: string;
+  url?: string;
+  /** The item's file on this computer; the job swaps it for an open token. */
+  localPath?: string;
 }
 
 /** What the panel decrypts. Rendered as text only, never as HTML. */
 export interface PrivateAnswerPlaintextV1 {
   v: 1;
   answer: string;
+  /** Only the items the answer cites. The panel lists them on request (a collapsed "Sources"). */
   citations: PrivateAnswerCitation[];
-  /** What the private items could not answer, when the model said so. */
+  /** What the private items could not answer: complete sentences, none when the answer is complete. */
   unanswered?: string[];
 }
 
@@ -107,7 +134,7 @@ export interface PrivateAnswerModel {
     evidence: readonly PrivateEvidenceItem[],
     signal?: AbortSignal,
     observe?: PrivateAnswerObserver,
-  ): Promise<{ answer: string; citations: PrivateAnswerCitation[]; unanswered?: string[] }>;
+  ): Promise<{ answer: string; citations: PrivateAnswerSourceCitation[]; unanswered?: string[] }>;
   /**
    * Kill or reset the model runtime (its child process or session). Called
    * when an analysis passes its hard deadline, after the engine has already
