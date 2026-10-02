@@ -12,8 +12,11 @@
  * all requests, and given a local deadline that does not depend on the relay.
  */
 import {
+  AUTH_BOUND,
+  AUTH_LEGACY,
   CONNECT_PATH,
   PROTOCOL_VERSION,
+  PowCancelledError,
   chunks,
   decodeBodyFrame,
   encodeBodyFrame,
@@ -21,6 +24,7 @@ import {
   parseHeaderList,
   parseTextFrame,
   streamId,
+  type AuthScheme,
   type ClientToRelayMessage,
 } from '../shared/protocol.ts';
 import { FORWARDED_METHODS, forwardPath, forwardRequestHeaders, forwardResponseHeaders } from './forward.ts';
@@ -97,7 +101,16 @@ export class RelayClient {
   private socket: WebSocket | undefined;
   private stopped = true;
   private register = false;
+  /**
+   * The relay advertised no signature scheme and rejected scheme 3: it
+   * predates the host binding, so answer it with scheme 2 (shared/protocol.ts).
+   * Cleared by any challenge that advertises a scheme, and by a scheme-2
+   * answer that is rejected too, so the fallback is taken once per rejection.
+   */
+  private legacyRelay = false;
   private failures = 0;
+  /** Cancels the current handshake's proof of work (timeout, close, stop). */
+  private handshake: AbortController | undefined;
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly inbound = new Map<number, Inbound>();
@@ -134,6 +147,8 @@ export class RelayClient {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.handshake?.abort();
+    this.handshake = undefined;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.abortAll();
@@ -158,6 +173,15 @@ export class RelayClient {
     let ready = false;
     const { identity } = this.options;
     let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+    // One challenge per handshake, answered with one scheme; its proof of
+    // work stops when this socket is given up on.
+    this.handshake?.abort();
+    const handshake = new AbortController();
+    this.handshake = handshake;
+    let challenged = false;
+    let advertised = false;
+    let answeredWith: AuthScheme | undefined;
+    let fallBack = false;
 
     /**
      * The session is over: schedule the next attempt. Runs once per socket,
@@ -170,6 +194,8 @@ export class RelayClient {
       if (finished) return;
       finished = true;
       clearTimeout(handshakeTimer);
+      handshake.abort();
+      if (this.handshake === handshake) this.handshake = undefined;
       if (this.socket === socket) {
         this.socket = undefined;
         if (this.heartbeat) clearInterval(this.heartbeat);
@@ -188,6 +214,11 @@ export class RelayClient {
         const retryInMs = this.options.revokedBackoffMs ?? 6 * 60 * 60_000;
         this.options.onStatus?.({ state: 'offline', reason, retryInMs });
         this.schedule(retryInMs);
+        return;
+      }
+      if (fallBack) {
+        // The relay predates the host binding: answer it with scheme 2 now.
+        this.schedule(0);
         return;
       }
       if (this.register && this.failures === 0) {
@@ -230,6 +261,17 @@ export class RelayClient {
       if (!message) return socket.close(4002, 'protocol_error');
       switch (message.type) {
         case 'challenge': {
+          // A relay sends one challenge per session; another is a protocol error
+          // (and would otherwise start another proof of work).
+          if (challenged || ready) {
+            reason = 'the relay sent a second challenge';
+            return socket.close(4002, 'protocol_error');
+          }
+          challenged = true;
+          advertised = typeof message.auth === 'number';
+          if (advertised) this.legacyRelay = false;
+          const scheme: AuthScheme = this.legacyRelay && !advertised ? AUTH_LEGACY : AUTH_BOUND;
+          answeredWith = scheme;
           const kind = this.register ? 'register' : 'hello';
           // A register solves the relay's proof of work first (a fraction of
           // a second); a relay asking for an unreasonable one is given up on.
@@ -239,11 +281,16 @@ export class RelayClient {
             nonce: String(message.nonce),
             powBits: typeof message.pow === 'number' ? message.pow : 0,
             relayHost: this.options.relayHost,
+            scheme,
+            signal: handshake.signal,
           }).then(
             (auth) => {
-              if (this.socket === socket) this.send(auth);
+              if (this.socket === socket && !handshake.signal.aborted) this.send(auth);
             },
-            () => abandon(4002, 'protocol_error', 'the relay asked for an unreasonable registration proof of work'),
+            (error) => {
+              if (error instanceof PowCancelledError || handshake.signal.aborted) return;
+              abandon(4002, 'protocol_error', 'the relay asked for an unreasonable registration proof of work');
+            },
           );
           return;
         }
@@ -282,6 +329,18 @@ export class RelayClient {
         case 'error':
           reason = String(message.message ?? message.code);
           if (message.code === 'unregistered') this.register = true;
+          if (message.code === 'bad_signature' && !advertised) {
+            // A relay that advertised no scheme and rejected scheme 3 is one
+            // from before the host binding: retry with scheme 2 at once. A
+            // rejected scheme 2 is a real failure; the next attempt starts
+            // from scheme 3 again, after the usual backoff.
+            if (answeredWith === AUTH_BOUND && !this.legacyRelay) {
+              this.legacyRelay = true;
+              fallBack = true;
+            } else if (answeredWith === AUTH_LEGACY) {
+              this.legacyRelay = false;
+            }
+          }
           if (message.code === 'replaced') replaced = true;
           if (message.code === 'revoked') revoked = true;
           return;

@@ -10,6 +10,22 @@
  * same nonce (the challenge's `pow` bits), so registrations cost the caller
  * real time. The relay answers `ready`, or `error` and closes.
  *
+ * Signature schemes (`auth`), negotiated without changing `v`, so an install
+ * and a relay of different releases always connect, whichever deploys first:
+ *
+ *   3 (AUTH_BOUND)   the signature covers the relay host; the challenge
+ *                    advertises `auth: 3` and the answer carries `auth: 3`.
+ *   2 (AUTH_LEGACY)  the signature before host binding (no `auth` field).
+ *                    A relay that advertises nothing speaks only this.
+ *
+ * A current install answers every challenge with scheme 3. If a relay that
+ * advertised no scheme rejects that signature, the install retries at once
+ * with scheme 2 (a relay from before the binding). A current relay accepts
+ * scheme 3 always, and scheme 2 from installs it already knows only while
+ * its legacy window is open (`acceptLegacyAuth`; docs/design/chatgpt-plugin.md,
+ * "Relay protocol compatibility"). A registration proof of work is required
+ * only for an install id the relay has never registered.
+ *
  * After `ready`, the session multiplexes HTTP requests from the public
  * internet to the install's loopback worker:
  *
@@ -35,6 +51,11 @@ export const MAX_TEXT_FRAME_BYTES = 16 * 1024;
 /** Body chunks are at most this large (the sender splits larger ones). */
 export const MAX_BODY_CHUNK_BYTES = 64 * 1024;
 const SIGNATURE_DOMAIN = 'olympus-connect-relay/v2';
+/** The signature before host binding: what relays and installs from before 2026-10-02 speak. */
+export const AUTH_LEGACY = 2;
+/** The signature bound to the relay host. */
+export const AUTH_BOUND = 3;
+export type AuthScheme = typeof AUTH_LEGACY | typeof AUTH_BOUND;
 const POW_DOMAIN = 'olympus-connect-relay/v2/register-pow';
 /**
  * Most proof-of-work bits an install will spend on one registration. A relay
@@ -45,10 +66,15 @@ export const MAX_REGISTRATION_POW_BITS = 22;
 /** Install ids are 32 lowercase base32 characters: the first 160 bits of SHA-256 over the install's SPKI. */
 export const INSTALL_ID_PATTERN = /^[a-z2-7]{32}$/;
 
-/** `pow`: leading zero bits a `register` must show (registration proof of work, below). */
-export type ChallengeMessage = { type: 'challenge'; v: number; nonce: string; pow: number };
-export type HelloMessage = { type: 'hello'; v: number; installId: string; sig: string };
-export type RegisterMessage = { type: 'register'; v: number; installId: string; publicKey: string; sig: string; pow: string };
+/**
+ * `pow`: leading zero bits a `register` of a new install id must show
+ * (registration proof of work, below). `auth`: the highest signature scheme
+ * the relay accepts; absent from relays that predate negotiation.
+ */
+export type ChallengeMessage = { type: 'challenge'; v: number; nonce: string; pow: number; auth?: number };
+/** `auth` is present for scheme 3 and absent for scheme 2 (the legacy wire form, byte for byte). */
+export type HelloMessage = { type: 'hello'; v: number; installId: string; sig: string; auth?: number };
+export type RegisterMessage = { type: 'register'; v: number; installId: string; publicKey: string; sig: string; pow?: string; auth?: number };
 export type ReadyMessage = { type: 'ready'; installId: string };
 export type PingMessage = { type: 'ping' };
 export type PongMessage = { type: 'pong' };
@@ -120,16 +146,28 @@ export function spkiOf(key: KeyObject): Buffer {
 
 /**
  * What an install signs: the domain, the message kind, the relay's nonce, the
- * install id, and the relay host the install dialed (its configured
- * `relayHost`, lowercased), so a relay cannot pass a challenge from another
- * relay through and use the answer there.
+ * install id, and (scheme 3) the relay host the install dialed (its
+ * configured `relayHost`, lowercased), so a relay cannot pass a challenge from
+ * another relay through and use the answer there. Scheme 2 is the same
+ * payload without the host, exactly as installs and relays from before the
+ * binding produce it.
  */
-function signedPayload(kind: 'hello' | 'register', nonce: string, installId: string, relayHost: string): Buffer {
-  return Buffer.from([SIGNATURE_DOMAIN, kind, nonce, installId, relayHost.toLowerCase()].join('\n'), 'utf8');
+function signedPayload(kind: 'hello' | 'register', nonce: string, installId: string, relayHost: string, scheme: AuthScheme): Buffer {
+  const fields = scheme === AUTH_LEGACY
+    ? [SIGNATURE_DOMAIN, kind, nonce, installId]
+    : [SIGNATURE_DOMAIN, kind, nonce, installId, relayHost.toLowerCase()];
+  return Buffer.from(fields.join('\n'), 'utf8');
 }
 
-export function signInstallMessage(privateKey: KeyObject, kind: 'hello' | 'register', nonce: string, installId: string, relayHost: string): string {
-  return base64url(sign(null, signedPayload(kind, nonce, installId, relayHost), privateKey));
+export function signInstallMessage(
+  privateKey: KeyObject,
+  kind: 'hello' | 'register',
+  nonce: string,
+  installId: string,
+  relayHost: string,
+  scheme: AuthScheme = AUTH_BOUND,
+): string {
+  return base64url(sign(null, signedPayload(kind, nonce, installId, relayHost, scheme), privateKey));
 }
 
 export function verifyInstallMessage(
@@ -139,10 +177,11 @@ export function verifyInstallMessage(
   installId: string,
   relayHost: string,
   sig: string,
+  scheme: AuthScheme = AUTH_BOUND,
 ): boolean {
   if (typeof sig !== 'string' || sig.length > 128) return false;
   try {
-    return verify(null, signedPayload(kind, nonce, installId, relayHost), publicKey, Buffer.from(sig, 'base64url'));
+    return verify(null, signedPayload(kind, nonce, installId, relayHost, scheme), publicKey, Buffer.from(sig, 'base64url'));
   } catch {
     return false;
   }
@@ -177,29 +216,59 @@ export function verifyRegistrationPow(bits: number, nonce: string, installId: st
   return leadingZeroBits(powDigest(nonce, installId, relayHost, pow)) >= bits;
 }
 
-/** Finds a registration proof of work, yielding to the event loop between batches. */
-export async function solveRegistrationPow(bits: number, nonce: string, installId: string, relayHost: string): Promise<string> {
+/**
+ * Finds a registration proof of work, yielding to the event loop between
+ * batches. `signal` stops it (the handshake timed out, the socket closed, or
+ * the client stopped): the promise then rejects and no more hashing is done.
+ */
+export async function solveRegistrationPow(
+  bits: number,
+  nonce: string,
+  installId: string,
+  relayHost: string,
+  signal?: AbortSignal,
+): Promise<string> {
   if (!Number.isInteger(bits) || bits < 0 || bits > MAX_REGISTRATION_POW_BITS) throw new Error('the relay asked for an unreasonable registration proof of work');
   for (let counter = 0; ; counter += 1) {
+    if (counter % 4096 === 0) {
+      if (counter > 0) await new Promise((resolve) => setTimeout(resolve, 0));
+      if (signal?.aborted) throw new PowCancelledError();
+    }
     const candidate = String(counter);
     if (bits === 0 || leadingZeroBits(powDigest(nonce, installId, relayHost, candidate)) >= bits) return candidate;
-    if (counter % 4096 === 4095) await new Promise((resolve) => setTimeout(resolve, 0));
   }
 }
 
-/** The install's answer to a challenge: `hello`, or `register` with its key and proof of work. */
+export class PowCancelledError extends Error {
+  constructor() {
+    super('registration proof of work cancelled');
+    this.name = 'PowCancelledError';
+  }
+}
+
+/**
+ * The install's answer to a challenge: `hello`, or `register` with its key
+ * and proof of work, signed with `scheme` (default 3, bound to the relay
+ * host). Scheme 2 produces the legacy wire form, for a relay that rejected 3.
+ */
 export async function installAuthMessage(input: {
   kind: 'hello' | 'register';
   identity: { readonly installId: string; readonly publicKeySpki: string; readonly privateKey: KeyObject };
   nonce: string;
   powBits: number;
   relayHost: string;
+  scheme?: AuthScheme;
+  signal?: AbortSignal;
 }): Promise<ClientAuthMessage> {
   const { kind, identity, nonce, relayHost } = input;
-  const sig = signInstallMessage(identity.privateKey, kind, nonce, identity.installId, relayHost);
-  if (kind === 'hello') return { type: 'hello', v: PROTOCOL_VERSION, installId: identity.installId, sig };
-  const pow = await solveRegistrationPow(input.powBits, nonce, identity.installId, relayHost);
-  return { type: 'register', v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig, pow };
+  const scheme = input.scheme ?? AUTH_BOUND;
+  const sig = signInstallMessage(identity.privateKey, kind, nonce, identity.installId, relayHost, scheme);
+  const auth = scheme === AUTH_BOUND ? { auth: AUTH_BOUND } : {};
+  if (kind === 'hello') return { type: 'hello', v: PROTOCOL_VERSION, installId: identity.installId, sig, ...auth };
+  // A relay that speaks only scheme 2 predates the proof of work.
+  if (scheme === AUTH_LEGACY) return { type: 'register', v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig };
+  const pow = await solveRegistrationPow(input.powBits, nonce, identity.installId, relayHost, input.signal);
+  return { type: 'register', v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig, pow, ...auth };
 }
 
 export function newNonce(): string {

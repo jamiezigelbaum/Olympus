@@ -12,6 +12,8 @@
  *                         OpenAI's domain verification token (unset: 404)
  *   RELAY_REGISTRY_PATH   default /var/lib/olympus-relay/registry.jsonl
  *   RELAY_ADMIN_SOCKET    default <registry dir>/admin.sock
+ *   RELAY_LEGACY_AUTH     `off` closes the legacy signature window (default on;
+ *                         docs/design/chatgpt-plugin.md, "Relay protocol compatibility")
  *
  * `main.ts admin <status|revoke|restore> ...` runs the operator command
  * instead of the relay (server/admin.ts), so the compiled binary carries both.
@@ -26,6 +28,14 @@ if (process.argv[2] === 'admin') {
   const { code, out } = await runAdmin(process.argv.slice(3));
   (code === 0 ? process.stdout : process.stderr).write(out);
   process.exit(code);
+}
+
+/** The legacy signature window: open unless RELAY_LEGACY_AUTH says off. */
+function legacyAuth(): boolean {
+  const value = (process.env.RELAY_LEGACY_AUTH ?? 'on').trim().toLowerCase();
+  if (['off', '0', 'false', 'no'].includes(value)) return false;
+  if (['on', '1', 'true', 'yes', ''].includes(value)) return true;
+  throw new Error('RELAY_LEGACY_AUTH must be on or off');
 }
 
 function port(name: string, fallback: number): number {
@@ -61,6 +71,7 @@ relay = await startRelay({
   ...(process.env.RELAY_INSTALL_URL ? { installUrl: process.env.RELAY_INSTALL_URL } : {}),
   ...(process.env.RELAY_DEMO_INSTALL_ID ? { demoInstallId: process.env.RELAY_DEMO_INSTALL_ID } : {}),
   appsChallenge,
+  limits: { acceptLegacyAuth: legacyAuth() },
   trustProxy: true,
   log,
 });

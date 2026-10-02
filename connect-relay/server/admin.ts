@@ -172,6 +172,7 @@ export function formatStatus(status: RelayStatus, running = true): string {
       `Online now:                 ${status.online}`,
       `Requests in flight:         ${status.inFlight}`,
       `Uploads in progress:        ${status.uploading}`,
+      `Request bytes held:         ${status.heldRequestBytes}`,
       `Bytes queued for callers:   ${status.queuedBytes}`,
     );
   }
@@ -218,7 +219,7 @@ export async function runAdmin(
     // Nothing is listening: the relay is stopped, so the log has no other writer.
     if (request.op === 'status') {
       const counts = readRegistrySnapshot(registryPath).counts();
-      return { code: 0, out: formatStatus({ ...counts, online: 0, inFlight: 0, uploading: 0, queuedBytes: 0, startedAt: '' }, false) };
+      return { code: 0, out: formatStatus({ ...counts, online: 0, inFlight: 0, uploading: 0, heldRequestBytes: 0, queuedBytes: 0, startedAt: '' }, false) };
     }
     if (request.op === 'revoke') {
       // Only the service user writes the log: an append by root (or anyone

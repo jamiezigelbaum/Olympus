@@ -37,6 +37,8 @@
 import type { Server, ServerWebSocket } from 'bun';
 import { createHash } from 'node:crypto';
 import {
+  AUTH_BOUND,
+  AUTH_LEGACY,
   CONNECT_PATH,
   INSTALL_ID_PATTERN,
   PROTOCOL_VERSION,
@@ -49,6 +51,7 @@ import {
   streamId,
   verifyInstallMessage,
   verifyRegistrationPow,
+  type AuthScheme,
   type ChallengeMessage,
   type ErrorMessage,
   type RelayErrorCode,
@@ -141,6 +144,8 @@ export interface RelayStatus extends RegistryCounts {
   readonly inFlight: number;
   /** Request bodies being uploaded right now. */
   readonly uploading: number;
+  /** Request body bytes the relay holds: uploading, waiting for admission, or forwarded and not yet answered. */
+  readonly heldRequestBytes: number;
   /** Response bytes waiting for slow callers. */
   readonly queuedBytes: number;
   readonly startedAt: string;
@@ -282,15 +287,20 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
    * nothing), and each growth is charged to the relay-wide and per-address
    * upload budgets; the upload has an absolute and an idle deadline. None of
    * this depends on the route or on what the credential looks like.
+   *
+   * The body's bytes stay charged after it has arrived, for as long as the
+   * relay holds it: the caller calls `release` once the body is no longer
+   * needed (the request was answered without reaching an install, or its
+   * stream to the install is over). A body that cannot be charged is a 503.
    */
   const readBody = async (
     request: Request,
     max: number,
     ip: string,
-  ): Promise<{ ok: true; body: Uint8Array } | { ok: false; response: Response }> => {
+  ): Promise<{ ok: true; body: Uint8Array; release: () => void } | { ok: false; response: Response }> => {
     const declared = Number(request.headers.get('content-length') ?? '0');
     if (Number.isFinite(declared) && declared > max) return { ok: false, response: tooLarge() };
-    if (!request.body) return { ok: true, body: new Uint8Array() };
+    if (!request.body) return { ok: true, body: new Uint8Array(), release: () => {} };
     const ticket = uploads.begin(ip);
     if (!ticket) {
       log('request_refused', { reason: 'upload_capacity' });
@@ -301,6 +311,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       void reader.cancel().catch(() => {});
       return { ok: false as const, response };
     };
+    let delivered = false;
     try {
       const startedAt = Date.now();
       let buffer = new Uint8Array(0);
@@ -346,9 +357,18 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         buffer.set(value, total);
         total += value.byteLength;
       }
-      return { ok: true, body: buffer.subarray(0, total) };
+      // Held from here until released: trimmed to what arrived, so the
+      // charge is the body's own size, not its growth headroom.
+      if (total < buffer.byteLength) {
+        const slack = buffer.byteLength - total;
+        buffer = buffer.slice(0, total);
+        ticket.refund(slack);
+      }
+      ticket.endUpload();
+      delivered = true;
+      return { ok: true, body: buffer, release: ticket.release };
     } finally {
-      ticket.end();
+      if (!delivered) ticket.release();
     }
   };
 
@@ -390,9 +410,34 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     ip: string;
     /** Set for an access token: confirmation is tracked for it. */
     credentialKey?: string;
+    /**
+     * Returns the body's upload charge (readBody): when the request is
+     * answered without reaching an install, or when its stream is over.
+     */
+    releaseBody?: () => void;
     offline: () => Response;
     unknown: () => Response;
   }): Promise<Response> => {
+    let released = false;
+    const releaseBody = () => {
+      if (released) return;
+      released = true;
+      input.releaseBody?.();
+    };
+    let forwarded = false;
+    try {
+      return await forwardToInstall(input, releaseBody, () => (forwarded = true));
+    } finally {
+      // Not handed to a session stream (refused, offline, failed): nothing holds the body now.
+      if (!forwarded) releaseBody();
+    }
+  };
+
+  const forwardToInstall = async (
+    input: Parameters<typeof toInstall>[0],
+    releaseBody: () => void,
+    handedOff: () => void,
+  ): Promise<Response> => {
     const { installId } = input;
     if (unroutable(installId)) {
       log('request_refused', { install: installTag(installId), reason: 'unknown_install' });
@@ -414,6 +459,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     // stream's own timers (session.ts) govern it, not the connection idle limit.
     server.timeout(input.request, 0);
     try {
+      handedOff();
       return await session.forward({
         method: input.request.method,
         path: input.path,
@@ -435,10 +481,16 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           admitted.refund();
           if (input.credentialKey) confirmed.delete(input.credentialKey);
         },
-        onFinish: admitted.release,
+        // The stream is over on both sides: its slot, and the request body
+        // the relay held for it, are free.
+        onFinish: () => {
+          admitted.release();
+          releaseBody();
+        },
       });
     } catch {
       admitted.release();
+      releaseBody();
       log('request_failed', { install: installTag(installId) });
       return json(502, { error: 'bad_gateway' });
     }
@@ -451,14 +503,18 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     if (authorization === null) {
       const anonymous = await readBody(request, Math.min(limits.maxAnonymousRequestBodyBytes, limits.maxRequestBodyBytes), ip);
       if (!anonymous.ok) return anonymous.response;
-      return relayMcpResponse({
-        method: request.method,
-        body: new TextDecoder().decode(anonymous.body),
-        now: now(),
-        state: 'not_connected',
-        installUrl: bridge.installUrl,
-        protectedResourceMetadataUrl: origin.protectedResourceMetadataUrl,
-      });
+      try {
+        return relayMcpResponse({
+          method: request.method,
+          body: new TextDecoder().decode(anonymous.body),
+          now: now(),
+          state: 'not_connected',
+          installUrl: bridge.installUrl,
+          protectedResourceMetadataUrl: origin.protectedResourceMetadataUrl,
+        });
+      } finally {
+        anonymous.release();
+      }
     }
     const token = /^Bearer\s+(\S+)$/i.exec(authorization.trim())?.[1];
     const installId = credentialInstallId('access', token);
@@ -477,7 +533,6 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     const read = await readBody(request, limits.maxRequestBodyBytes, ip);
     if (!read.ok) return read.response;
     const body = read.body;
-    const text = new TextDecoder().decode(body);
     return toInstall({
       installId,
       request,
@@ -486,12 +541,14 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       lane,
       route: 'api',
       ip,
-      // Only an owner-lane call may take the reserved dashboard slot.
-      dashboard: lane === 'owner' && isDashboardCall(text),
+      // Only an owner-lane call may take the reserved dashboard slot. The
+      // decoded text is not kept: only the charged body is held.
+      dashboard: lane === 'owner' && isDashboardCall(new TextDecoder().decode(body)),
       credentialKey: key,
+      releaseBody: read.release,
       offline: () => relayMcpResponse({
         method: request.method,
-        body: text,
+        body: new TextDecoder().decode(body),
         now: now(),
         state: 'mac_offline',
         lastSeenAt: registry.get(installId)?.lastSeenAt,
@@ -524,12 +581,16 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     const invalidGrant = () => json(400, { error: 'invalid_grant', error_description: 'The grant is invalid, expired, or revoked.' });
     // RFC 7009: revoking an unknown token succeeds.
     const unknown = kind === 'token' ? invalidGrant : () => new Response(null, { status: 200, headers: { 'Cache-Control': 'no-store' } });
-    if (!installId) return unknown();
+    if (!installId) {
+      read.release();
+      return unknown();
+    }
     return toInstall({
       installId,
       request,
       path,
       body,
+      releaseBody: read.release,
       lane: 'control',
       route: 'api',
       ip,
@@ -609,14 +670,14 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     const demoInstallId = config.demoInstallId;
     if (!demoInstallId) return json(404, { error: 'not_found' });
     if (request.method !== 'GET' && request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' });
-    const read = request.method === 'POST' ? await readBody(request, MAX_FORM_BYTES, ip) : { ok: true as const, body: new Uint8Array() };
+    const read = request.method === 'POST' ? await readBody(request, MAX_FORM_BYTES, ip) : { ok: true as const, body: new Uint8Array(), release: () => {} };
     if (!read.ok) return read.response;
     const body = read.body;
     const unavailable = () => new Response('The Olympus demo is not available right now. Try again later.', {
       status: 503,
       headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '60' },
     });
-    return toInstall({ installId: demoInstallId, request, path, body, lane: 'control', route: 'demo', ip, dashboard: false, offline: unavailable, unknown: unavailable });
+    return toInstall({ installId: demoInstallId, request, path, body, releaseBody: read.release, lane: 'control', route: 'demo', ip, dashboard: false, offline: unavailable, unknown: unavailable });
   };
 
   /**
@@ -652,6 +713,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       request,
       path: url.pathname,
       body: read.body,
+      releaseBody: read.release,
       lane: 'unverified',
       route: 'api',
       ip,
@@ -676,13 +738,40 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     ws.close(4000, code);
   };
 
+  /**
+   * The signature scheme a session answer proves, or undefined when it proves
+   * none the relay accepts. Scheme 3 (bound to this relay's host) is always
+   * accepted, also from an install that sent no `auth` field (one released
+   * between the binding and negotiation). Scheme 2 (the pre-binding form) is
+   * accepted only when the answer claimed no scheme, the id is one this relay
+   * already knows, and the legacy window is open.
+   */
+  const verifiedScheme = (
+    key: Parameters<typeof verifyInstallMessage>[0],
+    kind: 'hello' | 'register',
+    nonce: string,
+    installId: string,
+    sig: string,
+    claimed: unknown,
+    known: boolean,
+  ): AuthScheme | undefined => {
+    if (verifyInstallMessage(key, kind, nonce, installId, relayHost, sig, AUTH_BOUND)) return AUTH_BOUND;
+    if (claimed !== undefined || !known || !limits.acceptLegacyAuth) return undefined;
+    return verifyInstallMessage(key, kind, nonce, installId, relayHost, sig, AUTH_LEGACY) ? AUTH_LEGACY : undefined;
+  };
+
   const authenticate = (ws: ServerWebSocket<SocketData>, message: Record<string, unknown>): void => {
     clearTimeout(ws.data.authTimer);
     if (message.v !== PROTOCOL_VERSION) return fail(ws, 'unsupported_version', `relay speaks protocol ${PROTOCOL_VERSION}`, 'version');
+    // An answer naming a scheme names one this relay speaks; none means scheme 2 or an unnegotiated 3.
+    if (message.auth !== undefined && message.auth !== AUTH_BOUND) {
+      return fail(ws, 'unsupported_version', `relay speaks signature scheme ${AUTH_BOUND}`, 'auth_scheme');
+    }
     const installId = typeof message.installId === 'string' ? message.installId : '';
     const sig = typeof message.sig === 'string' ? message.sig : '';
     if (!INSTALL_ID_PATTERN.test(installId)) return fail(ws, 'bad_request', 'installId is malformed', 'malformed');
     if (registry.isRevoked(installId)) return fail(ws, 'revoked', 'this install was revoked by the relay operator', 'revoked');
+    let scheme: AuthScheme;
     if (message.type === 'register') {
       const publicKey = typeof message.publicKey === 'string' ? message.publicKey : '';
       let key;
@@ -692,16 +781,23 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         return fail(ws, 'bad_request', 'publicKey must be an Ed25519 SPKI', 'malformed');
       }
       if (installIdForPublicKey(spkiOf(key)) !== installId) return fail(ws, 'id_mismatch', 'installId is not derived from publicKey', 'id_mismatch');
+      // An id this relay registered (still, or before it expired) has paid
+      // for its registration already; only a new id proves work. The id is
+      // derived from the key, so only the key's holder can claim a known id.
+      const registered = registry.get(installId) !== undefined;
+      const returning = !registered && registry.wasRemoved(installId);
+      const known = registered || returning;
       // One hash, before the signature and before any budget is spent.
-      if (!verifyRegistrationPow(limits.registrationPowBits, ws.data.nonce, installId, relayHost, message.pow)) {
+      if (!known && !verifyRegistrationPow(limits.registrationPowBits, ws.data.nonce, installId, relayHost, message.pow)) {
         return fail(ws, 'bad_request', 'registration proof of work missing or too weak', 'pow');
       }
-      if (!verifyInstallMessage(key, 'register', ws.data.nonce, installId, relayHost, sig)) return fail(ws, 'bad_signature', 'register signature rejected', 'signature');
-      if (!registry.get(installId)) {
+      const verified = verifiedScheme(key, 'register', ws.data.nonce, installId, sig, message.auth, known);
+      if (verified === undefined) return fail(ws, 'bad_signature', 'register signature rejected', 'signature');
+      scheme = verified;
+      if (!registered) {
         // A returning install (registered here before, since expired) and a
         // new one draw on separate budgets, both keyed by the address's
         // allocation (IPv6 /48), so a flood of new ids cannot lock either out.
-        const returning = registry.wasRemoved(installId);
         const allocation = prefixKey(ws.data.ip);
         const admitted = returning
           ? reregistrationsPerIp.take(allocation) && takeGlobal(reregistrationsGlobal, 'reregistrations')
@@ -713,9 +809,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     } else if (message.type === 'hello') {
       const record = registry.get(installId);
       if (!record) return fail(ws, 'unregistered', 'install is not registered', 'unregistered');
-      if (!verifyInstallMessage(publicKeyOf(record), 'hello', ws.data.nonce, installId, relayHost, sig)) {
-        return fail(ws, 'bad_signature', 'hello signature rejected', 'signature');
-      }
+      const verified = verifiedScheme(publicKeyOf(record), 'hello', ws.data.nonce, installId, sig, message.auth, true);
+      if (verified === undefined) return fail(ws, 'bad_signature', 'hello signature rejected', 'signature');
+      scheme = verified;
       registry.confirm(installId);
     } else {
       return fail(ws, 'bad_request', 'expected hello or register', 'malformed');
@@ -732,7 +828,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     sessions.set(installId, session);
     registry.seen(installId);
     session.send({ type: 'ready', installId });
-    log('session_ready', { install: installTag(installId) });
+    // `legacy_auth` sessions are what the legacy window still serves: the
+    // operator closes it once none appear (docs/design/chatgpt-plugin.md).
+    log('session_ready', { install: installTag(installId), ...(scheme === AUTH_LEGACY ? { legacy_auth: true } : {}) });
   };
 
   /** A socket leaves the pending pool: it authenticated, failed, closed, or was evicted. */
@@ -838,7 +936,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         ws.data.pending = true;
         pendingSockets.add(ws);
         ws.data.authTimer = setTimeout(() => ws.close(4000, 'auth_timeout'), limits.authTimeoutMs);
-        ws.send(JSON.stringify({ type: 'challenge', v: PROTOCOL_VERSION, nonce: ws.data.nonce, pow: limits.registrationPowBits } satisfies ChallengeMessage));
+        ws.send(JSON.stringify({ type: 'challenge', v: PROTOCOL_VERSION, nonce: ws.data.nonce, pow: limits.registrationPowBits, auth: AUTH_BOUND } satisfies ChallengeMessage));
       },
       message(ws, data) {
         const session = ws.data.session;
@@ -913,7 +1011,15 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     status: () => {
       let inFlight = 0;
       for (const session of sessions.values()) inFlight += session.activeStreams;
-      return { ...registry.counts(), online: sessions.size, inFlight, uploading: uploads.active, queuedBytes: queueBudget.used, startedAt };
+      return {
+        ...registry.counts(),
+        online: sessions.size,
+        inFlight,
+        uploading: uploads.active,
+        heldRequestBytes: uploads.bufferedBytes,
+        queuedBytes: queueBudget.used,
+        startedAt,
+      };
     },
     sweep,
     async close() {

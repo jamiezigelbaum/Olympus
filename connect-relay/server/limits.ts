@@ -19,8 +19,20 @@ export interface RelayLimits {
   readonly reregistrationsPerIp: BucketSpec;
   /** Returning registrations across the relay. */
   readonly reregistrationsGlobal: BucketSpec;
-  /** Leading zero bits a `register` must prove (shared/protocol.ts); 0 turns it off. */
+  /**
+   * Leading zero bits a `register` of an id this relay has never registered
+   * must prove (shared/protocol.ts); 0 turns it off. A registered or
+   * returning id re-registers without it.
+   */
   readonly registrationPowBits: number;
+  /**
+   * Migration window: accept the pre-binding signature (scheme 2) from an
+   * install this relay already knows (registered, or registered before and
+   * expired). New registrations always need scheme 3. On by default until
+   * the sunset in docs/design/chatgpt-plugin.md ("Relay protocol
+   * compatibility"); `RELAY_LEGACY_AUTH=off` closes it.
+   */
+  readonly acceptLegacyAuth: boolean;
   /**
    * A registration whose install never authenticated again (`hello`) and is
    * not online is dropped after this long, so one-shot registrations cannot
@@ -126,6 +138,7 @@ export const DEFAULT_LIMITS: RelayLimits = {
   reregistrationsPerIp: { capacity: 5, refillPerSecond: 5 / 3600 },
   reregistrationsGlobal: { capacity: 500, refillPerSecond: 500 / 3600 },
   registrationPowBits: 16,
+  acceptLegacyAuth: true,
   unconfirmedRegistrationTtlMs: 24 * 60 * 60_000,
   sessionAttemptsPerIp: { capacity: 30, refillPerSecond: 0.5 },
   sessionsPerIp: 20,
@@ -372,10 +385,14 @@ export class ConfirmedCredentials {
 }
 
 /**
- * Request bodies while they upload: a global and a per-address count of
- * uploads, and a global and a per-address byte budget charged as the body
- * buffer grows with bytes that actually arrived (never by a declared length).
- * A ticket is taken before any body byte is read.
+ * Request bodies, from their first byte until the relay lets go of them: a
+ * global and a per-address count of uploads in progress, and a global and a
+ * per-address byte budget charged as the body buffer grows with bytes that
+ * actually arrived (never by a declared length). A ticket is taken before any
+ * body byte is read. The upload count is returned when the body has arrived
+ * (`endUpload`); the bytes stay charged while the relay still holds the body
+ * (waiting for an admission slot, forwarding it, waiting for the install's
+ * answer) and are returned only by `release`.
  */
 export class UploadBudget {
   private uploads = 0;
@@ -385,10 +402,12 @@ export class UploadBudget {
 
   constructor(private readonly limits: RelayLimits) {}
 
+  /** Uploads in progress. */
   get active(): number {
     return this.uploads;
   }
 
+  /** Request body bytes held: uploading, or read and not yet released. */
   get bufferedBytes(): number {
     return this.bytes;
   }
@@ -400,26 +419,40 @@ export class UploadBudget {
     if (!releaseAddress) return undefined;
     this.uploads += 1;
     let charged = 0;
-    let done = false;
+    let uploading = true;
+    let released = false;
     const perAddressCap = Math.min(this.limits.maxUploadBufferedBytesPerIp, Math.floor(this.limits.maxUploadBufferedBytes / 16));
+    const uncharge = (n: number) => {
+      this.bytes -= n;
+      charged -= n;
+      const held = (this.bytesPerAddress.get(address) ?? 0) - n;
+      if (held > 0) this.bytesPerAddress.set(address, held);
+      else this.bytesPerAddress.delete(address);
+    };
+    const endUpload = () => {
+      if (!uploading) return;
+      uploading = false;
+      this.uploads -= 1;
+      releaseAddress();
+    };
     return {
       charge: (n) => {
         const held = this.bytesPerAddress.get(address) ?? 0;
-        if (done || this.bytes + n > this.limits.maxUploadBufferedBytes || held + n > perAddressCap) return false;
+        if (released || !uploading || this.bytes + n > this.limits.maxUploadBufferedBytes || held + n > perAddressCap) return false;
         this.bytes += n;
         this.bytesPerAddress.set(address, held + n);
         charged += n;
         return true;
       },
-      end: () => {
-        if (done) return;
-        done = true;
-        this.bytes -= charged;
-        const held = (this.bytesPerAddress.get(address) ?? 0) - charged;
-        if (held > 0) this.bytesPerAddress.set(address, held);
-        else this.bytesPerAddress.delete(address);
-        this.uploads -= 1;
-        releaseAddress();
+      refund: (n) => {
+        if (!released) uncharge(Math.max(0, Math.min(n, charged)));
+      },
+      endUpload,
+      release: () => {
+        endUpload();
+        if (released) return;
+        released = true;
+        uncharge(charged);
       },
     };
   }
@@ -428,8 +461,12 @@ export class UploadBudget {
 export interface UploadTicket {
   /** Charges `n` more buffered bytes; false when the relay-wide or this address's budget is spent. */
   charge(n: number): boolean;
-  /** Releases the ticket and every byte it charged; one-shot. */
-  end(): void;
+  /** Returns `n` of the bytes charged (a buffer trimmed to what arrived). */
+  refund(n: number): void;
+  /** The body has arrived: the upload count is returned, its bytes stay charged. */
+  endUpload(): void;
+  /** The relay holds the body no more: everything is returned; one-shot. */
+  release(): void;
 }
 
 /** Response bytes queued for public callers that read slower than installs send, across the relay. */
