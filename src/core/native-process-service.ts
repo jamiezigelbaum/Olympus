@@ -27,7 +27,8 @@ export function setNativeProcessChildStdio(mode: NativeProcessChildStdio): void 
  * mode; the OpenClaw Gateway sets none.
  */
 export interface NativeProcessChildObserver {
-  spawned(serviceId: string, processGroupId: number): void;
+  /** `argv`: the exact command and arguments the group leader was spawned with. */
+  spawned(serviceId: string, processGroupId: number, argv?: readonly string[]): void;
   stopped(serviceId: string, processGroupId: number): void;
 }
 let childObserver: NativeProcessChildObserver | undefined;
@@ -36,10 +37,11 @@ export function setNativeProcessChildObserver(observer: NativeProcessChildObserv
   childObserver = observer;
 }
 
-function notifyChildObserver(event: 'spawned' | 'stopped', serviceId: string, pid: number | undefined): void {
+function notifyChildObserver(event: 'spawned' | 'stopped', serviceId: string, pid: number | undefined, argv?: readonly string[]): void {
   if (!childObserver || !pid || process.platform === 'win32') return;
   try {
-    childObserver[event](serviceId, pid);
+    if (event === 'spawned') childObserver.spawned(serviceId, pid, argv);
+    else childObserver.stopped(serviceId, pid);
   } catch {
     // Advisory bookkeeping never changes supervision.
   }
@@ -303,7 +305,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     });
     lifetime.child = child;
     lifetime.childReady = false;
-    notifyChildObserver('spawned', options.id, child.pid);
+    notifyChildObserver('spawned', options.id, child.pid, [settings.command, ...settings.args]);
     let spawnFailed = false;
 
     child.once('exit', (code, signal) => {

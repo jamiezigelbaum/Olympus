@@ -15,7 +15,6 @@
  */
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { configFromPluginConfig } from './config.ts';
 import {
@@ -35,7 +34,7 @@ import {
 } from './native-process-service.ts';
 import { createNativeRelayService } from './native-relay-service.ts';
 import { createNativeWorkerService } from './native-worker-service.ts';
-import { olympusDataDir, resolveRemoteAccessMode } from './remote-access.ts';
+import { resolveRemoteAccessMode } from './remote-access.ts';
 
 export const ENGINE_STATUS_SCHEMA = 'olympus.engine.status.v1';
 /** EX_CONFIG: launchd's throttle keeps a misconfigured engine from spinning. */
@@ -137,10 +136,7 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   if (reaped.stopped.length > 0) {
     log(`engine: stopped ${reaped.stopped.length} process group(s) a previous engine left running (${reaped.stopped.map((child) => child.service).join(', ')}).`);
   }
-  setNativeProcessChildObserver(engineChildrenRecorder({
-    path: childrenPath,
-    markers: engineChildMarkers(options.moduleUrl, dataEnv),
-  }));
+  setNativeProcessChildObserver(engineChildrenRecorder({ path: childrenPath }));
 
   const now = () => new Date().toISOString();
   const status: EngineStatusFile = {
@@ -227,22 +223,6 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     process.once('SIGINT', onSignal);
   }
   return { stop, status: () => structuredClone(status) };
-}
-
-/**
- * Command-line fragments that prove a process belongs to this install: the
- * packaged cli.js every child runs, and the models directory the built-in
- * model server is started from.
- */
-export function engineChildMarkers(moduleUrl: string, env: Record<string, string | undefined>): string[] {
-  const markers: string[] = [];
-  try {
-    markers.push(fileURLToPath(new URL('./cli.js', moduleUrl)));
-  } catch {
-    // A non-file module URL (tests) has no cli.js marker.
-  }
-  markers.push(join(olympusDataDir(env), 'models'));
-  return markers;
 }
 
 /** `olympus __engine-run`: start the host and stay up until launchd stops it. */
