@@ -1452,12 +1452,14 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   hide: 'Hide',
   hideLabel: 'Hide private answer',
   tryAgain: 'Try again',
-  noModel: 'Private answers need the private model on your Mac.',
-  downloading: 'The private model is downloading ({percent}%)…',
-  downloadingUnknown: 'The private model is downloading…',
+  /** No job exists in these two states, so the panel can only say what to do and to ask again. */
+  noModel: 'Private answers need the private model on your Mac. Open the Olympus dashboard to finish setup, then ask again.',
+  downloading: 'The private model is downloading ({percent}%). Ask again when it\'s ready.',
+  downloadingUnknown: 'The private model is downloading. Ask again when it\'s ready.',
   downloadingLabel: 'Private model download',
   preparing: 'Preparing the answer on your Mac…',
-  preparingFull: 'Reading the full report on your Mac…',
+  /** A full-detail answer reads selected parts more closely, not necessarily every page. */
+  preparingFull: 'Reading your report in more detail on your Mac…',
   slow: 'Your Mac is taking longer than usual to prepare the answer.',
   failed: 'Olympus couldn\'t answer this on your Mac.',
   claimed: 'This answer was already opened in another window.',

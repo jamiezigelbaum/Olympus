@@ -20,7 +20,8 @@ const SECRET_TITLES = ['Orchard lease.pdf', 'Landlord email', 'Renewal terms', '
 const SECRET_GAP = 'the monthly rent';
 const PLAINTEXT = { v: 1, answer: SECRET_ANSWER, citations: SECRET_TITLES.map((title) => ({ title, source: 'Dropbox' })), unanswered: [SECRET_GAP] };
 
-type RelayReply = { status: number; body?: unknown; retryAfter?: string } | 'ready' | 'throw';
+/** 'hang': the request never settles and ignores its abort signal (a stalled connection). */
+type RelayReply = { status: number; body?: unknown; retryAfter?: string } | 'ready' | 'throw' | 'hang';
 
 interface Fetched {
   url: string;
@@ -144,6 +145,7 @@ interface MountOptions {
   openai?: Record<string, any>;
   pollCapMs?: number;
   fullPollCapMs?: number;
+  requestTimeoutMs?: number;
   replies?: RelayReply[];
   plaintext?: unknown;
   idb?: FakeIdb;
@@ -166,6 +168,7 @@ function mount(options: MountOptions = {}): Host {
     secondMs: 1,
     pollCapMs: options.pollCapMs ?? 5_000,
     fullPollCapMs: options.fullPollCapMs ?? 5_000,
+    ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
     keyStore: { timeoutMs: 30 },
     noteMs: 60_000,
     heightResendMs: options.heightResendMs ?? 400,
@@ -208,6 +211,7 @@ function mount(options: MountOptions = {}): Host {
       }
       const reply = replies.length > 1 ? replies.shift()! : replies[0]!;
       if (reply === 'throw') throw new TypeError('Failed to fetch');
+      if (reply === 'hang') return new Promise<Response>(() => undefined);
       if (reply === 'ready') {
         const panel = await importPanelPublicKey(body.publicKey);
         const plaintext = padPrivateAnswerPlaintext(JSON.stringify(options.plaintext ?? PLAINTEXT));
@@ -355,7 +359,7 @@ describe('the card while the answer is prepared', () => {
   test('no private model: the sentence, no button, no request', async () => {
     const host = mount();
     host.push({ content: [], _meta: meta({ v: 1, count: 4, state: 'no_model' }) });
-    expect(host.doc.querySelector('.sub')?.textContent).toBe('Private answers need the private model on your Mac.');
+    expect(host.doc.querySelector('.sub')?.textContent).toBe('Private answers need the private model on your Mac. Open the Olympus dashboard to finish setup, then ask again.');
     expect(host.buttons()).toHaveLength(0);
     await sleep(10);
     expect(host.fetched).toHaveLength(0);
@@ -365,11 +369,11 @@ describe('the card while the answer is prepared', () => {
   test('model downloading: the percent, a thin bar, no button', () => {
     const host = mount();
     host.push({ content: [], _meta: meta({ v: 1, count: 2, state: 'model_downloading', percent: 40 }) });
-    expect(host.doc.querySelector('.sub')?.textContent).toBe('The private model is downloading (40%)…');
+    expect(host.doc.querySelector('.sub')?.textContent).toBe('The private model is downloading (40%). Ask again when it\'s ready.');
     expect(host.doc.querySelector('[role=progressbar]')?.getAttribute('aria-valuenow')).toBe('40');
     expect(host.buttons()).toHaveLength(0);
     host.push({ content: [], _meta: meta({ v: 1, count: 2, state: 'model_downloading' }) });
-    expect(host.text()).toContain('The private model is downloading…');
+    expect(host.text()).toContain('The private model is downloading. Ask again when it\'s ready.');
     expect(host.doc.querySelector('[role=progressbar]')).toBeNull();
     expect(host.fetched).toHaveLength(0);
     expectNoJargon(host);
@@ -538,7 +542,7 @@ describe('collecting the private answer', () => {
     await reveal(host);
   });
 
-  test('a full-detail answer says it is reading the full report and waits longer', async () => {
+  test('a full-detail answer says it is reading in more detail and waits longer', async () => {
     const host = mount({ pollCapMs: 30, fullPollCapMs: 5_000, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }] });
     host.push({ content: [], structuredContent: { results: [] }, _meta: meta({ v: 1, count: 2, state: 'ready', jobId: JOB, detail: 'full' }) });
     expect(host.text()).toContain(W.preparingFull);
@@ -565,6 +569,29 @@ describe('collecting the private answer', () => {
     host.button(W.tryAgain).click();
     await host.until(() => host.text().includes('31 March'), 'the answer');
     expect(new Set(host.fetched.map((call) => call.body.publicKey)).size).toBe(1);
+  });
+
+  test('a request that never answers cannot hold "Preparing…": the deadline ends it with Try again', async () => {
+    const host = mount({ pollCapMs: 40, replies: ['hang'] });
+    host.push(ready());
+    expect(host.text()).toContain(W.preparing);
+    await host.until(() => host.text().includes(W.slow), 'the slow notice');
+    expect(host.doc.querySelector('.card .sub.warn')?.textContent).toBe(W.slow);
+    expect(host.buttons().map((b) => b.textContent)).toEqual([W.tryAgain]);
+    expect(host.fetched[0]!.init.signal.aborted).toBe(true);
+    host.replies.splice(0, host.replies.length, 'ready');
+    host.button(W.tryAgain).click();
+    await host.until(() => host.text().includes('31 March'), 'the answer');
+    expect(new Set(host.fetched.map((call) => call.body.publicKey)).size).toBe(1);
+  });
+
+  test('one hung request is aborted after its own timeout and the panel asks again', async () => {
+    const host = mount({ pollCapMs: 5_000, requestTimeoutMs: 20, replies: ['hang', 'ready'] });
+    host.push(ready());
+    await host.until(() => host.text().includes('31 March'), 'the answer');
+    expect(host.fetched).toHaveLength(2);
+    expect(host.fetched[0]!.init.signal.aborted).toBe(true);
+    expect(host.fetched[1]!.init.signal.aborted).toBe(false);
   });
 
   test('a sealed answer that does not open is a plain error, not a crash', async () => {
