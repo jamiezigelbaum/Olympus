@@ -46177,8 +46177,9 @@ var init_vocabulary = __esm(() => {
     macOffline: "Your Mac is offline, so the private answer can't be shown.",
     unreachable: "Olympus couldn't reach your Mac. Try again in a moment.",
     generic: "Olympus couldn't show the private answer here.",
-    sources: "From: {list}",
-    more: "and {n} more",
+    sourcesToggle: "Sources ({n})",
+    openedOnMac: "Opened on your Mac",
+    openFailed: "Couldn't open it on your Mac",
     unanswered: "Not found in your private items: {list}"
   };
 });
@@ -104140,6 +104141,8 @@ function chatgptPrivateAnswerProgram(config2) {
   let errorText = "";
   let canRetry = false;
   let answer = null;
+  let sourcesOpen = false;
+  let notes = {};
   let pair = null;
   let run = 0;
   let theme = "";
@@ -104230,6 +104233,8 @@ function chatgptPrivateAnswerProgram(config2) {
       errorText = "";
       canRetry = false;
       answer = null;
+      sourcesOpen = false;
+      notes = {};
       pair = null;
     }
     info = next;
@@ -104390,6 +104395,22 @@ function chatgptPrivateAnswerProgram(config2) {
     const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key, ciphertext);
     return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ""));
   }
+  function readOpen(value) {
+    if (!value || typeof value !== "object")
+      return null;
+    if (value.kind === "mac" && typeof value.token === "string" && /^[A-Za-z0-9._~-]{1,1024}$/.test(value.token)) {
+      return { kind: "mac", token: value.token };
+    }
+    if (value.kind === "web" && typeof value.url === "string" && value.url.length <= 4096) {
+      try {
+        const parsed = new URL(value.url);
+        if (parsed.protocol === "https:" && parsed.hostname && !parsed.username && !parsed.password) {
+          return { kind: "web", url: parsed.href };
+        }
+      } catch {}
+    }
+    return null;
+  }
   function readAnswer(value) {
     if (!value || typeof value !== "object" || value.v !== 1 || typeof value.answer !== "string")
       return null;
@@ -104403,7 +104424,7 @@ function chatgptPrivateAnswerProgram(config2) {
       const name = typeof c.title === "string" && c.title.trim() ? c.title.trim() : typeof c.source === "string" && c.source.trim() ? c.source.trim() : "";
       if (name && !seen[name]) {
         seen[name] = true;
-        sources.push(name);
+        sources.push({ name, open: readOpen(c.open) });
       }
     }
     const unanswered = (Array.isArray(value.unanswered) ? value.unanswered : []).filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
@@ -104488,6 +104509,8 @@ function chatgptPrivateAnswerProgram(config2) {
             return;
           }
           answer = opened;
+          sourcesOpen = false;
+          notes = {};
           phase = "revealed";
           focusAfter = byUser ? "answer" : "";
           render();
@@ -104528,6 +104551,62 @@ function chatgptPrivateAnswerProgram(config2) {
     focusAfter = "show";
     render();
   }
+  function toggleSources() {
+    sourcesOpen = !sourcesOpen;
+    focusAfter = "sources";
+    render();
+  }
+  function openSource(index) {
+    const shown = answer;
+    const source = shown ? shown.sources[index] : undefined;
+    if (!shown || !source || !source.open)
+      return;
+    const target = source.open;
+    if (target.kind === "web") {
+      const host = openai();
+      if (host && typeof host.openExternal === "function") {
+        try {
+          host.openExternal({ href: target.url });
+        } catch {}
+      } else {
+        request("ui/open-link", { url: target.url }, () => {
+          return;
+        });
+      }
+      return;
+    }
+    const jobId = info ? info.jobId : "";
+    const done = (ok) => {
+      if (answer !== shown)
+        return;
+      const note = { text: ok ? T.openedOnMac : T.openFailed, warn: !ok };
+      notes[index] = note;
+      render();
+      setTimeout(() => {
+        if (answer !== shown || notes[index] !== note)
+          return;
+        delete notes[index];
+        render();
+      }, config2.noteMs);
+    };
+    if (!JOB_ID.test(jobId) || typeof window.fetch !== "function")
+      return done(false);
+    let posting;
+    try {
+      posting = window.fetch(config2.relayOrigin + "/private/" + jobId + "/open", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ v: 1, open: target.token }),
+        credentials: "omit",
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
+        mode: "cors"
+      });
+    } catch {
+      return done(false);
+    }
+    posting.then((response) => done(!!response && response.status === 204), () => done(false));
+  }
   function el(tag, cls, text) {
     const node = doc2.createElement(tag);
     if (cls)
@@ -104566,12 +104645,70 @@ function chatgptPrivateAnswerProgram(config2) {
     svg.appendChild(shackle);
     return svg;
   }
-  function sourcesLine(sources) {
-    const shown = sources.slice(0, 3);
-    let list = shown.join(", ");
-    if (sources.length > shown.length)
-      list += " " + fill(T.more, { n: String(sources.length - shown.length) });
-    return fill(T.sources, { list });
+  function chevron() {
+    const svg = doc2.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "chev");
+    svg.setAttribute("viewBox", "0 0 12 12");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const path = doc2.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", "M3 4.5l3 3 3-3");
+    svg.appendChild(path);
+    return svg;
+  }
+  let keyedAt = 0;
+  function onActivate(node, action) {
+    node.addEventListener("click", (event) => {
+      if (event && event.detail === 0 && Date.now() - keyedAt < 500)
+        return;
+      action();
+    });
+    node.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar")
+        return;
+      event.preventDefault();
+      if (event.repeat)
+        return;
+      keyedAt = Date.now();
+      action();
+    });
+  }
+  function sourcesView(sources) {
+    const wrap = el("div", "sources");
+    const toggle = el("button", "src-toggle");
+    toggle.type = "button";
+    toggle.setAttribute("data-key", "sources");
+    toggle.setAttribute("aria-expanded", sourcesOpen ? "true" : "false");
+    toggle.appendChild(doc2.createTextNode(fill(T.sourcesToggle, { n: String(sources.length) })));
+    toggle.appendChild(chevron());
+    onActivate(toggle, toggleSources);
+    wrap.appendChild(toggle);
+    if (!sourcesOpen)
+      return wrap;
+    const list = el("ul", "src-list");
+    list.id = "olympus-sources";
+    toggle.setAttribute("aria-controls", list.id);
+    sources.forEach((source, index) => {
+      const item = el("li", "src");
+      if (source.open) {
+        const link = el("button", "src-link", source.name);
+        link.type = "button";
+        link.setAttribute("data-key", "source-" + index);
+        link.addEventListener("click", () => openSource(index));
+        item.appendChild(link);
+      } else {
+        item.appendChild(el("span", "src-name", source.name));
+      }
+      const note = notes[index];
+      if (note) {
+        const said = el("span", note.warn ? "src-note warn" : "src-note", note.text);
+        said.setAttribute("role", "status");
+        item.appendChild(said);
+      }
+      list.appendChild(item);
+    });
+    wrap.appendChild(list);
+    return wrap;
   }
   function card(open7) {
     const node = el("section", open7 ? "card open" : "card");
@@ -104645,9 +104782,10 @@ function chatgptPrivateAnswerProgram(config2) {
       body.appendChild(el("p", "", part));
     view.card.appendChild(body);
     if (shown.sources.length)
-      view.card.appendChild(el("p", "sub foot", sourcesLine(shown.sources)));
-    if (shown.unanswered.length)
-      view.card.appendChild(el("p", "sub foot", fill(T.unanswered, { list: shown.unanswered.join("; ") })));
+      view.card.appendChild(sourcesView(shown.sources));
+    const gaps = shown.unanswered.map((item) => item.trim()).filter(Boolean);
+    if (gaps.length)
+      view.card.appendChild(el("p", "gaps", fill(T.unanswered, { list: gaps.join("; ") })));
     return view.card;
   }
   function render() {
@@ -104655,9 +104793,13 @@ function chatgptPrivateAnswerProgram(config2) {
       doc2.documentElement.setAttribute("data-theme", theme);
     else
       doc2.documentElement.removeAttribute("data-theme");
+    const active = doc2.activeElement;
+    const had = active && root.contains(active) ? active.getAttribute("data-key") || "" : "";
     root.textContent = "";
     if (info)
       root.appendChild(phase === "revealed" && answer ? revealedView(answer) : cardView(info));
+    if (!focusAfter && had)
+      focusAfter = had;
     if (focusAfter) {
       const key = focusAfter;
       focusAfter = "";
@@ -104679,10 +104821,13 @@ function chatgptPrivateAnswerProgram(config2) {
     }
     return Math.ceil((node.offsetHeight || 0) + margins);
   }
+  let initialized = false;
   let lastHeight = -1;
-  function reportHeight() {
+  function reportHeight(force) {
+    if (!initialized)
+      return;
     const height = cardHeight();
-    if (height === lastHeight)
+    if (height === lastHeight && !force)
       return;
     lastHeight = height;
     const host = openai();
@@ -104724,6 +104869,14 @@ function chatgptPrivateAnswerProgram(config2) {
   const fonts = doc2.fonts;
   if (fonts && fonts.ready && typeof fonts.ready.then === "function")
     fonts.ready.then(() => afterLayout());
+  function markInitialized() {
+    if (initialized)
+      return;
+    initialized = true;
+    reportHeight(true);
+    setTimeout(() => reportHeight(true), config2.heightResendMs);
+  }
+  window.addEventListener("load", () => reportHeight(true));
   readGlobals();
   render();
   request("ui/initialize", {
@@ -104734,7 +104887,9 @@ function chatgptPrivateAnswerProgram(config2) {
     if (result && result.hostContext)
       hostContext(result.hostContext);
     notify("ui/notifications/initialized");
+    markInitialized();
   });
+  setTimeout(markInitialized, config2.initFallbackMs);
 }
 function vars2(palette, card) {
   return [
@@ -104758,6 +104913,9 @@ function chatgptPrivateAnswerPageHtml(options) {
     copy: DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY,
     secondMs: options.secondMs ?? 1000,
     pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
+    noteMs: options.noteMs ?? 4000,
+    heightResendMs: options.heightResendMs ?? 400,
+    initFallbackMs: options.initFallbackMs ?? 500,
     keyStore: { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, ...options.keyStore }
   };
   return [
@@ -104825,12 +104983,27 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
 .bar-fill{height:100%;background:var(--run)}
 .answer{margin-top:0.625rem;display:flex;flex-direction:column;gap:0.625rem;font-size:0.9375rem;line-height:1.6;white-space:pre-line}
 .answer:focus{outline:none}
-.foot{margin-top:0.5rem}
+.sources{margin-top:0.5rem}
+.src-toggle{display:inline-flex;align-items:center;gap:0.25rem;font:inherit;font-size:0.8125rem;font-weight:500;line-height:1.4;color:var(--muted);background:none;border:0;border-radius:6px;padding:0.125rem 0;margin:0;cursor:pointer;-webkit-appearance:none;appearance:none}
+.src-toggle:hover{color:var(--text)}
+.src-toggle:focus{outline:none}
+.src-toggle:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.chev{width:0.75rem;height:0.75rem;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;transition:transform 0.15s}
+.src-toggle[aria-expanded=true] .chev{transform:rotate(180deg)}
+.src-list{list-style:none;margin:0.25rem 0 0;padding:0;display:flex;flex-direction:column;gap:0.125rem;font-size:0.8125rem;line-height:1.45}
+.src-name{color:var(--text)}
+.src-link{font:inherit;color:var(--text);background:none;border:0;padding:0;margin:0;text-align:left;cursor:pointer;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:2px;-webkit-appearance:none;appearance:none}
+.src-link:hover{text-decoration-color:currentColor}
+.src-link:focus{outline:none}
+.src-link:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:2px}
+.src-note{margin-left:0.5rem;font-size:0.75rem;color:var(--muted)}
+.src-note.warn{color:var(--warning)}
+.gaps{margin-top:0.5rem;font-size:0.75rem;line-height:1.4;color:var(--muted)}
 .btn{flex:none;font:inherit;font-size:0.875rem;font-weight:500;line-height:1.25;min-height:2rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--raise);color:var(--text);cursor:pointer;-webkit-appearance:none;appearance:none;box-shadow:none}
 .btn:hover{background:var(--hover)}
 .btn:focus{outline:none}
 .btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-@media (prefers-reduced-motion:reduce){.spinner{animation-duration:3s}}
+@media (prefers-reduced-motion:reduce){.spinner{animation-duration:3s}.chev{transition:none}}
 `;
 });
 

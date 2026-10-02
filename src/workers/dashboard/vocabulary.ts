@@ -1465,7 +1465,10 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   macOffline: 'Your Mac is offline, so the private answer can\'t be shown.',
   unreachable: 'Olympus couldn\'t reach your Mac. Try again in a moment.',
   generic: 'Olympus couldn\'t show the private answer here.',
-  sources: 'From: {list}',
-  more: 'and {n} more',
+  /** The collapsed disclosure under the answer; it opens a list of titles. */
+  sourcesToggle: 'Sources ({n})',
+  /** Brief inline result after a source is opened on the person's Mac. */
+  openedOnMac: 'Opened on your Mac',
+  openFailed: 'Couldn\'t open it on your Mac',
   unanswered: 'Not found in your private items: {list}',
 } as const;

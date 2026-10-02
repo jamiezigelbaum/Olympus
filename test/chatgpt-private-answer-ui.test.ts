@@ -28,8 +28,16 @@ interface Fetched {
   body: { v: number; publicKey: string };
 }
 
+interface OpenCall {
+  url: string;
+  init: any;
+  body: unknown;
+}
+
 interface Host {
   win: Window;
+  /** POSTs to the relay's /open route (a source opened on the Mac). */
+  openCalls: OpenCall[];
   doc: Document;
   sent: any[];
   calls: Array<[string, unknown]>;
@@ -132,8 +140,35 @@ const ready = (count = 3, jobId = JOB) => ({ content: [], structuredContent: { r
 /** A relay that binds the job to the first key that claims it, like the engine. */
 interface Claim { key?: string }
 
-function mount(options: { openai?: Record<string, any>; pollCapMs?: number; replies?: RelayReply[]; plaintext?: unknown; idb?: FakeIdb; claim?: Claim } = {}): Host {
-  const html = privateAnswerPageHtml({ relayOrigin: RELAY, secondMs: 1, pollCapMs: options.pollCapMs ?? 5_000, keyStore: { timeoutMs: 30 } });
+interface MountOptions {
+  openai?: Record<string, any>;
+  pollCapMs?: number;
+  replies?: RelayReply[];
+  plaintext?: unknown;
+  idb?: FakeIdb;
+  claim?: Claim;
+  /** When the host answers ui/initialize: ms after the request, or never. */
+  initAfterMs?: number | 'never';
+  /** Leave window.openai out entirely (a plain MCP Apps host). */
+  noOpenai?: boolean;
+  /** Leave window.openai.openExternal out. */
+  noOpenExternal?: boolean;
+  /** The relay's reply to /open: a status, or a network failure. */
+  openReply?: number | 'throw';
+  heightResendMs?: number;
+  initFallbackMs?: number;
+}
+
+function mount(options: MountOptions = {}): Host {
+  const html = privateAnswerPageHtml({
+    relayOrigin: RELAY,
+    secondMs: 1,
+    pollCapMs: options.pollCapMs ?? 5_000,
+    keyStore: { timeoutMs: 30 },
+    noteMs: 60_000,
+    heightResendMs: options.heightResendMs ?? 400,
+    initFallbackMs: options.initFallbackMs ?? 500,
+  });
   const start = html.indexOf('<script>') + '<script>'.length;
   const script = html.slice(start, html.indexOf('</script>', start));
   const win = new Window({ url: 'https://web-sandbox.oaiusercontent.com/' });
@@ -141,13 +176,14 @@ function mount(options: { openai?: Record<string, any>; pollCapMs?: number; repl
   const sent: any[] = [];
   const calls: Host['calls'] = [];
   const fetched: Fetched[] = [];
+  const openCalls: OpenCall[] = [];
   const replies: RelayReply[] = options.replies ?? ['ready'];
   const dispatch = (data: unknown) => win.dispatchEvent(new win.MessageEvent('message', { data, source: parent as any }));
   const parent = {
     postMessage: (message: any) => {
       sent.push(message);
-      if (message.method === 'ui/initialize') {
-        setTimeout(() => dispatch({ jsonrpc: '2.0', id: message.id, result: { hostContext: { theme: 'light' } } }), 0);
+      if (message.method === 'ui/initialize' && options.initAfterMs !== 'never') {
+        setTimeout(() => dispatch({ jsonrpc: '2.0', id: message.id, result: { hostContext: { theme: 'light' } } }), options.initAfterMs ?? 0);
       }
     },
   };
@@ -158,6 +194,11 @@ function mount(options: { openai?: Record<string, any>; pollCapMs?: number; repl
     configurable: true,
     value: async (url: string, init: any) => {
       const body = JSON.parse(init.body);
+      if (url.endsWith('/open')) {
+        openCalls.push({ url, init, body });
+        if (options.openReply === 'throw') throw new TypeError('Failed to fetch');
+        return new Response(null, { status: options.openReply ?? 204 });
+      }
       fetched.push({ url, init, body });
       if (options.claim) {
         options.claim.key ??= body.publicKey;
@@ -176,19 +217,22 @@ function mount(options: { openai?: Record<string, any>; pollCapMs?: number; repl
       return new Response(JSON.stringify(reply.body ?? {}), { status: reply.status, headers });
     },
   });
-  (win as any).openai = {
-    ...options.openai,
-    notifyIntrinsicHeight: (height: number) => calls.push(['notifyIntrinsicHeight', height]),
-    setWidgetState: (args: unknown) => calls.push(['setWidgetState', args]),
-    sendFollowUpMessage: (args: unknown) => calls.push(['sendFollowUpMessage', args]),
-    callTool: (...args: unknown[]) => calls.push(['callTool', args]),
-    openExternal: (args: unknown) => calls.push(['openExternal', args]),
-  };
+  if (!options.noOpenai) {
+    (win as any).openai = {
+      ...options.openai,
+      notifyIntrinsicHeight: (height: number) => calls.push(['notifyIntrinsicHeight', height]),
+      setWidgetState: (args: unknown) => calls.push(['setWidgetState', args]),
+      sendFollowUpMessage: (args: unknown) => calls.push(['sendFollowUpMessage', args]),
+      callTool: (...args: unknown[]) => calls.push(['callTool', args]),
+      ...(options.noOpenExternal ? {} : { openExternal: (args: unknown) => calls.push(['openExternal', args]) }),
+    };
+  }
   new Function('window', 'document', script)(win, win.document);
   const panel = () => win.document.getElementById('panel')!;
   const buttons = () => Array.from(panel().querySelectorAll('button')) as unknown as HTMLButtonElement[];
   const host: Host = {
     win,
+    openCalls,
     doc: win.document as unknown as Document,
     sent,
     calls,
@@ -408,16 +452,19 @@ describe('collecting the private answer', () => {
     const paragraphs = Array.from(host.doc.querySelectorAll('.answer p')).map((p) => p.textContent);
     expect(paragraphs).toEqual(['The lease on Orchard Lane ends 31 March.', 'Renewal needs <b>90 days</b> notice.']);
     expect(host.doc.querySelector('.answer b')).toBeNull();
-    expect(host.text()).toContain('From: Orchard lease.pdf, Landlord email, Renewal terms and 1 more');
-    expect(host.text()).toContain(`Not found in your private items: ${SECRET_GAP}`);
-    expect(host.buttons().map((b) => b.textContent)).toEqual([W.hide]);
+    expect(host.text()).not.toContain('From:');
+    expect(host.text()).toContain('Sources (4)');
+    expect(host.text()).not.toContain('Orchard lease.pdf');
+    expect(host.doc.querySelector('.gaps')?.textContent).toBe(`Not found in your private items: ${SECRET_GAP}`);
+    expect(host.buttons().map((b) => b.textContent)).toEqual([W.hide, 'Sources (4)']);
     expect(host.doc.querySelector('.row')!.lastElementChild!.textContent).toBe(W.hide);
     expect(host.doc.querySelector('.row .sub')?.textContent).toBe('Not sent to ChatGPT');
     // Everything stays inside the one card.
     const card = host.doc.querySelector('section.card')!;
     expect(host.doc.getElementById('panel')!.children).toHaveLength(1);
     expect(card.querySelector('.answer')).not.toBeNull();
-    expect(card.querySelectorAll('.foot')).toHaveLength(2);
+    // Answer, then the Sources row, then the quiet gaps line: nothing else.
+    expect(Array.from(card.children).map((child) => child.className)).toEqual(['row', 'answer', 'sources', 'gaps']);
     // Revealing by itself does not pull focus into the frame.
     expect(host.doc.activeElement?.getAttribute('data-key')).toBeNull();
     expectNoJargon(host);
@@ -506,6 +553,220 @@ describe('collecting the private answer', () => {
     const host = mount({ plaintext: { v: 2, nope: true } });
     host.push(ready());
     await host.until(() => host.text().includes(W.generic), 'generic error');
+  });
+});
+
+const MAC_TOKEN = 'mt_Q2xvc2VkLWxvb3A.9-x~';
+const WEB_URL = 'https://mail.example.com/m/1?thread=7';
+const OPENABLE = {
+  v: 1,
+  answer: SECRET_ANSWER,
+  citations: [
+    { title: 'Orchard lease.pdf', open: { kind: 'mac', token: MAC_TOKEN } },
+    { title: 'Landlord email', open: { kind: 'web', url: WEB_URL } },
+    { title: 'Renewal terms', open: { kind: 'web', url: 'http://insecure.example.com/x' } },
+    { title: 'Deposit receipt', open: { kind: 'web', url: 'javascript:alert(1)' } },
+    { title: 'Inventory', open: { kind: 'ftp', url: 'ftp://x' } },
+    { title: 'Bad token', open: { kind: 'mac', token: 'has space' } },
+    { title: 'No target' },
+  ],
+  unanswered: [SECRET_GAP],
+};
+
+function toggle(host: Host): HTMLButtonElement {
+  const node = host.doc.querySelector('.src-toggle') as HTMLButtonElement | null;
+  if (!node) throw new Error('no Sources toggle');
+  return node;
+}
+function key(host: Host, node: Element, name: string): void {
+  node.dispatchEvent(new (host.win as any).KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
+}
+const rows = (host: Host) => Array.from(host.doc.querySelectorAll('.src-list li')).map((li) => li.textContent);
+const links = (host: Host) => Array.from(host.doc.querySelectorAll('.src-list .src-link')) as unknown as HTMLButtonElement[];
+
+describe('the Sources disclosure', () => {
+  test('closed by default; click and keyboard flip aria-expanded and show plain rows', async () => {
+    const host = mount();
+    await reveal(host);
+    expect(host.text()).not.toContain('From:');
+    expect(toggle(host).textContent).toBe('Sources (4)');
+    expect(toggle(host).getAttribute('aria-expanded')).toBe('false');
+    expect(toggle(host).querySelector('svg.chev')?.getAttribute('aria-hidden')).toBe('true');
+    expect(host.doc.querySelector('.src-list')).toBeNull();
+    for (const title of SECRET_TITLES) expect(host.text()).not.toContain(title);
+
+    toggle(host).click();
+    expect(toggle(host).getAttribute('aria-expanded')).toBe('true');
+    expect(toggle(host).getAttribute('aria-controls')).toBe(host.doc.querySelector('.src-list')!.id);
+    expect(rows(host)).toEqual(SECRET_TITLES);
+    // Without an open target every source is a plain text row.
+    expect(links(host)).toHaveLength(0);
+    expect(host.doc.querySelectorAll('.src-list .src-name')).toHaveLength(4);
+    expect(host.doc.activeElement?.getAttribute('data-key')).toBe('sources');
+
+    key(host, toggle(host), 'Enter');
+    expect(toggle(host).getAttribute('aria-expanded')).toBe('false');
+    expect(host.doc.querySelector('.src-list')).toBeNull();
+    key(host, toggle(host), ' ');
+    expect(toggle(host).getAttribute('aria-expanded')).toBe('true');
+    key(host, toggle(host), 'Tab');
+    expect(toggle(host).getAttribute('aria-expanded')).toBe('true');
+
+    // Hide and Show keep the answer; a new answer starts closed again.
+    host.button(W.hide).click();
+    host.button(W.show).click();
+    expect(toggle(host).getAttribute('aria-expanded')).toBe('true');
+    await sleep(10);
+    expect(host.fetched).toHaveLength(1);
+  });
+
+  test('only well-formed mac tokens and https addresses become links', async () => {
+    const host = mount({ plaintext: OPENABLE });
+    await reveal(host);
+    expect(toggle(host).textContent).toBe('Sources (7)');
+    toggle(host).click();
+    expect(rows(host)).toEqual(OPENABLE.citations.map((c) => c.title));
+    expect(links(host).map((link) => link.textContent)).toEqual(['Orchard lease.pdf', 'Landlord email']);
+  });
+
+  test('a Mac source posts {v:1, open: token} to the job\'s /open route and says it opened', async () => {
+    const host = mount({ plaintext: OPENABLE });
+    await reveal(host);
+    toggle(host).click();
+    links(host)[0]!.click();
+    await host.until(() => host.text().includes(W.openedOnMac), 'the opened note');
+    expect(host.openCalls).toHaveLength(1);
+    const call = host.openCalls[0]!;
+    expect(call.url).toBe(`${RELAY}/private/${JOB}/open`);
+    expect(call.init.method).toBe('POST');
+    expect(call.init.credentials).toBe('omit');
+    expect(call.init.headers).toEqual({ 'content-type': 'application/json' });
+    expect(call.body).toEqual({ v: 1, open: MAC_TOKEN });
+    expect(host.doc.querySelector('.src-note')?.className).toBe('src-note');
+    expect(host.doc.querySelector('.src-note')?.getAttribute('role')).toBe('status');
+    // Nothing else moved: no new collection, no host call.
+    expect(host.fetched).toHaveLength(1);
+    expect(host.calls.filter(([name]) => name !== 'notifyIntrinsicHeight')).toEqual([]);
+  });
+
+  for (const reply of [500, 404, 'throw'] as const) {
+    test(`a Mac source whose open ${reply === 'throw' ? 'cannot reach the relay' : `gets ${reply}`} says it couldn't`, async () => {
+      const host = mount({ plaintext: OPENABLE, openReply: reply });
+      await reveal(host);
+      toggle(host).click();
+      links(host)[0]!.click();
+      await host.until(() => host.text().includes(W.openFailed), 'the failure note');
+      expect(host.doc.querySelector('.src-note.warn')?.textContent).toBe(W.openFailed);
+      expect(host.text()).not.toContain(W.openedOnMac);
+    });
+  }
+
+  test('a web source opens through window.openai.openExternal with its https address', async () => {
+    const host = mount({ plaintext: OPENABLE });
+    await reveal(host);
+    toggle(host).click();
+    links(host)[1]!.click();
+    expect(host.calls.filter(([name]) => name === 'openExternal')).toEqual([['openExternal', { href: WEB_URL }]]);
+    expect(host.openCalls).toHaveLength(0);
+    expect(host.sent.some((m) => m.method === 'ui/open-link')).toBe(false);
+  });
+
+  test('without openExternal, a web source asks the host with ui/open-link', async () => {
+    const host = mount({ plaintext: OPENABLE, noOpenExternal: true });
+    await reveal(host);
+    toggle(host).click();
+    links(host)[1]!.click();
+    const asked = host.sent.filter((m) => m.method === 'ui/open-link');
+    expect(asked).toHaveLength(1);
+    expect(asked[0].params).toEqual({ url: WEB_URL });
+  });
+
+  test('other schemes never reach the host or the network', async () => {
+    const host = mount({ plaintext: OPENABLE });
+    await reveal(host);
+    toggle(host).click();
+    for (const name of ['Renewal terms', 'Deposit receipt', 'Inventory', 'Bad token']) {
+      const row = Array.from(host.doc.querySelectorAll('.src-list li')).find((li) => li.textContent === name)!;
+      expect(row.querySelector('button')).toBeNull();
+      (row.firstChild as HTMLElement).click();
+    }
+    const outbound = JSON.stringify({ sent: host.sent, calls: host.calls });
+    for (const bad of ['insecure.example.com', 'javascript:', 'ftp:', 'has space']) expect(outbound).not.toContain(bad);
+    expect(host.openCalls).toHaveLength(0);
+  });
+});
+
+describe('the quiet gaps line', () => {
+  test('caption-sized, muted, and absent when there is nothing (or only whitespace) to list', async () => {
+    for (const unanswered of [[], ['   ', '\n'], undefined]) {
+      const host = mount({ plaintext: { ...PLAINTEXT, unanswered } });
+      await reveal(host);
+      expect(host.doc.querySelector('.gaps')).toBeNull();
+      expect(host.text()).not.toContain('Not found');
+    }
+    const host = mount({ plaintext: { ...PLAINTEXT, unanswered: ['  the monthly rent ', '', 'the deposit amount for the flat on Orch…'] } });
+    await reveal(host);
+    const gaps = host.doc.querySelector('.gaps')!;
+    expect(gaps.className).toBe('gaps');
+    expect(gaps.textContent).toBe('Not found in your private items: the monthly rent; the deposit amount for the flat on Orch…');
+    const css = privateAnswerResourceHtml();
+    expect(css).toContain('.gaps{margin-top:0.5rem;font-size:0.75rem;line-height:1.4;color:var(--muted)}');
+  });
+});
+
+describe('the height waits for the handshake', () => {
+  function measure(host: Host, height = 74): void {
+    const proto = (host.win as any).HTMLElement.prototype;
+    Object.defineProperty(proto, 'offsetHeight', { configurable: true, get(this: any) { return this.classList?.contains('card') ? height : 0; } });
+    Object.defineProperty(proto, 'offsetWidth', { configurable: true, get(this: any) { return this.classList?.contains('card') ? 640 : 0; } });
+  }
+  const sizes = (host: Host) => host.sent.filter((m) => m.method === 'ui/notifications/size-changed').map((m) => m.params.height);
+
+  test('a host that answers ui/initialize late gets the final height right after initialized, and again later', async () => {
+    const host = mount({ initAfterMs: 60, heightResendMs: 30, openai: { toolResponseMetadata: meta({ v: 1, count: 2, state: 'ready', jobId: JOB }) } });
+    measure(host);
+    // The precomputed answer arrives before the handshake finishes.
+    await host.until(() => host.text().includes('31 March'), 'the answer');
+    expect(sizes(host)).toEqual([]);
+    expect(host.heights()).toEqual([]);
+    await host.until(() => sizes(host).length > 0, 'the first size');
+    const methods = host.sent.map((m) => m.method);
+    expect(methods.indexOf('ui/notifications/initialized')).toBeLessThan(methods.indexOf('ui/notifications/size-changed'));
+    expect(sizes(host)).toEqual([74]);
+    expect(host.heights()).toEqual([74]);
+    // Forced once more a moment later, even though nothing changed.
+    await host.until(() => sizes(host).length === 2, 'the resend');
+    expect(sizes(host)).toEqual([74, 74]);
+    expect(host.heights()).toEqual([74, 74]);
+    await sleep(40);
+    expect(sizes(host)).toEqual([74, 74]);
+  });
+
+  test('a host that never answers gets the height through the fallback, never 0 while the card shows', async () => {
+    const host = mount({ initAfterMs: 'never', initFallbackMs: 40, heightResendMs: 30, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '30' }] });
+    measure(host);
+    host.push(ready());
+    await sleep(20);
+    expect(sizes(host)).toEqual([]);
+    await host.until(() => host.heights().length > 0, 'the fallback height');
+    expect(host.sent.some((m) => m.method === 'ui/notifications/initialized')).toBe(false);
+    await sleep(50);
+    expect(host.heights().length).toBeGreaterThan(0);
+    expect(host.heights().every((height) => height === 74)).toBe(true);
+    expect(sizes(host).every((height) => height === 74)).toBe(true);
+  });
+
+  test('the window load event resends the height', async () => {
+    const host = mount({ heightResendMs: 10_000 });
+    measure(host);
+    await sleep(10);
+    host.push(ready());
+    await host.until(() => host.text().includes('31 March'), 'the answer');
+    await sleep(20);
+    const before = sizes(host).length;
+    host.win.dispatchEvent(new host.win.Event('load'));
+    expect(sizes(host).length).toBe(before + 1);
+    expect(sizes(host).at(-1)).toBe(74);
   });
 });
 
@@ -613,6 +874,21 @@ describe('privacy', () => {
     } finally {
       Object.assign(console, original);
     }
+  });
+
+  test('opening sources sends the host only the web address: never titles, the answer or the Mac token', async () => {
+    const host = mount({ plaintext: OPENABLE });
+    await reveal(host);
+    toggle(host).click();
+    links(host)[0]!.click();
+    links(host)[1]!.click();
+    await host.until(() => host.text().includes(W.openedOnMac), 'the opened note');
+    const hostBound = JSON.stringify({ sent: host.sent, calls: host.calls, widgetState: (host.win as any).openai.widgetState ?? null });
+    for (const secret of ['31 March', 'Orchard', '90 days', SECRET_GAP, 'Landlord email', MAC_TOKEN, JOB]) expect(hostBound).not.toContain(secret);
+    expect(host.calls.map(([name]) => name).filter((name) => name !== 'notifyIntrinsicHeight')).toEqual(['openExternal']);
+    expect(hostBound).toContain(WEB_URL);
+    expect(host.win.localStorage.length).toBe(0);
+    expect(host.win.sessionStorage.length).toBe(0);
   });
 
   test('the page contacts only the relay, builds text only and reaches no other origin', () => {

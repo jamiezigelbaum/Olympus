@@ -15,8 +15,12 @@
  *
  * Privacy: the decrypted answer and its sources live only in this program's
  * memory. Nothing goes to widget state, model context, follow-up messages,
- * tool calls, storage, the console or a URL. The one network call is the POST
- * to `<relayOrigin>/private/<job id>` (the resource CSP's one connect domain).
+ * tool calls, storage, the console or a URL. The network calls are POSTs to
+ * `<relayOrigin>/private/<job id>` (the resource CSP's one connect domain) and,
+ * when the person opens a source on their Mac, `<relayOrigin>/private/<job
+ * id>/open` with that source's opaque token. A source that carries a web
+ * address (https only) is handed to the host to open: that address is the one
+ * thing the host ever sees, and only on the person's click.
  *
  * The key pair is kept per job id in this origin's IndexedDB (database
  * `olympus-private-answer`, store `keys`): ChatGPT re-mounts the widget on
@@ -48,6 +52,11 @@ export interface ChatGptPrivateAnswerConfig {
   secondMs: number;
   /** How long one collection keeps polling before offering Try again. */
   pollCapMs: number;
+  /** How long "Opened on your Mac" (or its failure) stays beside a source. */
+  noteMs: number;
+  /** The handshake: re-send the height this long after initialized, and send anyway if the host never answers. */
+  heightResendMs: number;
+  initFallbackMs: number;
   /** Where the key pair per job id is kept across re-mounts. */
   keyStore: { database: string; store: string; maxAgeMs: number; timeoutMs: number };
 }
@@ -56,6 +65,9 @@ export interface ChatGptPrivateAnswerPageOptions {
   relayOrigin: string;
   secondMs?: number;
   pollCapMs?: number;
+  noteMs?: number;
+  heightResendMs?: number;
+  initFallbackMs?: number;
   /** Tests shorten the store's timeout. */
   keyStore?: Partial<ChatGptPrivateAnswerConfig['keyStore']>;
 }
@@ -92,12 +104,19 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   let errorText = '';
   let canRetry = false;
   // The decrypted answer, in memory only, for this job, until the frame unloads.
-  let answer: { text: string; sources: string[]; unanswered: string[] } | null = null;
+  let answer: Answer | null = null;
+  // The Sources disclosure (closed by default) and each source's brief open
+  // result, by index. Memory only; a new answer resets both.
+  let sourcesOpen = false;
+  let notes: Record<number, { text: string; warn: boolean }> = {};
   // The key pair this job is claimed with: retries, polls and re-mounts reuse it.
   let pair: { jobId: string; privateKey: CryptoKey; publicKey: string } | null = null;
   let run = 0;
   let theme = '';
   let focusAfter = '';
+  type Open = { kind: 'mac'; token: string } | { kind: 'web'; url: string };
+  type Source = { name: string; open: Open | null };
+  type Answer = { text: string; sources: Source[]; unanswered: string[] };
 
   // ---- host bridge -------------------------------------------------------
   let nextId = 1;
@@ -188,6 +207,8 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       errorText = '';
       canRetry = false;
       answer = null;
+      sourcesOpen = false;
+      notes = {};
       pair = null;
     }
     info = next;
@@ -350,10 +371,31 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ''));
   }
 
+  /**
+   * A citation's optional open target. Only two shapes count, and anything
+   * else (another kind, a malformed token, a non-https address) is ignored, so
+   * the source shows as plain text.
+   */
+  function readOpen(value: Any): Open | null {
+    if (!value || typeof value !== 'object') return null;
+    if (value.kind === 'mac' && typeof value.token === 'string' && /^[A-Za-z0-9._~-]{1,1024}$/.test(value.token)) {
+      return { kind: 'mac', token: value.token };
+    }
+    if (value.kind === 'web' && typeof value.url === 'string' && value.url.length <= 4096) {
+      try {
+        const parsed = new URL(value.url);
+        if (parsed.protocol === 'https:' && parsed.hostname && !parsed.username && !parsed.password) {
+          return { kind: 'web', url: parsed.href };
+        }
+      } catch { /* not an address */ }
+    }
+    return null;
+  }
+
   /** The decrypted plaintext, checked and reduced to what the panel shows. */
-  function readAnswer(value: Any): { text: string; sources: string[]; unanswered: string[] } | null {
+  function readAnswer(value: Any): Answer | null {
     if (!value || typeof value !== 'object' || value.v !== 1 || typeof value.answer !== 'string') return null;
-    const sources: string[] = [];
+    const sources: Source[] = [];
     const seen: Record<string, boolean> = {};
     const citations = Array.isArray(value.citations) ? value.citations : [];
     for (let i = 0; i < citations.length; i++) {
@@ -363,7 +405,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         : typeof c.source === 'string' && c.source.trim() ? c.source.trim() : '';
       if (name && !seen[name]) {
         seen[name] = true;
-        sources.push(name);
+        sources.push({ name, open: readOpen(c.open) });
       }
     }
     const unanswered = (Array.isArray(value.unanswered) ? value.unanswered : [])
@@ -454,6 +496,8 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
             return;
           }
           answer = opened;
+          sourcesOpen = false;
+          notes = {};
           phase = 'revealed';
           focusAfter = byUser ? 'answer' : '';
           render();
@@ -487,6 +531,57 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     phase = 'hidden';
     focusAfter = 'show';
     render();
+  }
+
+  function toggleSources(): void {
+    sourcesOpen = !sourcesOpen;
+    focusAfter = 'sources';
+    render();
+  }
+
+  /** Opens one source: a web address through the host, a Mac item through the relay. */
+  function openSource(index: number): void {
+    const shown = answer;
+    const source = shown ? shown.sources[index] : undefined;
+    if (!shown || !source || !source.open) return;
+    const target = source.open;
+    if (target.kind === 'web') {
+      const host = openai();
+      if (host && typeof host.openExternal === 'function') {
+        try { host.openExternal({ href: target.url }); } catch { /* the host declined */ }
+      } else {
+        request('ui/open-link', { url: target.url }, () => undefined);
+      }
+      return;
+    }
+    const jobId = info ? info.jobId : '';
+    const done = (ok: boolean) => {
+      if (answer !== shown) return;
+      const note = { text: ok ? T.openedOnMac : T.openFailed, warn: !ok };
+      notes[index] = note;
+      render();
+      setTimeout(() => {
+        if (answer !== shown || notes[index] !== note) return;
+        delete notes[index];
+        render();
+      }, config.noteMs);
+    };
+    if (!JOB_ID.test(jobId) || typeof (window as Any).fetch !== 'function') return done(false);
+    let posting: Promise<Response>;
+    try {
+      posting = (window as Any).fetch(config.relayOrigin + '/private/' + jobId + '/open', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ v: 1, open: target.token }),
+        credentials: 'omit',
+        cache: 'no-store',
+        referrerPolicy: 'no-referrer',
+        mode: 'cors',
+      });
+    } catch {
+      return done(false);
+    }
+    posting.then((response) => done(!!response && response.status === 204), () => done(false));
   }
 
   // ---- view --------------------------------------------------------------
@@ -527,11 +622,71 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     return svg;
   }
 
-  function sourcesLine(sources: string[]): string {
-    const shown = sources.slice(0, 3);
-    let list = shown.join(', ');
-    if (sources.length > shown.length) list += ' ' + fill(T.more, { n: String(sources.length - shown.length) });
-    return fill(T.sources, { list });
+  function chevron(): Element {
+    const svg = doc.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'chev');
+    svg.setAttribute('viewBox', '0 0 12 12');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    const path = doc.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', 'M3 4.5l3 3 3-3');
+    svg.appendChild(path);
+    return svg;
+  }
+
+  // Enter and Space toggle on the key itself (and the click a browser then
+  // synthesises is ignored), so the toggle works the same in every host.
+  let keyedAt = 0;
+  function onActivate(node: HTMLElement, action: () => void): void {
+    node.addEventListener('click', (event: Any) => {
+      if (event && event.detail === 0 && Date.now() - keyedAt < 500) return;
+      action();
+    });
+    node.addEventListener('keydown', (event: Any) => {
+      if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+      event.preventDefault();
+      if (event.repeat) return;
+      keyedAt = Date.now();
+      action();
+    });
+  }
+
+  /** The collapsed "Sources (n)" disclosure and, when open, one row per source. */
+  function sourcesView(sources: Source[]): HTMLElement {
+    const wrap = el('div', 'sources');
+    const toggle = el('button', 'src-toggle') as HTMLButtonElement;
+    toggle.type = 'button';
+    toggle.setAttribute('data-key', 'sources');
+    toggle.setAttribute('aria-expanded', sourcesOpen ? 'true' : 'false');
+    toggle.appendChild(doc.createTextNode(fill(T.sourcesToggle, { n: String(sources.length) })));
+    toggle.appendChild(chevron());
+    onActivate(toggle, toggleSources);
+    wrap.appendChild(toggle);
+    if (!sourcesOpen) return wrap;
+    const list = el('ul', 'src-list');
+    list.id = 'olympus-sources';
+    toggle.setAttribute('aria-controls', list.id);
+    sources.forEach((source, index) => {
+      const item = el('li', 'src');
+      if (source.open) {
+        const link = el('button', 'src-link', source.name) as HTMLButtonElement;
+        link.type = 'button';
+        link.setAttribute('data-key', 'source-' + index);
+        link.addEventListener('click', () => openSource(index));
+        item.appendChild(link);
+      } else {
+        item.appendChild(el('span', 'src-name', source.name));
+      }
+      const note = notes[index];
+      if (note) {
+        const said = el('span', note.warn ? 'src-note warn' : 'src-note', note.text);
+        said.setAttribute('role', 'status');
+        item.appendChild(said);
+      }
+      list.appendChild(item);
+    });
+    wrap.appendChild(list);
+    return wrap;
   }
 
   /**
@@ -601,7 +756,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     return view.card;
   }
 
-  function revealedView(shown: NonNullable<typeof answer>): HTMLElement {
+  function revealedView(shown: Answer): HTMLElement {
     const view = card(true);
     view.line.textContent = T.notSent;
     view.row.appendChild(button(T.hide, 'hide', hide, T.hideLabel));
@@ -611,16 +766,22 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     const paragraphs = shown.text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
     for (const part of paragraphs) body.appendChild(el('p', '', part));
     view.card.appendChild(body);
-    if (shown.sources.length) view.card.appendChild(el('p', 'sub foot', sourcesLine(shown.sources)));
-    if (shown.unanswered.length) view.card.appendChild(el('p', 'sub foot', fill(T.unanswered, { list: shown.unanswered.join('; ') })));
+    if (shown.sources.length) view.card.appendChild(sourcesView(shown.sources));
+    // The backend marks a cut-off item with its own ellipsis; the panel adds none.
+    const gaps = shown.unanswered.map((item) => item.trim()).filter(Boolean);
+    if (gaps.length) view.card.appendChild(el('p', 'gaps', fill(T.unanswered, { list: gaps.join('; ') })));
     return view.card;
   }
 
   function render(): void {
     if (theme) doc.documentElement.setAttribute('data-theme', theme);
     else doc.documentElement.removeAttribute('data-theme');
+    // A redraw keeps focus on the control that had it (a source being opened).
+    const active = doc.activeElement as HTMLElement | null;
+    const had = active && root.contains(active) ? active.getAttribute('data-key') || '' : '';
     root.textContent = '';
     if (info) root.appendChild(phase === 'revealed' && answer ? revealedView(answer) : cardView(info));
+    if (!focusAfter && had) focusAfter = had;
     if (focusAfter) {
       const key = focusAfter;
       focusAfter = '';
@@ -648,10 +809,19 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
 
   // One report per real change, at most once a frame: repeated reports of the
   // same size made the host re-lay out the frame on every poll.
+  //
+  // Nothing is reported before the host answers ui/initialize: a host drops
+  // sizes sent before the handshake and keeps the height the frame inherited
+  // (live 2026-10-02, a precomputed answer arrived at once and its card sat
+  // about 150px taller than its content). The handshake then sends the current
+  // height (forced, even if unchanged), again a moment later and on load; a
+  // host that never answers gets it after a short fallback.
+  let initialized = false;
   let lastHeight = -1;
-  function reportHeight(): void {
+  function reportHeight(force?: boolean): void {
+    if (!initialized) return;
     const height = cardHeight();
-    if (height === lastHeight) return;
+    if (height === lastHeight && !force) return;
     lastHeight = height;
     const host = openai();
     if (host && typeof host.notifyIntrinsicHeight === 'function') host.notifyIntrinsicHeight(height);
@@ -685,6 +855,14 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   const fonts = (doc as Any).fonts;
   if (fonts && fonts.ready && typeof fonts.ready.then === 'function') fonts.ready.then(() => afterLayout());
 
+  function markInitialized(): void {
+    if (initialized) return;
+    initialized = true;
+    reportHeight(true);
+    setTimeout(() => reportHeight(true), config.heightResendMs);
+  }
+  window.addEventListener('load', () => reportHeight(true));
+
   // ---- start -------------------------------------------------------------
   readGlobals();
   render();
@@ -695,7 +873,9 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   }, (result: Any) => {
     if (result && result.hostContext) hostContext(result.hostContext);
     notify('ui/notifications/initialized');
+    markInitialized();
   });
+  setTimeout(markInitialized, config.initFallbackMs);
 }
 
 // The card's own surfaces: a soft tint over ChatGPT's page and a raised
@@ -745,12 +925,27 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
 .bar-fill{height:100%;background:var(--run)}
 .answer{margin-top:0.625rem;display:flex;flex-direction:column;gap:0.625rem;font-size:0.9375rem;line-height:1.6;white-space:pre-line}
 .answer:focus{outline:none}
-.foot{margin-top:0.5rem}
+.sources{margin-top:0.5rem}
+.src-toggle{display:inline-flex;align-items:center;gap:0.25rem;font:inherit;font-size:0.8125rem;font-weight:500;line-height:1.4;color:var(--muted);background:none;border:0;border-radius:6px;padding:0.125rem 0;margin:0;cursor:pointer;-webkit-appearance:none;appearance:none}
+.src-toggle:hover{color:var(--text)}
+.src-toggle:focus{outline:none}
+.src-toggle:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.chev{width:0.75rem;height:0.75rem;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;transition:transform 0.15s}
+.src-toggle[aria-expanded=true] .chev{transform:rotate(180deg)}
+.src-list{list-style:none;margin:0.25rem 0 0;padding:0;display:flex;flex-direction:column;gap:0.125rem;font-size:0.8125rem;line-height:1.45}
+.src-name{color:var(--text)}
+.src-link{font:inherit;color:var(--text);background:none;border:0;padding:0;margin:0;text-align:left;cursor:pointer;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:2px;-webkit-appearance:none;appearance:none}
+.src-link:hover{text-decoration-color:currentColor}
+.src-link:focus{outline:none}
+.src-link:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:2px}
+.src-note{margin-left:0.5rem;font-size:0.75rem;color:var(--muted)}
+.src-note.warn{color:var(--warning)}
+.gaps{margin-top:0.5rem;font-size:0.75rem;line-height:1.4;color:var(--muted)}
 .btn{flex:none;font:inherit;font-size:0.875rem;font-weight:500;line-height:1.25;min-height:2rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--raise);color:var(--text);cursor:pointer;-webkit-appearance:none;appearance:none;box-shadow:none}
 .btn:hover{background:var(--hover)}
 .btn:focus{outline:none}
 .btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-@media (prefers-reduced-motion:reduce){.spinner{animation-duration:3s}}
+@media (prefers-reduced-motion:reduce){.spinner{animation-duration:3s}.chev{transition:none}}
 `;
 
 /** The panel page, with every string it prints inlined as data. */
@@ -762,6 +957,9 @@ export function chatgptPrivateAnswerPageHtml(options: ChatGptPrivateAnswerPageOp
     copy: DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY,
     secondMs: options.secondMs ?? 1000,
     pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
+    noteMs: options.noteMs ?? 4000,
+    heightResendMs: options.heightResendMs ?? 400,
+    initFallbackMs: options.initFallbackMs ?? 500,
     keyStore: { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, ...options.keyStore },
   };
   return [
