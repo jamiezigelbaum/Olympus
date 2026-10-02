@@ -9,8 +9,9 @@ is removed with:
 curl -fsSL https://olympusplugin.ai/uninstall.sh | sh
 ```
 
-It runs `olympus engine uninstall` (unloads the engine and removes its
-LaunchAgent), then deletes `~/Library/Application Support/Olympus` (the app,
+It unloads the engine with `launchctl bootout` and, only once launchd
+confirms it no longer has the agent, removes its LaunchAgent; it uses system
+tools only and never runs the installed Bun. Then it deletes `~/Library/Application Support/Olympus` (the app,
 the previous app and the Bun runtime), the `~/.local/bin/olympus` command the
 installer wrote, and the PATH line it added to `~/.zprofile` or
 `~/.bash_profile`. It keeps settings and data (`~/.olympus`,

@@ -5,7 +5,9 @@
  *
  * Unit tests: PATH shims stand in for curl, uname, sw_vers, sysctl, id and
  * launchctl; a fake Bun runs each package's dist/cli.js as a shell script
- * that logs the engine command it was given.
+ * that logs the engine command it was given. The installer's lock is the
+ * real /usr/bin/lockf on macOS; elsewhere (Linux CI) a lockf shim over
+ * flock(1) stands in for it.
  *
  * End to end (macOS): real curl fetches a release tarball built from this
  * checkout and a zip of the real Bun from a local HTTPS server; the real
@@ -106,12 +108,52 @@ interface Harness {
   runtimeBun: string;
   uid: number;
   run(version: string, env?: Record<string, string>, options?: { sha256?: string; bunExeSha256?: string }): RunResult;
+  /** The same, in the background: its process id and its result. */
+  start(version: string, env?: Record<string, string>): { pid: number; done: Promise<RunResult> };
   uninstall(env?: Record<string, string>): RunResult;
   /** The engine commands run, with the verified download and the app folder named <download> and <app>. */
   logLines(): string[];
   curlCalls(): string[];
   /** The release tarball for a version (built once). */
   tarball(version: string): string;
+}
+
+/** lockf(1) for a system without it: the options the installer uses, over flock(1). */
+const LOCKF_SHIM = `#!/bin/sh
+# Test stand-in for lockf(1) on a system without it: the options the installer uses, over flock(1).
+wait_for=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -k|-s|-n|-w) shift ;;
+    -t) if [ "$2" = 0 ]; then wait_for="-n"; else wait_for="-w $2"; fi; shift 2 ;;
+    *) break ;;
+  esac
+done
+file=$1
+shift
+exec flock $wait_for "$file" "$@"
+`;
+
+/** Hold the installer lock the way another installer does, until released. */
+async function holdLock(h: Harness, lock: string): Promise<() => Promise<void>> {
+  const lockf = existsSync('/usr/bin/lockf') ? '/usr/bin/lockf' : join(h.root, 'bin', 'lockf');
+  mkdirSync(dirname(lock), { recursive: true });
+  const child = Bun.spawn([lockf, '-k', lock, '/bin/sh', '-c', 'echo held; exec cat >/dev/null'], { stdin: 'pipe', stdout: 'pipe', stderr: 'inherit' });
+  const reader = child.stdout.getReader();
+  const { value } = await reader.read();
+  expect(new TextDecoder().decode(value)).toBe('held\n');
+  return async () => {
+    await child.stdin.end();
+    await child.exited;
+  };
+}
+
+async function waitFor(condition: () => boolean, ms = 20_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting');
+    await Bun.sleep(50);
+  }
 }
 
 /** The shells the scripts must run under: sh, and dash where it is installed (it is /bin/sh on Debian and Ubuntu). */
@@ -157,6 +199,8 @@ esac
   writeExecutable(join(bin, 'id'), '#!/bin/sh\ncase "$1" in -u) echo "${FAKE_UID:-501}" ;; -un) echo tester ;; *) /usr/bin/id "$@" ;; esac\n');
   // launchctl: logs each call; print answers FAKE_LAUNCHCTL_PRINT (113, "not loaded", by default).
   writeExecutable(join(bin, 'launchctl'), `#!/bin/sh\necho "launchctl $*" >> "${log}"\nif [ "$1" = print ]; then exit "\${FAKE_LAUNCHCTL_PRINT:-113}"; fi\n`);
+  // lockf, where the system has none (the installer uses /usr/bin/lockf when it exists).
+  writeExecutable(join(bin, 'lockf'), LOCKF_SHIM);
   // mv: FAKE_MV_FAIL_ONCE=<destination> fails the first move onto that path.
   writeExecutable(join(bin, 'mv'), `#!/bin/sh
 for last in "$@"; do :; done
@@ -180,6 +224,8 @@ exec /bin/mv "$@"
     // FAKE_UNHEALTHY fails every `engine verify`.
     writeFileSync(join(staging, 'package', 'dist', 'cli.js'), [
       `echo "${version} $*" >> "${log}"`,
+      // FAKE_BLOCK_VERSION: that version's install waits (after saying so in <root>/blocked) until <root>/release exists.
+      `if [ "$2" = install ] && [ "$FAKE_BLOCK_VERSION" = "${version}" ]; then : > "${root}/blocked"; while [ ! -e "${root}/release" ]; do sleep 0.1; done; fi`,
       'if [ "$2" = verify ]; then [ -z "$FAKE_UNHEALTHY" ] || exit 1; exit 0; fi',
       `if [ "$2" = install ] && { [ "$FAKE_FAIL_VERSION" = "${version}" ] || [ -n "$FAKE_FAIL_RESTORE" ]; }; then exit 1; fi`,
       // FAKE_TERM_VERSION: that version's install stops the installer (Ctrl-C, a closed Terminal).
@@ -199,6 +245,21 @@ exec /bin/mv "$@"
   });
   const support = join(home, 'Library', 'Application Support', 'Olympus');
   const app = join(support, 'app');
+  const writeScript = (version: string, options: { sha256?: string; bunExeSha256?: string } = {}): string => {
+    const tarball = makeTarball(version);
+    const script = join(root, `install-${version}.sh`);
+    writeFileSync(script, renderForTest({
+      version,
+      tarball,
+      releaseBase: 'https://releases.test',
+      bunBase: 'https://bun.test',
+      bunZip,
+      bunExe: fakeBun,
+      ...(options.sha256 ? { sha256: options.sha256 } : {}),
+      ...(options.bunExeSha256 ? { bunExeSha256: options.bunExeSha256 } : {}),
+    }));
+    return script;
+  };
   return {
     root,
     home,
@@ -208,20 +269,16 @@ exec /bin/mv "$@"
     uid: UID,
     tarball: makeTarball,
     run(version, extra = {}, options = {}) {
-      const tarball = makeTarball(version);
-      const script = join(root, `install-${version}.sh`);
-      writeFileSync(script, renderForTest({
-        version,
-        tarball,
-        releaseBase: 'https://releases.test',
-        bunBase: 'https://bun.test',
-        bunZip,
-        bunExe: fakeBun,
-        ...(options.sha256 ? { sha256: options.sha256 } : {}),
-        ...(options.bunExeSha256 ? { bunExeSha256: options.bunExeSha256 } : {}),
-      }));
+      const script = writeScript(version, options);
       const result = spawnSync(shell, [script], { encoding: 'utf8', timeout: 30_000, env: env(extra) });
       return { status: result.status, stderr: result.stderr, stdout: result.stdout };
+    },
+    start(version, extra = {}) {
+      const script = writeScript(version);
+      const child = Bun.spawn([shell, script], { env: env(extra), stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+      const done = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+        .then(([stdout, stderr, status]) => ({ status, stdout, stderr }));
+      return { pid: child.pid, done };
     },
     uninstall(extra = {}) {
       const result = spawnSync(shell, [UNINSTALL], { encoding: 'utf8', timeout: 30_000, env: env(extra) });
@@ -261,8 +318,9 @@ function unpackInto(tarball: string, dir: string): void {
   rmSync(staging, { recursive: true, force: true });
 }
 
+/** What is left in the support folder besides the app, the previous app, the runtime and the (kept) lock file. */
 const leftovers = (support: string): string[] =>
-  existsSync(support) ? readdirSync(support).filter((name) => name !== 'app' && name !== 'app.previous' && name !== 'runtime') : [];
+  existsSync(support) ? readdirSync(support).filter((name) => !['app', 'app.previous', 'runtime', '.install-lock'].includes(name)) : [];
 
 describe.each(SHELLS)('install.sh under %s', (shell) => {
   shellTest('installs Bun and Olympus, starts the engine, and tells the user the next step in ChatGPT', () => {
@@ -410,10 +468,10 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
   shellTest('PoC: an upgrade cut short while its engine was starting is swapped back on the next run and done again', () => {
     const h = harness(shell);
     expectSucceeded(h.run(V1));
-    // The swap finished, the marker says the engine never proved the new build.
+    // The swap finished, the record (another, dead installer's transaction) says the engine never proved the new build.
     renameSync(h.app, `${h.app}.previous`);
     unpackInto(h.tarball(V2), h.app);
-    writeFileSync(join(h.support, '.install-swap'), 'upgrade\n');
+    writeFileSync(join(h.support, '.install-swap'), `upgrade ${'c'.repeat(32)}\n`);
     const result = h.run(V2);
     expectSucceeded(result);
     expect(result.stdout).toContain('Put back the version that was installed before an interrupted upgrade.');
@@ -450,24 +508,107 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     expect(appVersion(`${h.app}.previous`)).toBe(V1);
   });
 
-  shellTest('one installer at a time: a lock held by a running process refuses; a lock left by a dead one is taken over', () => {
+  shellTest('one installer at a time: a lock another process holds refuses and is left alone; a lock file left by a dead installer is no lock', async () => {
     const h = harness(shell);
     expectSucceeded(h.run(V1));
-    const lock = join(h.support, '.install.lock');
-    mkdirSync(lock);
-    writeFileSync(join(lock, 'pid'), `${process.pid}\n`);
-    const busy = h.run(V2);
-    expect(busy.status).not.toBe(0);
-    expect(busy.stderr).toContain(`another Olympus installer is running (process ${process.pid}).`);
-    expect(appVersion(h.app)).toBe(V1);
-    // Another installer's lock is not this one's to remove.
-    expect(readFileSync(join(lock, 'pid'), 'utf8')).toBe(`${process.pid}\n`);
+    const lock = join(h.support, '.install-lock');
+    const release = await holdLock(h, lock);
+    writeFileSync(lock, `${process.pid} ${'a'.repeat(32)}\n`);
+    try {
+      const busy = h.run(V2);
+      expect(busy.status).not.toBe(0);
+      expect(busy.stderr).toContain(`another Olympus installer is running (process ${process.pid}).`);
+      expect(appVersion(h.app)).toBe(V1);
+      // Another installer's lock is not this one's to change.
+      expect(readFileSync(lock, 'utf8')).toBe(`${process.pid} ${'a'.repeat(32)}\n`);
+    } finally {
+      await release();
+    }
 
+    // What an installer that died (even by SIGKILL) leaves: the file, naming a process that is gone. The lock went with it.
     const dead = spawnSync('/bin/sh', ['-c', 'echo $$']).stdout.toString().trim();
-    writeFileSync(join(lock, 'pid'), `${dead}\n`);
+    writeFileSync(lock, `${dead} ${'b'.repeat(32)}\n`);
     expectSucceeded(h.run(V2));
     expect(appVersion(h.app)).toBe(V2);
-    expect(existsSync(lock)).toBe(false);
+    expect(leftovers(h.support)).toEqual([]);
+  });
+
+  shellTest('PoC: an installer killed outright releases the lock with its process; the next one finishes its upgrade', async () => {
+    const h = harness(shell);
+    expectSucceeded(h.run(V1));
+    const first = h.start(V2, { FAKE_BLOCK_VERSION: V2 });
+    await waitFor(() => existsSync(join(h.root, 'blocked')));
+    process.kill(first.pid, 'SIGKILL');
+    expect((await first.done).status).not.toBe(0);
+    // No cleanup ran, yet the lock goes with the process: the system frees it.
+    const lock = join(h.support, '.install-lock');
+    const lockf = existsSync('/usr/bin/lockf') ? '/usr/bin/lockf' : join(h.root, 'bin', 'lockf');
+    await waitFor(() => spawnSync(lockf, ['-k', '-s', '-t', '0', lock, 'true']).status === 0, 5_000);
+    // The upgrade it left: app/ is the new version, with its swap record.
+    expect(readFileSync(join(h.support, '.install-swap'), 'utf8')).toMatch(/^upgrade [0-9a-f]{32}\n$/);
+    writeFileSync(join(h.root, 'release'), '');
+    const next = h.run(V2);
+    expectSucceeded(next);
+    expect(next.stdout).toContain('Put back the version that was installed before an interrupted upgrade.');
+    expect(appVersion(h.app)).toBe(V2);
+    expect(appVersion(`${h.app}.previous`)).toBe(V1);
+    expect(leftovers(h.support)).toEqual([]);
+  });
+
+  shellTest('PoC: an installer that fails or is refused while another holds the lock never touches that installer\'s upgrade', async () => {
+    const h = harness(shell);
+    expectSucceeded(h.run(V1));
+    const first = h.start(V2, { FAKE_BLOCK_VERSION: V2 });
+    await waitFor(() => existsSync(join(h.root, 'blocked')));
+    // The first installer is mid-upgrade: its swap record names its transaction.
+    const swap = join(h.support, '.install-swap');
+    const record = readFileSync(swap, 'utf8');
+    expect(record).toMatch(/^upgrade [0-9a-f]{32}\n$/);
+    expect(readFileSync(join(h.support, '.install-lock'), 'utf8')).toBe(`${first.pid} ${record.split(' ')[1]}`);
+    const untouched = (): void => {
+      expect(readFileSync(swap, 'utf8')).toBe(record);
+      expect(appVersion(h.app)).toBe(V2);
+      expect(appVersion(`${h.app}.previous`)).toBe(V1);
+      expect(existsSync(`${h.app}.failed`)).toBe(false);
+    };
+    try {
+      // A second installer that fails before the lock (a download that does not match)...
+      const failed = h.run(V3, {}, { sha256: '0'.repeat(64) });
+      expect(failed.status).not.toBe(0);
+      expect(failed.stderr).toContain('the Olympus download did not match its checksum');
+      expect(failed.stderr).not.toContain('The upgrade stopped before it finished');
+      untouched();
+      // ...and one refused by the lock.
+      const busy = h.run(V3);
+      expect(busy.status).not.toBe(0);
+      expect(busy.stderr).toContain(`another Olympus installer is running (process ${first.pid}).`);
+      expect(busy.stderr).not.toContain('The upgrade stopped before it finished');
+      untouched();
+      // No engine command ran for V3.
+      expect(h.logLines().filter((line) => line.startsWith(V3))).toEqual([]);
+    } finally {
+      writeFileSync(join(h.root, 'release'), '');
+    }
+    const done = await first.done;
+    expectSucceeded(done);
+    expect(appVersion(h.app)).toBe(V2);
+    expect(appVersion(`${h.app}.previous`)).toBe(V1);
+    expect(leftovers(h.support)).toEqual([]);
+  });
+
+  shellTest('PoC: an installed Bun with the pinned bytes but without execute permission is made executable, not left broken', () => {
+    for (const mode of [0o644, 0o600, 0o777]) {
+      const h = harness(shell);
+      expectSucceeded(h.run(V1));
+      chmodSync(h.runtimeBun, mode);
+      const result = h.run(V2);
+      expectSucceeded(result);
+      expect({ mode, now: statSync(h.runtimeBun).mode & 0o777 }).toEqual({ mode, now: 0o755 });
+      expect(appVersion(h.app)).toBe(V2);
+      // The verified bytes were kept, not downloaded again.
+      expect(h.curlCalls().filter((url) => url.includes('bun.test'))).toHaveLength(1);
+      expect(h.logLines().at(-1)).toBe(`${V2} engine install --bun ${h.runtimeBun} --restart`);
+    }
   });
 
   shellTest('PoC: a symbolic link anywhere in the managed folders is refused before anything cached runs or anything changes', () => {
@@ -669,9 +810,15 @@ describe.each(SHELLS)('uninstall.sh under %s', (shell) => {
     expectSucceeded(h.run(V1));
     mkdirSync(join(h.home, '.olympus'), { recursive: true });
     writeFileSync(join(h.home, '.olympus', 'engine.json'), '{}');
+    const plist = join(h.home, 'Library', 'LaunchAgents', 'ai.olympusplugin.engine.plist');
+    mkdirSync(dirname(plist), { recursive: true });
+    writeFileSync(plist, '<plist/>');
     const result = h.uninstall();
     expectSucceeded(result);
-    expect(h.logLines().at(-1)).toBe(`${V1} engine uninstall`);
+    // launchctl only: the installed engine CLI is not run.
+    expect(h.logLines().slice(1)).toEqual([`launchctl bootout gui/${h.uid}/ai.olympusplugin.engine`, `launchctl print gui/${h.uid}/ai.olympusplugin.engine`]);
+    expect(result.stdout).toContain('Stopped Olympus and removed its login item.');
+    expect(existsSync(plist)).toBe(false);
     expect(existsSync(h.support)).toBe(false);
     expect(existsSync(join(h.home, '.local', 'bin', 'olympus'))).toBe(false);
     expect(readFileSync(join(h.home, '.zprofile'), 'utf8')).toBe('export EDITOR=vim\n\n');
@@ -738,31 +885,84 @@ describe.each(SHELLS)('uninstall.sh under %s', (shell) => {
     expect(existsSync(join(h.home, '.local', 'bin', 'olympus'))).toBe(true);
   });
 
-  shellTest('PoC: with the app gone, an agent launchd still has (or cannot report) stops the uninstall before anything is deleted', () => {
-    for (const print of ['0', '5']) {
+  shellTest('PoC: with the app gone, an agent launchd still has (or cannot report) stops the uninstall before anything is deleted, with or without its plist', () => {
+    for (const [print, withPlist] of [['0', true], ['5', true], ['0', false]] as const) {
       const h = harness(shell);
       const plist = join(h.home, 'Library', 'LaunchAgents', 'ai.olympusplugin.engine.plist');
-      mkdirSync(dirname(plist), { recursive: true });
-      writeFileSync(plist, '<plist/>');
+      if (withPlist) {
+        mkdirSync(dirname(plist), { recursive: true });
+        writeFileSync(plist, '<plist/>');
+      }
       mkdirSync(join(h.support, 'runtime'), { recursive: true });
+      mkdirSync(join(h.home, '.local', 'bin'), { recursive: true });
+      writeFileSync(join(h.home, '.local', 'bin', 'olympus'), '#!/bin/sh\n# Written by the Olympus installer\n');
       const result = h.uninstall({ FAKE_LAUNCHCTL_PRINT: print });
-      expect(result.status).not.toBe(0);
+      expect({ print, withPlist, status: result.status }).toEqual({ print, withPlist, status: 1 });
       expect(result.stderr).toContain('Olympus could not be stopped, so nothing was removed.');
       expect(result.stderr).toContain(`(status ${print})`);
-      expect(existsSync(plist)).toBe(true);
+      expect(h.logLines()[0]).toBe(`launchctl bootout gui/${h.uid}/ai.olympusplugin.engine`);
+      expect(existsSync(plist)).toBe(withPlist);
       expect(existsSync(h.support)).toBe(true);
+      expect(existsSync(join(h.home, '.local', 'bin', 'olympus'))).toBe(true);
     }
   }, 30_000);
 
-  shellTest('an engine that cannot be stopped leaves everything in place', () => {
+  shellTest('an installed engine launchd still has after bootout leaves everything in place', () => {
     const h = harness(shell);
     expectSucceeded(h.run(V1));
-    writeFileSync(join(h.app, 'dist', 'cli.js'), 'exit 1\n');
-    const result = h.uninstall();
+    const result = h.uninstall({ FAKE_LAUNCHCTL_PRINT: '0' });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('Olympus could not be stopped, so nothing was removed.');
     expect(existsSync(h.app)).toBe(true);
+    expect(existsSync(h.runtimeBun)).toBe(true);
     expect(existsSync(join(h.home, '.local', 'bin', 'olympus'))).toBe(true);
+    expect(readFileSync(join(h.home, '.zprofile'), 'utf8')).toContain('Added by the Olympus installer');
+  });
+
+  shellTest('PoC: never runs the installed Bun or engine CLI, whatever they are', () => {
+    const h = harness(shell);
+    expectSucceeded(h.run(V1));
+    const ran = join(h.root, 'cached-code-ran');
+    writeExecutable(h.runtimeBun, `#!/bin/sh\n: > "${ran}"\n`);
+    writeFileSync(join(h.app, 'dist', 'cli.js'), `: > "${ran}"\n`);
+    const before = h.logLines().length;
+    const result = h.uninstall();
+    expectSucceeded(result);
+    expect(existsSync(ran)).toBe(false);
+    expect(h.logLines().slice(before)).toEqual([`launchctl bootout gui/${h.uid}/ai.olympusplugin.engine`, `launchctl print gui/${h.uid}/ai.olympusplugin.engine`]);
+    expect(existsSync(h.support)).toBe(false);
+    expect(readFileSync(UNINSTALL, 'utf8')).not.toMatch(/"\$BUN"|runtime\/bun"|dist\/cli\.js/);
+  });
+
+  shellTest('with nothing installed, still asks launchd before reporting nothing to stop', () => {
+    const h = harness(shell);
+    const result = h.uninstall();
+    expectSucceeded(result);
+    expect(result.stdout).toContain('Olympus is not running.');
+    expect(h.logLines()).toEqual([`launchctl bootout gui/${h.uid}/ai.olympusplugin.engine`, `launchctl print gui/${h.uid}/ai.olympusplugin.engine`]);
+  });
+
+  shellTest('helper processes the engine recorded are not signalled; the user is told how to clear them', () => {
+    const h = harness(shell);
+    const children = join(h.home, '.local', 'share', 'openclaw', 'olympus', 'engine', 'children.json');
+    mkdirSync(dirname(children), { recursive: true });
+    writeFileSync(children, JSON.stringify({ schema: 'olympus.engine.children.v2', host_pid: 1, children: [{ service: 'olympus-worker', pgid: 99999, started_at: '', process_started: null, argv: [] }] }));
+    const result = h.uninstall();
+    expectSucceeded(result);
+    expect(result.stdout).toContain('Some Olympus helper processes may still be running; log out or restart the Mac to clear them.');
+    writeFileSync(children, JSON.stringify({ schema: 'olympus.engine.children.v2', host_pid: 1, children: [] }));
+    expect(h.uninstall().stdout).not.toContain('helper processes');
+  });
+
+  shellTest('a linked or unmarked olympus command is left alone', () => {
+    const h = harness(shell);
+    const target = join(h.root, 'someone-elses-olympus');
+    writeFileSync(target, '#!/bin/sh\n# Written by the Olympus installer\n');
+    mkdirSync(join(h.home, '.local', 'bin'), { recursive: true });
+    symlinkSync(target, join(h.home, '.local', 'bin', 'olympus'));
+    expectSucceeded(h.uninstall());
+    expect(lstatSync(join(h.home, '.local', 'bin', 'olympus')).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target, 'utf8')).toBe('#!/bin/sh\n# Written by the Olympus installer\n');
   });
 
   shellTest('refuses root', () => {

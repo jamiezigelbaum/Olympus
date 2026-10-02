@@ -47,11 +47,16 @@
 # Safety: every folder the installer manages must be a real folder owned by
 # the user running it (never a symbolic link), checked before anything cached
 # runs or anything changes. The installed Bun runs only when it matches the
-# SHA-256 pinned below. One installer runs at a time (a lock folder holding
-# its process id; a lock whose process is gone is taken over). An upgrade
-# records that it is swapping folders before the first rename; if it stops
-# partway (an error, Ctrl-C, a power cut), the previous version is put back,
-# then or on the next run.
+# SHA-256 pinned below (and is made executable when it is not). One installer
+# runs at a time: it holds a lock on a file through the system's lockf, which
+# the operating system releases when the installer's process ends, however it
+# ends, so there is never a stale lock to take over. An upgrade records,
+# under its own random transaction id, that it is swapping folders before the
+# first rename; if it stops partway (an error, Ctrl-C, a power cut), the
+# previous version is put back, then or on the next run. Only the installer
+# that holds the lock and wrote that record ever acts on it; a later
+# installer finishes an interrupted one only after taking the lock, when the
+# installer that wrote it is provably gone.
 #
 # Disk: after install, Olympus downloads its built-in search model (about
 # 225 MB) and a private answer model of 1.3 to 2.7 GB depending on memory
@@ -137,9 +142,16 @@ check_mac() {
   [ "$major" -ge "$MACOS_MIN_MAJOR" ] \
     || die "this Mac runs macOS $macos." "Olympus needs macOS $MACOS_MIN_MAJOR (Ventura) or later. Update macOS in System Settings, then run this again."
 
-  for tool in curl shasum tar unzip awk cmp diff find ps; do
+  for tool in curl shasum tar unzip awk cmp diff find ps od mkfifo; do
     command -v "$tool" >/dev/null 2>&1 || die "the $tool command is missing from this Mac."
   done
+  # The lock: macOS's own lockf. (Only a system without /usr/bin/lockf, such
+  # as a test machine, finds one on PATH.)
+  if [ -x /usr/bin/lockf ]; then
+    LOCKF=/usr/bin/lockf
+  else
+    LOCKF=$(command -v lockf 2>/dev/null) || die "the lockf command is missing from this Mac."
+  fi
 }
 
 # --- The folders the installer manages -------------------------------------
@@ -172,11 +184,11 @@ check_file() {
 # the lock.
 check_layout() {
   for dir in "$HOME/Library" "$HOME/Library/Application Support" "$SUPPORT" \
-    "$APP" "$APP.next" "$APP.previous" "$APP.failed" "$RUNTIME" "$LOCK" \
+    "$APP" "$APP.next" "$APP.previous" "$APP.failed" "$RUNTIME" \
     "$HOME/Library/Logs" "$LOGDIR" "$HOME/.local" "$HOME/.local/bin"; do
     check_dir "$dir"
   done
-  for file in "$BUN" "$LOG" "$SWAP_STATE"; do
+  for file in "$BUN" "$LOG" "$LOCK" "$SWAP_STATE"; do
     check_file "$file"
   done
 }
@@ -192,43 +204,66 @@ discard() {
 }
 
 # --- One installer at a time -----------------------------------------------
-
+#
+# lockf takes an exclusive flock(2) lock on $LOCK, or fails at once when
+# another process holds it, and keeps it while its command runs. Its command
+# reads (and discards) a pipe that only this installer writes to, so it ends,
+# and the lock goes, when this installer closes the pipe or its process ends
+# in any way. The operating system releases the lock; nothing ever decides
+# that a lock is stale, removes it, or takes it over.
 acquire_lock() {
-  tries=0
-  while ! mkdir "$LOCK" 2>/dev/null; do
-    holder=$(cat "$LOCK/pid" 2>/dev/null || true)
+  mkfifo "$WORK/lock.hold" "$WORK/lock.ready"
+  "$LOCKF" -k -s -t 0 "$LOCK" /bin/sh -c 'echo held; exec cat >/dev/null' \
+    <"$WORK/lock.hold" >"$WORK/lock.ready" 2>/dev/null &
+  LOCK_HELPER=$!
+  # Only this installer holds the pipe open: cli() closes it for the engine
+  # commands it runs, so no process outlives the installer holding the lock.
+  exec 8>"$WORK/lock.hold"
+  held=""
+  read -r held <"$WORK/lock.ready" || true
+  if [ "$held" != held ]; then
+    exec 8>&-
+    wait "$LOCK_HELPER" 2>/dev/null || true
+    holder=$(awk 'NR == 1 { print $1 }' "$LOCK" 2>/dev/null || true)
     case "$holder" in ''|*[!0-9]*) holder="" ;; esac
-    if [ -n "$holder" ] && ps -p "$holder" >/dev/null 2>&1; then
-      die "another Olympus installer is running (process $holder)." "Wait for it to finish, then run this again. If none is running, delete $LOCK and run this again."
+    if [ -n "$holder" ]; then
+      die "another Olympus installer is running (process $holder)." "Wait for it to finish, then run this again."
     fi
-    tries=$((tries + 1))
-    [ "$tries" -le 3 ] \
-      || die "the installer lock $LOCK could not be taken." "If no other Olympus installer is running, delete that folder and run this again."
-    if [ -z "$holder" ] && [ "$tries" = 1 ]; then
-      # Its installer may be about to write its process id.
-      sleep 1
-      continue
-    fi
-    # The installer that held it is gone: take it over.
-    rm -rf "$LOCK.stale.$$"
-    mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null || true
-    rm -rf "$LOCK.stale.$$"
-  done
+    die "another Olympus installer is running." "Wait for it to finish, then run this again."
+  fi
   LOCKED=1
-  printf '%s\n' "$$" > "$LOCK/pid"
+  # For the message another installer shows; the lock is lockf's, not this text.
+  printf '%s %s\n' "$$" "$TXID" > "$LOCK"
+}
+
+# holds_lock: this installer took the lock and its lockf still holds it.
+holds_lock() {
+  [ "$LOCKED" = 1 ] || return 1
+  helper_state=$(ps -o stat= -p "$LOCK_HELPER" 2>/dev/null || true)
+  case "$helper_state" in ''|*Z*) return 1 ;; esac
+}
+
+release_lock() {
+  [ "$LOCKED" = 1 ] || return 0
+  LOCKED=0
+  exec 8>&-
+  wait "$LOCK_HELPER" 2>/dev/null || true
 }
 
 # --- Interrupted upgrades --------------------------------------------------
 #
-# An upgrade writes $SWAP_STATE ("upgrade") after removing the old
-# app.previous and before its first rename, and removes it once the new
-# version is proven healthy or the previous one is back. The folders it can
-# leave behind, and what puts the previous version back:
+# An upgrade writes $SWAP_STATE ("upgrade <transaction id>") after removing
+# the old app.previous and before its first rename, and removes it once the
+# new version is proven healthy or the previous one is back. Only an
+# installer holding the lock runs this: at its start, for whatever an
+# interrupted installer left (that installer is gone, or the lock would not
+# have been free), and on its own exit, for its own transaction only. The
+# folders an upgrade can leave behind, and what puts the previous version back:
 #   app missing, app.previous present        rename app.previous to app
 #   app (new) and app.previous (old) present  only with $SWAP_STATE: swap back
 #   app.failed present (a restore was cut short) with app present: remove it
 recover_swap() {
-  kind=$(cat "$SWAP_STATE" 2>/dev/null || true)
+  kind=$(awk 'NR == 1 { print $1 }' "$SWAP_STATE" 2>/dev/null || true)
   if [ ! -d "$APP" ] && [ -d "$APP.previous" ]; then
     mv "$APP.previous" "$APP" || return 1
     step "Put back the version an interrupted upgrade had moved aside."
@@ -245,26 +280,34 @@ recover_swap() {
   rm -f "$SWAP_STATE"
 }
 
-# On any exit: an upgrade that did not reach its own outcome puts the
-# previous version back; the lock and the download folder go.
+# owns_swap: the swap record is this installer's own transaction.
+owns_swap() {
+  [ -f "$SWAP_STATE" ] && [ "$(cat "$SWAP_STATE" 2>/dev/null || true)" = "upgrade $TXID" ]
+}
+
+# On any exit: this installer's own upgrade that did not reach its outcome
+# puts the previous version back, while this installer still holds the lock;
+# then the lock and the download folder go. Anything else (an installer that
+# never took the lock, a record another installer wrote) is left alone.
 cleanup() {
   status=$?
   trap - EXIT
-  if [ "$status" != 0 ] && [ -n "${SWAP_STATE:-}" ] && [ -f "$SWAP_STATE" ]; then
-    if recover_swap; then
+  if [ "$status" != 0 ] && [ "${LOCKED:-0}" = 1 ] && owns_swap; then
+    if holds_lock && recover_swap; then
       printf '%s\n' "The upgrade stopped before it finished, so the previous version was put back. Run the installer again." >&2
     else
       printf '%s\n' "The upgrade stopped before it finished, and the previous version could not be put back yet. Run the installer again: it finishes putting it back first." >&2
     fi
   fi
-  if [ "${LOCKED:-0}" = 1 ]; then rm -rf "$LOCK"; fi
+  release_lock
   if [ -n "${WORK:-}" ]; then rm -rf "$WORK"; fi
   exit "$status"
 }
 
 # --- Bun and the Olympus package -------------------------------------------
 
-# The installed Bun, when it is the pinned program.
+# The installed Bun, when it is the pinned program (its bytes; its mode is
+# set separately).
 bun_is_pinned() {
   [ -f "$BUN" ] && [ ! -L "$BUN" ] && [ "$(sha256_of "$BUN")" = "$BUN_EXE_SHA256_DARWIN_AARCH64" ]
 }
@@ -296,7 +339,7 @@ same_package() {
 cli() {
   pkg=$1
   shift
-  "$BUN" "$pkg/dist/cli.js" "$@" >> "$LOG" 2>&1 </dev/null
+  "$BUN" "$pkg/dist/cli.js" "$@" >> "$LOG" 2>&1 </dev/null 8>&-
 }
 
 start_engine() {
@@ -322,7 +365,7 @@ main() {
   APP="$SUPPORT/app"
   RUNTIME="$SUPPORT/runtime"
   BUN="$RUNTIME/bun"
-  LOCK="$SUPPORT/.install.lock"
+  LOCK="$SUPPORT/.install-lock"
   SWAP_STATE="$SUPPORT/.install-swap"
   LOGDIR="$HOME/Library/Logs/Olympus"
   LOG="$LOGDIR/install.log"
@@ -330,7 +373,11 @@ main() {
   ARTIFACT="olympus-$OLYMPUS_VERSION.tgz"
   ARTIFACT_URL="$RELEASE_BASE/$OLYMPUS_VERSION/$ARTIFACT"
   LOCKED=0
+  LOCK_HELPER=""
   WORK=""
+  # This run's transaction id, in the lock and in any swap record it writes.
+  TXID=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+  printf '%s' "$TXID" | grep -Eq '^[0-9a-f]{32}$' || die "a random transaction id could not be read from /dev/urandom."
 
   # Before anything cached runs or anything changes.
   check_layout
@@ -376,6 +423,10 @@ main() {
     mv "$RUNTIME/bun.next" "$BUN"
     bun_is_pinned || die "the Bun put in place does not match its checksum."
   fi
+  # The right bytes are not enough: it must be executable (only by its owner
+  # to change). chmod keeps the file, so a running engine is unaffected.
+  chmod 755 "$BUN" && [ -x "$BUN" ] \
+    || die "the Bun runtime at $BUN could not be made executable." "Details may be in $LOG. Email $SUPPORT_EMAIL."
 
   # 3. The same release again: the installed files must be the verified
   #    download, and the engine must run this build.
@@ -412,7 +463,7 @@ main() {
     # The running engine was restarted onto $APP by the last install, so
     # app.previous is not in use and can go.
     discard "$APP.previous"
-    printf 'upgrade\n' > "$SWAP_STATE"
+    printf 'upgrade %s\n' "$TXID" > "$SWAP_STATE"
     mv "$APP" "$APP.previous"
   else
     # Nothing runnable to keep: a folder without the engine CLI is not a version.

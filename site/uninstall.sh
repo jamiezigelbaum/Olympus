@@ -5,19 +5,24 @@
 #
 # Removes what https://olympusplugin.ai/install.sh put on this Mac, for the
 # user running it (no administrator password):
-#   - stops Olympus and removes its login item (`olympus engine uninstall`:
-#     ~/Library/LaunchAgents/ai.olympusplugin.engine.plist);
+#   - stops Olympus with launchctl and removes its login item
+#     (~/Library/LaunchAgents/ai.olympusplugin.engine.plist), but only once
+#     launchd confirms it no longer has the agent;
 #   - deletes ~/Library/Application Support/Olympus (the app, the previous
 #     app and the Bun runtime the installer downloaded);
 #   - deletes ~/.local/bin/olympus when the installer wrote it, and the one
 #     PATH line the installer added to ~/.zprofile or ~/.bash_profile.
+#
+# It uses only the tools macOS ships: it never runs the downloaded Bun or
+# anything else the installer put in place, which it cannot vouch for.
 #
 # It keeps your data and settings, and lists where they are. To delete your
 # data too, run `olympus engine stop` and then `olympus data delete --all`
 # BEFORE running this. ChatGPT stays linked to this Mac until you remove
 # Olympus in ChatGPT or delete the data.
 #
-# Served as-is from site/uninstall.sh; it downloads and runs nothing.
+# Served as-is from site/uninstall.sh; it downloads nothing and runs nothing
+# it downloaded.
 set -eu
 
 LAUNCHER_MARK='Written by the Olympus installer'
@@ -94,10 +99,11 @@ remove_marked_line() {
   step "Removed the Olympus PATH line from $profile."
 }
 
-# stop_agent_directly: unload the agent with launchctl when the app that
-# would do it is gone. Only launchd saying the agent is not loaded (113 or 3)
-# counts as stopped.
-stop_agent_directly() {
+# stop_agent: unload the agent with launchctl, whether or not its plist is
+# still there, and go on only once launchd says it does not have it (113 or
+# 3). Stopping the agent stops the engine, which stops the helpers it
+# started.
+stop_agent() {
   target="gui/$(id -u)/$LABEL"
   launchctl bootout "$target" >/dev/null 2>&1 || true
   tries=0
@@ -119,33 +125,42 @@ main() {
   if [ -z "${HOME:-}" ] || [ ! -d "$HOME" ]; then die "your home folder (\$HOME) was not found."; fi
 
   SUPPORT="$HOME/Library/Application Support/Olympus"
-  APP="$SUPPORT/app"
-  BUN="$SUPPORT/runtime/bun"
   PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
   LOGDIR="$HOME/Library/Logs/Olympus"
   LAUNCHER="$HOME/.local/bin/olympus"
+  # The engine's record of the helper processes it started (as it runs, with HOME only).
+  CHILDREN="$HOME/.local/share/openclaw/olympus/engine/children.json"
 
   say "Uninstalling Olympus from this Mac."
-  if [ -x "$BUN" ] && [ -f "$APP/dist/cli.js" ]; then
-    mkdir -p "$LOGDIR"
-    printf '\n== Olympus uninstaller, %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$LOGDIR/install.log"
-    "$BUN" "$APP/dist/cli.js" engine uninstall >> "$LOGDIR/install.log" 2>&1 </dev/null \
-      || die "Olympus could not be stopped, so nothing was removed." "Details are in $LOGDIR/install.log. Email support@olympusplugin.ai with that file."
-    step "Stopped Olympus and removed its login item."
-  elif [ -e "$PLIST" ] || [ -L "$PLIST" ]; then
-    # The app is already gone: unload and remove the agent directly.
-    stop_agent_directly
+  if [ -e "$PLIST" ] && [ ! -L "$PLIST" ] && [ ! -f "$PLIST" ]; then
+    die "$PLIST is not a file, so nothing was removed." "Move it aside, then run this again."
+  fi
+
+  # 1. Stop it: always ask launchd, even with the app and plist gone.
+  stop_agent
+  if [ -e "$PLIST" ] || [ -L "$PLIST" ]; then
     rm -f "$PLIST"
     step "Stopped Olympus and removed its login item."
   else
-    step "Olympus was not running from this installer's location."
+    step "Olympus is not running."
+  fi
+  # The engine stops its helpers when launchd stops it. One that ended
+  # without doing so (a crash) leaves them recorded; telling them apart from
+  # unrelated processes needs the engine, which this does not run.
+  if [ -f "$CHILDREN" ] && grep -q '"pgid"' "$CHILDREN" 2>/dev/null; then
+    step "Some Olympus helper processes may still be running; log out or restart the Mac to clear them."
   fi
 
-  if [ -d "$SUPPORT" ]; then
+  # 2. Remove the app, the runtime and the command.
+  if [ -L "$SUPPORT" ]; then
+    rm -f "$SUPPORT"
+    step "Deleted the link $SUPPORT."
+  elif [ -d "$SUPPORT" ]; then
     rm -rf "$SUPPORT"
     step "Deleted $SUPPORT."
   fi
-  if [ -f "$LAUNCHER" ] && grep -qF "$LAUNCHER_MARK" "$LAUNCHER"; then
+  # Only the installer's own launcher: a real file carrying its mark.
+  if [ ! -L "$LAUNCHER" ] && [ -f "$LAUNCHER" ] && grep -qF "$LAUNCHER_MARK" "$LAUNCHER" 2>/dev/null; then
     rm -f "$LAUNCHER"
     step "Deleted the olympus command ($LAUNCHER)."
   fi
