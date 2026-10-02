@@ -1,0 +1,195 @@
+/**
+ * Privacy: what is private for the owner, the local twin of the ChatGPT
+ * privacy screen (dashboard/chatgpt/privacy.ts), reached from Setup's Privacy
+ * row and the Sensitivity page. One authoritative view of the owner's privacy
+ * profile (holistic review 2026-10-02, item 11).
+ *
+ * The owner describes what is private in their own words and may name
+ * folders, Gmail labels and senders that are always private. Saving runs the
+ * same engine operation as ChatGPT's olympus_privacy_set (the worker's
+ * POST /dashboard/privacy), so the two surfaces edit one profile. Rules on
+ * Secrets-tier locations never reach this page and are kept as saved.
+ *
+ * Names: the description and the rules' names are rendered only here, only to
+ * a reader holding the controls or the operator's own connection; a reader with
+ * the read-only dash_ link gets one sentence pointing at Setup instead.
+ * "Public" never appears: the owner's choice is private or not.
+ *
+ * The page is inert markup; the shared browser controller adds and removes
+ * rules in place and saves the whole list (browser-controller.ts, privacy).
+ */
+import type { PrivacyRuleView, PrivacySettings } from '../../chatgpt/dashboard-contract.ts';
+import type { SourceDashboardViewModel } from '../../source-dashboard.ts';
+import { mailScopeDraftView } from '../../../core/mail-source-scope.ts';
+import {
+  DASHBOARD_CONTROL_GATE_ID,
+  escapeHtml,
+  pageShell,
+} from '../components.ts';
+import { DASHBOARD_NAV_CSS, renderDashboardNav } from '../nav.ts';
+import { DASHBOARD_PRIVACY_CSS, DASHBOARD_SOURCE_ROWS_CSS } from '../static-styles.ts';
+import { DASHBOARD_LOCAL_PRIVACY_COPY as W, dashboardCheckedLabel, dashboardIsConnectedSource } from '../vocabulary.ts';
+import { dashboardControlsAvailable, fill, setupHref } from '../source-rows.ts';
+import type { DashboardPageOptions } from './home.ts';
+
+/** Folder sources a private folder can come from, with their names. */
+const FOLDER_SOURCES: Readonly<Record<string, string>> = {
+  'dropbox.files': 'Dropbox',
+  'google_drive.docs': 'Google Drive',
+};
+const MAIL_SOURCE_ID = 'gmail.email';
+
+export function renderDashboardPrivacyPage(
+  view: SourceDashboardViewModel,
+  options?: DashboardPageOptions,
+): string {
+  const now = options?.now ?? new Date();
+  return pageShell({
+    title: 'Olympus',
+    crumb: W.crumb,
+    ...(options?.basePath === undefined ? {} : { basePath: options.basePath }),
+    meta: dashboardCheckedLabel(view.generated_at, now),
+    body: [
+      renderDashboardNav('setup', { ...(options?.basePath === undefined ? {} : { basePath: options.basePath }) }),
+      renderPrivacyBody(view, options),
+    ].join('\n'),
+    styles: [DASHBOARD_NAV_CSS, DASHBOARD_SOURCE_ROWS_CSS, DASHBOARD_PRIVACY_CSS],
+    controller: { ...(options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken }) },
+    poll: {
+      unlocked: options?.controlSessionCsrfToken !== undefined,
+      ...(options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }),
+    },
+    ...(options?.format === undefined ? {} : { format: options.format }),
+  });
+}
+
+function renderPrivacyBody(view: SourceDashboardViewModel, options: DashboardPageOptions | undefined): string {
+  const head = `<h2 class="ptitle">${escapeHtml(W.title)}</h2><p class="pintro">${escapeHtml(W.intro)}</p>`;
+  // The read-only dash_ link never shows the owner's words or their folder
+  // names. (A native read-only connection is the operator's own and may read
+  // them, with every control disabled, like the folder picker.)
+  if (options?.readOnly === true && options.controlMode !== 'native') {
+    return `<div class="privacy" data-privacy-locked>${head}<p class="pnote">${escapeHtml(W.locked)} `
+      + `<a href="${escapeHtml(`${setupHref(options.basePath)}#${DASHBOARD_CONTROL_GATE_ID}`)}">Setup →</a></p></div>`;
+  }
+  const settings = options?.privacySettings;
+  if (!settings) {
+    const sentence = options?.privacy === 'unreadable' ? W.loadFailed : W.unavailable;
+    return `<div class="privacy">${head}<p class="pnote">${escapeHtml(sentence)}</p></div>`;
+  }
+  const canEdit = dashboardControlsAvailable(options);
+  const folderSources = Object.keys(FOLDER_SOURCES).filter((id) => connected(view, id));
+  const gmail = connected(view, MAIL_SOURCE_ID);
+  const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
+  const rules = settings.rules.map((rule) => privacyRuleRow(rule, canEdit)).join('');
+  const pending = Math.max(0, Math.floor(settings.pendingCount));
+  const pendingLine = pending > 0
+    ? fill(pending === 1 ? W.pending.one : W.pending.many, { n: pending.toLocaleString('en-US') })
+    : W.nothingPending;
+  const note = canEdit
+    ? ''
+    : `<p class="pnote">${escapeHtml(options?.controlMode === 'native' ? W.readOnly : W.locked)}</p>`;
+  const folderButton = folderSources.length > 0
+    ? `<button type="button" class="btn" data-privacy-add="folder"${disabled}>${escapeHtml(W.addFolder)}</button>`
+    : `<span class="blocked"><button type="button" class="btn" disabled aria-disabled="true">${escapeHtml(W.addFolder)}</button><span class="hint">${escapeHtml(W.needFolderSource)}</span></span>`;
+  const labelButton = gmail
+    ? `<button type="button" class="btn" data-privacy-add="label"${disabled}>${escapeHtml(W.addLabel)}</button>`
+    : `<span class="blocked"><button type="button" class="btn" disabled aria-disabled="true">${escapeHtml(W.addLabel)}</button><span class="hint">${escapeHtml(W.needGmail)}</span></span>`;
+  return `<div class="privacy" data-privacy-editor>${head}${note}`
+    + `<form class="pform" data-privacy-form`
+    + ` data-folder-sources="${escapeHtml(JSON.stringify(folderSources.map((id) => ({ id, label: FOLDER_SOURCES[id] }))))}"`
+    + ` data-mail-draft="${escapeHtml(JSON.stringify(mailScopeDraftView(undefined)))}"`
+    + ` data-copy="${escapeHtml(JSON.stringify(CLIENT_COPY))}">`
+    + `<label class="plabel" for="privacy-description">${escapeHtml(W.descriptionLabel)}</label>`
+    + `<textarea class="ptext" id="privacy-description" name="description" maxlength="2000" rows="5"`
+    + ` placeholder="${escapeHtml(W.descriptionPlaceholder)}"${canEdit ? '' : ' readonly'}>${escapeHtml(settings.description)}</textarea>`
+    + `<div class="sect">${escapeHtml(W.rulesTitle)}</div>`
+    + `<div class="srows" data-privacy-rules>${rules}</div>`
+    + `<p class="foot pempty" data-privacy-empty${settings.rules.length > 0 ? ' hidden' : ''}>${escapeHtml(W.rulesEmpty)}</p>`
+    + `<div class="padd">${folderButton}${labelButton}`
+    + `<button type="button" class="btn" data-privacy-add="sender"${disabled}>${escapeHtml(W.addSender)}</button></div>`
+    + senderPanel()
+    + `<div class="ppanel" data-privacy-panel="label" hidden><p class="pnote">${escapeHtml(W.labelIntro)}</p>`
+    + `<div class="srows" data-privacy-list></div><p class="actmsg" data-privacy-panel-message role="status"></p>`
+    + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml(W.close)}</button></div>`
+    + `<div class="ppanel" data-privacy-panel="folder" hidden><p class="pnote">${escapeHtml(W.folderIntro)}</p>`
+    + `<div class="psources" data-privacy-folder-sources></div><p class="ppath" data-privacy-folder-path></p>`
+    + `<div class="srows" data-privacy-list></div><p class="actmsg" data-privacy-panel-message role="status"></p>`
+    + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml(W.close)}</button></div>`
+    + `<div class="pfooter"><p>${escapeHtml(pendingLine)}</p>`
+    + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml(W.save)}</button>`
+    + `<a class="btn" href="${escapeHtml(setupHref(options?.basePath))}" data-privacy-cancel>${escapeHtml(W.cancel)}</a></div>`
+    + `<span class="actmsg" data-action-message role="status"></span></div>`
+    + `</form></div>`;
+}
+
+function senderPanel(): string {
+  return `<div class="ppanel" data-privacy-panel="sender" hidden><p class="pnote">${escapeHtml(W.senderIntro)}</p>`
+    + `<label class="plabel" for="privacy-sender">${escapeHtml(W.senderLabel)}</label>`
+    + `<div class="prow"><input class="keyfield ptextline" id="privacy-sender" type="text" autocomplete="off"`
+    + ` placeholder="${escapeHtml(W.senderPlaceholder)}" data-privacy-sender>`
+    + `<button type="button" class="btn" data-privacy-sender-add>${escapeHtml(W.senderAdd)}</button>`
+    + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml(W.close)}</button></div>`
+    + `<p class="actmsg" data-privacy-panel-message role="status"></p></div>`;
+}
+
+/** True when the source is connected and signed in, so its folders or labels can be listed. */
+function connected(view: SourceDashboardViewModel, sourceId: string): boolean {
+  const source = view.sources.find((card) => card.source_id === sourceId);
+  return source !== undefined && dashboardIsConnectedSource(source)
+    && source.connection.state !== 'awaiting_consent' && source.connection.state !== 'reauth_required';
+}
+
+/** A rule's name and what kind of place it is, in the editor's words. */
+export function privacyRuleWords(rule: PrivacyRuleView): { name: string; kind: string } {
+  if (rule.kind === 'sender') return { name: rule.value, kind: W.kindSender };
+  if (rule.kind === 'label') return { name: rule.value, kind: W.kindLabel };
+  const fromKey = rule.key.startsWith('/') ? rule.key.split('/').filter(Boolean).pop() : undefined;
+  return {
+    name: rule.display || fromKey || W.unnamedFolder,
+    kind: fill(W.kindFolder, { source: FOLDER_SOURCES[rule.source_id] ?? rule.source_id }),
+  };
+}
+
+/** One always-private rule as a row; the rule itself rides along for the save. */
+function privacyRuleRow(rule: PrivacyRuleView, canEdit: boolean): string {
+  const words = privacyRuleWords(rule);
+  const data = JSON.stringify(rule);
+  return `<div class="srow nodot prule" data-privacy-rule="${escapeHtml(data)}">`
+    + `<div class="smain"><p class="sline strong">${escapeHtml(words.name)}</p><p class="sline">${escapeHtml(words.kind)}</p></div>`
+    + `<div class="sact"><button type="button" class="btn" data-privacy-remove`
+    + ` aria-label="${escapeHtml(fill(W.removeFor, { name: words.name }))}"${canEdit ? '' : ' disabled aria-disabled="true"'}>${escapeHtml(W.remove)}</button></div>`
+    + `</div>`;
+}
+
+/**
+ * The words the browser controller prints while it edits the list (it is
+ * serialized into the standalone page, so it carries no vocabulary of its own).
+ */
+const CLIENT_COPY = {
+  remove: W.remove,
+  removeFor: W.removeFor,
+  undo: W.undo,
+  removed: W.removed,
+  kindFolder: W.kindFolder,
+  kindLabel: W.kindLabel,
+  kindSender: W.kindSender,
+  makePrivate: W.makePrivate,
+  alreadyPrivate: W.alreadyPrivate,
+  folderUp: W.folderUp,
+  folderOpen: W.folderOpen,
+  folderEmpty: W.folderEmpty,
+  folderMore: W.folderMore,
+  noLabels: W.noLabels,
+  loading: W.loading,
+  loadFailed: W.loadFailed,
+  senderInvalid: W.senderInvalid,
+  senderDuplicate: W.senderDuplicate,
+  saving: W.saving,
+  saved: W.saved,
+  saveFailed: W.saveFailed,
+  unchanged: W.unchanged,
+  discard: 'Discard your changes?',
+} as const;
+
+export type DashboardPrivacyClientCopy = typeof CLIENT_COPY;

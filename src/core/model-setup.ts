@@ -62,7 +62,7 @@ const CARD_COPY: Record<ModelSetupCard['id'], {
 }> = {
   gemini: {
     label: 'Gemini',
-    missing: 'Gemini makes Public and Personal content searchable. Add its API key to continue.',
+    missing: 'Gemini makes everything you have not marked private searchable. Add its API key to continue.',
     applying: 'Applying the Gemini key.',
     ready: 'The Gemini key is connected.',
   },

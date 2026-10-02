@@ -17,6 +17,7 @@ import { renderDashboardDetailPage } from './pages/detail.ts';
 import { renderDashboardSetupPage } from './pages/setup.ts';
 import { renderDashboardBackgroundPage } from './pages/background.ts';
 import { renderDashboardSensitivityPage } from './pages/sensitivity.ts';
+import { renderDashboardPrivacyPage } from './pages/privacy.ts';
 
 export const DASHBOARD_HTML_PATH = '/dashboard';
 /** ?source=<DashboardSourceCard.source_id> selects the detail page. */
@@ -27,6 +28,8 @@ export const DASHBOARD_SETUP_QUERY_PARAM = 'setup';
 export const DASHBOARD_BACKGROUND_QUERY_PARAM = 'background';
 /** ?sensitivity serves the categories-and-tiers page. Same path, same auth. */
 export const DASHBOARD_SENSITIVITY_QUERY_PARAM = 'sensitivity';
+/** ?privacy serves the Privacy editor. Same path, same auth; a dash_ reader sees no names. */
+export const DASHBOARD_PRIVACY_QUERY_PARAM = 'privacy';
 
 export interface DashboardHtmlRouteInput {
   url: URL;
@@ -63,6 +66,9 @@ export function renderDashboardHtmlRoute(input: DashboardHtmlRouteInput): Dashbo
   // anything.
   if (url.searchParams.has(DASHBOARD_SENSITIVITY_QUERY_PARAM)) {
     return { html: renderDashboardSensitivityPage(view, options), status: 200 };
+  }
+  if (url.searchParams.has(DASHBOARD_PRIVACY_QUERY_PARAM)) {
+    return { html: renderDashboardPrivacyPage(view, options), status: 200 };
   }
   if (url.searchParams.has(DASHBOARD_SETUP_QUERY_PARAM) || servesSetupImplicitly(view)) {
     return { html: renderDashboardSetupPage(view, options), status: 200 };
@@ -115,6 +121,7 @@ function dashboardControlUiUrl(params: OlympusDashboardReadParams): URL {
   else if (params.view === 'setup') url.searchParams.set('setup', '');
   else if (params.view === 'background') url.searchParams.set('background', '');
   else if (params.view === 'sensitivity') url.searchParams.set('sensitivity', '');
+  else if (params.view === 'privacy') url.searchParams.set('privacy', '');
   return url;
 }
 
@@ -129,6 +136,7 @@ function dashboardControlUiTitle(
   if (params.view === 'setup') return 'Olympus / Setup';
   if (params.view === 'background') return 'Olympus / Background';
   if (params.view === 'sensitivity') return 'Olympus / Sensitivity';
+  if (params.view === 'privacy') return 'Olympus / Privacy';
   return 'Olympus';
 }
 
@@ -195,4 +203,5 @@ export {
   renderDashboardSensitivityBody,
   renderDashboardSensitivityPage,
 } from './pages/sensitivity.ts';
+export { renderDashboardPrivacyPage } from './pages/privacy.ts';
 export { DASHBOARD_STATUS_ORDER, type DashboardStatus } from './vocabulary.ts';

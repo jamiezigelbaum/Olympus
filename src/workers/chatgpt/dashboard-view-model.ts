@@ -14,6 +14,7 @@
  * leaves the engine.
  */
 import type { ModelSetupView } from '../../core/model-setup.ts';
+import { dashboardHonestStatus } from '../dashboard/shared-status.ts';
 import { dashboardSourceProgress, type DashboardPhase } from '../dashboard/phases.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import {
@@ -82,8 +83,6 @@ const STAGE_DETAIL: Readonly<Record<Exclude<SourceProgress['stage'], 'done'>, st
   indexing: DASHBOARD_CHATGPT_VOCABULARY.stageSearchable,
 };
 
-/** Stalled reasons the owner fixes from this page; the source then reads Needs you. */
-const FIXABLE_STALLS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending']);
 
 
 /** Sources ChatGPT can connect: Olympus's own (publisher) OAuth apps, which return through the relay. */
@@ -451,17 +450,12 @@ function reconnectFix(definition: DashboardSupportedSourceDefinition): Dashboard
 }
 
 /**
- * The status word, held to the progress bar: never Fresh while a stage is
- * unfinished. A stall the owner fixes here reads Needs you; any other
- * unfinished stage reads Working unless the vocabulary already said something
- * more urgent (Needs you, Failing).
+ * The status word, held to the progress bar. Shared with the local pages
+ * (dashboard/shared-status.ts, holistic review 2026-10-02 item 9), so both
+ * surfaces read the same word for the same engine state.
  */
-function honestStatus(status: DashboardStatus, progress: SourceProgress | undefined): DashboardStatus {
-  if (!progress || progress.stage === 'done') return status;
-  if (progress.stalled && progress.stalledReason && FIXABLE_STALLS.has(progress.stalledReason)) return 'Needs you';
-  if (status === 'Needs you' || status === 'Failing') return status;
-  return 'Working';
-}
+const honestStatus = dashboardHonestStatus;
+export { dashboardHonestStatus };
 
 const STAGE_FOR_PHASE: Readonly<Record<DashboardPhase['id'], Exclude<SourceProgress['stage'], 'done'>>> = {
   metadata_sync: 'listing',

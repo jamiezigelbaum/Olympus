@@ -67,8 +67,9 @@ describe('donutGlyph', () => {
   test('renders the mockup geometry and the dasharray for a fraction', () => {
     const svg = donutGlyph(0.49);
     expect(svg).toContain('viewBox="0 0 14 14"');
-    expect(svg).toContain('<circle cx="7" cy="7" r="6" stroke="#AE9EF0" stroke-width="1.5"/>');
-    expect(svg).toContain('r="2" stroke="#AE9EF0" stroke-width="4"');
+    // Painted through the theme variable, so the glyph follows light and dark.
+    expect(svg).toContain('<circle cx="7" cy="7" r="6" style="stroke:var(--run-fill)" stroke-width="1.5"/>');
+    expect(svg).toContain('r="2" style="stroke:var(--run-fill)" stroke-width="4"');
     expect(svg).toContain('stroke-dasharray="6.16 12.566"');
     expect(svg).toContain('transform="rotate(-90 7 7)"');
     expect(svg).toContain('aria-hidden="true"');
@@ -86,18 +87,19 @@ describe('donutGlyph', () => {
     expect(donutGlyph(Number.POSITIVE_INFINITY)).toContain('stroke-dasharray="12.57 12.566"');
   });
 
-  test('refuses a color that is not a literal hex', () => {
+  test('refuses a color that is not a literal hex or one theme variable', () => {
     const svg = donutGlyph(0.5, 'red" onload="evil()');
     expect(svg).not.toContain('onload');
-    expect(svg).toContain('#AE9EF0');
+    expect(svg).toContain('var(--run-fill)');
+    expect(donutGlyph(0.5, 'var(--x);background:url(x)')).not.toContain('url(');
   });
 });
 
 describe('waitingGlyph and dotGlyph', () => {
   test('waiting is a grey double ring with no progress claim', () => {
     const svg = waitingGlyph();
-    expect(svg).toContain('<circle cx="7" cy="7" r="6" stroke="#8C8E97" stroke-width="1.5"/>');
-    expect(svg).toContain('<circle cx="7" cy="7" r="2.6" stroke="#8C8E97" stroke-width="1.5"/>');
+    expect(svg).toContain('<circle cx="7" cy="7" r="6" style="stroke:var(--off)" stroke-width="1.5"/>');
+    expect(svg).toContain('<circle cx="7" cy="7" r="2.6" style="stroke:var(--off)" stroke-width="1.5"/>');
     expect(svg).not.toContain('stroke-dasharray');
   });
 
@@ -105,7 +107,7 @@ describe('waitingGlyph and dotGlyph', () => {
     expect(dotGlyph('#6CC08B')).toBe('<span class="dot" style="background:#6CC08B"></span>');
     const hostile = dotGlyph('red;} body{display:none} .x{color:red');
     expect(hostile).not.toContain('display:none');
-    expect(hostile).toContain('#8C8E97');
+    expect(hostile).toContain('var(--off)');
   });
 });
 
@@ -116,16 +118,18 @@ describe('statusGlyph', () => {
 
   test('Working falls back to a plain ring when no fraction is defensible', () => {
     const svg = statusGlyph('Working');
-    expect(svg).toContain('stroke="#AE9EF0"');
+    expect(svg).toContain('style="stroke:var(--run-fill)"');
     expect(svg).not.toContain('stroke-dasharray');
   });
 
   test('the other five words each get their own glyph', () => {
     expect(statusGlyph('Waiting')).toContain('r="2.6"');
-    expect(statusGlyph('Fresh')).toBe('<span class="dot" style="background:#6CC08B"></span>');
-    expect(statusGlyph('Needs you')).toContain('#E3AA45');
-    expect(statusGlyph('Failing')).toContain('#F08276');
-    expect(statusGlyph('Off')).toContain('#30323A');
+    expect(statusGlyph('Fresh')).toBe('<span class="dot" style="background:var(--good)"></span>');
+    // Needs you is the warm orange fill, never the text colour.
+    expect(statusGlyph('Needs you')).toContain('var(--warn-fill)');
+    expect(statusGlyph('Failing')).toContain('var(--bad)');
+    // Off is a hollow grey ring: nothing is claimed.
+    expect(statusGlyph('Off')).toBe('<span class="dot hollow"></span>');
   });
 });
 
@@ -436,9 +440,11 @@ describe('setupRow', () => {
       action: { label: 'Connect', kind: 'oauth', source: 'google_drive' },
     });
     expect(html).toContain('class="setrow"');
-    expect(html).toContain('class="dot"');
+    // Not connected: a hollow grey ring, and an outlined Connect.
+    expect(html).toContain('class="dot hollow"');
     expect(html).toContain('Documents and folders, indexed and searchable');
     expect(html).toContain('data-connect-kind="oauth"');
+    expect(html).not.toContain('btn primary');
   });
 
   test('a sheet action toggles the named sheet without an inline handler', () => {

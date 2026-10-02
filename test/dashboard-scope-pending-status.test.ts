@@ -12,7 +12,6 @@ import type { DashboardSourceCard } from '../src/workers/source-dashboard.ts';
 import { renderDashboardHomePage } from '../src/workers/dashboard/pages/home.ts';
 import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.ts';
 import { dashboardStatus, dashboardSubLine } from '../src/workers/dashboard/vocabulary.ts';
-import { statusGlyph } from '../src/workers/dashboard/components.ts';
 
 // The owner's first-install test (2026-09-23): Dropbox connected with its
 // folders not yet chosen read Fresh, green, "synced just now", while nothing
@@ -42,31 +41,35 @@ test('a connected source waiting for its folder scope reads Waiting, never Fresh
   expect(dashboardStatus({ source: reauth })).toBe('Needs you');
 });
 
-test('home groups a scope-pending source with the first-sync wait, under the waiting glyph', () => {
+test('home shows a scope-pending source as one orange row with Choose folders, never Fresh', () => {
+  // The ChatGPT dashboard's rule, from the shared derivation: a stall the owner
+  // fixes here needs them, says why in one sentence and carries its fix.
   const html = renderDashboardHomePage(view, { now: DASHBOARD_PREVIEW_NOW });
-  expect(html).toContain('Waiting — 3');
-  expect(html).not.toContain('Fresh — ');
-  const card = cardFor(html, 'dropbox.files');
-  expect(card).toContain('choose which folders to include');
-  expect(card).not.toContain('synced');
-  // The same glyph Readwise draws while it waits for its first sync.
-  const waitingGlyph = statusGlyph('Waiting');
-  expect(card).toContain(waitingGlyph);
-  expect(cardFor(html, 'readwise.library')).toContain(waitingGlyph);
-  expect(cardFor(html, 'readwise.library')).toContain('waiting for the first sync');
+  expect(html).not.toContain('— Fresh');
+  const row = rowFor(html, 'dropbox.files');
+  expect(row).toContain('class="dot tone-warn"');
+  expect(row).toContain('Paused until you choose folders');
+  expect(row).toContain('>Choose folders</a>');
+  expect(row).not.toContain('Synced');
+  // Readwise before its first sync is in progress, calmly: a yellow dot and
+  // the card's own sentence, never an alarm and never Fresh.
+  const readwise = rowFor(html, 'readwise.library');
+  expect(readwise).toContain('class="dot tone-run"');
+  expect(readwise).toContain('Waiting for the first sync');
+  expect(readwise).not.toContain('· stalled');
 });
 
-test('setup lists a scope-pending source under Waiting, not Fresh', () => {
+test('setup lists a scope-pending source at the top with its one fix, not Fresh', () => {
   const html = renderDashboardSetupPage(view);
-  expect(html).toContain('Waiting — 3');
-  expect(html).not.toContain('Fresh — ');
-  const start = html.indexOf('Waiting — 3');
-  const section = html.slice(start, html.indexOf('<div class="sect', start + 1));
-  expect(section).toContain('>Dropbox<');
-  expect(section).toContain('>Google Drive<');
-  expect(section).toContain('choose which folders to include');
-  expect(section).toContain('>Readwise<');
-  expect(section).toContain('waiting for the first sync');
+  expect(html).not.toContain('— Fresh');
+  const rows = [...html.matchAll(/data-source-row="([^"]+)"/g)].map((match) => match[1]);
+  expect(rows.slice(0, 2).sort()).toEqual(['dropbox.files', 'google_drive.docs']);
+  for (const id of ['dropbox.files', 'google_drive.docs']) {
+    const row = rowFor(html, id);
+    expect(row).toContain('Paused until you choose folders');
+    expect(row).toContain('>Choose folders</');
+  }
+  expect(rowFor(html, 'readwise.library')).toContain('Waiting for the first sync');
 });
 
 test('Google Drive connected with no approved folders reads Waiting through the real scope authority and builder', () => {
@@ -107,8 +110,8 @@ test('Google Drive connected with no approved folders reads Waiting through the 
     expect(dashboardStatus({ source: drive })).toBe('Waiting');
     expect(dashboardSubLine(drive)).toBe('choose which folders to include');
     const home = renderDashboardHomePage(built, { now: DASHBOARD_PREVIEW_NOW });
-    expect(cardFor(home, 'google_drive.docs')).toContain('choose which folders to include');
-    expect(cardFor(home, 'google_drive.docs')).toContain(statusGlyph('Waiting'));
+    expect(rowFor(home, 'google_drive.docs')).toContain('Paused until you choose folders');
+    expect(rowFor(home, 'google_drive.docs')).toContain('class="dot tone-warn"');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -130,8 +133,9 @@ function emptyStatusFor(now: Date): SourceIndexStatusResult {
   };
 }
 
-function cardFor(html: string, sourceId: string): string {
-  const start = html.indexOf(`href="/dashboard?source=${sourceId}"`);
+function rowFor(html: string, sourceId: string): string {
+  const start = html.indexOf(`data-source-row="${sourceId}"`);
   expect(start).toBeGreaterThan(-1);
-  return html.slice(start, html.indexOf('</a>', start));
+  const next = html.indexOf('data-source-row="', start + 1);
+  return html.slice(start, next === -1 ? undefined : next);
 }

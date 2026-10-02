@@ -480,6 +480,8 @@ function isDashboardControlRoute(request: Request): boolean {
     '/dashboard/connect/oauth/cancel',
     '/dashboard/connect/api-key',
     '/dashboard/models/check',
+    '/dashboard/models/retry',
+    '/dashboard/privacy',
     '/dashboard/sync-now',
     '/dashboard/embedding-priority',
     '/dashboard/disconnect',

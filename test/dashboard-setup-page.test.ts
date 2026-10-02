@@ -23,12 +23,13 @@ describe('dashboard first-run page', () => {
         expect(html).toContain('data-dashboard-href="/dashboard?source=dropbox.files"');
         expect(html).toContain('<a class="name" href="/dashboard?source=dropbox.files">Dropbox</a>');
       } else {
-        expect(html).toContain('rowzone" href="/dashboard?source=dropbox.files"');
+        expect(html).toContain('data-dashboard-href="/dashboard?source=dropbox.files"');
+        expect(html).toContain('<a class="name" href="/dashboard?source=dropbox.files">Dropbox</a>');
       }
     }
   });
 
-  test('sorts rows into sections by connection state, attention first', () => {
+  test('lists engaged sources as rows, the ones that need the owner first, and says Not connected once', () => {
     const html = renderDashboardSetupPage(viewWith([
       card('gmail.email', 'Gmail', {
         configured: true,
@@ -57,6 +58,9 @@ describe('dashboard first-run page', () => {
       card('readwise.library', 'Readwise', {
         configured: true,
         connection: connection({ state: 'synced', label: 'synced 41 minutes ago' }),
+        // Everything found, read and indexed: the one state that may read Fresh.
+        freshness: { label: 'Last checked 41 minutes ago', hours: 0.7, stale: false },
+        coverage: { indexed_items: 250, content_ready_items: 250, embedded_items: 250, needs_review_items: 0 },
       }),
       card('x.bookmarks', 'X bookmarks', {
         connection: connection({
@@ -67,18 +71,22 @@ describe('dashboard first-run page', () => {
       }),
     ]));
 
-    const order = [
-      '▲ Needs you — 1',
-      'Working — 1',
-      'Connecting — 1',
-      'Fresh — 1',
-      'Available to connect — 1',
-    ].map((heading) => html.indexOf(heading));
-    expect(order).not.toContain(-1);
-    expect([...order].sort((left, right) => left - right)).toEqual(order);
-    expect(segmentFor(html, 'Dropbox')).toContain('signed out');
-    expect(segmentFor(html, 'Google Drive')).toContain('waiting for you to approve in the Google Drive tab · expires in 9m');
-    expect(segmentFor(html, 'Readwise')).toContain('synced 41 minutes ago');
+    // Each fact once (owner rule, 2026-10-02): no status-word groups; a source
+    // that needs the owner is its own row at the top, then the rest, then the
+    // options under one Not connected heading.
+    const rows = [...html.matchAll(/data-source-row="([^"]+)"/g)].map((match) => match[1]);
+    expect(rows).toEqual(['dropbox.files', 'google_drive.docs', 'gmail.email', 'readwise.library']);
+    expect(html).not.toMatch(/(Fresh|Working|Waiting|Connecting|Needs you|Available to connect) — \d/);
+    expect(html.split('>Not connected<').length - 1).toBe(1);
+    expect(html.indexOf('>Not connected<')).toBeGreaterThan(html.indexOf('data-source-row="readwise.library"'));
+    expect(html.indexOf('>X bookmarks<')).toBeGreaterThan(html.indexOf('>Not connected<'));
+    expect(segmentFor(html, 'Dropbox')).toContain('Paused: Olympus needs you to sign in to Dropbox again');
+    // A sign-in still outstanding: what to do and how long the link lasts,
+    // never which browser tab to look in.
+    expect(segmentFor(html, 'Google Drive')).toContain('Finish signing in to Google Drive · link expires in 9 min');
+    expect(html).not.toContain('approve in the');
+    expect(segmentFor(html, 'Readwise')).toMatch(/<p class="sline">Synced [^<]+ ago<\/p>/);
+    expect(segmentFor(html, 'Readwise')).toContain('class="dot tone-good"');
     // Every engaged row click-throughs to its detail page — home's rule — so
     // no warning on this page is a dead end.
     expect(segmentFor(html, 'Dropbox')).toContain('href="/dashboard?source=dropbox.files"');
@@ -104,7 +112,7 @@ describe('dashboard first-run page', () => {
     ]));
 
     const row = segmentFor(html, 'X bookmarks');
-    expect(html).toContain('▲ Needs you — 1');
+    expect(row).toContain('class="dot tone-warn"');
     // The same sheet-opening button and sheet the Available-to-connect row
     // gets: this is where home's "Set up" degradation link sends the reader.
     expect(row).toContain('data-sheet-toggle="#setup-x-bookmarks"');
@@ -187,7 +195,7 @@ describe('dashboard first-run page', () => {
     expect(html).toContain('navigator.clipboard.writeText');
   });
 
-  test('states what a first ingest has landed and claims no fraction of an unknown total', () => {
+  test('says Finding items during a first sync and claims no fraction of an unknown total', () => {
     const html = renderDashboardSetupPage(viewWith([
       card('gmail.email', 'Gmail', {
         configured: true,
@@ -197,7 +205,12 @@ describe('dashboard first-run page', () => {
       }),
     ]));
 
-    expect(segmentFor(html, 'Gmail')).toContain('first sync · 4,812 indexed so far · ~38m left');
+    // Honest progress (owner rule, 2026-10-02): the first unfinished stage,
+    // and "Finding items" while there is no total to measure against.
+    const gmail = segmentFor(html, 'Gmail');
+    expect(gmail).toContain('Finding items');
+    expect(gmail).not.toContain('%');
+    expect(gmail).not.toContain('Synced');
     // The provider-side total does not exist on the view model, so no bar.
     expect(html).not.toContain('class="bar"');
     expect(html).not.toContain('role="progressbar"');
@@ -214,8 +227,8 @@ describe('dashboard first-run page', () => {
     ]));
 
     const dropbox = segmentFor(html, 'Dropbox');
-    expect(dropbox).toContain('syncing · 44,000 indexed so far');
-    expect(dropbox).not.toContain('first ingest');
+    expect(dropbox).toContain('Finding items');
+    expect(dropbox).not.toContain('first');
   });
 
   test('renders no header count at all', () => {
@@ -261,7 +274,8 @@ describe('dashboard first-run page', () => {
     expect(html).not.toContain('Security preset');
     expect(html).not.toContain('sources ready');
     expect(html).not.toContain('Advanced Google BYO required');
-    expect(html).toContain('Available to connect — 7');
+    expect(html.split('>Not connected<').length - 1).toBe(1);
+    expect(html).not.toContain('Available to connect');
     expect(segmentFor(html, 'Dropbox')).toContain('<input type="hidden" name="source" value="dropbox">');
     // The api-key route rejects a body without `api_key`, so the form must
     // carry the field, not just the kind marker.
@@ -420,11 +434,12 @@ describe('dashboard first-run page', () => {
     const html = renderDashboardSetupPage(view, { now: NOW });
 
     // The vocabulary word wins over the connection state: a synced card with a
-    // degraded credential or a stalled answer lane is never headed "Fresh".
-    expect(html).toContain('▲ Needs you — 2');
-    expect(html).not.toContain('Fresh —');
-    expect(segmentFor(html, 'Dropbox')).toContain("can&#39;t sign in");
-    expect(segmentFor(html, 'Gmail')).toContain('paused — indexing has stopped');
+    // degraded credential or a stalled answer lane never reads Fresh.
+    expect(segmentFor(html, 'Dropbox')).toContain('class="dot tone-warn"');
+    expect(segmentFor(html, 'Gmail')).toContain('class="dot tone-warn"');
+    expect(html).not.toContain('— Fresh');
+    expect(segmentFor(html, 'Dropbox')).toContain("Can&#39;t sign in");
+    expect(segmentFor(html, 'Gmail')).toContain('Paused — indexing has stopped');
   });
 });
 
@@ -436,11 +451,16 @@ describe('dashboard setup framing and copy', () => {
     now: NOW,
   });
 
-  test('frames the unconnected group as options rather than a deficit', () => {
+  test('says Not connected once, as the heading over the options, and no row repeats it', () => {
     const html = renderDashboardSetupPage(realView(), { now: NOW });
 
-    expect(html).toContain('Available to connect');
+    expect(html.split('>Not connected<').length - 1).toBe(1);
     expect(html).not.toContain('Not connected —');
+    expect(html).not.toContain('Available to connect');
+    // The options carry a hollow ring and an outlined button, never a status word.
+    expect(html).toContain('<span class="dot hollow"></span>');
+    const options = html.slice(html.indexOf('>Not connected<'));
+    expect(options.slice(0, options.indexOf('class="sheet'))).not.toContain('btn primary');
   });
 
   test('kills the needs-one-time-setup status and says Set up on the button', () => {
@@ -635,7 +655,7 @@ function sheetFor(html: string, sourceId: string): string {
 function segmentFor(html: string, label: string): string {
   // A state row is a div when it carries a control and an anchor when the whole
   // row is the link; the name inside is a span or an anchor by the same rule.
-  const segments = html.split(/(?=<(?:div|a) class="(?:attncard|setrow|sect))/);
+  const segments = html.split(/(?=<(?:div|a) class="(?:attncard|setrow|srow|sect))/);
   const segment = segments.find((part) =>
     part.includes(`>${label}</span>`) || part.includes(`>${label}</a>`));
   if (segment === undefined) throw new Error(`no row for ${label}`);

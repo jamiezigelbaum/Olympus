@@ -13,6 +13,7 @@ import {
   type OlympusDashboardReadParams,
   type OlympusDashboardReadResult,
   type OlympusDashboardSourceId,
+  type OlympusPrivacyRule,
 } from '../control-ui-contract.ts';
 import type { OlympusConfig } from './config.ts';
 import { workerAuthTokenFromConfig } from './worker-auth.ts';
@@ -83,6 +84,9 @@ const OAUTH_CALLBACK_SOURCES = ['gmail', 'google-drive', 'dropbox', 'x'] as cons
 const OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60_000;
 const OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30;
 const OAUTH_CALLBACK_RATE_LIMIT_MAX_BUCKETS = 1_024;
+/** The engine's own caps (classification/privacy-profile.ts); the engine validates the rest. */
+const PRIVACY_DESCRIPTION_MAX = 2_000;
+const PRIVACY_RULES_MAX = 100;
 
 interface OAuthCallbackRateLimitBucket {
   windowStart: number;
@@ -327,6 +331,40 @@ export function parseDashboardControlParams(value: unknown): OlympusDashboardCon
       expected_scope_revision: boundedString(record.expected_scope_revision, 256, 'expected_scope_revision', false),
       scope: parseMailScopeDraftParam(record.scope),
     };
+  }
+  if (action === 'save_privacy') {
+    const record = exactRecord(outer, ['action', 'description', 'rules']);
+    const description = record.description === undefined
+      ? undefined
+      : boundedText(record.description, PRIVACY_DESCRIPTION_MAX, 'description');
+    let rules: OlympusPrivacyRule[] | undefined;
+    if (record.rules !== undefined) {
+      if (!Array.isArray(record.rules) || record.rules.length > PRIVACY_RULES_MAX) {
+        throw new DashboardGatewayInvalidRequestError(`rules must be a list of at most ${PRIVACY_RULES_MAX} rules.`);
+      }
+      rules = record.rules.map((value): OlympusPrivacyRule => {
+        const rule = exactRecord(value, ['kind', 'source_id', 'key', 'value', 'display']);
+        const key = optionalBoundedString(rule.key, 1_024, 'key', false);
+        const ruleValue = optionalBoundedString(rule.value, 240, 'value', false);
+        const display = optionalBoundedString(rule.display, 200, 'display', false);
+        return {
+          kind: enumValue(rule.kind, ['folder', 'label', 'sender'] as const, 'kind'),
+          source_id: enumValue(rule.source_id, ['dropbox.files', 'google_drive.docs', 'gmail.email'] as const, 'source_id'),
+          ...(key ? { key } : {}),
+          ...(ruleValue ? { value: ruleValue } : {}),
+          ...(display ? { display } : {}),
+        };
+      });
+    }
+    return {
+      action,
+      ...(description !== undefined ? { description } : {}),
+      ...(rules ? { rules } : {}),
+    };
+  }
+  if (action === 'retry_model') {
+    const record = exactRecord(outer, ['action', 'model']);
+    return { action, model: enumValue(record.model, ['embedding', 'answers'] as const, 'model') };
   }
   if (action === 'browse_folder_scope') {
     const record = exactRecord(outer, ['action', 'source_id', 'parent_key', 'cursor']);
@@ -837,6 +875,16 @@ function dashboardControlWorkerRequest(params: OlympusDashboardControlParams): {
       };
     case 'set_embedding_priority':
       return { path: '/dashboard/embedding-priority', body: { on: params.on } };
+    case 'save_privacy':
+      return {
+        path: '/dashboard/privacy',
+        body: {
+          ...(params.description !== undefined ? { description: params.description } : {}),
+          ...(params.rules ? { rules: params.rules } : {}),
+        },
+      };
+    case 'retry_model':
+      return { path: '/dashboard/models/retry', body: { model: params.model } };
     case 'disconnect':
       return { path: '/dashboard/disconnect', body: { source_id: params.source_id, acknowledge: true } };
     case 'unpair':
@@ -1155,6 +1203,14 @@ function boundedString(
     throw new DashboardGatewayInvalidRequestError(`${label} is invalid.`);
   }
   return normalized;
+}
+
+/** Free text that may be empty (the owner clearing their privacy description). */
+function boundedText(value: unknown, maxLength: number, label: string): string {
+  if (typeof value !== 'string' || value.length > maxLength || value.includes('\0')) {
+    throw new DashboardGatewayInvalidRequestError(`${label} is invalid.`);
+  }
+  return value;
 }
 
 function optionalBoundedString(

@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { renderDashboardHomePage } from '../src/workers/dashboard/pages/home.ts';
 import { sourceCard } from '../src/workers/dashboard/components.ts';
-import { dashboardConnectedStatusGroups } from '../src/workers/dashboard/vocabulary.ts';
 import type {
   DashboardSourceCard,
   SourceDashboardViewModel,
@@ -11,23 +10,21 @@ const NOW = new Date('2026-07-02T12:00:00.000Z');
 const GENERATED_AT = '2026-07-02T11:59:48.000Z';
 
 describe('dashboard home page sections', () => {
-  test('gives every status group a heading that names the word and counts its members', () => {
+  test('lists every connected source as one row under one Sources heading, the ones that need the owner first', () => {
     const view = fixtureView([
       syncedSource({ source_id: 'google_drive.docs', label: 'Google Drive' }),
       syncedSource({ source_id: 'readwise.library', label: 'Readwise' }),
-      syncingSource({ source_id: 'gmail.email', label: 'Gmail' }),
+      reauthSource({ source_id: 'dropbox.files', label: 'Dropbox' }),
     ]);
 
     const html = renderDashboardHomePage(view, { now: NOW, controlSessionCsrfToken: 'csrf-fixture' });
 
-    const groups = dashboardConnectedStatusGroups(view, { now: NOW });
-    expect(groups.length).toBeGreaterThan(0);
-    for (const group of groups) {
-      expect(html).toContain(`${group.status} — ${group.sources.length}`);
-    }
-    // Sections follow DASHBOARD_STATUS_ORDER, so headings appear in group order.
-    const positions = groups.map((group) => html.indexOf(`${group.status} — `));
-    expect(positions).toEqual([...positions].sort((left, right) => left - right));
+    expect(html).toContain('<div class="sect">Sources</div>');
+    // Each fact once (owner rule, 2026-10-02): no status-word headings, and
+    // the source that needs the owner is its own row, moved to the top.
+    expect(html).not.toMatch(/(Fresh|Working|Waiting|Needs you|Failing) — \d/);
+    const rows = [...html.matchAll(/data-source-row="([^"]+)"/g)].map((match) => match[1]);
+    expect(rows).toEqual(['dropbox.files', 'google_drive.docs', 'readwise.library']);
   });
 
   test('names every source it was handed', () => {
@@ -85,7 +82,7 @@ describe('dashboard home answer lanes', () => {
 });
 
 describe('dashboard home working donut', () => {
-  test('draws the wedge from the card ingestion coverage', () => {
+  test('draws no donut: a row carries its state in its dot and its sentence', () => {
     const view = fixtureView([
       syncingSource({
         source_id: 'gmail.email',
@@ -101,8 +98,8 @@ describe('dashboard home working donut', () => {
 
     const html = renderDashboardHomePage(view, { now: NOW });
 
-    // 0.5 x 12.566, through statusGlyph -> donutGlyph on the rendered card.
-    expect(html).toContain('stroke-dasharray="6.28 12.566"');
+    expect(html).not.toContain('stroke-dasharray');
+    expect(html).toContain('class="dot tone-');
   });
 
   test('claims no wedge at all on cards that are not Working', () => {
@@ -220,7 +217,7 @@ describe('dashboard home connected sources only', () => {
 });
 
 describe('dashboard home attention', () => {
-  test('raises a needs-you section for a source whose credentials need reauth', () => {
+  test('a source that needs reconnecting is one orange row at the top, with no separate Needs-you list', () => {
     const view = fixtureView([
       syncedSource({ source_id: 'google_drive.docs', label: 'Google Drive' }),
       reauthSource({ source_id: 'dropbox.files', label: 'Dropbox' }),
@@ -228,11 +225,14 @@ describe('dashboard home attention', () => {
 
     const html = renderDashboardHomePage(view, { now: NOW });
 
-    expect(html).toContain('class="sect attn"');
-    expect(html).toContain('Needs you — 1');
-    expect(html).toContain('Dropbox');
-    // Attention leads the page: its heading precedes every card grid.
-    expect(html.indexOf('Needs you — 1')).toBeLessThan(html.indexOf('class="cards"'));
+    expect(html).not.toContain('class="sect attn"');
+    expect(html).not.toContain('<div class="sect">Needs you</div>');
+    expect(html.split('Dropbox</a>').length - 1).toBe(1);
+    const row = html.slice(html.indexOf('data-source-row="dropbox.files"'), html.indexOf('data-source-row="google_drive.docs"'));
+    expect(row).toContain('class="dot tone-warn"');
+    // The words for screen readers; sighted readers get the dot and the sentence.
+    expect(row).toContain('<span class="sr"> — Needs you</span>');
+    expect(row).toContain('Paused: Olympus needs you to sign in to Dropbox again');
   });
 
   test('shows no attention section at all when every source is quiet', () => {
@@ -289,17 +289,16 @@ describe('dashboard home attention', () => {
 
     const html = renderDashboardHomePage(view, { now: NOW, controlSessionCsrfToken: 'csrf-fixture' });
 
-    expect(html).toContain('Needs you — 1');
     // The sheet that finishes this flow now renders under this very row, so
-    // the reader never leaves the page to press the same button again. The
-    // toggle is styled as the row's main act, same as an oauth Reauthenticate.
-    expect(html).toContain('class="btn primary" type="button" data-sheet-toggle="#setup-x-bookmarks"');
+    // the reader never leaves the page to press the same button again. Row
+    // buttons are outlined; the accent belongs to a page's one primary action.
+    expect(html).toContain('class="btn" type="button" data-sheet-toggle="#setup-x-bookmarks"');
     expect(html).toContain('id="setup-x-bookmarks"');
     expect(html).toContain('To read your Gmail, Olympus needs a free Google app key.');
     expect(html).not.toContain('<a class="btn" href="/dashboard?setup">Set up</a>');
     // The ROW opens the sheet; the oauth form it carries lives inside the
     // sheet, where the app key the route needs is actually collected.
-    const row = html.slice(html.indexOf('class="attncard'), html.indexOf('<div class="sheet"'));
+    const row = html.slice(html.indexOf('data-source-row="x.bookmarks"'), html.indexOf('<div class="sheet"'));
     expect(row).toContain('data-sheet-toggle="#setup-x-bookmarks"');
     expect(row).not.toContain('data-connect-kind');
   });
@@ -327,13 +326,12 @@ describe('dashboard home attention', () => {
 
     const html = renderDashboardHomePage(view, { now: NOW, controlSessionCsrfToken: 'csrf-fixture' });
 
-    expect(html).toContain('Needs you — 1');
     // Every problem offers one fix: Sync now, the route that exists for it.
     expect(html).toContain('data-sync-kind="sync_now"');
-    expect(html).toContain('>Sync now</button>');
-    // And the warning still leads to the source's own page.
+    expect(html).toContain('<button class="btn" type="submit">Sync now</button>');
+    // And the row still leads to the source's own page.
     expect(html).toContain('<a class="name" href="/dashboard?source=gmail.email">Gmail</a>');
-    expect(html).toContain('<a class="go" href="/dashboard?source=gmail.email"');
+    expect(html).toContain('data-dashboard-href="/dashboard?source=gmail.email"');
   });
 
   test('renders no dead button on a row whose fix this reader cannot run', () => {
@@ -358,15 +356,14 @@ describe('dashboard home attention', () => {
 });
 
 describe('dashboard home card hit zone', () => {
-  test('makes the whole card the link to detail, not the name inside it', () => {
+  test('links the source name to its detail page, and the whole row with it', () => {
     const view = fixtureView([syncedSource({ source_id: 'gmail.email', label: 'Gmail' })]);
 
     const html = renderDashboardHomePage(view, { now: NOW });
 
-    expect(html).toContain('<a class="card cardlink" href="/dashboard?source=gmail.email">');
-    // The name is plain text inside the card link now.
-    expect(html).toContain('Gmail</div>');
-    expect(html).not.toContain('<div class="card">');
+    expect(html).toContain('<a class="name" href="/dashboard?source=gmail.email">Gmail</a>');
+    expect(html).toContain('data-dashboard-href="/dashboard?source=gmail.email"');
+    expect(html).not.toContain('class="card');
   });
 
   test('leaves a card with nowhere to go as a plain card', () => {
@@ -425,34 +422,10 @@ describe('dashboard home calm', () => {
     expect(html).toContain('Olympus');
   });
 
-  test('spaces every card grid but the last one', () => {
-    const view = fixtureView([
-      syncedSource({ source_id: 'google_drive.docs', label: 'Google Drive' }),
-      syncingSource({ source_id: 'gmail.email', label: 'Gmail' }),
-    ]);
 
-    const html = renderDashboardHomePage(view, { now: NOW });
 
-    // Matched inside the style attribute: the shared stylesheet carries plain
-    // margin and grid declarations of its own.
-    expect(html.split('style="margin-bottom:22px"').length - 1).toBe(1);
-  });
 
-  test('keeps the last card grid spaced when the Background section follows it', () => {
-    const view = fixtureView([
-      syncedSource({ source_id: 'google_drive.docs', label: 'Google Drive' }),
-      draining(syncingSource({ source_id: 'gmail.email', label: 'Gmail' })),
-    ]);
-
-    const html = renderDashboardHomePage(view, { now: NOW });
-
-    expect(html).toContain('<div class="sect">Background</div>');
-    // Both card grids keep their bottom margin: neither is the page's last
-    // section any more.
-    expect(html.split('margin-bottom:22px').length - 1).toBe(2);
-  });
-
-  test('widens a section to four columns once it fills a row', () => {
+  test('lays sources out as rows, never as card grids', () => {
     const view = fixtureView([
       syncedSource({ source_id: 'google_drive.docs', label: 'Google Drive' }),
       syncedSource({ source_id: 'readwise.library', label: 'Readwise' }),
@@ -462,19 +435,8 @@ describe('dashboard home calm', () => {
 
     const html = renderDashboardHomePage(view, { now: NOW });
 
-    expect(html).toContain('<div class="cards" style="grid-template-columns:repeat(4,1fr)">');
-  });
-
-  test('leaves a three-card section on the default grid', () => {
-    const view = fixtureView([
-      syncedSource({ source_id: 'google_drive.docs', label: 'Google Drive' }),
-      syncedSource({ source_id: 'readwise.library', label: 'Readwise' }),
-      syncedSource({ source_id: 'telegram.messages', label: 'Telegram' }),
-    ]);
-
-    const html = renderDashboardHomePage(view, { now: NOW });
-
-    expect(html).toContain('<div class="cards">');
+    expect(html).toContain('<div class="srows">');
+    expect(html).not.toContain('class="cards"');
     expect(html).not.toContain('style="grid-template-columns');
   });
 });

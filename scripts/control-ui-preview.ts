@@ -17,7 +17,12 @@ import {
   renderSourceDispositionsControlUi,
   type SourceDispositionsView,
 } from '../src/workers/source-dispositions.ts';
-import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from './dashboard-preview.ts';
+import {
+  buildDashboardPreviewOptions,
+  buildDashboardPreviewView,
+  DASHBOARD_PREVIEW_NOW,
+  mailPickerBrowseFixture,
+} from './dashboard-preview.ts';
 import { FIRST_RUN_RESOURCES, FIRST_RUN_RESOURCES_KEY, FIRST_RUN_ROOT } from '../test/fixtures/chatgpt-picker-first-run.ts';
 
 const PORT = Number(process.env.CONTROL_UI_PREVIEW_PORT ?? 8931);
@@ -25,6 +30,9 @@ const ROOT = join(import.meta.dir, '..');
 // The preview view behind the native Setup page; any dashboard-preview state
 // (for example models, models-applying, first-install).
 const SETUP_STATE = process.env.CONTROL_UI_PREVIEW_SETUP_STATE ?? 'partial';
+// One preview view for every page (for example review, review-unconfigured,
+// review-indexing); unset keeps the older full/setup-state split.
+const STATE = process.env.CONTROL_UI_PREVIEW_STATE;
 
 export function buildDispositionsPreviewView(): SourceDispositionsView {
   const counts = {
@@ -126,7 +134,7 @@ export function previewFolderLevel(parentKey?: string): OlympusFolderScopeNode[]
 }
 
 /** The preview's read handler; tests render the same pages through it. */
-export function readResult(params: OlympusDashboardReadParams, canWrite: boolean, setupState = SETUP_STATE) {
+export function readResult(params: OlympusDashboardReadParams, canWrite: boolean, setupState = SETUP_STATE, state = STATE) {
   if (params.view === 'dispositions') {
     if (params.source_id === 'dropbox.files' || params.source_id === 'google_drive.docs') {
       const source = params.source_id as OlympusFolderScopeSourceId;
@@ -142,11 +150,13 @@ export function readResult(params: OlympusDashboardReadParams, canWrite: boolean
     }
     return renderSourceDispositionsControlUi(buildDispositionsPreviewView(), canWrite);
   }
+  const viewState = state ?? (params.view === 'setup' ? setupState : 'full');
   return renderDashboardControlUi({
     params,
-    view: buildDashboardPreviewView(params.view === 'setup' ? setupState : 'full'),
+    view: buildDashboardPreviewView(viewState),
     canWrite,
     options: {
+      ...buildDashboardPreviewOptions(viewState),
       now: DASHBOARD_PREVIEW_NOW,
       nativeOAuthAvailable: true,
       embeddingRuntime: {
@@ -165,7 +175,8 @@ export function readResult(params: OlympusDashboardReadParams, canWrite: boolean
 function page(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Olympus native UI preview</title><style>
-    body{margin:0;background:#09090c;color:#ddd;font:14px system-ui}.hostbar{position:sticky;top:0;z-index:20;display:flex;gap:10px;align-items:center;padding:10px 14px;background:#17171c;border-bottom:1px solid #292930}.hostbar button{background:#24242b;color:#ddd;border:1px solid #3a3a44;border-radius:6px;padding:6px 10px}.hostbar .spacer{flex:1}#app{min-height:calc(100vh - 50px)}</style></head>
+    body{margin:0;background:#09090c;color:#ddd;font:14px system-ui}.hostbar{position:sticky;top:0;z-index:20;display:flex;gap:10px;align-items:center;padding:10px 14px;background:#17171c;border-bottom:1px solid #292930}.hostbar button{background:#24242b;color:#ddd;border:1px solid #3a3a44;border-radius:6px;padding:6px 10px}.hostbar .spacer{flex:1}#app{min-height:calc(100vh - 50px)}
+    @media (prefers-color-scheme: light){body{background:#f3f3f5;color:#222}.hostbar{background:#e9e9ee;border-color:#d4d4da}.hostbar button{background:#fff;color:#222;border-color:#c9c9d0}}</style></head>
   <body><div class="hostbar"><strong>OpenClaw · Plugins</strong><span id="nav"></span><span class="spacer"></span><label><input id="write" type="checkbox" checked> operator.write</label></div><div id="app"></div>
   <script type="module">
     import plugin from '/dist/control-ui/index.js';
@@ -200,6 +211,17 @@ if (import.meta.main) {
       if (request.method === 'POST' && url.pathname === '/rpc/control') {
         const body = await request.json() as OlympusDashboardControlParams & { __can_write?: boolean };
         if (body.__can_write !== true) return Response.json({ status: 403, body: { error: { message: 'Preview connection is read-only.' } } });
+        // The Privacy editor's folder and label lists answer from the same
+        // fixtures as the pickers, so Add a folder and Add a Gmail label can be
+        // walked here; saving still needs a worker.
+        if (body.action === 'browse_folder_scope') {
+          const { __can_write: _write, ...browse } = body;
+          const folders = readResult({ view: 'dispositions', ...browse } as OlympusDashboardReadParams, true);
+          return Response.json({ status: 200, body: { ok: true, scope_browser: folders.scope_browser } });
+        }
+        if (body.action === 'browse_mail_scope') {
+          return Response.json({ status: 200, body: mailPickerBrowseFixture(body.draft) });
+        }
         return Response.json({ status: 501, body: { error: { message: 'Preview only: no worker or provider action runs here.' } } });
       }
       return new Response('not found', { status: 404 });

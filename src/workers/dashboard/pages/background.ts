@@ -1078,7 +1078,7 @@ function renderStrip(strip: readonly DashboardLaneStripItem[], label: string | u
 const STRIP_TONE_COLORS: Readonly<Record<DashboardLaneTone, string>> = {
   good: 'var(--good)',
   bad: 'var(--bad)',
-  run: 'var(--run)',
+  run: 'var(--run-fill)',
   idle: 'var(--line)',
 };
 

@@ -155,6 +155,13 @@ import {
   INTERNAL_EMAIL_CORPUS_ID,
 } from '../google-connectors/corpora.ts';
 import { renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
+import type { DashboardModelInstalls } from '../dashboard/source-rows.ts';
+import type { PrivacySettings } from '../chatgpt/dashboard-contract.ts';
+
+/** A privacy read or save, as the dashboard routes need it: the settings, or a fixed code and sentence. */
+export type DashboardPrivacyOutcome =
+  | { ok: true; settings: PrivacySettings }
+  | { ok: false; code: string; message: string };
 import {
   OLYMPUS_DASHBOARD_VIEWS,
   type OlympusFolderScopeBrowseResult,
@@ -484,6 +491,20 @@ export interface EmailSourceWorkerOptions {
     modelSetup?: () => ModelSetupView;
     checkModelSetup?: () => Promise<ModelSetupView>;
     connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
+    /**
+     * The owner's privacy settings, through the same engine operations as
+     * ChatGPT's olympus_privacy_get / olympus_privacy_set (validation, caps,
+     * Secrets-tier locations kept off the page and kept as saved). Absent: the
+     * dashboard shows no Privacy row and the save route answers 501.
+     */
+    privacy?: {
+      read(): Promise<DashboardPrivacyOutcome>;
+      save(update: Record<string, unknown>): Promise<DashboardPrivacyOutcome>;
+    };
+    /** The built-in models' installs, for the Models row (status only). */
+    modelInstalls?: () => DashboardModelInstalls;
+    /** Starts a built-in model's failed install again; false when that model is not built in here. */
+    retryModel?: (model: 'embedding' | 'answers') => boolean;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
@@ -1349,7 +1370,32 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // gives the lanes a trailing rate — one reading per render.
           const backgroundRuntime = readBackgroundRuntime({ env: process.env });
           const controlSessionCsrfToken = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
+          // The owner's privacy settings, counts only, for the Privacy row; the
+          // full settings only for the Privacy editor itself.
+          const privacyRead = sourceDashboard.privacy
+            ? await sourceDashboard.privacy.read().catch(() => undefined)
+            : undefined;
+          const privacyWanted = url.searchParams.has('privacy') || dashboardUi?.params.view === 'privacy';
+          let modelInstalls: DashboardModelInstalls | undefined;
+          try {
+            modelInstalls = sourceDashboard.modelInstalls?.();
+          } catch {
+            modelInstalls = undefined;
+          }
           const options: DashboardBackgroundPageOptions = {
+            ...(modelInstalls ? { modelInstalls } : {}),
+            ...(sourceDashboard.privacy
+              ? {
+                  privacy: privacyRead?.ok
+                    ? {
+                        configured: privacyRead.settings.configured,
+                        pendingCount: privacyRead.settings.pendingCount,
+                        ruleCount: privacyRead.settings.rules.length,
+                      }
+                    : 'unreadable' as const,
+                }
+              : {}),
+            ...(privacyWanted && privacyRead?.ok ? { privacySettings: privacyRead.settings } : {}),
             embeddingRuntime,
             backgroundRuntime,
             ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
@@ -1761,6 +1807,36 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // Return promptly; the authoritative Models card receives their result.
           void sourceDashboard.checkModelSetup().catch(() => undefined);
           return json({ ok: true, status_message: 'Readiness check requested. See the Models cards above for the result.' });
+        }
+
+        // The owner's privacy settings, saved through the same engine operation
+        // as ChatGPT's olympus_privacy_set: each field given replaces the saved
+        // one, every rule is validated and capped, and rules on Secrets-tier
+        // locations stay as saved. Bearer or control session only, like every
+        // control route here.
+        if (request.method === 'POST' && url.pathname === '/dashboard/privacy') {
+          if (!sourceDashboard?.privacy) {
+            throw new EmailSourceWorkerError(501, 'privacy_not_supported', 'This worker does not support privacy settings.');
+          }
+          const record = await parseObjectBody(request);
+          const outcome = await sourceDashboard.privacy.save(record);
+          if (!outcome.ok) {
+            throw new EmailSourceWorkerError(outcome.code === 'invalid_params' ? 400 : 500, outcome.code, outcome.message);
+          }
+          return json({ ok: true, settings: outcome.settings, status_message: 'Privacy saved.' });
+        }
+
+        if (request.method === 'POST' && url.pathname === '/dashboard/models/retry') {
+          if (!sourceDashboard?.retryModel) {
+            throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'This worker does not support restarting a model download.');
+          }
+          const record = await parseObjectBody(request);
+          const model = record.model === 'embedding' || record.model === 'answers' ? record.model : undefined;
+          if (!model) throw new EmailSourceWorkerError(400, 'invalid_request', 'model must be embedding or answers.');
+          if (!sourceDashboard.retryModel(model)) {
+            throw new EmailSourceWorkerError(409, 'model_not_configured', 'That model is not the built-in one on this computer.');
+          }
+          return json({ ok: true, status_message: 'Downloading again. This row updates as it goes.' });
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/connect/api-key') {

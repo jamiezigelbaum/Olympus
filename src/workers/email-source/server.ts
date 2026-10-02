@@ -1,3 +1,4 @@
+import type { PrivacySettings } from '../chatgpt/dashboard-contract.ts';
 import { modelInstallFailedReason } from '../../core/model-install-failure.ts';
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
@@ -4127,6 +4128,19 @@ export async function main(): Promise<void> {
             modelSetup: getModelSetup,
             checkModelSetup: () => modelSetup.checkLocalModels(),
             connectModelKey,
+            // The local dashboard's Privacy row and editor, and its Models row,
+            // read and act through the same engine operations as the ChatGPT
+            // setup tools (set up further down; called only per request).
+            privacy: {
+              read: () => dashboardPrivacy('get', {}),
+              save: (update) => dashboardPrivacy('set', update),
+            },
+            modelInstalls: () => {
+              const embedding = chatgptEmbeddingState();
+              const privateModel = chatgptPrivateModelState();
+              return { ...(embedding ? { embedding } : {}), ...(privateModel ? { privateModel } : {}) };
+            },
+            retryModel: (model) => chatgptSetup.retryModel(model),
             stopMessagingCapture,
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,
@@ -4403,6 +4417,27 @@ export async function main(): Promise<void> {
       return builtIn.length > 0;
     },
   });
+  // The local dashboard's privacy settings: the ChatGPT privacy tools run
+  // in-process, so validation, caps and the Secrets-location filter are the
+  // tools' own. Only the settings (or a fixed code and sentence) come back.
+  const { callSetupTool } = await import('../chatgpt/setup-tools.ts');
+  const { ChatGptSurfaceError, errorMessage: chatgptErrorMessage } = await import('../chatgpt/response-builder.ts');
+  const { PRIVACY_GET_TOOL_NAME, PRIVACY_SET_TOOL_NAME, PRIVACY_META_KEY } = await import('../chatgpt/dashboard-contract.ts');
+  const dashboardPrivacy = async (mode: 'get' | 'set', args: Record<string, unknown>) => {
+    try {
+      const result = await callSetupTool(mode === 'get' ? PRIVACY_GET_TOOL_NAME : PRIVACY_SET_TOOL_NAME, args, chatgptSetup);
+      const meta = result._meta as Record<string, unknown> | undefined;
+      const settings = meta?.[PRIVACY_META_KEY] as PrivacySettings | undefined;
+      if (!settings) return { ok: false as const, code: 'unavailable', message: 'Olympus could not read your privacy settings.' };
+      return { ok: true as const, settings };
+    } catch (error) {
+      return {
+        ok: false as const,
+        code: error instanceof ChatGptSurfaceError ? error.code : 'unavailable',
+        message: chatgptErrorMessage(error),
+      };
+    }
+  };
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === '1';
   // source_answer needs an Analyst the Mac can actually run; without one,
   // ChatGPT answers from olympus_search alone.
@@ -4441,6 +4476,18 @@ export async function main(): Promise<void> {
       }
     : undefined;
   // The dashboard's install progress follows the built-in model's download.
+  const chatgptPrivateModelState = () => {
+    if (!workerBuiltInModel) return undefined;
+    const status = builtInPrivateModelStatus(process.env);
+    if (!status.enabled) return undefined;
+    return {
+      state: status.state,
+      percent: status.percent,
+      bytesDone: status.bytesDone,
+      bytesTotal: status.bytesTotal,
+      ...(status.state === 'failed' ? { failedReason: modelInstallFailedReason(status.failure) } : {}),
+    };
+  };
   const chatgptEmbeddingState = () => {
     const builtIn = (['public_safe', 'internal', 'secure_local'] as const)
       .some((domain) => sovereigntyEngine.resolveEmbeddingProfile(domain)?.profile.provider === 'built-in');
@@ -4501,18 +4548,7 @@ export async function main(): Promise<void> {
             ...(chatgptPrivateMatchProbe ? { privateMatchProbe: chatgptPrivateMatchProbe } : {}),
             answerModelAvailable: chatgptAnswerModelAvailable,
             embedding: chatgptEmbeddingState,
-            privateModel: () => {
-              if (!workerBuiltInModel) return undefined;
-              const status = builtInPrivateModelStatus(process.env);
-              if (!status.enabled) return undefined;
-              return {
-                state: status.state,
-                percent: status.percent,
-                bytesDone: status.bytesDone,
-                bytesTotal: status.bytesTotal,
-                ...(status.state === 'failed' ? { failedReason: modelInstallFailedReason(status.failure) } : {}),
-              };
-            },
+            privateModel: chatgptPrivateModelState,
             privacy: () => {
               const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
               return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };

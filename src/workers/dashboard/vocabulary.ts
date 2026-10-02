@@ -385,10 +385,12 @@ export function dashboardAttentionLine(
     case 'awaiting_consent': {
       // The label is the provider's own name off the card, so the sentence
       // points at the tab the owner is actually looking at.
-      const base = `waiting for you to approve in the ${source.label} tab`;
+      // The sign-in may be in any browser or on any device, so the line says
+      // what to do, never which tab to look in (owner rule, 2026-10-02).
+      const base = `finish signing in to ${source.label}`;
       const minutes = source.connection.pending?.expires_in_minutes;
       return minutes !== undefined && minutes > 0
-        ? `${base} · expires in ${dashboardDuration(minutes * 60)}`
+        ? `${base} · link expires in ${Math.max(1, Math.ceil(minutes))} min`
         : base;
     }
     case 'needs_setup':
@@ -520,9 +522,9 @@ export const DASHBOARD_INDEXING_NAME = 'Indexing';
 /**
  * "98% done, 4,055 items left, about 2 hours" — the half after the name.
  *
- * Moving with no measured rate says "estimating time left"; a stopped lane
- * says stalled; a lane something parked says paused. No ETA is printed
- * without a rate behind it.
+ * Moving with no measured rate says nothing about time (owner rule,
+ * 2026-10-02: no ETA unless measured, and no placeholder for one); a stopped
+ * lane says stalled; a lane something parked says paused.
  */
 export function dashboardIndexingFacts(progress: DashboardIndexingProgress): string {
   if (progress.state === 'done') return 'up to date';
@@ -533,9 +535,7 @@ export function dashboardIndexingFacts(progress: DashboardIndexingProgress): str
   }
   switch (progress.state) {
     case 'moving':
-      parts.push(progress.etaMs !== undefined && progress.etaMs > 0
-        ? dashboardEtaWords(progress.etaMs)
-        : 'estimating time left…');
+      if (progress.etaMs !== undefined && progress.etaMs > 0) parts.push(dashboardEtaWords(progress.etaMs));
       break;
     case 'stalled':
       parts.push('stalled');
@@ -1573,4 +1573,142 @@ export const DASHBOARD_PICKER_COPY = {
   browseFailed: 'Could not list folders. Your choices are still here; try again when the connection is ready.',
   saved: 'Saved. Opening the source status…',
   unconfirmed: 'Could not confirm the result. Reopen the picker to check your saved choices before retrying.',
+} as const;
+
+/**
+ * The local dashboard's words for the ChatGPT dashboard's rules, ported on
+ * 2026-10-02 (source-rows.ts, and the Home, Setup and Privacy pages). Where
+ * both surfaces say the same thing the value is the ChatGPT block's own, so
+ * they cannot drift apart; wording that names ChatGPT or "your Mac" is
+ * rewritten here for the computer Olympus runs on. Never "Public": the owner's
+ * choices are private or not.
+ */
+export const DASHBOARD_LOCAL_COPY = {
+  needsYou: DASHBOARD_CHATGPT_PAGE_COPY.needsYou,
+  sources: DASHBOARD_CHATGPT_PAGE_COPY.sources,
+  sourcesLocal: 'On this computer',
+  sourcesCloud: DASHBOARD_CHATGPT_PAGE_COPY.sourcesCloud,
+  notConnected: DASHBOARD_CHATGPT_PAGE_COPY.notConnected,
+  noSources: 'No sources connected yet.',
+  progress: DASHBOARD_CHATGPT_PAGE_COPY.progress,
+  progressInitial: DASHBOARD_CHATGPT_PAGE_COPY.progressInitial,
+  progressRefresh: DASHBOARD_CHATGPT_PAGE_COPY.progressRefresh,
+  percentDone: DASHBOARD_CHATGPT_PAGE_COPY.percentDone,
+  left: DASHBOARD_CHATGPT_PAGE_COPY.left,
+  eta: DASHBOARD_CHATGPT_PAGE_COPY.eta,
+  stalled: DASHBOARD_CHATGPT_PAGE_COPY.stalled,
+  units: DASHBOARD_CHATGPT_PAGE_COPY.units,
+  /** A source's bar: its first unfinished stage. */
+  sourceStages: DASHBOARD_CHATGPT_PAGE_COPY.sourceStages,
+  findingItems: DASHBOARD_CHATGPT_PAGE_COPY.findingItems,
+  sourceProgress: DASHBOARD_CHATGPT_PAGE_COPY.sourceProgress,
+  /** One plain sentence per reason a source is not moving; {source} is its name. */
+  stalledReasons: {
+    waiting_for_credentials: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.waiting_for_credentials,
+    scope_pending: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.scope_pending,
+    scope_pending_mail: 'Paused until you choose mail',
+    provider_unavailable: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.provider_unavailable,
+    model_downloading: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.model_downloading,
+  },
+  /** A sign-in that is still outstanding: what to do, and how long the link stays good. */
+  connecting: 'Finish signing in to {source}',
+  linkExpires: DASHBOARD_CHATGPT_PAGE_COPY.linkExpires,
+  openSignInAgain: DASHBOARD_CHATGPT_PICKER_COPY.connectReopen,
+  cancelSignIn: 'Cancel sign-in',
+  chooseFolders: DASHBOARD_CHATGPT_SETUP_LABELS.chooseFolders,
+  chooseMail: DASHBOARD_CHATGPT_SETUP_LABELS.chooseMail,
+  syncNow: 'Sync now',
+  seeModels: 'See models',
+  models: DASHBOARD_CHATGPT_PAGE_COPY.models,
+  modelBuiltIn: DASHBOARD_CHATGPT_PAGE_COPY.modelBuiltIn,
+  modelCustom: DASHBOARD_CHATGPT_PAGE_COPY.modelCustom,
+  modelReady: DASHBOARD_CHATGPT_PAGE_COPY.modelReady,
+  modelGettingReady: DASHBOARD_CHATGPT_PAGE_COPY.modelGettingReady,
+  modelNeedsYou: DASHBOARD_CHATGPT_PAGE_COPY.modelNeedsYou,
+  modelNotReady: DASHBOARD_CHATGPT_PAGE_COPY.modelNotReady,
+  modelNotWorking: DASHBOARD_CHATGPT_PAGE_COPY.modelNotWorking,
+  modelChecking: DASHBOARD_CHATGPT_PAGE_COPY.modelChecking,
+  modelSearch: DASHBOARD_CHATGPT_PAGE_COPY.modelSearch,
+  modelAnswers: DASHBOARD_CHATGPT_PAGE_COPY.modelAnswers,
+  modelNames: DASHBOARD_CHATGPT_PAGE_COPY.modelNames,
+  modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
+  modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
+  modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,
+  modelInstallBytes: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallBytes,
+  modelInstallReasons: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallReasons,
+  modelTryAgain: DASHBOARD_CHATGPT_PICKER_COPY.tryAgain,
+  /** A built-in model whose install failed, in Needs you: its sentence, by failure code. */
+  modelInstallFailedItem: DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed,
+  modelsNotReady: 'Models are not ready, so sources stay locked.',
+  privacy: {
+    section: DASHBOARD_CHATGPT_PRIVACY_COPY.section,
+    row: DASHBOARD_CHATGPT_PRIVACY_COPY.row,
+    edit: DASHBOARD_CHATGPT_PRIVACY_COPY.edit,
+    editLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.editLabel,
+    setUpSentence: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.sentence,
+    setUp: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label,
+    pending: DASHBOARD_CHATGPT_PRIVACY_COPY.dashboardPending,
+    unreadable: 'Olympus could not read your privacy settings.',
+  },
+} as const;
+
+/**
+ * The local Privacy editor (pages/privacy.ts). The ChatGPT screen's layout and
+ * most of its words; the intro and the per-rule sentences say "this computer"
+ * and "a cloud model" instead of ChatGPT and "your Mac".
+ */
+export const DASHBOARD_LOCAL_PRIVACY_COPY = {
+  crumb: 'Privacy',
+  back: 'Back to Setup',
+  title: DASHBOARD_CHATGPT_PRIVACY_COPY.title,
+  intro: 'Olympus may use a cloud model to answer from items you have not marked private. Private items are answered only on this computer and never sent to a cloud model. Passwords and other secrets are always kept on this computer.',
+  descriptionLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionLabel,
+  descriptionPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionPlaceholder,
+  rulesTitle: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesTitle,
+  rulesEmpty: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesEmpty,
+  kindFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.kindFolder,
+  kindLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.kindLabel,
+  kindSender: DASHBOARD_CHATGPT_PRIVACY_COPY.kindSender,
+  unnamedFolder: 'A folder',
+  remove: DASHBOARD_CHATGPT_PRIVACY_COPY.remove,
+  removeFor: DASHBOARD_CHATGPT_PRIVACY_COPY.removeFor,
+  removed: DASHBOARD_CHATGPT_PRIVACY_COPY.removed,
+  undo: DASHBOARD_CHATGPT_PRIVACY_COPY.undo,
+  addFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.addFolder,
+  addLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.addLabel,
+  addSender: DASHBOARD_CHATGPT_PRIVACY_COPY.addSender,
+  needFolderSource: DASHBOARD_CHATGPT_PRIVACY_COPY.needFolderSource,
+  needGmail: DASHBOARD_CHATGPT_PRIVACY_COPY.needGmail,
+  folderIntro: 'Open a folder to look inside it. Make private covers everything in the folder.',
+  folderUp: 'Back',
+  folderOpen: 'Open',
+  folderEmpty: 'No folders here.',
+  folderMore: 'Load more folders',
+  loading: 'Loading…',
+  loadFailed: 'Olympus could not load this list. Try again.',
+  makePrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.makePrivate,
+  alreadyPrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.alreadyPrivate,
+  labelIntro: 'Mail with a private label is answered only on this computer.',
+  noLabels: DASHBOARD_CHATGPT_PRIVACY_COPY.noLabels,
+  senderIntro: 'Mail from this sender is answered only on this computer.',
+  senderLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.senderLabel,
+  senderPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.senderPlaceholder,
+  senderAdd: DASHBOARD_CHATGPT_PRIVACY_COPY.senderAdd,
+  senderInvalid: DASHBOARD_CHATGPT_PRIVACY_COPY.senderInvalid,
+  senderDuplicate: DASHBOARD_CHATGPT_PRIVACY_COPY.senderDuplicate,
+  close: 'Done',
+  pending: {
+    one: '{n} item is waiting to be checked on this computer.',
+    many: '{n} items are waiting to be checked on this computer.',
+  },
+  nothingPending: 'Nothing is waiting to be checked.',
+  save: DASHBOARD_CHATGPT_PRIVACY_COPY.save,
+  saving: DASHBOARD_CHATGPT_PRIVACY_COPY.saving,
+  cancel: DASHBOARD_CHATGPT_PRIVACY_COPY.cancel,
+  saveFailed: DASHBOARD_CHATGPT_PRIVACY_COPY.saveFailed,
+  saved: DASHBOARD_CHATGPT_PRIVACY_COPY.saved,
+  unchanged: 'No changes to save.',
+  locked: 'Unlock dashboard controls in Setup to see and change what is private.',
+  readOnly: 'Your OpenClaw connection is read-only, so privacy can be read here but not changed.',
+  unavailable: 'Privacy settings are not available from this worker.',
 } as const;

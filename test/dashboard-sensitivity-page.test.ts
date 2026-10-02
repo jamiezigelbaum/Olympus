@@ -21,7 +21,9 @@ describe('dashboard sensitivity categories', () => {
   test('lists the owner categories with their own words and the tier they raise into', () => {
     const html = renderDashboardSensitivityBody(fixtureView({ sensitivity: fixtureSensitivity() }));
 
-    expect(html).toContain('<div class="sect">Private categories</div>');
+    // The map file still feeds classification, so its categories stay
+    // visible, behind a disclosure that says where they come from.
+    expect(html).toContain('<summary>Also private: 2 categories from your sensitivity map file</summary>');
     expect(html).toContain('<span class="name">Financial</span>');
     expect(html).toContain('statements, tax, banking');
     expect(html).toContain('Private (S4) · 12 match terms');
@@ -60,23 +62,40 @@ describe('dashboard sensitivity categories', () => {
     expect(html).not.toContain('keywords');
   });
 
-  test('says one plain sentence when no map is configured, and invents no rows', () => {
+  test('says nothing about a map that is not there, and invents no rows', () => {
     const html = renderDashboardSensitivityBody(fixtureView());
 
-    expect(html).toContain('<div class="sect">Private categories</div>');
-    expect(html).toContain('No Private categories are configured.');
+    // A "none configured" here read as if nothing were private while the
+    // owner's privacy profile held rules (holistic review 2026-10-02, item 11).
+    expect(html).not.toContain('Private categories');
+    expect(html).not.toContain('No Private categories are configured.');
     expect(html).not.toContain('Financial');
     expect(html).not.toContain('Health');
     expect(html).not.toContain('Therapy');
   });
 
-  test('says the same sentence for a map that holds no categories', () => {
+  test('says the same nothing for a map that holds no categories', () => {
     const html = renderDashboardSensitivityBody(
       fixtureView({ sensitivity: { configured: true, editable: false, categories: [] } }),
     );
 
-    expect(html).toContain('No Private categories are configured.');
+    expect(html).not.toContain('No Private categories are configured.');
     expect(html).not.toContain('class="catrow"');
+  });
+
+  test('leads with the privacy profile, the one ChatGPT and the Privacy editor edit, and links to the editor', () => {
+    const configured = renderDashboardSensitivityBody(
+      fixtureView({ sensitivity: fixtureSensitivity() }),
+      { privacy: { configured: true, pendingCount: 4, ruleCount: 3 } },
+    );
+    expect(configured).toContain('Your description · 3 always-private rules');
+    expect(configured).toContain('4 items waiting to be checked');
+    expect(configured).toContain('<a class="btn" href="/dashboard?privacy">Edit</a>');
+    expect(configured.indexOf('always-private rules')).toBeLessThan(configured.indexOf('sensitivity map file'));
+
+    const unset = renderDashboardSensitivityBody(fixtureView(), { privacy: { configured: false, pendingCount: 0, ruleCount: 0 } });
+    expect(unset).toContain('Tell Olympus what&#39;s private for you');
+    expect(unset).toContain('<a class="btn" href="/dashboard?privacy">Set up privacy</a>');
   });
 
   test('offers no remove, add or guidance control, and claims no preset or added date', () => {

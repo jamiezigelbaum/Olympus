@@ -55,7 +55,7 @@ describe('dashboard html route dispatch', () => {
     // No count in the header (owner ruling 2026-08-19 evening). The setup
     // summary card below names its counts; the header states staleness only.
     expect(page.html).not.toMatch(/<span class="meta">[^<]*connected/);
-    expect(page.html).toContain('Available to connect — 1');
+    expect(page.html).toContain('<div class="sect sub">Not connected</div>');
   });
 
   test('keeps the setup page reachable by query once sources are connected', () => {
@@ -134,7 +134,9 @@ describe('dashboard html route dispatch', () => {
 
     const page = renderDashboardHtmlRoute({ url: dashboardUrl(), view, options: { now: NOW } });
 
-    expect(page.html).toContain('Needs you — 1');
+    // Home, with the signed-out source as its own orange row and its fix.
+    expect(page.html).toContain('data-source-row="gmail.email"');
+    expect(page.html).toContain('class="dot tone-warn"');
     expect(page.html).not.toContain('Build a connector');
   });
 });

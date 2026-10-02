@@ -81,6 +81,7 @@ import {
   type DashboardVocabularyOptions,
 } from '../vocabulary.ts';
 import type { DashboardPageOptions } from './home.ts';
+import { dashboardSourceStates } from '../source-rows.ts';
 
 /** How many run bars the strip will draw. The mockup's window. */
 const RUN_STRIP_LIMIT = 20;
@@ -95,8 +96,8 @@ const DEFAULT_BASE_PATH = '/dashboard';
 
 /** The reader-facing word for each disposition a scope rule can carry. */
 const SCOPE_MODE_WORDS: Readonly<Record<string, string>> = {
-  exclude: 'invisible',
-  metadata_only: 'metadata only',
+  exclude: 'skipped',
+  metadata_only: 'names only',
 };
 
 /**
@@ -127,7 +128,12 @@ export function renderDashboardDetailPage(
   if (!source) return undefined;
   const now = options?.now ?? new Date();
   const degraded = options?.degradedCredentials ?? view.degraded_credentials ?? [];
-  const status = dashboardStatus({ source, degradedCredentials: degraded });
+  // The header's word is the rows' word: held to the progress bar by the same
+  // derivation the ChatGPT dashboard uses (shared-status.ts), so a source
+  // still reading or indexing never reads Fresh here.
+  const status = dashboardSourceStates(view, { ...options, now, degradedCredentials: degraded }).rows
+    .find((row) => row.source.source_id === source.source_id)?.status
+    ?? dashboardStatus({ source, degradedCredentials: degraded });
   const checked = dashboardCheckedLabel(view.generated_at, now);
   const scope = dashboardScopeForCard(view, source);
   // The picker route refuses the read-only query token, so the link is offered
@@ -224,10 +230,10 @@ function renderIngestionSelection(source: DashboardSourceCard): string {
   return `
         <div class="dsect">Added to Olympus</div>
         <div class="selectioncounts">
-          <div><span>Metadata only</span><b>${escapeHtml(count(selection.metadata_only_files))}</b></div>
-          <div><span>Full ingestion</span><b>${escapeHtml(count(selection.full_ingestion_files))}</b></div>
+          <div><span>Names only</span><b>${escapeHtml(count(selection.metadata_only_files))}</b></div>
+          <div><span>Fully indexed</span><b>${escapeHtml(count(selection.full_ingestion_files))}</b></div>
         </div>${deferred > 0
-          ? `<p class="hint">${escapeHtml(count(deferred))} selected for full ingestion ${deferred === 1 ? 'is' : 'are'} not being processed because of a separate ingestion policy.</p>`
+          ? `<p class="hint">${escapeHtml(count(deferred))} chosen to be fully indexed ${deferred === 1 ? 'is' : 'are'} not being processed because of a separate ingestion policy.</p>`
           : ''}`;
 }
 

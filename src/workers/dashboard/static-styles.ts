@@ -8,7 +8,9 @@ export const DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; 
 .bgrow:hover .go, .bgrow:focus-visible .go { color: var(--link); }
 .bgrow:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
 .minibar { display: block; width: 64px; height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; justify-self: end; }
-.minibar i { display: block; height: 100%; background: var(--run); }
+.minibar i { display: block; height: 100%; background: var(--run-fill); }
+/* Finished work is not in progress: a full bar reads ready, never yellow. */
+.minibar.done i { background: var(--good); }
 /* A bar always carries its number: the percent sits beside the track. */
 .labeledbar { display: flex; align-items: center; gap: 8px; justify-self: stretch; }
 .labeledbar .minibar { flex: 1; width: auto; }
@@ -46,7 +48,7 @@ export const DASHBOARD_PROGRESS_CSS = `.phase { margin: 0 0 14px; max-width: 520
 .phase.waiting .bar { background: var(--line2); }
 .phase.waiting .bar i { display: none; }
 .bar.indet.working { position: relative; }
-.bar.indet.working i { width: 34%; background: var(--run); animation: dashsweep 1.6s ease-in-out infinite; }
+.bar.indet.working i { width: 34%; background: var(--run-fill); animation: dashsweep 1.6s ease-in-out infinite; }
 @keyframes dashsweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(294%); } }
 .settled { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; color: var(--t2); font-size: var(--fs-body); max-width: 520px; }
 .banner { margin-bottom: 6px; }
@@ -391,4 +393,79 @@ export const MODEL_SETUP_CSS = `
 .modeltools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 16px}.modeltools p{margin:0;flex-basis:100%}
 .modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
 .modelextras{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 24px}
+`;
+
+/** The rows' layout, after the ChatGPT dashboard's list rows. */
+export const DASHBOARD_SOURCE_ROWS_CSS = `
+.srows { border-top: 1px solid var(--line); margin-bottom: 8px; }
+.srow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: start; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.srow .smain { grid-column: 1; grid-row: 1; min-width: 0; }
+.srow .sact { grid-column: 2; grid-row: 1; }
+.srow .smenu { grid-column: 3; grid-row: 1; }
+.srow .shead { display: flex; align-items: center; gap: 10px; }
+.srow .shead .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); text-decoration: none; }
+.srow .shead a.name:hover { color: var(--link); text-decoration: underline; }
+.srow .shead a.name:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; border-radius: 4px; }
+.srow .sneed { font-size: var(--fs-row); color: var(--t1); }
+.srow .sline { margin: 4px 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
+.srow .sline.strong { margin-left: 0; color: var(--t1); font-size: var(--fs-row); }
+.srow.nodot .sline { margin-left: 0; }
+.srow .sact { flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.srow .sact form { margin: 0; }
+.dot.tone-good { background: var(--good); }
+.dot.tone-run { background: var(--run-fill); }
+.dot.tone-warn { background: var(--warn-fill); }
+.dot.tone-bad { background: var(--bad); }
+.dot.tone-off { background: var(--off); }
+.sprog { margin: 0; }
+.srow .sprog .bar { max-width: none; height: 6px; margin: 8px 0 0 20px; }
+.sprog.overall .sline { margin: 0 0 8px; color: var(--t1); }
+.sprog.overall .bar { max-width: none; height: 6px; margin: 0 0 8px; }
+.sprog.stalled .sline { color: var(--t1); }
+.bar.stalled i { background: var(--warn-fill); }
+.sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+.modelsrow { margin: 28px 0 0; padding-top: 12px; border-top: 1px solid var(--line); }
+details.models > summary { font-size: var(--fs-section); font-weight: 600; color: var(--t1); cursor: pointer; padding: 4px 0; }
+details.models > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+details.models .modelsbody { margin-top: 12px; }
+.mlist { margin: 0 0 12px; padding-left: 20px; color: var(--t2); }
+.minstalls { display: grid; gap: 10px; margin: 8px 0 0; }
+.minstall .sline { margin: 0; color: var(--t2); font-size: var(--fs-body); }
+.minstall .bar { max-width: none; height: 6px; margin-top: 6px; }
+.minstall.failed .sline { color: var(--t1); font-weight: 600; }
+@media (max-width: 700px) {
+  .srow { grid-template-columns: minmax(0, 1fr) auto; }
+  .srow .sact { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; padding-left: 20px; }
+  .srow .smenu { grid-column: 2; grid-row: 1; }
+  .srow.nodot .sact { padding-left: 0; }
+  .srow .sact .rowlink { width: auto; justify-content: flex-start; }
+}
+`;
+
+/** The Privacy editor (pages/privacy.ts), after the ChatGPT privacy screen. */
+export const DASHBOARD_PRIVACY_CSS = `
+.privacy { max-width: 760px; }
+.ptitle { font-size: var(--fs-title); font-weight: 650; margin: 8px 0 6px; color: var(--t1); }
+.pintro { color: var(--t2); margin: 0 0 18px; max-width: 72ch; }
+.pnote { color: var(--t2); margin: 0 0 12px; }
+.plabel { display: block; font-weight: 600; font-size: var(--fs-body); color: var(--t1); margin: 0 0 6px; }
+.ptext { display: block; width: 100%; min-height: 120px; resize: vertical; background: var(--bg); border: 1px solid var(--field); border-radius: 8px; color: var(--t1); font: inherit; font-size: var(--fs-row); padding: 10px 12px; }
+.ptext:focus-visible, .ptextline:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.privacy .sect { margin-top: 24px; }
+.prule.removed .sline { text-decoration: line-through; color: var(--t3); }
+.pempty { margin: 8px 0 0; }
+.padd { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
+.ppanel { margin: 12px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.ppanel .srows { margin: 8px 0; }
+.ppanel .ppath { margin: 0 0 8px; color: var(--t2); }
+.ppanel .ppath:empty { display: none; }
+.psources { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
+.psources:empty { display: none; }
+.psources .btn[aria-pressed="true"] { background: var(--selected); border-color: var(--link-line); color: var(--t1); }
+.prow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ptextline { flex: 1 1 240px; width: auto; }
+.pfooter { margin: 24px 0 0; padding: 16px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 12px; }
+.pfooter p { margin: 0; color: var(--t1); }
+.pbuttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pbuttons a.btn { text-decoration: none; }
 `;

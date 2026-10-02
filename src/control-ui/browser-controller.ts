@@ -8,6 +8,7 @@ import type {
   OlympusFolderScopeSourceId,
   OlympusMailScopeDraft,
   OlympusSourceDispositionState,
+  OlympusPrivacyRule,
 } from '../control-ui-contract.ts';
 import type { DASHBOARD_PICKER_COPY } from '../workers/dashboard/vocabulary.ts';
 
@@ -111,8 +112,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function applyWriteCapability(): void {
     root.querySelectorAll<HTMLFormElement>(
-      'form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind],'
-        + 'form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind]',
+      'form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind],form[data-model-retry],'
+        + 'form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind],form[data-privacy-form]',
     ).forEach((form) => {
       // A form whose request is still outstanding keeps its submit controls
       // disabled, so a second click cannot issue a second transport call,
@@ -170,6 +171,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       case 'cancel_oauth': return 'Cancelling…';
       case 'sync_now': return 'Starting sync…';
       case 'set_embedding_priority': return 'Saving…';
+      case 'retry_model': return 'Starting the download again…';
       default: return 'Working…';
     }
   }
@@ -188,6 +190,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       case 'set_embedding_priority': return 'Saved.';
       case 'disconnect': return 'Disconnected. This card updates when Olympus confirms it.';
       case 'unpair': return 'Unpaired on this computer.';
+      case 'retry_model': return 'Downloading again. This row updates as it goes.';
       default: return 'Saved.';
     }
   }
@@ -344,6 +347,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     if (form.hasAttribute('data-embedding-kind')) {
       return { action: 'set_embedding_priority', on: body.on === 'true' };
+    }
+    if (form.hasAttribute('data-model-retry')) {
+      const model = form.dataset.modelRetry;
+      return model === 'embedding' || model === 'answers' ? { action: 'retry_model', model } : undefined;
     }
     if (form.hasAttribute('data-disconnect-kind')) {
       return {
@@ -701,6 +708,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const action = node.getAttribute('data-connect-kind')
       || node.getAttribute('data-sync-kind')
       || node.getAttribute('data-embedding-kind')
+      || node.getAttribute('data-model-retry')
       || node.getAttribute('data-disconnect-kind')
       || node.getAttribute('data-unpair-kind');
     if (action) return `${node.tagName}:${action}`;
@@ -776,6 +784,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (!force && query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')) return;
     // The owner is reading the agreement: a poll must not close it under them.
     if (!force && query('[data-remote-terms]:not([hidden])')) return;
+    // An edited privacy list, or a list the owner is picking from, is theirs
+    // until they save or leave.
+    if (!force && query('form[data-privacy-form][data-dirty="true"],[data-privacy-panel]:not([hidden])')) return;
     // A typed secret or folder query is the only copy of the user's work and
     // is never replaced by polling, however old the tab is.
     if (!force && hasDirtyInput()) return;
@@ -807,6 +818,479 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       : undefined;
   }
 
+  // ---- The Privacy editor (pages/privacy.ts) ------------------------------
+  // The page renders the saved description and rules; this edits the list in
+  // place and saves the whole of it through `save_privacy` (the same engine
+  // operation as ChatGPT's olympus_privacy_set). Names are only ever set as
+  // text, never as markup. An edited list holds the poll off until it is
+  // saved or discarded, like a typed field does.
+  type PrivacyRule = { kind: string; source_id: string; key?: string; value?: string; display?: string };
+  const PRIVACY_EMAIL = /^[^\s@<>"(),;:]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
+  const PRIVACY_DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+
+  function privacyCopy(form: HTMLFormElement): Record<string, string> {
+    try { return JSON.parse(form.dataset.copy || '{}') as Record<string, string>; } catch { return {}; }
+  }
+
+  function privacyFill(template: string, values: Record<string, string>): string {
+    let out = template || '';
+    for (const key of Object.keys(values)) out = out.split(`{${key}}`).join(values[key]!);
+    return out;
+  }
+
+  function privacyFolderSources(form: HTMLFormElement): Array<{ id: string; label: string }> {
+    try {
+      const list = JSON.parse(form.dataset.folderSources || '[]') as Array<{ id: string; label: string }>;
+      return Array.isArray(list) ? list.filter((entry) => entry && typeof entry.id === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function privacyRuleOf(row: Element): PrivacyRule | undefined {
+    try {
+      const rule = JSON.parse(row.getAttribute('data-privacy-rule') || '') as PrivacyRule;
+      return rule && typeof rule.kind === 'string' && typeof rule.source_id === 'string' ? rule : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** What makes two rules the same rule: the kind, the source and what is matched. */
+  function privacyIdentity(rule: PrivacyRule): string {
+    const matched = rule.kind === 'sender' ? (rule.value || '').toLowerCase() : rule.key || '';
+    return `${rule.kind}\u0000${rule.source_id}\u0000${matched}`;
+  }
+
+  function privacyKept(form: HTMLFormElement): PrivacyRule[] {
+    return Array.from(form.querySelectorAll('[data-privacy-rule]'))
+      .filter((row) => !row.hasAttribute('data-removed'))
+      .map(privacyRuleOf)
+      .filter((rule): rule is PrivacyRule => rule !== undefined);
+  }
+
+  function privacyWords(form: HTMLFormElement, rule: PrivacyRule): { name: string; kind: string } {
+    const copy = privacyCopy(form);
+    if (rule.kind === 'sender') return { name: rule.value || '', kind: copy.kindSender || '' };
+    if (rule.kind === 'label') return { name: rule.value || '', kind: copy.kindLabel || '' };
+    const source = privacyFolderSources(form).find((entry) => entry.id === rule.source_id);
+    return { name: rule.display || rule.key || '', kind: privacyFill(copy.kindFolder || '', { source: source ? source.label : rule.source_id }) };
+  }
+
+  function setPrivacyDirty(form: HTMLFormElement): void {
+    form.dataset.dirty = 'true';
+    const empty = form.querySelector<HTMLElement>('[data-privacy-empty]');
+    if (empty) empty.hidden = privacyKept(form).length > 0;
+  }
+
+  function privacyRow(form: HTMLFormElement, rule: PrivacyRule): HTMLElement {
+    const words = privacyWords(form, rule);
+    const copy = privacyCopy(form);
+    const row = document.createElement('div');
+    row.className = 'srow nodot prule';
+    row.setAttribute('data-privacy-rule', JSON.stringify(rule));
+    const main = document.createElement('div');
+    main.className = 'smain';
+    const name = document.createElement('p');
+    name.className = 'sline strong';
+    name.textContent = words.name;
+    const kind = document.createElement('p');
+    kind.className = 'sline';
+    kind.textContent = words.kind;
+    main.append(name, kind);
+    const actions = document.createElement('div');
+    actions.className = 'sact';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn';
+    remove.setAttribute('data-privacy-remove', '');
+    remove.setAttribute('aria-label', privacyFill(copy.removeFor || '', { name: words.name }));
+    remove.textContent = copy.remove || 'Remove';
+    actions.append(remove);
+    row.append(main, actions);
+    return row;
+  }
+
+  /** Adds a rule unless it is already on the list; false when it was. */
+  function addPrivacyRule(form: HTMLFormElement, rule: PrivacyRule): boolean {
+    const identity = privacyIdentity(rule);
+    const rows = Array.from(form.querySelectorAll('[data-privacy-rule]'));
+    const existing = rows.find((row) => {
+      const current = privacyRuleOf(row);
+      return current !== undefined && privacyIdentity(current) === identity;
+    });
+    if (existing) {
+      if (!existing.hasAttribute('data-removed')) return false;
+      togglePrivacyRemoved(form, existing as HTMLElement);
+      return true;
+    }
+    form.querySelector('[data-privacy-rules]')?.append(privacyRow(form, rule));
+    setPrivacyDirty(form);
+    return true;
+  }
+
+  function togglePrivacyRemoved(form: HTMLFormElement, row: HTMLElement): void {
+    const copy = privacyCopy(form);
+    const rule = privacyRuleOf(row);
+    const name = rule ? privacyWords(form, rule).name : '';
+    const button = row.querySelector<HTMLButtonElement>('[data-privacy-remove]');
+    const removed = !row.hasAttribute('data-removed');
+    row.toggleAttribute('data-removed', removed);
+    row.classList.toggle('removed', removed);
+    if (button) {
+      button.textContent = removed ? copy.undo || 'Undo' : copy.remove || 'Remove';
+      button.setAttribute('aria-label', removed ? `${copy.undo || 'Undo'}: ${name}` : privacyFill(copy.removeFor || '', { name }));
+    }
+    setPrivacyDirty(form);
+    say(form, removed ? privacyFill(copy.removed || '', { name }) : '');
+  }
+
+  function privacyPanel(form: HTMLFormElement, kind: string): HTMLElement | null {
+    return form.querySelector<HTMLElement>(`[data-privacy-panel="${kind}"]`);
+  }
+
+  function panelSay(panel: HTMLElement, message: string): void {
+    const slot = panel.querySelector('[data-privacy-panel-message]');
+    if (slot) slot.textContent = message;
+  }
+
+  function openPrivacyPanel(form: HTMLFormElement, kind: string): void {
+    form.querySelectorAll<HTMLElement>('[data-privacy-panel]').forEach((panel) => {
+      panel.hidden = panel.dataset.privacyPanel !== kind;
+    });
+    const panel = privacyPanel(form, kind);
+    if (!panel) return;
+    if (kind === 'sender') {
+      panel.querySelector<HTMLInputElement>('[data-privacy-sender]')?.focus();
+      return;
+    }
+    if (kind === 'label' && panel.dataset.loaded !== 'true') void loadPrivacyLabels(form, panel);
+    if (kind === 'folder') {
+      const sources = privacyFolderSources(form);
+      const holder = panel.querySelector<HTMLElement>('[data-privacy-folder-sources]');
+      if (holder && holder.childElementCount === 0 && sources.length > 1) {
+        for (const source of sources) {
+          const choose = document.createElement('button');
+          choose.type = 'button';
+          choose.className = 'btn';
+          choose.setAttribute('data-privacy-folder-source', source.id);
+          choose.textContent = source.label;
+          holder.append(choose);
+        }
+      }
+      if (!panel.dataset.source && sources[0]) void loadPrivacyFolders(form, panel, sources[0].id, []);
+    }
+    if (!panel.hasAttribute('tabindex')) panel.setAttribute('tabindex', '-1');
+    panel.focus();
+  }
+
+  function closePrivacyPanel(panel: HTMLElement): void {
+    panel.hidden = true;
+    panelSay(panel, '');
+    const form = panel.closest<HTMLFormElement>('form[data-privacy-form]');
+    const opener = form?.querySelector<HTMLElement>(`[data-privacy-add="${panel.dataset.privacyPanel}"]`);
+    opener?.focus();
+  }
+
+  /** One line in a picking list: the name, and Make private (or Already private). */
+  function privacyPickRow(form: HTMLFormElement, label: string, rule: PrivacyRule, open?: { key: string; name: string }): HTMLElement {
+    const copy = privacyCopy(form);
+    const row = document.createElement('div');
+    row.className = 'srow nodot';
+    const main = document.createElement('div');
+    main.className = 'smain';
+    const name = document.createElement('p');
+    name.className = 'sline strong';
+    name.textContent = label;
+    main.append(name);
+    const actions = document.createElement('div');
+    actions.className = 'sact';
+    if (open) {
+      const inside = document.createElement('button');
+      inside.type = 'button';
+      inside.className = 'btn';
+      inside.setAttribute('data-privacy-folder-open', JSON.stringify(open));
+      inside.textContent = copy.folderOpen || 'Open';
+      actions.append(inside);
+    }
+    const already = privacyKept(form).some((current) => privacyIdentity(current) === privacyIdentity(rule));
+    const make = document.createElement('button');
+    make.type = 'button';
+    make.className = 'btn';
+    make.setAttribute('data-privacy-make-private', JSON.stringify(rule));
+    make.textContent = already ? copy.alreadyPrivate || 'Already private' : copy.makePrivate || 'Make private';
+    make.disabled = already;
+    actions.append(make);
+    row.append(main, actions);
+    return row;
+  }
+
+  async function loadPrivacyLabels(form: HTMLFormElement, panel: HTMLElement): Promise<void> {
+    const copy = privacyCopy(form);
+    const list = panel.querySelector<HTMLElement>('[data-privacy-list]');
+    if (!list || panel.dataset.loading === 'true') return;
+    panel.dataset.loading = 'true';
+    panelSay(panel, copy.loading || '');
+    let draft: unknown;
+    try { draft = JSON.parse(form.dataset.mailDraft || 'null'); } catch { draft = null; }
+    try {
+      const result = await options.transport.control({
+        action: 'browse_mail_scope', source_id: 'gmail.email', draft: draft as OlympusMailScopeDraft,
+      });
+      if (disposed || !root.contains(form)) return;
+      const summary = result.body.summary && typeof result.body.summary === 'object'
+        ? result.body.summary as Record<string, unknown>
+        : undefined;
+      const labels = summary && Array.isArray(summary.labels) ? summary.labels as Array<Record<string, unknown>> : undefined;
+      if (result.status < 200 || result.status >= 300 || !labels) {
+        panelSay(panel, copy.loadFailed || '');
+        return;
+      }
+      list.replaceChildren();
+      const own = labels.filter((label) => typeof label.id === 'string' && typeof label.name === 'string' && label.system !== true);
+      for (const label of own) {
+        list.append(privacyPickRow(form, String(label.name), {
+          kind: 'label', source_id: 'gmail.email', key: String(label.id), value: String(label.name),
+        }));
+      }
+      panel.dataset.loaded = 'true';
+      panelSay(panel, own.length === 0 ? copy.noLabels || '' : '');
+    } catch {
+      if (!disposed) panelSay(panel, copy.loadFailed || '');
+    } finally {
+      delete panel.dataset.loading;
+    }
+  }
+
+  async function loadPrivacyFolders(
+    form: HTMLFormElement,
+    panel: HTMLElement,
+    sourceId: string,
+    path: Array<{ key: string; name: string }>,
+    cursor?: string,
+  ): Promise<void> {
+    const copy = privacyCopy(form);
+    const list = panel.querySelector<HTMLElement>('[data-privacy-list]');
+    if (!list || panel.dataset.loading === 'true') return;
+    panel.dataset.loading = 'true';
+    panelSay(panel, copy.loading || '');
+    const parent = path.length > 0 ? path[path.length - 1]!.key : undefined;
+    try {
+      const result = await options.transport.control({
+        action: 'browse_folder_scope',
+        source_id: sourceId as OlympusFolderScopeSourceId,
+        ...(parent ? { parent_key: parent } : {}),
+        ...(cursor ? { cursor } : {}),
+      });
+      if (disposed || !root.contains(form)) return;
+      const page = result.body.scope_browser as OlympusFolderScopeBrowseResult | undefined;
+      if (result.status < 200 || result.status >= 300 || !page || !Array.isArray(page.nodes)) {
+        panelSay(panel, copy.loadFailed || '');
+        return;
+      }
+      panel.dataset.source = sourceId;
+      panel.dataset.path = JSON.stringify(path);
+      panel.querySelectorAll<HTMLElement>('[data-privacy-folder-source]').forEach((choice) => {
+        choice.setAttribute('aria-pressed', choice.dataset.privacyFolderSource === sourceId ? 'true' : 'false');
+      });
+      if (!cursor) list.replaceChildren();
+      list.querySelector('[data-privacy-folder-more]')?.remove();
+      const where = panel.querySelector<HTMLElement>('[data-privacy-folder-path]');
+      if (where) {
+        where.replaceChildren();
+        if (path.length > 0) {
+          const up = document.createElement('button');
+          up.type = 'button';
+          up.className = 'btn';
+          up.setAttribute('data-privacy-folder-up', '');
+          up.textContent = copy.folderUp || 'Back';
+          const name = document.createElement('span');
+          name.textContent = ` ${path.map((step) => step.name).join(' / ')}`;
+          where.append(up, name);
+        }
+      }
+      for (const node of page.nodes) {
+        if (typeof node.key !== 'string' || typeof node.name !== 'string' || node.selectable === false) continue;
+        list.append(privacyPickRow(
+          form,
+          node.name,
+          { kind: 'folder', source_id: sourceId, key: node.key, display: node.name },
+          node.has_children ? { key: node.key, name: node.name } : undefined,
+        ));
+      }
+      if (page.next_cursor) {
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.className = 'btn';
+        more.setAttribute('data-privacy-folder-more', page.next_cursor);
+        more.textContent = copy.folderMore || 'Load more folders';
+        list.append(more);
+      }
+      panelSay(panel, list.querySelector('[data-privacy-make-private]') ? '' : copy.folderEmpty || '');
+    } catch {
+      if (!disposed) panelSay(panel, copy.loadFailed || '');
+    } finally {
+      delete panel.dataset.loading;
+    }
+  }
+
+  function privacyPath(panel: HTMLElement): Array<{ key: string; name: string }> {
+    try {
+      const path = JSON.parse(panel.dataset.path || '[]') as Array<{ key: string; name: string }>;
+      return Array.isArray(path) ? path : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function addPrivacySender(form: HTMLFormElement): void {
+    const copy = privacyCopy(form);
+    const panel = privacyPanel(form, 'sender');
+    const field = panel?.querySelector<HTMLInputElement>('[data-privacy-sender]');
+    if (!panel || !field) return;
+    const value = field.value.trim().toLowerCase();
+    if (!PRIVACY_EMAIL.test(value) && !PRIVACY_DOMAIN.test(value)) {
+      panelSay(panel, copy.senderInvalid || '');
+      field.focus();
+      return;
+    }
+    if (!addPrivacyRule(form, { kind: 'sender', source_id: 'gmail.email', value })) {
+      panelSay(panel, copy.senderDuplicate || '');
+      return;
+    }
+    field.value = '';
+    panelSay(panel, '');
+    field.focus();
+  }
+
+  async function savePrivacy(form: HTMLFormElement): Promise<void> {
+    const copy = privacyCopy(form);
+    if (!canWrite && !csrfToken) {
+      say(form, 'Your OpenClaw connection has read-only access.');
+      return;
+    }
+    if (pendingForms.has(form)) return;
+    const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+    const description = field ? field.value : undefined;
+    const rules = privacyKept(form);
+    setFormPending(form, true, copy.saving || 'Saving…');
+    let result: OlympusDashboardControlResult;
+    try {
+      result = await options.transport.control({
+        action: 'save_privacy',
+        ...(description !== undefined ? { description } : {}),
+        rules: rules as OlympusPrivacyRule[],
+      });
+    } catch {
+      say(form, copy.saveFailed || 'Could not reach Olympus.');
+      return;
+    } finally {
+      setFormPending(form, false);
+    }
+    if (result.status === 401 || result.status === 403) {
+      if (options.authority === 'worker-session') {
+        csrfToken = '';
+        say(form, 'The control session expired — unlock controls in Setup, then try again.');
+      } else {
+        canWrite = false;
+        applyWriteCapability();
+        say(form, 'Your write access expired. Reconnect with operator.write access, then try again.');
+      }
+      return;
+    }
+    if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+      say(form, result.status === 400 ? errorMessage(result) : copy.saveFailed || errorMessage(result));
+      return;
+    }
+    // Saved: the page is read again from what the engine now holds.
+    delete form.dataset.dirty;
+    if (field) field.defaultValue = field.value;
+    say(form, copy.saved || 'Saved.');
+    await refreshNow(true);
+    const next = query<HTMLFormElement>('form[data-privacy-form]');
+    if (next) say(next, copy.saved || 'Saved.');
+  }
+
+  /** The editor's clicks; true when the click was the editor's. */
+  function onPrivacyClick(target: Element, event: Event): boolean {
+    const form = target.closest<HTMLFormElement>('form[data-privacy-form]');
+    if (!form) return false;
+    const remove = target.closest<HTMLElement>('[data-privacy-remove]');
+    if (remove) {
+      const row = remove.closest<HTMLElement>('[data-privacy-rule]');
+      if (row) togglePrivacyRemoved(form, row);
+      return true;
+    }
+    const add = target.closest<HTMLElement>('[data-privacy-add]');
+    if (add) {
+      openPrivacyPanel(form, add.dataset.privacyAdd || '');
+      return true;
+    }
+    const close = target.closest<HTMLElement>('[data-privacy-panel-close]');
+    if (close) {
+      const panel = close.closest<HTMLElement>('[data-privacy-panel]');
+      if (panel) closePrivacyPanel(panel);
+      return true;
+    }
+    if (target.closest('[data-privacy-sender-add]')) {
+      addPrivacySender(form);
+      return true;
+    }
+    const make = target.closest<HTMLButtonElement>('[data-privacy-make-private]');
+    if (make) {
+      try {
+        const rule = JSON.parse(make.dataset.privacyMakePrivate || '') as PrivacyRule;
+        if (addPrivacyRule(form, rule)) {
+          make.textContent = privacyCopy(form).alreadyPrivate || 'Already private';
+          make.disabled = true;
+        }
+      } catch {
+        // A malformed button adds nothing.
+      }
+      return true;
+    }
+    const panel = target.closest<HTMLElement>('[data-privacy-panel="folder"]');
+    if (panel) {
+      const source = target.closest<HTMLElement>('[data-privacy-folder-source]');
+      if (source) {
+        void loadPrivacyFolders(form, panel, source.dataset.privacyFolderSource || '', []);
+        return true;
+      }
+      const open = target.closest<HTMLElement>('[data-privacy-folder-open]');
+      if (open && panel.dataset.source) {
+        try {
+          const step = JSON.parse(open.dataset.privacyFolderOpen || '') as { key: string; name: string };
+          void loadPrivacyFolders(form, panel, panel.dataset.source, [...privacyPath(panel), step]);
+        } catch {
+          // A malformed button opens nothing.
+        }
+        return true;
+      }
+      if (target.closest('[data-privacy-folder-up]') && panel.dataset.source) {
+        void loadPrivacyFolders(form, panel, panel.dataset.source, privacyPath(panel).slice(0, -1));
+        return true;
+      }
+      const more = target.closest<HTMLElement>('[data-privacy-folder-more]');
+      if (more && panel.dataset.source) {
+        void loadPrivacyFolders(form, panel, panel.dataset.source, privacyPath(panel), more.dataset.privacyFolderMore || undefined);
+        return true;
+      }
+    }
+    const cancel = target.closest<HTMLAnchorElement>('[data-privacy-cancel]');
+    if (cancel) {
+      const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+      const edited = form.dataset.dirty === 'true' || (field !== null && field.value !== field.defaultValue);
+      if (edited && !window.confirm(privacyCopy(form).discard || 'Discard your changes?')) {
+        event.preventDefault();
+        return true;
+      }
+      delete form.dataset.dirty;
+      if (field) field.value = field.defaultValue;
+      return false;
+    }
+    return false;
+  }
+
   function onSubmit(event: Event): void {
     const form = event.target instanceof HTMLFormElement ? event.target : null;
     if (!form || !root.contains(form)) return;
@@ -821,8 +1305,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       void submitAgentControl(form);
       return;
     }
+    if (form.hasAttribute('data-privacy-form')) {
+      event.preventDefault();
+      void savePrivacy(form);
+      return;
+    }
     if (!form.matches(
-      '[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind],[data-model-check]',
+      '[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-model-retry],[data-disconnect-kind],[data-unpair-kind],[data-model-check]',
     )) return;
     event.preventDefault();
     // Every control form records what it submitted: the answer may only
@@ -875,6 +1364,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }
       return;
     }
+    if (onPrivacyClick(target, event)) return;
     if (target.closest('[data-remote-terms-cancel]')) {
       hideRemoteTerms();
       return;

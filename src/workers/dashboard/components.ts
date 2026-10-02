@@ -21,7 +21,7 @@ import type {
 } from '../source-dashboard.ts';
 import type { EmbeddingRuntimeFacts } from './embedding-runtime.ts';
 import { dashboardSourceProgress, type DashboardPhaseId } from './phases.ts';
-import { DASHBOARD_STATUS_COLORS, DASHBOARD_THEME_CSS, DASHBOARD_THEME_TOKENS } from './theme.ts';
+import { DASHBOARD_STATUS_COLORS, DASHBOARD_THEME_CSS } from './theme.ts';
 import { dashboardActionLabel, type DashboardStatus } from './vocabulary.ts';
 
 export function escapeHtml(value: string): string {
@@ -40,12 +40,15 @@ export function escapeScriptJson(value: string): string {
 /** Circumference of the wedge circle: 2π × r, r = 2. */
 const DONUT_CIRCUMFERENCE = 12.566;
 
-/** Glyph colors are literal hex, so anything else is a style injection. */
-const HEX_COLOR = /^#[0-9A-Fa-f]{3,8}$/;
+/**
+ * Glyph colors are a literal hex or one theme variable (so a glyph follows the
+ * light or dark theme); anything else is a style injection.
+ */
+const SAFE_COLOR = /^(?:#[0-9A-Fa-f]{3,8}|var\(--[a-z0-9-]+\))$/;
 
 function safeColor(value: string | undefined, fallback: string): string {
   const trimmed = (value ?? '').trim();
-  return HEX_COLOR.test(trimmed) ? trimmed : fallback;
+  return SAFE_COLOR.test(trimmed) ? trimmed : fallback;
 }
 
 function clampFraction(value: number): number {
@@ -229,8 +232,8 @@ export function donutGlyph(fraction: number, color?: string): string {
   const stroke = safeColor(color, DASHBOARD_STATUS_COLORS.Working);
   const dash = (clampFraction(fraction) * DONUT_CIRCUMFERENCE).toFixed(2);
   return `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">`
-    + `<circle cx="7" cy="7" r="6" stroke="${stroke}" stroke-width="1.5"/>`
-    + `<circle cx="7" cy="7" r="2" stroke="${stroke}" stroke-width="4" stroke-dasharray="${dash} ${DONUT_CIRCUMFERENCE}" transform="rotate(-90 7 7)"/>`
+    + `<circle cx="7" cy="7" r="6" style="stroke:${stroke}" stroke-width="1.5"/>`
+    + `<circle cx="7" cy="7" r="2" style="stroke:${stroke}" stroke-width="4" stroke-dasharray="${dash} ${DONUT_CIRCUMFERENCE}" transform="rotate(-90 7 7)"/>`
     + `</svg>`;
 }
 
@@ -238,7 +241,7 @@ export function donutGlyph(fraction: number, color?: string): string {
 function ringGlyph(color: string): string {
   const stroke = safeColor(color, DASHBOARD_STATUS_COLORS.Working);
   return `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">`
-    + `<circle cx="7" cy="7" r="6" stroke="${stroke}" stroke-width="1.5"/>`
+    + `<circle cx="7" cy="7" r="6" style="stroke:${stroke}" stroke-width="1.5"/>`
     + `</svg>`;
 }
 
@@ -246,14 +249,14 @@ function ringGlyph(color: string): string {
 export function waitingGlyph(color?: string): string {
   const stroke = safeColor(color, DASHBOARD_STATUS_COLORS.Waiting);
   return `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">`
-    + `<circle cx="7" cy="7" r="6" stroke="${stroke}" stroke-width="1.5"/>`
-    + `<circle cx="7" cy="7" r="2.6" stroke="${stroke}" stroke-width="1.5"/>`
+    + `<circle cx="7" cy="7" r="6" style="stroke:${stroke}" stroke-width="1.5"/>`
+    + `<circle cx="7" cy="7" r="2.6" style="stroke:${stroke}" stroke-width="1.5"/>`
     + `</svg>`;
 }
 
 /** A plain filled dot, used by Fresh and by the not-connected rows. */
 export function dotGlyph(color: string): string {
-  return `<span class="dot" style="background:${safeColor(color, DASHBOARD_THEME_TOKENS.off)}"></span>`;
+  return `<span class="dot" style="background:${safeColor(color, DASHBOARD_STATUS_COLORS.Waiting)}"></span>`;
 }
 
 /** The right glyph for a status word; fraction is used only by Working. */
@@ -264,6 +267,8 @@ export function statusGlyph(status: DashboardStatus, fraction?: number): string 
       : donutGlyph(fraction, DASHBOARD_STATUS_COLORS.Working);
   }
   if (status === 'Waiting') return waitingGlyph(DASHBOARD_STATUS_COLORS.Waiting);
+  // Off claims nothing: a hollow grey ring (owner rule, 2026-10-02).
+  if (status === 'Off') return '<span class="dot hollow"></span>';
   return dotGlyph(DASHBOARD_STATUS_COLORS[status]);
 }
 
@@ -306,7 +311,7 @@ export interface DashboardActionInput {
    * 'link' renders a plain link, while 'control_link' mints the same bounded
    * control session as a form before navigating to a protected dashboard page.
    */
-  kind: 'oauth' | 'oauth_cancel' | 'api_key' | 'sync_now' | 'disconnect' | 'unpair' | 'link' | 'control_link' | 'none';
+  kind: 'oauth' | 'oauth_cancel' | 'api_key' | 'sync_now' | 'model_retry' | 'disconnect' | 'unpair' | 'link' | 'control_link' | 'none';
   /** The `source` value the control route expects. */
   source?: string;
   primary?: boolean;
@@ -384,6 +389,10 @@ export function actionButton(input: DashboardActionInput | undefined): string {
   const message = `<span class="actmsg" data-action-message role="status"></span>`;
   if (action.kind === 'sync_now') {
     return `<form class="rowform" data-sync-kind="sync_now">${source}${button}${message}</form>`;
+  }
+  // A built-in model's failed install, started again; `source` names the model.
+  if (action.kind === 'model_retry') {
+    return `<form class="rowform" data-model-retry="${escapeHtml(action.source ?? '')}">${button}${message}</form>`;
   }
   // Disconnect and Unpair are the same bounded shape — confirm, acknowledge,
   // one source_id — over two different routes, because they remove two
@@ -598,12 +607,14 @@ export function setupRow(input: DashboardSetupRowInput): string {
   // The column closes up only when NOTHING is in it: a row whose whole blurb is
   // the key-location link still needs its column.
   return `<div class="${blurbBody === '' ? 'setrow noblurb' : 'setrow'}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ''}>`
-    + `${dotGlyph(DASHBOARD_STATUS_COLORS.Off)}`
+    + `${statusGlyph('Off')}`
     + (href ? `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>` : `<span class="name">${escapeHtml(input.label)}</span>`)
     + `${blurbSpan}`
-    // The row's one main action is the filled button, on every row alike, so
-    // Connect never reads filled on one row and outlined on the next.
-    + `${actionButton({ ...input.action, primary: input.action.primary ?? true })}`
+    // Every source row's button is outlined, on every row alike, so Connect
+    // never reads filled on one row and outlined on the next; the accent fill
+    // belongs to the page's one primary action (owner rule, 2026-10-02). A
+    // row that IS a section's one main act (Agents' Connect an agent) says so.
+    + `${actionButton({ ...input.action, primary: input.action.primary ?? false })}`
     + `</div>`;
 }
 
@@ -771,7 +782,7 @@ export interface DashboardMiniBarInput {
 /** The thin grey lane bar: progress, stated quietly, never in the run color. */
 export function miniBar(input: DashboardMiniBarInput): string {
   const percent = clampPercent(input.percent);
-  const bar = `<span class="minibar" role="progressbar" aria-label="${escapeHtml(input.label)}" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100">`
+  const bar = `<span class="minibar${percent >= 100 ? ' done' : ''}" role="progressbar" aria-label="${escapeHtml(input.label)}" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100">`
     + `<i style="width:${percent}%"></i>`
     + `</span>`;
   return input.showPercent === true
@@ -785,7 +796,7 @@ export type DashboardLaneTone = 'good' | 'bad' | 'run' | 'idle';
 const LANE_TONE_COLORS: Readonly<Record<DashboardLaneTone, string>> = {
   good: 'var(--good)',
   bad: 'var(--bad)',
-  run: 'var(--run)',
+  run: 'var(--run-fill)',
   idle: 'var(--line)',
 };
 
@@ -1336,6 +1347,10 @@ export function standaloneDashboardControllerScript(
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
         if (action === 'sync_now') return ['/dashboard/sync-now', withoutAction(params)];
         if (action === 'set_embedding_priority') return ['/dashboard/embedding-priority', withoutAction(params)];
+        if (action === 'save_privacy') return ['/dashboard/privacy', withoutAction(params)];
+        if (action === 'retry_model') return ['/dashboard/models/retry', withoutAction(params)];
+        // The Privacy editor's folder and label lists: the pickers' own read-only browses.
+        if (action === 'browse_folder_scope' || action === 'browse_mail_scope') return ['/dashboard/dispositions', params];
         if (action === 'disconnect') return ['/dashboard/disconnect', withoutAction(params)];
         if (action === 'unpair') return ['/dashboard/unpair', withoutAction(params)];
         if (action === 'mint_agent_pairing_code') return ['/dashboard/agents/pairing-code', {}];

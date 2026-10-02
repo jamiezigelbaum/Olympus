@@ -7,7 +7,7 @@ const LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-e
 const CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>';
 const CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>';
 
-export function renderModelSetup(view: ModelSetupView | undefined): string {
+export function renderModelSetup(view: ModelSetupView | undefined, options: { heading?: boolean } = {}): string {
   if (!view) return '';
   // The local-models sheet opens in place: directly under whichever control
   // opens it, and only where one does.
@@ -51,9 +51,9 @@ export function renderModelSetup(view: ModelSetupView | undefined): string {
         + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`
         + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}`
         + '</div>' + localModelsSheet();
-  return '<section aria-label="Models"><div class="sect">Models</div>'
+  return `<section aria-label="Models">${options.heading === false ? '' : '<div class="sect">Models</div>'}`
     + (view.ready
-      ? '<p class="quiet" role="status">Models are ready. You can connect sources below.</p>'
+      ? `<p class="quiet" role="status">${options.heading === false ? 'Models are ready.' : 'Models are ready. You can connect sources below.'}</p>`
       : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>')
     + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : '')
     + `<div class="modelcards">${cards}</div>`

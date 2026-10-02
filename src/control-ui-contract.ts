@@ -15,6 +15,7 @@ export const OLYMPUS_DASHBOARD_VIEWS = [
   'setup',
   'background',
   'sensitivity',
+  'privacy',
   'source',
   'dispositions',
 ] as const;
@@ -211,6 +212,21 @@ export type OlympusDashboardControlParams =
     }
   | {
       /**
+       * Save what is private for the owner: the same operation as ChatGPT's
+       * olympus_privacy_set. Each field given replaces the saved one; `rules`
+       * is the whole list the editor shows. Answers with the settings now.
+       */
+      action: 'save_privacy';
+      description?: string;
+      rules?: OlympusPrivacyRule[];
+    }
+  | {
+      /** Start a built-in model's failed install again (ChatGPT's olympus_model_retry). */
+      action: 'retry_model';
+      model: 'embedding' | 'answers';
+    }
+  | {
+      /**
        * Turn remote access on or off. Turning it on the first time answers
        * 409 `terms_required` with the CA's agreement; the owner's explicit
        * acceptance is sent back naming that agreement's URL (null when the CA
@@ -220,6 +236,23 @@ export type OlympusDashboardControlParams =
       enabled: boolean;
       accept_terms?: { url: string | null };
     };
+
+/** Which kind of place an always-private rule names. */
+export type OlympusPrivacyRuleKind = 'folder' | 'label' | 'sender';
+
+/**
+ * One always-private rule, the same shape the ChatGPT privacy tools take
+ * (workers/chatgpt/dashboard-contract.ts PrivacyRuleView): a folder by its
+ * picker key (and its name as `display`), a Gmail label by id (`key`) and name
+ * (`value`), a sender by address or `@domain` (`value`).
+ */
+export interface OlympusPrivacyRule {
+  kind: OlympusPrivacyRuleKind;
+  source_id: 'dropbox.files' | 'google_drive.docs' | 'gmail.email';
+  key?: string;
+  value?: string;
+  display?: string;
+}
 
 export interface OlympusDashboardControlResult {
   status: number;

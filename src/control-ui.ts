@@ -57,7 +57,7 @@ function routeFromProps(props: Readonly<Record<string, string>>): OlympusDashboa
   const view = props.view;
   if (view === 'dispositions') return { view, ...(props.source_id ? { source_id: props.source_id } : {}) };
   if (view === 'setup' || view === 'background'
-    || view === 'sensitivity') return { view };
+    || view === 'sensitivity' || view === 'privacy') return { view };
   if (view === 'source' && props.source_id) return { view, source_id: props.source_id };
   return { view: 'home' };
 }
@@ -76,6 +76,7 @@ function routeFromHref(href: string): OlympusDashboardReadParams | undefined {
   if (url.searchParams.has('setup')) return { view: 'setup' };
   if (url.searchParams.has('background')) return { view: 'background' };
   if (url.searchParams.has('sensitivity')) return { view: 'sensitivity' };
+  if (url.searchParams.has('privacy')) return { view: 'privacy' };
   return { view: 'home' };
 }
 
