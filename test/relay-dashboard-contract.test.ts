@@ -20,6 +20,7 @@ import {
   DASHBOARD_TOOL_NAME,
   type DashboardViewModelV1,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { DASHBOARD_RESOURCE_VERSIONED_URI } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
 
 // Compile-time: the relay's shape is assignable to the contract. A contract
@@ -31,7 +32,9 @@ describe('the relay dashboard copy follows the contract', () => {
     expect(RELAY_TOOL_NAME).toBe(DASHBOARD_TOOL_NAME);
     expect(RELAY_RESOURCE_URI).toBe(DASHBOARD_RESOURCE_URI);
     expect(DASHBOARD_TOOL.name).toBe(DASHBOARD_TOOL_NAME);
-    expect(DASHBOARD_TOOL._meta?.['openai/outputTemplate']).toBe(DASHBOARD_RESOURCE_URI);
+    // The relay advertises the engine's content-versioned URI (`<base>?v=<hash>`),
+    // so ChatGPT fetches the same page version from either.
+    expect(DASHBOARD_TOOL._meta?.['openai/outputTemplate']).toBe(DASHBOARD_RESOURCE_VERSIONED_URI);
   });
 
   test('both relay states produce contract values with exactly the contract keys', () => {
