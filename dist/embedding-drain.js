@@ -10762,6 +10762,12 @@ function chunkWindowScore(text, termGroups) {
   }
   return { distinctGroups, occurrences };
 }
+function compactPassageWhitespace(text) {
+  return text.replace(/[^\S\n]+\n/g, `
+`).replace(/[^\S\n]{2,}/g, " ").replace(/\n{3,}/g, `
+
+`);
+}
 var CHUNK_WINDOW_PROSE_TERMS;
 var init_chunk_selection = __esm(() => {
   init_fts();
@@ -10772,6 +10778,7 @@ var init_chunk_selection = __esm(() => {
     "answers",
     "can",
     "could",
+    "did",
     "document",
     "documents",
     "does",
@@ -10783,6 +10790,7 @@ var init_chunk_selection = __esm(() => {
     "here",
     "how",
     "list",
+    "olympus",
     "please",
     "report",
     "reports",
@@ -10797,6 +10805,7 @@ var init_chunk_selection = __esm(() => {
     "there",
     "these",
     "this",
+    "use",
     "value",
     "values",
     "will",
@@ -11655,23 +11664,50 @@ function queryTermsForSpan(query) {
   }
   return [...seen];
 }
-function selectEvidencePassages(chunks, maxChars, focus) {
+function selectEvidencePassages(chunks, maxChars, focus, context = {}) {
   if (maxChars === undefined || maxChars <= 0)
     return budgetChunks(chunks, maxChars);
   const totalChars = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   if (totalChars <= maxChars || !focus)
     return budgetChunks(chunks, maxChars);
-  const termGroups = focus.query ? sourceIndexChunkQueryTerms(focus.query) : [];
-  const anchor = focus.anchorChunkIndex !== undefined && focus.anchorChunkIndex >= 0 && focus.anchorChunkIndex < chunks.length ? focus.anchorChunkIndex : undefined;
-  const scored = chunks.map((text, index) => ({ index, score: termGroups.length > 0 ? sourceIndexChunkTermScore(text, termGroups) : 0 })).filter((entry) => entry.score > 0 && entry.index !== anchor).sort((left, right) => right.score - left.score || left.index - right.index);
-  const picked = [
-    ...anchor !== undefined ? [anchor] : [],
-    ...scored.map((entry) => entry.index)
-  ].slice(0, MAX_PASSAGES_PER_CANDIDATE);
-  if (picked.length === 0)
-    return budgetChunks(chunks, maxChars);
-  const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
-  return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+  const termGroups = withoutNameTerms(focus.query ? sourceIndexChunkQueryTerms(focus.query) : [], context.title);
+  const lexical = chunks.map((text) => termGroups.length > 0 ? sourceIndexChunkTermScore(text, termGroups) : 0);
+  const relevance = (index) => context.relevance?.[index] ?? Number.NEGATIVE_INFINITY;
+  const anchorIndex = focus.anchorChunkIndex !== undefined && focus.anchorChunkIndex >= 0 && focus.anchorChunkIndex < chunks.length ? focus.anchorChunkIndex : undefined;
+  const anchor = anchorIndex !== undefined && (focus.anchorLane !== "keyword" || lexical[anchorIndex] > 0) ? anchorIndex : undefined;
+  if (lexical.some((score) => score > 0)) {
+    const scored = lexical.map((score, index) => ({ index, score })).filter((entry) => entry.score > 0 && entry.index !== anchor).sort((left, right) => right.score - left.score || relevance(right.index) - relevance(left.index) || left.index - right.index);
+    const picked = [
+      ...anchor !== undefined ? [anchor] : [],
+      ...scored.map((entry) => entry.index)
+    ].slice(0, MAX_PASSAGES_PER_CANDIDATE);
+    const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
+    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+  }
+  const ranked = chunks.map((_, index) => index).sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0) || relevance(right) - relevance(left) || left - right);
+  const kept = new Map;
+  let remaining = maxChars;
+  for (const index of ranked) {
+    if (remaining <= 0)
+      break;
+    const text = chunks[index];
+    const included = text.length > remaining ? text.slice(0, remaining) : text;
+    kept.set(index, included);
+    remaining -= included.length;
+  }
+  const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
+  return {
+    chunks: ordered.map(([, text]) => text),
+    truncated: ordered.length < chunks.length || ordered.some(([index, text]) => text.length < chunks[index].length)
+  };
+}
+function withoutNameTerms(termGroups, title) {
+  if (!title)
+    return termGroups;
+  const nameTokens = new Set(title.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []);
+  if (nameTokens.size === 0)
+    return termGroups;
+  return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
 }
 function budgetChunks(chunks, maxChars) {
   if (maxChars === undefined || maxChars <= 0)
@@ -13215,6 +13251,31 @@ var init_local_index = __esm(() => {
         metadataLayerContentUnread: pksFor(ledger.corpusCopyIdentities(this.corpusId, "metadata_layer_content_unread")),
         moving: ledger.corpusCopyCounts(this.corpusId).moving
       };
+    }
+    contentHeldPrivate(localItemId) {
+      if (this.trustDomain === "secure_local")
+        return false;
+      const row = this.db.query(`
+      SELECT provider, account_scope, provider_item_id, provider_conversation_id
+      FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
+    `).get(localItemId);
+      if (!row)
+        return false;
+      const identity = {
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      };
+      try {
+        const ledger = this.visibilityLedger();
+        if (!ledger || !ledger.corpusHasCopies(this.corpusId))
+          return false;
+        const copies = ledger.copiesForMany([identity]).get(tierLedgerIdentityKey(identity)) ?? [];
+        return copies.some((copy) => copy.state === "current" && copy.trustDomain === "secure_local" && (copy.layers === "content" || copy.layers === "both"));
+      } catch {
+        return false;
+      }
     }
     copyServable(identity) {
       return this.tierVisibleRows([identity], (entry) => entry, () => "metadata").length > 0 || this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
@@ -16819,7 +16880,7 @@ var init_local_index = __esm(() => {
     localContent(localItemId, maxChars, passageFocus, options = {}) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
-        provider_conversation_id,
+        provider_conversation_id, title,
         ${this.reactionsColumnPresent ? "reactions_json" : "NULL AS reactions_json"}
       FROM items WHERE local_item_id = ? AND tombstoned = 0
     `).get(localItemId);
@@ -16835,8 +16896,23 @@ var init_local_index = __esm(() => {
         return;
       }
       const servesContent = options.withoutContent !== true && this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
-      const chunkRows = servesContent ? this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk) : [];
-      const { chunks, truncated } = selectEvidencePassages(chunkRows.map((chunk) => chunk.bounded_text), maxChars, passageFocus);
+      const queryVector = passageFocus?.queryVector;
+      const vectorModelId = passageFocus?.queryVectorModelId;
+      const scoreByVector = queryVector !== undefined && queryVector.length > 0 && vectorModelId !== undefined;
+      const chunkRows = servesContent ? scoreByVector ? this.db.query(`
+          SELECT c.bounded_text, e.embedding
+          FROM chunks c
+          LEFT JOIN chunk_embeddings e
+            ON e.chunk_pk = c.chunk_pk AND e.model_id = ? AND e.content_hash = c.embedding_input_hash
+          WHERE c.item_pk = ? ORDER BY c.chunk_index
+        `).all(vectorModelId, row.item_pk) : this.db.query("SELECT bounded_text, NULL AS embedding FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk) : [];
+      const relevance = scoreByVector ? chunkRows.map((chunk) => {
+        if (chunk.embedding === null || chunk.embedding === undefined)
+          return;
+        const vector = decodeEmbedding(chunk.embedding);
+        return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
+      }) : undefined;
+      const { chunks, truncated } = selectEvidencePassages(chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)), maxChars, passageFocus, { title: row.title, ...relevance ? { relevance } : {} });
       const reactionLine = servesContent ? renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json)) : undefined;
       return {
         trustTier: trustTierFromRow(row.trust_tier),
