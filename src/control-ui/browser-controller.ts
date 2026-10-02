@@ -1146,10 +1146,12 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
 
   /** Mixed: the first shown choice below a folder that differs from its own, or ''. */
   function scopeMixed(draft: ScopeDraft, key: string): ScopeState | '' {
-    const own = shownScopeState(draft, key);
+    // Effective access, not the drawn state: a folder nothing reaches and a
+    // skipped folder inside it both let Olympus read nothing, so that is not Mixed.
+    const own = effectiveScopeState(draft, key);
     for (const other of draft.selections.keys()) {
       if (other === key || !(draft.ancestors.get(other) || []).includes(key)) continue;
-      const theirs = shownScopeState(draft, other);
+      const theirs = effectiveScopeState(draft, other);
       if (theirs !== own) return theirs;
     }
     return '';
@@ -1202,8 +1204,9 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
   }
 
   /**
-   * One pill of three segments: buttons with aria-pressed in a labelled
-   * radiogroup, one tab stop, arrow keys between segments (scopeKeydown).
+   * One pill of three segments: toggle buttons (aria-pressed) in a labelled
+   * group, since a pressed segment can be cleared. One tab stop; arrow keys,
+   * Home and End move focus between segments without choosing (scopeKeydown).
    * The explicit choice is filled; a choice that applies without being made
    * here is drawn weaker (outlined).
    */
@@ -1216,7 +1219,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     const node = draft.catalog.get(key);
     const capped = !account && !own && draft.selections.size >= MAX_SCOPE_RULES;
     const group = scopeEl('div', 'seg');
-    group.setAttribute('role', 'radiogroup');
+    group.setAttribute('role', 'group');
     group.setAttribute('aria-label', fillText(Q.choiceGroup, { name }));
     const buttons: HTMLButtonElement[] = [];
     for (const state of SCOPE_STATES) {
@@ -1434,8 +1437,18 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
       if (!allowed) view.querySelectorAll<HTMLButtonElement>('button:not([data-scope-up])').forEach((button) => { button.disabled = true; });
       draft.focus = undefined;
       if (keep) {
-        const target = Array.from(view.querySelectorAll<HTMLElement>('[data-scope-focus]')).find((node) => node.dataset.scopeFocus === keep);
-        if (target && !(target as HTMLButtonElement).disabled) target.focus();
+        const controls = Array.from(view.querySelectorAll<HTMLButtonElement>('button[data-scope-focus]'));
+        let target = controls.find((node) => node.dataset.scopeFocus === keep && !node.disabled);
+        // The control that had focus is gone or disabled (a cleared choice whose
+        // segment a stricter parent now blocks): stay on the same folder's
+        // control, on the choice it inherits, else on any control still enabled.
+        if (!target && !draft.busy) {
+          const key = keep.startsWith('seg:') ? keep.slice(4, keep.lastIndexOf(':')) : '';
+          const same = controls.filter((node) => !node.disabled && key !== '' && node.dataset.scopeKey === key);
+          target = same.find((node) => node.classList.contains('inherited')) || same.find((node) => node.classList.contains('on'))
+            || same[0] || controls.find((node) => !node.disabled);
+        }
+        target?.focus();
       }
     }
     scopeFooter(form, draft);
@@ -1551,7 +1564,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
       if (state && !draft.selections.has(key) && draft.selections.size >= MAX_SCOPE_RULES) return;
       if (state) draft.selections.set(key, state); else draft.selections.delete(key);
       draft.edited = true;
-      draft.focus = `seg:${key}:${state || draft.selections.get(key) || 'ingest'}`;
+      draft.focus = `seg:${key}:${state || scopeInherited(draft, key).state || 'ingest'}`;
     }
     renderScope(form, draft);
   }

@@ -1110,7 +1110,12 @@ describe('folder scope before ingestion', () => {
     expect(root.querySelector('select')).toBeNull();
     expect(root.querySelector('[data-scope-nodes] img')).toBeNull();
     expect(names(root)).toEqual(['Work <img src=x>']);
-    expect(root.querySelectorAll('li.seg-row .seg[role="radiogroup"]')).toHaveLength(1);
+    expect(root.querySelector('[role="radiogroup"], [role="radio"]')).toBeNull();
+    const group = root.querySelector<HTMLElement>('li.seg-row .seg')!;
+    expect(group.getAttribute('role')).toBe('group');
+    expect(group.getAttribute('aria-label')).toBe('Choice for Work <img src=x>');
+    expect(Array.from(group.querySelectorAll('button'), (button) => [button.type, button.getAttribute('aria-label'), button.getAttribute('aria-pressed'), button.tabIndex]))
+      .toEqual([['button', 'Full', 'false', 0], ['button', 'Names only', 'false', -1], ['button', 'Skip', 'false', -1]]);
     expect(root.querySelector<HTMLButtonElement>('[data-scope-start]')!.disabled).toBe(true);
     expect(root.querySelector('[data-scope-reason]')?.textContent).toBe('Choose at least one folder first.');
     const segment = root.querySelector<HTMLButtonElement>(seg('opaque-folder-A', 'metadata_only'))!; segment.focus();
@@ -1125,6 +1130,63 @@ describe('folder scope before ingestion', () => {
       whole_account: false, explicit_whole_account_confirmation: false,
     }]);
     expect(navigation).toEqual(['/dashboard?source=google_drive.docs']);
+    controller.dispose();
+  });
+
+  test('each control is a labelled group of toggle buttons: one tab stop, and arrows, Home and End move focus without choosing', async () => {
+    const { root } = scopeRoot();
+    const controller = mountDispositionsController({ root,
+      transport: { async read(params) { return page('parent_key' in params && params.parent_key ? 'opaque-folder-B' : 'opaque-folder-A'); }, async control() { return { status: 200, body: { ok: true } }; } },
+      navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
+      signal: new AbortController().signal, pollIntervalMs: 0,
+    });
+    await happyWindow.happyDOM.waitUntilComplete();
+    const key = (target: Element, name: string) => target.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
+    const focused = () => (document.activeElement as HTMLElement).dataset.scopeFocus;
+    const stops = (group: string) => Array.from(root.querySelectorAll<HTMLButtonElement>(`[data-scope-key="${group}"]`)).filter((button) => button.tabIndex === 0).map((button) => button.dataset.scopeState);
+    const full = root.querySelector<HTMLButtonElement>(seg('opaque-folder-A', 'ingest'))!; full.focus();
+    expect(stops('opaque-folder-A')).toEqual(['ingest']);
+    key(full, 'ArrowRight'); expect(focused()).toBe('seg:opaque-folder-A:metadata_only');
+    expect(stops('opaque-folder-A')).toEqual(['metadata_only']);
+    key(document.activeElement!, 'End'); expect(focused()).toBe('seg:opaque-folder-A:exclude');
+    key(document.activeElement!, 'ArrowRight'); expect(focused()).toBe('seg:opaque-folder-A:ingest');
+    key(document.activeElement!, 'ArrowLeft'); expect(focused()).toBe('seg:opaque-folder-A:exclude');
+    key(document.activeElement!, 'Home'); expect(focused()).toBe('seg:opaque-folder-A:ingest');
+    // Moving focus never chooses.
+    expect(pressed(root, 'opaque-folder-A')).toEqual([]);
+    expect(root.querySelector('[data-scope-summary]')?.textContent).toBe('Nothing chosen yet, so nothing will be read.');
+    // Parent Names only, then inside it: the arrows skip the blocked Full.
+    click(root, seg('opaque-folder-A', 'metadata_only'));
+    click(root, '[data-scope-open="opaque-folder-A"]'); await happyWindow.happyDOM.waitUntilComplete();
+    const names = root.querySelector<HTMLButtonElement>(seg('opaque-folder-B', 'metadata_only'))!;
+    expect(stops('opaque-folder-B')).toEqual(['metadata_only']);
+    names.focus();
+    key(names, 'ArrowRight'); expect(focused()).toBe('seg:opaque-folder-B:exclude');
+    key(document.activeElement!, 'ArrowRight'); expect(focused()).toBe('seg:opaque-folder-B:metadata_only');
+    controller.dispose();
+  });
+
+  test('clearing a choice keeps focus on that folder: parent Names only, child Skip, then Skip again', async () => {
+    const { root } = scopeRoot();
+    const controller = mountDispositionsController({ root,
+      transport: { async read(params) { return page('parent_key' in params && params.parent_key ? 'opaque-folder-B' : 'opaque-folder-A'); }, async control() { return { status: 200, body: { ok: true } }; } },
+      navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
+      signal: new AbortController().signal, pollIntervalMs: 0,
+    });
+    await happyWindow.happyDOM.waitUntilComplete();
+    const focused = () => (document.activeElement as HTMLElement).dataset.scopeFocus;
+    click(root, seg('opaque-folder-A', 'metadata_only'));
+    click(root, '[data-scope-open="opaque-folder-A"]'); await happyWindow.happyDOM.waitUntilComplete();
+    root.querySelector<HTMLButtonElement>(seg('opaque-folder-B', 'exclude'))!.focus();
+    click(root, seg('opaque-folder-B', 'exclude'));
+    expect(pressed(root, 'opaque-folder-B')).toEqual(['exclude']);
+    expect(focused()).toBe('seg:opaque-folder-B:exclude');
+    click(root, seg('opaque-folder-B', 'exclude'));
+    expect(pressed(root, 'opaque-folder-B')).toEqual([]);
+    // Full is blocked by the parent, so focus lands on the choice the folder now inherits.
+    expect(root.querySelector<HTMLButtonElement>(seg('opaque-folder-B', 'ingest'))!.disabled).toBe(true);
+    expect(focused()).toBe('seg:opaque-folder-B:metadata_only');
+    expect(root.querySelector<HTMLButtonElement>(seg('opaque-folder-B', 'metadata_only'))!.tabIndex).toBe(0);
     controller.dispose();
   });
 
@@ -1241,7 +1303,12 @@ describe('folder scope before ingestion', () => {
     controller.dispose();
   });
 
-  test('saved deep choices show Mixed before anything is opened, and an exception loads each level once', async () => {
+  test.each([
+    // Skipped inside a folder nothing reaches: Olympus reads nothing either way, so not Mixed.
+    ['exclude', ''],
+    // Fully indexed inside a folder nothing reaches: genuinely mixed access.
+    ['ingest', 'Mixed: some folders inside are fully indexed'],
+  ] as const)('a saved deep %s choice: Mixed only for differing access before anything is opened, and an exception loads each level once', async (deep, mixed) => {
     const { root } = scopeRoot();
     const reads: Array<{ parent_key?: string }> = [];
     const controller = mountDispositionsController({ root,
@@ -1249,7 +1316,7 @@ describe('folder scope before ingestion', () => {
         reads.push(params as never);
         const parent = 'parent_key' in params ? params.parent_key : undefined;
         const response = page(parent === 'opaque-folder-A' ? 'opaque-folder-B' : parent === 'opaque-folder-B' ? 'opaque-folder-C' : 'opaque-folder-A');
-        response.scope_browser!.selections = [{ key: 'opaque-folder-C', state: 'exclude', ancestor_keys: ['opaque-folder-A', 'opaque-folder-B'] }];
+        response.scope_browser!.selections = [{ key: 'opaque-folder-C', state: deep, ancestor_keys: ['opaque-folder-A', 'opaque-folder-B'] }];
         if (parent === 'opaque-folder-C') response.scope_browser!.nodes = [];
         return response;
       }, async control() { return { status: 200, body: { ok: true } }; } },
@@ -1257,12 +1324,13 @@ describe('folder scope before ingestion', () => {
       signal: new AbortController().signal, pollIntervalMs: 0,
     });
     await happyWindow.happyDOM.waitUntilComplete();
-    expect(root.querySelector('[data-scope-row="opaque-folder-A"] .ftag')?.textContent).toBe('Mixed');
+    expect(root.querySelector<HTMLElement>('[data-scope-row="opaque-folder-A"] .ftag')?.title ?? '').toBe(mixed);
     expect(root.querySelector('.exceptions .jump-btn .fname-text')?.textContent).toBe('A folder inside Work <img src=x>');
     click(root, '[data-scope-jump="opaque-folder-C"]'); await happyWindow.happyDOM.waitUntilComplete();
     expect(reads.map((read) => read.parent_key)).toEqual([undefined, 'opaque-folder-A', 'opaque-folder-B', 'opaque-folder-C']);
     expect(root.querySelector('.fpath')?.textContent).toBe('… / Child / Child');
-    expect(pressed(root.querySelector('.this-row')!, 'opaque-folder-C')).toEqual(['exclude']);
+    // The explicit choice keeps its own (filled) style either way.
+    expect(pressed(root.querySelector('.this-row')!, 'opaque-folder-C')).toEqual([deep]);
     controller.dispose();
   });
 

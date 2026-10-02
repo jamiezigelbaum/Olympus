@@ -1503,7 +1503,6 @@ export const DASHBOARD_PICKER_COPY = {
   loadMore: 'Load more folders',
   states: { ingest: 'Fully indexed', metadata_only: 'Names only', exclude: 'Skipped' },
   statesLower: { ingest: 'fully indexed', metadata_only: 'names only', exclude: 'skipped' },
-  notIncluded: 'Not included',
   mixed: 'Mixed',
   mixedSome: 'Mixed: some folders inside are {state}',
   /** The row control's segments: [full label, short label when the picker is narrow]. */

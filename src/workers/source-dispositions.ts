@@ -741,7 +741,7 @@ function renderFolderScopeSource(source: SourceFolderScopeSummary, locations: re
       ${note}
       <div class="scope-view" data-scope-view${source.connected ? '' : ' hidden'}>
         <div class="this-row account-row"><p class="this-label">${escapeHtml(accountName)}</p>
-          <div class="seg" role="radiogroup" aria-label="${escapeHtml(fillCopy(Q.choiceGroup, { name: accountName }))}">${segments}</div></div>
+          <div class="seg" role="group" aria-label="${escapeHtml(fillCopy(Q.choiceGroup, { name: accountName }))}">${segments}</div></div>
       </div>
       <p class="fstate" data-scope-loading role="status" aria-live="polite"${unavailable ? ' hidden' : ''}>${escapeHtml(Q.loadingFolders)}</p>
       <section class="picker-footer" aria-label="${escapeHtml(Q.summaryTitle)}"${source.connected ? '' : ' hidden'}>
