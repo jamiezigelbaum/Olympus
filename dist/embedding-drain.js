@@ -10962,31 +10962,151 @@ var init_fts = __esm(() => {
   TOKEN_PATTERN = /[\p{L}\p{N}_]+/gu;
   FTS_QUERY_STOPWORDS = new Set([
     "a",
+    "about",
+    "after",
+    "again",
+    "all",
+    "also",
+    "am",
     "an",
     "and",
+    "any",
+    "anything",
     "are",
+    "article",
+    "articles",
     "as",
     "at",
+    "be",
+    "been",
+    "before",
+    "being",
+    "but",
     "by",
+    "can",
+    "could",
+    "detail",
+    "details",
+    "did",
+    "do",
+    "doc",
+    "docs",
+    "document",
+    "documents",
+    "does",
+    "doing",
+    "done",
+    "each",
+    "file",
+    "files",
+    "find",
     "for",
+    "found",
     "from",
+    "get",
+    "give",
+    "got",
+    "had",
+    "happen",
+    "happened",
+    "has",
+    "have",
+    "having",
+    "he",
+    "her",
+    "here",
+    "him",
+    "his",
+    "how",
+    "i",
+    "if",
     "in",
+    "into",
     "is",
     "it",
+    "item",
+    "items",
+    "its",
+    "just",
+    "keep",
+    "kept",
+    "know",
+    "let",
+    "look",
+    "many",
     "me",
+    "might",
+    "more",
+    "most",
+    "much",
+    "must",
     "my",
+    "need",
+    "no",
+    "not",
+    "now",
     "of",
     "on",
     "or",
+    "our",
+    "out",
+    "paper",
+    "papers",
+    "please",
+    "read",
+    "remember",
+    "said",
+    "save",
+    "saved",
+    "say",
+    "says",
+    "see",
+    "she",
+    "should",
+    "show",
+    "so",
+    "some",
+    "something",
+    "stuff",
+    "such",
+    "tell",
+    "than",
+    "that",
     "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "thing",
+    "things",
+    "this",
+    "those",
     "to",
+    "use",
+    "using",
+    "very",
+    "want",
     "was",
+    "we",
     "were",
     "what",
     "when",
     "where",
+    "which",
+    "while",
     "who",
-    "with"
+    "whom",
+    "whose",
+    "why",
+    "with",
+    "would",
+    "write",
+    "written",
+    "wrote",
+    "you",
+    "your"
   ]);
   SOURCE_INDEX_SYNONYMS = Object.freeze({
     amount: ["balance", "credit", "deposit"],
@@ -13224,7 +13344,7 @@ function errorMessage2(error) {
 function nowIso() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -13245,10 +13365,14 @@ var init_local_index = __esm(() => {
   init_corpus();
   init_file_lease();
   init_embeddings();
+  init_manifest();
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
+  ]);
+  CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
+    [BUILT_IN_EMBEDDING_MODEL.modelId, 0.4]
   ]);
   CONTAINER_MIME_TYPES = Object.freeze([
     "inode/directory",
@@ -17075,7 +17199,7 @@ var init_local_index = __esm(() => {
       const selectedFtsScope = connectorStoreFtsScopeSql(filters);
       const terms = toFtsQuery(query, ftsOptions);
       if (!terms)
-        return { rows: [], saturated: false };
+        return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const groups = sourceIndexFtsTermGroups(query);
       const minimumSignal = groups.length >= 2;
@@ -17108,12 +17232,14 @@ var init_local_index = __esm(() => {
       ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
       LIMIT ?
     `).all(terms, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, ...selectedFtsScope.params, fetchLimit);
+      const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
       let selected = rows;
+      const matchedGroups = new Map;
+      const matchedGroupIndexes = new Map;
       if (minimumSignal && rows.length > 0) {
         const pks = rows.map((row) => row.item_pk);
         const placeholders = pks.map(() => "?").join(", ");
-        const matchedGroups = new Map;
-        for (const group of groups) {
+        for (const [groupIndex, group] of groups.entries()) {
           const hits = this.db.query(`
           SELECT DISTINCT connector_store_fts.item_pk
           FROM connector_store_fts
@@ -17124,9 +17250,19 @@ var init_local_index = __esm(() => {
         `).all(sourceIndexFtsGroupQuery(group), ...pks, ...selectedFtsScope.params);
           for (const hit of hits) {
             matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
+            matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
           }
         }
-        selected = rows.filter((row) => (matchedGroups.get(row.item_pk) ?? 0) >= 2);
+        const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
+        const weights = rows.every(enough) ? undefined : this.conceptWeights(groups);
+        selected = rows.filter((row) => {
+          if (enough(row))
+            return true;
+          if (!weights)
+            return false;
+          const matched = (matchedGroupIndexes.get(row.item_pk) ?? []).reduce((sum, index) => sum + weights.of[index], 0);
+          return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
+        });
       }
       selected = this.tierVisibleRows(selected, (row) => ({
         provider: row.provider,
@@ -17135,14 +17271,30 @@ var init_local_index = __esm(() => {
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
       const spanTerms = queryTermsForSpan(query);
+      const kept = selected.slice(0, limit);
       return {
-        rows: selected.slice(0, limit).map((row) => {
+        rows: kept.map((row) => {
           const base = searchRowFromItemRow(row);
           const chunk = row.chunk_pk === null || row.chunk_pk === undefined ? undefined : this.chunkMatchForChunkPk(row.chunk_pk, "keyword", spanTerms);
           return chunk ? { ...base, chunk } : base;
         }),
-        saturated: rows.length >= fetchLimit || selected.length > limit
+        saturated: rows.length >= fetchLimit || selected.length > limit,
+        concepts: {
+          total: groups.length,
+          matched: new Map(kept.map((row) => [
+            row.local_item_id,
+            minimumSignal ? matchedGroups.get(row.item_pk) ?? 0 : groups.length
+          ]))
+        }
       };
+    }
+    conceptWeights(groups) {
+      const items = this.db.query("SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0").get().count;
+      const of = groups.map((group) => {
+        const { count } = this.db.query("SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?").get(sourceIndexFtsGroupQuery(group));
+        return Math.max(0, Math.log((items + 1) / (count + 0.5)));
+      });
+      return { of, total: of.reduce((sum, weight) => sum + weight, 0) };
     }
     chunkMatchForChunkPk(chunkPk, lane, queryTerms) {
       const row = this.db.query("SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?").get(chunkPk);
@@ -24497,7 +24649,8 @@ class BuiltInSourceEmbeddingProvider {
   loading;
   loaded;
   lastFailure;
-  queue;
+  slotBusy = false;
+  waiting = { query: [], document: [] };
   constructor(options = {}) {
     this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
     this.env = options.env ?? process.env;
@@ -24539,6 +24692,10 @@ class BuiltInSourceEmbeddingProvider {
   async prepare() {
     await this.load();
   }
+  async warm() {
+    await this.load();
+    await this.embed([{ text: "warm up" }], { taskType: "RETRIEVAL_QUERY" });
+  }
   async retry() {
     if (!this.loading)
       this.lastFailure = undefined;
@@ -24557,7 +24714,7 @@ class BuiltInSourceEmbeddingProvider {
       }
     }
     const model = this.loaded ?? await this.load();
-    return this.serialized(() => this.embedLoaded(model, inputs, options.taskType));
+    return this.embedLoaded(model, inputs, options.taskType);
   }
   load() {
     if (this.loading)
@@ -24602,13 +24759,21 @@ class BuiltInSourceEmbeddingProvider {
       throw builtInEmbeddingOperationError(failure);
     }
   }
-  serialized(run) {
-    const previous = this.queue ?? Promise.resolve();
-    const next = previous.then(run, run);
-    this.queue = next.catch(() => {
-      return;
-    });
-    return next;
+  async withSlot(taskType, run) {
+    if (this.slotBusy) {
+      await new Promise((resolve4) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve4));
+    } else {
+      this.slotBusy = true;
+    }
+    try {
+      return await run();
+    } finally {
+      const next = this.waiting.query.shift() ?? this.waiting.document.shift();
+      if (next)
+        next();
+      else
+        this.slotBusy = false;
+    }
   }
   async embedLoaded(model, inputs, taskType) {
     const windowTokens = this.spec.maxTokens - 2;
@@ -24629,7 +24794,7 @@ class BuiltInSourceEmbeddingProvider {
     });
     const sums = inputs.map(() => new Float64Array(this.dimension));
     for (const batch of planBatches(windows)) {
-      const vectors = await this.forward(model, batch);
+      const vectors = await this.withSlot(taskType, () => this.forward(model, batch));
       batch.forEach((window2, row) => {
         const vector = vectors[row];
         const weight = window2.ids.length - 2;

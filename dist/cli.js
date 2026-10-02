@@ -15991,31 +15991,151 @@ var init_fts = __esm(() => {
   TOKEN_PATTERN2 = /[\p{L}\p{N}_]+/gu;
   FTS_QUERY_STOPWORDS = new Set([
     "a",
+    "about",
+    "after",
+    "again",
+    "all",
+    "also",
+    "am",
     "an",
     "and",
+    "any",
+    "anything",
     "are",
+    "article",
+    "articles",
     "as",
     "at",
+    "be",
+    "been",
+    "before",
+    "being",
+    "but",
     "by",
+    "can",
+    "could",
+    "detail",
+    "details",
+    "did",
+    "do",
+    "doc",
+    "docs",
+    "document",
+    "documents",
+    "does",
+    "doing",
+    "done",
+    "each",
+    "file",
+    "files",
+    "find",
     "for",
+    "found",
     "from",
+    "get",
+    "give",
+    "got",
+    "had",
+    "happen",
+    "happened",
+    "has",
+    "have",
+    "having",
+    "he",
+    "her",
+    "here",
+    "him",
+    "his",
+    "how",
+    "i",
+    "if",
     "in",
+    "into",
     "is",
     "it",
+    "item",
+    "items",
+    "its",
+    "just",
+    "keep",
+    "kept",
+    "know",
+    "let",
+    "look",
+    "many",
     "me",
+    "might",
+    "more",
+    "most",
+    "much",
+    "must",
     "my",
+    "need",
+    "no",
+    "not",
+    "now",
     "of",
     "on",
     "or",
+    "our",
+    "out",
+    "paper",
+    "papers",
+    "please",
+    "read",
+    "remember",
+    "said",
+    "save",
+    "saved",
+    "say",
+    "says",
+    "see",
+    "she",
+    "should",
+    "show",
+    "so",
+    "some",
+    "something",
+    "stuff",
+    "such",
+    "tell",
+    "than",
+    "that",
     "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "thing",
+    "things",
+    "this",
+    "those",
     "to",
+    "use",
+    "using",
+    "very",
+    "want",
     "was",
+    "we",
     "were",
     "what",
     "when",
     "where",
+    "which",
+    "while",
     "who",
-    "with"
+    "whom",
+    "whose",
+    "why",
+    "with",
+    "would",
+    "write",
+    "written",
+    "wrote",
+    "you",
+    "your"
   ]);
   SOURCE_INDEX_SYNONYMS = Object.freeze({
     amount: ["balance", "credit", "deposit"],
@@ -16463,11 +16583,61 @@ var init_reactions = __esm(() => {
   };
 });
 
+// src/workers/source-index/built-in-embedding/manifest.ts
+var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, BUILT_IN_EMBEDDING_MODEL, ONNX_RUNTIME_PACK;
+var init_manifest = __esm(() => {
+  ARCTIC_M_BASE = `https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v1.5/resolve/${ARCTIC_M_REVISION}`;
+  BUILT_IN_EMBEDDING_MODEL = {
+    modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
+    repository: "Snowflake/snowflake-arctic-embed-m-v1.5",
+    revision: ARCTIC_M_REVISION,
+    license: "Apache-2.0",
+    dimension: 768,
+    maxTokens: 512,
+    pooling: "cls",
+    queryPrefix: "Represent this sentence for searching relevant passages: ",
+    documentPrefix: "",
+    model: {
+      name: "model_quantized.onnx",
+      url: `${ARCTIC_M_BASE}/onnx/model_quantized.onnx`,
+      bytes: 110145162,
+      sha256: "a18f437b2466863901a0bdc14904cf93246f5ecce0b656fc773bc2b7b2f84f6e"
+    },
+    vocabulary: {
+      name: "vocab.txt",
+      url: `${ARCTIC_M_BASE}/vocab.txt`,
+      bytes: 231508,
+      sha256: "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+  };
+  ONNX_RUNTIME_PACK = {
+    version: "1.30.0",
+    runtime: {
+      name: "onnxruntime-node",
+      version: "1.30.0",
+      url: "https://registry.npmjs.org/onnxruntime-node/-/onnxruntime-node-1.30.0.tgz",
+      bytes: 113507888,
+      integrity: "sha512-twhs1C2C/BFkz1yc5OY0KIU2GUq6DURO7hD4bx5Q2Qy3nAMJwRXW8xU3NVczE29VA9lolLOYepoD8fjTGOfIqw=="
+    },
+    common: {
+      name: "onnxruntime-common",
+      version: "1.30.0",
+      url: "https://registry.npmjs.org/onnxruntime-common/-/onnxruntime-common-1.30.0.tgz",
+      bytes: 66795,
+      integrity: "sha512-7fdVWjAID1dVhH/G8qK3APARunV4VkBFoCQAP7qp4Wkab0mrorvmc+sqiT+mKXOzDqdjN5j+/Z9nb4gzNPWcyA=="
+    },
+    platforms: ["darwin-arm64", "linux-x64", "linux-arm64"]
+  };
+});
+
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash11, randomUUID as randomUUID4 } from "node:crypto";
 import { existsSync as existsSync15, lstatSync as lstatSync8, mkdirSync as mkdirSync10, statSync as statSync6 } from "node:fs";
 import { dirname as dirname15 } from "node:path";
 import { Database as Database3 } from "bun:sqlite";
+function semanticRelevanceBarFor(modelId, adapterBar) {
+  return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
+}
 function connectorStoreMigrations() {
   return [
     ...currentStoreMigrations(),
@@ -16879,19 +17049,21 @@ function createConnectorStoreCorpusAdapter(options) {
           rawExposed: false
         };
       }
+      const lanes = [
+        { name: "keyword", items: rows },
+        { name: "recency", items: recencyRows }
+      ];
       const fused = fuseRankedCandidateLanes({
-        lanes: [
-          { name: "keyword", items: rows },
-          { name: "recency", items: recencyRows }
-        ],
+        lanes,
         getId: (row) => row.sourceItem.localItemId,
-        limit: Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS)),
+        limit: allCandidates(lanes),
         tieBreaker: connectorStoreCandidateComparator(lexicalContentPreference)
       });
+      const complete = (candidate) => candidate.laneRanks.has("keyword") && keywordLane.completeItemIds.has(candidate.item.sourceItem.localItemId);
       const hits = withPinnedNewestChatHits({
         store,
         recencyRows,
-        hits: contentFirstCandidates(fused).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, options.resultProjector, filters?.locatorPathScope)),
+        hits: rankedCandidates(fused, request.maxResults, complete).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, options.resultProjector, filters?.locatorPathScope)),
         limit: request.maxResults,
         ...options.resultProjector ? { resultProjector: options.resultProjector } : {},
         ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
@@ -16999,27 +17171,34 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const keywordRows = keywordLane.rows;
   const vectorLane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
   const scoredVectorRows = vectorLane.rows;
-  const gateArmed = semanticRelevanceBar !== undefined;
-  const vectorRows = gateArmed ? scoredVectorRows.filter((row) => row.bestCosine >= semanticRelevanceBar) : scoredVectorRows;
+  const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
+  const gateArmed = relevanceBar !== undefined;
+  const vectorRows = gateArmed ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar) : scoredVectorRows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
   const recencyRows = chatRecencyLaneRows(store, accountScope, filters);
-  const contentBar = semanticRelevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
-  const contentPreference = connectorStoreContentPreference(new Set(contentBar === undefined ? [] : vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId)));
+  const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
+  const vettedVectorItemIds = new Set(contentBar === undefined ? [] : vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId));
+  const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
+  const lanes = [
+    { name: "keyword", items: keywordRows },
+    { name: "vector", items: vectorRows },
+    ...recencyRows.length > 0 ? [{ name: "recency", items: recencyRows }] : []
+  ];
   const fused = fuseRankedCandidateLanes({
-    lanes: [
-      { name: "keyword", items: keywordRows },
-      { name: "vector", items: vectorRows },
-      ...recencyRows.length > 0 ? [{ name: "recency", items: recencyRows }] : []
-    ],
+    lanes,
     getId: (row) => row.sourceItem.localItemId,
-    limit: maxResults,
+    limit: allCandidates(lanes),
     tieBreaker: connectorStoreCandidateComparator(contentPreference)
   });
+  const complete = (candidate) => {
+    const id = candidate.item.sourceItem.localItemId;
+    return candidate.laneRanks.has("vector") && vettedVectorItemIds.has(id) || candidate.laneRanks.has("keyword") && keywordLane.completeItemIds.has(id);
+  };
   const hits = withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: contentFirstCandidates(fused, contentPreference).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, resultProjector, filters?.locatorPathScope)),
+    hits: rankedCandidates(fused, maxResults, complete, contentPreference).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, resultProjector, filters?.locatorPathScope)),
     limit: maxResults,
     ...resultProjector ? { resultProjector } : {},
     ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
@@ -17088,8 +17267,14 @@ function normalizeSemanticRelevanceBar(value) {
 function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions = {}) {
   const plain = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions);
   const rows = plain.rows;
-  const content = rows.every(connectorStoreRowHasContent) ? { rows: [], saturated: false } : store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true });
+  const content = rows.every(connectorStoreRowHasContent) ? { rows: [], saturated: false, concepts: plain.concepts } : store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true });
   const contentRows = content.rows;
+  const complete = new Set;
+  for (const concepts of [plain.concepts, content.concepts]) {
+    for (const [id, matched] of concepts.matched)
+      if (matched >= concepts.total)
+        complete.add(id);
+  }
   const seen = new Set;
   const merged = [];
   for (const row of [
@@ -17102,14 +17287,19 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
     seen.add(row.sourceItem.localItemId);
     merged.push(row);
   }
+  const ordered = [
+    ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
+    ...merged.filter((row) => !complete.has(row.sourceItem.localItemId))
+  ];
   return {
-    rows: merged.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
+    rows: ordered.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
     matchCount: {
       matchedItems: merged.length,
       contentMatchedItems: merged.filter(connectorStoreRowHasContent).length,
       saturated: plain.saturated || content.saturated
     },
-    matchedItemIds: seen
+    matchedItemIds: seen,
+    completeItemIds: complete
   };
 }
 function connectorStoreRowHasContent(row) {
@@ -17118,11 +17308,15 @@ function connectorStoreRowHasContent(row) {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-function contentFirstCandidates(candidates, hasContent = lexicalContentPreference) {
-  return [
-    ...candidates.filter(hasContent),
-    ...candidates.filter((candidate) => !hasContent(candidate))
-  ];
+function rankedCandidates(candidates, limit, complete, hasContent = lexicalContentPreference) {
+  const tiers = [[], [], [], []];
+  for (const candidate of candidates) {
+    tiers[(complete(candidate) ? 0 : 2) + (hasContent(candidate) ? 0 : 1)].push(candidate);
+  }
+  return tiers.flat().slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
+}
+function allCandidates(lanes) {
+  return Math.max(1, lanes.reduce((total, lane) => total + lane.items.length, 0));
 }
 function connectorStoreCandidateComparator(hasContent) {
   return (left, right) => {
@@ -19015,7 +19209,7 @@ function errorMessage2(error) {
 function nowIso2() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -19036,10 +19230,14 @@ var init_local_index = __esm(() => {
   init_corpus();
   init_file_lease();
   init_embeddings();
+  init_manifest();
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
+  ]);
+  CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
+    [BUILT_IN_EMBEDDING_MODEL.modelId, 0.4]
   ]);
   CONTAINER_MIME_TYPES = Object.freeze([
     "inode/directory",
@@ -22866,7 +23064,7 @@ var init_local_index = __esm(() => {
       const selectedFtsScope = connectorStoreFtsScopeSql(filters);
       const terms = toFtsQuery(query, ftsOptions);
       if (!terms)
-        return { rows: [], saturated: false };
+        return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const groups = sourceIndexFtsTermGroups(query);
       const minimumSignal = groups.length >= 2;
@@ -22899,12 +23097,14 @@ var init_local_index = __esm(() => {
       ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
       LIMIT ?
     `).all(terms, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, ...selectedFtsScope.params, fetchLimit);
+      const required2 = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
       let selected = rows;
+      const matchedGroups = new Map;
+      const matchedGroupIndexes = new Map;
       if (minimumSignal && rows.length > 0) {
         const pks = rows.map((row) => row.item_pk);
         const placeholders = pks.map(() => "?").join(", ");
-        const matchedGroups = new Map;
-        for (const group of groups) {
+        for (const [groupIndex, group] of groups.entries()) {
           const hits = this.db.query(`
           SELECT DISTINCT connector_store_fts.item_pk
           FROM connector_store_fts
@@ -22915,9 +23115,19 @@ var init_local_index = __esm(() => {
         `).all(sourceIndexFtsGroupQuery(group), ...pks, ...selectedFtsScope.params);
           for (const hit of hits) {
             matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
+            matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
           }
         }
-        selected = rows.filter((row) => (matchedGroups.get(row.item_pk) ?? 0) >= 2);
+        const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required2;
+        const weights = rows.every(enough) ? undefined : this.conceptWeights(groups);
+        selected = rows.filter((row) => {
+          if (enough(row))
+            return true;
+          if (!weights)
+            return false;
+          const matched = (matchedGroupIndexes.get(row.item_pk) ?? []).reduce((sum, index) => sum + weights.of[index], 0);
+          return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
+        });
       }
       selected = this.tierVisibleRows(selected, (row) => ({
         provider: row.provider,
@@ -22926,14 +23136,30 @@ var init_local_index = __esm(() => {
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
       const spanTerms = queryTermsForSpan(query);
+      const kept = selected.slice(0, limit);
       return {
-        rows: selected.slice(0, limit).map((row) => {
+        rows: kept.map((row) => {
           const base = searchRowFromItemRow(row);
           const chunk = row.chunk_pk === null || row.chunk_pk === undefined ? undefined : this.chunkMatchForChunkPk(row.chunk_pk, "keyword", spanTerms);
           return chunk ? { ...base, chunk } : base;
         }),
-        saturated: rows.length >= fetchLimit || selected.length > limit
+        saturated: rows.length >= fetchLimit || selected.length > limit,
+        concepts: {
+          total: groups.length,
+          matched: new Map(kept.map((row) => [
+            row.local_item_id,
+            minimumSignal ? matchedGroups.get(row.item_pk) ?? 0 : groups.length
+          ]))
+        }
       };
+    }
+    conceptWeights(groups) {
+      const items = this.db.query("SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0").get().count;
+      const of = groups.map((group) => {
+        const { count } = this.db.query("SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?").get(sourceIndexFtsGroupQuery(group));
+        return Math.max(0, Math.log((items + 1) / (count + 0.5)));
+      });
+      return { of, total: of.reduce((sum, weight) => sum + weight, 0) };
     }
     chunkMatchForChunkPk(chunkPk, lane, queryTerms) {
       const row = this.db.query("SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?").get(chunkPk);
@@ -28224,53 +28450,6 @@ var init_venice_models = __esm(() => {
       this.modelId = modelId;
       this.privacyCategory = category;
     }
-  };
-});
-
-// src/workers/source-index/built-in-embedding/manifest.ts
-var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, BUILT_IN_EMBEDDING_MODEL, ONNX_RUNTIME_PACK;
-var init_manifest = __esm(() => {
-  ARCTIC_M_BASE = `https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v1.5/resolve/${ARCTIC_M_REVISION}`;
-  BUILT_IN_EMBEDDING_MODEL = {
-    modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
-    repository: "Snowflake/snowflake-arctic-embed-m-v1.5",
-    revision: ARCTIC_M_REVISION,
-    license: "Apache-2.0",
-    dimension: 768,
-    maxTokens: 512,
-    pooling: "cls",
-    queryPrefix: "Represent this sentence for searching relevant passages: ",
-    documentPrefix: "",
-    model: {
-      name: "model_quantized.onnx",
-      url: `${ARCTIC_M_BASE}/onnx/model_quantized.onnx`,
-      bytes: 110145162,
-      sha256: "a18f437b2466863901a0bdc14904cf93246f5ecce0b656fc773bc2b7b2f84f6e"
-    },
-    vocabulary: {
-      name: "vocab.txt",
-      url: `${ARCTIC_M_BASE}/vocab.txt`,
-      bytes: 231508,
-      sha256: "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
-    }
-  };
-  ONNX_RUNTIME_PACK = {
-    version: "1.30.0",
-    runtime: {
-      name: "onnxruntime-node",
-      version: "1.30.0",
-      url: "https://registry.npmjs.org/onnxruntime-node/-/onnxruntime-node-1.30.0.tgz",
-      bytes: 113507888,
-      integrity: "sha512-twhs1C2C/BFkz1yc5OY0KIU2GUq6DURO7hD4bx5Q2Qy3nAMJwRXW8xU3NVczE29VA9lolLOYepoD8fjTGOfIqw=="
-    },
-    common: {
-      name: "onnxruntime-common",
-      version: "1.30.0",
-      url: "https://registry.npmjs.org/onnxruntime-common/-/onnxruntime-common-1.30.0.tgz",
-      bytes: 66795,
-      integrity: "sha512-7fdVWjAID1dVhH/G8qK3APARunV4VkBFoCQAP7qp4Wkab0mrorvmc+sqiT+mKXOzDqdjN5j+/Z9nb4gzNPWcyA=="
-    },
-    platforms: ["darwin-arm64", "linux-x64", "linux-arm64"]
   };
 });
 
@@ -98696,7 +98875,8 @@ class BuiltInSourceEmbeddingProvider {
   loading;
   loaded;
   lastFailure;
-  queue;
+  slotBusy = false;
+  waiting = { query: [], document: [] };
   constructor(options = {}) {
     this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
     this.env = options.env ?? process.env;
@@ -98738,6 +98918,10 @@ class BuiltInSourceEmbeddingProvider {
   async prepare() {
     await this.load();
   }
+  async warm() {
+    await this.load();
+    await this.embed([{ text: "warm up" }], { taskType: "RETRIEVAL_QUERY" });
+  }
   async retry() {
     if (!this.loading)
       this.lastFailure = undefined;
@@ -98756,7 +98940,7 @@ class BuiltInSourceEmbeddingProvider {
       }
     }
     const model = this.loaded ?? await this.load();
-    return this.serialized(() => this.embedLoaded(model, inputs, options.taskType));
+    return this.embedLoaded(model, inputs, options.taskType);
   }
   load() {
     if (this.loading)
@@ -98801,13 +98985,21 @@ class BuiltInSourceEmbeddingProvider {
       throw builtInEmbeddingOperationError(failure);
     }
   }
-  serialized(run) {
-    const previous = this.queue ?? Promise.resolve();
-    const next = previous.then(run, run);
-    this.queue = next.catch(() => {
-      return;
-    });
-    return next;
+  async withSlot(taskType, run) {
+    if (this.slotBusy) {
+      await new Promise((resolve10) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve10));
+    } else {
+      this.slotBusy = true;
+    }
+    try {
+      return await run();
+    } finally {
+      const next = this.waiting.query.shift() ?? this.waiting.document.shift();
+      if (next)
+        next();
+      else
+        this.slotBusy = false;
+    }
   }
   async embedLoaded(model, inputs, taskType) {
     const windowTokens = this.spec.maxTokens - 2;
@@ -98828,7 +99020,7 @@ class BuiltInSourceEmbeddingProvider {
     });
     const sums = inputs.map(() => new Float64Array(this.dimension));
     for (const batch of planBatches(windows)) {
-      const vectors = await this.forward(model, batch);
+      const vectors = await this.withSlot(taskType, () => this.forward(model, batch));
       batch.forEach((window2, row) => {
         const vector = vectors[row];
         const weight = window2.ids.length - 2;
@@ -109004,10 +109196,10 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const [raw, probed] = await Promise.all([
           options.evidenceSearch({ question, ...limit ? { limit } : {} }, signal),
-          probeWithinDeadline(probe, question, ctx)
+          probeWithinDeadline(probe, question, ctx, options, "search")
         ]);
         const match = normalizeProbe(probed);
-        const privateMatch = match.count > 0 ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx), detail }, options) : undefined;
+        const privateMatch = match.count > 0 ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail }, options) : undefined;
         return searchToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       case SOURCE_ANSWER_TOOL.name: {
@@ -109025,10 +109217,10 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
             include_secure_local_content: false,
             timeoutMs: SOURCE_ANSWER_TIMEOUT_MS
           }),
-          probeWithinDeadline(probe, question, ctx)
+          probeWithinDeadline(probe, question, ctx, options, "search")
         ]);
         const match = normalizeProbe(probed);
-        const pending = match.count > 0 ? { question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx), detail } : undefined;
+        const pending = match.count > 0 ? { question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail } : undefined;
         const jobId = pendingJobId(raw);
         if (jobId) {
           rememberPrivateMatch(privateCaller(ctx), jobId, pending);
@@ -109068,13 +109260,23 @@ function normalizeProbe(value) {
   }
   return { count: 0, evidence: [] };
 }
-function probeWithinDeadline(probe, question, ctx) {
+function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search") {
+  const timeoutMs = options.privateMatchProbeTimeoutMs ?? PROBE_TIMEOUT_MS;
+  const log = options.privateMatchProbeLog ?? defaultProbeLog;
+  const startedAt = Date.now();
   let timer;
   const timeout = new Promise((resolve10) => {
-    timer = setTimeout(() => resolve10(false), PROBE_TIMEOUT_MS);
+    timer = setTimeout(() => {
+      log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
+      resolve10(false);
+    }, timeoutMs);
     timer.unref?.();
   });
-  return Promise.race([probe(question, ctx).catch(() => false), timeout]).finally(() => clearTimeout(timer));
+  const probed = probe(question, ctx).then((value) => value, () => {
+    log(`[chatgpt] private match probe failed stage=${stage} elapsed_ms=${Date.now() - startedAt}`);
+    return false;
+  });
+  return Promise.race([probed, timeout]).finally(() => clearTimeout(timer));
 }
 function detailArgument(value) {
   if (value === undefined || value === "summary")
@@ -109087,8 +109289,8 @@ function privateCaller(ctx) {
   const id = ctx.caller?.connectionId;
   return id ? `${ctx.caller?.surface ?? "remote"}:${id}` : undefined;
 }
-function privateRefresh(question, probe, context) {
-  return async () => normalizeProbe(await probeWithinDeadline(probe, question, context())).evidence;
+function privateRefresh(question, probe, context, options) {
+  return async () => normalizeProbe(await probeWithinDeadline(probe, question, context(), options, "refresh")).evidence;
 }
 function beginPrivateAnswer(pending, options) {
   const { question, match, refresh, caller, detail } = pending;
@@ -109215,7 +109417,9 @@ function createChatGptMcpServer(makeOperationContext, options, makeDetachedConte
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
   return server;
 }
-var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ANSWER_TOOLS, CHATGPT_TOOLS, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
+var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ANSWER_TOOLS, CHATGPT_TOOLS, defaultProbeLog = (line) => {
+  console.warn(line);
+}, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
   init_server2();
   init_types2();
@@ -111084,7 +111288,7 @@ class PrivateAnswerJobs {
         timing.queuedMs = Math.max(0, analysis.startedAt - Math.max(analysis.createdAt, analysis.claimedAt ?? analysis.createdAt));
       }
       if (analysis.readyAt !== undefined)
-        timing.searchToReadyMs = analysis.readyAt - job.createdAt;
+        timing.searchToReadyMs = Math.max(0, analysis.readyAt - job.createdAt);
     };
     const run = async () => {
       const cached2 = job.evidence ?? [];
@@ -111391,7 +111595,7 @@ async function boundedText(request, max) {
 }
 var AnalysisStop, defaultLog = (line) => {
   console.log(line);
-}, MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_UNANSWERED = 10, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_URL_CHARS = 2048, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 180000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, UNSAFE_CHARS2, defaultAudit = (event) => {
+}, MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_UNANSWERED = 10, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_URL_CHARS = 2048, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, UNSAFE_CHARS2, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
 };
 var init_private_answer_jobs = __esm(() => {
@@ -111692,9 +111896,9 @@ var init_private_answer_model = __esm(() => {
     maxLeadingItems: 2,
     leadGap: 0.01,
     leadingEvidenceChars: 5000,
-    deepEvidenceChars: 1e4,
-    deepPromptBytes: 14500,
-    deepAnswerChars: 3700
+    deepEvidenceChars: 7000,
+    deepPromptBytes: 11500,
+    deepAnswerChars: 2700
   };
 });
 
@@ -113418,7 +113622,7 @@ async function main() {
   if (true) {
     for (const provider of new Set([internalPolicyEmbeddingProvider, secureLocalPolicyEmbeddingProvider])) {
       if (provider instanceof BuiltInSourceEmbeddingProvider)
-        provider.prepare().catch(() => {
+        provider.warm().catch(() => {
           return;
         });
     }
