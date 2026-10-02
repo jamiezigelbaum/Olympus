@@ -828,6 +828,8 @@ function copyScopeList(list: ScopeList): ScopeList {
         ...(finite(node.file_count) ? { file_count: whole(node.file_count) } : {}),
       })),
       ...(list.next_cursor ? { next_cursor: opaque(list.next_cursor) } : {}),
+      ...(list.next_cursor && finite(list.remaining) ? { remaining: whole(list.remaining) } : {}),
+      ...(list.truncated === true ? { truncated: true as const } : {}),
       selections: (list.selections ?? []).slice(0, MAX_SCOPE_NODES).map(copySelection),
       whole_account_selected: list.whole_account_selected === true,
     };

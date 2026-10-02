@@ -519,8 +519,11 @@ async function scopeList(backend: ChatGptSetupBackend, args: Record<string, unkn
 
 /** Folders per page of `olympus_scope_list`, after sorting. */
 export const SCOPE_LIST_PAGE_SIZE = 100;
-/** Provider pages read for one level before sorting; a level larger than this lists what was read. */
-const MAX_PROVIDER_PAGES = 50;
+/**
+ * Provider pages read for one level before sorting. A level larger than this
+ * lists what was read and says so (`truncated`), never silently.
+ */
+export const MAX_PROVIDER_PAGES = 50;
 const FOLDER_COLLATOR = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
 const SORTED_CURSOR_PREFIX = 'olysort1.';
 
@@ -533,7 +536,7 @@ async function browseWholeLevel(
   backend: ChatGptSetupBackend,
   sourceId: ChatGptFolderSourceId,
   parentKey: string | undefined,
-): Promise<OlympusFolderScopeBrowseResult> {
+): Promise<WholeLevel> {
   const first = await backend.browseFolders({ sourceId, ...(parentKey ? { parentKey } : {}) });
   const nodes = [...first.nodes];
   const seen = new Set<string>();
@@ -549,7 +552,16 @@ async function browseWholeLevel(
   }
   const unique = new Map(nodes.map((node) => [node.key, node]));
   const { next_cursor: _providerCursor, ...rest } = first;
-  return { ...rest, nodes: [...unique.values()] };
+  // A cursor left unread after the page cap means folders were never listed;
+  // a repeated cursor is the provider's end, not a truncation.
+  const truncated = Boolean(cursor) && !seen.has(cursor!);
+  return { browse: { ...rest, nodes: [...unique.values()] }, truncated };
+}
+
+interface WholeLevel {
+  browse: OlympusFolderScopeBrowseResult;
+  /** The level had more provider pages than MAX_PROVIDER_PAGES. */
+  truncated: boolean;
 }
 
 interface SortPosition {
@@ -568,13 +580,13 @@ function compareFolders(a: SortPosition, b: SortPosition): number {
  * nor skips the rest: the next page is every folder sorted after it.
  */
 function sortedFolderPage(
-  browse: OlympusFolderScopeBrowseResult,
+  level: WholeLevel,
   secrets: SecretLocations,
   parentKey: string | undefined,
   after: SortPosition | undefined,
   ancestorKeys: readonly string[] = [],
 ): FolderScopeList {
-  const list = folderList(browse, secrets, ancestorKeys);
+  const list = folderList(level.browse, secrets, ancestorKeys);
   const sorted = [...list.nodes].sort(compareFolders);
   const rest = after ? sorted.filter((node) => compareFolders(node, after) > 0) : sorted;
   const page = rest.slice(0, SCOPE_LIST_PAGE_SIZE);
@@ -583,7 +595,10 @@ function sortedFolderPage(
   return {
     ...withoutCursor,
     nodes: page,
-    ...(rest.length > page.length && last ? { next_cursor: encodeSortedCursor(parentKey, last) } : {}),
+    ...(rest.length > page.length && last
+      ? { next_cursor: encodeSortedCursor(parentKey, last), remaining: rest.length - page.length }
+      : {}),
+    ...(level.truncated ? { truncated: true as const } : {}),
   };
 }
 
@@ -651,20 +666,31 @@ function folderList(browse: OlympusFolderScopeBrowseResult, secrets: SecretLocat
     status: browse.status,
     nodes: browse.nodes
       .filter((node) => !isSecretFolder(secrets, node.key, node.parent_key ? [...ancestorKeys, node.parent_key] : ancestorKeys))
-      .map((node) => ({
-        key: node.key,
-        ...(node.parent_key ? { parent_key: node.parent_key } : {}),
-        name: node.name,
-        kind: 'folder' as const,
-        has_children: node.has_children,
-        selectable: node.selectable,
-      })),
+      .map((node) => {
+        const sizeBytes = measurement(node.size_bytes);
+        const fileCount = measurement(node.file_count);
+        return {
+          key: node.key,
+          ...(node.parent_key ? { parent_key: node.parent_key } : {}),
+          name: node.name,
+          kind: 'folder' as const,
+          has_children: node.has_children,
+          selectable: node.selectable,
+          ...(sizeBytes !== undefined ? { size_bytes: sizeBytes } : {}),
+          ...(fileCount !== undefined ? { file_count: fileCount } : {}),
+        };
+      }),
     ...(browse.next_cursor ? { next_cursor: browse.next_cursor } : {}),
     selections: browse.selections
       .filter((selection) => !isSecretFolder(secrets, selection.key, selection.ancestor_keys))
       .map((selection) => ({ ...selection })),
     whole_account_selected: browse.whole_account_selected,
   };
+}
+
+/** A folder's size or file count, forwarded only as a finite non-negative whole number. */
+function measurement(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
 }
 
 function mailList(browse: Awaited<ReturnType<ChatGptSetupBackend['browseMail']>>, secrets: SecretLocations): MailScopeList {

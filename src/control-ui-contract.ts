@@ -45,6 +45,9 @@ export interface OlympusFolderScopeNode {
   kind: 'folder';
   has_children: boolean;
   selectable: boolean;
+  /** Optional measurements, only when a provider's listing reports them. */
+  size_bytes?: number;
+  file_count?: number;
 }
 
 export type OlympusSourceScopeStatus = 'scope_pending' | 'approved';

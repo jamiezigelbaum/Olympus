@@ -263,7 +263,10 @@ export interface ScopeFolderNode {
   kind: 'folder';
   has_children: boolean;
   selectable: boolean;
-  /** Not offered by the providers' folder listings today; reserved. */
+  /**
+   * Forwarded from the provider's listing when it reports them (the Dropbox
+   * and Drive folder listings do not today); absent otherwise.
+   */
   size_bytes?: number;
   file_count?: number;
 }
@@ -282,6 +285,14 @@ export interface FolderScopeList {
   status: 'scope_pending' | 'approved';
   nodes: ScopeFolderNode[];
   next_cursor?: string;
+  /** With `next_cursor`: how many more folders follow this page ("N more"). */
+  remaining?: number;
+  /**
+   * The level holds more folders than Olympus reads at once, so some are not
+   * listed at all (not on this page or any later one); `remaining` counts
+   * only the folders that were read.
+   */
+  truncated?: true;
   selections: ScopeSelection[];
   whole_account_selected: boolean;
 }

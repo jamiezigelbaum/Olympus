@@ -230,6 +230,8 @@ interface FakeBackendState {
   revision: string;
   /** Provider pages of folder names, in the provider's own order; page i+1 follows cursor `p<i+1>`. */
   pages?: string[][];
+  /** Folder measurements the fake provider reports, by name (absent: none reported). */
+  measures?: Record<string, { size_bytes?: number; file_count?: number }>;
   /** A worker code startOAuth / disconnect fail with. */
   startError?: string;
   disconnectError?: string;
@@ -282,7 +284,7 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
         account_generation: 'gen-1',
         scope_revision: state.revision,
         status: 'scope_pending',
-        nodes: names.map((name) => ({ key: `k-${name}`, name, kind: 'folder' as const, has_children: false, selectable: true })),
+        nodes: names.map((name) => ({ key: `k-${name}`, name, kind: 'folder' as const, has_children: false, selectable: true, ...state.measures?.[name] })),
         ...(index + 1 < state.pages.length ? { next_cursor: `p${index + 1}` } : {}),
         selections: [],
         whole_account_selected: false,
@@ -576,6 +578,8 @@ describe('setup tools over the remote handler', () => {
         const ui = result._meta?.[SCOPE_UI_META_KEY] as { nodes: Array<{ name: string }>; next_cursor?: string };
         expect(ui.nodes.length).toBeLessThanOrEqual(100);
         expect(result.structuredContent?.has_more).toBe(ui.next_cursor !== undefined);
+        if (pages === 0) expect((ui as { remaining?: number }).remaining).toBe(236 - 100);
+        expect((ui as { truncated?: true }).truncated).toBeUndefined();
         listed.push(...ui.nodes.map((node) => node.name));
         cursor = ui.next_cursor;
         pages++;
@@ -591,6 +595,45 @@ describe('setup tools over the remote handler', () => {
       expect(listed.indexOf('Folder 10')).toBeGreaterThan(listed.indexOf('Folder 9'));
       // A cursor is bound to its level and its own format.
       expect((await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs', cursor: 'p1' })).isError).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('olympus_scope_list forwards folder size and file count when the provider reports them, validated', async () => {
+    backendState.pages = [['Alpha', 'Beta', 'Gamma']];
+    backendState.measures = { Alpha: { size_bytes: 2048.4, file_count: 12 }, Beta: { size_bytes: -1, file_count: Number.NaN } };
+    const client = await connectClient();
+    try {
+      const result = await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs' });
+      const ui = result._meta?.[SCOPE_UI_META_KEY] as { nodes: Array<Record<string, unknown>> };
+      expect(ui.nodes.map((node) => [node.name, node.size_bytes, node.file_count])).toEqual([
+        ['Alpha', 2048, 12],
+        ['Beta', undefined, undefined],
+        ['Gamma', undefined, undefined],
+      ]);
+      // Measurements stay out of what the model reads.
+      expect(JSON.stringify(result.structuredContent)).not.toContain('2048');
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('olympus_scope_list says when a level is larger than it reads, never silently truncating', async () => {
+    // 60 provider pages of 2: Olympus reads 50 of them, then stops and says so.
+    backendState.pages = Array.from({ length: 60 }, (_, page) => [`F ${page * 2}`, `F ${page * 2 + 1}`]);
+    const client = await connectClient();
+    try {
+      const first = await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs' });
+      const ui = first._meta?.[SCOPE_UI_META_KEY] as { nodes: unknown[]; next_cursor?: string; remaining?: number; truncated?: true };
+      expect(ui.nodes).toHaveLength(100);
+      expect(ui.next_cursor).toBeUndefined();
+      expect(ui.remaining).toBeUndefined();
+      expect(ui.truncated).toBe(true);
+      // A level that fits is not marked.
+      backendState.pages = backendState.pages.slice(0, 3);
+      const small = await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs' });
+      expect((small._meta?.[SCOPE_UI_META_KEY] as { truncated?: true }).truncated).toBeUndefined();
     } finally {
       await client.close();
     }
