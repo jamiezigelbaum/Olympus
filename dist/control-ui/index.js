@@ -668,7 +668,7 @@ function mountDashboardController(options) {
       return;
     if (!force && query("[data-remote-terms]:not([hidden])"))
       return;
-    if (!force && query('form[data-privacy-form][data-dirty="true"],[data-privacy-panel]:not([hidden])'))
+    if (!force && query('form[data-privacy-form][data-dirty="true"],[data-privacy-panel]:not([hidden]),[data-privacy-confirm],[data-privacy-conflict]'))
       return;
     if (!force && hasDirtyInput())
       return;
@@ -732,7 +732,7 @@ function mountDashboardController(options) {
     }
   }
   function privacyIdentity(rule) {
-    const matched = rule.kind === "sender" ? (rule.value || "").toLowerCase() : rule.key || "";
+    const matched = rule.kind === "sender" ? (rule.value || "").trim().toLowerCase() : rule.key || "";
     return `${rule.kind}\x00${rule.source_id}\x00${matched}`;
   }
   function privacyKept(form) {
@@ -1030,7 +1030,67 @@ function mountDashboardController(options) {
     panelSay(panel, "");
     field.focus();
   }
-  async function savePrivacy(form) {
+  function privacyBaseline(form) {
+    try {
+      const saved = JSON.parse(form.dataset.saved || "{}");
+      return {
+        description: typeof saved.description === "string" ? saved.description : "",
+        rules: Array.isArray(saved.rules) ? saved.rules.filter((rule) => rule && typeof rule.kind === "string") : []
+      };
+    } catch {
+      return { description: "", rules: [] };
+    }
+  }
+  function privacyLowering(form) {
+    const baseline = privacyBaseline(form);
+    const kept = new Set(privacyKept(form).map(privacyIdentity));
+    const removed = baseline.rules.filter((rule) => !kept.has(privacyIdentity(rule))).map((rule) => rule.name || privacyWords(form, rule).name);
+    const field = form.querySelector('textarea[name="description"]');
+    const description = field !== null && field.value.trim() !== baseline.description.trim();
+    return { removed, description };
+  }
+  function clearPrivacyPrompts(form) {
+    form.querySelectorAll("[data-privacy-confirm],[data-privacy-conflict]").forEach((node) => node.remove());
+  }
+  function privacyPrompt(form, kind, lines, buttons) {
+    clearPrivacyPrompts(form);
+    const box = document.createElement("div");
+    box.className = "pprompt";
+    box.setAttribute(`data-privacy-${kind}`, "");
+    box.setAttribute("role", "alert");
+    for (const line of lines) {
+      const text = document.createElement("p");
+      text.textContent = line;
+      box.append(text);
+    }
+    const row = document.createElement("div");
+    row.className = "pbuttons";
+    for (const [attribute, label] of buttons) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn";
+      button.setAttribute(attribute, "");
+      button.textContent = label;
+      row.append(button);
+    }
+    box.append(row);
+    const footer = form.querySelector(".pfooter");
+    (footer || form).prepend(box);
+    row.querySelector("button")?.focus();
+  }
+  function showPrivacyConfirm(form, lowering) {
+    const copy = privacyCopy(form);
+    const lines = [];
+    if (lowering.removed.length > 0)
+      lines.push(privacyFill(copy.confirmRemoves || "", { list: lowering.removed.join(", ") }));
+    if (lowering.description)
+      lines.push(copy.confirmDescription || "");
+    privacyPrompt(form, "confirm", lines, [
+      ["data-privacy-confirm-yes", copy.confirm || "Confirm"],
+      ["data-privacy-confirm-no", copy.keepEditing || "Keep editing"]
+    ]);
+  }
+  async function savePrivacy(form, confirmed = false) {
     const copy = privacyCopy(form);
     if (!canWrite && !csrfToken) {
       say(form, "Your OpenClaw connection has read-only access.");
@@ -1038,16 +1098,26 @@ function mountDashboardController(options) {
     }
     if (pendingForms.has(form))
       return;
+    const lowering = privacyLowering(form);
+    const lowers = lowering.removed.length > 0 || lowering.description;
+    if (lowers && !confirmed) {
+      showPrivacyConfirm(form, lowering);
+      return;
+    }
+    clearPrivacyPrompts(form);
     const field = form.querySelector('textarea[name="description"]');
-    const description = field ? field.value : undefined;
+    const description = field ? field.value.trim() : undefined;
     const rules = privacyKept(form);
+    const revision = form.dataset.revision || "";
     setFormPending(form, true, copy.saving || "Saving…");
     let result;
     try {
       result = await options.transport.control({
         action: "save_privacy",
         ...description !== undefined ? { description } : {},
-        rules
+        rules,
+        ...revision ? { revision } : {},
+        ...lowers ? { confirm: true } : {}
       });
     } catch {
       say(form, copy.saveFailed || "Could not reach Olympus.");
@@ -1064,6 +1134,27 @@ function mountDashboardController(options) {
         applyWriteCapability();
         say(form, "Your write access expired. Reconnect with operator.write access, then try again.");
       }
+      return;
+    }
+    const error = result.body.error && typeof result.body.error === "object" ? result.body.error : {};
+    if (result.status === 409 && error.code === "conflict") {
+      const current = result.body.settings && typeof result.body.settings === "object" ? result.body.settings : {};
+      const saved = Array.isArray(current.rules) ? current.rules : [];
+      form.dataset.revision = typeof current.revision === "string" ? current.revision : "";
+      form.dataset.saved = JSON.stringify({
+        description: typeof current.description === "string" ? current.description : "",
+        rules: saved.map((rule) => ({ ...rule, name: privacyWords(form, rule).name }))
+      });
+      form.dataset.dirty = "true";
+      say(form, "");
+      privacyPrompt(form, "conflict", [copy.conflict || ""], [
+        ["data-privacy-apply-again", copy.applyAgain || "Apply my changes again"],
+        ["data-privacy-discard-mine", copy.discardMine || "Discard my changes"]
+      ]);
+      return;
+    }
+    if (result.status === 409 && error.code === "privacy_owner_only") {
+      showPrivacyConfirm(form, privacyLowering(form));
       return;
     }
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
@@ -1104,6 +1195,28 @@ function mountDashboardController(options) {
     }
     if (target.closest("[data-privacy-sender-add]")) {
       addPrivacySender(form);
+      return true;
+    }
+    if (target.closest("[data-privacy-confirm-yes]")) {
+      savePrivacy(form, true);
+      return true;
+    }
+    if (target.closest("[data-privacy-confirm-no]")) {
+      clearPrivacyPrompts(form);
+      form.querySelector('button[type="submit"]')?.focus();
+      return true;
+    }
+    if (target.closest("[data-privacy-apply-again]")) {
+      savePrivacy(form);
+      return true;
+    }
+    if (target.closest("[data-privacy-discard-mine]")) {
+      delete form.dataset.dirty;
+      clearPrivacyPrompts(form);
+      const field = form.querySelector('textarea[name="description"]');
+      if (field)
+        field.value = field.defaultValue;
+      refreshNow(true);
       return true;
     }
     const make = target.closest("[data-privacy-make-private]");
@@ -3484,7 +3597,8 @@ var DASHBOARD_SOURCE_ROWS_CSS = `
 .sprog.stalled .sline { color: var(--t1); }
 .bar.stalled i { background: var(--warn-fill); }
 .sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
-.modelsrow { margin: 28px 0 0; padding-top: 12px; border-top: 1px solid var(--line); }
+/* No border of its own: the list above already ends in one, and two read as a double divider. */
+.modelsrow { margin: 28px 0 0; }
 details.models > summary { font-size: var(--fs-section); font-weight: 600; color: var(--t1); cursor: pointer; padding: 4px 0; }
 details.models > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
 details.models .modelsbody { margin-top: 12px; }
@@ -3526,6 +3640,9 @@ var DASHBOARD_PRIVACY_CSS = `
 .pfooter p { margin: 0; color: var(--t1); }
 .pbuttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .pbuttons a.btn { text-decoration: none; }
+/* The confirm and conflict steps: a tinted box with a 1px border, never a stripe. */
+.pprompt { padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; display: grid; gap: 8px; }
+.pprompt p { margin: 0; color: var(--t1); }
 `;
 
 // src/control-ui/styles.ts

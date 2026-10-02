@@ -6839,7 +6839,14 @@ var init_vocabulary = __esm(() => {
     unchanged: "No changes to save.",
     locked: "Unlock dashboard controls in Setup to see and change what is private.",
     readOnly: "Your OpenClaw connection is read-only, so privacy can be read here but not changed.",
-    unavailable: "Privacy settings are not available from this worker."
+    unavailable: "Privacy settings are not available from this worker.",
+    confirmRemoves: "This removes protection from {list}.",
+    confirmDescription: "This changes your own words, which Olympus reads to keep items private.",
+    confirm: "Confirm",
+    keepEditing: "Keep editing",
+    conflict: "These privacy settings were changed somewhere else. Your changes are still here.",
+    applyAgain: "Apply my changes again",
+    discardMine: "Discard my changes"
   };
 });
 
@@ -17304,6 +17311,35 @@ var OLYMPUS_DASHBOARD_VIEWS = [
   "dispositions"
 ];
 
+// src/workers/dashboard/shared-privacy-rules.ts
+var SENDER = /^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
+function privacyRuleProblem(rule) {
+  if (rule.kind === "sender") {
+    if (rule.key !== undefined)
+      return "A sender rule takes value, not key.";
+    const value = (rule.value ?? "").trim();
+    return value.length > 0 && value.length <= 240 && SENDER.test(value) ? undefined : "A sender rule needs an address (name@example.com) or a whole domain (@example.com).";
+  }
+  if (rule.kind !== "folder" && rule.kind !== "label")
+    return "A rule kind must be folder, label or sender.";
+  const key = rule.key ?? "";
+  if (!key.trim() || key.length > 1024)
+    return "A folder or label rule needs its key.";
+  if (rule.kind === "folder") {
+    if (rule.source_id !== "dropbox.files" && rule.source_id !== "google_drive.docs")
+      return "A folder rule names Dropbox or Google Drive.";
+    if (rule.source_id === "dropbox.files" && !key.startsWith("/"))
+      return "A Dropbox folder key is a path.";
+    if (rule.value !== undefined)
+      return "A folder rule takes key, not value.";
+    return;
+  }
+  if (rule.source_id !== "gmail.email")
+    return "A label rule names Gmail.";
+  const name = (rule.value ?? "").trim();
+  return name && name.length <= 200 ? undefined : "A label rule needs its name.";
+}
+
 // src/core/control-ui-gateway.ts
 var DASHBOARD_READ_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 var DASHBOARD_CONTROL_RESPONSE_MAX_BYTES = 256 * 1024;
@@ -17522,7 +17558,11 @@ function parseDashboardControlParams(value) {
     };
   }
   if (action === "save_privacy") {
-    const record = exactRecord(outer, ["action", "description", "rules"]);
+    const record = exactRecord(outer, ["action", "description", "rules", "revision", "confirm"]);
+    const revision = optionalBoundedString(record.revision, 64, "revision", false);
+    if (record.confirm !== undefined && typeof record.confirm !== "boolean") {
+      throw new DashboardGatewayInvalidRequestError("confirm must be true or false.");
+    }
     const description = record.description === undefined ? undefined : boundedText(record.description, PRIVACY_DESCRIPTION_MAX, "description");
     let rules;
     if (record.rules !== undefined) {
@@ -17534,19 +17574,25 @@ function parseDashboardControlParams(value) {
         const key = optionalBoundedString(rule.key, 1024, "key", false);
         const ruleValue = optionalBoundedString(rule.value, 240, "value", false);
         const display = optionalBoundedString(rule.display, 200, "display", false);
-        return {
+        const parsed = {
           kind: enumValue(rule.kind, ["folder", "label", "sender"], "kind"),
           source_id: enumValue(rule.source_id, ["dropbox.files", "google_drive.docs", "gmail.email"], "source_id"),
           ...key ? { key } : {},
           ...ruleValue ? { value: ruleValue } : {},
           ...display ? { display } : {}
         };
+        const problem = privacyRuleProblem(parsed);
+        if (problem)
+          throw new DashboardGatewayInvalidRequestError(problem);
+        return parsed;
       });
     }
     return {
       action,
       ...description !== undefined ? { description } : {},
-      ...rules ? { rules } : {}
+      ...rules ? { rules } : {},
+      ...revision ? { revision } : {},
+      ...record.confirm === true ? { confirm: true } : {}
     };
   }
   if (action === "retry_model") {
@@ -18007,7 +18053,9 @@ function dashboardControlWorkerRequest(params) {
         path: "/dashboard/privacy",
         body: {
           ...params.description !== undefined ? { description: params.description } : {},
-          ...params.rules ? { rules: params.rules } : {}
+          ...params.rules ? { rules: params.rules } : {},
+          ...params.revision ? { revision: params.revision } : {},
+          ...params.confirm === true ? { confirm: true } : {}
         }
       };
     case "retry_model":

@@ -21386,7 +21386,14 @@ var init_vocabulary = __esm(() => {
     unchanged: "No changes to save.",
     locked: "Unlock dashboard controls in Setup to see and change what is private.",
     readOnly: "Your OpenClaw connection is read-only, so privacy can be read here but not changed.",
-    unavailable: "Privacy settings are not available from this worker."
+    unavailable: "Privacy settings are not available from this worker.",
+    confirmRemoves: "This removes protection from {list}.",
+    confirmDescription: "This changes your own words, which Olympus reads to keep items private.",
+    confirm: "Confirm",
+    keepEditing: "Keep editing",
+    conflict: "These privacy settings were changed somewhere else. Your changes are still here.",
+    applyAgain: "Apply my changes again",
+    discardMine: "Discard my changes"
   };
 });
 
@@ -21633,6 +21640,9 @@ var init_dashboard_view_model = __esm(() => {
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
 });
+
+// src/workers/dashboard/shared-privacy-rules.ts
+var init_shared_privacy_rules = () => {};
 
 // src/workers/google-connectors/gmail-live-control.ts
 var GMAIL_STORE_PULL_INTERVAL_MS, GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS, GMAIL_STORE_RECONCILE_INTERVAL_MS, GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, GMAIL_DAILY_REQUEST_GUARD_REASON = "gmail_daily_api_request_guard";
@@ -23499,6 +23509,7 @@ var TIER_NAMES = {
 // src/workers/dashboard/pages/privacy.ts
 init_mail_source_scope();
 init_vocabulary();
+init_shared_privacy_rules();
 var CLIENT_COPY = {
   remove: DASHBOARD_LOCAL_PRIVACY_COPY.remove,
   removeFor: DASHBOARD_LOCAL_PRIVACY_COPY.removeFor,
@@ -23522,7 +23533,14 @@ var CLIENT_COPY = {
   saved: DASHBOARD_LOCAL_PRIVACY_COPY.saved,
   saveFailed: DASHBOARD_LOCAL_PRIVACY_COPY.saveFailed,
   unchanged: DASHBOARD_LOCAL_PRIVACY_COPY.unchanged,
-  discard: "Discard your changes?"
+  discard: "Discard your changes?",
+  confirmRemoves: DASHBOARD_LOCAL_PRIVACY_COPY.confirmRemoves,
+  confirmDescription: DASHBOARD_LOCAL_PRIVACY_COPY.confirmDescription,
+  confirm: DASHBOARD_LOCAL_PRIVACY_COPY.confirm,
+  keepEditing: DASHBOARD_LOCAL_PRIVACY_COPY.keepEditing,
+  conflict: DASHBOARD_LOCAL_PRIVACY_COPY.conflict,
+  applyAgain: DASHBOARD_LOCAL_PRIVACY_COPY.applyAgain,
+  discardMine: DASHBOARD_LOCAL_PRIVACY_COPY.discardMine
 };
 
 // src/workers/dashboard/index.ts
