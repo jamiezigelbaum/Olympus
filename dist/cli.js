@@ -47686,7 +47686,7 @@ var init_vocabulary = __esm(() => {
       disabledReason: "Install Olympus first"
     },
     installing: {
-      title: "Installing Olympus on your Mac…",
+      title: "Olympus is setting up on your Mac…",
       disabledReason: "Available once Olympus is set up"
     },
     mac_offline: {
@@ -47695,7 +47695,7 @@ var init_vocabulary = __esm(() => {
       disabledReason: "Your Mac is offline"
     },
     relay_unavailable: {
-      title: "Olympus can't reach your Mac right now; retrying",
+      title: "Olympus can't reach your Mac right now.",
       disabledReason: "Can't reach your Mac"
     },
     actions: {
@@ -47914,8 +47914,10 @@ var init_vocabulary = __esm(() => {
     tryAgain: "Try again",
     descriptionLabel: "In your own words",
     descriptionPlaceholder: "For example: my health and therapy, money and taxes, anything about my kids, my divorce",
+    descriptionShared: 'ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.',
     rulesTitle: "Always private (optional)",
     rulesEmpty: "No folders, labels or senders yet.",
+    namesShared: "Folder and label names and senders you add here are shown to ChatGPT.",
     kindFolder: "Folder in {source}",
     kindLabel: "Gmail label",
     kindSender: "Sender",
@@ -47989,12 +47991,12 @@ var init_vocabulary = __esm(() => {
     hide: "Hide",
     hideLabel: "Hide private answer",
     tryAgain: "Try again",
-    noModel: "Private answers need the private model on your Mac.",
-    downloading: "The private model is downloading ({percent}%)…",
-    downloadingUnknown: "The private model is downloading…",
+    noModel: "Private answers need the private model on your Mac. Open the Olympus dashboard to finish setup, then ask again.",
+    downloading: "The private model is downloading ({percent}%). Ask again when it's ready.",
+    downloadingUnknown: "The private model is downloading. Ask again when it's ready.",
     downloadingLabel: "Private model download",
     preparing: "Preparing the answer on your Mac…",
-    preparingFull: "Reading the full report on your Mac…",
+    preparingFull: "Reading your report in more detail on your Mac…",
     slow: "Your Mac is taking longer than usual to prepare the answer.",
     failed: "Olympus couldn't answer this on your Mac.",
     claimed: "This answer was already opened in another window.",
@@ -103130,6 +103132,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       state.data = content;
       state.relayDown = false;
       render();
+      if (!refreshing)
+        scheduleRefresh();
       return true;
     }
     if (fromHost) {
@@ -103438,14 +103442,21 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(body, add(el("div", "actions"), fixControl(item.fix, key, "main", allowConfirm, itemSource(item))));
     return add(banner, body);
   }
-  function staleLine() {
+  function staleWords() {
     const data = state.data;
     if (!data || state.relayDown)
-      return null;
+      return "";
     const at = Date.parse(data.generatedAt);
     if (!isFinite(at) || Date.now() - at < config2.staleAfterMs)
+      return "";
+    return fill(P.updated, { when: ago(data.generatedAt) });
+  }
+  function staleLine() {
+    const words = staleWords();
+    drawnStale = words;
+    if (!words)
       return null;
-    const line = add(el("p", "stale"), el("span", "muted", fill(P.updated, { when: ago(data.generatedAt) })));
+    const line = add(el("p", "stale"), el("span", "muted", words));
     return add(line, state.busy === "refresh" ? button(P.working, "refresh", null, "plain") : button(P.checkAgain, "refresh", refresh, "plain"));
   }
   function needsYouSection(items) {
@@ -103960,8 +103971,95 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     },
     close: (notice, again, focusKey) => closeScreen(notice, again, focusKey)
   }) : null;
+  const R = config2.refresh;
+  let refreshTimer = null;
+  let refreshing = false;
+  let refreshFailures = 0;
+  let nextRefreshAt = 0;
+  let drawnStale = "";
+  function pageHidden() {
+    return doc2.visibilityState === "hidden" || doc2.hidden === true;
+  }
+  function moving() {
+    const data = state.data;
+    if (!data || state.relayDown || String(data.connection.state) !== "ready")
+      return true;
+    const sources = Array.isArray(data.sources) ? data.sources : [];
+    if (sources.some((source) => {
+      if (!source || typeof source !== "object")
+        return false;
+      if (source.connecting || source.status === "Working")
+        return true;
+      const progress = sourceProgress(source);
+      return !!progress && !progress.stalled;
+    }))
+      return true;
+    if (data.progress && !data.progress.stalled && !progressFinished(data.progress))
+      return true;
+    return !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== "failed");
+  }
+  function refreshDelay() {
+    const base = moving() ? R.activeMs : R.idleMs;
+    return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
+  }
+  function scheduleRefresh() {
+    if (refreshTimer)
+      clearTimeout(refreshTimer);
+    refreshTimer = null;
+    const wait = refreshDelay();
+    nextRefreshAt = Date.now() + wait;
+    if (!pageHidden())
+      refreshTimer = setTimeout(backgroundRefresh, wait);
+  }
+  function backgroundRefresh() {
+    refreshTimer = null;
+    if (pageHidden() || refreshing)
+      return;
+    if (picker && picker.active() || privacy && privacy.active() || state.busy) {
+      scheduleRefresh();
+      return;
+    }
+    refreshing = true;
+    request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
+      refreshing = false;
+      const ok = !!result && !result.isError && isDashboard(result.structuredContent);
+      refreshFailures = ok ? 0 : refreshFailures + 1;
+      acceptResult(result, true);
+      scheduleRefresh();
+    }, () => {
+      refreshing = false;
+      refreshFailures++;
+      state.relayDown = true;
+      render();
+      scheduleRefresh();
+    });
+  }
+  doc2.addEventListener("visibilitychange", () => {
+    if (pageHidden()) {
+      if (refreshTimer)
+        clearTimeout(refreshTimer);
+      refreshTimer = null;
+      return;
+    }
+    if (refreshing || refreshTimer)
+      return;
+    const left = nextRefreshAt - Date.now();
+    if (left <= 0)
+      backgroundRefresh();
+    else
+      refreshTimer = setTimeout(backgroundRefresh, left);
+    tickStale();
+  });
+  function tickStale() {
+    if (pageHidden() || compact() || picker && picker.active() || privacy && privacy.active())
+      return;
+    if (staleWords() !== drawnStale)
+      render();
+  }
+  setInterval(tickStale, R.staleTickMs);
   readOpenAiGlobals();
   render();
+  scheduleRefresh();
   request("ui/initialize", {
     protocolVersion: "2026-01-26",
     appInfo: { name: "olympus-dashboard", version: "1" },
@@ -104125,6 +104223,13 @@ function chatgptPickerProgram(kit) {
     }
     leave(fill(Q.connected, { source: p.label }), false);
   }
+  function reopen() {
+    if (!p || p.mode !== "connect")
+      return;
+    stopTimer();
+    session++;
+    startConnect(p.connectArgs, p.id, p.label, p.returnKey);
+  }
   function connectView(page) {
     add(page, el("h1", "", fill(Q.connectTitle, { source: p.label })));
     const box = el("div", "picker-status");
@@ -104136,7 +104241,7 @@ function chatgptPickerProgram(kit) {
       const line = el("p", "strong", Q.connectWaiting);
       line.setAttribute("role", "status");
       add(box, line, el("p", "muted", fill(Q.connectWaitingHelp, { source: p.label })));
-      add(box, add(el("div", "actions"), kit.button(Q.connectReopen, "picker:connect:reopen", () => kit.openLink(p.href), "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+      add(box, add(el("div", "actions"), kit.button(Q.connectReopen, "picker:connect:reopen", reopen, "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     } else if (p.phase === "timeout") {
       const line = el("p", "", fill(Q.connectTimeout, { source: p.label }));
       line.setAttribute("role", "alert");
@@ -104145,14 +104250,11 @@ function chatgptPickerProgram(kit) {
         p.startedAt = Date.now();
         kit.render("picker:connect:cancel");
         schedulePoll();
-      }, "main"), kit.button(Q.connectReopen, "picker:connect:reopen", () => kit.openLink(p.href), "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+      }, "main"), kit.button(Q.connectReopen, "picker:connect:reopen", reopen, "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     } else {
       const line = el("p", "", p.errorText || fill(Q.connectFailed, { source: p.label }));
       line.setAttribute("role", "alert");
-      add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", () => {
-        session++;
-        startConnect(p.connectArgs, p.id, p.label, p.returnKey);
-      }, "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+      add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", reopen, "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     }
     add(page, box);
   }
@@ -104380,11 +104482,12 @@ function chatgptPickerProgram(kit) {
     return out;
   }
   function mixed(key) {
-    const mine = effective(key);
+    const access = (state) => state === "exclude" ? "" : state;
+    const mine = access(effective(key));
     for (const other of descendants(key)) {
       const theirs = effective(other);
-      if (theirs !== mine)
-        return theirs;
+      if (access(theirs) !== mine)
+        return theirs || "exclude";
     }
     return "";
   }
@@ -104446,6 +104549,9 @@ function chatgptPickerProgram(kit) {
       else
         p.own.delete(key);
       p.edited = true;
+      const tapped = focus.slice(focus.lastIndexOf(":") + 1);
+      if (!value && tapped && !allowed(key, tapped))
+        focus = "picker:seg:" + key + ":" + effective(key);
     }
     if (p.notice && p.notice !== Q.conflict)
       p.notice = "";
@@ -104651,7 +104757,7 @@ function chatgptPickerProgram(kit) {
   }
   function segControl(name, focusBase, model) {
     const group2 = el("div", "seg");
-    group2.setAttribute("role", "radiogroup");
+    group2.setAttribute("role", "group");
     group2.setAttribute("aria-label", fill(Q.choiceGroup, { name }));
     const buttons = [];
     for (const state of STATES) {
@@ -105601,11 +105707,15 @@ function chatgptPrivacyProgram(kit) {
     area.value = s.description;
     area.disabled = s.saving;
     area.setAttribute("data-key", "privacy:description");
+    area.setAttribute("aria-describedby", "privacy-description-shared");
     area.addEventListener("input", () => {
       s.description = area.value;
       s.edited = true;
     });
     add(page, add(field, area));
+    const shared = el("p", "reason field-note", W.descriptionShared);
+    shared.id = "privacy-description-shared";
+    add(page, shared);
     const rules = add(el("section", "fsection"), el("h2", "", W.rulesTitle));
     if (s.rules.length) {
       const listNode = el("ul", "flist");
@@ -105620,6 +105730,7 @@ function chatgptPrivacyProgram(kit) {
       add(rules, el("p", "reason", W.needFolderSource));
     if (!gmail)
       add(rules, el("p", "reason", W.needGmail));
+    add(rules, el("p", "reason", W.namesShared));
     add(page, rules);
     const footer = el("section", "picker-footer");
     if (s.pendingCount > 0) {
@@ -105836,6 +105947,7 @@ function chatgptDashboardPageHtml(options = {}) {
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
     staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
+    refresh: { ...CHATGPT_DASHBOARD_REFRESH, ...options.refresh },
     picker: {
       tools: CHATGPT_PICKER_TOOLS,
       mailArgs: CHATGPT_PICKER_MAIL_ARGS,
@@ -105878,13 +105990,19 @@ function chatgptDashboardPageHtml(options = {}) {
 function scriptJson(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
 var init_page = __esm(() => {
   init_vocabulary();
   init_picker();
   init_privacy();
   CHATGPT_INLINE_ERROR_CODES = ["sign_in_failed", "source_not_connected", "source_busy", "disconnect_incomplete"];
   CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60000;
+  CHATGPT_DASHBOARD_REFRESH = {
+    activeMs: 15000,
+    idleMs: 60000,
+    maxBackoffMs: 5 * 60000,
+    staleTickMs: 30000
+  };
   STATUS_TONE = Object.fromEntries(Object.keys(DASHBOARD_STATUS_PRESENTATION).map((status) => [status, DASHBOARD_STATUS_PRESENTATION[status].colorToken]));
   CHATGPT_DASHBOARD_LIGHT = {
     bg: "#ffffff",
@@ -106016,6 +106134,7 @@ summary{cursor:pointer;border-radius:0.375rem}
 .picker-status{display:flex;flex-direction:column;gap:0.75rem;margin-top:1rem}
 .field{display:flex;flex-direction:column;gap:0.25rem;margin:0.75rem 0}
 .field-label{font-weight:600;font-size:0.875rem}
+.field+.field-note{margin:-0.5rem 0 0.75rem}
 .text{font:inherit;font-size:1rem;width:100%;min-height:2.25rem;padding:0.375rem 0.625rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
 textarea.text{resize:vertical;min-height:4.5rem}
 .picker-body{display:flex;flex-direction:column;container-type:inline-size}
@@ -107107,6 +107226,31 @@ function chatgptPrivateAnswerProgram(config2) {
   function wait(ms) {
     return new Promise((resolve10) => setTimeout(resolve10, ms));
   }
+  function bounded(work, ms, controller) {
+    return new Promise((resolve10, reject) => {
+      const timer = setTimeout(() => {
+        if (controller)
+          try {
+            controller.abort();
+          } catch {}
+        reject(new Error("timeout"));
+      }, Math.max(0, ms));
+      work.then((value) => {
+        clearTimeout(timer);
+        resolve10(value);
+      }, (error2) => {
+        clearTimeout(timer);
+        reject(error2);
+      });
+    });
+  }
+  function slow(byUser) {
+    phase = "slow";
+    errorText = T.slow;
+    canRetry = true;
+    focusAfter = byUser ? "retry" : "";
+    render();
+  }
   function fail(text, retry, byUser) {
     phase = "error";
     errorText = text;
@@ -107135,35 +107279,49 @@ function chatgptPrivateAnswerProgram(config2) {
     canRetry = false;
     focusAfter = byUser ? "status" : "";
     render();
-    const started = Date.now();
+    const deadline = Date.now() + (info.full ? config2.fullPollCapMs : config2.pollCapMs);
     try {
       const keys = await keyPair(jobId);
       for (;; ) {
         if (mine !== run)
           return;
+        const left = deadline - Date.now();
+        if (left <= 0)
+          return slow(byUser);
+        const limit = Math.min(config2.requestTimeoutMs, left);
+        const controller = typeof window.AbortController === "function" ? new window.AbortController : null;
         let response;
+        let body = null;
         try {
-          response = await window.fetch(config2.relayOrigin + "/private/" + jobId, {
+          response = await bounded(window.fetch(config2.relayOrigin + "/private/" + jobId, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
             credentials: "omit",
             cache: "no-store",
             referrerPolicy: "no-referrer",
-            mode: "cors"
-          });
-        } catch {
-          if (mine === run)
-            fail(T.unreachable, true, byUser);
+            mode: "cors",
+            signal: controller ? controller.signal : undefined
+          }), limit, controller);
+          if (mine !== run)
+            return;
+          try {
+            body = await bounded(response.json(), Math.min(config2.requestTimeoutMs, deadline - Date.now()), controller);
+          } catch (error2) {
+            if (error2 instanceof Error && error2.message === "timeout")
+              throw error2;
+            body = null;
+          }
+        } catch (error2) {
+          if (mine !== run)
+            return;
+          if (error2 instanceof Error && error2.message === "timeout") {
+            if (Date.now() >= deadline)
+              return slow(byUser);
+            continue;
+          }
+          fail(T.unreachable, true, byUser);
           return;
-        }
-        if (mine !== run)
-          return;
-        let body = null;
-        try {
-          body = await response.json();
-        } catch {
-          body = null;
         }
         if (mine !== run)
           return;
@@ -107205,14 +107363,8 @@ function chatgptPrivateAnswerProgram(config2) {
           return fail(T.generic, false, byUser);
         const header = Number(response.headers && response.headers.get ? response.headers.get("retry-after") : NaN);
         const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
-        if (Date.now() - started + seconds * config2.secondMs > (info && info.full ? config2.fullPollCapMs : config2.pollCapMs)) {
-          phase = "slow";
-          errorText = T.slow;
-          canRetry = true;
-          focusAfter = byUser ? "retry" : "";
-          render();
-          return;
-        }
+        if (Date.now() + seconds * config2.secondMs > deadline)
+          return slow(byUser);
         await wait(seconds * config2.secondMs);
       }
     } catch {
@@ -107588,6 +107740,7 @@ function chatgptPrivateAnswerPageHtml(options) {
     secondMs: options.secondMs ?? 1000,
     pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
     fullPollCapMs: options.fullPollCapMs ?? CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS,
+    requestTimeoutMs: options.requestTimeoutMs ?? CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS,
     noteMs: options.noteMs ?? 4000,
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,
@@ -107614,7 +107767,7 @@ function chatgptPrivateAnswerPageHtml(options) {
 function scriptJson2(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 190000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
+var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 190000, CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS = 20000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
 var init_private_answer2 = __esm(() => {
   init_vocabulary();
   init_private_answer_contract();
