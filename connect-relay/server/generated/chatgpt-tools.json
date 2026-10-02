@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=5a78e04b1013"
+          "resourceUri": "ui://olympus/dashboard?v=3504700716f1"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=5a78e04b1013",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=3504700716f1",
         "openai/ui": {
           "entrypoints": [
             {
@@ -81,9 +81,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=41b43bbd8f3d"
+          "resourceUri": "ui://olympus/private-answer?v=bcc59a79c21d"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=41b43bbd8f3d"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=bcc59a79c21d"
       }
     },
     {
@@ -145,9 +145,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=41b43bbd8f3d"
+          "resourceUri": "ui://olympus/private-answer?v=bcc59a79c21d"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=41b43bbd8f3d"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=bcc59a79c21d"
       }
     },
     {
@@ -180,9 +180,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=41b43bbd8f3d"
+          "resourceUri": "ui://olympus/private-answer?v=bcc59a79c21d"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=41b43bbd8f3d"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=bcc59a79c21d"
       }
     },
     {
@@ -733,6 +733,11 @@
             "type": "string",
             "maxLength": 128,
             "description": "The panel's confirmation from olympus_privacy_get."
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "The revision from olympus_privacy_get; a save against changed settings is refused."
           }
         },
         "additionalProperties": false
@@ -761,12 +766,12 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=5a78e04b1013",
+      "uri": "ui://olympus/dashboard?v=3504700716f1",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-answer?v=41b43bbd8f3d",
+      "uri": "ui://olympus/private-answer?v=bcc59a79c21d",
       "name": "Olympus private answer",
       "mimeType": "text/html;profile=mcp-app"
     }
