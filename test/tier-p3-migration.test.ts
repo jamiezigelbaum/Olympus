@@ -1039,6 +1039,32 @@ describe('tier migration review fixes', () => {
     expect(set.ledger.getCurrent(launch)).toMatchObject({ state: 'current', contentTier: 'private' });
     expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.internal]);
   });
+
+  test('the migration moves an item back into a store whose kept copy holds the same text', async () => {
+    const context = await rehearsal();
+    const launch = identityOf('rehearsal-library', 'launch');
+    const migrate = async (tier: 'public' | 'private') => {
+      const read = lanes(context, 'read');
+      const ledger = read.lanes[1]!.set.ledger;
+      ledger.setOverride(launch, { kind: 'tier', tier });
+      // A routed item moves when its re-decision queues the move.
+      const record = ledger.getCurrent(launch);
+      if (record?.routed && record.contentTier !== tier) ledger.beginMove(launch, { metadataTier: tier, contentTier: tier }, record.generation);
+      const plan = await planTierMigration({ lanes: read.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths });
+      await approveTierMigration({ planId: plan.planId, lanes: read.lanes, inputs: context.inputs, paths: context.paths });
+      const write = lanes(context, 'write');
+      return runTierMigration({
+        planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+        selector: 'source:rehearsal.library',
+      });
+    };
+    await migrate('public');
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.public_safe]);
+    // Its Personal copy is kept, superseded, with the same text: nothing to
+    // lose, so the move back is not skipped.
+    expect(await migrate('private')).toMatchObject({ moved: 1, skipped: 0 });
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.internal]);
+  });
 });
 
 function p1aDecision(tier: 'public' | 'private'): TierDecision {

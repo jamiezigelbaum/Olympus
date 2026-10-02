@@ -33,7 +33,14 @@ import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import { DEFAULT_TIER_REJUDGE_PER_PASS, rejudgeRoutedItems, type TierRejudgeReport } from '../connector-store/tier-rejudge.ts';
-import { TierLedger, tierLedgerPathForStore, type TierLedgerIdentity, type TierLedgerRecord } from './tier-ledger.ts';
+import {
+  TierLedger,
+  TierLedgerRaiseAbandonRefusedError,
+  tierLedgerIdentityKey,
+  tierLedgerPathForStore,
+  type TierLedgerIdentity,
+  type TierLedgerRecord,
+} from './tier-ledger.ts';
 
 export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60_000;
 
@@ -106,7 +113,8 @@ export interface TierSnifferServiceOptions {
     embeddingLedgerPath: string;
     maxPerPass?: number;
     /**
-     * How long a queued move may keep failing before it is given up
+     * How long a queued move may keep failing (from its first failed
+     * attempt in this process) before it is given up
      * (`TierLedger.abandonMove`): a lateral or lower move is abandoned, so the
      * item is no longer held mid-move; a raise is never rolled back to the
      * lower placement (that would expose what the newer decision hides), it
@@ -153,6 +161,8 @@ export class TierSnifferService {
   private readonly budget: SnifferCallBudget;
   private timer: ReturnType<typeof setInterval> | undefined;
   private running = false;
+  /** When each queued move (ledger, item, generation) first failed in this process. */
+  private readonly moveFailures = new Map<string, number>();
   private abort: AbortController | undefined;
   private lastTick: TierSnifferTick | undefined;
   private stopped = false;
@@ -441,13 +451,9 @@ export class TierSnifferService {
       for (const record of queued) {
         if (budget === 0 || signal.aborted || this.answering()) break;
         budget -= 1;
+        const identity = recordIdentity(record);
+        const failureKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}\u0000${record.generation}`;
         try {
-          const identity = {
-            provider: record.provider,
-            accountScope: record.accountScope,
-            providerItemId: record.providerItemId,
-            ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
-          };
           // A raise (a re-judged item now held) hid its copies first: they
           // are the move's sources all the same.
           const source = set.ledger.copies(identity).find((copy) => copy.state === 'current'
@@ -461,12 +467,16 @@ export class TierSnifferService {
             embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: 'system-automatic', why: AUTO_MOVE_WHY },
           });
           report.moved += 1;
+          this.moveFailures.delete(failureKey);
         } catch {
           // The move stays queued (held, never shown twice); the next pass or
           // the owner-approved migration picks it up.
           report.failed += 1;
-          const queuedAt = Date.parse(record.decidedAt);
-          if (Number.isFinite(queuedAt) && now - queuedAt >= staleAfterMs) this.settleStaleMove(set, record, report);
+          const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
+          this.moveFailures.set(failureKey, firstFailedAt);
+          if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set, record, report)) {
+            this.moveFailures.delete(failureKey);
+          }
         }
       }
     }
@@ -487,28 +497,28 @@ export class TierSnifferService {
    * that back would serve the item below its newest decision, so it stays
    * hidden and queued for a later pass or the owner-approved migration.
    */
-  private settleStaleMove(set: TieredStoreSet, record: TierLedgerRecord, report: TierAutoMoveReport): void {
+  private settleStaleMove(set: TieredStoreSet, record: TierLedgerRecord, report: TierAutoMoveReport): boolean {
     try {
-      const identity = {
-        provider: record.provider,
-        accountScope: record.accountScope,
-        providerItemId: record.providerItemId,
-        ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
-      };
-      const current = set.ledger.getCurrent(identity);
-      if (!current || current.state !== 'moving' || current.generation !== record.generation) return;
-      const hid = set.ledger.copies(identity)
-        .some((copy) => copy.state === 'superseded' && copy.supersededByGeneration === record.generation + 1);
-      if (hid) {
-        report.staleRaises = (report.staleRaises ?? 0) + 1;
-        return;
-      }
-      set.ledger.abandonMove(identity, { expectedGeneration: record.generation });
+      // The ledger refuses a raise inside the same transaction that would
+      // undo it, so no concurrent hide-first stage can slip in between.
+      set.ledger.abandonMove(recordIdentity(record), { expectedGeneration: record.generation });
       report.abandoned = (report.abandoned ?? 0) + 1;
-    } catch {
-      // Left queued; the next pass looks again.
+      return true;
+    } catch (error) {
+      if (error instanceof TierLedgerRaiseAbandonRefusedError) report.staleRaises = (report.staleRaises ?? 0) + 1;
+      // Otherwise left queued; the next pass looks again.
+      return false;
     }
   }
+}
+
+function recordIdentity(record: TierLedgerRecord): TierLedgerIdentity {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
+  };
 }
 
 const AUTO_MOVE_WHY = 'Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).';
