@@ -145,15 +145,26 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     if (host.theme === 'light' || host.theme === 'dark') theme = host.theme;
     if (host.toolResponseMetadata) accept(host.toolResponseMetadata, true);
   }
+  // The host announces globals often (its own layout changes included). Redraw
+  // only for a new theme; a new result redraws through accept.
   window.addEventListener('openai:set_globals', () => {
-    readGlobals();
-    render();
+    const host = openai();
+    if (!host) return;
+    const before = theme;
+    if (host.theme === 'light' || host.theme === 'dark') theme = host.theme;
+    if (host.toolResponseMetadata) accept(host.toolResponseMetadata);
+    if (theme !== before) render();
   });
 
   // ---- the tool result ---------------------------------------------------
   /** Reads `_meta[metaKey]`; anything unexpected renders nothing. */
   function accept(meta: Any, quiet?: boolean): void {
-    const value = meta && typeof meta === 'object' ? meta[config.metaKey] : null;
+    const value = meta && typeof meta === 'object' ? meta[config.metaKey] : undefined;
+    // The host re-delivers results and globals while the answer loads, some
+    // without our key. Absence is no news: only an explicit value replaces
+    // what is shown (live 2026-10-02, the card closed and reopened 3-4 times
+    // while loading because a bare re-delivery cleared it).
+    if (value === undefined && info) return;
     let next: typeof info = null;
     if (value && typeof value === 'object' && value.v === 1 && typeof value.count === 'number'
       && isFinite(value.count) && value.count >= 1
@@ -617,7 +628,6 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       if (target && typeof target.focus === 'function') target.focus();
     }
     observeCard();
-    reportHeight(true);
     afterLayout();
   }
 
@@ -636,10 +646,12 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     return Math.ceil((node.offsetHeight || 0) + margins);
   }
 
+  // One report per real change, at most once a frame: repeated reports of the
+  // same size made the host re-lay out the frame on every poll.
   let lastHeight = -1;
-  function reportHeight(force?: boolean): void {
+  function reportHeight(): void {
     const height = cardHeight();
-    if (!force && height === lastHeight) return;
+    if (height === lastHeight) return;
     lastHeight = height;
     const host = openai();
     if (host && typeof host.notifyIntrinsicHeight === 'function') host.notifyIntrinsicHeight(height);
@@ -648,17 +660,21 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   }
 
   /** Measures again once layout (and the next frame) has settled. */
+  let scheduled = false;
   function afterLayout(): void {
+    if (scheduled) return;
+    scheduled = true;
+    const measure = () => { scheduled = false; reportHeight(); };
     const frame = (window as Any).requestAnimationFrame;
-    if (typeof frame === 'function') frame.call(window, () => reportHeight());
-    else setTimeout(() => reportHeight(), 0);
+    if (typeof frame === 'function') frame.call(window, measure);
+    else setTimeout(measure, 0);
   }
 
   let observer: Any = null;
   let observed: Element | null = null;
   function observeCard(): void {
     if (!observer && typeof (window as Any).ResizeObserver === 'function') {
-      observer = new (window as Any).ResizeObserver(() => reportHeight());
+      observer = new (window as Any).ResizeObserver(() => afterLayout());
     }
     const node = info ? root.firstChild as Element | null : null;
     if (!observer || node === observed) return;
@@ -667,7 +683,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     if (node) observer.observe(node);
   }
   const fonts = (doc as Any).fonts;
-  if (fonts && fonts.ready && typeof fonts.ready.then === 'function') fonts.ready.then(() => reportHeight());
+  if (fonts && fonts.ready && typeof fonts.ready.then === 'function') fonts.ready.then(() => afterLayout());
 
   // ---- start -------------------------------------------------------------
   readGlobals();

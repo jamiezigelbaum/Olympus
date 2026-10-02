@@ -248,18 +248,36 @@ describe('nothing to show', () => {
     expect(host.fetched).toHaveLength(0);
   });
 
-  test('a match that goes away collapses back to zero height', () => {
+  test('a match that is explicitly withdrawn collapses back to zero height', async () => {
     const host = mount({ replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '30' }] });
     host.push(ready());
     expect(host.text()).toContain(W.title);
-    host.push({ content: [], _meta: {} });
+    host.push({ content: [], _meta: meta({ v: 1, count: 0, state: 'ready' }) });
     expect(host.text()).toBe('');
-    expect(host.heights().at(-1)).toBe(0);
+    await sleep(20);
+    expect(host.heights().at(-1) ?? 0).toBe(0);
+  });
+
+  test('a bare re-delivery while loading keeps the card open and does not restart', async () => {
+    const host = mount({ replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '30' }] });
+    host.push(ready());
+    for (let i = 0; i < 50 && host.fetched.length === 0; i++) await sleep(10);
+    const heightsBefore = host.heights().length;
+    for (let i = 0; i < 4; i++) {
+      host.push({ content: [], _meta: {} });
+      host.push({ content: [] });
+      (host.win as any).dispatchEvent(new (host.win as any).Event('openai:set_globals'));
+    }
+    await sleep(20);
+    expect(host.text()).toContain(W.preparing);
+    // Still the same collection: polls keep one key, nothing restarted.
+    expect(new Set(host.fetched.map((call) => call.body.publicKey)).size).toBe(1);
+    expect(host.heights().slice(heightsBefore)).not.toContain(0);
   });
 });
 
 describe('the card while the answer is prepared', () => {
-  test('a ready result starts collecting at once: lock circle, title, spinner line, no button', () => {
+  test('a ready result starts collecting at once: lock circle, title, spinner line, no button', async () => {
     const host = mount({ replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '30' }] });
     host.push(ready(3));
     const panel = host.doc.getElementById('panel')!;
@@ -270,6 +288,7 @@ describe('the card while the answer is prepared', () => {
     expect(panel.querySelector('.sub .spinner')).not.toBeNull();
     expect(panel.querySelector('.badge')).toBeNull();
     expect(host.buttons()).toHaveLength(0);
+    await sleep(20);
     expect(host.heights().length).toBeGreaterThan(0);
     expectNoJargon(host);
   });
@@ -339,7 +358,11 @@ describe('the reported height is the card, not the frame', () => {
     for (const height of [...host.heights(), ...sizes.map((size) => size.height)]) {
       expect([0, 74]).toContain(height);
     }
-    host.push({ content: [], _meta: {} });
+    // Each size is reported once: no repeats of the same height.
+    const reported = host.heights();
+    expect(reported.filter((h, i) => i > 0 && h === reported[i - 1])).toHaveLength(0);
+    host.push({ content: [], _meta: meta({ v: 1, count: 0, state: 'ready' }) });
+    await sleep(40);
     expect(host.heights().at(-1)).toBe(0);
   });
 

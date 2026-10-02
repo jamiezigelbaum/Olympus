@@ -103976,11 +103976,21 @@ function chatgptPrivateAnswerProgram(config2) {
       accept(host.toolResponseMetadata, true);
   }
   window.addEventListener("openai:set_globals", () => {
-    readGlobals();
-    render();
+    const host = openai();
+    if (!host)
+      return;
+    const before = theme;
+    if (host.theme === "light" || host.theme === "dark")
+      theme = host.theme;
+    if (host.toolResponseMetadata)
+      accept(host.toolResponseMetadata);
+    if (theme !== before)
+      render();
   });
   function accept(meta2, quiet) {
-    const value = meta2 && typeof meta2 === "object" ? meta2[config2.metaKey] : null;
+    const value = meta2 && typeof meta2 === "object" ? meta2[config2.metaKey] : undefined;
+    if (value === undefined && info)
+      return;
     let next = null;
     if (value && typeof value === "object" && value.v === 1 && typeof value.count === "number" && isFinite(value.count) && value.count >= 1 && (value.state === "ready" || value.state === "no_model" || value.state === "model_downloading")) {
       const percent = typeof value.percent === "number" && isFinite(value.percent) ? Math.max(0, Math.min(100, Math.round(value.percent))) : -1;
@@ -104436,7 +104446,6 @@ function chatgptPrivateAnswerProgram(config2) {
         target.focus();
     }
     observeCard();
-    reportHeight(true);
     afterLayout();
   }
   function cardHeight() {
@@ -104451,9 +104460,9 @@ function chatgptPrivateAnswerProgram(config2) {
     return Math.ceil((node.offsetHeight || 0) + margins);
   }
   let lastHeight = -1;
-  function reportHeight(force) {
+  function reportHeight() {
     const height = cardHeight();
-    if (!force && height === lastHeight)
+    if (height === lastHeight)
       return;
     lastHeight = height;
     const host = openai();
@@ -104462,18 +104471,26 @@ function chatgptPrivateAnswerProgram(config2) {
     const width = info && root.firstChild ? Math.ceil(root.firstChild.offsetWidth || 0) : 0;
     notify("ui/notifications/size-changed", width > 0 ? { width, height } : { height });
   }
+  let scheduled = false;
   function afterLayout() {
+    if (scheduled)
+      return;
+    scheduled = true;
+    const measure = () => {
+      scheduled = false;
+      reportHeight();
+    };
     const frame = window.requestAnimationFrame;
     if (typeof frame === "function")
-      frame.call(window, () => reportHeight());
+      frame.call(window, measure);
     else
-      setTimeout(() => reportHeight(), 0);
+      setTimeout(measure, 0);
   }
   let observer = null;
   let observed = null;
   function observeCard() {
     if (!observer && typeof window.ResizeObserver === "function") {
-      observer = new window.ResizeObserver(() => reportHeight());
+      observer = new window.ResizeObserver(() => afterLayout());
     }
     const node = info ? root.firstChild : null;
     if (!observer || node === observed)
@@ -104486,7 +104503,7 @@ function chatgptPrivateAnswerProgram(config2) {
   }
   const fonts = doc2.fonts;
   if (fonts && fonts.ready && typeof fonts.ready.then === "function")
-    fonts.ready.then(() => reportHeight());
+    fonts.ready.then(() => afterLayout());
   readGlobals();
   render();
   request("ui/initialize", {
