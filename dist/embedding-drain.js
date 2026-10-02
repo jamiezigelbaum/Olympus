@@ -7996,12 +7996,50 @@ function isValidIban(candidate) {
   return remainder === 1;
 }
 function findLuhnCardNumber(haystack) {
-  const runs = haystack.matchAll(/\d(?:[ -]?\d)*/g);
-  for (const run of runs) {
-    const digits = run[0].replace(/[ -]/g, "");
-    if (digits.length >= 13 && digits.length <= 19 && passesLuhn(digits))
+  for (const match of haystack.matchAll(CARD_GROUPED)) {
+    if (isCardNumber(match[1].replace(/[ -]/g, "")))
       return true;
   }
+  for (const match of haystack.matchAll(CARD_UNBROKEN)) {
+    const digits = match[0];
+    if (!isCardNumber(digits))
+      continue;
+    const before = haystack.slice(Math.max(0, match.index - CARD_WINDOW), match.index);
+    const after = haystack.slice(match.index + digits.length, match.index + digits.length + CARD_WINDOW);
+    if (CARD_CONTEXT.test(before) || CARD_CONTEXT.test(after))
+      return true;
+    const otherDigits = (before + after).replace(/\D/g, "").length;
+    if (otherDigits < CARD_DENSE_DIGITS)
+      return true;
+  }
+  return false;
+}
+function isCardNumber(digits) {
+  return cardIssuerAccepts(digits) && passesLuhn(digits);
+}
+function cardIssuerAccepts(digits) {
+  const length = digits.length;
+  const two = Number(digits.slice(0, 2));
+  const three = Number(digits.slice(0, 3));
+  const four = Number(digits.slice(0, 4));
+  const six = Number(digits.slice(0, 6));
+  if (digits[0] === "4")
+    return length === 13 || length === 16 || length === 19;
+  if (two >= 51 && two <= 55 || four >= 2221 && four <= 2720)
+    return length === 16;
+  if (two === 34 || two === 37)
+    return length === 15;
+  if (four === 6011 || two === 65 || three >= 644 && three <= 649 || six >= 622126 && six <= 622925) {
+    return length >= 16 && length <= 19;
+  }
+  if (three >= 300 && three <= 305 || two === 36 || two === 38 || two === 39)
+    return length >= 14 && length <= 19;
+  if (four >= 3528 && four <= 3589)
+    return length >= 16 && length <= 19;
+  if (two === 62)
+    return length >= 16 && length <= 19;
+  if (two === 50 || two >= 56 && two <= 69)
+    return length >= 13 && length <= 19;
   return false;
 }
 function passesLuhn(digits) {
@@ -8086,7 +8124,7 @@ function isShortPleasantry(haystack) {
     return false;
   return PLEASANTRY_PATTERN.test(text);
 }
-var IDENTITY_NAME_PATTERN, PERSONAL_LIFE_NAME_PATTERN, SECRET_FINDING_TYPES, FINANCIAL_STRONG_TERMS, FINANCIAL_WEAK_TERMS, HEALTH_STRONG_TERMS, HEALTH_WEAK_TERMS, HEALTH_ORIGIN_HINT, NIF_CHECK_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE", CLEAN_GMAIL_CATEGORIES, LIST_SENDER_LOCAL_PART, LIST_SENDER_DOMAIN, PUBLICISH_PATH_SEGMENTS, PRESENTATION_EXTENSIONS, PLEASANTRY_PATTERN, SCHEDULING_PATTERN, COMMERCE_NOTICE_PATTERN, WORK_COORDINATION_PATTERN;
+var IDENTITY_NAME_PATTERN, PERSONAL_LIFE_NAME_PATTERN, SECRET_FINDING_TYPES, FINANCIAL_STRONG_TERMS, FINANCIAL_WEAK_TERMS, HEALTH_STRONG_TERMS, HEALTH_WEAK_TERMS, HEALTH_ORIGIN_HINT, CARD_GROUPED, CARD_UNBROKEN, CARD_CONTEXT, CARD_WINDOW = 60, CARD_DENSE_DIGITS = 8, NIF_CHECK_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE", CLEAN_GMAIL_CATEGORIES, LIST_SENDER_LOCAL_PART, LIST_SENDER_DOMAIN, PUBLICISH_PATH_SEGMENTS, PRESENTATION_EXTENSIONS, PLEASANTRY_PATTERN, SCHEDULING_PATTERN, COMMERCE_NOTICE_PATTERN, WORK_COORDINATION_PATTERN;
 var init_engine = __esm(() => {
   init_content_policy();
   init_sensitivity_map();
@@ -8155,6 +8193,9 @@ var init_engine = __esm(() => {
     "hospital"
   ];
   HEALTH_ORIGIN_HINT = /clinic|hospital|medic|health|pharma|doctor/i;
+  CARD_GROUPED = /(?<![\d.,]|\d[ -])(\d{4}([ -])(?:\d{4}\2\d{4}\2\d{4}(?:\2\d{3})?|\d{4}\2\d{4}\2\d{1,3}|\d{6}\2\d{4,5}))(?!\d|[.,]\d|\2\d)/g;
+  CARD_UNBROKEN = /(?<![\d.,]|\d[ -])\d{13,19}(?!\d|[.,]\d)/g;
+  CARD_CONTEXT = /\b(?:cards?|card ?(?:no|number|#)|visa|master ?card|amex|american express|discover|diners|jcb|maestro|union ?pay|credit|debit|cardholder|exp|expiry|expires|expiration|valid thru|cvv2?|cvc2?|csc|security code)\b|\b(?:0[1-9]|1[0-2]) ?\/ ?(?:\d{2}|20\d{2})\b/i;
   CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
   LIST_SENDER_LOCAL_PART = /\b(?:no-?reply|donotreply|newsletter|mailer(?:-daemon)?|notifications?|updates|digest|news)@/i;
   LIST_SENDER_DOMAIN = /@(?:[a-z0-9-]+\.)*(?:substack\.com|mailchimp\.com|mailchimpapp\.net|mailgun\.(?:com|org|net)|sendgrid\.(?:com|net)|beehiiv\.com|buttondown\.email|list-manage\.com|lists?\.[a-z0-9.-]+)\b/i;
@@ -8375,6 +8416,7 @@ function classifyItemTiersWithPublic(input, options) {
   const content = contentPass({
     signals,
     text,
+    ...input.namesOnly ? { namesOnly: true } : {},
     matchInput,
     names: snifferNames(signals),
     metadata,
@@ -8385,7 +8427,8 @@ function classifyItemTiersWithPublic(input, options) {
     ...input.subject ? { subject: input.subject } : {}
   });
   const contentRead = text !== undefined || metadata.tier === "secrets";
-  const contentPending = content.pending || !contentRead;
+  const namesOnly = input.namesOnly === true && text === undefined;
+  const contentPending = content.pending || !contentRead && !namesOnly;
   return {
     ...base,
     metadataTier: metadata.tier,
@@ -8586,8 +8629,8 @@ function contentPass(args) {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
-      reasons: ["content:unread"],
-      pending: metadata.pending
+      reasons: [args.namesOnly ? "content:names_only" : "content:unread"],
+      pending: args.namesOnly ? false : metadata.pending
     };
   }
   if (!args.secretsCleared) {
@@ -8781,7 +8824,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-01.p3", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-02.p4", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_sensitivity_map();
   init_engine();
@@ -10497,12 +10540,13 @@ function isTextualMimeType(mimeType) {
   const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
   return normalized.startsWith("text/") || normalized === "application/json" || normalized === "application/xml" || normalized.endsWith("+json") || normalized.endsWith("+xml");
 }
-function decideItemTiers(connector, item, text, options, ledger) {
+function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
   const override = ledger?.getOverride(item.identity);
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
     provider: item.identity.provider,
     ...text !== undefined ? { text } : {},
+    ...extra.namesOnly ? { namesOnly: true } : {},
     subject: item.identity
   }, {
     ...options?.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {},
@@ -21254,6 +21298,9 @@ init_command_runner();
 // src/workers/file-extraction/extractors/text.ts
 init_command_runner();
 
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+init_command_runner();
+
 // src/workers/file-extraction/extractors/remote-vlm.ts
 init_command_runner();
 init_pdf_render();
@@ -25246,42 +25293,60 @@ function snifferReasonCode(verdict) {
   return `${category}:${verdict.confidence.toFixed(2)}`;
 }
 var SNIFFER_INJECTION_CATEGORY = "injection";
+function cachedSnifferVerdictHolds(verdict) {
+  return !(verdict.failSafe && verdict.category === SNIFFER_INJECTION_CATEGORY);
+}
+var STEER_WORD = String.raw`(?:personal|public|ordinary|not private|safe|harmless)`;
+var CONFIDENCE_NUMBER = String.raw`(?<![\d.,])(?:0?[.,]\d{1,3}|1[.,]0+)(?![\d.,])`;
+var HIGH_CONFIDENCE_NUMBER = String.raw`(?<![\d.,])(?:0?[.,]9\d{0,2}|1[.,]0+)(?![\d.,])`;
+var SAME_SENTENCE = String.raw`[^.!?;]{0,40}`;
+var NEAR = String.raw`[^a-z0-9]{1,4}(?:[a-z]+[^a-z0-9]{1,4}){0,2}`;
 var INJECTION_PATTERNS = [
-  /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^\n]{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier|guidance)\b/,
+  /\b(?:ignore|disregard|forget|override|bypass|skip)\b.{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier|guidance)\b/,
   /\b(?:system|developer|assistant|user)\s*(?:prompt|message|note)?\s*:/,
   /\b(?:system prompt|developer message|as an ai|you are an? (?:ai|assistant|model|classifier|sniffer)|respond with|answer with|reply with|output only|return only)\b/,
-  /\bverdicts?\b/,
-  /\b(?:tier|confidence|category)\b\s*["']?\s*[:=]/,
-  /[{}<>]/,
-  /\b(?:personal|private|public|ordinary)\b[^\n]{0,40}\b(?:confidence|0?[.,]\d{1,3}|1[.,]0+)\b/,
-  /\b(?:confidence|0?[.,]9\d?|1[.,]0+)\b[^\n]{0,40}\b(?:personal|public|ordinary)\b/,
-  /\b(?:classify|label|mark|treat|tag|consider|rate|answer|return)\b[^\n]{0,30}\b(?:as|is|:)\s*(?:personal|public|ordinary|not private|safe|harmless)\b/,
-  /\b(?:every|all|each|any|other)\s+(?:of the\s+)?(?:items?|files?|entries|entry|documents?|names?|messages?|rows?|lines?)\b/,
-  /\bthis\s+(?:list|batch|prompt)\b/,
-  /\b(?:everything|all of (?:this|these|them)|these|the rest)\b[^\n]{0,30}\b(?:is|are)\b[^\n]{0,20}\b(?:personal|ordinary|public|safe|harmless)\b/
+  /\bverdicts?\b\s*["']?\s*[:=[]/,
+  new RegExp(String.raw`\bverdicts?\b${SAME_SENTENCE}\b${STEER_WORD}\b`),
+  /["'](?:tier|confidence|category|verdicts?)["']\s*:/,
+  new RegExp(String.raw`\b(?:tier|confidence|category)\b\s*["']?\s*[:=]\s*["']?\s*(?:personal|private|public|ordinary|reference|${CONFIDENCE_NUMBER})`),
+  /\{[^{}]{0,40}\b(?:tier|personal|public|ordinary|verdicts?|confidence|category)\b/,
+  /<\s*\/?\s*(?:system|user|assistant|developer|human|instructions?|prompt|items?|documents?|names|excerpt|verdicts?|owner_privacy|context|im_start|im_end|inst|sys|tool[a-z_]*|output|response|answer)\b[^<>]{0,40}>/,
+  /<\|[^<>|]{1,30}\|>/,
+  /\[\s*\/?\s*(?:inst|sys)\s*\]/,
+  new RegExp(String.raw`\b(?:personal|private|public|ordinary)${NEAR}(?:confidence\b|${CONFIDENCE_NUMBER})`),
+  new RegExp(String.raw`(?:\bconfidence\b|${HIGH_CONFIDENCE_NUMBER})${NEAR}(?:personal|public|ordinary)\b`),
+  /\b(?:classify|label|mark|treat|tag|consider|answer)\b.{0,30}\b(?:as|is|:)\s*(?:personal|public|ordinary|not private|safe|harmless)\b/,
+  /\b(?:rate|return)\b.{0,30}\b(?:as|is|:)\s*(?:personal|public|ordinary|not private)\b/,
+  new RegExp(String.raw`\b(?:every|all|each|any|other)\s+(?:of the\s+)?(?:items?|files?|entries|entry|documents?|names?|messages?|rows?|lines?)\b${SAME_SENTENCE}\b(?:${STEER_WORD}|verdicts?|tier)\b`),
+  new RegExp(String.raw`\bthis\s+(?:list|batch|prompt)\b${SAME_SENTENCE}\b(?:${STEER_WORD}|verdicts?|tier)\b`),
+  /\b(?:everything|all of (?:this|these|them)|these|the rest)\b.{0,30}\b(?:is|are)\b.{0,20}\b(?:personal|ordinary|public|safe|harmless)\b/
 ];
-var COMPACT_MARKERS = [
+var WORD_RUN_MARKERS = [
   "ignoreprevious",
   "ignoreall",
   "ignoretherules",
   "ignoreinstructions",
-  "disregard",
   "systemprompt",
-  "verdict",
   "tierpersonal",
   "tierpublic",
   "personalordinary",
-  "confidence",
-  "everyitem",
-  "allitems",
-  "eachitem",
-  "classifyas",
-  "markas",
   "answerpersonal",
   "respondpersonal",
   "personal099",
   "personal0.99"
 ];
+var LETTER_SPACED_MARKERS = [
+  ...WORD_RUN_MARKERS,
+  "disregard",
+  "verdict",
+  "confidence",
+  "everyitem",
+  "allitems",
+  "eachitem",
+  "classifyas",
+  "markas"
+];
+var LETTER_SPACED_MIN_RUN = 4;
 var CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı";
 var CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli";
 function normalizeSnifferMaterial(material) {
@@ -25297,8 +25362,52 @@ function snifferMaterialLooksLikeInjection(material) {
   const normalized = normalizeSnifferMaterial(material);
   if (INJECTION_PATTERNS.some((pattern) => pattern.test(normalized)))
     return true;
-  const compact = normalized.replace(/[^a-z0-9.]/g, "");
-  return COMPACT_MARKERS.some((marker) => compact.includes(marker));
+  if (wholeWordRunHas(normalized, WORD_RUN_MARKERS))
+    return true;
+  for (const run of letterSpacedRuns(normalized)) {
+    const compact = run.replace(/[^a-z0-9.]/g, "");
+    if (LETTER_SPACED_MARKERS.some((marker) => compact.includes(marker)))
+      return true;
+    if (INJECTION_PATTERNS.some((pattern) => pattern.test(run.replace(/ /g, ""))))
+      return true;
+  }
+  return false;
+}
+function wholeWordRunHas(normalized, markers) {
+  const words = normalized.split(/[^a-z0-9.]+/).filter(Boolean);
+  const starts = new Set;
+  const ends = new Set;
+  let at = 0;
+  for (const word of words) {
+    starts.add(at);
+    at += word.length;
+    ends.add(at);
+  }
+  const compact = words.join("");
+  return markers.some((marker) => {
+    for (let index = compact.indexOf(marker);index >= 0; index = compact.indexOf(marker, index + 1)) {
+      if (starts.has(index) && ends.has(index + marker.length))
+        return true;
+    }
+    return false;
+  });
+}
+function letterSpacedRuns(normalized) {
+  const runs = [];
+  let run = [];
+  const flush = () => {
+    if (run.length >= LETTER_SPACED_MIN_RUN)
+      runs.push(run.join(" "));
+    run = [];
+  };
+  for (const token of normalized.split(" ")) {
+    if ([...token].length === 1)
+      run.push(token);
+    else
+      flush();
+  }
+  flush();
+  return runs;
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
   return `${lane.kind}:${promptVersion}`;
@@ -25425,8 +25534,9 @@ class CachedTierSniffer {
         promptVersion: this.promptVersion,
         mapRevision
       });
-      if (cached)
+      if (cached && cachedSnifferVerdictHolds(cached)) {
         return { verdict: "decided", tier: snifferTierKey(cached), code: snifferReasonCode(cached) };
+      }
       if (request.subject) {
         this.store.enqueue({
           subject: request.subject,
@@ -26048,7 +26158,7 @@ async function runSnifferPass(options) {
         continue;
       }
       const cached = target.sniffer.getVerdict(keyOf(question));
-      if (cached) {
+      if (cached && cachedSnifferVerdictHolds(cached)) {
         apply({ target, question }, cached);
         report.cacheHits += 1;
         continue;

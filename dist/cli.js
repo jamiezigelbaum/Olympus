@@ -13137,12 +13137,50 @@ function isValidIban(candidate) {
   return remainder === 1;
 }
 function findLuhnCardNumber(haystack) {
-  const runs = haystack.matchAll(/\d(?:[ -]?\d)*/g);
-  for (const run of runs) {
-    const digits = run[0].replace(/[ -]/g, "");
-    if (digits.length >= 13 && digits.length <= 19 && passesLuhn(digits))
+  for (const match of haystack.matchAll(CARD_GROUPED)) {
+    if (isCardNumber(match[1].replace(/[ -]/g, "")))
       return true;
   }
+  for (const match of haystack.matchAll(CARD_UNBROKEN)) {
+    const digits = match[0];
+    if (!isCardNumber(digits))
+      continue;
+    const before = haystack.slice(Math.max(0, match.index - CARD_WINDOW), match.index);
+    const after = haystack.slice(match.index + digits.length, match.index + digits.length + CARD_WINDOW);
+    if (CARD_CONTEXT.test(before) || CARD_CONTEXT.test(after))
+      return true;
+    const otherDigits = (before + after).replace(/\D/g, "").length;
+    if (otherDigits < CARD_DENSE_DIGITS)
+      return true;
+  }
+  return false;
+}
+function isCardNumber(digits) {
+  return cardIssuerAccepts(digits) && passesLuhn(digits);
+}
+function cardIssuerAccepts(digits) {
+  const length = digits.length;
+  const two = Number(digits.slice(0, 2));
+  const three = Number(digits.slice(0, 3));
+  const four = Number(digits.slice(0, 4));
+  const six = Number(digits.slice(0, 6));
+  if (digits[0] === "4")
+    return length === 13 || length === 16 || length === 19;
+  if (two >= 51 && two <= 55 || four >= 2221 && four <= 2720)
+    return length === 16;
+  if (two === 34 || two === 37)
+    return length === 15;
+  if (four === 6011 || two === 65 || three >= 644 && three <= 649 || six >= 622126 && six <= 622925) {
+    return length >= 16 && length <= 19;
+  }
+  if (three >= 300 && three <= 305 || two === 36 || two === 38 || two === 39)
+    return length >= 14 && length <= 19;
+  if (four >= 3528 && four <= 3589)
+    return length >= 16 && length <= 19;
+  if (two === 62)
+    return length >= 16 && length <= 19;
+  if (two === 50 || two >= 56 && two <= 69)
+    return length >= 13 && length <= 19;
   return false;
 }
 function passesLuhn(digits) {
@@ -13227,7 +13265,7 @@ function isShortPleasantry(haystack) {
     return false;
   return PLEASANTRY_PATTERN.test(text);
 }
-var IDENTITY_NAME_PATTERN, PERSONAL_LIFE_NAME_PATTERN, SECRET_FINDING_TYPES, FINANCIAL_STRONG_TERMS, FINANCIAL_WEAK_TERMS, HEALTH_STRONG_TERMS, HEALTH_WEAK_TERMS, HEALTH_ORIGIN_HINT, NIF_CHECK_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE", CLEAN_GMAIL_CATEGORIES, LIST_SENDER_LOCAL_PART, LIST_SENDER_DOMAIN, PUBLICISH_PATH_SEGMENTS, PRESENTATION_EXTENSIONS, PLEASANTRY_PATTERN, SCHEDULING_PATTERN, COMMERCE_NOTICE_PATTERN, WORK_COORDINATION_PATTERN;
+var IDENTITY_NAME_PATTERN, PERSONAL_LIFE_NAME_PATTERN, SECRET_FINDING_TYPES, FINANCIAL_STRONG_TERMS, FINANCIAL_WEAK_TERMS, HEALTH_STRONG_TERMS, HEALTH_WEAK_TERMS, HEALTH_ORIGIN_HINT, CARD_GROUPED, CARD_UNBROKEN, CARD_CONTEXT, CARD_WINDOW = 60, CARD_DENSE_DIGITS = 8, NIF_CHECK_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE", CLEAN_GMAIL_CATEGORIES, LIST_SENDER_LOCAL_PART, LIST_SENDER_DOMAIN, PUBLICISH_PATH_SEGMENTS, PRESENTATION_EXTENSIONS, PLEASANTRY_PATTERN, SCHEDULING_PATTERN, COMMERCE_NOTICE_PATTERN, WORK_COORDINATION_PATTERN;
 var init_engine = __esm(() => {
   init_content_policy();
   init_sensitivity_map();
@@ -13296,6 +13334,9 @@ var init_engine = __esm(() => {
     "hospital"
   ];
   HEALTH_ORIGIN_HINT = /clinic|hospital|medic|health|pharma|doctor/i;
+  CARD_GROUPED = /(?<![\d.,]|\d[ -])(\d{4}([ -])(?:\d{4}\2\d{4}\2\d{4}(?:\2\d{3})?|\d{4}\2\d{4}\2\d{1,3}|\d{6}\2\d{4,5}))(?!\d|[.,]\d|\2\d)/g;
+  CARD_UNBROKEN = /(?<![\d.,]|\d[ -])\d{13,19}(?!\d|[.,]\d)/g;
+  CARD_CONTEXT = /\b(?:cards?|card ?(?:no|number|#)|visa|master ?card|amex|american express|discover|diners|jcb|maestro|union ?pay|credit|debit|cardholder|exp|expiry|expires|expiration|valid thru|cvv2?|cvc2?|csc|security code)\b|\b(?:0[1-9]|1[0-2]) ?\/ ?(?:\d{2}|20\d{2})\b/i;
   CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
   LIST_SENDER_LOCAL_PART = /\b(?:no-?reply|donotreply|newsletter|mailer(?:-daemon)?|notifications?|updates|digest|news)@/i;
   LIST_SENDER_DOMAIN = /@(?:[a-z0-9-]+\.)*(?:substack\.com|mailchimp\.com|mailchimpapp\.net|mailgun\.(?:com|org|net)|sendgrid\.(?:com|net)|beehiiv\.com|buttondown\.email|list-manage\.com|lists?\.[a-z0-9.-]+)\b/i;
@@ -13516,6 +13557,7 @@ function classifyItemTiersWithPublic(input, options) {
   const content = contentPass({
     signals,
     text,
+    ...input.namesOnly ? { namesOnly: true } : {},
     matchInput,
     names: snifferNames(signals),
     metadata,
@@ -13526,7 +13568,8 @@ function classifyItemTiersWithPublic(input, options) {
     ...input.subject ? { subject: input.subject } : {}
   });
   const contentRead = text !== undefined || metadata.tier === "secrets";
-  const contentPending = content.pending || !contentRead;
+  const namesOnly = input.namesOnly === true && text === undefined;
+  const contentPending = content.pending || !contentRead && !namesOnly;
   return {
     ...base,
     metadataTier: metadata.tier,
@@ -13727,8 +13770,8 @@ function contentPass(args) {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
-      reasons: ["content:unread"],
-      pending: metadata.pending
+      reasons: [args.namesOnly ? "content:names_only" : "content:unread"],
+      pending: args.namesOnly ? false : metadata.pending
     };
   }
   if (!args.secretsCleared) {
@@ -13922,7 +13965,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-01.p3", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-02.p4", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_sensitivity_map();
   init_engine();
@@ -15520,12 +15563,13 @@ function isTextualMimeType(mimeType) {
   const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
   return normalized.startsWith("text/") || normalized === "application/json" || normalized === "application/xml" || normalized.endsWith("+json") || normalized.endsWith("+xml");
 }
-function decideItemTiers(connector, item, text, options, ledger) {
+function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
   const override = ledger?.getOverride(item.identity);
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
     provider: item.identity.provider,
     ...text !== undefined ? { text } : {},
+    ...extra.namesOnly ? { namesOnly: true } : {},
     subject: item.identity
   }, {
     ...options?.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {},
@@ -23642,7 +23686,7 @@ class TieredRoutingRun {
     const deferred = this.set.readsContentLater();
     const text = deferred && input.metadataOnly ? undefined : connectorStoreItemText(item);
     const classification = this.classification;
-    let decision = decideItemTiers(connector, item, text, classification, ledger);
+    let decision = decideItemTiers(connector, item, text, classification, ledger, { namesOnly: deferred && input.metadataOnly });
     if (classification?.unavailableReason && decision.contentTier !== "secrets") {
       decision = { ...decision, state: "pending", metadataPending: true, reasons: [...decision.reasons, `metadata:${classification.unavailableReason}`] };
     }
@@ -52858,6 +52902,9 @@ function snifferReasonCode(verdict) {
   const category = SNIFFER_CATEGORIES.includes(verdict.category) ? verdict.category : "other";
   return `${category}:${verdict.confidence.toFixed(2)}`;
 }
+function cachedSnifferVerdictHolds(verdict) {
+  return !(verdict.failSafe && verdict.category === SNIFFER_INJECTION_CATEGORY);
+}
 function normalizeSnifferMaterial(material) {
   const folded = material.normalize("NFKC").toLowerCase().normalize("NFKD").replace(/[\p{Cf}\p{Mn}\p{Me}͏ᅟᅠㅤﾠ]/gu, "");
   let mapped = "";
@@ -52871,8 +52918,52 @@ function snifferMaterialLooksLikeInjection(material) {
   const normalized = normalizeSnifferMaterial(material);
   if (INJECTION_PATTERNS.some((pattern) => pattern.test(normalized)))
     return true;
-  const compact = normalized.replace(/[^a-z0-9.]/g, "");
-  return COMPACT_MARKERS.some((marker) => compact.includes(marker));
+  if (wholeWordRunHas(normalized, WORD_RUN_MARKERS))
+    return true;
+  for (const run of letterSpacedRuns(normalized)) {
+    const compact = run.replace(/[^a-z0-9.]/g, "");
+    if (LETTER_SPACED_MARKERS.some((marker) => compact.includes(marker)))
+      return true;
+    if (INJECTION_PATTERNS.some((pattern) => pattern.test(run.replace(/ /g, ""))))
+      return true;
+  }
+  return false;
+}
+function wholeWordRunHas(normalized, markers) {
+  const words = normalized.split(/[^a-z0-9.]+/).filter(Boolean);
+  const starts = new Set;
+  const ends = new Set;
+  let at = 0;
+  for (const word of words) {
+    starts.add(at);
+    at += word.length;
+    ends.add(at);
+  }
+  const compact = words.join("");
+  return markers.some((marker) => {
+    for (let index = compact.indexOf(marker);index >= 0; index = compact.indexOf(marker, index + 1)) {
+      if (starts.has(index) && ends.has(index + marker.length))
+        return true;
+    }
+    return false;
+  });
+}
+function letterSpacedRuns(normalized) {
+  const runs = [];
+  let run = [];
+  const flush = () => {
+    if (run.length >= LETTER_SPACED_MIN_RUN)
+      runs.push(run.join(" "));
+    run = [];
+  };
+  for (const token of normalized.split(" ")) {
+    if ([...token].length === 1)
+      run.push(token);
+    else
+      flush();
+  }
+  flush();
+  return runs;
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
   return `${lane.kind}:${promptVersion}`;
@@ -52961,8 +53052,9 @@ class CachedTierSniffer {
         promptVersion: this.promptVersion,
         mapRevision
       });
-      if (cached)
+      if (cached && cachedSnifferVerdictHolds(cached)) {
         return { verdict: "decided", tier: snifferTierKey(cached), code: snifferReasonCode(cached) };
+      }
       if (request.subject) {
         this.store.enqueue({
           subject: request.subject,
@@ -52976,7 +53068,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_HARD_CATEGORIES, SNIFFER_INJECTION_CATEGORY = "injection", INJECTION_PATTERNS, COMPACT_MARKERS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_HARD_CATEGORIES, SNIFFER_INJECTION_CATEGORY = "injection", STEER_WORD, CONFIDENCE_NUMBER, HIGH_CONFIDENCE_NUMBER, SAME_SENTENCE, NEAR, INJECTION_PATTERNS, WORD_RUN_MARKERS, LETTER_SPACED_MARKERS, LETTER_SPACED_MIN_RUN = 4, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
 var init_sniffer = __esm(() => {
   init_engine();
   init_delphi_scorer();
@@ -52995,41 +53087,55 @@ var init_sniffer = __esm(() => {
     "other"
   ];
   SNIFFER_HARD_CATEGORIES = new Set(["health", "therapy", "financial", "legal", "identity"]);
+  STEER_WORD = String.raw`(?:personal|public|ordinary|not private|safe|harmless)`;
+  CONFIDENCE_NUMBER = String.raw`(?<![\d.,])(?:0?[.,]\d{1,3}|1[.,]0+)(?![\d.,])`;
+  HIGH_CONFIDENCE_NUMBER = String.raw`(?<![\d.,])(?:0?[.,]9\d{0,2}|1[.,]0+)(?![\d.,])`;
+  SAME_SENTENCE = String.raw`[^.!?;]{0,40}`;
+  NEAR = String.raw`[^a-z0-9]{1,4}(?:[a-z]+[^a-z0-9]{1,4}){0,2}`;
   INJECTION_PATTERNS = [
-    /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^\n]{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier|guidance)\b/,
+    /\b(?:ignore|disregard|forget|override|bypass|skip)\b.{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier|guidance)\b/,
     /\b(?:system|developer|assistant|user)\s*(?:prompt|message|note)?\s*:/,
     /\b(?:system prompt|developer message|as an ai|you are an? (?:ai|assistant|model|classifier|sniffer)|respond with|answer with|reply with|output only|return only)\b/,
-    /\bverdicts?\b/,
-    /\b(?:tier|confidence|category)\b\s*["']?\s*[:=]/,
-    /[{}<>]/,
-    /\b(?:personal|private|public|ordinary)\b[^\n]{0,40}\b(?:confidence|0?[.,]\d{1,3}|1[.,]0+)\b/,
-    /\b(?:confidence|0?[.,]9\d?|1[.,]0+)\b[^\n]{0,40}\b(?:personal|public|ordinary)\b/,
-    /\b(?:classify|label|mark|treat|tag|consider|rate|answer|return)\b[^\n]{0,30}\b(?:as|is|:)\s*(?:personal|public|ordinary|not private|safe|harmless)\b/,
-    /\b(?:every|all|each|any|other)\s+(?:of the\s+)?(?:items?|files?|entries|entry|documents?|names?|messages?|rows?|lines?)\b/,
-    /\bthis\s+(?:list|batch|prompt)\b/,
-    /\b(?:everything|all of (?:this|these|them)|these|the rest)\b[^\n]{0,30}\b(?:is|are)\b[^\n]{0,20}\b(?:personal|ordinary|public|safe|harmless)\b/
+    /\bverdicts?\b\s*["']?\s*[:=[]/,
+    new RegExp(String.raw`\bverdicts?\b${SAME_SENTENCE}\b${STEER_WORD}\b`),
+    /["'](?:tier|confidence|category|verdicts?)["']\s*:/,
+    new RegExp(String.raw`\b(?:tier|confidence|category)\b\s*["']?\s*[:=]\s*["']?\s*(?:personal|private|public|ordinary|reference|${CONFIDENCE_NUMBER})`),
+    /\{[^{}]{0,40}\b(?:tier|personal|public|ordinary|verdicts?|confidence|category)\b/,
+    /<\s*\/?\s*(?:system|user|assistant|developer|human|instructions?|prompt|items?|documents?|names|excerpt|verdicts?|owner_privacy|context|im_start|im_end|inst|sys|tool[a-z_]*|output|response|answer)\b[^<>]{0,40}>/,
+    /<\|[^<>|]{1,30}\|>/,
+    /\[\s*\/?\s*(?:inst|sys)\s*\]/,
+    new RegExp(String.raw`\b(?:personal|private|public|ordinary)${NEAR}(?:confidence\b|${CONFIDENCE_NUMBER})`),
+    new RegExp(String.raw`(?:\bconfidence\b|${HIGH_CONFIDENCE_NUMBER})${NEAR}(?:personal|public|ordinary)\b`),
+    /\b(?:classify|label|mark|treat|tag|consider|answer)\b.{0,30}\b(?:as|is|:)\s*(?:personal|public|ordinary|not private|safe|harmless)\b/,
+    /\b(?:rate|return)\b.{0,30}\b(?:as|is|:)\s*(?:personal|public|ordinary|not private)\b/,
+    new RegExp(String.raw`\b(?:every|all|each|any|other)\s+(?:of the\s+)?(?:items?|files?|entries|entry|documents?|names?|messages?|rows?|lines?)\b${SAME_SENTENCE}\b(?:${STEER_WORD}|verdicts?|tier)\b`),
+    new RegExp(String.raw`\bthis\s+(?:list|batch|prompt)\b${SAME_SENTENCE}\b(?:${STEER_WORD}|verdicts?|tier)\b`),
+    /\b(?:everything|all of (?:this|these|them)|these|the rest)\b.{0,30}\b(?:is|are)\b.{0,20}\b(?:personal|ordinary|public|safe|harmless)\b/
   ];
-  COMPACT_MARKERS = [
+  WORD_RUN_MARKERS = [
     "ignoreprevious",
     "ignoreall",
     "ignoretherules",
     "ignoreinstructions",
-    "disregard",
     "systemprompt",
-    "verdict",
     "tierpersonal",
     "tierpublic",
     "personalordinary",
+    "answerpersonal",
+    "respondpersonal",
+    "personal099",
+    "personal0.99"
+  ];
+  LETTER_SPACED_MARKERS = [
+    ...WORD_RUN_MARKERS,
+    "disregard",
+    "verdict",
     "confidence",
     "everyitem",
     "allitems",
     "eachitem",
     "classifyas",
-    "markas",
-    "answerpersonal",
-    "respondpersonal",
-    "personal099",
-    "personal0.99"
+    "markas"
   ];
   SNIFFER_SYSTEM_PROMPT = [
     "You are a privacy sniffer for a personal data index. For each numbered item, decide whether it is",
@@ -76201,6 +76307,7 @@ function createTextExtractor(options = {}) {
   const pdfTextTimeoutMs = options.pdfTextTimeoutMs ?? DEFAULT_PDF_TEXT_TIMEOUT_MS;
   const imageMediaDescriptor = options.imageMediaDescriptor ?? false;
   const pdfOcr = options.pdfOcr;
+  const imageOcr = options.imageOcr;
   return {
     kind,
     version: version2,
@@ -76241,6 +76348,9 @@ function createTextExtractor(options = {}) {
         });
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
+        const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
+        if (ocrOutput)
+          return ocrOutput;
         if (!imageMediaDescriptor) {
           return { status: "metadata_only" };
         }
@@ -76700,16 +76810,312 @@ var init_text = __esm(() => {
   init_document_formats();
 });
 
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+import { existsSync as existsSync40 } from "node:fs";
+import { dirname as dirname43, join as join59 } from "node:path";
+import { fileURLToPath as fileURLToPath8 } from "node:url";
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync40) {
+  let directory = dirname43(fileURLToPath8(moduleUrl));
+  for (let depth = 0;depth < 6; depth += 1) {
+    const candidate = join59(directory, APPLE_VISION_OCR_SCRIPT);
+    if (exists(candidate))
+      return candidate;
+    const parent = dirname43(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  return;
+}
+function appleVisionOcrSelected(preference, platform2 = process.platform) {
+  return preference === "auto" && platform2 === "darwin";
+}
+function parseOcrEnginePreference(value) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized)
+    return;
+  if (OCR_ENGINE_PREFERENCES.includes(normalized)) {
+    return normalized;
+  }
+  throw new Error(`OCR engine must be one of ${OCR_ENGINE_PREFERENCES.join(", ")}; got ${value}.`);
+}
+async function appleVisionPdfOcr(input, options) {
+  const maxPages = Math.max(1, Math.floor(options.maxPages ?? DEFAULT_APPLE_VISION_MAX_PAGES));
+  const pagesPerRun = Math.max(1, Math.floor(options.pagesPerRun ?? DEFAULT_APPLE_VISION_PAGES_PER_RUN));
+  const maxPixelEdge = options.pdfMaxPixelEdge ?? DEFAULT_APPLE_VISION_PDF_MAX_PIXEL_EDGE;
+  const now = options.now ?? Date.now;
+  const deadline = now() + (options.fileDeadlineMs ?? DEFAULT_APPLE_VISION_FILE_DEADLINE_MS);
+  const pages = [];
+  let totalPages;
+  let chars = 0;
+  let stopReason;
+  let firstPage = 1;
+  for (;; ) {
+    const lastPage = Math.min(firstPage + pagesPerRun - 1, maxPages, totalPages ?? maxPages);
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) {
+      stopReason = "time";
+      break;
+    }
+    const result = await runScript({
+      args: ["pdf", input.inputPath, String(firstPage), String(lastPage), String(maxPixelEdge)],
+      timeoutMs: Math.min(options.timeoutMs, remainingMs),
+      options,
+      deterministic: "pdf"
+    }).catch((error2) => {
+      if (error2 instanceof ExtractionCommandTimeoutError && pages.length > 0 && remainingMs < options.timeoutMs) {
+        return;
+      }
+      throw error2;
+    });
+    if (!result) {
+      stopReason = "time";
+      break;
+    }
+    if ("settled" in result)
+      return result.settled;
+    totalPages = result.totalPages;
+    for (const page of result.pages) {
+      pages.push(page);
+      chars += page.text.length;
+    }
+    if (lastPage >= totalPages)
+      break;
+    if (lastPage >= maxPages) {
+      stopReason = "pages";
+      break;
+    }
+    if (chars >= options.maxBoundedTextChars) {
+      stopReason = "text";
+      break;
+    }
+    firstPage = lastPage + 1;
+  }
+  const read = pages.filter((page) => normalizeExtractedText(page.text).length > 0);
+  if (read.length === 0) {
+    return mediaDescriptorOutput({
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes,
+      maxBoundedTextChars: options.maxBoundedTextChars,
+      kind: "media",
+      label: "scanned or image-only pdf",
+      warnings: ["ocr_empty", "pdf_image_only", APPLE_VISION_ENGINE_WARNING]
+    });
+  }
+  const joined = read.map((page) => `--- Page ${page.page} ---
+${normalizeExtractedText(page.text)}`).join(`
+
+`);
+  const bounded = boundText(joined, options.maxBoundedTextChars);
+  let warnings = ["ocr_text", APPLE_VISION_ENGINE_WARNING, "ocr_source_rasterized_pdf"];
+  if (stopReason === "pages")
+    warnings = appendWarning(warnings, "ocr_pdf_pages_capped");
+  if (stopReason === "time")
+    warnings = appendWarning(warnings, "ocr_pdf_time_capped");
+  if (pages.some((page) => page.unreadable))
+    warnings = appendWarning(warnings, "ocr_pdf_page_unreadable");
+  const derivation = buildDerivation({
+    artifact: "image_ocr",
+    structural: { kind: "whole_file", label: "pdf ocr text" },
+    bounded,
+    confidence: weightedConfidence(read),
+    warnings
+  });
+  const capped = stopReason === "pages" || stopReason === "time";
+  return {
+    status: "indexed",
+    text: bounded.text,
+    derivations: [{
+      ...derivation,
+      structuralRef: {
+        ...derivation.structuralRef,
+        readPages: pages.length,
+        ...totalPages !== undefined ? { totalPages } : {}
+      }
+    }],
+    ...capped || bounded.warnings.length > 0 ? {
+      warnings: [
+        ...stopReason === "pages" ? ["ocr_pdf_pages_capped"] : [],
+        ...stopReason === "time" ? ["ocr_pdf_time_capped"] : [],
+        ...bounded.warnings
+      ]
+    } : {}
+  };
+}
+async function appleVisionImageOcr(input, options) {
+  const maxPixelEdge = options.imageMaxPixelEdge ?? DEFAULT_APPLE_VISION_IMAGE_MAX_PIXEL_EDGE;
+  const result = await runScript({
+    args: ["image", input.inputPath, String(maxPixelEdge)],
+    timeoutMs: options.timeoutMs,
+    options,
+    deterministic: "image"
+  });
+  if ("settled" in result)
+    return result.settled;
+  const page = result.pages[0];
+  const bounded = boundText(normalizeExtractedText(page?.text ?? ""), options.maxBoundedTextChars);
+  if (!page || !bounded.text) {
+    return mediaDescriptorOutput({
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes,
+      maxBoundedTextChars: options.maxBoundedTextChars,
+      kind: "image",
+      label: "image file",
+      warnings: ["ocr_empty", "image_only", APPLE_VISION_ENGINE_WARNING]
+    });
+  }
+  return {
+    status: "indexed",
+    text: bounded.text,
+    derivations: [buildDerivation({
+      artifact: "image_ocr",
+      structural: { kind: "image", label: "image ocr text" },
+      bounded,
+      confidence: weightedConfidence([page]),
+      warnings: ["ocr_text", APPLE_VISION_ENGINE_WARNING]
+    })],
+    ...bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}
+  };
+}
+async function runScript(input) {
+  const scriptPath = input.options.scriptPath;
+  if (!scriptPath)
+    throw new AppleVisionOcrUnavailableError("the packaged script was not found");
+  let stdout;
+  try {
+    ({ stdout } = await input.options.commandRunner({
+      command: input.options.osascriptPath ?? APPLE_VISION_OSASCRIPT,
+      args: ["-l", "JavaScript", scriptPath, ...input.args],
+      timeoutMs: input.timeoutMs
+    }));
+  } catch (error2) {
+    if (error2?.code === "ENOENT") {
+      throw new AppleVisionOcrUnavailableError("osascript is not present");
+    }
+    if (error2 instanceof ExtractionCommandError) {
+      if (error2.exitCode === APPLE_VISION_EXIT_ENGINE_UNAVAILABLE) {
+        throw new AppleVisionOcrUnavailableError("Vision text recognition is not available on this macOS");
+      }
+      if (error2.exitCode === APPLE_VISION_EXIT_PDF_LOCKED && input.deterministic === "pdf") {
+        return { settled: { status: "failed_terminal", errorKind: "ocrmypdf_pdf_encrypted" } };
+      }
+      if (error2.exitCode === APPLE_VISION_EXIT_INPUT_UNREADABLE) {
+        return {
+          settled: {
+            status: "failed_terminal",
+            errorKind: input.deterministic === "pdf" ? "ocrmypdf_pdf_invalid" : "ocr_image_unreadable"
+          }
+        };
+      }
+    }
+    throw error2;
+  }
+  return parseScriptResult(stdout);
+}
+function parseScriptResult(stdout) {
+  const parsed = JSON.parse(stdout);
+  if (!parsed || typeof parsed !== "object")
+    throw new Error("OCR script answered no object.");
+  const record3 = parsed;
+  const totalPages = Number(record3.totalPages);
+  if (!Number.isInteger(totalPages) || totalPages < 1 || !Array.isArray(record3.pages)) {
+    throw new Error("OCR script answered an unexpected shape.");
+  }
+  const pages = record3.pages.map((entry) => {
+    const page = entry;
+    const pageNumber = Number(page.page);
+    if (!Number.isInteger(pageNumber) || typeof page.text !== "string") {
+      throw new Error("OCR script answered an unexpected page.");
+    }
+    const confidence = Number(page.confidence);
+    return {
+      page: pageNumber,
+      text: page.text,
+      confidence: Number.isFinite(confidence) ? Math.min(1, Math.max(0, confidence)) : 0,
+      ...page.unreadable === true ? { unreadable: true } : {}
+    };
+  });
+  return { totalPages, pages };
+}
+function weightedConfidence(pages) {
+  let weighted = 0;
+  let weight = 0;
+  for (const page of pages) {
+    weighted += page.confidence * page.text.length;
+    weight += page.text.length;
+  }
+  return weight > 0 ? Math.round(weighted / weight * 1000) / 1000 : 0;
+}
+var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js", APPLE_VISION_OSASCRIPT = "/usr/bin/osascript", APPLE_VISION_ENGINE_WARNING = "ocr_engine_apple_vision", DEFAULT_APPLE_VISION_MAX_PAGES = 100, DEFAULT_APPLE_VISION_PAGES_PER_RUN = 8, DEFAULT_APPLE_VISION_PDF_MAX_PIXEL_EDGE = 3000, DEFAULT_APPLE_VISION_IMAGE_MAX_PIXEL_EDGE = 4096, DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = 600000, APPLE_VISION_EXIT_INPUT_UNREADABLE = 65, APPLE_VISION_EXIT_PDF_LOCKED = 66, APPLE_VISION_EXIT_ENGINE_UNAVAILABLE = 69, OCR_ENGINE_PREFERENCES, AppleVisionOcrUnavailableError;
+var init_apple_vision_ocr = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+  OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
+  AppleVisionOcrUnavailableError = class AppleVisionOcrUnavailableError extends Error {
+    constructor(reason) {
+      super(`Built-in macOS scan reading is unavailable: ${reason}.`);
+      this.name = "AppleVisionOcrUnavailableError";
+    }
+  };
+});
+
 // src/workers/file-extraction/extractors/ocr.ts
 import { mkdtemp as mkdtemp3, readFile as readFile8, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
-import { join as join59 } from "node:path";
+import { join as join60 } from "node:path";
+function createOcrEngine(input) {
+  const options = input.options ?? {};
+  let vision;
+  if (appleVisionOcrSelected(options.preference ?? "auto", options.platform ?? process.platform)) {
+    vision = {
+      commandRunner: options.appleVisionCommandRunner ?? input.commandRunner,
+      scriptPath: options.appleVisionScriptPath === null ? undefined : options.appleVisionScriptPath ?? resolveAppleVisionOcrScript(),
+      timeoutMs: input.timeoutMs,
+      maxBoundedTextChars: input.maxBoundedTextChars,
+      ...options.maxPages !== undefined ? { maxPages: options.maxPages } : {},
+      ...options.pagesPerRun !== undefined ? { pagesPerRun: options.pagesPerRun } : {},
+      ...options.fileDeadlineMs !== undefined ? { fileDeadlineMs: options.fileDeadlineMs } : {},
+      ...options.now !== undefined ? { now: options.now } : {}
+    };
+  }
+  return {
+    get vision() {
+      return vision;
+    },
+    markVisionUnavailable() {
+      if (vision) {
+        console.error("Built-in macOS scan reading is unavailable on this host; using the tesseract commands.");
+      }
+      vision = undefined;
+    }
+  };
+}
+async function withVision(engine, read) {
+  const vision = engine.vision;
+  if (!vision)
+    return;
+  try {
+    return await read(vision);
+  } catch (error2) {
+    if (error2 instanceof AppleVisionOcrUnavailableError) {
+      engine.markVisionUnavailable();
+      return;
+    }
+    throw error2;
+  }
+}
 function createOcrExtractor(options = {}) {
   const kind = options.kind ?? OCR_EXTRACTOR_KIND;
   const version2 = options.version ?? OCR_EXTRACTOR_VERSION;
   const maxBoundedTextChars = options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS;
   const commandRunner = options.commandRunner ?? runExtractionCommand;
   const timeoutMs = options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS;
+  const engine = createOcrEngine({
+    options: options.engine,
+    commandRunner,
+    timeoutMs,
+    maxBoundedTextChars
+  });
   const textExtractor = createTextExtractor({
     kind,
     version: version2,
@@ -76732,25 +77138,12 @@ function createOcrExtractor(options = {}) {
         return missingBytesFailure();
       const mimeType = normalizeMimeType2(input.mimeType ?? input.ref.mimeType);
       const sizeBytes = input.sizeBytes ?? bytes.byteLength;
+      const laneInput = { bytes, mimeType: mimeType ?? "", sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs };
       if (mimeType === PDF_MIME_TYPE) {
-        return runOcrLane(() => extractPdfOcr({
-          bytes,
-          mimeType,
-          sizeBytes,
-          maxBoundedTextChars,
-          commandRunner,
-          timeoutMs
-        }));
+        return runOcrLane(async () => await withVision(engine, (vision) => visionPdf(laneInput, vision)) ?? extractPdfOcr(laneInput));
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
-        return runOcrLane(() => extractImageOcr({
-          bytes,
-          mimeType,
-          sizeBytes,
-          maxBoundedTextChars,
-          commandRunner,
-          timeoutMs
-        }));
+        return runOcrLane(async () => await withVision(engine, (vision) => visionImage(laneInput, vision)) ?? extractImageOcr(laneInput));
       }
       return textExtractor.extract(input);
     }
@@ -76758,30 +77151,70 @@ function createOcrExtractor(options = {}) {
 }
 function createPdfOcr(options = {}) {
   const commandRunner = options.commandRunner ?? runExtractionCommand;
+  const maxBoundedTextChars = options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS;
+  const timeoutMs = options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS;
+  const engine = createOcrEngine({ options: options.engine, commandRunner, timeoutMs, maxBoundedTextChars });
   return async ({ bytes, mimeType, sizeBytes }) => {
+    const laneInput = {
+      bytes,
+      mimeType,
+      sizeBytes,
+      maxBoundedTextChars,
+      commandRunner: async (request) => {
+        try {
+          return await commandRunner(request);
+        } catch (error2) {
+          if (isCommandMissing(error2))
+            throw new OcrUnavailableError;
+          throw error2;
+        }
+      },
+      timeoutMs
+    };
     try {
-      return await runOcrLane(() => extractPdfOcr({
-        bytes,
-        mimeType,
-        sizeBytes,
-        maxBoundedTextChars: options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS,
-        commandRunner: async (request) => {
-          try {
-            return await commandRunner(request);
-          } catch (error2) {
-            if (isCommandMissing(error2))
-              throw new OcrUnavailableError;
-            throw error2;
-          }
-        },
-        timeoutMs: options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS
-      }));
+      return await runOcrLane(async () => await withVision(engine, (vision) => visionPdf(laneInput, vision)) ?? extractPdfOcr(laneInput));
     } catch (error2) {
       if (error2 instanceof OcrUnavailableError)
         return;
       throw error2;
     }
   };
+}
+function createImageOcr(options = {}) {
+  const commandRunner = options.commandRunner ?? runExtractionCommand;
+  const maxBoundedTextChars = options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS;
+  const timeoutMs = options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS;
+  const engine = createOcrEngine({ options: options.engine, commandRunner, timeoutMs, maxBoundedTextChars });
+  return async ({ bytes, mimeType, sizeBytes }) => {
+    if (!engine.vision)
+      return;
+    const laneInput = { bytes, mimeType, sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs };
+    return runOcrLane(() => withVision(engine, (vision) => visionImage(laneInput, vision)));
+  };
+}
+async function visionPdf(input, vision) {
+  return withTempInput(input.bytes, ".pdf", (inputPath) => appleVisionPdfOcr({
+    inputPath,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes
+  }, vision));
+}
+async function visionImage(input, vision) {
+  return withTempInput(input.bytes, imageExtensionForMimeType(input.mimeType), (inputPath) => appleVisionImageOcr({
+    inputPath,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes
+  }, vision));
+}
+async function withTempInput(bytes, extension, read) {
+  const tempDir = await mkdtemp3(join60(tmpdir5(), TEMP_DIR_PREFIX3));
+  try {
+    const inputPath = join60(tempDir, `input${extension}`);
+    await writeFile3(inputPath, bytes);
+    return await read(inputPath);
+  } finally {
+    await rm4(tempDir, { recursive: true, force: true });
+  }
 }
 async function runOcrLane(run) {
   try {
@@ -76796,11 +77229,11 @@ async function runOcrLane(run) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp3(join59(tmpdir5(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join60(tmpdir5(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join59(tempDir, "input.pdf");
-    const outputPath = join59(tempDir, "output.pdf");
-    const sidecarPath = join59(tempDir, "sidecar.txt");
+    const inputPath = join60(tempDir, "input.pdf");
+    const outputPath = join60(tempDir, "output.pdf");
+    const sidecarPath = join60(tempDir, "sidecar.txt");
     await writeFile3(inputPath, input.bytes);
     try {
       await input.commandRunner({
@@ -76857,9 +77290,9 @@ async function extractPdfOcr(input) {
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp3(join59(tmpdir5(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join60(tmpdir5(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join59(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+    const inputPath = join60(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
     await writeFile3(inputPath, input.bytes);
     const result = await input.commandRunner({
       command: OCR_IMAGE_COMMAND,
@@ -76947,6 +77380,7 @@ var init_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
   init_text();
+  init_apple_vision_ocr();
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS = [
     "ocrmypdf_pdf_encrypted",
     "ocrmypdf_pdf_signed",
@@ -77139,7 +77573,7 @@ var init_remote_vlm = __esm(() => {
 // src/workers/file-extraction/extractors/transcription.ts
 import { mkdtemp as mkdtemp4, readFile as readFile9, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir6 } from "node:os";
-import { extname, join as join60 } from "node:path";
+import { extname, join as join61 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
   const argv = command.trim().split(/\s+/).filter(Boolean);
   if (argv.length === 0) {
@@ -77215,8 +77649,8 @@ function createTranscriptionExtractor(options = {}) {
       try {
         let inputPath = input.localPath;
         if (!inputPath) {
-          tempDir = await mkdtemp4(join60(tmpdir6(), tempDirPrefix));
-          inputPath = join60(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
+          tempDir = await mkdtemp4(join61(tmpdir6(), tempDirPrefix));
+          inputPath = join61(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile4(inputPath, bytes);
         }
         const transcribed = await transcriber.transcribe({
@@ -77687,6 +78121,16 @@ var init_vlm = __esm(() => {
 
 // src/workers/file-extraction/registry.ts
 function createDefaultExtractorRegistry(config2 = {}) {
+  const ocrEngine = {
+    ...config2.ocr?.engine !== undefined ? { preference: config2.ocr.engine } : {},
+    ...config2.ocr?.maxPages !== undefined ? { maxPages: config2.ocr.maxPages } : {},
+    ...config2.ocr?.platform !== undefined ? { platform: config2.ocr.platform } : {}
+  };
+  const ocrShared = {
+    engine: ocrEngine,
+    ...config2.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config2.ocr.ocrTimeoutMs } : {},
+    ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {}
+  };
   const extractors = [
     createTranscriptionExtractor({
       ...config2.transcription?.command !== undefined ? { command: config2.transcription.command } : {},
@@ -77697,15 +78141,10 @@ function createDefaultExtractorRegistry(config2 = {}) {
       ...config2.text?.pdfTextCommand !== undefined ? { pdfTextCommand: config2.text.pdfTextCommand } : {},
       ...config2.text?.pdfTextTimeoutMs !== undefined ? { pdfTextTimeoutMs: config2.text.pdfTextTimeoutMs } : {},
       ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {},
-      pdfOcr: createPdfOcr({
-        ...config2.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config2.ocr.ocrTimeoutMs } : {},
-        ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {}
-      })
+      pdfOcr: createPdfOcr(ocrShared),
+      imageOcr: createImageOcr(ocrShared)
     }),
-    createOcrExtractor({
-      ...config2.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config2.ocr.ocrTimeoutMs } : {},
-      ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {}
-    }),
+    createOcrExtractor(ocrShared),
     createVlmPdfExtractor({
       ...config2.vlmPdf?.client ? { client: config2.vlmPdf.client } : {},
       ...config2.vlmPdf?.prompt !== undefined ? { prompt: config2.vlmPdf.prompt } : {},
@@ -79571,7 +80010,7 @@ var init_analyst_openai = __esm(() => {
 
 // src/core/venice-model-catalog.ts
 import {
-  existsSync as existsSync40,
+  existsSync as existsSync41,
   mkdirSync as mkdirSync33,
   readFileSync as readFileSync36,
   renameSync as renameSync10,
@@ -79580,11 +80019,11 @@ import {
 } from "node:fs";
 import { randomUUID as randomUUID19 } from "node:crypto";
 import { homedir as homedir46 } from "node:os";
-import { dirname as dirname43, isAbsolute as isAbsolute11, join as join61 } from "node:path";
+import { dirname as dirname44, isAbsolute as isAbsolute11, join as join62 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir46(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute11(configuredRoot) ? configuredRoot : join61(homeDir, ".cache");
-  return join61(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute11(configuredRoot) ? configuredRoot : join62(homeDir, ".cache");
+  return join62(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -79754,7 +80193,7 @@ function parseCatalogModels(payload) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync40(path))
+  if (!existsSync41(path))
     return;
   let payload;
   try {
@@ -79790,7 +80229,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID19()}.tmp`;
   try {
-    mkdirSync33(dirname43(path), { recursive: true, mode: 448 });
+    mkdirSync33(dirname44(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync12(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -80501,7 +80940,7 @@ import {
   unlink as unlink2
 } from "node:fs/promises";
 import { homedir as homedir47 } from "node:os";
-import { dirname as dirname44, join as join62 } from "node:path";
+import { dirname as dirname45, join as join63 } from "node:path";
 function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
   const audit = result.audit;
   const skipped2 = audit.skipped_corpora.map((skip) => ({
@@ -80615,7 +81054,7 @@ async function appendSourceAnswerLatencyLine(path, record3, options = {}) {
   const line = `${JSON.stringify(record3)}
 `;
   const maxBytes = options.maxBytes ?? DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
-  await mkdir5(dirname44(path), { recursive: true, mode: 448 });
+  await mkdir5(dirname45(path), { recursive: true, mode: 448 });
   await makeExistingLedgerPrivate(path);
   if (Number.isFinite(maxBytes) && maxBytes > 0) {
     await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line), maxBytes);
@@ -80668,8 +81107,8 @@ function resolveSourceAnswerLatencyLogPath(env = process.env) {
     }
     return raw;
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join62(homedir47(), ".local", "share");
-  return join62(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join63(homedir47(), ".local", "share");
+  return join63(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
 }
 async function makeExistingLedgerPrivate(path) {
   try {
@@ -88868,7 +89307,7 @@ var init_embedding_ledger2 = __esm(() => {
 
 // src/workers/dashboard/background-runtime.ts
 import { readFileSync as readFileSync38 } from "node:fs";
-import { join as join63 } from "node:path";
+import { join as join64 } from "node:path";
 function resolveLaneReportDir(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim();
   if (explicit)
@@ -88980,7 +89419,7 @@ function readBackgroundRuntime(options = {}) {
   const guard = readGuardArbitration(resolveGuardReportPath(env));
   const lanes = [];
   for (const spec of LANE_REPORTS) {
-    const record3 = readJsonFile2(join63(dir, spec.file));
+    const record3 = readJsonFile2(join64(dir, spec.file));
     if (record3 === undefined)
       continue;
     const updatedAt = readStamp(record3.updated_at) ?? readStamp(record3.generated_at);
@@ -89505,8 +89944,8 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync21, copyFileSync, existsSync as existsSync41, lstatSync as lstatSync19, mkdirSync as mkdirSync34, readFileSync as readFileSync39 } from "node:fs";
-import { dirname as dirname45 } from "node:path";
+import { chmodSync as chmodSync21, copyFileSync, existsSync as existsSync42, lstatSync as lstatSync19, mkdirSync as mkdirSync34, readFileSync as readFileSync39 } from "node:fs";
+import { dirname as dirname46 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
   const scopeSourceIds = new Set((options.folderScopes ?? []).map((source) => source.disposition_source_id));
@@ -89563,7 +90002,7 @@ function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync41(path)) {
+  if (!existsSync42(path)) {
     return {
       path,
       present: false,
@@ -89612,7 +90051,7 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync41(path)) {
+  if (existsSync42(path)) {
     const stat5 = lstatSync19(path);
     if (stat5.isSymbolicLink() || !stat5.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
@@ -89621,7 +90060,7 @@ function writeSourceIngestionExclusionsFile(options) {
     copyFileSync(path, backupPath);
     chmodSync21(backupPath, 384);
   } else {
-    mkdirSync34(dirname45(path), { recursive: true });
+    mkdirSync34(dirname46(path), { recursive: true });
   }
   writePrivateFileAtomicSync(path, text);
   return {
@@ -90322,7 +90761,7 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 import { createHash as createHash48, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 import { readFileSync as readFileSync40, statSync as statSync15 } from "node:fs";
 import { homedir as homedir49 } from "node:os";
-import { join as join64, resolve as resolve9 } from "node:path";
+import { join as join65, resolve as resolve9 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -93538,7 +93977,7 @@ function readDashboardRegistryOutcome(registryPath) {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync40(join64(homedir49(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync40(join65(homedir49(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -94275,7 +94714,7 @@ import { createHash as createHash49, randomUUID as randomUUID20 } from "node:cry
 import {
   closeSync as closeSync11,
   createReadStream,
-  existsSync as existsSync42,
+  existsSync as existsSync43,
   mkdirSync as mkdirSync35,
   openSync as openSync11,
   readFileSync as readFileSync41,
@@ -94287,19 +94726,19 @@ import {
   writeSync as writeSync2
 } from "node:fs";
 import { homedir as homedir50 } from "node:os";
-import { dirname as dirname46, isAbsolute as isAbsolute12, join as join65 } from "node:path";
+import { dirname as dirname47, isAbsolute as isAbsolute12, join as join66 } from "node:path";
 function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform()) {
   const configured = env[BUILT_IN_REASONING_DIR_ENV]?.trim();
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join65(env.HOME?.trim() || homedir50(), ".local", "share");
-  const root = configured || join65(dataRoot, "openclaw", "olympus", "models", "built-in-reasoning");
+  const dataRoot = env.XDG_DATA_HOME?.trim() || join66(env.HOME?.trim() || homedir50(), ".local", "share");
+  const root = configured || join66(dataRoot, "openclaw", "olympus", "models", "built-in-reasoning");
   if (!isAbsolute12(root))
     throw new TypeError("The built-in reasoning directory must be an absolute path.");
   return {
     root,
-    modelDir: join65(root, model.modelId),
-    runtimeDir: join65(root, `llama.cpp-${runtime.release}-${platform2}`),
-    statusPath: join65(root, "status.json"),
-    lockPath: join65(root, "install.lock")
+    modelDir: join66(root, model.modelId),
+    runtimeDir: join66(root, `llama.cpp-${runtime.release}-${platform2}`),
+    statusPath: join66(root, "status.json"),
+    lockPath: join66(root, "install.lock")
   };
 }
 function currentPlatform() {
@@ -94328,7 +94767,7 @@ async function installBuiltInReasoning(options) {
   const platform2 = options.platform ?? currentPlatform();
   const paths = builtInReasoningPaths(model, options.env, runtime, platform2);
   const reporter = new ProgressReporter(paths.statusPath, model.modelId, options.now, options.onProgress);
-  const modelPath = join65(paths.modelDir, model.file.name);
+  const modelPath = join66(paths.modelDir, model.file.name);
   const log = options.log ?? ((line) => console.log(line));
   const timing = {
     downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS,
@@ -94359,16 +94798,16 @@ async function installBuiltInReasoning(options) {
       serverPath: findServerBinary(paths.runtimeDir),
       gpu: archive.gpu
     });
-    if (existsSync42(modelPath) && runtimeInstalled(paths.runtimeDir, archive)) {
+    if (existsSync43(modelPath) && runtimeInstalled(paths.runtimeDir, archive)) {
       await stage("verify", () => verifyModelFile(modelPath, model, reporter, timing.verifyTimeoutMs));
       finished();
       return installed();
     }
     await stage("install", () => withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
-      if (existsSync42(modelPath) && runtimeInstalled(paths.runtimeDir, archive))
+      if (existsSync43(modelPath) && runtimeInstalled(paths.runtimeDir, archive))
         return;
       const fetchImpl = options.fetchImpl ?? fetch;
-      const needModel = !existsSync42(modelPath);
+      const needModel = !existsSync43(modelPath);
       const needRuntime = !runtimeInstalled(paths.runtimeDir, archive);
       reporter.begin((needModel ? model.file.bytes : 0) + (needRuntime ? archive.bytes : 0));
       if (needRuntime) {
@@ -94402,7 +94841,7 @@ function reportBuiltInReasoningState(options, state, failure) {
 function findServerBinary(runtimeDir) {
   const marker = readRuntimeMarker(runtimeDir);
   if (marker?.serverPath)
-    return join65(runtimeDir, marker.serverPath);
+    return join66(runtimeDir, marker.serverPath);
   throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server is not installed.");
 }
 async function verifyModelFile(path, model, reporter, timeoutMs) {
@@ -94421,20 +94860,20 @@ async function verifyModelFile(path, model, reporter, timeoutMs) {
 }
 function readRuntimeMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync41(join65(runtimeDir, RUNTIME_MARKER), "utf8"));
+    return JSON.parse(readFileSync41(join66(runtimeDir, RUNTIME_MARKER), "utf8"));
   } catch {
     return;
   }
 }
 function runtimeInstalled(runtimeDir, archive) {
   const marker = readRuntimeMarker(runtimeDir);
-  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync42(join65(runtimeDir, marker.serverPath));
+  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync43(join66(runtimeDir, marker.serverPath));
 }
 async function installRuntime(fetchImpl, runtimeDir, archive, reporter, extract, stallMs) {
   const staging = `${runtimeDir}.staging-${randomUUID20()}`;
   ensureDirectory(staging);
   try {
-    const archivePath = join65(staging, archive.name);
+    const archivePath = join66(staging, archive.name);
     await downloadVerified(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server", stallMs);
     reporter.set("verifying", "Unpacking the built-in model server");
     try {
@@ -94448,7 +94887,7 @@ async function installRuntime(fetchImpl, runtimeDir, archive, reporter, extract,
       throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
     }
     const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
-    writeFileSync13(join65(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync13(join66(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync11(runtimeDir, { recursive: true, force: true });
     renameSync11(staging, runtimeDir);
@@ -94471,14 +94910,14 @@ function extractWithTar(archivePath, targetDir) {
 function locateFile(root, name, depth = 0, prefix = "") {
   let entries;
   try {
-    entries = readdirSync5(join65(root, prefix));
+    entries = readdirSync5(join66(root, prefix));
   } catch {
     return;
   }
   if (entries.includes(name)) {
     const relative7 = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync16(join65(root, relative7)).isFile())
+      if (statSync16(join66(root, relative7)).isFile())
         return relative7;
     } catch {}
   }
@@ -94487,7 +94926,7 @@ function locateFile(root, name, depth = 0, prefix = "") {
   for (const entry of entries) {
     const child = prefix ? `${prefix}/${entry}` : entry;
     try {
-      if (!statSync16(join65(root, child)).isDirectory())
+      if (!statSync16(join66(root, child)).isDirectory())
         continue;
     } catch {
       continue;
@@ -94502,7 +94941,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expectedS
   const partial2 = `${target}.partial`;
   const hash = createHash49("sha256");
   let received = 0;
-  if (existsSync42(partial2)) {
+  if (existsSync43(partial2)) {
     const size = statSync16(partial2).size;
     if (size > 0 && size < expectedBytes) {
       await hashInto(partial2, hash, VERIFY_TIMEOUT_MS);
@@ -94758,7 +95197,7 @@ class ProgressReporter {
       return;
     this.lastWriteMs = nowMs;
     try {
-      mkdirSync35(dirname46(this.statusPath), { recursive: true, mode: 448 });
+      mkdirSync35(dirname47(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
       writeFileSync13(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
@@ -94789,7 +95228,7 @@ import { randomBytes as randomBytes15 } from "node:crypto";
 import { mkdtempSync as mkdtempSync2, rmSync as rmSync12, writeFileSync as writeFileSync14 } from "node:fs";
 import { createServer as createServer2 } from "node:net";
 import { availableParallelism, setPriority, tmpdir as tmpdir7 } from "node:os";
-import { join as join66 } from "node:path";
+import { join as join67 } from "node:path";
 function builtInReasoningThreads(parallelism = availableParallelism()) {
   return Math.max(1, Math.min(4, Math.floor(parallelism / 2)));
 }
@@ -94860,8 +95299,8 @@ function createLlamaServerHandle(launch, options = {}) {
   const start = async (signal) => {
     const port = await freeLoopbackPort();
     const token = randomBytes15(24).toString("base64url");
-    tokenDir = mkdtempSync2(join66(tmpdir7(), "olympus-built-in-model-"));
-    const tokenFile = join66(tokenDir, "token");
+    tokenDir = mkdtempSync2(join67(tmpdir7(), "olympus-built-in-model-"));
+    const tokenFile = join67(tokenDir, "token");
     writeFileSync14(tokenFile, `${token}
 `, { mode: 384 });
     const spawned = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
@@ -95849,7 +96288,7 @@ import { createHash as createHash50, randomUUID as randomUUID21 } from "node:cry
 import {
   closeSync as closeSync12,
   createReadStream as createReadStream2,
-  existsSync as existsSync43,
+  existsSync as existsSync44,
   mkdirSync as mkdirSync36,
   openSync as openSync12,
   readFileSync as readFileSync42,
@@ -95860,19 +96299,19 @@ import {
   writeSync as writeSync3
 } from "node:fs";
 import { homedir as homedir51 } from "node:os";
-import { dirname as dirname47, isAbsolute as isAbsolute13, join as join67 } from "node:path";
+import { dirname as dirname48, isAbsolute as isAbsolute13, join as join68 } from "node:path";
 function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform2 = currentPlatform2()) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join67(env.HOME?.trim() || homedir51(), ".local", "share");
-  const root = configured || join67(dataRoot, "openclaw", "olympus", "models", "built-in-embedding");
+  const dataRoot = env.XDG_DATA_HOME?.trim() || join68(env.HOME?.trim() || homedir51(), ".local", "share");
+  const root = configured || join68(dataRoot, "openclaw", "olympus", "models", "built-in-embedding");
   if (!isAbsolute13(root))
     throw new TypeError("The built-in embedding directory must be an absolute path.");
   return {
     root,
-    modelDir: join67(root, model.modelId),
-    runtimeDir: join67(root, `onnxruntime-${runtime.version}-${platform2}`),
-    statusPath: join67(root, "status.json"),
-    lockPath: join67(root, "install.lock")
+    modelDir: join68(root, model.modelId),
+    runtimeDir: join68(root, `onnxruntime-${runtime.version}-${platform2}`),
+    statusPath: join68(root, "status.json"),
+    lockPath: join68(root, "install.lock")
   };
 }
 function currentPlatform2() {
@@ -95902,8 +96341,8 @@ async function installBuiltInEmbedding(options = {}) {
   const paths = builtInEmbeddingPaths(options.env, model, runtime, platform2);
   const reporter = new ProgressReporter2(paths.statusPath, model.modelId, options.now, options.onProgress);
   const installed = {
-    modelPath: join67(paths.modelDir, model.model.name),
-    vocabularyPath: join67(paths.modelDir, model.vocabulary.name),
+    modelPath: join68(paths.modelDir, model.model.name),
+    vocabularyPath: join68(paths.modelDir, model.vocabulary.name),
     runtimeDir: paths.runtimeDir
   };
   try {
@@ -95922,14 +96361,14 @@ async function installBuiltInEmbedding(options = {}) {
         return;
       const fetchImpl = options.fetchImpl ?? fetch;
       const pending = [
-        ...modelFiles.filter((file) => !existsSync43(join67(paths.modelDir, file.name)))
+        ...modelFiles.filter((file) => !existsSync44(join68(paths.modelDir, file.name)))
       ];
       const pendingPackages = runtimePackages.length > 0 && !runtimeInstalled2(paths.runtimeDir, runtimePackages) ? runtimePackages : [];
       const bytesTotal = pending.reduce((sum2, file) => sum2 + file.bytes, 0) + pendingPackages.reduce((sum2, pack) => sum2 + pack.bytes, 0);
       reporter.begin(bytesTotal);
       ensureDirectory2(paths.modelDir);
       for (const file of pending) {
-        await downloadVerified2(fetchImpl, file.url, join67(paths.modelDir, file.name), file.bytes, {
+        await downloadVerified2(fetchImpl, file.url, join68(paths.modelDir, file.name), file.bytes, {
           kind: "sha256",
           expected: file.sha256
         }, reporter, labelFor(file));
@@ -95962,11 +96401,11 @@ function labelFor(file) {
   return file.name.endsWith(".onnx") ? "Downloading the built-in search model" : "Downloading the model vocabulary";
 }
 function installComplete(paths, modelFiles, runtimePackages) {
-  return modelFiles.every((file) => existsSync43(join67(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled2(paths.runtimeDir, runtimePackages));
+  return modelFiles.every((file) => existsSync44(join68(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled2(paths.runtimeDir, runtimePackages));
 }
 async function verifyModelFiles(dir, files, reporter) {
   for (const file of files) {
-    const path = join67(dir, file.name);
+    const path = join68(dir, file.name);
     const key = `${path}:${file.sha256}`;
     verifiedThisProcess2 ??= new Set;
     if (verifiedThisProcess2.has(key))
@@ -95983,7 +96422,7 @@ async function verifyModelFiles(dir, files, reporter) {
 }
 function runtimeInstalled2(runtimeDir, packages) {
   try {
-    const marker = JSON.parse(readFileSync42(join67(runtimeDir, RUNTIME_MARKER2), "utf8"));
+    const marker = JSON.parse(readFileSync42(join68(runtimeDir, RUNTIME_MARKER2), "utf8"));
     return packages.every((pack) => marker.packages.some((entry) => entry.name === pack.name && entry.integrity === pack.integrity));
   } catch {
     return false;
@@ -95994,7 +96433,7 @@ async function installRuntime2(fetchImpl, runtimeDir, packages, platform2, repor
   ensureDirectory2(staging);
   try {
     for (const pack of packages) {
-      const archivePath = join67(staging, `${pack.name}.tgz`);
+      const archivePath = join68(staging, `${pack.name}.tgz`);
       await downloadVerified2(fetchImpl, pack.url, archivePath, pack.bytes, {
         kind: "integrity",
         expected: pack.integrity
@@ -96006,8 +96445,8 @@ async function installRuntime2(fetchImpl, runtimeDir, packages, platform2, repor
         throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${pack.name} had no files for ${platform2}.`);
       }
       for (const file of files) {
-        const target = join67(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
-        ensureDirectory2(dirname47(target));
+        const target = join68(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
+        ensureDirectory2(dirname48(target));
         writeFileSync15(target, file.data, { mode: file.mode & 493 || 420 });
       }
       rmSync13(archivePath, { force: true });
@@ -96015,7 +96454,7 @@ async function installRuntime2(fetchImpl, runtimeDir, packages, platform2, repor
     const marker = {
       packages: packages.map((pack) => ({ name: pack.name, integrity: pack.integrity }))
     };
-    writeFileSync15(join67(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
+    writeFileSync15(join68(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync13(runtimeDir, { recursive: true, force: true });
     renameSync12(staging, runtimeDir);
@@ -96241,7 +96680,7 @@ class ProgressReporter2 {
       return;
     this.lastWriteMs = nowMs;
     try {
-      mkdirSync36(dirname47(this.statusPath), { recursive: true, mode: 448 });
+      mkdirSync36(dirname48(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
       writeFileSync15(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
@@ -96266,11 +96705,11 @@ var init_assets = __esm(() => {
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { createRequire as createRequire3 } from "node:module";
-import { join as join68 } from "node:path";
+import { join as join69 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire3(join68(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire3(join69(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -98664,12 +99103,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname48, join as join69 } from "node:path";
+import { dirname as dirname49, join as join70 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join69(dirname48(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join70(dirname49(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -99123,9 +99562,9 @@ function createAnswerActivity(onBusy) {
 import { createHash as createHash53 } from "node:crypto";
 import { mkdirSync as mkdirSync37 } from "node:fs";
 import { homedir as homedir52 } from "node:os";
-import { dirname as dirname49, join as join70 } from "node:path";
+import { dirname as dirname50, join as join71 } from "node:path";
 function defaultPrivacyProfilePath() {
-  return join70(homedir52(), ".olympus", "privacy.json");
+  return join71(homedir52(), ".olympus", "privacy.json");
 }
 function resolvePrivacyProfilePath(options = {}) {
   const env = options.env ?? process.env;
@@ -99281,7 +99720,7 @@ function writePrivacyProfile(update, options = {}) {
   if (!unchanged)
     writeOwnerTierRules([...kept, ...owned], rulesOptions);
   const path = resolvePrivacyProfilePath(options);
-  mkdirSync37(dirname49(path), { recursive: true, mode: 448 });
+  mkdirSync37(dirname50(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify({ schemaVersion: PRIVACY_PROFILE_SCHEMA_VERSION, ...next }, null, 2)}
 `);
   return next;
@@ -99315,7 +99754,7 @@ var init_privacy_profile = __esm(() => {
 
 // src/workers/classification/sniffer-resolver.ts
 import { mkdirSync as mkdirSync38, readFileSync as readFileSync44 } from "node:fs";
-import { dirname as dirname50 } from "node:path";
+import { dirname as dirname51 } from "node:path";
 function defaultSnifferMaxCallsPerPass(kind) {
   return kind === "venice" ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
 }
@@ -99352,7 +99791,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync38(dirname50(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync38(dirname51(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -99471,7 +99910,7 @@ async function runSnifferPass(options) {
         continue;
       }
       const cached2 = target.sniffer.getVerdict(keyOf(question));
-      if (cached2) {
+      if (cached2 && cachedSnifferVerdictHolds(cached2)) {
         apply({ target, question }, cached2);
         report.cacheHits += 1;
         continue;
@@ -99711,7 +100150,7 @@ var init_tier_rejudge = __esm(() => {
 });
 
 // src/workers/classification/sniffer-service.ts
-import { existsSync as existsSync44 } from "node:fs";
+import { existsSync as existsSync45 } from "node:fs";
 
 class TierSnifferService {
   options;
@@ -99756,7 +100195,7 @@ class TierSnifferService {
     let remainingQuestions = 0;
     for (const ledgerPath of this.ledgerPaths()) {
       const path = tierSnifferPathForLedger(ledgerPath);
-      if (path === ":memory:" || !existsSync44(path))
+      if (path === ":memory:" || !existsSync45(path))
         continue;
       let store;
       try {
@@ -99810,11 +100249,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync44(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync45(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own = tierLedgerPathForStore(store.dbPath);
-      if (existsSync44(own))
+      if (existsSync45(own))
         paths.add(own);
     }
     return [...paths];
@@ -107126,7 +107565,7 @@ __export(exports_remote_mcp, {
   authenticateRemoteRequest: () => authenticateRemoteRequest,
   REMOTE_MCP_PATH: () => REMOTE_MCP_PATH
 });
-import { existsSync as existsSync45 } from "node:fs";
+import { existsSync as existsSync46 } from "node:fs";
 function isRemoteMcpRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_MCP_PATH;
@@ -107206,7 +107645,7 @@ function lazyRemoteConnectionStore(resolvePath3, open6) {
     if (store)
       return store;
     const dbPath = resolvePath3();
-    if (!options.create && !existsSync45(dbPath))
+    if (!options.create && !existsSync46(dbPath))
       return;
     store = open6(dbPath);
     return store;
@@ -109317,9 +109756,9 @@ __export(exports_open_target, {
   dropboxPreviewUrl: () => dropboxPreviewUrl,
   createDropboxOpenTargets: () => createDropboxOpenTargets
 });
-import { existsSync as existsSync46, readFileSync as readFileSync45, readdirSync as readdirSync6, realpathSync as realpathSync2, statSync as statSync19 } from "node:fs";
+import { existsSync as existsSync47, readFileSync as readFileSync45, readdirSync as readdirSync6, realpathSync as realpathSync2, statSync as statSync19 } from "node:fs";
 import { homedir as homedir53 } from "node:os";
-import { join as join71, sep as sep7 } from "node:path";
+import { join as join72, sep as sep7 } from "node:path";
 function dropboxPreviewUrl(displayPath) {
   const segments = dropboxSegments(displayPath);
   if (!segments || segments.length === 0)
@@ -109344,7 +109783,7 @@ function localDropboxRoots(options = {}) {
     }
   } catch {}
   try {
-    const info = JSON.parse(readFileSync45(join71(home, ".dropbox", "info.json"), "utf8"));
+    const info = JSON.parse(readFileSync45(join72(home, ".dropbox", "info.json"), "utf8"));
     if (info && typeof info === "object") {
       for (const account of Object.values(info)) {
         const path = account && typeof account === "object" ? account.path : undefined;
@@ -109354,13 +109793,13 @@ function localDropboxRoots(options = {}) {
     }
   } catch {}
   try {
-    const cloud = join71(home, "Library", "CloudStorage");
+    const cloud = join72(home, "Library", "CloudStorage");
     for (const entry of readdirSync6(cloud).sort()) {
       if (/^Dropbox/.test(entry))
-        candidates.push(join71(cloud, entry));
+        candidates.push(join72(cloud, entry));
     }
   } catch {}
-  candidates.push(join71(home, "Dropbox"));
+  candidates.push(join72(home, "Dropbox"));
   const roots = [];
   for (const candidate of candidates) {
     try {
@@ -109394,9 +109833,9 @@ function createDropboxOpenTargets(options = {}) {
   };
 }
 function localFileUnder(root, segments) {
-  const path = join71(root, ...segments);
+  const path = join72(root, ...segments);
   try {
-    if (!existsSync46(path))
+    if (!existsSync47(path))
       return;
     const real = realpathSync2.native(path);
     if (!real.startsWith(root.endsWith(sep7) ? root : `${root}${sep7}`))
@@ -110001,8 +110440,8 @@ __export(exports_server2, {
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle
 });
 import { execFile } from "node:child_process";
-import { existsSync as existsSync47 } from "node:fs";
-import { dirname as dirname51, isAbsolute as isAbsolute14, join as join72 } from "node:path";
+import { existsSync as existsSync48 } from "node:fs";
+import { dirname as dirname52, isAbsolute as isAbsolute14, join as join73 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -110333,7 +110772,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync47(store.dbPath))
+        if (!existsSync48(store.dbPath))
           continue;
         const handle = new LocalConnectorStore({
           dbPath: store.dbPath,
@@ -111023,6 +111462,8 @@ async function main() {
   const fileExtractionPdfTextTimeoutMs = parseOptionalTimeoutSecondsOrNone(process.env.OLYMPUS_FILE_EXTRACTION_PDF_TEXT_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_PDF_TEXT_TIMEOUT_SECONDS");
   const fileExtractionPdfRenderTimeoutMs = parseOptionalTimeoutSecondsOrNone(process.env.OLYMPUS_FILE_EXTRACTION_PDF_RENDER_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_PDF_RENDER_TIMEOUT_SECONDS");
   const fileExtractionOcrTimeoutMs = parseOptionalTimeoutSecondsOrNone(process.env.OLYMPUS_FILE_EXTRACTION_OCR_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_OCR_TIMEOUT_SECONDS");
+  const fileExtractionOcrEngine = parseOcrEnginePreference(process.env.OLYMPUS_FILE_EXTRACTION_OCR_ENGINE);
+  const fileExtractionOcrMaxPages = parseOptionalPositiveInteger(process.env.OLYMPUS_FILE_EXTRACTION_OCR_MAX_PAGES, "OLYMPUS_FILE_EXTRACTION_OCR_MAX_PAGES");
   const fileExtractionMaxBoundedTextChars = parseOptionalPositiveInteger(process.env.OLYMPUS_FILE_EXTRACTION_MAX_BOUNDED_TEXT_CHARS, "OLYMPUS_FILE_EXTRACTION_MAX_BOUNDED_TEXT_CHARS");
   const fileExtractionRemoteEnabled = parseOptionalBooleanEnv(process.env.OLYMPUS_FILE_EXTRACTION_REMOTE_ENABLED, "OLYMPUS_FILE_EXTRACTION_REMOTE_ENABLED");
   const fileExtractionRemoteConfigured = [
@@ -111439,9 +111880,11 @@ async function main() {
           ...fileExtractionMaxBoundedTextChars !== undefined ? { maxBoundedTextChars: fileExtractionMaxBoundedTextChars } : {}
         }
       } : {},
-      ...fileExtractionOcrTimeoutMs !== undefined || fileExtractionPdfRenderTimeoutMs !== undefined ? {
+      ...fileExtractionOcrTimeoutMs !== undefined || fileExtractionPdfRenderTimeoutMs !== undefined || fileExtractionOcrEngine !== undefined || fileExtractionOcrMaxPages !== undefined ? {
         ocr: {
           ...fileExtractionOcrTimeoutMs !== undefined ? { ocrTimeoutMs: fileExtractionOcrTimeoutMs } : {},
+          ...fileExtractionOcrEngine !== undefined ? { engine: fileExtractionOcrEngine } : {},
+          ...fileExtractionOcrMaxPages !== undefined ? { maxPages: fileExtractionOcrMaxPages } : {},
           ...fileExtractionPdfRenderTimeoutMs !== undefined ? { pdfRenderTimeoutMs: fileExtractionPdfRenderTimeoutMs } : {}
         }
       } : {},
@@ -112722,7 +113165,7 @@ async function main() {
     classificationLedgerPath: resolveClassificationLedgerPath(process.env),
     ...snifferRuntime.source === "built_in" ? { modelAvailable: () => snifferRuntime.builtIn.available() } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join72(dirname51(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join73(dirname52(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -113278,6 +113721,7 @@ var init_server5 = __esm(async () => {
   init_readiness_ledger();
   init_venice_client();
   init_openai_compatible_client();
+  init_apple_vision_ocr();
   init_email_source();
   init_analyst_answer();
   init_answer_latency_log();
