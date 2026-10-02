@@ -47444,7 +47444,7 @@ var init_answer_ready_coverage = __esm(() => {
 function dashboardStatusResolution(input) {
   const source = input.source;
   const unknownValue = firstUnknownEnumValue(source);
-  if (degradationForSource(source, input.degradedCredentials)) {
+  if (dashboardDegradationForSource(source, input.degradedCredentials)) {
     return {
       status: "Needs you",
       mappedUnknown: unknownValue !== undefined,
@@ -47532,7 +47532,7 @@ function dashboardSubLine(source, options) {
   }
 }
 function dashboardAttentionLine(source, options) {
-  const degradation = degradationForSource(source, options?.degradedCredentials);
+  const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
     return clause ? `can't sign in · ${clause}` : `can't sign in`;
@@ -47560,9 +47560,6 @@ function dashboardAttentionLine(source, options) {
   if ((source.queue_health.retrying_tasks ?? 0) > 0)
     return "a sync is retrying on its own";
   return "";
-}
-function dashboardCredentialAttention(source, options) {
-  return source.connection.provider_refusal !== undefined || source.connection.state === "reauth_required" || degradationForSource(source, options?.degradedCredentials) !== undefined;
 }
 function dashboardActionLabel(label) {
   return /^re-?auth/i.test(label.trim()) ? DASHBOARD_RECONNECT_LABEL : label;
@@ -47828,7 +47825,7 @@ function degradationClause(degradation) {
       return "";
   }
 }
-function degradationForSource(source, degraded) {
+function dashboardDegradationForSource(source, degraded) {
   if (!degraded || degraded.length === 0)
     return;
   const candidates = new Set([
@@ -47956,13 +47953,13 @@ var init_vocabulary = __esm(() => {
   };
   DASHBOARD_CHATGPT_REFUSAL_COPY = {
     line: {
-      address: "sign-in didn't go through · try Reconnect",
-      declined: "sign-in was declined · try Reconnect",
-      unfinished: "didn't finish signing in · try Reconnect"
+      address: "sign-in didn't go through — try Reconnect",
+      declined: "sign-in was declined — connect again to retry",
+      unfinished: "didn't finish signing in — try Reconnect"
     },
     sentence: {
       address: (source) => `${source} sign-in didn't go through. Try Reconnect.`,
-      declined: (source) => `${source} sign-in was declined. Try Reconnect.`,
+      declined: (source) => `${source} sign-in was declined. Connect again to retry.`,
       unfinished: (source) => `${source} didn't finish signing in. Try Reconnect.`
     }
   };
@@ -89362,8 +89359,15 @@ function dashboardHonestStatus(status, progress) {
     return status;
   return "Working";
 }
+function dashboardCredentialProblem(card, degraded) {
+  return card.connection.provider_refusal !== undefined || dashboardDegradationForSource(card, degraded) !== undefined || card.connection.state === "reauth_required" || card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card);
+}
+function dashboardRefusedFirstConnect(card) {
+  return card.connection.provider_refusal !== undefined && (card.connection.state === "not_connected" || card.connection.state === "needs_setup") && card.coverage.indexed_items === 0;
+}
 var DASHBOARD_FIXABLE_STALLS;
 var init_shared_status = __esm(() => {
+  init_vocabulary();
   DASHBOARD_FIXABLE_STALLS = new Set([
     "waiting_for_credentials",
     "scope_pending"
@@ -89382,10 +89386,11 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     const scrubbed = scrubCard(definition, card);
     const connecting = connectingFor(definition, card, now);
     const vocabularyStatus = dashboardStatus({ source: scrubbed, ...degraded ? { degradedCredentials: degraded } : {} });
-    const measured = connecting || vocabularyStatus === "Off" ? undefined : measuredSourceProgress(card, scrubbed, embedding, vocabularyStatus, now);
+    const credentials = dashboardCredentialProblem(scrubbed, degraded);
+    const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) ? undefined : measuredSourceProgress(card, scrubbed, embedding, vocabularyStatus, credentials, now);
     const progress2 = measured?.progress;
-    let status = connecting ? "Needs you" : honestStatus(vocabularyStatus, progress2);
-    if (!connecting && (status === "Needs you" || status === "Failing") && progress2 && progress2.stage !== "done" && !progress2.stalled && attentionItem(definition, scrubbed, degraded, undefined, progress2).fix?.tool === DASHBOARD_TOOL_NAME) {
+    let status = connecting || credentials ? "Needs you" : dashboardHonestStatus(vocabularyStatus, progress2);
+    if (!connecting && !credentials && (status === "Needs you" || status === "Failing") && progress2 && progress2.stage !== "done" && !progress2.stalled && attentionItem(definition, scrubbed, degraded, undefined, progress2).fix?.tool === DASHBOARD_TOOL_NAME) {
       status = "Working";
     }
     return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress: progress2, counts: measured?.counts };
@@ -89468,10 +89473,10 @@ function sourceGroup(definition) {
 }
 function sourceEntry(definition, card, status, actionKind, degraded, connecting, progress) {
   const inFlight = progress && progress.stage !== "done" && status !== "Needs you" && status !== "Failing";
-  const detail = connecting ? CONNECTING_DETAIL : inFlight ? STAGE_DETAIL[progress.stage] : dashboardSubLine(card, degraded ? { degradedCredentials: degraded } : undefined);
+  const detail = connecting ? CONNECTING_DETAIL : inFlight ? STAGE_DETAIL[progress.stage] : dashboardSubLine(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} });
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
-  const reconnect = progress?.stalledReason === "waiting_for_credentials" ? reconnectFix(definition) : undefined;
-  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect;
+  const reconnect = dashboardCredentialProblem(card, degraded) || progress?.stalledReason === "waiting_for_credentials" ? reconnectFix(definition) : undefined;
+  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : reconnect ?? (scopePending(card) ? scopeFix(definition, card) : undefined);
   const menu = [];
   if (status !== "Off" && card.scope_selection && !scopePending(card)) {
     const fix = scopeFix(definition, card);
@@ -89503,9 +89508,9 @@ function attentionItem(definition, card, degraded, connecting, progress) {
   if (connecting) {
     return { id: `source:${definition.source_id}`, sentence: `${definition.label} — ${CONNECTING_REASON}`, fix: connecting.fix };
   }
-  const reason = dashboardAttentionLine(card, degraded ? { degradedCredentials: degraded } : undefined);
+  const reason = dashboardAttentionLine(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} });
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
-  const reauth = card.connection.state === "reauth_required" || progress?.stalledReason === "waiting_for_credentials" || card.connection.state !== "connected" && card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card);
+  const reauth = dashboardCredentialProblem(card, degraded) || progress?.stalledReason === "waiting_for_credentials";
   const reconnect = reauth ? reconnectFix(definition) : undefined;
   const fix = reconnect ?? (reauth ? checkAgainFix(onMacHelp("reconnect")) : undefined) ?? (scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
@@ -89526,9 +89531,9 @@ function reconnectFix(definition) {
   const source = oauthSource(definition);
   return source ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : undefined;
 }
-function measuredSourceProgress(card, scrubbed, embedding, status, now) {
+function measuredSourceProgress(card, scrubbed, embedding, status, credentials, now) {
   const unit = unitFor(scrubbed);
-  const credentialsMissing = status === "Needs you" && (scrubbed.connection.state === "reauth_required" || scrubbed.coverage.indexed_items > 0 && !dashboardIsConnectedSource(scrubbed));
+  const credentialsMissing = status === "Needs you" && credentials;
   const found = count(scrubbed.coverage.indexed_items);
   if (scopePending(scrubbed)) {
     return {
@@ -89758,6 +89763,7 @@ function scrubCard(definition, card) {
   const connectionLabel = KNOWN_CONNECTION_LABELS.has(card.connection.label) || SYNCED_RELATIVE.test(card.connection.label) ? card.connection.label : "";
   const freshnessLabel2 = card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || card.freshness.label.startsWith("Answer lane:") ? card.freshness.label : "";
   const pending = card.connection.pending;
+  const refusal = card.connection.provider_refusal;
   return {
     corpus_id: definition.primary_corpus_id,
     source_id: definition.source_id,
@@ -89813,7 +89819,8 @@ function scrubCard(definition, card) {
       label: connectionLabel,
       action: { kind: "none" },
       handles: [],
-      ...pending && finite(pending.expires_in_minutes) ? { pending: { started_at: "", expires_at: "", expires_in_minutes: count(pending.expires_in_minutes) } } : {}
+      ...pending && finite(pending.expires_in_minutes) ? { pending: { started_at: "", expires_at: "", expires_in_minutes: count(pending.expires_in_minutes) } } : {},
+      ...refusal ? { provider_refusal: { code: KNOWN_REFUSAL_CODES.has(refusal.code) ? refusal.code : "", reason: "" } } : {}
     },
     ...card.progress && finite(card.progress.indexed_items_per_hour) ? {
       progress: {
@@ -89872,7 +89879,7 @@ function isoOrUndefined(value) {
 function isoOrNow(value, now) {
   return isoOrUndefined(value) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS, honestStatus, STAGE_FOR_PHASE, ON_MAC_HELP_URL = "https://olympusplugin.ai/help/on-your-mac/", PRIVATE_MODEL_INSTALLING;
+var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE, ON_MAC_HELP_URL = "https://olympusplugin.ai/help/on-your-mac/", PRIVATE_MODEL_INSTALLING;
 var init_dashboard_view_model = __esm(() => {
   init_shared_status();
   init_phases();
@@ -89915,8 +89922,8 @@ var init_dashboard_view_model = __esm(() => {
     "Preparing answer-ready text",
     "Waiting for the first sync"
   ]);
+  KNOWN_REFUSAL_CODES = new Set(["access_denied", "redirect_uri_mismatch", "invalid_redirect_uri", "redirect_uri_not_registered"]);
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
-  honestStatus = dashboardHonestStatus;
   STAGE_FOR_PHASE = {
     metadata_sync: "listing",
     extraction: "reading",
@@ -90323,7 +90330,7 @@ function dashboardSourceStates(view, options = {}) {
   const rows = view.sources.map((source) => {
     const entry = engine.get(source.source_id);
     const connecting = connectingFor2(source, now);
-    const credential = !connecting && dashboardCredentialAttention(source, degraded ? { degradedCredentials: degraded } : {});
+    const credential = !connecting && dashboardCredentialProblem(source, degraded);
     const progress = !connecting && !credential && entry?.progress && (entry.progress.stage !== "done" || entry.progress.stalled) ? entry.progress : undefined;
     const local = dashboardHonestStatus(dashboardStatus({ source, ...degraded ? { degradedCredentials: degraded } : {} }), progress);
     let status = entry?.status ?? local;
@@ -90458,7 +90465,7 @@ function dashboardReconnectAction(source, view, options) {
     const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view, action));
     return { action: { label: label2, kind: "none", sheet: sheetId, ...blocked }, sheet };
   }
-  if (action.kind === "none" && dashboardCredentialAttention(source, options?.degradedCredentials ? { degradedCredentials: options.degradedCredentials } : {})) {
+  if (action.kind === "none" && dashboardCredentialProblem(source, options?.degradedCredentials)) {
     const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
     const route = definition?.connect_action;
     if (route?.kind !== "oauth" && route?.kind !== "api_key")
@@ -110815,7 +110822,7 @@ async function callSetupTool(name, args, backend) {
         const { confirmation, revision, ...fields } = args;
         if (confirmation !== undefined && typeof confirmation !== "string")
           throw new ChatGptSurfaceError("invalid_params");
-        if (revision !== undefined && (typeof revision !== "string" || !revision || revision.length > 64)) {
+        if (typeof revision !== "string" || !revision || revision.length > 64) {
           throw new ChatGptSurfaceError("invalid_params");
         }
         let update;
@@ -110825,11 +110832,9 @@ async function callSetupTool(name, args, backend) {
           throw new ChatGptSurfaceError("invalid_params");
         }
         const secrets = secretLocations(backend);
-        if (revision !== undefined) {
-          const current = backend.privacySettings();
-          if (current.revision !== revision)
-            return privacyToolResult(visiblePrivacy(current, secrets), "conflict");
-        }
+        const current = backend.privacySettings();
+        if (current.revision !== revision)
+          return privacyToolResult(visiblePrivacy(current, secrets), "conflict");
         const confirmed = confirmation !== undefined && privacyConfirmationValid(backend, confirmation);
         if (!confirmed && lowersPrivacy(update, visiblePrivacy(backend.privacySettings(), secrets))) {
           throw new ChatGptSurfaceError("privacy_owner_only");
@@ -111305,6 +111310,7 @@ var init_setup_tools = __esm(() => {
         confirmation: { type: "string", maxLength: 128, description: "The panel's confirmation from olympus_privacy_get." },
         revision: { type: "string", maxLength: 64, description: "The revision from olympus_privacy_get; a save against changed settings is refused." }
       },
+      required: ["revision"],
       additionalProperties: false
     },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },

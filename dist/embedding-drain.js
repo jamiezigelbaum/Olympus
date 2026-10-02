@@ -21709,13 +21709,14 @@ var init_shared_privacy_logic = __esm(() => {
 // src/workers/dashboard/shared-status.ts
 var DASHBOARD_FIXABLE_STALLS;
 var init_shared_status = __esm(() => {
+  init_vocabulary();
   DASHBOARD_FIXABLE_STALLS = new Set([
     "waiting_for_credentials",
     "scope_pending"
   ]);
 });
 // src/workers/chatgpt/dashboard-view-model.ts
-var CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS, PRIVATE_MODEL_INSTALLING;
+var CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, PRIVATE_MODEL_INSTALLING;
 var init_dashboard_view_model = __esm(() => {
   init_shared_status();
   init_phases();
@@ -21756,6 +21757,7 @@ var init_dashboard_view_model = __esm(() => {
     "Preparing answer-ready text",
     "Waiting for the first sync"
   ]);
+  KNOWN_REFUSAL_CODES = new Set(["access_denied", "redirect_uri_mismatch", "invalid_redirect_uri", "redirect_uri_not_registered"]);
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
 });
