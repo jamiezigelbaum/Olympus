@@ -33,7 +33,7 @@ import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import { DEFAULT_TIER_REJUDGE_PER_PASS, rejudgeRoutedItems, type TierRejudgeReport } from '../connector-store/tier-rejudge.ts';
-import { TierLedger, tierLedgerPathForStore, type TierLedgerIdentity } from './tier-ledger.ts';
+import { TierLedger, tierLedgerPathForStore, type TierLedgerIdentity, type TierLedgerRecord } from './tier-ledger.ts';
 
 export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60_000;
 
@@ -105,10 +105,19 @@ export interface TierSnifferServiceOptions {
     /** The embedding ledger each automatic move is recorded in. */
     embeddingLedgerPath: string;
     maxPerPass?: number;
+    /**
+     * How long a queued move may keep failing before it is given up
+     * (`TierLedger.abandonMove`): a lateral or lower move is abandoned, so the
+     * item is no longer held mid-move; a raise is never rolled back to the
+     * lower placement (that would expose what the newer decision hides), it
+     * stays queued and is counted as stale. Default DEFAULT_STALE_MOVE_MS.
+     */
+    staleAfterMs?: number;
   };
 }
 
 export const DEFAULT_AUTO_MOVES_PER_PASS = 25;
+export const DEFAULT_STALE_MOVE_MS = 60 * 60_000;
 export const BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = 'built-in local model, nothing leaves the Mac (owner default 2026-10-01)';
 
 export interface TierAutoMoveReport {
@@ -116,6 +125,10 @@ export interface TierAutoMoveReport {
   failed: number;
   /** Queued moves left for the owner-approved migration (a store not on the built-in embedding model). */
   notEligible: number;
+  /** Failed moves older than the stale bound that were given up: the item is back where it was. */
+  abandoned?: number;
+  /** Failed raises older than the stale bound: kept hidden and queued, never rolled back. */
+  staleRaises?: number;
 }
 
 export interface TierClassificationBacklog {
@@ -409,6 +422,8 @@ export class TierSnifferService {
     signal: AbortSignal,
   ): Promise<TierAutoMoveReport> {
     const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0 };
+    const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
+    const now = (this.options.now ?? (() => new Date()))().getTime();
     let budget = Math.max(0, options.maxPerPass ?? DEFAULT_AUTO_MOVES_PER_PASS);
     for (const ledgerPath of this.ledgerPaths()) {
       if (budget === 0 || signal.aborted) break;
@@ -450,13 +465,49 @@ export class TierSnifferService {
           // The move stays queued (held, never shown twice); the next pass or
           // the owner-approved migration picks it up.
           report.failed += 1;
+          const queuedAt = Date.parse(record.decidedAt);
+          if (Number.isFinite(queuedAt) && now - queuedAt >= staleAfterMs) this.settleStaleMove(set, record, report);
         }
       }
     }
     if (report.moved > 0 || report.failed > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} left queued.`);
+      this.options.log?.(
+        `Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed`
+        + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ''}`
+        + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ''}.`,
+      );
     }
     return report;
+  }
+
+  /**
+   * A move that kept failing past the stale bound. A lateral or lower move
+   * hid nothing: it is abandoned, the item leaves `moving` at its tiers and
+   * its copies serve as before. A raise hid its source for privacy: putting
+   * that back would serve the item below its newest decision, so it stays
+   * hidden and queued for a later pass or the owner-approved migration.
+   */
+  private settleStaleMove(set: TieredStoreSet, record: TierLedgerRecord, report: TierAutoMoveReport): void {
+    try {
+      const identity = {
+        provider: record.provider,
+        accountScope: record.accountScope,
+        providerItemId: record.providerItemId,
+        ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
+      };
+      const current = set.ledger.getCurrent(identity);
+      if (!current || current.state !== 'moving' || current.generation !== record.generation) return;
+      const hid = set.ledger.copies(identity)
+        .some((copy) => copy.state === 'superseded' && copy.supersededByGeneration === record.generation + 1);
+      if (hid) {
+        report.staleRaises = (report.staleRaises ?? 0) + 1;
+        return;
+      }
+      set.ledger.abandonMove(identity, { expectedGeneration: record.generation });
+      report.abandoned = (report.abandoned ?? 0) + 1;
+    } catch {
+      // Left queued; the next pass looks again.
+    }
   }
 }
 

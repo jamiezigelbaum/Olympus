@@ -13,6 +13,7 @@ import { classifyItemTiers, type TierDecision } from '../src/workers/classificat
 import {
   TierLedger,
   TierLedgerGenerationConflictError,
+  TierLedgerSecretsRollbackRefusedError,
   placementIsRaise,
   type TierPlacementPlan,
 } from '../src/workers/classification/tier-ledger.ts';
@@ -351,5 +352,69 @@ describe('embedding holds follow the decision through a move', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('abandoning a move that never flipped', () => {
+  const visible = (store: TierLedger) => store.copies(ITEM).filter((copy) => copy.state === 'current').map((copy) => [copy.corpusId, copy.layers]);
+
+  test('a queued raise is put back exactly where it was: hidden copies current again, tiers unchanged', () => {
+    const store = ledger();
+    store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL));
+    const before = store.copies(ITEM);
+    store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secure', decidedBy: 'sensitive_detector' }), {
+      copies: [{ ...INTERNAL, layers: 'metadata' }, { ...SECURE, layers: 'content' }],
+      embedHold: false,
+    });
+    expect(visible(store)).toEqual([]);
+    expect(() => store.abandonMove(ITEM, { expectedGeneration: 2 })).toThrow(TierLedgerGenerationConflictError);
+
+    const abandoned = store.abandonMove(ITEM, { expectedGeneration: 1 });
+    expect(abandoned).toMatchObject({ state: 'current', generation: 1, contentTier: 'private', targetContentTier: null, targetMetadataTier: null });
+    expect(visible(store)).toEqual([[INTERNAL.corpusId, 'both']]);
+    expect(store.copies(ITEM).map(({ updatedAt: _updatedAt, ...copy }) => copy))
+      .toEqual(before.map(({ updatedAt: _updatedAt, ...copy }) => copy));
+    expect(store.history(ITEM).at(-1)).toMatchObject({ generation: 1, decidedBy: 'rollback', state: 'current' });
+    // Not mid-move any more: the next decision is the router's again.
+    expect(store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL)).outcome).not.toBe('held_moving');
+    expect(() => store.abandonMove(ITEM, { expectedGeneration: 1 })).toThrow(TierLedgerGenerationConflictError);
+    store.close();
+  });
+
+  test('a move interrupted after staging keeps its staged copy hidden, out of reach of a later move or rollback', () => {
+    const store = ledger();
+    store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secure' }), whole(SECURE));
+    store.stageMove(ITEM, {
+      expectedGeneration: 1,
+      target: { metadataTier: 'private', contentTier: 'private' },
+      destination: [{ ...INTERNAL, layers: 'both' }],
+      hideSource: false,
+    });
+    store.abandonMove(ITEM, { expectedGeneration: 1 });
+    expect(visible(store)).toEqual([[SECURE.corpusId, 'both']]);
+    expect(store.copies(ITEM).find((copy) => copy.corpusId === INTERNAL.corpusId))
+      .toMatchObject({ state: 'superseded', supersededByGeneration: null });
+    // A staged copy no longer turns an unchanged placement into a move.
+    expect(store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secure' }), whole(SECURE)).outcome).not.toBe('queued_move');
+
+    // The same move again stages and flips normally.
+    store.stageMove(ITEM, {
+      expectedGeneration: 1,
+      target: { metadataTier: 'private', contentTier: 'private' },
+      destination: [{ ...INTERNAL, layers: 'both' }],
+      hideSource: false,
+    });
+    store.completeMove(ITEM, { expectedGeneration: 1, destination: [{ ...INTERNAL, layers: 'both' }] });
+    expect(visible(store)).toEqual([[INTERNAL.corpusId, 'both']]);
+    store.close();
+  });
+
+  test('a move toward Secrets is never abandoned', () => {
+    const store = ledger();
+    store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL));
+    store.beginMove(ITEM, { metadataTier: 'secrets', contentTier: 'secrets' }, 1);
+    expect(() => store.abandonMove(ITEM, { expectedGeneration: 1 })).toThrow(TierLedgerSecretsRollbackRefusedError);
+    expect(store.getCurrent(ITEM)).toMatchObject({ state: 'moving' });
+    store.close();
   });
 });

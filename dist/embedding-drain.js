@@ -9766,6 +9766,35 @@ class TierLedger {
     })();
     return this.getCurrent(identity);
   }
+  abandonMove(identity, options) {
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state !== "moving") {
+        throw new TierLedgerGenerationConflictError;
+      }
+      if (existing.targetContentTier === "secrets" || existing.targetMetadataTier === "secrets" || existing.contentTier === "secrets" || existing.metadataTier === "secrets") {
+        throw new TierLedgerSecretsRollbackRefusedError;
+      }
+      const moveGeneration = existing.generation + 1;
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+      `).run(now, ...idParams(identity));
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'current', superseded_by_generation = NULL, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND copy_state = 'superseded' AND superseded_by_generation = ?
+      `).run(now, ...idParams(identity), moveGeneration);
+      const state = existing.metadataPending || existing.contentPending ? "pending" : "current";
+      this.db.query(`
+        UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
+      `).run(state, ...idParams(identity), existing.generation);
+      this.appendHistory(identity, existing.generation, existing.metadataTier, existing.contentTier, "rollback", JSON.stringify(existing.reasons), state, now);
+    })();
+    return this.getCurrent(identity);
+  }
   flipToSecrets(identity, options) {
     const now = this.now().toISOString();
     let copies = [];
@@ -25712,11 +25741,23 @@ async function moveTieredItem(options) {
   if (sources.length === 0)
     throw new Error("The item has no copy to move from.");
   const raise = placementIsRaise(sources, placement.copies);
+  const exports = new Map;
+  const exportFrom = (copy) => {
+    if (!exports.has(copy.corpusId)) {
+      const domain = set.domainForCorpus(copy.corpusId);
+      exports.set(copy.corpusId, domain ? set.store(domain)?.exportItemCopy(identity) : undefined);
+    }
+    return exports.get(copy.corpusId);
+  };
   const kept = ledger.copies(identity);
   for (const planned of placement.copies) {
-    if (sources.some((source) => source.corpusId === planned.corpusId))
+    if (sources.some((source2) => source2.corpusId === planned.corpusId))
       continue;
-    if (kept.some((copy) => copy.corpusId === planned.corpusId && copy.state === "superseded")) {
+    const keptHere = kept.find((copy) => copy.corpusId === planned.corpusId && copy.state === "superseded");
+    if (!keptHere)
+      continue;
+    const source = copyServingLayer(sources, "content") ?? sources[0];
+    if (!sameText(exportFrom(keptHere), exportFrom(source))) {
       throw new TierMoveRefusedError("The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.");
     }
   }
@@ -25728,14 +25769,6 @@ async function moveTieredItem(options) {
     ...placement.embedHold ? { embedHold: true } : {}
   });
   const destinations = [];
-  const exports = new Map;
-  const exportFrom = (copy) => {
-    if (!exports.has(copy.corpusId)) {
-      const domain = set.domainForCorpus(copy.corpusId);
-      exports.set(copy.corpusId, domain ? set.store(domain)?.exportItemCopy(identity) : undefined);
-    }
-    return exports.get(copy.corpusId);
-  };
   for (const planned of placement.copies) {
     const kept2 = sources.find((source) => source.corpusId === planned.corpusId);
     if (kept2 && layersCover(kept2.layers, planned.layers)) {
@@ -25869,6 +25902,14 @@ async function moveToSecrets(options, expectedGeneration) {
     secretsChunks: settled.chunks,
     secretsDisposition: settled.disposition
   };
+}
+function sameText(kept, source) {
+  if (!kept || !source || kept.chunks.length !== source.chunks.length)
+    return false;
+  return kept.chunks.every((chunk, index) => {
+    const other = source.chunks[index];
+    return chunk.chunkIndex === other.chunkIndex && chunk.boundedText === other.boundedText && chunk.contentHash === other.contentHash && chunk.embeddingInputHash === other.embeddingInputHash;
+  });
 }
 function layersCover(held, wanted) {
   return held === "both" || held === wanted;
@@ -26285,6 +26326,7 @@ function columnString(value) {
 init_tier_ledger();
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
+var DEFAULT_STALE_MOVE_MS = 60 * 60000;
 var BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)";
 
 class TierSnifferService {
@@ -26511,6 +26553,8 @@ class TierSnifferService {
   }
   async runAutoMoves(options, signal) {
     const report = { moved: 0, failed: 0, notEligible: 0 };
+    const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
+    const now = (this.options.now ?? (() => new Date))().getTime();
     let budget = Math.max(0, options.maxPerPass ?? DEFAULT_AUTO_MOVES_PER_PASS);
     for (const ledgerPath of this.ledgerPaths()) {
       if (budget === 0 || signal.aborted)
@@ -26549,13 +26593,36 @@ class TierSnifferService {
           report.moved += 1;
         } catch {
           report.failed += 1;
+          const queuedAt = Date.parse(record.decidedAt);
+          if (Number.isFinite(queuedAt) && now - queuedAt >= staleAfterMs)
+            this.settleStaleMove(set, record, report);
         }
       }
     }
     if (report.moved > 0 || report.failed > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} left queued.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}.`);
     }
     return report;
+  }
+  settleStaleMove(set, record, report) {
+    try {
+      const identity = {
+        provider: record.provider,
+        accountScope: record.accountScope,
+        providerItemId: record.providerItemId,
+        ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+      };
+      const current = set.ledger.getCurrent(identity);
+      if (!current || current.state !== "moving" || current.generation !== record.generation)
+        return;
+      const hid = set.ledger.copies(identity).some((copy) => copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1);
+      if (hid) {
+        report.staleRaises = (report.staleRaises ?? 0) + 1;
+        return;
+      }
+      set.ledger.abandonMove(identity, { expectedGeneration: record.generation });
+      report.abandoned = (report.abandoned ?? 0) + 1;
+    } catch {}
   }
 }
 var AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";

@@ -1483,6 +1483,57 @@ export class TierLedger {
   }
 
   /**
+   * Give up a move that never flipped (queued, or interrupted between stage
+   * and flip) and put the item back exactly where it was: the copies the move
+   * hid for itself are current again, any copy it staged stays hidden (kept,
+   * superseded by no flip, so neither a later move nor a rollback picks it up),
+   * and the row leaves `moving` at its unchanged tiers. Its newest decision's
+   * flags stay recorded. No store is written.
+   *
+   * Refused unless the row is mid-move at the expected generation, and for a
+   * move toward Secrets.
+   */
+  abandonMove(identity: TierLedgerIdentity, options: { expectedGeneration: number }): TierLedgerRecord {
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state !== 'moving') {
+        throw new TierLedgerGenerationConflictError();
+      }
+      if (existing.targetContentTier === 'secrets' || existing.targetMetadataTier === 'secrets'
+        || existing.contentTier === 'secrets' || existing.metadataTier === 'secrets') {
+        throw new TierLedgerSecretsRollbackRefusedError();
+      }
+      const moveGeneration = existing.generation + 1;
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+      `).run(now, ...idParams(identity));
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'current', superseded_by_generation = NULL, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND copy_state = 'superseded' AND superseded_by_generation = ?
+      `).run(now, ...idParams(identity), moveGeneration);
+      const state: TierLedgerState = existing.metadataPending || existing.contentPending ? 'pending' : 'current';
+      this.db.query(`
+        UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
+      `).run(state, ...idParams(identity), existing.generation);
+      this.appendHistory(
+        identity,
+        existing.generation,
+        existing.metadataTier,
+        existing.contentTier,
+        'rollback',
+        JSON.stringify(existing.reasons),
+        state,
+        now,
+      );
+    })();
+    return this.getCurrent(identity)!;
+  }
+
+  /**
    * A move to Secrets: hide every copy at once and make Secrets the item's
    * tiers. The caller then tombstones each store copy (vectors deleted, the
    * one mandatory deletion) and calls `removeCopies`.
