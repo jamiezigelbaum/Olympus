@@ -12,6 +12,7 @@
 import type { DashboardAgentsView } from '../../agent-connections.ts';
 import type { SourceDashboardViewModel } from '../../source-dashboard.ts';
 import {
+  DASHBOARD_INDEXING_NAME,
   DASHBOARD_LOCAL_COPY,
   dashboardHomeMeta,
   dashboardIsConnectedSource,
@@ -111,12 +112,15 @@ export function renderDashboardHomePage(
   const sources = connected.length === 0
     ? `<p class="foot">${escapeHtml(DASHBOARD_LOCAL_COPY.noSources)}</p>`
     : dashboardSourceList(connected, view, options, false);
+  const progress = dashboardProgressSection({ ...states, rows: connected });
   const blocks = [
     dashboardNeedsSection(dashboardOtherNeeds(states, view, options, 'home')),
     `<div class="sect">${escapeHtml(DASHBOARD_LOCAL_COPY.sources)}</div>`,
     sources,
-    dashboardProgressSection({ ...states, rows: connected }),
-    renderBackgroundSection(view, options),
+    progress,
+    // Each fact once: while the page-wide Progress line shows, the Background
+    // card does not repeat an indexing number of its own beside it.
+    renderBackgroundSection(view, options, progress !== ''),
     renderSetupLink(options),
   ];
   const nav = renderDashboardNav('home', {
@@ -163,9 +167,11 @@ function renderSetupLink(options: DashboardPageOptions | undefined): string {
 function renderBackgroundSection(
   view: SourceDashboardViewModel,
   options: DashboardPageOptions | undefined,
+  progressShown = false,
 ): string {
-  const lanes = dashboardBackgroundLanes(view, options);
-  if (lanes.length === 0) return '';
+  const lanes = dashboardBackgroundLanes(view, options)
+    .filter((lane) => !progressShown || lane.name !== DASHBOARD_INDEXING_NAME);
+  if (lanes.length === 0 || dashboardBackgroundRowLines(lanes).length === 0) return '';
   return [
     '<div class="sect">Background</div>',
     backgroundRow({

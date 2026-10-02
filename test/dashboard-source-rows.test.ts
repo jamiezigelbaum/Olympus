@@ -18,6 +18,7 @@ import {
   type DashboardSourceRowState,
 } from '../src/workers/dashboard/source-rows.ts';
 import { dashboardStatus } from '../src/workers/dashboard/vocabulary.ts';
+import { DASHBOARD_SOURCE_ROWS_CSS } from '../src/workers/dashboard/static-styles.ts';
 
 /**
  * The ChatGPT dashboard's rules on the local pages (owner, 2026-10-02), read
@@ -167,7 +168,8 @@ describe('rule 3: honest progress', () => {
     expect(page('review', 'home')).not.toContain('<div class="sect">Progress</div>');
     const html = page('review-indexing', 'home');
     const section = html.slice(html.indexOf('<div class="sect">Progress</div>'), html.indexOf('<div class="sect">Background</div>'));
-    expect(section).toContain('First index: 44% done, 1,860 items left');
+    // Done counts what is searchable (indexed), not items read (upstream 4853e2c9).
+    expect(section).toContain('First index: 40% done, 2,010 items left');
     // The stalled source says so in its own row; the line is about what moves.
     expect(section).not.toContain('stalled');
     expect(section).not.toContain('about ');
@@ -193,6 +195,26 @@ describe('rule 3: honest progress', () => {
     expect(dashboardHonestStatus('Fresh', { stage: 'indexing', unit: 'items', done: 0, total: 100, percent: 0, stalled: false })).toBe('Working');
     expect(dashboardHonestStatus('Fresh', { stage: 'listing', unit: 'files', done: 0, total: 0, percent: 0, stalled: true, stalledReason: 'scope_pending' })).toBe('Needs you');
     expect(dashboardHonestStatus('Fresh', { stage: 'done', unit: 'files', done: 5, total: 5, percent: 100, stalled: false })).toBe('Fresh');
+  });
+});
+
+describe('each number once on Home, and one divider above Models', () => {
+  test('while the Progress line shows, the Background card does not repeat an indexing number', () => {
+    const working = page('review-indexing', 'home');
+    expect(working).toContain('<div class="sect">Progress</div>');
+    const background = working.includes('<div class="sect">Background</div>')
+      ? working.slice(working.indexOf('<div class="sect">Background</div>'), working.indexOf('Connect more sources'))
+      : '';
+    expect(background).not.toContain('Indexing');
+    // With no Progress line, the Background card keeps its indexing line.
+    const quiet = page('review', 'home');
+    expect(quiet).not.toContain('<div class="sect">Progress</div>');
+    expect(quiet.slice(quiet.indexOf('<div class="sect">Background</div>'))).toContain('Indexing');
+  });
+
+  test('the Models row draws no border of its own over the list above it', () => {
+    const rule = DASHBOARD_SOURCE_ROWS_CSS.split('\n').find((line) => line.startsWith('.modelsrow {'))!;
+    expect(rule).not.toContain('border');
   });
 });
 

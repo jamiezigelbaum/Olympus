@@ -219,6 +219,10 @@ export type OlympusDashboardControlParams =
       action: 'save_privacy';
       description?: string;
       rules?: OlympusPrivacyRule[];
+      /** The revision the page was showing: a save against changed settings answers conflict. */
+      revision?: string;
+      /** The owner confirmed on the page that this save lowers protection (removes a rule or changes the words). */
+      confirm?: boolean;
     }
   | {
       /** Start a built-in model's failed install again (ChatGPT's olympus_model_retry). */

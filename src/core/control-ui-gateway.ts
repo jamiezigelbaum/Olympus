@@ -17,6 +17,7 @@ import {
 } from '../control-ui-contract.ts';
 import type { OlympusConfig } from './config.ts';
 import { workerAuthTokenFromConfig } from './worker-auth.ts';
+import { privacyRuleProblem } from '../workers/dashboard/shared-privacy-rules.ts';
 import {
   createGatewayCallbackPeerHeader,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
@@ -333,7 +334,11 @@ export function parseDashboardControlParams(value: unknown): OlympusDashboardCon
     };
   }
   if (action === 'save_privacy') {
-    const record = exactRecord(outer, ['action', 'description', 'rules']);
+    const record = exactRecord(outer, ['action', 'description', 'rules', 'revision', 'confirm']);
+    const revision = optionalBoundedString(record.revision, 64, 'revision', false);
+    if (record.confirm !== undefined && typeof record.confirm !== 'boolean') {
+      throw new DashboardGatewayInvalidRequestError('confirm must be true or false.');
+    }
     const description = record.description === undefined
       ? undefined
       : boundedText(record.description, PRIVACY_DESCRIPTION_MAX, 'description');
@@ -347,19 +352,24 @@ export function parseDashboardControlParams(value: unknown): OlympusDashboardCon
         const key = optionalBoundedString(rule.key, 1_024, 'key', false);
         const ruleValue = optionalBoundedString(rule.value, 240, 'value', false);
         const display = optionalBoundedString(rule.display, 200, 'display', false);
-        return {
+        const parsed: OlympusPrivacyRule = {
           kind: enumValue(rule.kind, ['folder', 'label', 'sender'] as const, 'kind'),
           source_id: enumValue(rule.source_id, ['dropbox.files', 'google_drive.docs', 'gmail.email'] as const, 'source_id'),
           ...(key ? { key } : {}),
           ...(ruleValue ? { value: ruleValue } : {}),
           ...(display ? { display } : {}),
         };
+        const problem = privacyRuleProblem(parsed);
+        if (problem) throw new DashboardGatewayInvalidRequestError(problem);
+        return parsed;
       });
     }
     return {
       action,
       ...(description !== undefined ? { description } : {}),
       ...(rules ? { rules } : {}),
+      ...(revision ? { revision } : {}),
+      ...(record.confirm === true ? { confirm: true } : {}),
     };
   }
   if (action === 'retry_model') {
@@ -881,6 +891,8 @@ function dashboardControlWorkerRequest(params: OlympusDashboardControlParams): {
         body: {
           ...(params.description !== undefined ? { description: params.description } : {}),
           ...(params.rules ? { rules: params.rules } : {}),
+          ...(params.revision ? { revision: params.revision } : {}),
+          ...(params.confirm === true ? { confirm: true } : {}),
         },
       };
     case 'retry_model':

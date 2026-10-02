@@ -63,6 +63,9 @@ import {
   type ChatGptToolResult,
 } from './response-builder.ts';
 import { isSecretFolder, isSecretLabel, isSecretSender, type SecretLocations } from './scope-privacy.ts';
+// The privacy rules both editors share (moved, unchanged, 2026-10-02).
+import { isSecretPrivacyRule, lowersPrivacy, visiblePrivacy } from '../dashboard/shared-privacy.ts';
+export { isSecretPrivacyRule, lowersPrivacy, visiblePrivacy };
 
 /** An error the backend reports with the worker's own code; mapped to a fixed sentence here. */
 export class SetupBackendError extends Error {
@@ -449,18 +452,6 @@ export async function callSetupTool(
 }
 
 /**
- * Whether a save would lower the owner's protection: it removes a saved rule
- * or changes the owner's description (which the private classifier reads).
- * Adding rules, or saving the description unchanged, never lowers it.
- */
-function lowersPrivacy(update: ReturnType<typeof parsePrivacyProfileInput>, current: PrivacySettings): boolean {
-  if (update.description !== undefined && update.description !== current.description) return true;
-  if (!update.rules) return false;
-  const kept = new Set(update.rules.map((rule) => privacyRuleId(rule)));
-  return current.rules.some((rule) => !kept.has(privacyRuleId(rule)));
-}
-
-/**
  * Panel confirmations for privacy changes that lower protection. One is
  * issued with every olympus_privacy_get, in its result `_meta` (which reaches
  * the widget only, never the model), lives PRIVACY_CONFIRMATION_TTL_MS and is
@@ -499,17 +490,6 @@ function privacyConfirmationValid(backend: ChatGptSetupBackend, token: string): 
 
 function spendPrivacyConfirmation(backend: ChatGptSetupBackend, token: string): void {
   confirmationsFor(backend).delete(token);
-}
-
-/** The settings without any rule on a Secrets location (scope-privacy.ts): those never leave the Mac. */
-function visiblePrivacy(settings: PrivacySettings, secrets: SecretLocations): PrivacySettings {
-  return { ...settings, rules: settings.rules.filter((rule) => !isSecretPrivacyRule(secrets, rule)) };
-}
-
-function isSecretPrivacyRule(secrets: SecretLocations, rule: { kind: string; key?: string; value?: string }): boolean {
-  if (rule.kind === 'folder') return isSecretFolder(secrets, rule.key ?? '');
-  if (rule.kind === 'label') return isSecretLabel(secrets, rule.key ?? '');
-  return isSecretSender(secrets, rule.value ?? '');
 }
 
 async function scopeList(backend: ChatGptSetupBackend, args: Record<string, unknown>): Promise<ScopeList> {

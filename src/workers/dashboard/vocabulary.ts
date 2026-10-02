@@ -1711,4 +1711,12 @@ export const DASHBOARD_LOCAL_PRIVACY_COPY = {
   locked: 'Unlock dashboard controls in Setup to see and change what is private.',
   readOnly: 'Your OpenClaw connection is read-only, so privacy can be read here but not changed.',
   unavailable: 'Privacy settings are not available from this worker.',
+  /** The save's confirm step: only for a save that lowers protection. {list} names the rules. */
+  confirmRemoves: 'This removes protection from {list}.',
+  confirmDescription: 'This changes your own words, which Olympus reads to keep items private.',
+  confirm: 'Confirm',
+  keepEditing: 'Keep editing',
+  conflict: 'These privacy settings were changed somewhere else. Your changes are still here.',
+  applyAgain: 'Apply my changes again',
+  discardMine: 'Discard my changes',
 } as const;

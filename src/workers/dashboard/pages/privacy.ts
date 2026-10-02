@@ -30,13 +30,11 @@ import { DASHBOARD_NAV_CSS, renderDashboardNav } from '../nav.ts';
 import { DASHBOARD_PRIVACY_CSS, DASHBOARD_SOURCE_ROWS_CSS } from '../static-styles.ts';
 import { DASHBOARD_LOCAL_PRIVACY_COPY as W, dashboardCheckedLabel, dashboardIsConnectedSource } from '../vocabulary.ts';
 import { dashboardControlsAvailable, fill, setupHref } from '../source-rows.ts';
+import { PRIVACY_FOLDER_SOURCE_NAMES, privacyRuleWords as sharedPrivacyRuleWords } from '../shared-privacy-rules.ts';
 import type { DashboardPageOptions } from './home.ts';
 
 /** Folder sources a private folder can come from, with their names. */
-const FOLDER_SOURCES: Readonly<Record<string, string>> = {
-  'dropbox.files': 'Dropbox',
-  'google_drive.docs': 'Google Drive',
-};
+const FOLDER_SOURCES = PRIVACY_FOLDER_SOURCE_NAMES;
 const MAIL_SOURCE_ID = 'gmail.email';
 
 export function renderDashboardPrivacyPage(
@@ -99,7 +97,11 @@ function renderPrivacyBody(view: SourceDashboardViewModel, options: DashboardPag
     + `<form class="pform" data-privacy-form`
     + ` data-folder-sources="${escapeHtml(JSON.stringify(folderSources.map((id) => ({ id, label: FOLDER_SOURCES[id] }))))}"`
     + ` data-mail-draft="${escapeHtml(JSON.stringify(mailScopeDraftView(undefined)))}"`
-    + ` data-copy="${escapeHtml(JSON.stringify(CLIENT_COPY))}">`
+    + ` data-copy="${escapeHtml(JSON.stringify(CLIENT_COPY))}"`
+    // What the engine holds now, so a save can tell what it would remove and
+    // send back the revision it was edited against (compare-and-swap).
+    + ` data-revision="${escapeHtml(settings.revision ?? '')}"`
+    + ` data-saved="${escapeHtml(JSON.stringify(savedBaseline(settings)))}">`
     + `<label class="plabel" for="privacy-description">${escapeHtml(W.descriptionLabel)}</label>`
     + `<textarea class="ptext" id="privacy-description" name="description" maxlength="2000" rows="5"`
     + ` placeholder="${escapeHtml(W.descriptionPlaceholder)}"${canEdit ? '' : ' readonly'}>${escapeHtml(settings.description)}</textarea>`
@@ -140,14 +142,19 @@ function connected(view: SourceDashboardViewModel, sourceId: string): boolean {
     && source.connection.state !== 'awaiting_consent' && source.connection.state !== 'reauth_required';
 }
 
-/** A rule's name and what kind of place it is, in the editor's words. */
+/** A rule's name and what kind of place it is, in the editor's words (shared-privacy.ts). */
 export function privacyRuleWords(rule: PrivacyRuleView): { name: string; kind: string } {
-  if (rule.kind === 'sender') return { name: rule.value, kind: W.kindSender };
-  if (rule.kind === 'label') return { name: rule.value, kind: W.kindLabel };
-  const fromKey = rule.key.startsWith('/') ? rule.key.split('/').filter(Boolean).pop() : undefined;
+  return sharedPrivacyRuleWords(rule, W);
+}
+
+/**
+ * The saved settings a save is measured against: the description and each
+ * rule with its name, for the confirm step's "This removes protection from…".
+ */
+function savedBaseline(settings: PrivacySettings): { description: string; rules: Array<PrivacyRuleView & { name: string }> } {
   return {
-    name: rule.display || fromKey || W.unnamedFolder,
-    kind: fill(W.kindFolder, { source: FOLDER_SOURCES[rule.source_id] ?? rule.source_id }),
+    description: settings.description,
+    rules: settings.rules.map((rule) => ({ ...rule, name: privacyRuleWords(rule).name })),
   };
 }
 
@@ -190,6 +197,13 @@ const CLIENT_COPY = {
   saveFailed: W.saveFailed,
   unchanged: W.unchanged,
   discard: 'Discard your changes?',
+  confirmRemoves: W.confirmRemoves,
+  confirmDescription: W.confirmDescription,
+  confirm: W.confirm,
+  keepEditing: W.keepEditing,
+  conflict: W.conflict,
+  applyAgain: W.applyAgain,
+  discardMine: W.discardMine,
 } as const;
 
 export type DashboardPrivacyClientCopy = typeof CLIENT_COPY;

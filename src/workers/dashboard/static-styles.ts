@@ -424,7 +424,8 @@ export const DASHBOARD_SOURCE_ROWS_CSS = `
 .sprog.stalled .sline { color: var(--t1); }
 .bar.stalled i { background: var(--warn-fill); }
 .sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
-.modelsrow { margin: 28px 0 0; padding-top: 12px; border-top: 1px solid var(--line); }
+/* No border of its own: the list above already ends in one, and two read as a double divider. */
+.modelsrow { margin: 28px 0 0; }
 details.models > summary { font-size: var(--fs-section); font-weight: 600; color: var(--t1); cursor: pointer; padding: 4px 0; }
 details.models > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
 details.models .modelsbody { margin-top: 12px; }
@@ -468,4 +469,7 @@ export const DASHBOARD_PRIVACY_CSS = `
 .pfooter p { margin: 0; color: var(--t1); }
 .pbuttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .pbuttons a.btn { text-decoration: none; }
+/* The confirm and conflict steps: a tinted box with a 1px border, never a stripe. */
+.pprompt { padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; display: grid; gap: 8px; }
+.pprompt p { margin: 0; color: var(--t1); }
 `;

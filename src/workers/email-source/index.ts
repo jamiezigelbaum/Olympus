@@ -160,7 +160,7 @@ import type { PrivacySettings } from '../chatgpt/dashboard-contract.ts';
 
 /** A privacy read or save, as the dashboard routes need it: the settings, or a fixed code and sentence. */
 export type DashboardPrivacyOutcome =
-  | { ok: true; settings: PrivacySettings }
+  | { ok: true; status: 'current' | 'saved' | 'conflict'; settings: PrivacySettings }
   | { ok: false; code: string; message: string };
 import {
   OLYMPUS_DASHBOARD_VIEWS,
@@ -1821,7 +1821,19 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const record = await parseObjectBody(request);
           const outcome = await sourceDashboard.privacy.save(record);
           if (!outcome.ok) {
-            throw new EmailSourceWorkerError(outcome.code === 'invalid_params' ? 400 : 500, outcome.code, outcome.message);
+            // Lowering protection without the owner's confirmation is refused
+            // as a conflict the page answers with its confirm step.
+            const status = outcome.code === 'invalid_params' ? 400 : outcome.code === 'privacy_owner_only' ? 409 : 500;
+            return json({ ok: false, error: { code: outcome.code, message: outcome.message } }, status);
+          }
+          if (outcome.status === 'conflict') {
+            // Changed somewhere else since the page was read: nothing saved;
+            // the current settings come back so the page can keep the draft.
+            return json({
+              ok: false,
+              error: { code: 'conflict', message: 'These privacy settings were changed somewhere else. Your changes are still here.' },
+              settings: outcome.settings,
+            }, 409);
           }
           return json({ ok: true, settings: outcome.settings, status_message: 'Privacy saved.' });
         }
