@@ -16,8 +16,13 @@
 #
 # Upgrades: the new package is swapped in, then `engine install --restart`
 # reloads the agent so launchd runs the new build (the plist carries the build
-# identity). If that fails, the previous package is put back and started
-# again. `olympus engine rollback` returns to app.previous later.
+# identity) and waits (up to 60 s) for proof that the engine runs that build
+# and its worker answers; it exits non-zero without that proof. Then the
+# previous package is put back, started again, and checked the same way with
+# `engine verify` (the previous package's, or the new one's when the previous
+# predates it). The installer says which of the two outcomes happened; a
+# restore that fails is reported, never ignored. `olympus engine rollback`
+# returns to app.previous later.
 #
 # Disk: after install, Olympus downloads its built-in search model (about
 # 225 MB) and, on Apple-silicon Macs, a private answer model of 1.3 to 2.7 GB
@@ -128,18 +133,31 @@ mv "$APP.next" "$APP"
 
 # 3. Register the per-user LaunchAgent and (re)start it on this build. The
 #    plist names the build, so an upgrade reloads the agent; --restart covers
-#    an agent loaded from an identical plist.
+#    an agent loaded from an identical plist. The command succeeds only once
+#    the engine proves this build healthy.
 if ! "$BUN" "$APP/dist/cli.js" engine install --bun "$BUN" --restart; then
   if [ "$UPGRADE" = 1 ] && [ -d "$APP.previous" ]; then
     printf 'olympus install: the new version could not be started; restoring the previous one.\n' >&2
     rm -rf "$APP.failed"
     mv "$APP" "$APP.failed"
     mv "$APP.previous" "$APP"
+    RESTORED=0
     # A previous version from before --restart reloads anyway: its plist differs.
-    "$BUN" "$APP/dist/cli.js" engine install --bun "$BUN" --restart >/dev/null 2>&1 \
-      || "$BUN" "$APP/dist/cli.js" engine install --bun "$BUN" >/dev/null 2>&1 || true
+    if "$BUN" "$APP/dist/cli.js" engine install --bun "$BUN" --restart >/dev/null 2>&1 \
+      || "$BUN" "$APP/dist/cli.js" engine install --bun "$BUN" >/dev/null 2>&1; then
+      # Proof, not launchd's word: the previous package's own `engine verify`,
+      # or, when it predates that command, the new package's.
+      if "$BUN" "$APP/dist/cli.js" engine verify >/dev/null 2>&1 \
+        || "$BUN" "$APP.failed/dist/cli.js" engine verify >/dev/null 2>&1; then
+        RESTORED=1
+      fi
+    fi
     rm -rf "$APP.failed"
+    if [ "$RESTORED" = 1 ]; then
+      die "the new version could not be started; the previous version was restored and is running. See olympus engine logs."
+    fi
+    die "the new version could not be started, and the restored previous version did not come back healthy either. See olympus engine logs."
   fi
   die "the engine could not be started; see olympus engine logs."
 fi
-printf '\nOlympus is installed. Check it with:\n  "%s" "%s/dist/cli.js" engine status\n' "$BUN" "$APP"
+printf '\nOlympus is installed and running. Check it with:\n  "%s" "%s/dist/cli.js" engine status\n' "$BUN" "$APP"

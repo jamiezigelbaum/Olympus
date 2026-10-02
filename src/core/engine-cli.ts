@@ -13,7 +13,7 @@ import {
   engineConflictWarnings,
   enginePaths,
   inspectEngine,
-  installEngine,
+  installEngineVerified,
   readEngineConfig,
   readEngineLogs,
   redactLogLine,
@@ -22,7 +22,9 @@ import {
   startEngine,
   stopEngine,
   uninstallEngine,
+  verifyEngine,
   type EngineExec,
+  type EngineHealthDeps,
 } from './engine-service.ts';
 import { resolveOpenClawExecutable } from './openclaw-executable.ts';
 import { OperationError } from './operation-error.ts';
@@ -36,6 +38,7 @@ export const ENGINE_CLI_USAGE = {
   'engine stop': 'olympus engine stop',
   'engine restart': 'olympus engine restart',
   'engine rollback': 'olympus engine rollback',
+  'engine verify': 'olympus engine verify',
   'engine logs': 'olympus engine logs [--lines <n>] [--follow]',
 } as const;
 
@@ -47,6 +50,8 @@ export interface EngineCliDeps {
   env?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
   openclawPath?: () => string | undefined;
+  /** Test seam for the post-install health proof. */
+  health?: EngineHealthDeps;
 }
 
 export async function runEngineCommand(args: string[], deps: EngineCliDeps = {}): Promise<unknown> {
@@ -59,15 +64,21 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
   };
   if (command === 'install') {
     const options = parseInstallArgs(rest);
-    const result = installEngine({ ...service, ...options });
+    const result = await installEngineVerified({ ...service, ...options, ...(deps.health ? { health: deps.health } : {}) });
     const { plist, ...summary } = result;
     return {
       ...summary,
       ...(options.dryRun ? { plist } : {}),
       next: result.action === 'dry_run'
         ? 'Rerun without --dry-run to write and load the agent.'
-        : 'Run olympus engine status; the engine links itself to the relay once the worker is ready.',
+        : result.ok
+          ? 'Run olympus engine status; the engine links itself to the relay once the worker is ready.'
+          : 'Run olympus engine logs to see why the engine did not become healthy.',
     };
+  }
+  if (command === 'verify') {
+    expectNoArgs('verify', rest);
+    return verifyEngine({ ...service, ...(deps.health ? { health: deps.health } : {}) });
   }
   if (command === 'uninstall') {
     expectNoArgs('uninstall', rest);
@@ -87,7 +98,7 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
   }
   if (command === 'rollback') {
     expectNoArgs('rollback', rest);
-    return rollbackEngine(service);
+    return rollbackEngine({ ...service, ...(deps.health ? { health: deps.health } : {}) });
   }
   if (command === 'status') {
     expectNoArgs('status', rest);

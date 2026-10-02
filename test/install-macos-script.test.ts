@@ -59,9 +59,13 @@ esac
   const makeTarball = (version: string): string => {
     const staging = join(root, `pkg-${version}`);
     mkdirSync(join(staging, 'package', 'dist'), { recursive: true });
+    // The fake engine CLI: FAKE_FAIL_VERSION fails that version's install (it
+    // never proves healthy), FAKE_FAIL_RESTORE fails every install, and
+    // FAKE_UNHEALTHY fails every `engine verify`.
     writeFileSync(join(staging, 'package', 'dist', 'cli.js'), [
       `echo "${version} $*" >> "${log}"`,
-      `if [ "$FAKE_FAIL_VERSION" = "${version}" ]; then exit 1; fi`,
+      'if [ "$2" = verify ]; then [ -z "$FAKE_UNHEALTHY" ] || exit 1; exit 0; fi',
+      `if [ "$FAKE_FAIL_VERSION" = "${version}" ] || [ -n "$FAKE_FAIL_RESTORE" ]; then exit 1; fi`,
       '',
     ].join('\n'));
     const file = join(tarballs, `olympus-${version}.tgz`);
@@ -119,20 +123,49 @@ describe('install-macos.sh', () => {
     expect(h.logLines().at(-1)).toBe(`v2 engine install --bun ${bun} --restart`);
   });
 
-  darwinTest('an upgrade whose engine cannot start puts the previous version back and starts it', () => {
+  darwinTest('an upgrade whose engine does not prove healthy puts the previous version back, starts it, and verifies it', () => {
     const h = harness();
     expect(h.run('v1').status).toBe(0);
     expect(h.run('v2').status).toBe(0);
     const failed = h.run('v3', { FAKE_FAIL_VERSION: 'v3' });
     expect(failed.status).not.toBe(0);
     expect(failed.stderr).toContain('restoring the previous one');
+    expect(failed.stderr).toContain('the previous version was restored and is running');
     expect(appVersion(h.app)).toBe('v2');
     expect(existsSync(`${h.app}.failed`)).toBe(false);
     const bun = join(h.root, 'bin', 'bun');
-    expect(h.logLines().slice(-2)).toEqual([
+    expect(h.logLines().slice(-3)).toEqual([
       `v3 engine install --bun ${bun} --restart`,
       `v2 engine install --bun ${bun} --restart`,
+      'v2 engine verify',
     ]);
+  });
+
+  darwinTest('PoC: a restore that cannot start the previous version is reported, not swallowed', () => {
+    const h = harness();
+    expect(h.run('v1').status).toBe(0);
+    const failed = h.run('v2', { FAKE_FAIL_RESTORE: '1' });
+    expect(failed.status).not.toBe(0);
+    expect(failed.stderr).toContain('the restored previous version did not come back healthy either');
+    expect(failed.stderr).not.toContain('was restored and is running');
+    const bun = join(h.root, 'bin', 'bun');
+    // Both ways of starting the previous version were tried; nothing claimed it healthy.
+    expect(h.logLines().slice(-3)).toEqual([
+      `v2 engine install --bun ${bun} --restart`,
+      `v1 engine install --bun ${bun} --restart`,
+      `v1 engine install --bun ${bun}`,
+    ]);
+    expect(appVersion(h.app)).toBe('v1');
+  });
+
+  darwinTest('PoC: a previous version whose install exits 0 but never proves healthy is reported as not restored', () => {
+    const h = harness();
+    expect(h.run('v1').status).toBe(0);
+    const failed = h.run('v2', { FAKE_FAIL_VERSION: 'v2', FAKE_UNHEALTHY: '1' });
+    expect(failed.status).not.toBe(0);
+    expect(failed.stderr).toContain('did not come back healthy either');
+    // The previous package's verifier, then the new package's (for a previous one that predates verify).
+    expect(h.logLines().slice(-2)).toEqual(['v1 engine verify', 'v2 engine verify']);
   });
 
   darwinTest('a Bun on PATH older than the minimum is not used; the pinned download must match its pinned digest', () => {

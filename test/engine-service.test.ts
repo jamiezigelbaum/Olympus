@@ -16,6 +16,8 @@ import {
   engineSovereigntySeedBlocker,
   inspectEngine,
   installEngine,
+  installEngineVerified,
+  installedEngineBuild,
   installedProgram,
   parseLaunchctlPrint,
   readEngineLogs,
@@ -25,7 +27,10 @@ import {
   startEngine,
   stopEngine,
   uninstallEngine,
+  verifyEngine,
+  waitForEngineHealthy,
   type EngineExec,
+  type EngineHealthDeps,
 } from '../src/core/engine-service.ts';
 import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
 import { runDoctor, type DoctorDeps, type DoctorHostFacts } from '../src/core/doctor.ts';
@@ -80,6 +85,47 @@ function fakeLaunchctl(): { exec: EngineExec; calls: string[][]; loaded: () => b
   };
   return { exec, calls, loaded: () => loaded };
 }
+
+/**
+ * A launchctl whose (re)started host writes its status file the way
+ * engine-host.ts does: the build the plist names, started now, and the
+ * worker's readiness. `unhealthy` builds start but their worker never gets
+ * ready.
+ */
+function launchingLaunchctl(home: string, unhealthy: (build: string | null) => boolean = () => false) {
+  const base = fakeLaunchctl();
+  const paths = enginePaths(home);
+  const start = () => {
+    const build = installedEngineBuild(paths.plistPath);
+    mkdirSync(join(paths.statusPath, '..'), { recursive: true });
+    const bad = unhealthy(build);
+    writeFileSync(paths.statusPath, JSON.stringify({
+      schema: 'olympus.engine.status.v1',
+      pid: process.pid,
+      started_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      state: 'running',
+      build,
+      remote_mode: 'relay',
+      services: { 'olympus-worker': bad ? { state: 'failing', message: 'Olympus worker exited during startup.' } : { state: 'ok', message: null } },
+    }));
+  };
+  const exec: EngineExec = (command, args) => {
+    const result = base.exec(command, args);
+    if (result.status === 0 && (args[0] === 'bootstrap' || args[0] === 'kickstart')) start();
+    return result;
+  };
+  return { ...base, exec };
+}
+
+/** Health checks that never wait for real time and find a worker that answers. */
+const fastHealth = (overrides: EngineHealthDeps = {}): EngineHealthDeps => ({
+  timeoutMs: 50,
+  pollMs: 5,
+  pidAlive: () => true,
+  fetchImpl: (async () => new Response('{"ok":true}', { status: 200 })) as unknown as typeof fetch,
+  ...overrides,
+});
 
 describe('engine LaunchAgent plist', () => {
   test('runs the engine host with Bun, keeps it alive, and logs to ~/Library/Logs/Olympus', () => {
@@ -452,9 +498,9 @@ describe('engine upgrades restart the engine on the new build', () => {
     expect(parseInstallArgs(['--restart'])).toEqual({ restart: true });
   });
 
-  test('rollback swaps in the previous app and reloads the agent onto it; a second rollback swaps back', () => {
+  test('rollback swaps in the previous app and reloads the agent onto it; a second rollback swaps back', async () => {
     const { root, home, bun } = fixture();
-    const launchctl = fakeLaunchctl();
+    const launchctl = launchingLaunchctl(home);
     const paths = enginePaths(home);
     const makeApp = (dir: string, version: string) => {
       mkdirSync(join(dir, 'dist'), { recursive: true });
@@ -463,11 +509,13 @@ describe('engine upgrades restart the engine on the new build', () => {
     };
     makeApp(paths.appDir, '2.0.0');
     makeApp(paths.previousAppDir, '1.0.0');
-    const service = { platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec };
+    const service = { platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec, health: fastHealth() };
     installEngine({ ...service, fromCheckout: paths.appDir, bunBin: bun });
 
     launchctl.calls.length = 0;
-    const back = rollbackEngine(service);
+    const back = await rollbackEngine(service);
+    expect(back.ok).toBe(true);
+    expect(back.health).toMatchObject({ ok: true, running_build: back.running_build, worker: 'ok' });
     expect(back.running_build).toMatch(/^1\.0\.0\+/);
     expect(back.previous_build).toMatch(/^2\.0\.0\+/);
     expect(back.action).toBe('reloaded');
@@ -478,7 +526,7 @@ describe('engine upgrades restart the engine on the new build', () => {
     // The runtime the installed agent used is kept.
     expect(installedProgram(paths.plistPath)).toEqual({ runtimePath: bun, entryPath: join(paths.appDir, 'dist', 'cli.js') });
 
-    const forward = rollbackEngine(service);
+    const forward = await rollbackEngine(service);
     expect(forward.running_build).toMatch(/^2\.0\.0\+/);
     expect(readFileSync(join(paths.appDir, 'dist', 'cli.js'), 'utf8')).toBe('// 2.0.0\n');
     expect(readdirSync(paths.appSupportDir).sort()).toEqual(['app', 'app.previous']);
@@ -486,12 +534,12 @@ describe('engine upgrades restart the engine on the new build', () => {
     // A checkout install has no previous app to return to.
     const checkout = makeCheckout(root, 'dev-checkout');
     installEngine({ ...service, fromCheckout: checkout, bunBin: bun });
-    expect(() => rollbackEngine(service)).toThrow('not the installed app');
+    await expect(rollbackEngine(service)).rejects.toThrow('not the installed app');
   });
 
-  test('a rollback whose agent cannot be loaded puts the running version back', () => {
+  test('a rollback whose agent cannot be loaded puts the running version back', async () => {
     const { home, bun } = fixture();
-    const launchctl = fakeLaunchctl();
+    const launchctl = launchingLaunchctl(home);
     const paths = enginePaths(home);
     for (const [dir, version] of [[paths.appDir, '2.0.0'], [paths.previousAppDir, '1.0.0']] as const) {
       mkdirSync(join(dir, 'dist'), { recursive: true });
@@ -507,25 +555,162 @@ describe('engine upgrades restart the engine on the new build', () => {
       }
       return launchctl.exec(command, args);
     };
-    expect(() => rollbackEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: flaky })).toThrow('could not load the engine agent');
+    await expect(rollbackEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: flaky, health: fastHealth() })).rejects.toThrow('could not load the engine agent');
     expect(readFileSync(join(paths.appDir, 'dist', 'cli.js'), 'utf8')).toBe('// 2.0.0\n');
     expect(readFileSync(join(paths.previousAppDir, 'dist', 'cli.js'), 'utf8')).toBe('// 1.0.0\n');
     expect(readFileSync(paths.plistPath, 'utf8')).toContain('2.0.0+');
     expect(launchctl.loaded()).toBe(true);
   });
 
-  test('rollback without an installed engine or a previous app refuses and changes nothing', () => {
+  test('rollback without an installed engine or a previous app refuses and changes nothing', async () => {
     const { home, bun } = fixture();
     const launchctl = fakeLaunchctl();
     const service = { platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec };
-    expect(() => rollbackEngine(service)).toThrow('not installed');
+    await expect(rollbackEngine(service)).rejects.toThrow('not installed');
     const paths = enginePaths(home);
     mkdirSync(join(paths.appDir, 'dist'), { recursive: true });
     writeFileSync(join(paths.appDir, 'package.json'), JSON.stringify({ name: 'olympus', version: '2.0.0' }));
     writeFileSync(join(paths.appDir, 'dist', 'cli.js'), '// 2\n');
     installEngine({ ...service, fromCheckout: paths.appDir, bunBin: bun });
-    expect(() => rollbackEngine(service)).toThrow('is not an Olympus checkout or package');
+    await expect(rollbackEngine(service)).rejects.toThrow('is not an Olympus checkout or package');
     expect(existsSync(paths.appDir)).toBe(true);
+  });
+});
+
+describe('install and rollback succeed only on proof the new build is healthy', () => {
+  const makeApps = (home: string) => {
+    const paths = enginePaths(home);
+    for (const [dir, version] of [[paths.appDir, '2.0.0'], [paths.previousAppDir, '1.0.0']] as const) {
+      mkdirSync(join(dir, 'dist'), { recursive: true });
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'olympus', version }));
+      writeFileSync(join(dir, 'dist', 'cli.js'), `// ${version}\n`);
+    }
+    return paths;
+  };
+
+  test('a verified install reports ok once the restarted host runs this build and the worker answers', async () => {
+    const { home, checkout, bun } = fixture();
+    const launchctl = launchingLaunchctl(home);
+    const fetched: string[] = [];
+    const result = await installEngineVerified({
+      platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun,
+      health: fastHealth({ fetchImpl: (async (url: string) => { fetched.push(url); return new Response('{}', { status: 200 }); }) as unknown as typeof fetch }),
+    });
+    expect(result.ok).toBe(true);
+    expect(result.health).toMatchObject({ ok: true, expected_build: result.program.build, running_build: result.program.build, worker: 'ok' });
+    expect(fetched).toEqual(['http://127.0.0.1:8010/v1/health']);
+  });
+
+  test('PoC: launchd accepting the agent is not success: a worker that never gets ready is ok: false with the reason', async () => {
+    const { home, checkout, bun } = fixture();
+    const launchctl = launchingLaunchctl(home, () => true);
+    const result = await installEngineVerified({ platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun, health: fastHealth() });
+    expect(result.ok).toBe(false);
+    expect(result.action).toBe('bootstrapped');
+    expect(result.reason).toContain('the worker is not ready yet: Olympus worker exited during startup.');
+  });
+
+  test('a status file from before the restart, another build, a dead pid, or a silent worker is not proof', async () => {
+    const { home } = fixture();
+    const paths = enginePaths(home);
+    mkdirSync(join(paths.statusPath, '..'), { recursive: true });
+    const write = (fields: Record<string, unknown>) => writeFileSync(paths.statusPath, JSON.stringify({
+      schema: 'olympus.engine.status.v1', pid: 4242, started_at: new Date(1_000).toISOString(), state: 'running', build: 'b1',
+      services: { 'olympus-worker': { state: 'ok' } }, ...fields,
+    }));
+    const check = (deps: EngineHealthDeps = {}, since?: number) =>
+      waitForEngineHealthy({ paths, expectedBuild: 'b1', ...(since === undefined ? {} : { since }) }, fastHealth(deps));
+    write({});
+    expect((await check()).ok).toBe(true);
+    expect((await check({}, 2_000)).reason).toBe('the engine has not restarted yet');
+    write({ build: 'b0' });
+    expect((await check()).reason).toBe('the engine runs build b0, not b1');
+    write({});
+    expect((await check({ pidAlive: () => false })).reason).toBe('the engine process named in its status is not running');
+    expect((await check({ fetchImpl: (async () => new Response('no', { status: 503 })) as unknown as typeof fetch })).reason).toBe('the worker /health answered HTTP 503');
+    expect((await check({ fetchImpl: (async () => { throw new Error('refused'); }) as unknown as typeof fetch })).reason).toBe('the worker /health did not answer');
+    write({ state: 'stopping' });
+    expect((await check()).reason).toBe('the engine is stopping');
+    // A config that turns the worker off needs no worker answer.
+    write({ services: { 'olympus-worker': { state: 'off' } } });
+    expect(await check({ fetchImpl: (async () => { throw new Error('refused'); }) as unknown as typeof fetch })).toMatchObject({ ok: true, worker: 'off' });
+  });
+
+  test('the wait is bounded and polls until proof arrives', async () => {
+    const { home } = fixture();
+    const paths = enginePaths(home);
+    let clock = 0;
+    let polls = 0;
+    const proof = await waitForEngineHealthy({ paths, expectedBuild: 'b1' }, {
+      timeoutMs: 60_000,
+      pollMs: 500,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+        polls += 1;
+        if (polls === 3) {
+          mkdirSync(join(paths.statusPath, '..'), { recursive: true });
+          writeFileSync(paths.statusPath, JSON.stringify({ schema: 'olympus.engine.status.v1', pid: 1, state: 'running', build: 'b1', services: { 'olympus-worker': { state: 'ok' } } }));
+        }
+      },
+      pidAlive: () => true,
+      fetchImpl: (async () => new Response('{}')) as unknown as typeof fetch,
+    });
+    expect(proof).toMatchObject({ ok: true, waited_ms: 1_500 });
+    clock = 0;
+    rmSync(paths.statusPath);
+    const timedOut = await waitForEngineHealthy({ paths, expectedBuild: 'b1' }, { timeoutMs: 60_000, pollMs: 500, now: () => clock, sleep: async (ms) => { clock += ms; } });
+    expect(timedOut).toMatchObject({ ok: false, waited_ms: 60_000, reason: 'the engine has not written its status yet' });
+  });
+
+  test('PoC: a rollback to a build that never gets healthy reports failure, puts the running build back, and proves it healthy', async () => {
+    const { home, bun } = fixture();
+    const paths = makeApps(home);
+    const launchctl = launchingLaunchctl(home, (build) => build?.startsWith('1.0.0+') ?? false);
+    const service = { platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec, health: fastHealth() };
+    installEngine({ ...service, fromCheckout: paths.appDir, bunBin: bun });
+    const result = await rollbackEngine(service);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/^Rolling back to build 1\.0\.0\+\w+ failed \(.*the worker is not ready yet.*\); build 2\.0\.0\+\w+ was put back and is healthy\.$/);
+    expect(result.restored).toMatchObject({ ok: true });
+    expect(readFileSync(join(paths.appDir, 'dist', 'cli.js'), 'utf8')).toBe('// 2.0.0\n');
+    expect(installedEngineBuild(paths.plistPath)).toMatch(/^2\.0\.0\+/);
+  });
+
+  test('PoC: when putting the running build back fails too, the rollback says so instead of swallowing it', async () => {
+    const { home, bun } = fixture();
+    const paths = makeApps(home);
+    const healthy = launchingLaunchctl(home);
+    installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: healthy.exec, fromCheckout: paths.appDir, bunBin: bun });
+    const sick = launchingLaunchctl(home, () => true);
+    const result = await rollbackEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: sick.exec, health: fastHealth() });
+    expect(result.ok).toBe(false);
+    expect(result.restored).toMatchObject({ ok: false });
+    expect(result.reason).toContain('putting back build 2.0.0+');
+    expect(result.reason).toContain('failed too');
+
+    // A launchctl failure on the way back is reported with the original error.
+    let bootstraps = 0;
+    const broken: EngineExec = (command, args) => {
+      if (args[0] === 'bootstrap' && ++bootstraps >= 1) return { status: 5, stdout: '', stderr: 'Bootstrap failed: 5: Input/output error' };
+      return healthy.exec(command, args);
+    };
+    await expect(rollbackEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: broken, health: fastHealth() }))
+      .rejects.toThrow(/could not load the engine agent.*Putting back build .* failed too/);
+  });
+
+  test('engine verify proves the build the installed agent names', async () => {
+    const { home, checkout, bun } = fixture();
+    const launchctl = launchingLaunchctl(home);
+    installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun });
+    const ok = await verifyEngine({ platform: 'darwin', homeDir: home, health: fastHealth() });
+    expect(ok).toMatchObject({ ok: true, health: { running_build: engineBuildIdentity(checkout) } });
+    writeFileSync(join(checkout, 'dist', 'cli.js'), '// v2\n');
+    installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: fakeLaunchctl().exec, fromCheckout: checkout, bunBin: bun });
+    // The plist now names a build no host has started.
+    const stale = await verifyEngine({ platform: 'darwin', homeDir: home, health: fastHealth() });
+    expect(stale.ok).toBe(false);
+    expect(stale.reason).toContain('not ' + engineBuildIdentity(checkout));
   });
 });
 

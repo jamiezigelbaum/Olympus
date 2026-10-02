@@ -426,6 +426,197 @@ export function installEngine(options: EngineInstallOptions = {}): EngineInstall
   };
 }
 
+// ---------------------------------------------------------------------------
+// Health proof: an install or rollback is done when the new build is serving
+
+/** Default bound on waiting for the engine to prove the new build healthy. */
+export const ENGINE_HEALTH_TIMEOUT_MS = 60_000;
+const ENGINE_HEALTH_POLL_MS = 500;
+const WORKER_SERVICE_ID = 'olympus-worker';
+const DEFAULT_WORKER_BASE_URL = 'http://127.0.0.1:8010/v1';
+
+export interface EngineHealthDeps {
+  /** Longest wait for proof (default 60 s). */
+  timeoutMs?: number;
+  pollMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  /** Whether the host pid in the status file is alive; defaults to signal 0. */
+  pidAlive?: (pid: number) => boolean;
+  fetchImpl?: typeof fetch;
+}
+
+export interface EngineHealthProof {
+  ok: boolean;
+  /** The build the engine was expected to run, and the one its status file reports. */
+  expected_build: string | null;
+  running_build: string | null;
+  pid: number | null;
+  /** `ok`: the worker service is ready and /health answered; `off`: the config turns the worker off. */
+  worker: 'ok' | 'off' | 'not_ready';
+  waited_ms: number;
+  /** Why there is no proof yet (the last check that failed), when ok is false. */
+  reason?: string;
+}
+
+/**
+ * Waits, bounded, for fresh proof that the engine runs `expectedBuild`: its
+ * status file (written by the host launchd started) reports that build, is
+ * running, was started at or after `since` when given (so a status file from
+ * before the restart proves nothing), names a live pid, and reports the
+ * worker service ready; and the worker answers GET <baseUrl>/health.
+ */
+export async function waitForEngineHealthy(
+  input: { paths: EnginePaths; expectedBuild: string | null; since?: number },
+  deps: EngineHealthDeps = {},
+): Promise<EngineHealthProof> {
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const timeoutMs = deps.timeoutMs ?? ENGINE_HEALTH_TIMEOUT_MS;
+  const pidAlive = deps.pidAlive ?? defaultPidAlive;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const started = now();
+  let last: EngineHealthProof = {
+    ok: false,
+    expected_build: input.expectedBuild,
+    running_build: null,
+    pid: null,
+    worker: 'not_ready',
+    waited_ms: 0,
+    reason: 'the engine has not written its status yet',
+  };
+  for (;;) {
+    last = { ...(await checkEngineHealthOnce(input, pidAlive, fetchImpl)), waited_ms: now() - started };
+    if (last.ok || now() - started >= timeoutMs) return last;
+    await sleep(Math.min(deps.pollMs ?? ENGINE_HEALTH_POLL_MS, Math.max(0, timeoutMs - (now() - started))));
+  }
+}
+
+async function checkEngineHealthOnce(
+  input: { paths: EnginePaths; expectedBuild: string | null; since?: number },
+  pidAlive: (pid: number) => boolean,
+  fetchImpl: typeof fetch,
+): Promise<Omit<EngineHealthProof, 'waited_ms'>> {
+  const base = { ok: false as const, expected_build: input.expectedBuild, running_build: null, pid: null, worker: 'not_ready' as const };
+  let status: { schema?: unknown; state?: unknown; build?: unknown; pid?: unknown; started_at?: unknown; services?: Record<string, { state?: unknown; message?: unknown }> };
+  try {
+    status = JSON.parse(readFileSync(input.paths.statusPath, 'utf8'));
+  } catch {
+    return { ...base, reason: 'the engine has not written its status yet' };
+  }
+  const runningBuild = typeof status.build === 'string' ? status.build : null;
+  const pid = typeof status.pid === 'number' && Number.isSafeInteger(status.pid) && status.pid > 0 ? status.pid : null;
+  const seen = { ...base, running_build: runningBuild, pid };
+  if (status?.schema !== 'olympus.engine.status.v1') return { ...seen, reason: 'the engine status file is not one this version reads' };
+  if (input.since !== undefined) {
+    const startedAt = typeof status.started_at === 'string' ? Date.parse(status.started_at) : Number.NaN;
+    if (!Number.isFinite(startedAt) || startedAt < input.since) return { ...seen, reason: 'the engine has not restarted yet' };
+  }
+  if (status.state !== 'running') return { ...seen, reason: `the engine is ${typeof status.state === 'string' ? status.state : 'not running'}` };
+  if (input.expectedBuild !== null && runningBuild !== input.expectedBuild) {
+    return { ...seen, reason: `the engine runs build ${runningBuild ?? 'unknown'}, not ${input.expectedBuild}` };
+  }
+  if (pid === null || !pidAlive(pid)) return { ...seen, reason: 'the engine process named in its status is not running' };
+  const worker = status.services?.[WORKER_SERVICE_ID];
+  if (worker?.state === 'off') return { ...seen, ok: true, worker: 'off' };
+  if (worker?.state !== 'ok') {
+    const message = typeof worker?.message === 'string' && worker.message ? `: ${worker.message.slice(0, 200)}` : '';
+    return { ...seen, reason: `the worker is not ready yet${message}` };
+  }
+  const baseUrl = engineWorkerBaseUrl(input.paths);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2_000);
+  try {
+    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/health`, { method: 'GET', signal: controller.signal });
+    await response.body?.cancel().catch(() => undefined);
+    if (!response.ok) return { ...seen, reason: `the worker /health answered HTTP ${response.status}` };
+  } catch {
+    return { ...seen, reason: 'the worker /health did not answer' };
+  } finally {
+    clearTimeout(timer);
+  }
+  return { ...seen, ok: true, worker: 'ok' };
+}
+
+/** The worker's loopback API base from engine.json (`email.baseUrl`), or the default. */
+export function engineWorkerBaseUrl(paths: EnginePaths): string {
+  try {
+    const value = (readEngineConfig(paths.configPath)?.email as { baseUrl?: unknown } | undefined)?.baseUrl;
+    if (typeof value === 'string') {
+      const url = new URL(value);
+      if (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) return value;
+    }
+  } catch {
+    // The default below.
+  }
+  return DEFAULT_WORKER_BASE_URL;
+}
+
+function defaultPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** What `olympus engine install` reports: the launchd outcome, and whether the build proved healthy. */
+export type EngineVerifiedInstallResult = Omit<EngineInstallResult, 'ok'> & {
+  ok: boolean;
+  /** Absent for a dry run. */
+  health?: EngineHealthProof;
+  reason?: string;
+};
+
+/**
+ * Install (or upgrade) and load the agent, then wait for proof that the
+ * engine runs this build and its worker is healthy. `ok` is false, with the
+ * reason, when that proof does not arrive in time: launchd accepting the
+ * agent is not success.
+ */
+export async function installEngineVerified(options: EngineInstallOptions & { health?: EngineHealthDeps } = {}): Promise<EngineVerifiedInstallResult> {
+  const now = options.health?.now ?? Date.now;
+  const since = now();
+  const result = installEngine(options);
+  if (result.action === 'dry_run') return result;
+  const health = await waitForEngineHealthy({
+    paths: enginePaths(absolute(options.homeDir ?? homedir(), 'home directory')),
+    expectedBuild: result.program.build ?? null,
+    // Nothing was restarted for an unchanged agent: the running host is the proof.
+    ...(result.action === 'unchanged' ? {} : { since }),
+  }, options.health);
+  return health.ok
+    ? { ...result, ok: true, health }
+    : { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? 'unknown'} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.` };
+}
+
+/** The build the installed agent's plist names (OLYMPUS_ENGINE_BUILD), or null. */
+export function installedEngineBuild(plistPath: string): string | null {
+  try {
+    const text = readFileSync(plistPath, 'utf8');
+    const match = new RegExp(`<key>${ENGINE_BUILD_ENV}</key>\\s*<string>([^<]*)</string>`).exec(text);
+    return match ? unxml(match[1]!) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `olympus engine verify`: wait for proof that the engine runs the build its
+ * installed agent names. The installer uses it to check a restored previous
+ * version, whose own CLI may predate health checks.
+ */
+export async function verifyEngine(options: EngineServiceOptions & { health?: EngineHealthDeps } = {}): Promise<{ ok: boolean; health: EngineHealthProof; reason?: string }> {
+  assertDarwin(options.platform);
+  const paths = enginePaths(absolute(options.homeDir ?? homedir(), 'home directory'));
+  if (!existsSync(paths.plistPath)) {
+    throw new OperationError('config_error', 'The engine is not installed.', 'Run olympus engine install.');
+  }
+  const health = await waitForEngineHealthy({ paths, expectedBuild: installedEngineBuild(paths.plistPath) }, options.health);
+  return health.ok ? { ok: true, health } : { ok: false, health, reason: `The engine is not healthy: ${health.reason}.` };
+}
+
 /**
  * Refuse, before anything is written, a layout the install would refuse
  * halfway: a symlink or file in a managed directory chain, or a non-regular
@@ -691,23 +882,37 @@ export function startEngine(options: EngineServiceOptions = {}): { ok: true; act
 }
 
 export interface EngineRollbackResult {
-  ok: true;
-  /** The build now running, and the one kept as app.previous (rolling back again returns to it). */
+  /** True only when the swapped-in build proved healthy. */
+  ok: boolean;
+  /** The build now installed in app/, and the one kept as app.previous (rolling back again returns to it). */
   running_build: string;
   previous_build: string;
   app_dir: string;
   previous_app_dir: string;
   action: EngineInstallResult['action'];
+  health: EngineHealthProof;
+  /** Why the rollback failed, when ok is false. */
+  reason?: string;
+  /**
+   * When the rolled-back-to build failed: the version that was running was
+   * put back, and whether it proved healthy again.
+   */
+  restored?: { ok: boolean; build: string; reason?: string };
 }
 
 /**
  * Swap the installed app with the one the last upgrade replaced
- * (app.previous), then reload the agent so launchd runs it. Running it again
- * swaps back. Only for an engine scripts/install-macos.sh installed: the
- * agent must run app/dist/cli.js. A checkout install has no previous copy to
- * return to; reinstall from the checkout you want instead.
+ * (app.previous), then reload the agent so launchd runs it, and wait for
+ * proof that it is healthy. Running it again swaps back. Only for an engine
+ * scripts/install-macos.sh installed: the agent must run app/dist/cli.js. A
+ * checkout install has no previous copy to return to; reinstall from the
+ * checkout you want instead.
+ *
+ * If the previous build cannot be loaded or does not prove healthy, the
+ * version that was running is put back and verified too; a failure of that
+ * recovery is reported, never swallowed.
  */
-export function rollbackEngine(options: EngineServiceOptions & { bunBin?: string } = {}): EngineRollbackResult {
+export async function rollbackEngine(options: EngineServiceOptions & { bunBin?: string; health?: EngineHealthDeps } = {}): Promise<EngineRollbackResult> {
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
   const paths = enginePaths(homeDir);
@@ -728,35 +933,65 @@ export function rollbackEngine(options: EngineServiceOptions & { bunBin?: string
   const bunBin = options.bunBin ?? installed.runtimePath;
 
   swapAppDirectories(paths);
-  const reinstall = (): EngineInstallResult => installEngine({
+  const reinstall = (): Promise<EngineVerifiedInstallResult> => installEngineVerified({
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
     ...(options.exec ? { exec: options.exec } : {}),
     ...(options.uid !== undefined ? { uid: options.uid } : {}),
     ...(options.platform ? { platform: options.platform } : {}),
+    ...(options.health ? { health: options.health } : {}),
     fromCheckout: paths.appDir,
     bunBin,
     restart: true,
   });
-  let result: EngineInstallResult;
-  try {
-    result = reinstall();
-  } catch (error) {
-    // Put the version that was running back, and its agent with it.
+  /** Put the version that was running back, and prove it healthy again. */
+  const restore = async (): Promise<{ ok: boolean; build: string; reason?: string }> => {
     swapAppDirectories(paths);
+    const build = engineBuildIdentity(paths.appDir);
     try {
-      reinstall();
-    } catch {
-      // The original failure is the one to report.
+      const back = await reinstall();
+      return back.ok ? { ok: true, build } : { ok: false, build, reason: back.reason ?? 'it did not prove healthy' };
+    } catch (error) {
+      return { ok: false, build, reason: error instanceof Error ? error.message : String(error) };
     }
-    throw error;
+  };
+  let result: EngineVerifiedInstallResult;
+  try {
+    result = await reinstall();
+  } catch (error) {
+    const restored = await restore();
+    if (restored.ok) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new OperationError(
+      'config_error',
+      `${message} Putting back build ${restored.build} failed too: ${restored.reason}`,
+      'Run olympus engine logs, then the Olympus installer again.',
+    );
   }
+  if (result.ok) {
+    return {
+      ok: true,
+      running_build: result.program.build ?? engineBuildIdentity(paths.appDir),
+      previous_build: engineBuildIdentity(paths.previousAppDir),
+      app_dir: paths.appDir,
+      previous_app_dir: paths.previousAppDir,
+      action: result.action,
+      health: result.health!,
+    };
+  }
+  const failedBuild = result.program.build ?? 'unknown';
+  const restored = await restore();
   return {
-    ok: true,
-    running_build: result.program.build ?? engineBuildIdentity(paths.appDir),
+    ok: false,
+    running_build: engineBuildIdentity(paths.appDir),
     previous_build: engineBuildIdentity(paths.previousAppDir),
     app_dir: paths.appDir,
     previous_app_dir: paths.previousAppDir,
     action: result.action,
+    health: result.health!,
+    reason: restored.ok
+      ? `Rolling back to build ${failedBuild} failed (${result.reason}); build ${restored.build} was put back and is healthy.`
+      : `Rolling back to build ${failedBuild} failed (${result.reason}); putting back build ${restored.build} failed too: ${restored.reason}`,
+    restored,
   };
 }
 
