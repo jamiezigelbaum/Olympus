@@ -32,7 +32,10 @@ with citations, with the dashboard rendered inside ChatGPT.
 - Dashboard split: this lane owns the backend and the view-model contract;
   the UX lane owns `src/workers/dashboard/**`, the `ui://` HTML and digest pins.
 - Setup lists local files and notes before Gmail and Drive (connector-policy
-  posture: Olympus is a knowledge engine, not a connector).
+  posture: Olympus is a knowledge engine, not a connector). Not delivered in
+  1.0: no local files or notes source exists yet, so the listing, skills and
+  site name Dropbox, Gmail and Google Drive, plus the sources set up on the
+  Mac (review 2026-10-02 #12).
 
 ## Platform facts this design depends on
 
@@ -733,7 +736,7 @@ the release plan: [Olympus 1.0 (ChatGPT)](../V0_4_RELEASE.md#olympus-10-chatgpt)
    LaunchAgent).
 3. The engine starts, links itself to the relay, and opens the approval page
    on the Mac; one click connects ChatGPT.
-4. In the Olympus sidebar: local files and notes first, then Gmail, Drive,
+4. In the Olympus sidebar: local files and notes first (target; not in 1.0), then Gmail, Drive,
    Dropbox with accounts they already have. Built-in embeddings start indexing.
 5. Ask questions in ChatGPT.
 
