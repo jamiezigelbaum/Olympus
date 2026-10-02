@@ -341,6 +341,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       edited: false, saving: false, saveError: '', discarding: false,
       // folders
       roots: [], rootCursor: '', branches: new Map(), cursors: new Map(), catalog: new Map(),
+      // Per level ('' is the root): how many more folders follow ("N more"), and levels Olympus could not list in full.
+      remaining: new Map(), truncated: new Set(),
       ancestors: new Map(), own: new Map(), whole: false, wholeConfirmed: false,
       path: [], lastSeg: '',
       // mail
@@ -453,6 +455,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const nodes = previous.concat(fresh).sort((a: Any, b: Any) =>
       String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
     const next = typeof page.next_cursor === 'string' && page.next_cursor ? page.next_cursor : '';
+    const more = typeof page.remaining === 'number' && isFinite(page.remaining) && page.remaining > 0 ? Math.round(page.remaining) : 0;
+    if (next && more) p.remaining.set(parentKey, more);
+    else p.remaining.delete(parentKey);
+    if (page.truncated === true) p.truncated.add(parentKey);
     if (parentKey) {
       p.branches.set(parentKey, nodes);
       if (next) p.cursors.set(parentKey, next);
@@ -979,7 +985,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
 
   function loadMore(parentKey: string): HTMLElement {
     const busy = p.loading === (parentKey || 'root');
-    return kit.button(busy ? Q.loadingFolders : Q.loadMore, 'picker:more:' + parentKey, busy || p.loading ? null : () => list(parentKey, true), 'plain');
+    const more = p.remaining.get(parentKey) || 0;
+    const label = more ? fill(more === 1 ? Q.loadMoreCount.one : Q.loadMoreCount.many, { n: kit.count(more) }) : Q.loadMore;
+    return kit.button(busy ? Q.loadingFolders : label, 'picker:more:' + parentKey, busy || p.loading ? null : () => list(parentKey, true), 'plain');
   }
 
   function levelList(parentKey: string, nodes: Any[], hasMore: boolean): HTMLElement {
@@ -987,6 +995,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     for (const node of nodes) add(listNode, folderRow(node));
     if (!nodes.length) add(listNode, el('li', 'muted fempty', Q.noFolders));
     if (hasMore) add(listNode, add(el('li', 'fmore'), loadMore(parentKey)));
+    // Some folders here were never listed: say so rather than imply this is all of them.
+    if (p.truncated.has(parentKey)) add(listNode, el('li', 'muted fmore', Q.truncated));
     return listNode;
   }
 

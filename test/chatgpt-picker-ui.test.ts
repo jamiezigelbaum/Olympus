@@ -687,6 +687,30 @@ describe('folder picker', () => {
     expect(host.hasButton(Q.loadMore)).toBe(false);
   });
 
+  test('sizes and counts show beside a folder; Load more says how many follow; an incomplete level says so', async () => {
+    const host = await openFolders({ remaining: 1, truncated: true });
+    const row = rowOf(host, 'Tax Returns 2024');
+    expect(row.querySelector('.fsize')!.textContent).toBe('2 GB');
+    expect(row.querySelector('.fcount')!.textContent).toBe('· 1,200 files');
+    expect(rowOf(host, 'Medical Records').querySelector('.fcount')!.textContent).toBe('· 1 file');
+    expect(host.hasButton(Q.loadMore)).toBe(false);
+    host.button('Load 1 more folder').click();
+    await host.settle();
+    expect(host.text()).toContain('Kids Photos');
+    expect(host.hasButton('Load 1 more folder')).toBe(false);
+    // Truncated: some folders were never listed, and the list says so.
+    expect(host.text()).toContain(Q.truncated);
+    openFolder(host, 'Tax Returns 2024');
+    await host.settle();
+    expect(host.text()).toContain(Q.truncated);
+    expect(Q.loadMoreCount.many.replace('{n}', '3')).toBe('Load 3 more folders');
+  });
+
+  test('a complete level has no incomplete-list note', async () => {
+    const host = await openFolders();
+    expect(host.text()).not.toContain(Q.truncated);
+  });
+
   test('Everything in Dropbox: Full asks for an inline confirmation before Save, every folder then inherits it, and a second tap turns it off', async () => {
     const host = await openFolders();
     const prompt = Q.wholePrompt.replace('{source}', 'Dropbox');
