@@ -116,10 +116,10 @@ const SAVED_RULES = [
   { kind: 'sender', source_id: 'gmail.email', value: 'doctor@clinic.example', display: 'doctor@clinic.example' },
 ];
 
-function privacyResult(description: string, rules: unknown[], pendingCount = 0): Result {
+function privacyResult(description: string, rules: unknown[], pendingCount = 0, extra: Record<string, unknown> = {}): Result {
   return {
-    structuredContent: { rules: rules.length, pendingCount, described: description.length > 0 },
-    _meta: { [CHATGPT_PRIVACY_META_KEY]: { description, rules, pendingCount } },
+    structuredContent: { status: 'current', rules: rules.length, pendingCount, described: description.length > 0 },
+    _meta: { [CHATGPT_PRIVACY_META_KEY]: { description, rules, pendingCount, revision: 'rev1', ...extra } },
   };
 }
 
@@ -149,12 +149,14 @@ interface Setup {
   saves: any[];
 }
 
-async function openPrivacy(options: { description?: string; rules?: unknown[]; pending?: number; sources?: unknown[]; dashboard?: DashboardViewModelV1; setResult?: Serve } = {}): Promise<Setup> {
+async function openPrivacy(options: { description?: string; rules?: unknown[]; pending?: number; sources?: unknown[]; dashboard?: DashboardViewModelV1; setResult?: Serve; getResult?: Serve } = {}): Promise<Setup> {
+  let issued = 0;
   const saves: any[] = [];
   const dashboard = options.dashboard ?? model({ configured: false, pendingCount: 0 }, { needsYou: [ASK], sources: (options.sources ?? [DROPBOX, GMAIL]) as any });
   const host = mount({
     olympus_dashboard: () => ({ structuredContent: dashboard }),
-    [P.get]: () => privacyResult(options.description ?? '', options.rules ?? [], options.pending ?? 0),
+    // Like the engine: every get issues a fresh confirmation, only in _meta.
+    [P.get]: options.getResult ?? (() => privacyResult(options.description ?? '', options.rules ?? [], options.pending ?? 0, { confirmation: `conf${++issued}` })),
     [P.set]: options.setResult ?? ((args) => {
       saves.push(args);
       return privacyResult(args.description ?? '', (args.rules ?? []).map((rule: any) => ({ ...rule, display: rule.value ?? rule.key })));
@@ -366,6 +368,13 @@ describe('saving', () => {
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
     host.button(W.senderAdd).click();
     host.button(W.save).click();
+    // Removing a rule and new words lower protection: an inline step names what goes, before anything is sent.
+    const box = host.doc.querySelector('.confirm-box')!;
+    expect(box.getAttribute('role')).toBe('alert');
+    expect(box.textContent).toContain('This removes protection from Lawyer Letters.');
+    expect(box.textContent).toContain(W.confirmDescription);
+    expect(host.toolCalls(P.set)).toEqual([]);
+    host.button(W.confirm).click();
     await host.settle();
     expect(saves).toEqual([{
       description: DESCRIPTION,
@@ -374,6 +383,8 @@ describe('saving', () => {
         { kind: 'sender', source_id: 'gmail.email', value: 'doctor@clinic.example' },
         { kind: 'sender', source_id: 'gmail.email', value: '@example.com' },
       ],
+      revision: 'rev1',
+      confirmation: 'conf1',
     }]);
     expect(host.text()).toContain(W.saved);
     expect(host.text()).not.toContain(W.title);
@@ -387,9 +398,93 @@ describe('saving', () => {
     area.value = DESCRIPTION;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
     host.button(W.save).click();
+    host.button(W.confirm).click();
     await host.settle();
     expect(host.text()).toContain(W.saveFailed);
     expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe(DESCRIPTION);
+  });
+
+  test('adding protection saves at once, with the revision and no confirmation', async () => {
+    const { host, saves } = await openPrivacy({ description: 'old words', rules: SAVED_RULES });
+    host.button(W.addSender).click();
+    const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
+    input.value = '@example.com';
+    input.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    host.button(W.senderAdd).click();
+    host.button(W.save).click();
+    expect(host.doc.querySelector('.confirm-box')).toBeNull();
+    await host.settle();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].revision).toBe('rev1');
+    expect(saves[0].confirmation).toBeUndefined();
+    expect(host.text()).toContain(W.saved);
+  });
+
+  test('Cancel in the confirmation step sends nothing and keeps the changes', async () => {
+    const { host } = await openPrivacy({ rules: SAVED_RULES });
+    host.button('Remove Medical Records').click();
+    host.button(W.save).click();
+    expect(host.text()).toContain('This removes protection from Medical Records.');
+    host.button(W.cancel).click();
+    expect(host.doc.querySelector('.confirm-box')).toBeNull();
+    expect(host.text()).toContain('Removed: Medical Records');
+    expect(host.toolCalls(P.set)).toEqual([]);
+    // Undoing the removal leaves nothing to confirm.
+    host.button('Undo removing Medical Records').click();
+    host.button(W.save).click();
+    expect(host.doc.querySelector('.confirm-box')).toBeNull();
+  });
+
+  test('settings changed elsewhere: the save is refused, the view reloads with them and says so; the next save uses their revision', async () => {
+    const theirs = [{ kind: 'sender', source_id: 'gmail.email', value: 'lawyer@firm.example', display: 'lawyer@firm.example' }];
+    let first = true;
+    const sent: any[] = [];
+    const { host } = await openPrivacy({
+      rules: SAVED_RULES,
+      setResult: (args) => {
+        sent.push(args);
+        if (first) {
+          first = false;
+          const current = privacyResult('their words', theirs, 0, { revision: 'rev2' });
+          return { ...current, structuredContent: { status: 'conflict' } };
+        }
+        return privacyResult(args.description ?? '', (args.rules ?? []).map((rule: any) => ({ ...rule, display: rule.value ?? rule.key })));
+      },
+    });
+    host.button(W.addSender).click();
+    const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
+    input.value = '@example.com';
+    input.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    host.button(W.senderAdd).click();
+    host.button(W.save).click();
+    await host.settle();
+    expect(host.text()).toContain(W.title);
+    expect(host.text()).toContain(W.conflict);
+    expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe('their words');
+    expect(ruleRows(host)).toEqual(['lawyer@firm.exampleSender']);
+    host.button(W.save).click();
+    await host.settle();
+    expect(sent.map((args) => args.revision)).toEqual(['rev1', 'rev2']);
+    expect(host.text()).toContain(W.saved);
+  });
+
+  test('a confirmation the engine no longer accepts is fetched fresh once, then the save goes through', async () => {
+    const sent: any[] = [];
+    const { host } = await openPrivacy({
+      rules: SAVED_RULES,
+      setResult: (args) => {
+        sent.push(args);
+        if (args.confirmation === 'conf1') return { isError: true, structuredContent: { error: 'privacy_owner_only' }, content: [] };
+        return privacyResult('', (args.rules ?? []).map((rule: any) => ({ ...rule, display: rule.value ?? rule.key })));
+      },
+    });
+    host.button('Remove Medical Records').click();
+    host.button(W.save).click();
+    host.button(W.confirm).click();
+    await host.settle();
+    expect(host.toolCalls(P.get)).toHaveLength(2);
+    expect(sent.map((args) => args.confirmation)).toEqual(['conf1', 'conf2']);
+    expect(host.text()).toContain(W.saved);
   });
 
   test('Cancel with changes asks inline first; without changes it just goes back', async () => {

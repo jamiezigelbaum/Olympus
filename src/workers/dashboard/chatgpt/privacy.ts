@@ -110,6 +110,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     s = {
       screen: 'main', returnKey, loaded: false, loading: true, error: '',
       description: '', rules: [], pendingCount: 0,
+      // The saved settings this view started from: the compare-and-swap revision,
+      // the saved description, and the owner's confirmation for a save that lowers protection.
+      revision: '', savedDescription: '', confirmation: '', confirmedAt: 0, confirmStep: false, notice: '',
       edited: false, saving: false, saveError: '', discarding: false, picking: false,
       labels: [], labelsLoading: false, labelsError: '',
       sender: '', senderError: '',
@@ -138,16 +141,29 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
       && typeof rule.display === 'string' && (typeof rule.key === 'string' || typeof rule.value === 'string');
   }
 
+  /**
+   * The saved settings, replacing whatever the view held. A result without a
+   * confirmation (a save or a conflict) keeps the one already held: it is
+   * spent only by the save that uses it.
+   */
   function take(data: Any): void {
     s.description = typeof data.description === 'string' ? data.description : '';
+    s.savedDescription = s.description;
+    s.revision = typeof data.revision === 'string' ? data.revision : '';
+    s.edited = false;
+    s.confirmStep = false;
     s.rules = data.rules.filter(validRule).map((rule: Any) => {
-      const copy: Any = { kind: rule.kind, source_id: rule.source_id, display: rule.display, removed: false };
+      // `saved`: removing it lowers protection, so the save needs the owner's confirmation.
+      const copy: Any = { kind: rule.kind, source_id: rule.source_id, display: rule.display, removed: false, saved: true };
       if (typeof rule.key === 'string') copy.key = rule.key;
       if (typeof rule.value === 'string') copy.value = rule.value;
       return copy;
     });
     s.pendingCount = typeof data.pendingCount === 'number' && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
-    s.confirmation = typeof data.confirmation === 'string' ? data.confirmation : '';
+    if (typeof data.confirmation === 'string' && data.confirmation) {
+      s.confirmation = data.confirmation;
+      s.confirmedAt = Date.now();
+    }
   }
 
   function load(): void {
@@ -200,25 +216,66 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     s.saveError = '';
   }
 
+  /** Saved rules this save would drop, and whether it changes the saved description: both lower protection. */
+  function lowering(): { removed: Any[]; described: boolean } {
+    return {
+      removed: s.rules.filter((rule: Any) => rule.saved && rule.removed),
+      described: s.description.trim() !== s.savedDescription,
+    };
+  }
+  function lowers(): boolean {
+    const change = lowering();
+    return change.removed.length > 0 || change.described;
+  }
+
+  /** Save: a save that lowers protection first asks inline, then carries the owner's confirmation. */
   function save(): void {
     if (!s || !s.loaded || s.saving) return;
-    const rules = kept();
-    const args: Any = { description: s.description.trim(), rules: rules.map(ruleOut) };
-    // The owner's confirmation from olympus_privacy_get: removals and new words need it.
-    if (s.confirmation) args.confirmation = s.confirmation;
+    if (lowers()) {
+      s.confirmStep = true;
+      s.saveError = '';
+      kit.render('privacy:confirm:yes');
+      return;
+    }
+    send(false, false);
+  }
+
+  /** The olympus_privacy_get confirmation lives 30 minutes; one older than this is fetched again first. */
+  const CONFIRMATION_FRESH_MS = 25 * 60_000;
+
+  function send(confirmed: boolean, retried: boolean): void {
+    if (confirmed && (!s.confirmation || Date.now() - s.confirmedAt > CONFIRMATION_FRESH_MS)) {
+      renewConfirmation(() => send(true, true));
+      return;
+    }
+    const args: Any = { description: s.description.trim(), rules: kept().map(ruleOut) };
+    // Always the revision the view was built from: a save over changed settings is refused.
+    if (s.revision) args.revision = s.revision;
+    // Only a save that lowers protection carries the confirmation, which it spends.
+    if (confirmed) args.confirmation = s.confirmation;
     s.saving = true;
     s.saveError = '';
+    s.confirmStep = false;
     kit.render('privacy:save');
     const mine = session;
     kit.call(T.set, args).then((result) => {
       if (mine !== session || !s) return;
       s.saving = false;
+      const content = result && result.structuredContent && typeof result.structuredContent === 'object' ? result.structuredContent : null;
+      if (confirmed && result && result.isError && content && content.error === 'privacy_owner_only' && !retried) {
+        // The confirmation expired or was spent elsewhere: fetch a fresh one once.
+        s.confirmation = '';
+        renewConfirmation(() => send(true, true));
+        return;
+      }
       const data = settings(result);
-      if (!data) {
+      if (data && content && content.status === 'conflict') return conflict(data);
+      if (!data || result.isError) {
         s.saveError = W.saveFailed;
         kit.render('privacy:save');
         return;
       }
+      if (confirmed) s.confirmation = '';
       kit.remember(data.rules.filter(validRule).length);
       leave(W.saved, true);
     }, () => {
@@ -227,6 +284,60 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
       s.saveError = W.saveFailed;
       kit.render('privacy:save');
     });
+  }
+
+  /** The settings changed somewhere else: show the current ones and say so; nothing was saved. */
+  function conflict(data: Any): void {
+    take(data);
+    s.notice = W.conflict;
+    s.saveError = '';
+    kit.render('privacy:description');
+  }
+
+  /** olympus_privacy_get again for a fresh confirmation; settings changed meanwhile are a conflict. */
+  function renewConfirmation(then: () => void): void {
+    s.saving = true;
+    s.saveError = '';
+    s.confirmStep = false;
+    kit.render('privacy:save');
+    const mine = session;
+    kit.call(T.get, {}).then((result) => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      const data = settings(result);
+      if (!data || typeof data.confirmation !== 'string' || !data.confirmation) {
+        s.saveError = W.saveFailed;
+        kit.render('privacy:save');
+        return;
+      }
+      if (s.revision && typeof data.revision === 'string' && data.revision !== s.revision) return conflict(data);
+      s.confirmation = data.confirmation;
+      s.confirmedAt = Date.now();
+      then();
+    }, () => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      s.saveError = W.saveFailed;
+      kit.render('privacy:save');
+    });
+  }
+
+  /** The inline step before a save that lowers protection: what it removes, Confirm or Cancel. */
+  function confirmBox(): HTMLElement {
+    const change = lowering();
+    const box = el('div', 'confirm-box');
+    box.setAttribute('role', 'alert');
+    if (change.removed.length) {
+      add(box, el('p', 'strong', fill(W.confirmRemove, { list: change.removed.map((rule: Any) => rule.display).join(', ') })));
+    }
+    if (change.described) add(box, el('p', change.removed.length ? '' : 'strong', W.confirmDescription));
+    add(box, add(el('div', 'actions'),
+      kit.button(W.confirm, 'privacy:confirm:yes', () => send(true, false), 'danger'),
+      kit.button(W.cancel, 'privacy:confirm:no', () => {
+        s.confirmStep = false;
+        kit.render('privacy:save');
+      }, 'plain')));
+    return box;
   }
 
   // ---- sources -----------------------------------------------------------
@@ -376,6 +487,11 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
   function mainView(page: HTMLElement): void {
     add(page, el('h1', '', W.title));
     add(page, el('p', 'muted intro', W.intro));
+    if (s.notice) {
+      const notice = el('p', 'notice', s.notice);
+      notice.setAttribute('role', 'status');
+      add(page, notice);
+    }
     if (s.error) {
       const error = el('div', 'banner');
       error.setAttribute('role', 'alert');
@@ -429,6 +545,11 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     const footer = el('section', 'picker-footer');
     if (s.pendingCount > 0) {
       add(footer, el('p', '', fill(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
+    }
+    // The confirmation step stands in for Save while it is open (and while the change still lowers protection).
+    if (s.confirmStep && !s.saving && lowers()) {
+      add(page, add(footer, confirmBox()));
+      return;
     }
     const row = el('div', 'actions');
     if (s.saving) {
