@@ -398,7 +398,7 @@ describe('folder picker', () => {
       expect(name.tagName).toBe(opens ? 'BUTTON' : 'P');
       expect(Array.from(name.children).slice(0, 2).map((child) => child.className)).toEqual([opens ? 'fopen' : 'fopen-gap', 'fname-main']);
       expect(name.firstElementChild!.getAttribute('aria-hidden')).toBe('true');
-      expect(row.lastElementChild!.getAttribute('role')).toBe('radiogroup');
+      expect(row.lastElementChild!.getAttribute('role')).toBe('group');
       expect(Array.from(row.querySelectorAll('.seg-opt .seg-long')).map((node) => node.textContent)).toEqual(['Full', 'Names only', 'Skip']);
       expect(Array.from(row.querySelectorAll('.seg-opt .seg-short')).map((node) => node.textContent)).toEqual(['Full', 'Names', 'Skip']);
     }
@@ -416,10 +416,11 @@ describe('folder picker', () => {
     expectNoJargon(host);
   });
 
-  test('accessibility: a labelled radiogroup per row, aria-pressed segments, one tab stop, and arrow keys move between segments', async () => {
+  test('accessibility: a labelled group of toggle buttons per row (not radios), aria-pressed segments, one tab stop, and arrow keys move between segments', async () => {
     const host = await openFolders();
     const group = rowOf(host, 'Medical Records').querySelector('.seg')!;
-    expect(group.getAttribute('role')).toBe('radiogroup');
+    expect(group.getAttribute('role')).toBe('group');
+    expect(doc(host).querySelector('[role=radiogroup], [role=radio]')).toBeNull();
     expect(group.getAttribute('aria-label')).toBe('Choice for Medical Records');
     const segs = () => Array.from(rowOf(host, 'Medical Records').querySelectorAll('.seg-opt')) as unknown as HTMLButtonElement[];
     expect(segs().map((button) => button.tagName)).toEqual(['BUTTON', 'BUTTON', 'BUTTON']);
@@ -453,6 +454,43 @@ describe('folder picker', () => {
     tap(host, 'Medical Records', 'metadata_only');
     expect(focused(host)).toBe('picker:seg:k-b:metadata_only');
     expect(segs().map((button) => button.tabIndex)).toEqual([-1, 0, -1]);
+    // Tapping it again clears it; a toggle, so focus stays put.
+    tap(host, 'Medical Records', 'metadata_only');
+    expect(segs().map((button) => button.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false']);
+    expect(focused(host)).toBe('picker:seg:k-b:metadata_only');
+  });
+
+  test('Mixed follows access: Skip inside a folder that is not included is not Mixed; Full inside it is', async () => {
+    const host = await openFolders();
+    openFolder(host, 'Tax Returns 2024');
+    await host.settle();
+    tap(host, 'Therapy Notes', 'exclude');
+    tap(host, 'Divorce', 'exclude');
+    host.button(Q.up).click();
+    expect(rowShows(host, 'Tax Returns 2024')).toEqual({ pressed: '', inherited: '' });
+    expect(mixedTag(host, 'Tax Returns 2024')).toBeNull();
+    openFolder(host, 'Tax Returns 2024');
+    tap(host, 'Divorce', 'ingest');
+    host.button(Q.up).click();
+    expect(mixedTag(host, 'Tax Returns 2024')!.getAttribute('title')).toBe('Mixed: some folders inside are fully indexed');
+  });
+
+  test('clearing a choice the parent overrides keeps focus on an enabled segment: the inherited one', async () => {
+    const host = await openFolders({
+      selections: [
+        { key: 'k-a', state: 'exclude', ancestor_keys: [] },
+        { key: 'k-a1', state: 'metadata_only', ancestor_keys: ['k-a'] },
+      ],
+    });
+    openFolder(host, 'Tax Returns 2024');
+    await host.settle();
+    expect(rowShows(host, 'Therapy Notes')).toEqual({ pressed: 'metadata_only', inherited: 'exclude' });
+    seg(host, 'Therapy Notes', 'metadata_only').focus();
+    tap(host, 'Therapy Notes', 'metadata_only');
+    expect(rowShows(host, 'Therapy Notes')).toEqual({ pressed: '', inherited: 'exclude' });
+    expect(seg(host, 'Therapy Notes', 'metadata_only').disabled).toBe(true);
+    expect(focused(host)).toBe('picker:seg:k-a1:exclude');
+    expect(seg(host, 'Therapy Notes', 'exclude').tabIndex).toBe(0);
   });
 
   test('folders are listed alphabetically, numbers in numeric order', async () => {

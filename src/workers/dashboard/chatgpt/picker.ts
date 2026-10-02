@@ -535,12 +535,18 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return out;
   }
 
-  /** Derived from the known rules below a folder, never stored: the first effective choice that differs. */
+  /**
+   * Derived from the known rules below a folder, never stored: the first
+   * choice inside that gives different access. Not included and Skip both
+   * mean Olympus reads nothing, so an unchosen folder whose folders are only
+   * skipped is not Mixed.
+   */
   function mixed(key: string): string {
-    const mine = effective(key);
+    const access = (state: string) => (state === 'exclude' ? '' : state);
+    const mine = access(effective(key));
     for (const other of descendants(key)) {
       const theirs = effective(other);
-      if (theirs !== mine) return theirs;
+      if (access(theirs) !== mine) return theirs || 'exclude';
     }
     return '';
   }
@@ -603,6 +609,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       if (value) p.own.set(key, value);
       else p.own.delete(key);
       p.edited = true;
+      // Cleared under a stricter parent, the tapped segment is no longer
+      // possible (so disabled): focus moves to the choice it now inherits.
+      const tapped = focus.slice(focus.lastIndexOf(':') + 1);
+      if (!value && tapped && !allowed(key, tapped)) focus = 'picker:seg:' + key + ':' + effective(key);
     }
     // The connect line is a one-time hello; a refreshed-view warning stays until the next save.
     if (p.notice && p.notice !== Q.conflict) p.notice = '';
@@ -807,12 +817,13 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   /**
-   * One pill of three segments (Full, Names only, Skip): buttons with
-   * aria-pressed in a radiogroup, one tab stop, arrow keys between segments.
+   * One pill of three segments (Full, Names only, Skip): a labelled group of
+   * toggle buttons (aria-pressed), not radios, since tapping the chosen one
+   * clears it. One tab stop; arrow keys only move focus between segments.
    */
   function segControl(name: string, focusBase: string, model: SegModel): HTMLElement {
     const group = el('div', 'seg');
-    group.setAttribute('role', 'radiogroup');
+    group.setAttribute('role', 'group');
     group.setAttribute('aria-label', fill(Q.choiceGroup, { name }));
     const buttons: HTMLButtonElement[] = [];
     for (const state of STATES) {
