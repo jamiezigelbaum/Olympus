@@ -59,24 +59,28 @@ mailbox.
 
 Olympus 1.0 is a ChatGPT plugin. The Olympus engine runs on your Mac and
 keeps your index there; ChatGPT asks it questions through one secure
-connection that you approve on the Mac. You need a Mac and ChatGPT. You do
-not need OpenClaw, Tailscale, an API key or a new account.
+connection that you approve on the Mac. You need ChatGPT and a Mac with
+Apple silicon (M1 or later) on macOS 13 Ventura or later; Intel Macs are not
+supported. You do not need OpenClaw, Tailscale, an API key or a new account.
 
-> The Mac installer is not available yet: whether it is a script or a signed
-> `.pkg` is still open in the
-> [release plan](docs/V0_4_RELEASE.md#olympus-10-chatgpt). Until it ships,
-> step 1 is for testers who already have the engine on their Mac, and
-> ChatGPT's setup skill says so instead of running any install command.
+### 1. Install Olympus on your Mac, then add it in ChatGPT
 
-### 1. Add Olympus and install the engine on your Mac
+1. Open **Terminal** and run:
 
-1. Open the ChatGPT desktop app on your Mac.
-2. Add **Olympus** from ChatGPT's plugin directory.
-3. Install the engine. When the installer ships, it installs Olympus for
-   your macOS user only (no administrator password), runs it in the
-   background as a login item (a LaunchAgent), and downloads its built-in
-   models once. Testers set it up from the build they were given; ask
-   *"Set up Olympus on my Mac"* and ChatGPT checks whether it is there.
+   ```bash
+   curl -fsSL https://olympusplugin.ai/install.sh | sh
+   ```
+
+   It installs Olympus for your macOS user only (no administrator password),
+   checks every download against a pinned SHA-256 before using it, runs
+   Olympus in the background as a login item (a LaunchAgent), adds the
+   `olympus` command, and waits until the engine proves it is running. Then
+   Olympus downloads its built-in models once. Running it again updates or
+   repairs the install; a failed update puts the previous version back.
+   Details, folders and uninstall: <https://olympusplugin.ai/install/>.
+2. In the ChatGPT desktop app, add **Olympus** from the plugin directory and
+   ask *"Connect Olympus"*. ChatGPT's setup skill shows the same install
+   command if Olympus is not on the Mac yet; it never runs commands itself.
 
 ### 2. Approve ChatGPT on your Mac
 
@@ -181,8 +185,11 @@ it handles them in transit. Full details: the
 [ChatGPT design](docs/design/chatgpt-plugin.md) and the
 [trust model](docs/TRUST_MODEL.md).
 
-To stop Olympus, run `olympus engine uninstall` (it keeps your settings and
-data); `olympus data delete --all` deletes what Olympus stored on your Mac.
+To uninstall, run `curl -fsSL https://olympusplugin.ai/uninstall.sh | sh`:
+it stops Olympus and removes the app, the runtime and the `olympus` command,
+and keeps your settings and data. To delete those too, first run
+`olympus engine stop` and `olympus data delete --all`. To only stop Olympus
+and remove its login item, run `olympus engine uninstall`.
 
 The rest of this README covers Olympus with OpenClaw, which stays supported
 and optional.

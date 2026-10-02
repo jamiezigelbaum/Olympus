@@ -86,9 +86,9 @@ waits for a calendar slot.
 | # | Item | Owner | Precondition |
 |---|---|---|---|
 | 1 | **Olympus logo.** Replace `chatgpt-plugin/assets/icon.png` (a temporary placeholder; not the OCU mark) and set `logo`, `composerIcon` and `brandColor` in `chatgpt-plugin/plugin.json`. | Owner makes the artwork; any session wires it in | The artwork |
-| 2 | **Mac installer.** No supported installer exists yet: `scripts/install-macos.sh` is a draft that needs an artifact URL and checksum, and no published package contains `olympus engine install`. The placeholder `install.sh` command is gone: the setup skill and `site/install/` now say the installer is not available yet and run no command (review 2026-10-02 #1). **Open owner decision: a script (`curl … \| sh`) or a signed, notarized `.pkg` for 1.0.** Once decided, a session builds and verifies it on a clean Mac user, then rewrites the setup skill's step 2 and `site/install/` around the real command. | Owner decides script vs signed `.pkg`; a session builds it | Owner decision |
+| 2 | **Mac installer: a script** (owner decision 2026-10-03, Decisions). `curl -fsSL https://olympusplugin.ai/install.sh \| sh`, built on branch `claude/install-script`: `scripts/install-macos.sh` is the one source; `bun scripts/publish-release-to-site.ts` builds the release tarball, puts it at `site/releases/<version>/olympus-<version>.tgz` and writes `site/install.sh` with its version, SHA-256 and size pinned (both gitignored); `site/deploy/deploy.sh` refuses to publish unless `--check` proves the served installer is the template with those pins and the tarball matches. Apple silicon and macOS 13+ only (Intel refused: the built-in models ship for Apple silicon only); pinned Bun 1.3.14; per-user, no `sudo`; same-release re-run repairs, a new release upgrades and restores the previous version on failure; `site/uninstall.sh` removes it and keeps data. The setup skill, `site/install/` and the README show the one command. Remaining: publish rc.1 to the site, then a fresh-install test on a clean Mac user (item 4). | A session built it; the owner publishes (Google publisher client ID for the release build, then `site/deploy/deploy.sh`) | Independent review of the installer (install/upgrade is critical class) |
 | 3 | **Integration PR** `claude/chatgpt-plugin` → `main` (squash) with a critical-review receipt, since the branch touches critical paths. Rename this plan to the v1 plan in the same merge and update every link to it, AGENTS.md included. | A session opens it and gets the independent review; **the owner runs the receipt** from his login | Required exact-head CI green; independent review |
-| 4 | **`1.0.0-rc.1`**: set `package.json` and `plugin.json` to it together (test enforced), build, then a fresh-install test on a clean Mac user: add the plugin → install the engine → approve on the Mac → connect Dropbox → choose folders → ask a Personal and a Private question. | A session; the owner drives ChatGPT | Item 3 merged; item 2 for a true fresh install |
+| 4 | **`1.0.0-rc.1`**: `package.json`, `openclaw.plugin.json` and `plugin.json` are set to it (test enforced; done on `claude/install-script`). Build and publish it with item 2's tooling, then a fresh-install test on a clean Mac user: add the plugin → install the engine → approve on the Mac → connect Dropbox → choose folders → ask a Personal and a Private question. | A session; the owner drives ChatGPT | Item 3 merged; item 2 published |
 | 5 | **ChatGPT directory submission** under OCU Inc., per the [kit](../chatgpt-plugin/SUBMISSION.md): 5a-5e below. | Owner submits | 5a-5e |
 | 5a | Domain verification: the challenge token from platform.openai.com, served by the relay at `/.well-known/openai-apps-challenge` (relay config). | Owner gets the token; a session sets the relay config | Owner starts the submission |
 | 5b | Reviewer demo engine with synthetic data only (`demo-data/`, the demo marker, `remote.demoConsent`, credentials in 1Password); settle how its `.eml` files are ingested; confirm each intended tier on it. | A session | Item 4 |
@@ -101,7 +101,7 @@ waits for a calendar slot.
 - **Built-in scan reading** with macOS Vision OCR (filed below: "Deferred to
   the release after 1.0: built-in scan reading").
 - **Delphi as a configured private lane** for the owner's own install.
-- **Signed `.pkg` installer and installer skill**, if 1.0 ships a script
+- **Signed `.pkg` installer and installer skill**: 1.0 ships a script (decided 2026-10-03)
   (design: "Later").
 - **MCP Events** (design: "Later").
 - **Dead Let's Encrypt agreement UI.** The browser dashboard still carries
@@ -127,6 +127,14 @@ and Linux installations, every source's actual limits are documented, and beta
 testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
+
+- **2026-10-03 — The 1.0 Mac installer is a script.** Owner decision: Olympus
+  1.0 ships with `curl -fsSL https://olympusplugin.ai/install.sh | sh`, not a
+  signed `.pkg`, and the website is published. The release tarball is hosted
+  on olympusplugin.ai beside the installer (no npm publication needed), and
+  the installer pins its version, SHA-256 and size, and Bun's, verifying each
+  before anything runs. A signed, notarized `.pkg` stays deferred to after 1.0
+  (above).
 
 - **2026-10-01 — This release is Olympus 1.0.** Owner decision: the
   standalone engine, the ChatGPT plugin, the relay and the Personal / Private

@@ -844,9 +844,11 @@ the release plan: [Olympus 1.0 (ChatGPT)](../V0_4_RELEASE.md#olympus-10-chatgpt)
 ## Target user journey
 
 1. Find Olympus in ChatGPT, add it.
-2. The Olympus panel says "Install on your Mac"; ChatGPT's desktop agent runs
-   the signed installer after the user approves (no admin password; per-user
-   LaunchAgent).
+2. The Olympus panel says "Install on your Mac"; the user runs the one-line
+   installer in Terminal (`curl -fsSL https://olympusplugin.ai/install.sh | sh`,
+   the 1.0 decision of 2026-10-03; no admin password; per-user LaunchAgent).
+   Later, a signed installer that ChatGPT's desktop agent runs after the user
+   approves.
 3. The engine starts, links itself to the relay, and opens the approval page
    on the Mac; one click connects ChatGPT.
 4. In the Olympus sidebar: local files and notes first (target; not in 1.0), then Gmail, Drive,

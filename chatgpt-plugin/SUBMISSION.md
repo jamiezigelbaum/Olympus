@@ -2,7 +2,8 @@
 
 Status: draft, 2026-10-01; tools, tiers and the private answer panel updated
 2026-10-02; installer, sources and sensitive-data items updated after the
-2026-10-02 product review. Publisher: **Open Coordination Unlimited, Inc.**
+2026-10-02 product review; installer items updated 2026-10-03 for the
+one-line script. Publisher: **Open Coordination Unlimited, Inc.**
 (verified OpenAI platform organization). Submit at
 platform.openai.com/plugins. Platform rules referenced here come from the
 OpenAI Plugins docs (deploy/submission, deploy/app-review, plugin-guidelines)
@@ -251,12 +252,26 @@ Package
       **Olympus needs its own logo** (owner, 2026-10-01: not the OCU mark).
       `assets/icon.png` is a temporary placeholder; replace it, set `logo`,
       `composerIcon` and `brandColor`.
-- [ ] Skills pass the automated scan (no instructions to run unreviewed
-      commands). The `install.sh` placeholder is removed: until the installer
-      ships, the setup skill runs no install command and says it is not
-      available yet. Once the owner picks a script or a signed `.pkg`
-      (release plan, item 2), rewrite the skill's step 2 around the real,
-      reviewed command and rescan.
+- [ ] Skills pass the automated scan. The setup skill shows the user exactly
+      one reviewed command to run in Terminal themselves,
+      `curl -fsSL https://olympusplugin.ai/install.sh | sh`, and never runs
+      commands itself (owner decision 2026-10-03: the 1.0 installer is a
+      script). If the scan rejects a `curl | sh` instruction in a skill, link
+      https://olympusplugin.ai/install/ instead and rescan.
+
+Installer
+- [ ] The build under review is published to the site:
+      `OLYMPUS_GOOGLE_PILOT_CLIENT_ID=<publisher client id> bun scripts/publish-release-to-site.ts`,
+      then `site/deploy/deploy.sh --dry-run` and `site/deploy/deploy.sh`.
+      `curl -fsSL https://olympusplugin.ai/install.sh | grep '^OLYMPUS_VERSION='`
+      shows the version in `plugin.json`.
+- [ ] Fresh-install test on a clean macOS user on Apple silicon: the one
+      command ends with Olympus running; ChatGPT desktop → add the plugin →
+      "Connect Olympus" → Approve on the Mac → connect Dropbox → a Personal
+      and a Private question. Then re-run the command (repair), install the
+      next rc over it (upgrade), and run the uninstall command.
+- [ ] An Intel Mac (or `uname -m` x86_64 without Rosetta) is refused with
+      the plain message, and nothing is written.
 
 Server and UI
 - [ ] MCP endpoint `https://mcp.olympusplugin.ai/mcp` (Streamable HTTP) is
