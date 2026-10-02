@@ -38,6 +38,7 @@ import {
   rejudgeRoutedItems,
   type TierRejudgeReport,
 } from '../connector-store/tier-rejudge.ts';
+import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
 import { sweepOwnerRuleRaises } from '../connector-store/tier-rules-sweep.ts';
 import {
   TierLedger,
@@ -325,9 +326,9 @@ export class TierSnifferService {
 
   private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
     const { lane } = this.options;
-    // Owner rules that raise apply to stored items whatever the model's
-    // state: no model is asked.
-    this.sweepOwnerRules();
+    // Owner rules that raise, and names-only folders, apply to stored items
+    // whatever the model's state: no model is asked.
+    this.settleStoredItems();
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       // Nothing is asked and nothing is counted: flagged items wait, pending
       // and held Private, until the model is there. A model whose download
@@ -427,8 +428,13 @@ export class TierSnifferService {
     }
   }
 
-  /** Applies newly added raising owner rules to each set's stored items, a bounded page per tick; never throws. */
-  private sweepOwnerRules(): void {
+  /**
+   * Settles each set's stored items a bounded page per tick: newly added
+   * raising owner rules raise what they match (tier-rules-sweep.ts), and
+   * items a names-only folder covers stop waiting for text
+   * (tier-names-only-settle.ts). Never throws.
+   */
+  private settleStoredItems(): void {
     for (const ledgerPath of this.ledgerPaths()) {
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
@@ -442,6 +448,14 @@ export class TierSnifferService {
         }
       } catch {
         // A set that cannot be read keeps its placements this tick.
+      }
+      try {
+        const settled = settleNamesOnlyItems({ set });
+        if (settled.settled > 0) {
+          this.options.log?.(`Olympus tier names-only: ${settled.settled} stored item(s) settled on their names.`);
+        }
+      } catch {
+        // Left pending this tick.
       }
     }
   }

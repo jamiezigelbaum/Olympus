@@ -21,7 +21,7 @@
 // T-1. A private lane that exists but is not ready holds read items.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
@@ -59,6 +59,7 @@ import {
 } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem, TierMoveRefusedError } from '../src/workers/connector-store/tier-move.ts';
 import { defaultStoreTrustTier } from '../src/workers/connector-store/tier-placement.ts';
+import { settleNamesOnlyItems } from '../src/workers/connector-store/tier-names-only-settle.ts';
 import { sweepOwnerRuleRaises } from '../src/workers/connector-store/tier-rules-sweep.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
@@ -111,7 +112,7 @@ afterEach(() => {
 
 let ownerWords: string | undefined;
 
-async function freshInstall(options: { lane?: typeof BUILT_IN_SNIFFER_LANE } = {}) {
+async function freshInstall(options: { lane?: typeof BUILT_IN_SNIFFER_LANE; extract?: boolean } = {}) {
   ownerWords = undefined;
   const policy = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
   const installed = configureInstalledTierClassification({
@@ -141,7 +142,7 @@ async function freshInstall(options: { lane?: typeof BUILT_IN_SNIFFER_LANE } = {
   const sync = createDropboxProviderStoreSyncHandler({ store: secure, account: 'personal', broker, metadataClient, tierSet: lane.set });
   await sync.pull({ approved_scope_key: 'dropbox.personal:/' });
   const sink = createTieredStoreExtractionSink({ set: lane.set, syncConnectorId: 'extraction', ownerConnectorId: 'dropbox', ownershipKind: 'observed' });
-  for (const file of FILES) {
+  for (const file of options.extract === false ? [] : FILES) {
     await sink.accept({
       ref: {
         corpusId: SECURE_CORPUS,
@@ -540,6 +541,38 @@ describe('9. built-in default approvals', () => {
       ...revokedOlder,
     ];
     expect(isClassifierApproved(ownerAgain, key, { builtInDefault: true })).toBe(true);
+  });
+});
+
+describe('11a. items a names-only folder covers stop waiting for text', () => {
+  test('a row recorded before p4, pending on text that never comes, is settled on its names without a re-list', async () => {
+    const install = await freshInstall({ extract: false });
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'pending', contentRead: false, contentPending: true });
+    expect(install.lane.ledger.getCurrent(garden)!.reasons).toContain('content:unread');
+    // Not names-only yet: nothing settles.
+    expect(settleNamesOnlyItems({ set: install.lane.set })).toMatchObject({ settled: 0 });
+
+    // The owner sets the folder to Names only; the lane's stores read the rule.
+    mkdirSync(root, { recursive: true });
+    writeFileSync(env.OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH!, JSON.stringify({
+      schemaVersion: 1,
+      rules: [{ id: 'notes-names-only', mode: 'metadata_only', sources: ['dropbox.personal'], path_prefixes: ['/Notes'], reason: 'names only' }],
+    }), { mode: 0o600 });
+    install.lane.internal.current()?.close();
+    const lane = createDropboxTierLane({ secureStore: install.secure, env, policy: defaultDropboxIngestionPolicy(), secretLocations: install.secrets });
+    closers.push(() => lane.internal.current()?.close());
+
+    const report = settleNamesOnlyItems({ set: lane.set });
+    expect(report.settled).toBe(1);
+    const settled = lane.ledger.getCurrent(garden)!;
+    expect(settled).toMatchObject({ state: 'current', contentRead: false, contentPending: false, contentTier: settled.metadataTier });
+    expect(settled.reasons).toContain('content:names_only');
+    expect(settled.reasons).not.toContain('content:unread');
+    // Its names copy is where it was; nothing moved.
+    expect(lane.ledger.copies(garden).filter((copy) => copy.state === 'current'))
+      .toEqual([expect.objectContaining({ corpusId: INTERNAL_CORPUS, layers: 'metadata' })]);
+    // The bank letter waits on its names question, not on text: left alone.
+    expect(lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending', metadataPending: true });
   });
 });
 

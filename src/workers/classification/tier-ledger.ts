@@ -187,9 +187,14 @@ export interface TierRejudgeQuestion {
 }
 
 interface StoredRejudgeQuestion extends TierRejudgeQuestion {
-  /** The row's generation and decision time when asked: a newer decision makes the question stale. */
+  /**
+   * The row's decision when asked (generation, time, reasons, decider): any
+   * newer decision changes one of them and makes the question stale.
+   */
   generation: number;
   decidedAt: string;
+  reasonsJson: string;
+  decidedBy: string;
 }
 
 export class TierLedgerGenerationConflictError extends Error {
@@ -763,7 +768,9 @@ export class TierLedger {
           AND (i.rejudged_key IS NULL OR i.rejudged_key != ?)
           AND NOT (i.rejudge_json IS NOT NULL
             AND json_extract(i.rejudge_json, '$.generation') = i.generation
-            AND json_extract(i.rejudge_json, '$.decidedAt') = i.decided_at)
+            AND json_extract(i.rejudge_json, '$.decidedAt') = i.decided_at
+            AND json_extract(i.rejudge_json, '$.reasonsJson') = i.reasons_json
+            AND json_extract(i.rejudge_json, '$.decidedBy') = i.decided_by)
           AND instr(i.reasons_json, '"override:') = 0
           AND instr(i.reasons_json, '"metadata:owner_rule:') = 0
           AND NOT EXISTS (
@@ -854,6 +861,8 @@ export class TierLedger {
       const question: StoredRejudgeQuestion = {
         generation: existing.generation,
         decidedAt: existing.decidedAt,
+        reasonsJson: JSON.stringify(existing.reasons),
+        decidedBy: existing.decidedBy,
         decision: options.decision,
         keepVisible: options.keepVisible,
       };
@@ -882,6 +891,26 @@ export class TierLedger {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).get(...idParams(identity)) as (TierItemRow & { rejudge_json: string | null }) | null;
     return row ? openRejudgeQuestionOf(row) : undefined;
+  }
+
+  /**
+   * Routed items held pending ONLY because their text has not been read (no
+   * open names question, content unread), in key order after `after`: the
+   * rows a names-only settle pass checks (tier-names-only-settle.ts).
+   */
+  listAwaitingText(options: { limit?: number; after?: TierLedgerIdentity } = {}): TierLedgerRecord[] {
+    const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
+    const after = options.after
+      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
+      : null;
+    const rows = this.db.query(`
+      SELECT * FROM tier_items
+      WHERE state = 'pending' AND routed = 1 AND content_read = 0 AND content_pending = 1 AND metadata_pending = 0
+        AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?
+    `).all(after ? 1 : null, ...(after ?? [null, null, null, null]), limit);
+    return (rows as TierItemRow[]).map(recordFromRow);
   }
 
   /** Items waiting on an unanswered sniffer question, oldest first. */
@@ -2363,7 +2392,8 @@ function openRejudgeQuestionOf(row: TierItemRow & { rejudge_json?: string | null
   } catch {
     return undefined;
   }
-  if (stored.generation !== row.generation || stored.decidedAt !== row.decided_at || !stored.decision) return undefined;
+  if (stored.generation !== row.generation || stored.decidedAt !== row.decided_at
+    || stored.reasonsJson !== row.reasons_json || stored.decidedBy !== row.decided_by || !stored.decision) return undefined;
   return { decision: stored.decision, keepVisible: stored.keepVisible === true };
 }
 

@@ -326,7 +326,9 @@ section consolidates and supersedes all other policy wording.
   one Secrets policy. A newly saved raising owner rule (always Private,
   Secrets) is applied to items already stored, hidden first. Automatic moves
   may replace a superseded copy their own item's earlier move left in the
-  destination, and a failing move goes to the back of the queue. The tier
+  destination, and a failing move goes to the back of the queue. Items a
+  names-only folder covers that were left pending on unread text before
+  classifier p4 are settled on their names without a re-list. The tier
   ledger gains schema 4 (additive: `move_attempts`, `rejudged_key`,
   `rejudge_json`), and the classification ledger's approval vocabulary gains
   `built_in_default` (the built-in model's standing default, never counted

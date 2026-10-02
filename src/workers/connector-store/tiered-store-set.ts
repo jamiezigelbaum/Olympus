@@ -94,6 +94,7 @@ import {
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
 import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { secretsDisposition } from './secrets-disposition.ts';
+import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 
 
@@ -402,7 +403,7 @@ export class TieredStoreSet {
     } = {},
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
-    this.applyNewOwnerRuleRaises();
+    this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];
@@ -437,7 +438,7 @@ export class TieredStoreSet {
     entries: ReadonlyArray<{ trustDomain: SourceTrustDomain; connector: SourceConnector; sync?: ConnectorStoreSyncOptions }>,
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
-    this.applyNewOwnerRuleRaises();
+    this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'per_leg');
     const legRuns: TieredStoreLegRun[] = [];
     for (const entry of entries) {
@@ -452,14 +453,21 @@ export class TieredStoreSet {
 
   /**
    * A listing re-judges only what it lists, and an incremental one never
-   * re-lists an unchanged item: a newly saved raising owner rule (an
-   * "always Private" folder) is applied to items already stored first
-   * (tier-rules-sweep.ts, a bounded page per run; the sniffer's tick runs it
-   * too). Never fails the sync.
+   * re-lists an unchanged item. Before each run, a bounded page of items
+   * already stored is settled: a newly saved raising owner rule (an "always
+   * Private" folder) raises the ones it matches (tier-rules-sweep.ts), and
+   * items a names-only folder covers stop waiting for text that never comes
+   * (tier-names-only-settle.ts). The sniffer's tick runs both too. Never
+   * fails the sync.
    */
-  private applyNewOwnerRuleRaises(): void {
+  private settleStoredItems(): void {
     try {
       sweepOwnerRuleRaises({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      settleNamesOnlyItems({ set: this });
     } catch {
       // The next run (or the sniffer's tick) tries again.
     }
