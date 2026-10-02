@@ -8954,6 +8954,7 @@ class TierLedger {
       db = new Database(this.dbPath, { create: true });
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
+      settleStaleEmbedHolds(db, this.now().toISOString());
       if (onDisk)
         restrictLedgerFiles(this.dbPath);
     } catch (error) {
@@ -9687,6 +9688,12 @@ class TierLedger {
           WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
         `).run(generation, now, ...idParams(identity), source.corpusId);
       }
+      if (options.embedHold !== undefined) {
+        this.db.query(`
+          UPDATE tier_copies SET embed_hold = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'
+        `).run(options.embedHold ? 1 : 0, ...idParams(identity));
+      }
       this.flipTiers(identity, existing, {
         metadataTier: existing.targetMetadataTier,
         contentTier: existing.targetContentTier,
@@ -10113,6 +10120,18 @@ function rowOf(record) {
     metadataForced: record.metadataForced,
     metadataFlagged: record.metadataFlagged
   };
+}
+function settleStaleEmbedHolds(db, now) {
+  return db.query(`
+    UPDATE tier_copies SET embed_hold = 0, updated_at = ?
+    WHERE embed_hold = 1 AND copy_state = 'current'
+      AND EXISTS (
+        SELECT 1 FROM tier_items t
+        WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+          AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
+      )
+  `).run(now).changes;
 }
 function isOpenSnifferReason(reason, pass) {
   if (pass === "metadata") {
@@ -25762,6 +25781,7 @@ async function moveTieredItem(options) {
   const flipped = ledger.completeMove(identity, {
     expectedGeneration: record.generation,
     destination: placement.copies,
+    embedHold: placement.embedHold === true,
     ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {}
   });
   const supersededCorpora = ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId);
