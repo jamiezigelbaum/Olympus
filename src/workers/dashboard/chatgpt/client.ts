@@ -36,6 +36,14 @@ export interface ChatGptDashboardClientConfig {
   /** No tool result within this long means the relay cannot reach the Mac. */
   resultTimeoutMs: number;
   staleAfterMs: number;
+  /**
+   * Re-reading the dashboard while the page is visible: every `activeMs`
+   * while something is moving (a source working or signing in, setup
+   * unfinished, the Mac unreachable), every `idleMs` otherwise, doubling
+   * after each failure up to `maxBackoffMs`. The "Updated … ago" line is
+   * redrawn every `staleTickMs` even when nothing new arrives.
+   */
+  refresh: { activeMs: number; idleMs: number; maxBackoffMs: number; staleTickMs: number };
   /** The in-place Connect flow and folder/mail pickers (picker.ts). */
   picker: ChatGptPickerConfig;
   /** The privacy setup screen and the dashboard's Privacy row (privacy.ts). */
@@ -203,6 +211,8 @@ export function chatgptDashboardClient(
       state.data = content;
       state.relayDown = false;
       render();
+      // Fresh data from any path restarts the periodic wait from now.
+      if (!refreshing) scheduleRefresh();
       return true;
     }
     if (fromHost) {
@@ -496,12 +506,20 @@ export function chatgptDashboardClient(
     return add(banner, body);
   }
 
-  function staleLine(): HTMLElement | null {
+  /** The stale line's words as drawn now, '' when it is not shown (the freshness tick compares it). */
+  function staleWords(): string {
     const data = state.data;
-    if (!data || state.relayDown) return null;
+    if (!data || state.relayDown) return '';
     const at = Date.parse(data.generatedAt);
-    if (!isFinite(at) || Date.now() - at < config.staleAfterMs) return null;
-    const line = add(el('p', 'stale'), el('span', 'muted', fill(P.updated, { when: ago(data.generatedAt) })));
+    if (!isFinite(at) || Date.now() - at < config.staleAfterMs) return '';
+    return fill(P.updated, { when: ago(data.generatedAt) });
+  }
+
+  function staleLine(): HTMLElement | null {
+    const words = staleWords();
+    drawnStale = words;
+    if (!words) return null;
+    const line = add(el('p', 'stale'), el('span', 'muted', words));
     return add(line, state.busy === 'refresh'
       ? button(P.working, 'refresh', null, 'plain')
       : button(P.checkAgain, 'refresh', refresh, 'plain'));
@@ -1055,9 +1073,100 @@ export function chatgptDashboardClient(
     close: (notice: string, again: boolean, focusKey: string) => closeScreen(notice, again, focusKey),
   }) : null;
 
+  // ---- freshness ---------------------------------------------------------
+  // While the page is visible it re-reads the dashboard on its own, so
+  // progress, an offline Mac coming back and "Updated … ago" never freeze.
+  // Hidden pages do nothing until they are shown again.
+  const R = config.refresh;
+  let refreshTimer: Any = null;
+  let refreshing = false;
+  let refreshFailures = 0;
+  let nextRefreshAt = 0;
+  let drawnStale = '';
+
+  function pageHidden(): boolean {
+    return doc.visibilityState === 'hidden' || doc.hidden === true;
+  }
+
+  /** Something is moving or not settled, so the page checks often. */
+  function moving(): boolean {
+    const data = state.data;
+    if (!data || state.relayDown || String(data.connection.state) !== 'ready') return true;
+    const sources = Array.isArray(data.sources) ? data.sources : [];
+    if (sources.some((source: Any) => {
+      if (!source || typeof source !== 'object') return false;
+      if (source.connecting || source.status === 'Working') return true;
+      const progress = sourceProgress(source);
+      return !!progress && !progress.stalled;
+    })) return true;
+    if (data.progress && !data.progress.stalled && !progressFinished(data.progress)) return true;
+    return !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== 'failed');
+  }
+
+  function refreshDelay(): number {
+    const base = moving() ? R.activeMs : R.idleMs;
+    return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
+  }
+
+  function scheduleRefresh(): void {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = null;
+    const wait = refreshDelay();
+    nextRefreshAt = Date.now() + wait;
+    if (!pageHidden()) refreshTimer = setTimeout(backgroundRefresh, wait);
+  }
+
+  function backgroundRefresh(): void {
+    refreshTimer = null;
+    if (pageHidden() || refreshing) return;
+    // The picker polls on its own while sign-in finishes, and the picker and
+    // Privacy screens re-read the dashboard when they close; a control's own
+    // call is in flight while busy. None of them gets a second poller.
+    if ((picker && picker.active()) || (privacy && privacy.active()) || state.busy) {
+      scheduleRefresh();
+      return;
+    }
+    refreshing = true;
+    request('tools/call', { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+      refreshing = false;
+      const ok = !!result && !result.isError && isDashboard(result.structuredContent);
+      refreshFailures = ok ? 0 : refreshFailures + 1;
+      acceptResult(result, true);
+      scheduleRefresh();
+    }, () => {
+      refreshing = false;
+      refreshFailures++;
+      state.relayDown = true;
+      render();
+      scheduleRefresh();
+    });
+  }
+
+  doc.addEventListener('visibilitychange', () => {
+    if (pageHidden()) {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = null;
+      return;
+    }
+    // Back in view: check at once when a check fell due while hidden.
+    if (refreshing || refreshTimer) return;
+    const left = nextRefreshAt - Date.now();
+    if (left <= 0) backgroundRefresh();
+    else refreshTimer = setTimeout(backgroundRefresh, left);
+    tickStale();
+  });
+
+  /** Redraws when the "Updated … ago" line would read differently, with or without new data. */
+  function tickStale(): void {
+    if (pageHidden() || compact() || (picker && picker.active()) || (privacy && privacy.active())) return;
+    if (staleWords() !== drawnStale) render();
+  }
+  setInterval(tickStale, R.staleTickMs);
+
   // ---- start -------------------------------------------------------------
   readOpenAiGlobals();
   render();
+  scheduleRefresh();
   request('ui/initialize', {
     protocolVersion: '2026-01-26',
     appInfo: { name: 'olympus-dashboard', version: '1' },

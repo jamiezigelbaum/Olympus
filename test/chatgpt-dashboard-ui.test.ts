@@ -4,7 +4,7 @@
  * document whose parent is a fake MCP Apps host (JSON-RPC over postMessage),
  * optionally with `window.openai`.
  */
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, jest, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
@@ -680,6 +680,132 @@ describe('inline card', () => {
     host.button('Open Olympus').click();
     expect(host.sent.find((message) => message.method === 'ui/request-display-mode')!.params).toEqual({ mode: 'fullscreen' });
   });
+});
+
+describe('freshness: the page re-reads the dashboard while it is visible', () => {
+  const working = () => model({ sources: [{ id: 'notes', label: 'Notes', group: 'local', status: 'Working' }] });
+  const settled = () => model({ sources: [{ id: 'gmail', label: 'Gmail', group: 'cloud', status: 'Fresh', lastSyncAt: ago(MIN) }] });
+  const dashboardCalls = (host: Host) => host.toolCalls().filter((call) => call.name === 'olympus_dashboard').length;
+  /** Settles promise callbacks after a fake-timer step. */
+  const flush = async () => {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+  const advance = async (ms: number) => {
+    jest.advanceTimersByTime(ms);
+    await flush();
+  };
+  const setHidden = (host: Host, hidden: boolean) => {
+    Object.defineProperty(host.win.document, 'visibilityState', { value: hidden ? 'hidden' : 'visible', configurable: true });
+    Object.defineProperty(host.win.document, 'hidden', { value: hidden, configurable: true });
+    host.win.document.dispatchEvent(new host.win.Event('visibilitychange'));
+  };
+  /** Fake timers for the body only: happy-dom's own teardown needs real ones. */
+  const withFakeTimers = (body: () => Promise<void>) => async () => {
+    jest.useFakeTimers();
+    try {
+      await body();
+    } finally {
+      jest.useRealTimers();
+    }
+  };
+
+  test('every 15 s while a source is working, every 60 s once settled', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: working() });
+    await advance(14_999);
+    expect(dashboardCalls(host)).toBe(0);
+    await advance(1);
+    expect(dashboardCalls(host)).toBe(1);
+    // A background check shows no Working… on any control.
+    expect(host.buttons().some((node) => node.textContent === DASHBOARD_CHATGPT_PAGE_COPY.working)).toBe(false);
+    host.respond('tools/call', { structuredContent: settled() });
+    await flush();
+    await advance(59_999);
+    expect(dashboardCalls(host)).toBe(1);
+    await advance(1);
+    expect(dashboardCalls(host)).toBe(2);
+  }));
+
+  test('a connecting source or unfinished setup counts as moving', withFakeTimers(async () => {
+    const connecting = mount();
+    connecting.push({ structuredContent: model({ sources: [{ id: 'drive', label: 'Google Drive', group: 'cloud', status: 'Needs you', connecting: { expiresAt: new Date(Date.now() + 600_000).toISOString() } }] }) });
+    const setup = mount();
+    setup.push({ structuredContent: model({ connection: { state: 'installing' } }) });
+    await advance(15_000);
+    expect(dashboardCalls(connecting)).toBe(1);
+    expect(dashboardCalls(setup)).toBe(1);
+  }));
+
+  test('failures back off, doubling up to 5 min, and a success resets the pace', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: working() });
+    await advance(15_000);
+    expect(dashboardCalls(host)).toBe(1);
+    let calls = 1;
+    for (const wait of [30_000, 60_000, 120_000, 240_000, 300_000, 300_000]) {
+      host.respond('tools/call', undefined, { code: -32000, message: 'unreachable' });
+      await flush();
+      expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
+      await advance(wait - 1);
+      expect(dashboardCalls(host)).toBe(calls);
+      await advance(1);
+      expect(dashboardCalls(host)).toBe(++calls);
+    }
+    host.respond('tools/call', { structuredContent: working() });
+    await flush();
+    expect(host.text()).not.toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
+    await advance(15_000);
+    expect(dashboardCalls(host)).toBe(calls + 1);
+  }));
+
+  test('a hidden page does not poll; shown again, it checks at once when a check fell due', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: settled() });
+    await advance(30_000);
+    setHidden(host, true);
+    await advance(10 * MIN);
+    expect(dashboardCalls(host)).toBe(0);
+    setHidden(host, false);
+    await flush();
+    expect(dashboardCalls(host)).toBe(1);
+  }));
+
+  test('shown again before a check is due, it waits out the rest of the interval', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: settled() });
+    await advance(20_000);
+    setHidden(host, true);
+    await advance(10_000);
+    setHidden(host, false);
+    await advance(29_999);
+    expect(dashboardCalls(host)).toBe(0);
+    await advance(1);
+    expect(dashboardCalls(host)).toBe(1);
+  }));
+
+  test('no second poller while the Connect flow waits for sign-in; leaving it re-reads once', withFakeTimers(async () => {
+    const host = mount({ html: chatgptDashboardPageHtml({ resultTimeoutMs: 5_000, connectPollMs: 60 * MIN, connectPollCapMs: 120 * MIN }) });
+    host.push({ structuredContent: model({ sources: [{ id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Off', primary: { label: 'Connect', tool: 'olympus_connect_source', args: { source: 'dropbox' } } }] }) });
+    host.button('Connect').click();
+    host.respond('tools/call', { structuredContent: { status: 'open_link', source: 'dropbox', openUrl: 'https://mcp.olympusplugin.ai/go/abc' } });
+    await flush();
+    expect(host.text()).toContain('Waiting for you to finish signing in');
+    await advance(10 * MIN);
+    expect(dashboardCalls(host)).toBe(0);
+    host.button('Cancel').click();
+    expect(dashboardCalls(host)).toBe(1);
+  }));
+
+  test('"Updated … ago" appears and moves on by itself, with no new data and no tool call', withFakeTimers(async () => {
+    const host = mount({ html: chatgptDashboardPageHtml({ resultTimeoutMs: 5_000, refresh: { idleMs: 24 * 60 * MIN } }) });
+    host.push({ structuredContent: { ...settled(), generatedAt: ago(9.5 * MIN) } });
+    expect(host.text()).not.toContain('Updated');
+    await advance(30_000);
+    expect(host.text()).toContain('Updated 10 min ago');
+    await advance(60_000);
+    expect(host.text()).toContain('Updated 11 min ago');
+    expect(dashboardCalls(host)).toBe(0);
+  }));
 });
 
 function rgb(hex: string): [number, number, number] {

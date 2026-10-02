@@ -45,6 +45,8 @@ export interface ChatGptDashboardPageOptions {
   connectPollMs?: number;
   /** How long the Connect flow waits before offering Check again. */
   connectPollCapMs?: number;
+  /** The dashboard's own periodic re-read (tests shorten it). */
+  refresh?: Partial<ChatGptDashboardClientConfig['refresh']>;
 }
 
 export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
@@ -56,6 +58,13 @@ export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
  */
 export const CHATGPT_INLINE_ERROR_CODES = ['sign_in_failed', 'source_not_connected', 'source_busy', 'disconnect_incomplete'] as const;
 export const CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60_000;
+/** Visible-page refresh: often while something moves, rarely when settled, backing off on failure. */
+export const CHATGPT_DASHBOARD_REFRESH = {
+  activeMs: 15_000,
+  idleMs: 60_000,
+  maxBackoffMs: 5 * 60_000,
+  staleTickMs: 30_000,
+} as const;
 
 const STATUS_TONE = Object.fromEntries(
   (Object.keys(DASHBOARD_STATUS_PRESENTATION) as DashboardStatus[])
@@ -277,6 +286,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
     staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
+    refresh: { ...CHATGPT_DASHBOARD_REFRESH, ...options.refresh },
     picker: {
       tools: CHATGPT_PICKER_TOOLS,
       mailArgs: CHATGPT_PICKER_MAIL_ARGS,
