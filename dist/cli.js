@@ -46455,10 +46455,66 @@ async function verifyEngine(options = {}) {
   if (!existsSync27(paths.plistPath)) {
     throw new OperationError("config_error", "The engine is not installed.", "Run olympus engine install.");
   }
-  const health = await waitForEngineHealthy({ paths, expectedBuild: installedEngineBuild(paths.plistPath) }, options.health);
-  return health.ok ? { ok: true, health } : { ok: false, health, reason: `The engine is not healthy: ${health.reason}.` };
+  const expectedBuild = expectedEngineBuild(options);
+  const installedBuild = installedEngineBuild(paths.plistPath);
+  if (installedBuild !== expectedBuild) {
+    return {
+      ok: false,
+      expected_build: expectedBuild,
+      installed_build: installedBuild,
+      reason: `The installed engine agent runs build ${installedBuild ?? "unknown"}, not ${expectedBuild}: run olympus engine install --restart.`
+    };
+  }
+  const health = await waitForEngineHealthy({ paths, expectedBuild }, options.health);
+  return health.ok ? { ok: true, expected_build: expectedBuild, installed_build: installedBuild, health } : { ok: false, expected_build: expectedBuild, installed_build: installedBuild, health, reason: `The engine is not healthy: ${health.reason}.` };
 }
-function preflightEnginePaths(homeDir, paths = enginePaths(homeDir)) {
+function expectedEngineBuild(options) {
+  if (options.expectedBuild !== undefined && options.expectPackage !== undefined) {
+    throw new OperationError("invalid_params", "Pass --expect-build or --expect-package, not both.");
+  }
+  if (options.expectedBuild !== undefined) {
+    if (!/^[0-9A-Za-z.+-]{1,96}$/.test(options.expectedBuild))
+      throw new OperationError("invalid_params", `--expect-build ${JSON.stringify(options.expectedBuild)} is not a build identity.`);
+    return options.expectedBuild;
+  }
+  let root;
+  if (options.expectPackage !== undefined) {
+    root = resolvePath(options.expectPackage);
+  } else {
+    try {
+      root = olympusPackageRoot();
+    } catch {
+      throw new OperationError("config_error", "The Olympus package this command runs from could not be found.", "Pass --expect-package <folder> or --expect-build <build>.");
+    }
+  }
+  assertOlympusPackage(root, "--expect-package");
+  assertFile(join39(root, "dist", "cli.js"), `${root} has no dist/cli.js, so it is not a runnable Olympus package.`);
+  return engineBuildIdentity(root);
+}
+function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = process.getuid?.()) {
+  const installed = [
+    [paths.appSupportDir, "Olympus application"],
+    [paths.appDir, "Olympus application"],
+    [`${paths.appDir}.next`, "Olympus application"],
+    [paths.previousAppDir, "Olympus application"],
+    [paths.runtimeDir, "Olympus runtime"]
+  ];
+  for (const [dir, label] of installed) {
+    let problem;
+    try {
+      assertManagedPathParentsSync(homeDir, dir, label);
+      const stat3 = existsSync27(dir) || isSymlink(dir) ? lstatSync13(dir) : undefined;
+      if (stat3 && (stat3.isSymbolicLink() || !stat3.isDirectory()))
+        problem = `${dir} is not a real folder (a symbolic link or a file).`;
+      else if (stat3 && ownerUid !== undefined && stat3.uid !== ownerUid)
+        problem = `${dir} belongs to another user.`;
+    } catch (error) {
+      problem = error instanceof Error ? error.message : String(error);
+    }
+    if (problem) {
+      throw new OperationError("config_error", `Olympus cannot install here: ${problem}`, `Olympus runs only from real folders that belong to you. Move ${dir} aside, then run the Olympus installer again. Nothing was changed.`);
+    }
+  }
   const managed = [
     [paths.plistPath, "LaunchAgent"],
     [paths.logPath, "engine log"],
@@ -46648,6 +46704,7 @@ async function rollbackEngine(options = {}) {
   if (installed.entryPath !== appEntry) {
     throw new OperationError("config_error", `This engine runs ${installed.entryPath}, not the installed app, so it has no previous version to return to.`, "Reinstall from the checkout or package you want with olympus engine install.");
   }
+  preflightEnginePaths(homeDir, paths);
   assertOlympusPackage(paths.previousAppDir, "The previous app");
   assertFile(join39(paths.previousAppDir, "dist", "cli.js"), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
   const bunBin = options.bunBin ?? installed.runtimePath;
@@ -46921,6 +46978,13 @@ function resolveBun(explicit) {
     } catch {}
   }
   throw new OperationError("config_error", "Olympus needs Bun 1.2+ and could not find it.", "Install Bun from https://bun.sh, or pass --bun <absolute path>.");
+}
+function isSymlink(path) {
+  try {
+    return lstatSync13(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 function isBunName(path) {
   return basename5(path).toLowerCase() === "bun";
@@ -121476,7 +121540,7 @@ var ENGINE_CLI_USAGE = {
   "engine stop": "olympus engine stop",
   "engine restart": "olympus engine restart",
   "engine rollback": "olympus engine rollback",
-  "engine verify": "olympus engine verify",
+  "engine verify": "olympus engine verify [--expect-package <path> | --expect-build <build>]",
   "engine logs": "olympus engine logs [--lines <n>] [--follow]"
 };
 async function runEngineCommand(args, deps = {}) {
@@ -121498,8 +121562,7 @@ async function runEngineCommand(args, deps = {}) {
     };
   }
   if (command === "verify") {
-    expectNoArgs("verify", rest);
-    return verifyEngine({ ...service, ...deps.health ? { health: deps.health } : {} });
+    return verifyEngine({ ...service, ...parseVerifyArgs(rest), ...deps.health ? { health: deps.health } : {} });
   }
   if (command === "uninstall") {
     expectNoArgs("uninstall", rest);
@@ -121650,6 +121713,31 @@ function parseInstallArgs(args) {
       options.bunBin = arg.slice("--bun=".length);
     else
       throw new OperationError("invalid_params", `Unknown engine install option: ${arg}`);
+  }
+  return options;
+}
+function parseVerifyArgs(args) {
+  const options = {};
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index];
+    let name;
+    let value;
+    if (arg === "--expect-package" || arg === "--expect-build") {
+      name = arg;
+      value = args[index + 1];
+      index += 1;
+    } else if (arg.startsWith("--expect-package=") || arg.startsWith("--expect-build=")) {
+      name = arg.slice(0, arg.indexOf("="));
+      value = arg.slice(arg.indexOf("=") + 1);
+    } else {
+      throw new OperationError("invalid_params", `Unknown engine verify option: ${arg}`);
+    }
+    if (!value || value.startsWith("--"))
+      throw new OperationError("invalid_params", `${name} needs a value.`);
+    if (name === "--expect-package")
+      options.expectPackage = value;
+    else
+      options.expectedBuild = value;
   }
   return options;
 }
