@@ -1,4 +1,3 @@
-import type { PrivacySettings } from '../chatgpt/dashboard-contract.ts';
 import { modelInstallFailedReason } from '../../core/model-install-failure.ts';
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
@@ -4132,6 +4131,7 @@ export async function main(): Promise<void> {
             // read and act through the same engine operations as the ChatGPT
             // setup tools (set up further down; called only per request).
             privacy: {
+              summary: () => dashboardPrivacy.summary(),
               read: () => dashboardPrivacy.read(),
               save: (update) => dashboardPrivacy.save(update),
             },
@@ -4418,54 +4418,15 @@ export async function main(): Promise<void> {
     },
   });
   // The local dashboard's privacy settings, through the ChatGPT privacy
-  // tools' own operation: the same validation, caps, revision check, owner
-  // confirmation and Secrets-location filter. Reading never issues a panel
-  // confirmation (the page polls); a save that lowers protection asks for one
-  // at dispatch, once the owner has confirmed it on the page.
-  const { callSetupTool } = await import('../chatgpt/setup-tools.ts');
-  const { ChatGptSurfaceError, errorMessage: chatgptErrorMessage } = await import('../chatgpt/response-builder.ts');
-  const { PRIVACY_GET_TOOL_NAME, PRIVACY_SET_TOOL_NAME, PRIVACY_META_KEY } = await import('../chatgpt/dashboard-contract.ts');
-  const { lowersPrivacy, visiblePrivacy } = await import('../dashboard/shared-privacy.ts');
-  const privacyFailure = (error: unknown) => ({
-    ok: false as const,
-    code: error instanceof ChatGptSurfaceError ? error.code : 'unavailable',
-    message: chatgptErrorMessage(error),
+  // tools' own operation (dashboard-privacy.ts): counts for the pages that
+  // name privacy, full settings only for the editor, and saves that always
+  // carry their revision.
+  const { createDashboardPrivacyAdapter } = await import('./dashboard-privacy.ts');
+  const dashboardPrivacy = createDashboardPrivacyAdapter({
+    backend: chatgptSetup,
+    readSettings: (pending) => readChatGptPrivacySettings(process.env, pending),
+    pendingCount: pendingClassificationCount,
   });
-  const dashboardPrivacy = {
-    read: async () => {
-      try {
-        return { ok: true as const, status: 'current' as const, settings: visiblePrivacy(chatgptSetup.privacySettings(), chatgptSetup.secretLocations()) };
-      } catch (error) {
-        return privacyFailure(error);
-      }
-    },
-    save: async (update: Record<string, unknown>) => {
-      try {
-        const { confirm, ...fields } = update;
-        const args: Record<string, unknown> = { ...fields };
-        if (confirm === true) {
-          const visible = visiblePrivacy(chatgptSetup.privacySettings(), chatgptSetup.secretLocations());
-          const draft = {
-            ...(typeof fields.description === 'string' ? { description: fields.description.trim() } : {}),
-            ...(Array.isArray(fields.rules) ? { rules: fields.rules as Array<{ kind: string; source_id: string }> } : {}),
-          };
-          if (lowersPrivacy(draft, visible)) {
-            const issued = await callSetupTool(PRIVACY_GET_TOOL_NAME, {}, chatgptSetup);
-            const token = (issued._meta as Record<string, { confirmation?: string }> | undefined)?.[PRIVACY_META_KEY]?.confirmation;
-            if (token) args.confirmation = token;
-          }
-        }
-        const result = await callSetupTool(PRIVACY_SET_TOOL_NAME, args, chatgptSetup);
-        const settings = (result._meta as Record<string, PrivacySettings> | undefined)?.[PRIVACY_META_KEY];
-        const status = (result.structuredContent as { status?: string } | undefined)?.status === 'conflict' ? 'conflict' as const : 'saved' as const;
-        if (!settings) return { ok: false as const, code: 'unavailable', message: 'Olympus could not read your privacy settings.' };
-        const { confirmation: _issued, ...shown } = settings;
-        return { ok: true as const, status, settings: shown };
-      } catch (error) {
-        return privacyFailure(error);
-      }
-    },
-  };
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === '1';
   // source_answer needs an Analyst the Mac can actually run; without one,
   // ChatGPT answers from olympus_search alone.

@@ -63,12 +63,22 @@ export function renderDashboardPrivacyPage(
 
 function renderPrivacyBody(view: SourceDashboardViewModel, options: DashboardPageOptions | undefined): string {
   const head = `<h2 class="ptitle">${escapeHtml(W.title)}</h2><p class="pintro">${escapeHtml(W.intro)}</p>`;
-  // The read-only dash_ link never shows the owner's words or their folder
-  // names. (A native read-only connection is the operator's own and may read
-  // them, with every control disabled, like the folder picker.)
-  if (options?.readOnly === true && options.controlMode !== 'native') {
-    return `<div class="privacy" data-privacy-locked>${head}<p class="pnote">${escapeHtml(W.locked)} `
-      + `<a href="${escapeHtml(`${setupHref(options.basePath)}#${DASHBOARD_CONTROL_GATE_ID}`)}">Setup →</a></p></div>`;
+  // The owner's words and the rules' names are shown only to a reader who
+  // can change them: the control session, or a native connection with
+  // operator.write. Anyone else (the dash_ link, a read-only OpenClaw
+  // connection) gets the counts and where to unlock (Codex review,
+  // 2026-10-02: write authority before any privacy content, on every surface).
+  if (!dashboardControlsAvailable(options)) {
+    const summary = options?.privacy !== undefined && options.privacy !== 'unreadable' ? options.privacy : undefined;
+    const counts = summary
+      ? `<p class="pnote" data-privacy-counts>${escapeHtml(summary.configured
+        ? fill(summary.ruleCount === 1 ? W.countsOne : W.counts, { n: summary.ruleCount.toLocaleString('en-US') })
+        : W.countsUnset)}</p>`
+      : '';
+    const unlock = options?.controlMode === 'native'
+      ? `<p class="pnote">${escapeHtml(W.readOnly)}</p>`
+      : `<p class="pnote">${escapeHtml(W.locked)} <a href="${escapeHtml(`${setupHref(options?.basePath)}#${DASHBOARD_CONTROL_GATE_ID}`)}">Setup →</a></p>`;
+    return `<div class="privacy" data-privacy-locked>${head}${counts}${unlock}</div>`;
   }
   const settings = options?.privacySettings;
   if (!settings) {

@@ -156,12 +156,9 @@ import {
 } from '../google-connectors/corpora.ts';
 import { renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
 import type { DashboardModelInstalls } from '../dashboard/source-rows.ts';
-import type { PrivacySettings } from '../chatgpt/dashboard-contract.ts';
+import type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
 
-/** A privacy read or save, as the dashboard routes need it: the settings, or a fixed code and sentence. */
-export type DashboardPrivacyOutcome =
-  | { ok: true; status: 'current' | 'saved' | 'conflict'; settings: PrivacySettings }
-  | { ok: false; code: string; message: string };
+export type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
 import {
   OLYMPUS_DASHBOARD_VIEWS,
   type OlympusFolderScopeBrowseResult,
@@ -498,6 +495,9 @@ export interface EmailSourceWorkerOptions {
      * dashboard shows no Privacy row and the save route answers 501.
      */
     privacy?: {
+      /** Counts only, for the pages that name privacy. */
+      summary(): Promise<DashboardPrivacySummaryOutcome>;
+      /** The full settings, for the editor; supplied only to a reader with write authority. */
       read(): Promise<DashboardPrivacyOutcome>;
       save(update: Record<string, unknown>): Promise<DashboardPrivacyOutcome>;
     };
@@ -1372,10 +1372,25 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const controlSessionCsrfToken = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
           // The owner's privacy settings, counts only, for the Privacy row; the
           // full settings only for the Privacy editor itself.
-          const privacyRead = sourceDashboard.privacy
+          // Only the pages that name privacy read it (Home's one ask, Setup's
+          // row, Sensitivity, the editor): Background and source pages poll
+          // without it. Counts for the row; the full settings only for the
+          // editor, and only for a reader with write authority.
+          const dashboardPage = dashboardUi
+            ? dashboardUi.params.view
+            : url.searchParams.has('privacy') ? 'privacy'
+              : url.searchParams.has('sensitivity') ? 'sensitivity'
+                : url.searchParams.has('background') ? 'background'
+                  : url.searchParams.has('source') ? 'source'
+                    : url.searchParams.has('setup') ? 'setup' : 'home';
+          const privacyShown = dashboardPage === 'home' || dashboardPage === 'setup' || dashboardPage === 'sensitivity' || dashboardPage === 'privacy';
+          const writeAuthority = dashboardUi ? dashboardUi.canWrite : request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+          const privacySummary = sourceDashboard.privacy && privacyShown
+            ? await sourceDashboard.privacy.summary().catch(() => undefined)
+            : undefined;
+          const privacyRead = sourceDashboard.privacy && dashboardPage === 'privacy' && writeAuthority
             ? await sourceDashboard.privacy.read().catch(() => undefined)
             : undefined;
-          const privacyWanted = url.searchParams.has('privacy') || dashboardUi?.params.view === 'privacy';
           let modelInstalls: DashboardModelInstalls | undefined;
           try {
             modelInstalls = sourceDashboard.modelInstalls?.();
@@ -1384,18 +1399,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const options: DashboardBackgroundPageOptions = {
             ...(modelInstalls ? { modelInstalls } : {}),
-            ...(sourceDashboard.privacy
-              ? {
-                  privacy: privacyRead?.ok
-                    ? {
-                        configured: privacyRead.settings.configured,
-                        pendingCount: privacyRead.settings.pendingCount,
-                        ruleCount: privacyRead.settings.rules.length,
-                      }
-                    : 'unreadable' as const,
-                }
+            ...(sourceDashboard.privacy && privacyShown
+              ? { privacy: privacySummary?.ok ? privacySummary.summary : 'unreadable' as const }
               : {}),
-            ...(privacyWanted && privacyRead?.ok ? { privacySettings: privacyRead.settings } : {}),
+            ...(privacyRead?.ok ? { privacySettings: privacyRead.settings } : {}),
             embeddingRuntime,
             backgroundRuntime,
             ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),

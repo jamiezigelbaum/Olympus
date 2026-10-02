@@ -338,7 +338,9 @@ export function parseDashboardControlParams(value: unknown): OlympusDashboardCon
   }
   if (action === 'save_privacy') {
     const record = exactRecord(outer, ['action', 'description', 'rules', 'revision', 'confirm']);
-    const revision = optionalBoundedString(record.revision, 64, 'revision', false);
+    // Always the revision the editor was built from: without it a save would
+    // skip the compare-and-swap (the empty profile has one too).
+    const revision = boundedString(record.revision, 64, 'revision', false);
     if (record.confirm !== undefined && typeof record.confirm !== 'boolean') {
       throw new DashboardGatewayInvalidRequestError('confirm must be true or false.');
     }
@@ -372,7 +374,7 @@ export function parseDashboardControlParams(value: unknown): OlympusDashboardCon
       action,
       ...(description !== undefined ? { description } : {}),
       ...(rules ? { rules } : {}),
-      ...(revision ? { revision } : {}),
+      revision,
       ...(record.confirm === true ? { confirm: true } : {}),
     };
   }
@@ -895,7 +897,7 @@ function dashboardControlWorkerRequest(params: OlympusDashboardControlParams): {
         body: {
           ...(params.description !== undefined ? { description: params.description } : {}),
           ...(params.rules ? { rules: params.rules } : {}),
-          ...(params.revision ? { revision: params.revision } : {}),
+          revision: params.revision,
           ...(params.confirm === true ? { confirm: true } : {}),
         },
       };

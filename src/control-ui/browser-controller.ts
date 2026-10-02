@@ -1362,7 +1362,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         ...(description !== undefined ? { description } : {}),
         rules: privacyRulesOut(form, logic) as unknown as OlympusPrivacyRule[],
         // Always the revision the view was built from: a save over changed settings is refused.
-        ...(revision ? { revision } : {}),
+        revision,
         // Only a save that lowers protection carries the confirmation.
         ...(lowers ? { confirm: true } : {}),
       });

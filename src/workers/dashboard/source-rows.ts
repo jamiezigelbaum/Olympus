@@ -36,6 +36,7 @@ import {
   DASHBOARD_SIGNED_OUT,
   dashboardAttentionLine,
   dashboardCount,
+  dashboardCredentialAttention,
   dashboardEtaWords,
   dashboardProviderRefusalDetail,
   dashboardProviderRefusalSentence,
@@ -136,7 +137,11 @@ export function dashboardSourceStates(view: SourceDashboardViewModel, options: D
   const rows = view.sources.map((source): DashboardSourceRowState => {
     const entry = engine.get(source.source_id);
     const connecting = connectingFor(source, now);
-    const progress = !connecting && entry?.progress && (entry.progress.stage !== 'done' || entry.progress.stalled)
+    // A refused sign-in or a credential problem needs the owner whatever the
+    // progress says (Codex review, 2026-10-02): the row shows that sentence
+    // and its reconnect, not a stage line over work that cannot finish.
+    const credential = !connecting && dashboardCredentialAttention(source, degraded ? { degradedCredentials: degraded } : {});
+    const progress = !connecting && !credential && entry?.progress && (entry.progress.stage !== 'done' || entry.progress.stalled)
       ? entry.progress
       : undefined;
     // The same derivation ChatGPT uses (shared-status.ts): the vocabulary's
@@ -155,6 +160,7 @@ export function dashboardSourceStates(view: SourceDashboardViewModel, options: D
     if ((local === 'Needs you' || local === 'Failing') && status !== 'Needs you' && status !== 'Failing' && !working) {
       status = local;
     }
+    if (credential) status = 'Needs you';
     // Mid-sign-in reads Needs you whatever else the card says: finishing the
     // sign-in is the owner's next step (the ChatGPT rule, for every source).
     if (connecting) status = 'Needs you';
@@ -346,6 +352,16 @@ export function dashboardReconnectAction(
     if (!dashboardControlsAvailable(options)) return { action: lockedAction(label, options?.basePath) };
     const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view, action));
     return { action: { label, kind: 'none', sheet: sheetId, ...blocked }, sheet };
+  }
+  if (action.kind === 'none' && dashboardCredentialAttention(source, options?.degradedCredentials ? { degradedCredentials: options.degradedCredentials } : {})) {
+    // A connected source whose sign-in was refused or lapsed carries no
+    // connect action of its own; its repair is the source's own connect
+    // route, worded as Reconnect.
+    const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
+    const route = definition?.connect_action;
+    if (route?.kind !== 'oauth' && route?.kind !== 'api_key') return undefined;
+    if (!dashboardControlsAvailable(options)) return { action: lockedAction(DASHBOARD_RECONNECT_LABEL, options?.basePath) };
+    return { action: { label: DASHBOARD_RECONNECT_LABEL, kind: route.kind, source: route.source, ...blocked } };
   }
   if (action.kind !== 'oauth' && action.kind !== 'api_key') return undefined;
   const label = reconnecting && action.label === 'Connect' ? DASHBOARD_RECONNECT_LABEL : action.label;
@@ -543,9 +559,14 @@ function rowBody(state: DashboardSourceRowState, options: DashboardRowOptions | 
 export function dashboardSourceRow(
   state: DashboardSourceRowState,
   view: SourceDashboardViewModel,
-  options: DashboardRowOptions | undefined,
+  pageOptions: DashboardRowOptions | undefined,
   withMenu: boolean,
 ): string {
+  // The worker's credential degradations ride on the view unless the page
+  // names its own: the row's sentence and fix must see the same ones its
+  // status did.
+  const degraded = pageOptions?.degradedCredentials ?? view.degraded_credentials;
+  const options: DashboardRowOptions = { ...pageOptions, ...(degraded ? { degradedCredentials: degraded } : {}) };
   const source = state.source;
   const href = safeHref(detailHref(source, options?.basePath));
   const fix = dashboardSourceRowFix(state, view, options, withMenu);

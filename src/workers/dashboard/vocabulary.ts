@@ -418,6 +418,21 @@ export function dashboardAttentionLine(
   return '';
 }
 
+/**
+ * True when the card names a sign-in problem the owner must act on: the
+ * provider refused the last sign-in, the credential is degraded, or the
+ * connection needs a fresh sign-in. Unfinished work does not resolve any of
+ * them, so they need the owner whatever the progress says.
+ */
+export function dashboardCredentialAttention(
+  source: DashboardSourceCard,
+  options?: DashboardVocabularyOptions,
+): boolean {
+  return source.connection.provider_refusal !== undefined
+    || source.connection.state === 'reauth_required'
+    || degradationForSource(source, options?.degradedCredentials) !== undefined;
+}
+
 /** The row word for a connection the owner has to sign back into. */
 export const DASHBOARD_SIGNED_OUT = 'signed out';
 
@@ -1709,7 +1724,11 @@ export const DASHBOARD_LOCAL_PRIVACY_COPY = {
   saved: DASHBOARD_CHATGPT_PRIVACY_COPY.saved,
   unchanged: 'No changes to save.',
   locked: 'Unlock dashboard controls in Setup to see and change what is private.',
-  readOnly: 'Your OpenClaw connection is read-only, so privacy can be read here but not changed.',
+  readOnly: 'Your OpenClaw connection is read-only. What is private is shown only to a connection that can change it.',
+  /** What a reader without write authority sees: counts, never the words or names. */
+  counts: 'Your description and {n} always-private rules are set.',
+  countsOne: 'Your description and 1 always-private rule are set.',
+  countsUnset: 'Nothing is set as private yet.',
   unavailable: 'Privacy settings are not available from this worker.',
   /** The save's confirm and conflict steps: the ChatGPT panel's own words. */
   confirmRemoves: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmRemove,

@@ -18,13 +18,16 @@ import { mountDashboardController } from '../src/control-ui/browser-controller.t
 import { defaultConfig } from '../src/core/config.ts';
 import { parseDashboardControlParams, requestDashboardControl } from '../src/core/control-ui-gateway.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
-import { callSetupTool } from '../src/workers/chatgpt/setup-tools.ts';
+import { callSetupTool, type ChatGptSetupBackend } from '../src/workers/chatgpt/setup-tools.ts';
 import type { PrivacySettings } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { PRIVACY_GET_TOOL_NAME, PRIVACY_META_KEY, PRIVACY_SET_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { renderDashboardHtmlRoute } from '../src/workers/dashboard/index.ts';
 import { renderDashboardPrivacyPage } from '../src/workers/dashboard/pages/privacy.ts';
 import { standaloneDashboardControllerScript } from '../src/workers/dashboard/components.ts';
 import { createEmailSourceWorker, type DashboardPrivacyOutcome } from '../src/workers/email-source/index.ts';
+import { createDashboardPrivacyAdapter } from '../src/workers/email-source/dashboard-privacy.ts';
+import type { SecretStore } from '../src/core/secret-store.ts';
+import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import { lowersPrivacy, privacyLogic, privacyRuleIdentity } from '../src/workers/dashboard/shared-privacy.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 
@@ -81,12 +84,23 @@ describe('the Privacy editor page', () => {
     for (const secret of ['My health', 'Medical Records', 'Lawyer', 'billing@clinic.example']) expect(html).not.toContain(secret);
   });
 
-  test('a native read-only connection reads the settings with every control disabled', () => {
+  test('a native read-only connection gets counts and why, never the description or names', () => {
     const page = readResult({ view: 'privacy' }, false, 'partial', 'review');
     expect(page.title).toBe('Olympus / Privacy');
-    expect(page.body).toContain('Your OpenClaw connection is read-only');
-    expect(page.body).toContain('<button type="submit" class="btn primary" disabled aria-disabled="true">Save</button>');
-    expect(page.body).toContain(' readonly>');
+    expect(page.can_write).toBe(false);
+    expect(page.body).toContain('data-privacy-locked');
+    expect(page.body).toContain('Your description and 3 always-private rules are set.');
+    expect(page.body).toContain('Your OpenClaw connection is read-only.');
+    for (const secret of ['My health', 'Medical Records', 'Lawyer', 'billing@clinic.example']) expect(page.body).not.toContain(secret);
+    expect(page.body).not.toContain('data-privacy-form');
+  });
+
+  test('a standalone page without the control session gets the same: counts, never content', () => {
+    const html = renderDashboardPrivacyPage(buildDashboardPreviewView('review'), {
+      now: NOW, ...buildDashboardPreviewOptions('review'),
+    });
+    expect(html).toContain('data-privacy-locked');
+    for (const secret of ['My health', 'Medical Records', 'Lawyer', 'billing@clinic.example']) expect(html).not.toContain(secret);
   });
 
   test('without the worker\'s privacy settings the page says so instead of an empty editor', () => {
@@ -114,13 +128,13 @@ describe('the privacy rules both editors share', () => {
   });
 
   test('the Gateway refuses a rule without its kind\'s shape, by the editors\' own rule', () => {
-    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules: [{ kind: 'label', source_id: 'gmail.email', key: 'L1' }] }))
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', revision: 'r1', rules: [{ kind: 'label', source_id: 'gmail.email', key: 'L1' }] }))
       .toThrow('shape of its kind');
-    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules: [{ kind: 'folder', source_id: 'gmail.email', key: '/x' }] }))
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', revision: 'r1', rules: [{ kind: 'folder', source_id: 'gmail.email', key: '/x' }] }))
       .toThrow('shape of its kind');
     // A folder saved without its name is a valid rule.
-    expect(parseDashboardControlParams({ action: 'save_privacy', rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/x' }] }))
-      .toEqual({ action: 'save_privacy', rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/x' }] });
+    expect(parseDashboardControlParams({ action: 'save_privacy', revision: 'r1', rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/x' }] }))
+      .toEqual({ action: 'save_privacy', revision: 'r1', rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/x' }] });
   });
 });
 
@@ -131,19 +145,23 @@ describe('the save_privacy and retry_model control actions', () => {
       { kind: 'label', source_id: 'gmail.email', key: 'Label_12', value: 'Lawyer' },
       { kind: 'sender', source_id: 'gmail.email', value: '@clinic.example' },
     ];
-    expect(parseDashboardControlParams({ action: 'save_privacy', description: 'health', rules }))
-      .toEqual({ action: 'save_privacy', description: 'health', rules } as OlympusDashboardControlParams);
+    expect(parseDashboardControlParams({ action: 'save_privacy', description: 'health', rules, revision: 'r1' }))
+      .toEqual({ action: 'save_privacy', description: 'health', rules, revision: 'r1' } as OlympusDashboardControlParams);
     // The description may be cleared.
-    expect(parseDashboardControlParams({ action: 'save_privacy', description: '' })).toEqual({ action: 'save_privacy', description: '' });
-    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules, api_key: 'x' })).toThrow();
-    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules: [{ kind: 'public', source_id: 'gmail.email' }] })).toThrow();
-    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules: [{ kind: 'sender', source_id: 'gmail.email', value: 'a@b.c', tier: 'x' }] })).toThrow();
-    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules: Array.from({ length: 101 }, () => rules[2]) })).toThrow();
-    expect(() => parseDashboardControlParams({ action: 'save_privacy', description: 'x'.repeat(2_001) })).toThrow();
+    expect(parseDashboardControlParams({ action: 'save_privacy', description: '', revision: 'r1' }))
+      .toEqual({ action: 'save_privacy', description: '', revision: 'r1' });
+    // No revision, no save: an omitted or empty one would skip the compare-and-swap.
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules })).toThrow('revision');
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules, revision: '' })).toThrow('revision');
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', rules, revision: 'r1', api_key: 'x' })).toThrow();
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', revision: 'r1', rules: [{ kind: 'public', source_id: 'gmail.email' }] })).toThrow();
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', revision: 'r1', rules: [{ kind: 'sender', source_id: 'gmail.email', value: 'a@b.c', tier: 'x' }] })).toThrow();
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', revision: 'r1', rules: Array.from({ length: 101 }, () => rules[2]) })).toThrow();
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', revision: 'r1', description: 'x'.repeat(2_001) })).toThrow();
     expect(parseDashboardControlParams({ action: 'retry_model', model: 'answers' })).toEqual({ action: 'retry_model', model: 'answers' });
     expect(parseDashboardControlParams({ action: 'save_privacy', rules: [], revision: 'r1', confirm: true }))
       .toEqual({ action: 'save_privacy', rules: [], revision: 'r1', confirm: true });
-    expect(() => parseDashboardControlParams({ action: 'save_privacy', confirm: 'yes' })).toThrow();
+    expect(() => parseDashboardControlParams({ action: 'save_privacy', revision: 'r1', confirm: 'yes' })).toThrow();
     expect(() => parseDashboardControlParams({ action: 'retry_model', model: 'gpt' })).toThrow();
   });
 
@@ -178,6 +196,7 @@ describe('the save_privacy and retry_model control actions', () => {
       sovereigntyEngine: createSovereigntyEngine(loadSovereigntyPreset('private-cloud-only')),
       registryPath: join(dir, 'handles.json'),
       privacy: {
+        summary: async () => ({ ok: true, summary: { configured: true, pendingCount: 2, ruleCount: 0 } }),
         read: async (): Promise<DashboardPrivacyOutcome> => ({ ok: true, status: 'current', settings }),
         save: async (update): Promise<DashboardPrivacyOutcome> => {
           saved.push(update);
@@ -509,3 +528,141 @@ describe('the Privacy editor in the browser', () => {
     abort.abort();
   });
 });
+
+describe('the worker\'s privacy adapter (production code)', () => {
+  function memoryBackend(initial: PrivacySettings) {
+    let stored = initial;
+    const backend = {
+      privacySettings: () => stored,
+      savePrivacy: (update: { description?: string; rules?: PrivacySettings['rules'] }) => {
+        stored = {
+          ...stored,
+          configured: true,
+          revision: `${stored.revision}+`,
+          ...(update.description !== undefined ? { description: update.description } : {}),
+          ...(update.rules ? { rules: update.rules } : {}),
+        };
+        return stored;
+      },
+      secretLocations: () => ({ folderKeys: new Set(), pathPrefixes: [], labelIds: new Set(), senders: [] }),
+    } as unknown as ChatGptSetupBackend;
+    let pendingCalls = 0;
+    let clock = 0;
+    const adapter = createDashboardPrivacyAdapter({
+      backend,
+      readSettings: (pending) => ({ ...stored, pendingCount: pending }),
+      pendingCount: () => { pendingCalls++; return 7; },
+      now: () => clock,
+    });
+    return { adapter, stored: () => stored, pendingCalls: () => pendingCalls, tick: (ms: number) => { clock += ms; } };
+  }
+  const RULE = { kind: 'sender' as const, source_id: 'gmail.email' as const, value: 'billing@clinic.example' };
+
+  test('a save without a revision is refused and changes nothing, even with the owner\'s confirmation', async () => {
+    const { adapter, stored } = memoryBackend({ configured: true, description: 'health', pendingCount: 0, revision: 'r2', rules: [RULE] });
+    for (const update of [{ rules: [], confirm: true }, { rules: [], revision: '', confirm: true }, { description: 'x', revision: '  ' }]) {
+      const outcome = await adapter.save(update);
+      expect(outcome).toMatchObject({ ok: false, code: 'invalid_params' });
+    }
+    expect(stored().rules).toEqual([RULE]);
+    expect(stored().revision).toBe('r2');
+  });
+
+  test('a first save carries the empty profile\'s revision; a stale one is a conflict; a lowering one needs the confirmation', async () => {
+    const empty = memoryBackend({ configured: false, description: '', pendingCount: 0, revision: 'prv1.unset', rules: [] });
+    expect(await empty.adapter.save({ revision: 'prv1.unset', description: '', rules: [RULE] })).toMatchObject({ ok: true, status: 'saved' });
+    const saved = memoryBackend({ configured: true, description: 'health', pendingCount: 0, revision: 'r2', rules: [RULE] });
+    expect(await saved.adapter.save({ revision: 'r1', description: 'health', rules: [RULE] })).toMatchObject({ ok: true, status: 'conflict' });
+    expect(await saved.adapter.save({ revision: 'r2', description: 'health', rules: [] })).toMatchObject({ ok: false, code: 'privacy_owner_only' });
+    expect(await saved.adapter.save({ revision: 'r2', description: 'health', rules: [], confirm: true })).toMatchObject({ ok: true, status: 'saved' });
+    expect(saved.stored().rules).toEqual([]);
+  });
+
+  test('the summary is counts only, and the backlog count is reused for a minute', async () => {
+    const { adapter, pendingCalls, tick } = memoryBackend({ configured: true, description: 'health', pendingCount: 0, revision: 'r1', rules: [RULE] });
+    expect(await adapter.summary()).toEqual({ ok: true, summary: { configured: true, pendingCount: 7, ruleCount: 1 } });
+    await adapter.summary();
+    await adapter.read();
+    expect(pendingCalls()).toBe(1);
+    tick(60_000);
+    await adapter.summary();
+    expect(pendingCalls()).toBe(2);
+  });
+});
+
+describe('only the pages that name privacy read it', () => {
+  function memorySecretStore(): SecretStore {
+    const values = new Map<string, string>();
+    return {
+      label: 'memory',
+      get: async (key: string) => values.get(key),
+      getSync: (key: string) => values.get(key),
+      set: async (key: string, value: string) => { values.set(key, value); },
+      delete: async (key: string) => { values.delete(key); },
+    } as SecretStore;
+  }
+
+  test('Background and source polls never call the privacy hook; Setup reads counts; the editor needs write authority', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-privacy-poll-'));
+    const calls: string[] = [];
+    const settings: PrivacySettings = { configured: true, description: 'secret words', rules: [], pendingCount: 0, revision: 'r1' };
+    const worker = createEmailSourceWorker({
+      sourceIndexStatus: {
+        async status() {
+          return {
+            kind: 'source_index_status',
+            generated_at: NOW.toISOString(),
+            corpora: [],
+            policy: {
+              read_only: true, raw_source_exposed: false, source_packets_exposed: false,
+              source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true,
+            },
+          } as unknown as SourceIndexStatusResult;
+        },
+      },
+      sourceDashboard: {
+        sovereigntyEngine: createSovereigntyEngine(loadSovereigntyPreset('private-cloud-only')),
+        registryPath: join(dir, 'handles.json'),
+        secretStore: memorySecretStore(),
+        registryAdoptionIntervalMs: 0,
+        privacy: {
+          summary: async () => { calls.push('summary'); return { ok: true, summary: { configured: true, pendingCount: 0, ruleCount: 0 } }; },
+          read: async () => { calls.push('read'); return { ok: true, status: 'current', settings }; },
+          save: async () => ({ ok: false, code: 'unavailable', message: 'no' }),
+        },
+      },
+    });
+    const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'test-control' });
+    const get = async (query: string) => {
+      const response = await fetch(new Request(`http://worker.test/dashboard${query}`, { headers: { Authorization: 'Bearer test-control' } }));
+      return { status: response.status, html: await response.text() };
+    };
+    const native = async (view: string, canWrite: boolean) => {
+      const response = await fetch(new Request(`http://worker.test/dashboard/ui?native=1&view=${view}&can_write=${canWrite ? 1 : 0}`, {
+        headers: { Authorization: 'Bearer test-control' },
+      }));
+      return await response.json() as { body: string };
+    };
+    try {
+      await get('?background');
+      await get('?source=gmail.email');
+      await native('background', true);
+      expect(calls).toEqual([]);
+      await get('?setup');
+      expect(calls).toEqual(['summary']);
+      calls.length = 0;
+      // The bearer page without a control session, and a read-only native
+      // connection: counts only, the full settings never read.
+      expect((await get('?privacy')).html).not.toContain('secret words');
+      expect((await native('privacy', false)).body).not.toContain('secret words');
+      expect(calls).toEqual(['summary', 'summary']);
+      calls.length = 0;
+      expect((await native('privacy', true)).body).toContain('secret words');
+      expect(calls).toEqual(['summary', 'read']);
+    } finally {
+      worker.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+

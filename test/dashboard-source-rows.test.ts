@@ -198,6 +198,47 @@ describe('rule 3: honest progress', () => {
   });
 });
 
+describe('a sign-in problem needs the owner whatever the progress says (Codex review, 2026-10-02)', () => {
+  function withDrive(patch: (drive: ReturnType<typeof buildDashboardPreviewView>['sources'][number]) => void) {
+    const view = buildDashboardPreviewView('review');
+    const drive = view.sources.find((source) => source.source_id === 'google_drive.docs')!;
+    patch(drive);
+    return view;
+  }
+  const render = (view: ReturnType<typeof buildDashboardPreviewView>, kind: 'home' | 'setup') => {
+    const options = { now: NOW, controlSessionCsrfToken: 'csrf', ...buildDashboardPreviewOptions('review') };
+    return kind === 'home' ? renderDashboardHomePage(view, options) : renderDashboardSetupPage(view, options);
+  };
+
+  test('a refused sign-in over reading in progress stays Needs you, with its sentence and Reconnect', () => {
+    const view = withDrive((drive) => {
+      drive.connection = { ...drive.connection, provider_refusal: { code: 'access_denied', reason: 'The user denied access.' } };
+    });
+    // Reading is still under way on the engine's own progress.
+    expect(dashboardSourceStates(view, { now: NOW }).rows.find((row) => row.source.source_id === 'google_drive.docs')!.status).toBe('Needs you');
+    for (const kind of ['home', 'setup'] as const) {
+      const row = rowFor(render(view, kind), 'google_drive.docs');
+      expect(row).toContain('class="dot tone-warn"');
+      expect(row).toContain('Sign-in was declined');
+      expect(row).toContain('data-connect-kind="oauth"');
+      expect(row).toContain('>Reconnect</button>');
+      expect(row).not.toContain('Reading — 40%');
+    }
+  });
+
+  test('a degraded credential over reading in progress stays Needs you too', () => {
+    const view = withDrive(() => undefined);
+    view.degraded_credentials = [{
+      kind: 'worker_credential_degraded', display_name: 'Google Drive', state: 'retrying',
+      status_label: 'Credential unavailable - needs your attention', hint: '', attempts: 1, max_attempts: 3,
+    }];
+    const row = rowFor(render(view, 'home'), 'google_drive.docs');
+    expect(row).toContain('class="dot tone-warn"');
+    expect(row).toContain('Can&#39;t sign in');
+    expect(row).not.toContain('Reading — 40%');
+  });
+});
+
 describe('each number once on Home, and one divider above Models', () => {
   test('while the Progress line shows, the Background card does not repeat an indexing number', () => {
     const working = page('review-indexing', 'home');
