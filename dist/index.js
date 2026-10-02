@@ -10269,11 +10269,14 @@ var DEFAULT_STOP_GRACE_MS = 2000;
 var DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
 var childStdio = "ignore";
 var childObserver;
-function notifyChildObserver(event, serviceId, pid) {
+function notifyChildObserver(event, serviceId, pid, argv) {
   if (!childObserver || !pid || process.platform === "win32")
     return;
   try {
-    childObserver[event](serviceId, pid);
+    if (event === "spawned")
+      childObserver.spawned(serviceId, pid, argv);
+    else
+      childObserver.stopped(serviceId, pid);
   } catch {}
 }
 function backgroundNativeProcessService(service) {
@@ -10382,7 +10385,7 @@ function createNativeProcessService(options) {
     });
     lifetime.child = child;
     lifetime.childReady = false;
-    notifyChildObserver("spawned", options.id, child.pid);
+    notifyChildObserver("spawned", options.id, child.pid, [settings.command, ...settings.args]);
     let spawnFailed = false;
     child.once("exit", (code, signal) => {
       if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
@@ -14247,6 +14250,9 @@ import { dirname as dirname7, join as join10 } from "node:path";
 function engineChildrenPath(env = process.env) {
   return join10(olympusDataDir(env), "engine", "children.json");
 }
+var LSTART = String.raw`[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}`;
+var TABLE_LINE = new RegExp(String.raw`^\s*(\d+)\s+(\d+)\s+(${LSTART})\s+(.*)$`);
+var PS_ENV = { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8", TZ: "UTC" };
 
 // src/core/engine-service.ts
 init_operation_error();

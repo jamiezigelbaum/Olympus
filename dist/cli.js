@@ -45851,16 +45851,48 @@ function engineChildrenPath(env = process.env) {
 function readEngineChildren(path) {
   try {
     const parsed = JSON.parse(readFileSync24(path, "utf8"));
-    if (parsed?.schema !== ENGINE_CHILDREN_SCHEMA || !Array.isArray(parsed.children) || !Array.isArray(parsed.markers))
+    if (!Array.isArray(parsed?.children))
       return;
+    if (parsed.schema !== ENGINE_CHILDREN_SCHEMA && parsed.schema !== ENGINE_CHILDREN_SCHEMA_V1)
+      return;
+    const legacy = parsed.schema === ENGINE_CHILDREN_SCHEMA_V1;
+    const children = [];
+    for (const child of parsed.children) {
+      if (!child || !Number.isSafeInteger(child.pgid) || child.pgid <= 1)
+        continue;
+      const argv = !legacy && Array.isArray(child.argv) && child.argv.length > 0 && child.argv.every((arg) => typeof arg === "string") ? child.argv : [];
+      children.push({
+        service: typeof child.service === "string" ? child.service : "unknown",
+        pgid: child.pgid,
+        started_at: typeof child.started_at === "string" ? child.started_at : "",
+        process_started: !legacy && typeof child.process_started === "string" && child.process_started ? child.process_started : null,
+        argv
+      });
+    }
     return {
-      ...parsed,
-      markers: parsed.markers.filter((marker) => typeof marker === "string" && marker.length >= 8),
-      children: parsed.children.filter((child) => Number.isSafeInteger(child?.pgid) && child.pgid > 1)
+      schema: ENGINE_CHILDREN_SCHEMA,
+      host_pid: typeof parsed.host_pid === "number" ? parsed.host_pid : 0,
+      children
     };
   } catch {
     return;
   }
+}
+function isRecordedLeader(entry, child) {
+  return entry !== undefined && entry.pid === child.pgid && entry.pgid === child.pgid && child.process_started !== null && child.argv.length > 0 && entry.started === child.process_started && entry.command === child.argv.join(" ");
+}
+function verifyGroup(table, child) {
+  if (!table)
+    return { ok: false, reason: "unreadable" };
+  const members = table.filter((entry) => entry.pgid === child.pgid);
+  if (members.length === 0)
+    return { ok: false, reason: "gone" };
+  const leader = members.find((entry) => entry.pid === child.pgid);
+  if (!leader)
+    return { ok: false, reason: "unverified" };
+  if (child.process_started === null || child.argv.length === 0)
+    return { ok: false, reason: "unverified" };
+  return isRecordedLeader(leader, child) ? { ok: true } : { ok: false, reason: "not_ours" };
 }
 function reapRecordedEngineChildren(path, deps = {}) {
   const result = { stopped: [], skipped: [] };
@@ -45878,64 +45910,86 @@ function reapRecordedEngineChildren(path, deps = {}) {
   const kill = deps.kill ?? ((pid, signal) => process.kill(pid, signal));
   const sleep2 = deps.sleep ?? sleepSync2;
   const selfPid = deps.selfPid ?? process.pid;
-  const table = list();
-  if (!table)
+  const first = list();
+  if (!first)
     return result;
-  const selfGroup = table.find((entry) => entry.pid === selfPid)?.pgid;
-  const targets = [];
+  const selfGroup = first.find((entry) => entry.pid === selfPid)?.pgid;
+  const unsettled = [];
+  const skip = (child, reason) => result.skipped.push({ service: child.service, pgid: child.pgid, reason });
+  const candidates = [];
   for (const child of record.children) {
     if (child.pgid === selfPid || child.pgid === selfGroup) {
-      result.skipped.push({ service: child.service, pgid: child.pgid, reason: "self" });
+      skip(child, "self");
       continue;
     }
-    const members = table.filter((entry) => entry.pgid === child.pgid);
-    if (members.length === 0) {
-      result.skipped.push({ service: child.service, pgid: child.pgid, reason: "gone" });
-      continue;
-    }
-    const ours = record.markers.length > 0 && members.some((member) => record.markers.some((marker) => member.command.includes(marker)));
-    if (!ours) {
-      result.skipped.push({ service: child.service, pgid: child.pgid, reason: "not_ours" });
-      continue;
-    }
-    targets.push(child);
+    const verdict = verifyGroup(first, child);
+    if (verdict.ok)
+      candidates.push(child);
+    else
+      skip(child, verdict.reason === "unreadable" ? "unverified" : verdict.reason);
   }
-  for (const child of targets)
+  const terminated = [];
+  for (const child of candidates) {
+    const verdict = verifyGroup(list(), child);
+    if (!verdict.ok) {
+      if (verdict.reason === "gone")
+        result.stopped.push({ service: child.service, pgid: child.pgid });
+      else if (verdict.reason === "unreadable") {
+        skip(child, "unverified");
+        unsettled.push(child);
+      } else
+        skip(child, verdict.reason);
+      continue;
+    }
     signalGroup(kill, child.pgid, "SIGTERM");
-  if (targets.length > 0) {
+    terminated.push(child);
+  }
+  if (terminated.length > 0)
     sleep2(deps.graceMs ?? DEFAULT_REAP_GRACE_MS);
-    const after = list();
-    for (const child of targets) {
-      if (!after || after.some((entry) => entry.pgid === child.pgid))
-        signalGroup(kill, child.pgid, "SIGKILL");
+  for (const child of terminated) {
+    const verdict = verifyGroup(list(), child);
+    if (verdict.ok) {
+      signalGroup(kill, child.pgid, "SIGKILL");
       result.stopped.push({ service: child.service, pgid: child.pgid });
+    } else if (verdict.reason === "gone") {
+      result.stopped.push({ service: child.service, pgid: child.pgid });
+    } else {
+      skip(child, "unverified");
+      if (verdict.reason === "unreadable")
+        unsettled.push(child);
     }
   }
-  removeRecord(path);
+  if (unsettled.length > 0)
+    writeRecord(path, { ...record, children: unsettled });
+  else
+    removeRecord(path);
   return result;
 }
 function engineChildrenRecorder(input) {
   const children = new Map;
+  const startTimeOf = input.startTimeOf ?? processStartTime;
   const write = () => {
-    try {
-      if (children.size === 0) {
-        removeRecord(input.path);
-        return;
-      }
-      mkdirSync19(dirname26(input.path), { recursive: true, mode: 448 });
-      const file = {
-        schema: ENGINE_CHILDREN_SCHEMA,
-        host_pid: input.hostPid ?? process.pid,
-        markers: input.markers,
-        children: [...children.values()]
-      };
-      writePrivateFileAtomicSync(input.path, `${JSON.stringify(file, null, 2)}
-`);
-    } catch {}
+    if (children.size === 0) {
+      removeRecord(input.path);
+      return;
+    }
+    writeRecord(input.path, { schema: ENGINE_CHILDREN_SCHEMA, host_pid: input.hostPid ?? process.pid, children: [...children.values()] });
   };
   return {
-    spawned(serviceId, pid) {
-      children.set(pid, { service: serviceId, pgid: pid, started_at: (input.now?.() ?? new Date).toISOString() });
+    spawned(serviceId, pid, argv) {
+      let started;
+      try {
+        started = startTimeOf(pid);
+      } catch {
+        started = undefined;
+      }
+      children.set(pid, {
+        service: serviceId,
+        pgid: pid,
+        started_at: (input.now?.() ?? new Date).toISOString(),
+        process_started: started ?? null,
+        argv: argv ? [...argv] : []
+      });
       write();
     },
     stopped(_serviceId, pid) {
@@ -45948,22 +46002,64 @@ function parseProcessTable(text) {
   const entries = [];
   for (const line of text.split(`
 `)) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    const match = TABLE_LINE.exec(line);
     if (!match)
       continue;
-    entries.push({ pid: Number(match[1]), pgid: Number(match[2]), command: match[3].trim() });
+    entries.push({ pid: Number(match[1]), pgid: Number(match[2]), started: normalizeStart(match[3]), command: decodePsCommand(match[4].trim()) });
   }
   return entries;
 }
+function decodePsCommand(command) {
+  if (!/\\[0-7]{3}/.test(command))
+    return command;
+  const bytes = [];
+  for (let index = 0;index < command.length; ) {
+    const escape2 = /^\\([0-7]{3})/.exec(command.slice(index, index + 4));
+    if (escape2) {
+      bytes.push(parseInt(escape2[1], 8) & 255);
+      index += 4;
+      continue;
+    }
+    const codePoint = command.codePointAt(index);
+    const char = String.fromCodePoint(codePoint);
+    bytes.push(...Buffer.from(char, "utf8"));
+    index += char.length;
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+function normalizeStart(value) {
+  return value.trim().replace(/\s+/g, " ");
+}
 function listProcessTable() {
-  const result = spawnSync4("ps", ["-axww", "-o", "pid=,pgid=,command="], { encoding: "utf8", timeout: 1e4, maxBuffer: 32 * 1024 * 1024 });
+  const result = spawnSync4("ps", ["-axww", "-o", "pid=,pgid=,lstart=,command="], {
+    encoding: "utf8",
+    timeout: 1e4,
+    maxBuffer: 32 * 1024 * 1024,
+    env: PS_ENV
+  });
   if (result.status !== 0 || typeof result.stdout !== "string")
     return;
   return parseProcessTable(result.stdout);
 }
+function processStartTime(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 1)
+    return;
+  const result = spawnSync4("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, env: PS_ENV });
+  if (result.status !== 0 || typeof result.stdout !== "string")
+    return;
+  const value = normalizeStart(result.stdout);
+  return new RegExp(`^${LSTART}$`).test(value) ? value : undefined;
+}
 function signalGroup(kill, pgid, signal) {
   try {
     kill(-pgid, signal);
+  } catch {}
+}
+function writeRecord(path, file) {
+  try {
+    mkdirSync19(dirname26(path), { recursive: true, mode: 448 });
+    writePrivateFileAtomicSync(path, `${JSON.stringify(file, null, 2)}
+`);
   } catch {}
 }
 function removeRecord(path) {
@@ -45975,10 +46071,13 @@ function removeRecord(path) {
 function sleepSync2(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
-var ENGINE_CHILDREN_SCHEMA = "olympus.engine.children.v1", DEFAULT_REAP_GRACE_MS = 2000;
+var ENGINE_CHILDREN_SCHEMA = "olympus.engine.children.v2", ENGINE_CHILDREN_SCHEMA_V1 = "olympus.engine.children.v1", DEFAULT_REAP_GRACE_MS = 2000, LSTART, TABLE_LINE, PS_ENV;
 var init_engine_children = __esm(() => {
   init_atomic_file();
   init_remote_access();
+  LSTART = String.raw`[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}`;
+  TABLE_LINE = new RegExp(String.raw`^\s*(\d+)\s+(\d+)\s+(${LSTART})\s+(.*)$`);
+  PS_ENV = { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8", TZ: "UTC" };
 });
 
 // src/core/engine-service.ts
@@ -46231,6 +46330,128 @@ function installEngine(options = {}) {
     action
   };
 }
+async function waitForEngineHealthy(input, deps = {}) {
+  const now = deps.now ?? Date.now;
+  const sleep2 = deps.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+  const timeoutMs = deps.timeoutMs ?? ENGINE_HEALTH_TIMEOUT_MS;
+  const pidAlive = deps.pidAlive ?? defaultPidAlive;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const started = now();
+  let last = {
+    ok: false,
+    expected_build: input.expectedBuild,
+    running_build: null,
+    pid: null,
+    worker: "not_ready",
+    waited_ms: 0,
+    reason: "the engine has not written its status yet"
+  };
+  for (;; ) {
+    last = { ...await checkEngineHealthOnce(input, pidAlive, fetchImpl), waited_ms: now() - started };
+    if (last.ok || now() - started >= timeoutMs)
+      return last;
+    await sleep2(Math.min(deps.pollMs ?? ENGINE_HEALTH_POLL_MS, Math.max(0, timeoutMs - (now() - started))));
+  }
+}
+async function checkEngineHealthOnce(input, pidAlive, fetchImpl) {
+  const base = { ok: false, expected_build: input.expectedBuild, running_build: null, pid: null, worker: "not_ready" };
+  let status;
+  try {
+    status = JSON.parse(readFileSync25(input.paths.statusPath, "utf8"));
+  } catch {
+    return { ...base, reason: "the engine has not written its status yet" };
+  }
+  const runningBuild = typeof status.build === "string" ? status.build : null;
+  const pid = typeof status.pid === "number" && Number.isSafeInteger(status.pid) && status.pid > 0 ? status.pid : null;
+  const seen = { ...base, running_build: runningBuild, pid };
+  if (status?.schema !== "olympus.engine.status.v1")
+    return { ...seen, reason: "the engine status file is not one this version reads" };
+  if (input.since !== undefined) {
+    const startedAt = typeof status.started_at === "string" ? Date.parse(status.started_at) : Number.NaN;
+    if (!Number.isFinite(startedAt) || startedAt < input.since)
+      return { ...seen, reason: "the engine has not restarted yet" };
+  }
+  if (status.state !== "running")
+    return { ...seen, reason: `the engine is ${typeof status.state === "string" ? status.state : "not running"}` };
+  if (input.expectedBuild !== null && runningBuild !== input.expectedBuild) {
+    return { ...seen, reason: `the engine runs build ${runningBuild ?? "unknown"}, not ${input.expectedBuild}` };
+  }
+  if (pid === null || !pidAlive(pid))
+    return { ...seen, reason: "the engine process named in its status is not running" };
+  const worker = status.services?.[WORKER_SERVICE_ID];
+  if (worker?.state === "off")
+    return { ...seen, ok: true, worker: "off" };
+  if (worker?.state !== "ok") {
+    const message = typeof worker?.message === "string" && worker.message ? `: ${worker.message.slice(0, 200)}` : "";
+    return { ...seen, reason: `the worker is not ready yet${message}` };
+  }
+  const baseUrl = engineWorkerBaseUrl(input.paths);
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), 2000);
+  try {
+    const response = await fetchImpl(`${baseUrl.replace(/\/$/, "")}/health`, { method: "GET", signal: controller.signal });
+    await response.body?.cancel().catch(() => {
+      return;
+    });
+    if (!response.ok)
+      return { ...seen, reason: `the worker /health answered HTTP ${response.status}` };
+  } catch {
+    return { ...seen, reason: "the worker /health did not answer" };
+  } finally {
+    clearTimeout(timer);
+  }
+  return { ...seen, ok: true, worker: "ok" };
+}
+function engineWorkerBaseUrl(paths) {
+  try {
+    const value = readEngineConfig(paths.configPath)?.email?.baseUrl;
+    if (typeof value === "string") {
+      const url = new URL(value);
+      if (url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))
+        return value;
+    }
+  } catch {}
+  return DEFAULT_WORKER_BASE_URL;
+}
+function defaultPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+async function installEngineVerified(options = {}) {
+  const now = options.health?.now ?? Date.now;
+  const since = now();
+  const result = installEngine(options);
+  if (result.action === "dry_run")
+    return result;
+  const health = await waitForEngineHealthy({
+    paths: enginePaths(absolute(options.homeDir ?? homedir31(), "home directory")),
+    expectedBuild: result.program.build ?? null,
+    ...result.action === "unchanged" ? {} : { since }
+  }, options.health);
+  return health.ok ? { ...result, ok: true, health } : { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? "unknown"} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.` };
+}
+function installedEngineBuild(plistPath) {
+  try {
+    const text = readFileSync25(plistPath, "utf8");
+    const match = new RegExp(`<key>${ENGINE_BUILD_ENV}</key>\\s*<string>([^<]*)</string>`).exec(text);
+    return match ? unxml(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+async function verifyEngine(options = {}) {
+  assertDarwin(options.platform);
+  const paths = enginePaths(absolute(options.homeDir ?? homedir31(), "home directory"));
+  if (!existsSync27(paths.plistPath)) {
+    throw new OperationError("config_error", "The engine is not installed.", "Run olympus engine install.");
+  }
+  const health = await waitForEngineHealthy({ paths, expectedBuild: installedEngineBuild(paths.plistPath) }, options.health);
+  return health.ok ? { ok: true, health } : { ok: false, health, reason: `The engine is not healthy: ${health.reason}.` };
+}
 function preflightEnginePaths(homeDir, paths = enginePaths(homeDir)) {
   const managed = [
     [paths.plistPath, "LaunchAgent"],
@@ -46409,7 +46630,7 @@ function startEngine(options = {}) {
   mustSucceed(exec("launchctl", ["bootstrap", guiDomain(options.uid), paths.plistPath]), "load the engine agent");
   return { ok: true, action: "started" };
 }
-function rollbackEngine(options = {}) {
+async function rollbackEngine(options = {}) {
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir31(), "home directory");
   const paths = enginePaths(homeDir);
@@ -46425,32 +46646,59 @@ function rollbackEngine(options = {}) {
   assertFile(join39(paths.previousAppDir, "dist", "cli.js"), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
   const bunBin = options.bunBin ?? installed.runtimePath;
   swapAppDirectories(paths);
-  const reinstall = () => installEngine({
+  const reinstall = () => installEngineVerified({
     ...options.homeDir ? { homeDir: options.homeDir } : {},
     ...options.exec ? { exec: options.exec } : {},
     ...options.uid !== undefined ? { uid: options.uid } : {},
     ...options.platform ? { platform: options.platform } : {},
+    ...options.health ? { health: options.health } : {},
     fromCheckout: paths.appDir,
     bunBin,
     restart: true
   });
+  const restore = async () => {
+    swapAppDirectories(paths);
+    const build = engineBuildIdentity(paths.appDir);
+    try {
+      const back = await reinstall();
+      return back.ok ? { ok: true, build } : { ok: false, build, reason: back.reason ?? "it did not prove healthy" };
+    } catch (error) {
+      return { ok: false, build, reason: error instanceof Error ? error.message : String(error) };
+    }
+  };
   let result;
   try {
-    result = reinstall();
+    result = await reinstall();
   } catch (error) {
-    swapAppDirectories(paths);
-    try {
-      reinstall();
-    } catch {}
-    throw error;
+    const restored2 = await restore();
+    if (restored2.ok)
+      throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new OperationError("config_error", `${message} Putting back build ${restored2.build} failed too: ${restored2.reason}`, "Run olympus engine logs, then the Olympus installer again.");
   }
+  if (result.ok) {
+    return {
+      ok: true,
+      running_build: result.program.build ?? engineBuildIdentity(paths.appDir),
+      previous_build: engineBuildIdentity(paths.previousAppDir),
+      app_dir: paths.appDir,
+      previous_app_dir: paths.previousAppDir,
+      action: result.action,
+      health: result.health
+    };
+  }
+  const failedBuild = result.program.build ?? "unknown";
+  const restored = await restore();
   return {
-    ok: true,
-    running_build: result.program.build ?? engineBuildIdentity(paths.appDir),
+    ok: false,
+    running_build: engineBuildIdentity(paths.appDir),
     previous_build: engineBuildIdentity(paths.previousAppDir),
     app_dir: paths.appDir,
     previous_app_dir: paths.previousAppDir,
-    action: result.action
+    action: result.action,
+    health: result.health,
+    reason: restored.ok ? `Rolling back to build ${failedBuild} failed (${result.reason}); build ${restored.build} was put back and is healthy.` : `Rolling back to build ${failedBuild} failed (${result.reason}); putting back build ${restored.build} failed too: ${restored.reason}`,
+    restored
   };
 }
 function swapAppDirectories(paths) {
@@ -46701,7 +46949,7 @@ function unxml(value) {
 function xml(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
-var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, STANDALONE_SOVEREIGNTY_PRESET = "no-sensitive", ENV_POLICY_KEY, LOG_TAIL_BYTES;
+var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "no-sensitive", ENV_POLICY_KEY, LOG_TAIL_BYTES;
 var init_engine_service = __esm(() => {
   init_atomic_file();
   init_engine_children();
@@ -58262,11 +58510,14 @@ function setNativeProcessChildStdio(mode) {
 function setNativeProcessChildObserver(observer) {
   childObserver = observer;
 }
-function notifyChildObserver(event, serviceId, pid) {
+function notifyChildObserver(event, serviceId, pid, argv) {
   if (!childObserver || !pid || process.platform === "win32")
     return;
   try {
-    childObserver[event](serviceId, pid);
+    if (event === "spawned")
+      childObserver.spawned(serviceId, pid, argv);
+    else
+      childObserver.stopped(serviceId, pid);
   } catch {}
 }
 function backgroundNativeProcessService(service) {
@@ -58366,7 +58617,7 @@ function createNativeProcessService(options) {
     });
     lifetime.child = child;
     lifetime.childReady = false;
-    notifyChildObserver("spawned", options.id, child.pid);
+    notifyChildObserver("spawned", options.id, child.pid, [settings.command, ...settings.args]);
     let spawnFailed = false;
     child.once("exit", (code, signal) => {
       if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
@@ -59589,12 +59840,10 @@ __export(exports_engine_host, {
   runEngineHostProcess: () => runEngineHostProcess,
   engineStatusPath: () => engineStatusPath,
   engineHostServices: () => engineHostServices,
-  engineChildMarkers: () => engineChildMarkers,
   ENGINE_STATUS_SCHEMA: () => ENGINE_STATUS_SCHEMA
 });
 import { mkdirSync as mkdirSync31 } from "node:fs";
 import { join as join56 } from "node:path";
-import { fileURLToPath as fileURLToPath8 } from "node:url";
 function engineHostServices(pluginConfig, moduleUrl) {
   const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl });
   return [
@@ -59640,10 +59889,7 @@ async function startEngineHost(options) {
   if (reaped.stopped.length > 0) {
     log(`engine: stopped ${reaped.stopped.length} process group(s) a previous engine left running (${reaped.stopped.map((child) => child.service).join(", ")}).`);
   }
-  setNativeProcessChildObserver(engineChildrenRecorder({
-    path: childrenPath,
-    markers: engineChildMarkers(options.moduleUrl, dataEnv)
-  }));
+  setNativeProcessChildObserver(engineChildrenRecorder({ path: childrenPath }));
   const now = () => new Date().toISOString();
   const status = {
     schema: ENGINE_STATUS_SCHEMA,
@@ -59725,14 +59971,6 @@ async function startEngineHost(options) {
     process.once("SIGINT", onSignal);
   }
   return { stop, status: () => structuredClone(status) };
-}
-function engineChildMarkers(moduleUrl, env) {
-  const markers = [];
-  try {
-    markers.push(fileURLToPath8(new URL("./cli.js", moduleUrl)));
-  } catch {}
-  markers.push(join56(olympusDataDir(env), "models"));
-  return markers;
 }
 async function runEngineHostProcess(moduleUrl) {
   const handle = await startEngineHost({ moduleUrl });
@@ -74475,12 +74713,13 @@ function installIdForPublicKey(spkiDer) {
 function spkiOf(key) {
   return key.export({ format: "der", type: "spki" });
 }
-function signedPayload(kind, nonce, installId, relayHost) {
-  return Buffer.from([SIGNATURE_DOMAIN, kind, nonce, installId, relayHost.toLowerCase()].join(`
+function signedPayload(kind, nonce, installId, relayHost, scheme) {
+  const fields = scheme === AUTH_LEGACY ? [SIGNATURE_DOMAIN, kind, nonce, installId] : [SIGNATURE_DOMAIN, kind, nonce, installId, relayHost.toLowerCase()];
+  return Buffer.from(fields.join(`
 `), "utf8");
 }
-function signInstallMessage(privateKey, kind, nonce, installId, relayHost) {
-  return base64url2(sign(null, signedPayload(kind, nonce, installId, relayHost), privateKey));
+function signInstallMessage(privateKey, kind, nonce, installId, relayHost, scheme = AUTH_BOUND) {
+  return base64url2(sign(null, signedPayload(kind, nonce, installId, relayHost, scheme), privateKey));
 }
 function powDigest(nonce, installId, relayHost, counter) {
   return createHash43("sha256").update(`${POW_DOMAIN}
@@ -74500,24 +74739,32 @@ function leadingZeroBits(digest2) {
   }
   return bits;
 }
-async function solveRegistrationPow(bits, nonce, installId, relayHost) {
+async function solveRegistrationPow(bits, nonce, installId, relayHost, signal) {
   if (!Number.isInteger(bits) || bits < 0 || bits > MAX_REGISTRATION_POW_BITS)
     throw new Error("the relay asked for an unreasonable registration proof of work");
   for (let counter = 0;; counter += 1) {
+    if (counter % 4096 === 0) {
+      if (counter > 0)
+        await new Promise((resolve8) => setTimeout(resolve8, 0));
+      if (signal?.aborted)
+        throw new PowCancelledError;
+    }
     const candidate = String(counter);
     if (bits === 0 || leadingZeroBits(powDigest(nonce, installId, relayHost, candidate)) >= bits)
       return candidate;
-    if (counter % 4096 === 4095)
-      await new Promise((resolve8) => setTimeout(resolve8, 0));
   }
 }
 async function installAuthMessage(input) {
   const { kind, identity, nonce, relayHost } = input;
-  const sig = signInstallMessage(identity.privateKey, kind, nonce, identity.installId, relayHost);
+  const scheme = input.scheme ?? AUTH_BOUND;
+  const sig = signInstallMessage(identity.privateKey, kind, nonce, identity.installId, relayHost, scheme);
+  const auth = scheme === AUTH_BOUND ? { auth: AUTH_BOUND } : {};
   if (kind === "hello")
-    return { type: "hello", v: PROTOCOL_VERSION, installId: identity.installId, sig };
-  const pow = await solveRegistrationPow(input.powBits, nonce, identity.installId, relayHost);
-  return { type: "register", v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig, pow };
+    return { type: "hello", v: PROTOCOL_VERSION, installId: identity.installId, sig, ...auth };
+  if (scheme === AUTH_LEGACY)
+    return { type: "register", v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig };
+  const pow = await solveRegistrationPow(input.powBits, nonce, identity.installId, relayHost, input.signal);
+  return { type: "register", v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig, pow, ...auth };
 }
 function parseTextFrame(data) {
   if (data.length > MAX_TEXT_FRAME_BYTES)
@@ -74563,10 +74810,16 @@ function parseHeaderList(value, maxEntries = 64) {
 function streamId(value) {
   return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 4294967295 ? value : undefined;
 }
-var PROTOCOL_VERSION = 2, CONNECT_PATH = "/v2/connect", MAX_TEXT_FRAME_BYTES, MAX_BODY_CHUNK_BYTES, SIGNATURE_DOMAIN = "olympus-connect-relay/v2", POW_DOMAIN = "olympus-connect-relay/v2/register-pow", MAX_REGISTRATION_POW_BITS = 22, BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
+var PROTOCOL_VERSION = 2, CONNECT_PATH = "/v2/connect", MAX_TEXT_FRAME_BYTES, MAX_BODY_CHUNK_BYTES, SIGNATURE_DOMAIN = "olympus-connect-relay/v2", AUTH_LEGACY = 2, AUTH_BOUND = 3, POW_DOMAIN = "olympus-connect-relay/v2/register-pow", MAX_REGISTRATION_POW_BITS = 22, BASE32 = "abcdefghijklmnopqrstuvwxyz234567", PowCancelledError;
 var init_protocol2 = __esm(() => {
   MAX_TEXT_FRAME_BYTES = 16 * 1024;
   MAX_BODY_CHUNK_BYTES = 64 * 1024;
+  PowCancelledError = class PowCancelledError extends Error {
+    constructor() {
+      super("registration proof of work cancelled");
+      this.name = "PowCancelledError";
+    }
+  };
 });
 
 // connect-relay/client/identity.ts
@@ -74710,7 +74963,9 @@ class RelayClient {
   socket;
   stopped = true;
   register = false;
+  legacyRelay = false;
   failures = 0;
+  handshake;
   heartbeat;
   reconnectTimer;
   inbound = new Map;
@@ -74740,6 +74995,8 @@ class RelayClient {
   }
   async stop() {
     this.stopped = true;
+    this.handshake?.abort();
+    this.handshake = undefined;
     if (this.reconnectTimer)
       clearTimeout(this.reconnectTimer);
     if (this.heartbeat)
@@ -74765,12 +75022,22 @@ class RelayClient {
     let ready = false;
     const { identity } = this.options;
     let handshakeTimer;
+    this.handshake?.abort();
+    const handshake = new AbortController;
+    this.handshake = handshake;
+    let challenged = false;
+    let advertised = false;
+    let answeredWith;
+    let fallBack = false;
     let finished = false;
     const finish = () => {
       if (finished)
         return;
       finished = true;
       clearTimeout(handshakeTimer);
+      handshake.abort();
+      if (this.handshake === handshake)
+        this.handshake = undefined;
       if (this.socket === socket) {
         this.socket = undefined;
         if (this.heartbeat)
@@ -74790,6 +75057,10 @@ class RelayClient {
         const retryInMs = this.options.revokedBackoffMs ?? 6 * 60 * 60000;
         this.options.onStatus?.({ state: "offline", reason, retryInMs });
         this.schedule(retryInMs);
+        return;
+      }
+      if (fallBack) {
+        this.schedule(0);
         return;
       }
       if (this.register && this.failures === 0) {
@@ -74827,17 +75098,33 @@ class RelayClient {
         return socket.close(4002, "protocol_error");
       switch (message.type) {
         case "challenge": {
+          if (challenged || ready) {
+            reason = "the relay sent a second challenge";
+            return socket.close(4002, "protocol_error");
+          }
+          challenged = true;
+          advertised = typeof message.auth === "number";
+          if (advertised)
+            this.legacyRelay = false;
+          const scheme = this.legacyRelay && !advertised ? AUTH_LEGACY : AUTH_BOUND;
+          answeredWith = scheme;
           const kind = this.register ? "register" : "hello";
           installAuthMessage({
             kind,
             identity,
             nonce: String(message.nonce),
             powBits: typeof message.pow === "number" ? message.pow : 0,
-            relayHost: this.options.relayHost
+            relayHost: this.options.relayHost,
+            scheme,
+            signal: handshake.signal
           }).then((auth) => {
-            if (this.socket === socket)
+            if (this.socket === socket && !handshake.signal.aborted)
               this.send(auth);
-          }, () => abandon(4002, "protocol_error", "the relay asked for an unreasonable registration proof of work"));
+          }, (error2) => {
+            if (error2 instanceof PowCancelledError || handshake.signal.aborted)
+              return;
+            abandon(4002, "protocol_error", "the relay asked for an unreasonable registration proof of work");
+          });
           return;
         }
         case "ready":
@@ -74878,6 +75165,14 @@ class RelayClient {
           reason = String(message.message ?? message.code);
           if (message.code === "unregistered")
             this.register = true;
+          if (message.code === "bad_signature" && !advertised) {
+            if (answeredWith === AUTH_BOUND && !this.legacyRelay) {
+              this.legacyRelay = true;
+              fallBack = true;
+            } else if (answeredWith === AUTH_LEGACY) {
+              this.legacyRelay = false;
+            }
+          }
           if (message.code === "replaced")
             replaced = true;
           if (message.code === "revoked")
@@ -78326,9 +78621,9 @@ var init_text = __esm(() => {
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 import { existsSync as existsSync41 } from "node:fs";
 import { dirname as dirname44, join as join60 } from "node:path";
-import { fileURLToPath as fileURLToPath9 } from "node:url";
+import { fileURLToPath as fileURLToPath8 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync41) {
-  let directory = dirname44(fileURLToPath9(moduleUrl));
+  let directory = dirname44(fileURLToPath8(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
     const candidate = join60(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
@@ -119182,6 +119477,7 @@ var ENGINE_CLI_USAGE = {
   "engine stop": "olympus engine stop",
   "engine restart": "olympus engine restart",
   "engine rollback": "olympus engine rollback",
+  "engine verify": "olympus engine verify",
   "engine logs": "olympus engine logs [--lines <n>] [--follow]"
 };
 async function runEngineCommand(args, deps = {}) {
@@ -119194,13 +119490,17 @@ async function runEngineCommand(args, deps = {}) {
   };
   if (command === "install") {
     const options = parseInstallArgs(rest);
-    const result = installEngine({ ...service, ...options });
+    const result = await installEngineVerified({ ...service, ...options, ...deps.health ? { health: deps.health } : {} });
     const { plist, ...summary } = result;
     return {
       ...summary,
       ...options.dryRun ? { plist } : {},
-      next: result.action === "dry_run" ? "Rerun without --dry-run to write and load the agent." : "Run olympus engine status; the engine links itself to the relay once the worker is ready."
+      next: result.action === "dry_run" ? "Rerun without --dry-run to write and load the agent." : result.ok ? "Run olympus engine status; the engine links itself to the relay once the worker is ready." : "Run olympus engine logs to see why the engine did not become healthy."
     };
+  }
+  if (command === "verify") {
+    expectNoArgs("verify", rest);
+    return verifyEngine({ ...service, ...deps.health ? { health: deps.health } : {} });
   }
   if (command === "uninstall") {
     expectNoArgs("uninstall", rest);
@@ -119220,7 +119520,7 @@ async function runEngineCommand(args, deps = {}) {
   }
   if (command === "rollback") {
     expectNoArgs("rollback", rest);
-    return rollbackEngine(service);
+    return rollbackEngine({ ...service, ...deps.health ? { health: deps.health } : {} });
   }
   if (command === "status") {
     expectNoArgs("status", rest);
@@ -119493,6 +119793,9 @@ async function main2() {
       const result = await runEngineCommand(args.slice(1));
       if (result !== undefined)
         console.log(JSON.stringify(result, null, 2));
+      const verifying = ["install", "verify", "rollback"].includes(args[1] ?? "");
+      if (verifying && result && typeof result === "object" && result.ok === false)
+        process.exitCode = 1;
     } catch (error2) {
       if (error2 instanceof OperationError) {
         console.error(`Error [${error2.code}]: ${error2.message}`);
