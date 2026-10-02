@@ -7343,6 +7343,10 @@ var init_public_surface = __esm(() => {
     "engine status",
     "engine restart",
     "engine logs",
+    "engine stop",
+    "engine start",
+    "engine rollback",
+    "engine verify",
     "connect google",
     "connect gmail",
     "connect google-drive",
@@ -46318,7 +46322,7 @@ function installEngine(options = {}) {
   }
   if (action === "bootstrapped" || action === "reloaded") {
     exec("launchctl", ["enable", target]);
-    mustSucceed(exec("launchctl", ["bootstrap", guiDomain(options.uid), paths.plistPath]), "load the engine agent");
+    bootstrapAgent(exec, target, guiDomain(options.uid), paths.plistPath, action === "reloaded");
   }
   return {
     ...base,
@@ -46627,7 +46631,7 @@ function startEngine(options = {}) {
   mustSucceed(exec("launchctl", ["enable", target]), "enable the engine agent");
   if (launchctlLoaded(exec, target))
     return { ok: true, action: "already_running" };
-  mustSucceed(exec("launchctl", ["bootstrap", guiDomain(options.uid), paths.plistPath]), "load the engine agent");
+  bootstrapAgent(exec, target, guiDomain(options.uid), paths.plistPath, false);
   return { ok: true, action: "started" };
 }
 async function rollbackEngine(options = {}) {
@@ -46839,6 +46843,22 @@ function guiDomain(uid) {
 }
 function serviceTarget(uid) {
   return `${guiDomain(uid)}/${ENGINE_LABEL}`;
+}
+function bootstrapAgent(exec, target, domain, plistPath, afterBootout, sleep2 = sleepSync3) {
+  if (afterBootout)
+    for (let waited = 0;waited < 1e4 && launchctlLoaded(exec, target); waited += 250)
+      sleep2(250);
+  let result = exec("launchctl", ["bootstrap", domain, plistPath]);
+  for (let attempt = 1;result.status !== 0 && attempt < 8 && /\b5: Input\/output error\b/.test(`${result.stderr ?? ""}`); attempt += 1) {
+    sleep2(500);
+    if (launchctlLoaded(exec, target))
+      return;
+    result = exec("launchctl", ["bootstrap", domain, plistPath]);
+  }
+  mustSucceed(result, "load the engine agent");
+}
+function sleepSync3(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 function launchctlLoaded(exec, target) {
   const result = exec("launchctl", ["print", target]);
