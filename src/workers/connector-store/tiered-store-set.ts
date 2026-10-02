@@ -1016,7 +1016,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // The owner's installed inputs (map, rules file, sniffer) merged with the
     // set's own (TieredStoreSet.classification()), resolved once per run.
     const classification = this.classification;
-    let decision = decideItemTiers(connector, item, text, classification, ledger);
+    // Names-only by the owner's choice: the text never arrives, so the names
+    // are the whole decision and the item never waits on it.
+    let decision = decideItemTiers(connector, item, text, classification, ledger, { namesOnly: deferred && input.metadataOnly });
     // With the owner's rules file or map unusable, the decision (made with
     // the last good ones) may not place anything below Private: hold it
     // pending (secure_local, embedding held) until the file is fixed.

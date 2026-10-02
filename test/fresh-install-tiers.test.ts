@@ -41,7 +41,7 @@ import {
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
 import { BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON, TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
-import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, TIER_CLASSIFIER_VERSION } from '../src/workers/classification/tier-classifier.ts';
 import { loadSovereigntyEngine } from '../src/core/sovereignty.ts';
 import {
   createConnectorStoreContentProvider,
@@ -495,7 +495,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     // Next pass: the model reads the names and the excerpt and says Private.
     await service.runOnce();
     const judged = install.lane.ledger.getCurrent(identity('id:garden'))!;
-    expect(judged).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer', engineVersion: '2026-10-01.p3' });
+    expect(judged).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer', engineVersion: TIER_CLASSIFIER_VERSION });
     expect(judged.reasons.some((reason) => reason.startsWith('content:sniffer:local:'))).toBe(true);
     expect(prompts.some((prompt) => prompt.prompt.includes('Names: orchard-plan.pdf') && prompt.prompt.includes('pruning plan'))).toBe(true);
     expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
