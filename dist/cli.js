@@ -107726,6 +107726,11 @@ function copyDashboardViewModel(view) {
     const href = safeHref2(view.connection.action.href);
     connection.action = { id: view.connection.action.id, ...href ? { href } : {} };
   }
+  if (state === "not_connected") {
+    const installHref = safeHref2(view.connection.installHref);
+    if (installHref)
+      connection.installHref = installHref;
+  }
   if (state === "installing" && view.connection.progress) {
     connection.progress = {
       percent: percent(view.connection.progress.percent),
@@ -108411,8 +108416,8 @@ var init_response_builder = __esm(() => {
     [PRIVACY_GET_TOOL_NAME]: {}
   };
   HANDOFF_URL = /^https:\/\/mcp\.olympusplugin\.ai\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
-  CONNECTION_STATES = new Set(["not_installed", "installing", "ready", "mac_offline", "relay_unavailable"]);
-  CONNECTION_ACTIONS = new Set(["install", "open_olympus", "wake_mac", "retry"]);
+  CONNECTION_STATES = new Set(["not_connected", "not_installed", "installing", "ready", "mac_offline", "relay_unavailable"]);
+  CONNECTION_ACTIONS = new Set(["connect", "install", "open_olympus", "wake_mac", "retry"]);
   STATUSES = new Set(["Fresh", "Working", "Waiting", "Needs you", "Failing", "Off"]);
   UNITS = new Set(["files", "messages", "items"]);
   EMBEDDING_STATES = new Set(["downloading", "verifying", "ready", "failed"]);
