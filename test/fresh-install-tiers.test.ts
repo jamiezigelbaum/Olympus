@@ -630,13 +630,17 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
       );
     }
 
-    // Within the bound: retried, both left queued.
-    clock += 10 * 60_000;
+    // Queued long ago, but the bound counts from the first failed attempt:
+    // retried, both left queued.
+    clock += 3 * 60 * 60_000;
     expect(await service.runOnce()).toMatchObject({ autoMoves: { moved: 0, failed: 2 } });
     expect(ledger.getCurrent(garden)).toMatchObject({ state: 'moving' });
     expect(ledger.getCurrent(bank)).toMatchObject({ state: 'moving' });
+    clock += 10 * 60_000;
+    expect(await service.runOnce()).toMatchObject({ autoMoves: { moved: 0, failed: 2 } });
+    expect(ledger.getCurrent(garden)).toMatchObject({ state: 'moving' });
 
-    // Past the bound (measured from when each move was queued).
+    // Past the bound since the first failure.
     clock += 2 * 60 * 60_000;
     const settled = await service.runOnce();
     expect(settled).toMatchObject({ autoMoves: { failed: 2, abandoned: 1, staleRaises: 1 } });

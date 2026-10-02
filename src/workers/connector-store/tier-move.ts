@@ -330,7 +330,7 @@ async function moveToSecrets(options: TierMoveOptions, expectedGeneration: numbe
 }
 
 /** Whether a kept copy holds exactly the source's text, chunk for chunk (what `importItemCopy` keeps in place). */
-function sameText(kept: ConnectorStoreItemCopy | undefined, source: ConnectorStoreItemCopy | undefined): boolean {
+export function sameText(kept: ConnectorStoreItemCopy | undefined, source: ConnectorStoreItemCopy | undefined): boolean {
   if (!kept || !source || kept.chunks.length !== source.chunks.length) return false;
   return kept.chunks.every((chunk, index) => {
     const other = source.chunks[index]!;

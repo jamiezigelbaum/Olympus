@@ -14794,15 +14794,22 @@ class TierLedger {
         throw new TierLedgerSecretsRollbackRefusedError;
       }
       const moveGeneration = existing.generation + 1;
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-      `).run(now, ...idParams(identity));
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'current', superseded_by_generation = NULL, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-          AND copy_state = 'superseded' AND superseded_by_generation = ?
-      `).run(now, ...idParams(identity), moveGeneration);
+      const copies = this.copies(identity);
+      if (copies.some((copy) => copy.state === "superseded" && copy.supersededByGeneration === moveGeneration)) {
+        throw new TierLedgerRaiseAbandonRefusedError;
+      }
+      const staged = copies.filter((copy) => copy.state === "staged");
+      if (staged.length < copies.length) {
+        this.db.query(`
+          DELETE FROM tier_copies
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+        `).run(...idParams(identity));
+      } else {
+        this.db.query(`
+          UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+        `).run(now, ...idParams(identity));
+      }
       const state = existing.metadataPending || existing.contentPending ? "pending" : "current";
       this.db.query(`
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL
@@ -15463,7 +15470,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 3, TierLedgerGenerationConflictError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 3, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -15471,6 +15478,12 @@ var init_tier_ledger = __esm(() => {
     constructor(message = "Tier ledger generation changed; re-read the row before flipping.") {
       super(message);
       this.name = "TierLedgerGenerationConflictError";
+    }
+  };
+  TierLedgerRaiseAbandonRefusedError = class TierLedgerRaiseAbandonRefusedError extends Error {
+    constructor(message = "A raise is never abandoned: its hidden copies stay hidden until the move completes.") {
+      super(message);
+      this.name = "TierLedgerRaiseAbandonRefusedError";
     }
   };
   TierLedgerSecretsRollbackRefusedError = class TierLedgerSecretsRollbackRefusedError extends Error {
@@ -54933,7 +54946,7 @@ async function migrateOne(lane, proposal, context) {
   for (const copy of placement) {
     if (sources.some((source) => source.corpusId === copy.corpusId))
       continue;
-    if (existing.some((row) => row.corpusId === copy.corpusId && row.state === "superseded")) {
+    if (existing.some((row) => row.corpusId === copy.corpusId && row.state === "superseded") && !sameText(set.store(copy.trustDomain)?.exportItemCopy(proposal.identity), exported)) {
       return { kind: "skipped", reason: "destination_keeps_superseded_copy" };
     }
   }
@@ -99759,6 +99772,7 @@ class TierSnifferService {
   budget;
   timer;
   running = false;
+  moveFailures = new Map;
   abort;
   lastTick;
   stopped = false;
@@ -99998,13 +100012,9 @@ class TierSnifferService {
         if (budget === 0 || signal.aborted || this.answering())
           break;
         budget -= 1;
+        const identity = recordIdentity(record3);
+        const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record3.generation}`;
         try {
-          const identity = {
-            provider: record3.provider,
-            accountScope: record3.accountScope,
-            providerItemId: record3.providerItemId,
-            ...record3.conversationKey ? { providerConversationId: record3.conversationKey } : {}
-          };
           const source = set2.ledger.copies(identity).find((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record3.generation + 1);
           const exported = source ? set2.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
           if (!exported)
@@ -100016,11 +100026,14 @@ class TierSnifferService {
             embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY }
           });
           report.moved += 1;
+          this.moveFailures.delete(failureKey);
         } catch {
           report.failed += 1;
-          const queuedAt = Date.parse(record3.decidedAt);
-          if (Number.isFinite(queuedAt) && now - queuedAt >= staleAfterMs)
-            this.settleStaleMove(set2, record3, report);
+          const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
+          this.moveFailures.set(failureKey, firstFailedAt);
+          if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set2, record3, report)) {
+            this.moveFailures.delete(failureKey);
+          }
         }
       }
     }
@@ -100031,24 +100044,23 @@ class TierSnifferService {
   }
   settleStaleMove(set2, record3, report) {
     try {
-      const identity = {
-        provider: record3.provider,
-        accountScope: record3.accountScope,
-        providerItemId: record3.providerItemId,
-        ...record3.conversationKey ? { providerConversationId: record3.conversationKey } : {}
-      };
-      const current = set2.ledger.getCurrent(identity);
-      if (!current || current.state !== "moving" || current.generation !== record3.generation)
-        return;
-      const hid = set2.ledger.copies(identity).some((copy) => copy.state === "superseded" && copy.supersededByGeneration === record3.generation + 1);
-      if (hid) {
-        report.staleRaises = (report.staleRaises ?? 0) + 1;
-        return;
-      }
-      set2.ledger.abandonMove(identity, { expectedGeneration: record3.generation });
+      set2.ledger.abandonMove(recordIdentity(record3), { expectedGeneration: record3.generation });
       report.abandoned = (report.abandoned ?? 0) + 1;
-    } catch {}
+      return true;
+    } catch (error2) {
+      if (error2 instanceof TierLedgerRaiseAbandonRefusedError)
+        report.staleRaises = (report.staleRaises ?? 0) + 1;
+      return false;
+    }
   }
+}
+function recordIdentity(record3) {
+  return {
+    provider: record3.provider,
+    accountScope: record3.accountScope,
+    providerItemId: record3.providerItemId,
+    ...record3.conversationKey ? { providerConversationId: record3.conversationKey } : {}
+  };
 }
 function isBuiltInLane(lane) {
   return lane.kind === BUILT_IN_SNIFFER_LANE.kind && lane.profileId === BUILT_IN_SNIFFER_LANE.profileId && lane.modelId === BUILT_IN_SNIFFER_LANE.modelId;

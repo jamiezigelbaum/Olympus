@@ -179,6 +179,17 @@ export class TierLedgerGenerationConflictError extends Error {
   }
 }
 
+/**
+ * A raise hid its source copies so the item is never served below its newest
+ * decision: abandoning that move would serve them again, so the ledger refuses.
+ */
+export class TierLedgerRaiseAbandonRefusedError extends Error {
+  constructor(message = 'A raise is never abandoned: its hidden copies stay hidden until the move completes.') {
+    super(message);
+    this.name = 'TierLedgerRaiseAbandonRefusedError';
+  }
+}
+
 /** A rollback never re-exposes a Secret: the ledger refuses to flip a Secrets row back. */
 export class TierLedgerSecretsRollbackRefusedError extends Error {
   constructor(message = 'A Secrets row is never rolled back: its copies stay hidden until an approved purge.') {
@@ -1484,14 +1495,15 @@ export class TierLedger {
 
   /**
    * Give up a move that never flipped (queued, or interrupted between stage
-   * and flip) and put the item back exactly where it was: the copies the move
-   * hid for itself are current again, any copy it staged stays hidden (kept,
-   * superseded by no flip, so neither a later move nor a rollback picks it up),
-   * and the row leaves `moving` at its unchanged tiers. Its newest decision's
-   * flags stay recorded. No store is written.
+   * and flip) and leave the item exactly where it was: its current copies
+   * serve as before, any copy the move staged is forgotten (its store row,
+   * partial at best, is hidden by the item's other copy rows and rewritten by
+   * the next move there), and the row leaves `moving` at its unchanged tiers.
+   * Its newest decision's flags stay recorded. No store is written.
    *
-   * Refused unless the row is mid-move at the expected generation, and for a
-   * move toward Secrets.
+   * Refused unless the row is mid-move at the expected generation, for a move
+   * toward Secrets, and for a raise that hid its source copies (abandoning it
+   * would serve the item below its newest decision).
    */
   abandonMove(identity: TierLedgerIdentity, options: { expectedGeneration: number }): TierLedgerRecord {
     const now = this.now().toISOString();
@@ -1505,15 +1517,24 @@ export class TierLedger {
         throw new TierLedgerSecretsRollbackRefusedError();
       }
       const moveGeneration = existing.generation + 1;
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-      `).run(now, ...idParams(identity));
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'current', superseded_by_generation = NULL, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-          AND copy_state = 'superseded' AND superseded_by_generation = ?
-      `).run(now, ...idParams(identity), moveGeneration);
+      const copies = this.copies(identity);
+      if (copies.some((copy) => copy.state === 'superseded' && copy.supersededByGeneration === moveGeneration)) {
+        throw new TierLedgerRaiseAbandonRefusedError();
+      }
+      const staged = copies.filter((copy) => copy.state === 'staged');
+      if (staged.length < copies.length) {
+        this.db.query(`
+          DELETE FROM tier_copies
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+        `).run(...idParams(identity));
+      } else {
+        // Nothing else marks the item routed in its stores: keep the staged
+        // rows, hidden, so the stores' rows never read as a legacy item.
+        this.db.query(`
+          UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+        `).run(now, ...idParams(identity));
+      }
       const state: TierLedgerState = existing.metadataPending || existing.contentPending ? 'pending' : 'current';
       this.db.query(`
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL
