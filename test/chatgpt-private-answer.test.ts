@@ -67,7 +67,7 @@ function readyModel(overrides: Partial<PrivateAnswerModel> = {}): PrivateAnswerM
 }
 
 function makeJobs(model: PrivateAnswerModel, clock = { now: 1_000_000 }, extra: Partial<ConstructorParameters<typeof PrivateAnswerJobs>[0]> = {}) {
-  return new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, now: () => clock.now, log: () => {}, ...extra });
+  return new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, now: () => clock.now, log: () => {}, claimHoldMs: 0, ...extra });
 }
 
 /**
@@ -628,7 +628,7 @@ describe('end to end through a real relay', () => {
         return { answer: SECRET_ANSWER, citations: [] };
       },
     });
-    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => identity.installId });
+    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => identity.installId, claimHoldMs: 0 });
     const handler = createPrivateAnswerHandler({ jobs, isRelayed: (request) => request.headers.has('x-olympus-relay') });
     const engine = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: handler });
     const statuses: RelayClientStatus[] = [];

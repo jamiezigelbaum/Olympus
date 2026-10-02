@@ -68,6 +68,7 @@ function harness(
     activity,
     log: (line) => lines.push(line),
     precompute: options.precompute ?? false,
+    claimHoldMs: 0,
     ...(options.now ? { now: options.now } : {}),
   });
   return { jobs, lines, events, activity };
@@ -134,6 +135,7 @@ describe('1. every claimed job settles within its deadline', () => {
       activity,
       log: () => {},
       precompute: false,
+      claimHoldMs: 0,
     });
     const first = jobs.begin({ question: 'one', count: 1, evidence: EVIDENCE }).jobId!;
     clock.now = 500;
@@ -240,6 +242,7 @@ describe('2. the sniffer yields to a private answer', () => {
       installId: () => INSTALL,
       activity,
       log: () => {},
+      claimHoldMs: 0,
     });
 
     const pass = service.runOnce();

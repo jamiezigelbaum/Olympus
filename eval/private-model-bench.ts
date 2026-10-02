@@ -174,6 +174,8 @@ async function runPanel(model: ReturnType<typeof createBuiltInAnalystModel>, mod
         runtimeDir: paths.runtimeDir,
       }),
     });
+    // Loaded first, as in a running engine (a query before the model is loaded falls back to keyword search).
+    await provider.prepare();
     relevance = embeddingPanelRelevance(() => provider);
   }
   const { answerPrivately } = await import('../src/core/analyst-built-in.ts');

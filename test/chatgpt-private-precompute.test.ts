@@ -111,6 +111,26 @@ describe('1. the analysis starts at search time', () => {
     expect(activity.begins).toBe(activity.ends);
   });
 
+  test('the claiming POST holds briefly, so a precomputed answer arrives in its first response; a slower one gets 202', async () => {
+    const { model } = gatedModel();
+    const { jobs } = makeJobs(model, { claimHoldMs: 1_000 });
+    const evidence = [item('a')];
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence, refresh: async () => evidence });
+    await tick();
+    const panel = await generatePanelKeyPair();
+    const first = await jobs.claim(jobId!, panel.publicKey);
+    expect(first.status).toBe(200);
+    expect(first.body.status).toBe('ready');
+
+    const slow = gatedModel({ gated: true });
+    const held = makeJobs(slow.model, { claimHoldMs: 50 });
+    const pending = held.jobs.begin({ question: 'slow', count: 1, evidence, refresh: async () => evidence }).jobId!;
+    const startedAt = Date.now();
+    expect(await held.jobs.claim(pending, panel.publicKey)).toMatchObject({ status: 202, body: { status: 'pending' } });
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(40);
+    slow.release('slow');
+  });
+
   test('a claim while the precompute runs waits for it, then seals; the model runs once', async () => {
     const { model, calls, release } = gatedModel({ gated: true });
     const { jobs, lines } = makeJobs(model);
@@ -283,7 +303,9 @@ describe('3. several searches per turn', () => {
     release('q4');
     await tick();
     expect(await collect(jobs, last, await generatePanelKeyPair())).toMatchObject({ status: 'ready', answer: 'answer to q4 from 1 items' });
-    expect(lines[0]).toMatch(/precomputed=yes wait_at_claim_ms=\d+ search_to_ready_ms=\d+ queued_ms=0 /);
+    expect(lines[0]).toMatch(/precomputed=yes wait_at_claim_ms=\d+ search_to_ready_ms=\d+ queued_ms=\d+ /);
+    // It started as soon as the older precompute was aborted, not after it.
+    expect(Number(/queued_ms=(\d+)/.exec(lines[0]!)![1])).toBeLessThan(1_000);
     expect(calls.filter((call) => !call.signal?.aborted).map((call) => call.question)).toEqual(['q4']);
   });
 });

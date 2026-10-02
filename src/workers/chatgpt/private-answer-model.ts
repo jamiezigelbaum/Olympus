@@ -78,7 +78,7 @@ export interface PanelAnswerLimits {
 
 export const PANEL_ANSWER_LIMITS: Readonly<PanelAnswerLimits> = {
   maxItems: 4,
-  relevanceMargin: 0.06,
+  relevanceMargin: 0.04,
   maxPassageChars: 2_400,
   maxPromptBytes: 11_000,
   maxAnswerChars: 1_000,

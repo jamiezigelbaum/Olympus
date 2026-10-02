@@ -330,18 +330,19 @@ percent when known; counts only, no job).
    - **What the model reads.** The panel's model reads at most 4 readable
      items: the hits ranked by relevance to the question (the cosine
      similarity of the question to each item's name, weighted 0.7, and to
-     its name plus the first 400 characters of its passages, computed by
-     the Private corpora's embedding model and only when it runs on this
-     computer; retrieval order otherwise), cut 0.06 below the best item.
-     They are rendered compactly for the small model: per item its number
-     and name, one line of date, source and folder, then its passages as
-     quoted `source_data`, under the same Analyst instruction worded for
-     that list (answer from this evidence only, cite, say what is missing).
-     Measured 2026-10-02 on a real Private store: a ChatGPT-rewritten query
-     ranked two dated reports from other months first by retrieval, and the
-     small model answered from them; by name similarity the right files led
-     with a clear margin, and the prompt shrank from about 3,700 to about
-     1,600 tokens.
+     its name plus the first 400 characters of its passages, computed by the
+     Private corpora's embedding model and only when it runs on this
+     computer; retrieval order otherwise), cut 0.04 below the best item (on
+     a real store, items about the asked subject scored within 0.035 of each
+     other, the nearest other item 0.041 or more below). They are rendered
+     compactly for the small model: per item its number and name, one line
+     of date, source and folder, then its passages as quoted `source_data`,
+     under the same Analyst instruction worded for that list (answer from
+     this evidence only, cite, say what is missing). Measured 2026-10-02 on
+     a real Private store: a ChatGPT-rewritten query ranked two dated
+     reports from other months first by retrieval, and the small model
+     answered from them; by name similarity the right files led with a clear
+     margin, and the prompt shrank from about 3,700 to about 1,600 tokens.
    - **Timing log.** Each settled claim logs one content-free line:
      `[private-answer] outcome=… precomputed=yes|no wait_at_claim_ms=…
      search_to_ready_ms=… queued_ms=… refresh_ms=… matched=… items=…
@@ -353,8 +354,11 @@ percent when known; counts only, no job).
      lock out a real panel. The claim-time search on a pinned Private corpus
      passes the tier ledger's visibility gate too, so an item re-tiered
      since the search is never read.
-5. **Poll.** While the model works, the same key gets **202 `pending`** with
-   `Retry-After: 2`; the panel polls with the same key.
+5. **Poll.** The claiming POST holds up to 1.5 s for the answer (the
+   claim-time search and the seal), so a precomputed answer reaches the
+   panel in its first response. While the model still works, the same key
+   gets **202 `pending`** with `Retry-After: 2`; the panel polls with the
+   same key.
 6. **Collect.** When done, the engine generates its own ephemeral P-256 pair,
    derives `HKDF-SHA256(ECDH(mac, panel), salt = empty, info = job id)` as an
    AES-256-GCM key, seals `{v:1, answer, citations, unanswered?}`, padded

@@ -26,7 +26,8 @@
  *    included) is dropped. The precomputed answer is used only when every
  *    item it read is still Private-eligible; otherwise it is discarded and the
  *    answer is computed again from the current evidence (or the job fails).
- *    Until the answer is sealed, the claiming key gets 202 `pending` with
+ *    The claiming POST holds briefly (PRIVATE_ANSWER_CLAIM_HOLD_MS) for the
+ *    answer; until it is sealed, the claiming key gets 202 `pending` with
  *    Retry-After.
  * 4. Then the claiming key gets 200 `ready` with the answer sealed to that
  *    key (private-answer-crypto.ts), padded to a size bucket so the
@@ -105,6 +106,12 @@ export interface PrivateAnswerJobsOptions {
   analysisTimeoutMs?: number;
   /** Start each job's analysis when the job is created (default true). */
   precompute?: boolean;
+  /**
+   * The claiming POST waits up to this long for the answer before it
+   * answers 202 (default PRIVATE_ANSWER_CLAIM_HOLD_MS), so a precomputed
+   * answer reaches the panel in its first response, not after a poll interval.
+   */
+  claimHoldMs?: number;
   /** An identical question within this long shares one analysis. */
   dedupeMs?: number;
   /** An unclaimed job's precompute that has not started this long after its search is abandoned. */
@@ -248,6 +255,8 @@ export const PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 100_000;
 export const PRIVATE_ANSWER_DEDUPE_MS = 3 * 60_000;
 /** An unclaimed job's precompute not started within this long of its search is abandoned. */
 export const PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS = 2 * 60_000;
+/** How long the claiming POST holds for a ready answer (refresh and seal) before it answers 202. */
+export const PRIVATE_ANSWER_CLAIM_HOLD_MS = 1_500;
 const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
 
 const defaultAudit = (event: PrivateAnswerAuditEvent) => {
@@ -426,7 +435,19 @@ export class PrivateAnswerJobs {
     }
     if (job.claimKey === undefined) {
       job.claimKey = panel.raw;
-      this.startClaim(job, panel.key);
+      const settled = this.startClaim(job, panel.key);
+      // A precomputed answer needs only the evidence re-read and the seal:
+      // wait briefly so the panel gets it in this response.
+      const holdMs = this.options.claimHoldMs ?? PRIVATE_ANSWER_CLAIM_HOLD_MS;
+      if (holdMs > 0) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([settled, new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, holdMs);
+          (timer as { unref?: () => void }).unref?.();
+        })]);
+        clearTimeout(timer);
+      }
+      if (this.jobs.get(jobId) !== job) return gone();
     }
     const outcome = job.outcome;
     if (!outcome) {
@@ -676,7 +697,12 @@ export class PrivateAnswerJobs {
   /* Claims                                                          */
   /* -------------------------------------------------------------- */
 
-  private startClaim(job: Job, panelKey: CryptoKey): void {
+  /** Starts the claim's work; resolves once the job is ready or failed. */
+  private startClaim(job: Job, panelKey: CryptoKey): Promise<void> {
+    let claimSettled: () => void = () => undefined;
+    const done = new Promise<void>((resolve) => {
+      claimSettled = resolve;
+    });
     const abort = new AbortController();
     job.claimAbort = abort;
     const claimedAt = this.now();
@@ -700,6 +726,7 @@ export class PrivateAnswerJobs {
       timing.totalMs = this.now() - claimedAt;
       this.endActivity();
       this.logTiming(timing);
+      claimSettled();
     };
     // The deadline runs from the claim, so every claimed job is ready or
     // failed within analysisTimeoutMs whatever the queue, the evidence
@@ -790,6 +817,7 @@ export class PrivateAnswerJobs {
     run().catch(() => {
       settle({ kind: 'failed' }, 'error');
     });
+    return done;
   }
 
   private beginActivity(): void {

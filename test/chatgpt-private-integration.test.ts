@@ -140,7 +140,7 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
       sufficient: true,
     }));
     const privateModel = createBuiltInPrivateAnswerModel({ model: stub.model, available: () => true, answer: answerPrivately });
-    const jobs = new PrivateAnswerJobs({ model: () => privateModel, installId: () => INSTALL });
+    const jobs = new PrivateAnswerJobs({ model: () => privateModel, installId: () => INSTALL, claimHoldMs: 0 });
 
     const dir = mkdtempSync(join(tmpdir(), 'olympus-private-integration-'));
     const store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
@@ -253,7 +253,7 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
       sufficient: true,
     }));
     const privateModel = createBuiltInPrivateAnswerModel({ model: stub.model, available: () => true, answer: answerPrivately });
-    const jobs = new PrivateAnswerJobs({ model: () => privateModel, installId: () => INSTALL });
+    const jobs = new PrivateAnswerJobs({ model: () => privateModel, installId: () => INSTALL, claimHoldMs: 0 });
     const dir = mkdtempSync(join(tmpdir(), 'olympus-private-integration-'));
     const store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
     const worker = createEmailSourceWorker({});
