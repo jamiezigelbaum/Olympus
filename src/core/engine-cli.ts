@@ -38,7 +38,7 @@ export const ENGINE_CLI_USAGE = {
   'engine stop': 'olympus engine stop',
   'engine restart': 'olympus engine restart',
   'engine rollback': 'olympus engine rollback',
-  'engine verify': 'olympus engine verify',
+  'engine verify': 'olympus engine verify [--expect-package <path> | --expect-build <build>]',
   'engine logs': 'olympus engine logs [--lines <n>] [--follow]',
 } as const;
 
@@ -77,8 +77,7 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     };
   }
   if (command === 'verify') {
-    expectNoArgs('verify', rest);
-    return verifyEngine({ ...service, ...(deps.health ? { health: deps.health } : {}) });
+    return verifyEngine({ ...service, ...parseVerifyArgs(rest), ...(deps.health ? { health: deps.health } : {}) });
   }
   if (command === 'uninstall') {
     expectNoArgs('uninstall', rest);
@@ -226,6 +225,30 @@ export function parseInstallArgs(args: string[]): { fromCheckout?: string; bunBi
     } else if (arg.startsWith('--from-checkout=')) options.fromCheckout = arg.slice('--from-checkout='.length);
     else if (arg.startsWith('--bun=')) options.bunBin = arg.slice('--bun='.length);
     else throw new OperationError('invalid_params', `Unknown engine install option: ${arg}`);
+  }
+  return options;
+}
+
+/** `--expect-package <path>` or `--expect-build <build>`: the build verify must find running. */
+export function parseVerifyArgs(args: string[]): { expectPackage?: string; expectedBuild?: string } {
+  const options: { expectPackage?: string; expectedBuild?: string } = {};
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    let name: string;
+    let value: string | undefined;
+    if (arg === '--expect-package' || arg === '--expect-build') {
+      name = arg;
+      value = args[index + 1];
+      index += 1;
+    } else if (arg.startsWith('--expect-package=') || arg.startsWith('--expect-build=')) {
+      name = arg.slice(0, arg.indexOf('='));
+      value = arg.slice(arg.indexOf('=') + 1);
+    } else {
+      throw new OperationError('invalid_params', `Unknown engine verify option: ${arg}`);
+    }
+    if (!value || value.startsWith('--')) throw new OperationError('invalid_params', `${name} needs a value.`);
+    if (name === '--expect-package') options.expectPackage = value;
+    else options.expectedBuild = value;
   }
   return options;
 }

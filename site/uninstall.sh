@@ -22,6 +22,8 @@ set -eu
 
 LAUNCHER_MARK='Written by the Olympus installer'
 PATH_MARK='# Added by the Olympus installer'
+# shellcheck disable=SC2016 # Shown as written in the profile.
+PATH_LINE='export PATH="$HOME/.local/bin:$PATH" # Added by the Olympus installer'
 LABEL=ai.olympusplugin.engine
 
 say() { printf '%s\n' "$*"; }
@@ -32,14 +34,82 @@ die() {
   exit 1
 }
 
+# leave_line <file> <why>: say why the PATH line stays, and how to remove it.
+leave_line() {
+  step "Left $1 unchanged: $2"
+  step "  To finish, delete this line from it yourself: $PATH_LINE"
+}
+
 # remove_marked_line <file>: drop the installer's PATH line, keep the rest.
+# The rest is written to a new file beside it, checked, and renamed over the
+# original in one step, so the profile is never left half-written. A profile
+# that is a symbolic link or not this user's own file is left alone.
 remove_marked_line() {
-  [ -f "$1" ] && grep -qF "$PATH_MARK" "$1" || return 0
-  grep -vF "$PATH_MARK" "$1" > "$1.olympus-uninstall" || true
-  # Rewrite in place so a symlinked profile and its permissions survive.
-  cat "$1.olympus-uninstall" > "$1"
-  rm -f "$1.olympus-uninstall"
-  step "Removed the Olympus PATH line from $1."
+  profile=$1
+  if [ ! -e "$profile" ] && [ ! -L "$profile" ]; then return 0; fi
+  found=0
+  grep -qF "$PATH_MARK" "$profile" 2>/dev/null || found=$?
+  case "$found" in
+    0) ;;
+    1) return 0 ;;
+    *) leave_line "$profile" "it could not be read."; return 0 ;;
+  esac
+  if [ -L "$profile" ]; then
+    leave_line "$profile" "it is a symbolic link."
+    return 0
+  fi
+  if [ ! -f "$profile" ] || [ -z "$(find "$profile" -prune -user "$(id -u)" 2>/dev/null)" ]; then
+    leave_line "$profile" "it is not a regular file of yours."
+    return 0
+  fi
+  dir=$(dirname "$profile")
+  if ! next=$(mktemp "$dir/.olympus-uninstall.XXXXXX" 2>/dev/null); then
+    leave_line "$profile" "a new copy could not be written beside it."
+    return 0
+  fi
+  # The new file takes the profile's permissions before its contents.
+  kept=0
+  if cp -p "$profile" "$next" 2>/dev/null; then
+    grep -vF "$PATH_MARK" "$profile" > "$next" 2>/dev/null || kept=$?
+  else
+    kept=2
+  fi
+  # grep -v: 0 wrote lines, 1 wrote none (the profile held only that line), more is an error.
+  total=$(grep -c '' "$profile" 2>/dev/null || true)
+  marked=$(grep -cF "$PATH_MARK" "$profile" 2>/dev/null || true)
+  left=$(grep -c '' "$next" 2>/dev/null || true)
+  for count in "$total" "$marked" "$left"; do
+    case "$count" in ''|*[!0-9]*) kept=2 ;; esac
+  done
+  if [ "$kept" -gt 1 ] || grep -qF "$PATH_MARK" "$next" 2>/dev/null || [ "$((left + marked))" != "$total" ]; then
+    rm -f "$next"
+    leave_line "$profile" "the new copy did not check out."
+    return 0
+  fi
+  if ! mv -f "$next" "$profile"; then
+    rm -f "$next"
+    leave_line "$profile" "it could not be replaced."
+    return 0
+  fi
+  step "Removed the Olympus PATH line from $profile."
+}
+
+# stop_agent_directly: unload the agent with launchctl when the app that
+# would do it is gone. Only launchd saying the agent is not loaded (113 or 3)
+# counts as stopped.
+stop_agent_directly() {
+  target="gui/$(id -u)/$LABEL"
+  launchctl bootout "$target" >/dev/null 2>&1 || true
+  tries=0
+  while :; do
+    printed=0
+    launchctl print "$target" >/dev/null 2>&1 || printed=$?
+    case "$printed" in 113|3) return 0 ;; esac
+    tries=$((tries + 1))
+    [ "$tries" -lt 3 ] || break
+    sleep 1
+  done
+  die "Olympus could not be stopped, so nothing was removed." "launchctl still reports $target (status $printed). Restart the Mac, then run this again, or email support@olympusplugin.ai."
 }
 
 main() {
@@ -62,9 +132,9 @@ main() {
     "$BUN" "$APP/dist/cli.js" engine uninstall >> "$LOGDIR/install.log" 2>&1 </dev/null \
       || die "Olympus could not be stopped, so nothing was removed." "Details are in $LOGDIR/install.log. Email support@olympusplugin.ai with that file."
     step "Stopped Olympus and removed its login item."
-  elif [ -f "$PLIST" ]; then
+  elif [ -e "$PLIST" ] || [ -L "$PLIST" ]; then
     # The app is already gone: unload and remove the agent directly.
-    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    stop_agent_directly
     rm -f "$PLIST"
     step "Stopped Olympus and removed its login item."
   else

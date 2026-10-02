@@ -4,6 +4,7 @@
  *   OLYMPUS_GOOGLE_PILOT_CLIENT_ID=<publisher client id> bun scripts/publish-release-to-site.ts
  *   bun scripts/publish-release-to-site.ts --artifact release-artifacts/olympus-<version>.tgz
  *   bun scripts/publish-release-to-site.ts --check
+ *   bun scripts/publish-release-to-site.ts --pin-bun bun-darwin-aarch64.zip
  *
  * Builds the release tarball with scripts/release-artifact.ts (or takes the
  * one `--artifact` names), copies it to
@@ -11,6 +12,12 @@
  * from scripts/install-macos.sh with the tarball's version, SHA-256 and size
  * pinned. scripts/install-macos.sh is the one source of the installer; both
  * outputs are build products (gitignored, never committed).
+ *
+ * `--pin-bun <bun-darwin-aarch64.zip>` checks a Bun archive against the
+ * template's archive pin (SHA-256 and size) and writes the SHA-256 of the bun
+ * program inside it into the template's BUN_EXE_SHA256_DARWIN_AARCH64 line:
+ * the installer runs an already-installed Bun only when it matches that.
+ * Run it with the archive from the pinned URL whenever the Bun pin changes.
  *
  * `--check` is what deploy.sh runs before publishing: site/install.sh must be
  * exactly the template rendered with its own pins, pin the version in
@@ -73,6 +80,49 @@ export function readInstallScriptPins(script: string): ReleasePins | undefined {
   const bytes = /^OLYMPUS_BYTES=(\S+)$/m.exec(script)?.[1];
   if (!version || !sha256 || !bytes || !/^[0-9]+$/.test(bytes)) return undefined;
   return { version, sha256, bytes: Number(bytes) };
+}
+
+export interface BunPins {
+  zipSha256: string;
+  zipBytes: number;
+  exeSha256: string;
+}
+/** The program inside Bun's Apple-silicon release archive. */
+export const BUN_ZIP_ENTRY = 'bun-darwin-aarch64/bun';
+
+/** The Bun pins the installer template carries, or undefined when one is missing. */
+export function readBunPins(template: string): BunPins | undefined {
+  const zipSha256 = /^BUN_SHA256_DARWIN_AARCH64=([0-9a-f]{64})$/m.exec(template)?.[1];
+  const zipBytes = /^BUN_BYTES_DARWIN_AARCH64=([0-9]+)$/m.exec(template)?.[1];
+  const exeSha256 = /^BUN_EXE_SHA256_DARWIN_AARCH64=([0-9a-f]{64})$/m.exec(template)?.[1];
+  if (!zipSha256 || !zipBytes || !exeSha256) return undefined;
+  return { zipSha256, zipBytes: Number(zipBytes), exeSha256 };
+}
+
+/**
+ * The SHA-256 of the bun program inside a Bun release archive, once the
+ * archive matches the template's pinned SHA-256 and size.
+ */
+export function bunExecutableDigest(zipPath: string, pins: Pick<BunPins, 'zipSha256' | 'zipBytes'>): string {
+  const archive = fileDigest(zipPath);
+  if (archive.sha256 !== pins.zipSha256 || archive.bytes !== pins.zipBytes) {
+    throw new Error(`${zipPath} is not the pinned Bun archive: SHA-256 ${archive.sha256} and ${archive.bytes} bytes, not ${pins.zipSha256} and ${pins.zipBytes}.`);
+  }
+  const entry = spawnSync('unzip', ['-p', zipPath, BUN_ZIP_ENTRY], { maxBuffer: 512 * 1024 * 1024 });
+  if (entry.status !== 0 || entry.stdout.length === 0) {
+    throw new Error(`${zipPath} has no ${BUN_ZIP_ENTRY}: ${entry.stderr.toString().trim()}`);
+  }
+  return createHash('sha256').update(entry.stdout).digest('hex');
+}
+
+/** The template with its BUN_EXE_SHA256_DARWIN_AARCH64 line set to `exeSha256`. */
+export function pinBunExecutable(template: string, exeSha256: string): string {
+  if (!/^[0-9a-f]{64}$/.test(exeSha256)) throw new Error('The Bun program SHA-256 must be 64 lowercase hex characters.');
+  const line = /^BUN_EXE_SHA256_DARWIN_AARCH64=.*$/m;
+  if (template.split('\n').filter((candidate) => candidate.startsWith('BUN_EXE_SHA256_DARWIN_AARCH64=')).length !== 1) {
+    throw new Error(`${INSTALL_TEMPLATE} must contain one BUN_EXE_SHA256_DARWIN_AARCH64= line.`);
+  }
+  return template.replace(line, `BUN_EXE_SHA256_DARWIN_AARCH64=${exeSha256}`);
 }
 
 export function fileDigest(path: string): { sha256: string; bytes: number } {
@@ -176,10 +226,27 @@ function main(args: string[]): void {
     console.log(`site/install.sh pins olympus ${pins.version} (SHA-256 ${pins.sha256}, ${pins.bytes} bytes); the tarball matches.`);
     return;
   }
+  if (args[0] === '--pin-bun' && args[1] && args.length === 2) {
+    const templatePath = join(ROOT, INSTALL_TEMPLATE);
+    const template = readFileSync(templatePath, 'utf8');
+    const pins = readBunPins(template);
+    if (!pins) {
+      console.error(`${INSTALL_TEMPLATE} has no complete Bun pins.`);
+      process.exit(1);
+    }
+    const exeSha256 = bunExecutableDigest(resolve(args[1]), pins);
+    if (exeSha256 === pins.exeSha256) {
+      console.log(`${INSTALL_TEMPLATE} already pins the bun program in that archive: ${exeSha256}.`);
+      return;
+    }
+    writeFileSync(templatePath, pinBunExecutable(template, exeSha256));
+    console.log(`Pinned the bun program in ${INSTALL_TEMPLATE}: ${exeSha256} (was ${pins.exeSha256}).`);
+    return;
+  }
   let artifact: string | undefined;
   if (args[0] === '--artifact' && args[1] && args.length === 2) artifact = resolve(args[1]);
   else if (args.length > 0) {
-    console.error('Usage: bun scripts/publish-release-to-site.ts [--artifact <olympus-<version>.tgz> | --check]');
+    console.error('Usage: bun scripts/publish-release-to-site.ts [--artifact <olympus-<version>.tgz> | --check | --pin-bun <bun-darwin-aarch64.zip>]');
     process.exit(2);
   }
   if (!artifact) {

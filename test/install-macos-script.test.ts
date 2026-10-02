@@ -20,11 +20,16 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -53,7 +58,10 @@ function renderForTest(input: {
   releaseBase: string;
   bunBase: string;
   bunZip: string;
+  /** The bun program inside bunZip. */
+  bunExe: string;
   sha256?: string;
+  bunExeSha256?: string;
 }): string {
   return renderInstallScript(readFileSync(TEMPLATE, 'utf8'), {
     version: input.version,
@@ -63,7 +71,8 @@ function renderForTest(input: {
     .replace(/^RELEASE_BASE=.*$/m, `RELEASE_BASE=${input.releaseBase}`)
     .replace(/^BUN_BASE=.*$/m, `BUN_BASE=${input.bunBase}`)
     .replace(/^BUN_SHA256_DARWIN_AARCH64=.*$/m, `BUN_SHA256_DARWIN_AARCH64=${sha256(input.bunZip)}`)
-    .replace(/^BUN_BYTES_DARWIN_AARCH64=.*$/m, `BUN_BYTES_DARWIN_AARCH64=${sizeOf(input.bunZip)}`);
+    .replace(/^BUN_BYTES_DARWIN_AARCH64=.*$/m, `BUN_BYTES_DARWIN_AARCH64=${sizeOf(input.bunZip)}`)
+    .replace(/^BUN_EXE_SHA256_DARWIN_AARCH64=.*$/m, `BUN_EXE_SHA256_DARWIN_AARCH64=${input.bunExeSha256 ?? sha256(input.bunExe)}`);
 }
 
 function zipBun(dir: string, bunBinary: string): string {
@@ -95,13 +104,21 @@ interface Harness {
   support: string;
   app: string;
   runtimeBun: string;
-  run(version: string, env?: Record<string, string>, options?: { sha256?: string }): RunResult;
+  uid: number;
+  run(version: string, env?: Record<string, string>, options?: { sha256?: string; bunExeSha256?: string }): RunResult;
   uninstall(env?: Record<string, string>): RunResult;
+  /** The engine commands run, with the verified download and the app folder named <download> and <app>. */
   logLines(): string[];
   curlCalls(): string[];
+  /** The release tarball for a version (built once). */
+  tarball(version: string): string;
 }
 
-function harness(): Harness {
+/** The shells the scripts must run under: sh, and dash where it is installed (it is /bin/sh on Debian and Ubuntu). */
+const SHELLS = ['/bin/sh', ...(existsSync('/bin/dash') ? ['/bin/dash'] : [])];
+const UID = process.getuid?.() ?? 501;
+
+function harness(shell = '/bin/sh'): Harness {
   const root = mkdtempSync(join(tmpdir(), 'olympus-install-script-'));
   roots.push(root);
   const home = join(root, 'home');
@@ -138,7 +155,18 @@ esac
   writeExecutable(join(bin, 'sw_vers'), '#!/bin/sh\necho "${FAKE_MACOS:-15.1}"\n');
   writeExecutable(join(bin, 'sysctl'), '#!/bin/sh\necho "${FAKE_TRANSLATED:-0}"\n');
   writeExecutable(join(bin, 'id'), '#!/bin/sh\ncase "$1" in -u) echo "${FAKE_UID:-501}" ;; -un) echo tester ;; *) /usr/bin/id "$@" ;; esac\n');
-  writeExecutable(join(bin, 'launchctl'), `#!/bin/sh\necho "launchctl $*" >> "${log}"\n`);
+  // launchctl: logs each call; print answers FAKE_LAUNCHCTL_PRINT (113, "not loaded", by default).
+  writeExecutable(join(bin, 'launchctl'), `#!/bin/sh\necho "launchctl $*" >> "${log}"\nif [ "$1" = print ]; then exit "\${FAKE_LAUNCHCTL_PRINT:-113}"; fi\n`);
+  // mv: FAKE_MV_FAIL_ONCE=<destination> fails the first move onto that path.
+  writeExecutable(join(bin, 'mv'), `#!/bin/sh
+for last in "$@"; do :; done
+if [ -n "$FAKE_MV_FAIL_ONCE" ] && [ "$last" = "$FAKE_MV_FAIL_ONCE" ] && [ ! -e "${root}/mv-failed" ]; then
+  : > "${root}/mv-failed"
+  echo "mv: simulated failure" >&2
+  exit 1
+fi
+exec /bin/mv "$@"
+`);
 
   const makeTarball = (version: string): string => {
     const file = join(tarballs, `olympus-${version}.tgz`);
@@ -154,6 +182,8 @@ esac
       `echo "${version} $*" >> "${log}"`,
       'if [ "$2" = verify ]; then [ -z "$FAKE_UNHEALTHY" ] || exit 1; exit 0; fi',
       `if [ "$2" = install ] && { [ "$FAKE_FAIL_VERSION" = "${version}" ] || [ -n "$FAKE_FAIL_RESTORE" ]; }; then exit 1; fi`,
+      // FAKE_TERM_VERSION: that version's install stops the installer (Ctrl-C, a closed Terminal).
+      `if [ "$2" = install ] && [ "$FAKE_TERM_VERSION" = "${version}" ]; then kill -TERM "$PPID"; fi`,
       '',
     ].join('\n'));
     expect(spawnSync('tar', ['-czf', file, '-C', staging, 'package']).status).toBe(0);
@@ -164,15 +194,19 @@ esac
     HOME: home,
     SHELL: '/bin/zsh',
     TMPDIR: join(root, 'tmp'),
+    FAKE_UID: String(UID),
     ...extra,
   });
   const support = join(home, 'Library', 'Application Support', 'Olympus');
+  const app = join(support, 'app');
   return {
     root,
     home,
     support,
-    app: join(support, 'app'),
+    app,
     runtimeBun: join(support, 'runtime', 'bun'),
+    uid: UID,
+    tarball: makeTarball,
     run(version, extra = {}, options = {}) {
       const tarball = makeTarball(version);
       const script = join(root, `install-${version}.sh`);
@@ -182,17 +216,22 @@ esac
         releaseBase: 'https://releases.test',
         bunBase: 'https://bun.test',
         bunZip,
+        bunExe: fakeBun,
         ...(options.sha256 ? { sha256: options.sha256 } : {}),
+        ...(options.bunExeSha256 ? { bunExeSha256: options.bunExeSha256 } : {}),
       }));
-      const result = spawnSync('/bin/sh', [script], { encoding: 'utf8', timeout: 30_000, env: env(extra) });
+      const result = spawnSync(shell, [script], { encoding: 'utf8', timeout: 30_000, env: env(extra) });
       return { status: result.status, stderr: result.stderr, stdout: result.stdout };
     },
     uninstall(extra = {}) {
-      const result = spawnSync('/bin/sh', [UNINSTALL], { encoding: 'utf8', timeout: 30_000, env: env(extra) });
+      const result = spawnSync(shell, [UNINSTALL], { encoding: 'utf8', timeout: 30_000, env: env(extra) });
       return { status: result.status, stderr: result.stderr, stdout: result.stdout };
     },
     logLines() {
-      return existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [];
+      if (!existsSync(log)) return [];
+      return readFileSync(log, 'utf8').trim().split('\n')
+        .map((line) => line.split(` --expect-package ${app}`).join(' --expect-package <app>'))
+        .map((line) => line.replace(/ --expect-package \S*\/olympus-install\.\w+\/unpacked\/package$/, ' --expect-package <download>'));
     },
     curlCalls() {
       return existsSync(curlLog) ? readFileSync(curlLog, 'utf8').trim().split('\n') : [];
@@ -211,10 +250,23 @@ const appVersion = (dir: string): string | undefined => {
 const V1 = '1.0.0-rc.1';
 const V2 = '1.0.0-rc.2';
 const V3 = '1.0.0-rc.3';
+const V4 = '1.0.0-rc.4';
 
-describe('install.sh', () => {
+/** Unpack a release tarball into a folder, the way the installer leaves it (with its receipt). */
+function unpackInto(tarball: string, dir: string): void {
+  const staging = mkdtempSync(join(dirname(dir), '.unpack-'));
+  expect(spawnSync('tar', ['-xzf', tarball, '-C', staging]).status).toBe(0);
+  writeFileSync(join(staging, 'package', '.olympus-release-sha256'), `${sha256(tarball)}\n`);
+  renameSync(join(staging, 'package'), dir);
+  rmSync(staging, { recursive: true, force: true });
+}
+
+const leftovers = (support: string): string[] =>
+  existsSync(support) ? readdirSync(support).filter((name) => name !== 'app' && name !== 'app.previous' && name !== 'runtime') : [];
+
+describe.each(SHELLS)('install.sh under %s', (shell) => {
   shellTest('installs Bun and Olympus, starts the engine, and tells the user the next step in ChatGPT', () => {
-    const h = harness();
+    const h = harness(shell);
     const result = h.run(V1);
     expectSucceeded(result);
     expect(appVersion(h.app)).toBe(V1);
@@ -234,10 +286,12 @@ describe('install.sh', () => {
     expect(launcher).toContain('exec "$HOME/Library/Application Support/Olympus/runtime/bun" "$HOME/Library/Application Support/Olympus/app/dist/cli.js" "$@"');
     expect(readFileSync(join(h.home, '.zprofile'), 'utf8')).toBe('\nexport PATH="$HOME/.local/bin:$PATH" # Added by the Olympus installer\n');
     expect(readFileSync(join(h.home, 'Library', 'Logs', 'Olympus', 'install.log'), 'utf8')).toContain(`== Olympus installer ${V1}`);
+    // No lock, swap marker or scratch folder is left behind.
+    expect(leftovers(h.support)).toEqual([]);
   });
 
   shellTest('an upgrade swaps the app, keeps the previous one, restarts the engine, and reuses the installed Bun', () => {
-    const h = harness();
+    const h = harness(shell);
     expectSucceeded(h.run(V1));
     expectSucceeded(h.run(V2));
     expect(appVersion(h.app)).toBe(V2);
@@ -246,26 +300,47 @@ describe('install.sh', () => {
     expect(h.curlCalls().filter((url) => url.includes('bun.test'))).toHaveLength(1);
     // One PATH line, however often it runs.
     expect(readFileSync(join(h.home, '.zprofile'), 'utf8').match(/Olympus installer/g)).toHaveLength(1);
+    expect(leftovers(h.support)).toEqual([]);
   });
 
-  shellTest('running the same release again checks the engine instead of replacing the rollback copy, and repairs it when unhealthy', () => {
-    const h = harness();
+  shellTest('running the same release again checks the engine against the verified download, and repairs it when it does not prove that build', () => {
+    const h = harness(shell);
     expectSucceeded(h.run(V1));
     expectSucceeded(h.run(V2));
     const again = h.run(V2);
     expectSucceeded(again);
     expect(again.stdout).toContain(`Olympus ${V2} is already installed.`);
     expect(appVersion(`${h.app}.previous`)).toBe(V1);
-    expect(h.logLines().at(-1)).toBe(`${V2} engine verify`);
+    // The expected build is the verified download's, not whatever the installed agent names.
+    expect(h.logLines().at(-1)).toBe(`${V2} engine verify --expect-package <download>`);
 
     const repaired = h.run(V2, { FAKE_UNHEALTHY: '1' });
     expectSucceeded(repaired);
-    expect(h.logLines().slice(-2)).toEqual([`${V2} engine verify`, `${V2} engine install --bun ${h.runtimeBun} --restart`]);
+    expect(h.logLines().slice(-2)).toEqual([`${V2} engine verify --expect-package <download>`, `${V2} engine install --bun ${h.runtimeBun} --restart`]);
     expect(appVersion(`${h.app}.previous`)).toBe(V1);
   });
 
+  shellTest('PoC: an installed copy whose CLI is damaged or missing, with an intact receipt, is replaced from the verified download', () => {
+    const h = harness(shell);
+    expectSucceeded(h.run(V1));
+    expectSucceeded(h.run(V2));
+    const cli = join(h.app, 'dist', 'cli.js');
+    const good = readFileSync(cli, 'utf8');
+    for (const damage of [() => writeFileSync(cli, 'exit 0\n'), () => rmSync(cli)]) {
+      damage();
+      const result = h.run(V2);
+      expectSucceeded(result);
+      expect(result.stdout).toContain(`The installed copy of Olympus ${V2} is incomplete or changed; replacing it with the verified download...`);
+      expect(readFileSync(cli, 'utf8')).toBe(good);
+      // The rollback copy is kept, and the engine is restarted on the replaced files.
+      expect(appVersion(`${h.app}.previous`)).toBe(V1);
+      expect(h.logLines().at(-1)).toBe(`${V2} engine install --bun ${h.runtimeBun} --restart`);
+      expect(leftovers(h.support)).toEqual([]);
+    }
+  });
+
   shellTest('an upgrade whose engine does not prove healthy puts the previous version back, starts it, and verifies it', () => {
-    const h = harness();
+    const h = harness(shell);
     expectSucceeded(h.run(V1));
     expectSucceeded(h.run(V2));
     const failed = h.run(V3, { FAKE_FAIL_VERSION: V3 });
@@ -277,12 +352,13 @@ describe('install.sh', () => {
     expect(h.logLines().slice(-3)).toEqual([
       `${V3} engine install --bun ${h.runtimeBun} --restart`,
       `${V2} engine install --bun ${h.runtimeBun} --restart`,
-      `${V2} engine verify`,
+      `${V2} engine verify --expect-package <app>`,
     ]);
+    expect(leftovers(h.support)).toEqual([]);
   });
 
   shellTest('a restore that cannot start the previous version is reported, not swallowed', () => {
-    const h = harness();
+    const h = harness(shell);
     expectSucceeded(h.run(V1));
     const failed = h.run(V2, { FAKE_FAIL_RESTORE: '1' });
     expect(failed.status).not.toBe(0);
@@ -298,25 +374,144 @@ describe('install.sh', () => {
   });
 
   shellTest('a previous version whose install exits 0 but never proves healthy is reported as not restored', () => {
-    const h = harness();
+    const h = harness(shell);
     expectSucceeded(h.run(V1));
     const failed = h.run(V2, { FAKE_FAIL_VERSION: V2, FAKE_UNHEALTHY: '1' });
     expect(failed.status).not.toBe(0);
     expect(failed.stderr).toContain('did not come back healthy either');
-    // The previous package's verifier, then the new package's (for a previous one that predates verify).
-    expect(h.logLines().slice(-2)).toEqual([`${V1} engine verify`, `${V2} engine verify`]);
+    // The previous package's verifier, then the new package's (for a previous one that predates verify),
+    // both against the previous package's build.
+    expect(h.logLines().slice(-2)).toEqual([`${V1} engine verify --expect-package <app>`, `${V2} engine verify --expect-package <app>`]);
   });
 
   shellTest('a first install whose engine does not start says so and points to the log', () => {
-    const h = harness();
+    const h = harness(shell);
     const failed = h.run(V1, { FAKE_FAIL_VERSION: V1 });
     expect(failed.status).not.toBe(0);
     expect(failed.stderr).toContain('Olympus is installed but did not start.');
     expect(failed.stderr).toContain('install.log');
   });
 
+  shellTest('PoC: an upgrade cut short after its first rename is put back on the next run, then completed', () => {
+    const h = harness(shell);
+    expectSucceeded(h.run(V1));
+    // What a power cut between the two renames leaves: no app/, the old one as app.previous, the new one unpacked beside it.
+    renameSync(h.app, `${h.app}.previous`);
+    mkdirSync(join(`${h.app}.next`, 'dist'), { recursive: true });
+    writeFileSync(join(h.support, '.install-swap'), 'upgrade\n');
+    const result = h.run(V2);
+    expectSucceeded(result);
+    expect(result.stdout).toContain('Put back the version an interrupted upgrade had moved aside.');
+    expect(appVersion(h.app)).toBe(V2);
+    expect(appVersion(`${h.app}.previous`)).toBe(V1);
+    expect(leftovers(h.support)).toEqual([]);
+  });
+
+  shellTest('PoC: an upgrade cut short while its engine was starting is swapped back on the next run and done again', () => {
+    const h = harness(shell);
+    expectSucceeded(h.run(V1));
+    // The swap finished, the marker says the engine never proved the new build.
+    renameSync(h.app, `${h.app}.previous`);
+    unpackInto(h.tarball(V2), h.app);
+    writeFileSync(join(h.support, '.install-swap'), 'upgrade\n');
+    const result = h.run(V2);
+    expectSucceeded(result);
+    expect(result.stdout).toContain('Put back the version that was installed before an interrupted upgrade.');
+    expect(result.stdout).not.toContain('is already installed');
+    expect(appVersion(h.app)).toBe(V2);
+    expect(appVersion(`${h.app}.previous`)).toBe(V1);
+    expect(h.logLines().at(-1)).toBe(`${V2} engine install --bun ${h.runtimeBun} --restart`);
+    expect(leftovers(h.support)).toEqual([]);
+  });
+
+  shellTest('a failure after the first rename puts the previous version back before the installer exits', () => {
+    const h = harness(shell);
+    expectSucceeded(h.run(V1));
+    const failed = h.run(V2, { FAKE_MV_FAIL_ONCE: h.app });
+    expect(failed.status).not.toBe(0);
+    expect(failed.stderr).toContain('The upgrade stopped before it finished, so the previous version was put back. Run the installer again.');
+    expect(appVersion(h.app)).toBe(V1);
+    expect(existsSync(`${h.app}.previous`)).toBe(false);
+    expect(leftovers(h.support)).toEqual([]);
+    expect(h.logLines()).toEqual([`${V1} engine install --bun ${h.runtimeBun} --restart`]);
+  });
+
+  shellTest('an installer stopped (SIGTERM) while the new engine starts puts the previous version back', () => {
+    const h = harness(shell);
+    expectSucceeded(h.run(V1));
+    const stopped = h.run(V2, { FAKE_TERM_VERSION: V2 });
+    expect(stopped.status).toBe(143);
+    expect(stopped.stderr).toContain('so the previous version was put back');
+    expect(appVersion(h.app)).toBe(V1);
+    expect(leftovers(h.support)).toEqual([]);
+    // The next run upgrades again.
+    expectSucceeded(h.run(V2));
+    expect(appVersion(h.app)).toBe(V2);
+    expect(appVersion(`${h.app}.previous`)).toBe(V1);
+  });
+
+  shellTest('one installer at a time: a lock held by a running process refuses; a lock left by a dead one is taken over', () => {
+    const h = harness(shell);
+    expectSucceeded(h.run(V1));
+    const lock = join(h.support, '.install.lock');
+    mkdirSync(lock);
+    writeFileSync(join(lock, 'pid'), `${process.pid}\n`);
+    const busy = h.run(V2);
+    expect(busy.status).not.toBe(0);
+    expect(busy.stderr).toContain(`another Olympus installer is running (process ${process.pid}).`);
+    expect(appVersion(h.app)).toBe(V1);
+    // Another installer's lock is not this one's to remove.
+    expect(readFileSync(join(lock, 'pid'), 'utf8')).toBe(`${process.pid}\n`);
+
+    const dead = spawnSync('/bin/sh', ['-c', 'echo $$']).stdout.toString().trim();
+    writeFileSync(join(lock, 'pid'), `${dead}\n`);
+    expectSucceeded(h.run(V2));
+    expect(appVersion(h.app)).toBe(V2);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  shellTest('PoC: a symbolic link anywhere in the managed folders is refused before anything cached runs or anything changes', () => {
+    for (const [name, link] of [
+      ['Olympus', (h: Harness) => h.support],
+      ['app', (h: Harness) => h.app],
+      ['app.previous', (h: Harness) => `${h.app}.previous`],
+      ['runtime', (h: Harness) => dirname(h.runtimeBun)],
+      ['bun', (h: Harness) => h.runtimeBun],
+      ['.local/bin', (h: Harness) => join(h.home, '.local', 'bin')],
+    ] as const) {
+      const h = harness(shell);
+      expectSucceeded(h.run(V1));
+      if (name === 'app.previous') expectSucceeded(h.run(V2));
+      const path = link(h);
+      const elsewhere = join(h.root, `elsewhere-${name.replace('/', '-')}`);
+      renameSync(path, elsewhere);
+      symlinkSync(elsewhere, path);
+      const before = h.logLines().length;
+      const curls = h.curlCalls().length;
+      const result = h.run(V3);
+      expect({ name, status: result.status }).toEqual({ name, status: 1 });
+      expect(result.stderr).toContain(`Olympus was not installed: ${path} is a symbolic link.`);
+      expect(result.stderr).toContain('Olympus installs only into real folders (not symbolic links) that belong to you.');
+      // Nothing ran (no engine command, no download) and nothing moved.
+      expect(h.logLines()).toHaveLength(before);
+      expect(h.curlCalls()).toHaveLength(curls);
+      expect(lstatSync(path).isSymbolicLink()).toBe(true);
+    }
+  });
+
+  shellTest('PoC: managed folders that belong to another user are refused before anything changes', () => {
+    const h = harness(shell);
+    expectSucceeded(h.run(V1));
+    const result = h.run(V2, { FAKE_UID: String(h.uid + 1) });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('belongs to another user.');
+    expect(appVersion(h.app)).toBe(V1);
+    expect(h.logLines()).toHaveLength(1);
+    expect(h.curlCalls()).toHaveLength(2);
+  });
+
   shellTest('a tarball that does not match its pinned SHA-256 changes nothing on the Mac', () => {
-    const h = harness();
+    const h = harness(shell);
     const result = h.run(V1, {}, { sha256: '0'.repeat(64) });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('the Olympus download did not match its checksum, so it was not used.');
@@ -327,7 +522,7 @@ describe('install.sh', () => {
   });
 
   shellTest('a tarball that does not match on an upgrade leaves the installed version alone', () => {
-    const h = harness();
+    const h = harness(shell);
     expectSucceeded(h.run(V1));
     const result = h.run(V2, {}, { sha256: 'f'.repeat(64) });
     expect(result.status).not.toBe(0);
@@ -335,23 +530,33 @@ describe('install.sh', () => {
     expect(h.logLines()).toHaveLength(1);
   });
 
-  shellTest('a Bun download that does not match its pinned SHA-256 is never run', () => {
-    const h = harness();
+  shellTest('a Bun download that does not match its pinned SHA-256, or whose program does not, is never run', () => {
+    const h = harness(shell);
     const result = h.run(V1, { FAKE_BUN_CORRUPT: '1' });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('the Bun download did not match its checksum, so it was not used.');
     expect(existsSync(join(h.home, 'Library'))).toBe(false);
+
+    const program = h.run(V1, {}, { bunExeSha256: '0'.repeat(64) });
+    expect(program.status).not.toBe(0);
+    expect(program.stderr).toContain('the bun program in the Bun download did not match its checksum, so it was not used.');
+    expect(existsSync(join(h.home, 'Library'))).toBe(false);
   });
 
-  shellTest('a runtime Bun of another version is replaced by the pinned one', () => {
-    const h = harness();
+  shellTest('PoC: an installed Bun that is not the pinned program is never run, and is replaced from the verified download', () => {
+    const h = harness(shell);
     expectSucceeded(h.run(V1));
-    expectSucceeded(h.run(V2, { FAKE_BUN_VERSION: '1.2.0' }));
+    const ran = join(h.root, 'tampered-bun-ran');
+    writeExecutable(h.runtimeBun, `#!/bin/sh\n: > "${ran}"\necho 1.3.14\n`);
+    expectSucceeded(h.run(V2));
+    expect(existsSync(ran)).toBe(false);
+    expect(readFileSync(h.runtimeBun, 'utf8')).toContain('FAKE_BUN_VERSION');
     expect(h.curlCalls().filter((url) => url.includes('bun.test'))).toHaveLength(2);
+    expect(appVersion(h.app)).toBe(V2);
   });
 
   shellTest('an Intel Mac is refused before anything is downloaded', () => {
-    const h = harness();
+    const h = harness(shell);
     const result = h.run(V1, { FAKE_UNAME_M: 'x86_64', FAKE_TRANSLATED: '0' });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('this Mac has an Intel processor.');
@@ -361,13 +566,13 @@ describe('install.sh', () => {
   });
 
   shellTest('an Apple-silicon Mac whose Terminal runs under Rosetta installs the Apple-silicon build', () => {
-    const h = harness();
+    const h = harness(shell);
     expectSucceeded(h.run(V1, { FAKE_UNAME_M: 'x86_64', FAKE_TRANSLATED: '1' }));
     expect(h.curlCalls()[0]).toBe('https://bun.test/bun-v1.3.14/bun-darwin-aarch64.zip');
   });
 
   shellTest('macOS older than 13 is refused before anything is downloaded', () => {
-    const h = harness();
+    const h = harness(shell);
     const result = h.run(V1, { FAKE_MACOS: '12.7.4' });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('this Mac runs macOS 12.7.4.');
@@ -376,7 +581,7 @@ describe('install.sh', () => {
   });
 
   shellTest('root and other systems are refused', () => {
-    const h = harness();
+    const h = harness(shell);
     const root = h.run(V1, { FAKE_UID: '0' });
     expect(root.status).not.toBe(0);
     expect(root.stderr).toContain('it was run as root');
@@ -386,8 +591,8 @@ describe('install.sh', () => {
     expect(h.curlCalls()).toEqual([]);
   });
 
-  shellTest('an `olympus` command the installer did not write is left alone', () => {
-    const h = harness();
+  shellTest('an `olympus` command the installer did not write, or a link in its place, is left alone', () => {
+    const h = harness(shell);
     mkdirSync(join(h.home, '.local', 'bin'), { recursive: true });
     writeFileSync(join(h.home, '.local', 'bin', 'olympus'), '#!/bin/sh\necho mine\n');
     const result = h.run(V1);
@@ -396,30 +601,42 @@ describe('install.sh', () => {
     expect(result.stdout).toContain('this installer did not write it');
     expect(result.stdout).toContain(`"${h.runtimeBun}" "${h.app}/dist/cli.js" engine status`);
     expect(existsSync(join(h.home, '.zprofile'))).toBe(false);
+
+    const linked = harness(shell);
+    const target = join(linked.root, 'someone-elses-olympus');
+    writeFileSync(target, '#!/bin/sh\n# Written by the Olympus installer\n');
+    mkdirSync(join(linked.home, '.local', 'bin'), { recursive: true });
+    symlinkSync(target, join(linked.home, '.local', 'bin', 'olympus'));
+    expectSucceeded(linked.run(V1));
+    expect(lstatSync(join(linked.home, '.local', 'bin', 'olympus')).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target, 'utf8')).toBe('#!/bin/sh\n# Written by the Olympus installer\n');
   });
 
   shellTest('OLYMPUS_NO_MODIFY_PATH leaves shell profiles alone; ~/.local/bin already on PATH needs no line', () => {
-    const h = harness();
+    const h = harness(shell);
     expectSucceeded(h.run(V1, { OLYMPUS_NO_MODIFY_PATH: '1' }));
     expect(existsSync(join(h.home, '.zprofile'))).toBe(false);
-    const onPath = harness();
+    const onPath = harness(shell);
     const result = onPath.run(V1, { PATH: `${join(onPath.root, 'bin')}:${join(onPath.home, '.local', 'bin')}:/usr/bin:/bin:/usr/sbin:/sbin` });
     expectSucceeded(result);
     expect(existsSync(join(onPath.home, '.zprofile'))).toBe(false);
     expect(result.stdout).toContain('run: olympus engine status');
   });
+});
 
+describe('install.sh template', () => {
   test('the template refuses to run until a release is pinned into it', () => {
     const result = spawnSync('/bin/sh', [TEMPLATE], { encoding: 'utf8' });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('this is the installer template, not a release.');
   });
 
-  test('pins Bun by version, SHA-256 and size, and takes no download location or checksum from the environment', () => {
+  test('pins Bun by version, archive SHA-256 and size, and program SHA-256, and takes no download location or checksum from the environment', () => {
     const text = readFileSync(TEMPLATE, 'utf8');
     expect(text).toMatch(/^BUN_VERSION=1\.3\.14$/m);
     expect(text).toMatch(/^BUN_SHA256_DARWIN_AARCH64=[0-9a-f]{64}$/m);
     expect(text).toMatch(/^BUN_BYTES_DARWIN_AARCH64=[0-9]+$/m);
+    expect(text).toMatch(/^BUN_EXE_SHA256_DARWIN_AARCH64=[0-9a-f]{64}$/m);
     expect(text).toMatch(/^RELEASE_BASE=https:\/\/olympusplugin\.ai\/releases$/m);
     expect(text).toMatch(/^BUN_BASE=https:\/\/github\.com\/oven-sh\/bun\/releases\/download$/m);
     expect(text).not.toContain('SHASUMS256.txt"');
@@ -428,6 +645,8 @@ describe('install.sh', () => {
     expect(text).not.toMatch(/^\s*sudo\s/m);
     expect(text).not.toContain('DRAFT');
     expect(text).toContain("curl -fsSL --proto '=https' --tlsv1.2");
+    // An installed Bun is checked by digest, never trusted by running it.
+    expect(text).not.toContain('--version');
     // The whole script runs from main, on the last line, so a cut-short download runs nothing.
     expect(text.trimEnd().split('\n').at(-1)).toBe('main "$@"');
   });
@@ -441,9 +660,11 @@ describe('install.sh', () => {
   });
 });
 
-describe('uninstall.sh', () => {
+describe.each(SHELLS)('uninstall.sh under %s', (shell) => {
+  const PATH_LINE = 'export PATH="$HOME/.local/bin:$PATH" # Added by the Olympus installer';
+
   shellTest('stops the engine, removes the app, runtime, command and PATH line, and keeps data', () => {
-    const h = harness();
+    const h = harness(shell);
     writeFileSync(join(h.home, '.zprofile'), 'export EDITOR=vim\n');
     expectSucceeded(h.run(V1));
     mkdirSync(join(h.home, '.olympus'), { recursive: true });
@@ -460,21 +681,81 @@ describe('uninstall.sh', () => {
     expect(result.stdout).toContain('olympus data delete --all');
   });
 
-  shellTest('with the app already gone, unloads and removes the login item directly; a foreign command stays', () => {
-    const h = harness();
+  shellTest('PoC: removing the PATH line keeps every other byte of the profile and its permissions, and leaves no temporary file', () => {
+    const h = harness(shell);
+    const profile = join(h.home, '.zprofile');
+    // A last line with no newline, a line that only mentions Olympus, and the installer's line in the middle.
+    writeFileSync(profile, `export A=1\n# my Olympus notes\n${PATH_LINE}\nexport B=2`);
+    chmodSync(profile, 0o640);
+    const result = h.uninstall();
+    expectSucceeded(result);
+    expect(result.stdout).toContain(`Removed the Olympus PATH line from ${profile}.`);
+    expect(readFileSync(profile, 'utf8')).toBe('export A=1\n# my Olympus notes\nexport B=2\n');
+    expect(statSync(profile).mode & 0o777).toBe(0o640);
+    expect(readdirSync(h.home).filter((name) => name.includes('olympus-uninstall'))).toEqual([]);
+
+    // A profile holding only that line ends up empty, not deleted.
+    writeFileSync(profile, `${PATH_LINE}\n`);
+    expectSucceeded(h.uninstall());
+    expect(readFileSync(profile, 'utf8')).toBe('');
+  });
+
+  shellTest('PoC: a symlinked profile is left alone, and the uninstaller says which line to remove', () => {
+    const h = harness(shell);
+    const target = join(h.root, 'dotfiles-zprofile');
+    writeFileSync(target, `export A=1\n${PATH_LINE}\n`);
+    symlinkSync(target, join(h.home, '.zprofile'));
+    const result = h.uninstall();
+    expectSucceeded(result);
+    expect(result.stdout).toContain(`Left ${join(h.home, '.zprofile')} unchanged: it is a symbolic link.`);
+    expect(result.stdout).toContain(`To finish, delete this line from it yourself: ${PATH_LINE}`);
+    expect(readFileSync(target, 'utf8')).toBe(`export A=1\n${PATH_LINE}\n`);
+    expect(lstatSync(join(h.home, '.zprofile')).isSymbolicLink()).toBe(true);
+  });
+
+  (UID === 0 ? test.skip : shellTest)('PoC: a profile that cannot be read is left alone, not emptied', () => {
+    const h = harness(shell);
+    const profile = join(h.home, '.bash_profile');
+    writeFileSync(profile, `export A=1\n${PATH_LINE}\n`);
+    chmodSync(profile, 0o000);
+    const result = h.uninstall();
+    expectSucceeded(result);
+    expect(result.stdout).toContain(`Left ${profile} unchanged: it could not be read.`);
+    chmodSync(profile, 0o600);
+    expect(readFileSync(profile, 'utf8')).toBe(`export A=1\n${PATH_LINE}\n`);
+  });
+
+  shellTest('with the app already gone, unloads the login item, confirms launchd no longer has it, then removes it; a foreign command stays', () => {
+    const h = harness(shell);
     const plist = join(h.home, 'Library', 'LaunchAgents', 'ai.olympusplugin.engine.plist');
     mkdirSync(dirname(plist), { recursive: true });
     writeFileSync(plist, '<plist/>');
     mkdirSync(join(h.home, '.local', 'bin'), { recursive: true });
     writeFileSync(join(h.home, '.local', 'bin', 'olympus'), '#!/bin/sh\necho mine\n');
     expectSucceeded(h.uninstall());
-    expect(h.logLines()).toEqual(['launchctl bootout gui/501/ai.olympusplugin.engine']);
+    expect(h.logLines()).toEqual([`launchctl bootout gui/${h.uid}/ai.olympusplugin.engine`, `launchctl print gui/${h.uid}/ai.olympusplugin.engine`]);
     expect(existsSync(plist)).toBe(false);
     expect(existsSync(join(h.home, '.local', 'bin', 'olympus'))).toBe(true);
   });
 
+  shellTest('PoC: with the app gone, an agent launchd still has (or cannot report) stops the uninstall before anything is deleted', () => {
+    for (const print of ['0', '5']) {
+      const h = harness(shell);
+      const plist = join(h.home, 'Library', 'LaunchAgents', 'ai.olympusplugin.engine.plist');
+      mkdirSync(dirname(plist), { recursive: true });
+      writeFileSync(plist, '<plist/>');
+      mkdirSync(join(h.support, 'runtime'), { recursive: true });
+      const result = h.uninstall({ FAKE_LAUNCHCTL_PRINT: print });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('Olympus could not be stopped, so nothing was removed.');
+      expect(result.stderr).toContain(`(status ${print})`);
+      expect(existsSync(plist)).toBe(true);
+      expect(existsSync(h.support)).toBe(true);
+    }
+  }, 30_000);
+
   shellTest('an engine that cannot be stopped leaves everything in place', () => {
-    const h = harness();
+    const h = harness(shell);
     expectSucceeded(h.run(V1));
     writeFileSync(join(h.app, 'dist', 'cli.js'), 'exit 1\n');
     const result = h.uninstall();
@@ -485,7 +766,7 @@ describe('uninstall.sh', () => {
   });
 
   shellTest('refuses root', () => {
-    const h = harness();
+    const h = harness(shell);
     const result = h.uninstall({ FAKE_UID: '0' });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('it was run as root');
@@ -549,7 +830,7 @@ describe('install.sh end to end', () => {
       mkdirSync(dirname(tarball), { recursive: true });
       expect(spawnSync('tar', ['-czf', tarball, '-C', dirname(staging), 'package']).status).toBe(0);
       const script = join(root, `install-${version}.sh`);
-      writeFileSync(script, renderForTest({ version, tarball, releaseBase: `${origin}/releases`, bunBase: `${origin}/bun`, bunZip }));
+      writeFileSync(script, renderForTest({ version, tarball, releaseBase: `${origin}/releases`, bunBase: `${origin}/bun`, bunZip, bunExe: process.execPath }));
       return script;
     };
 
@@ -618,12 +899,31 @@ esac
     expect(appVersion(`${app}.previous`)).toBe(V1);
     expect(readFileSync(plistPath, 'utf8')).toContain(`<string>${V2}+`);
 
-    // A failed upgrade puts V2 back and proves it running.
-    const third = await sh([release(V3)], { FAKE_LAUNCHD_FAIL_VERSION: V3 });
-    expect(third.status).not.toBe(0);
-    expect(third.stderr).toContain('the previous version was restored and is running');
-    expect(appVersion(app)).toBe(V2);
+    // An upgrade to V3 cut short by an older installer after its swap, with no
+    // swap marker: app/ holds V3 (and its receipt), the agent still names V2.
+    // Running V3 again finds V3 installed, but the real `engine verify`,
+    // given the verified download, does not accept the V2 agent: the
+    // installer restarts the engine onto V3 instead of reporting success.
+    const v3 = release(V3);
+    const v3Tarball = join(served, 'releases', V3, `olympus-${V3}.tgz`);
+    rmSync(`${app}.previous`, { recursive: true });
+    renameSync(app, `${app}.previous`);
+    unpackInto(v3Tarball, app);
     expect(readFileSync(plistPath, 'utf8')).toContain(`<string>${V2}+`);
+    const reconciled = await sh([v3]);
+    expectSucceeded(reconciled, installLog());
+    expect(reconciled.stdout).toContain(`Olympus ${V3} is already installed.`);
+    expect(reconciled.stdout).toContain('Starting Olympus in the background');
+    expect(installLog()).toContain(`The installed engine agent runs build ${V2}+`);
+    expect(readFileSync(plistPath, 'utf8')).toContain(`<string>${V3}+`);
+    expect(appVersion(`${app}.previous`)).toBe(V2);
+
+    // A failed upgrade puts V3 back and proves it running.
+    const fourth = await sh([release(V4)], { FAKE_LAUNCHD_FAIL_VERSION: V4 });
+    expect(fourth.status).not.toBe(0);
+    expect(fourth.stderr).toContain('the previous version was restored and is running');
+    expect(appVersion(app)).toBe(V3);
+    expect(readFileSync(plistPath, 'utf8')).toContain(`<string>${V3}+`);
     expect(installLog()).toContain('Operation not permitted');
 
     // Uninstall: the real `engine uninstall` unloads and removes the agent.

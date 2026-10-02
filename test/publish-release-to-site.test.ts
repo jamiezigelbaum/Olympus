@@ -7,12 +7,15 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
+  bunExecutableDigest,
   checkSiteRelease,
+  pinBunExecutable,
   publishToSite,
+  readBunPins,
   readInstallScriptPins,
   releaseTarballPath,
   renderInstallScript,
@@ -21,6 +24,7 @@ import {
 const REPO = resolve(import.meta.dir, '..');
 const TEMPLATE = readFileSync(join(REPO, 'scripts', 'install-macos.sh'), 'utf8');
 const PINS = { version: '1.0.0-rc.1', sha256: 'a'.repeat(64), bytes: 1234 };
+const has = (tool: string): boolean => spawnSync('/bin/sh', ['-c', `command -v ${tool}`]).status === 0;
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -146,7 +150,7 @@ describe('site publishing wiring', () => {
     expect(tracked.stdout.trim()).toBe('');
   });
 
-  test('deploy.sh refuses to publish without the release check, and uploads releases before install.sh', () => {
+  test('deploy.sh refuses to publish without the release check, uploads releases before install.sh, and never deletes a release', () => {
     const deploy = readFileSync(join(REPO, 'site', 'deploy', 'deploy.sh'), 'utf8');
     const check = deploy.indexOf('publish-release-to-site.ts" --check');
     const releases = deploy.indexOf('"$SITE_DIR/releases/" "$TARGET:$REMOTE_DIR/releases/"');
@@ -157,5 +161,77 @@ describe('site publishing wiring', () => {
     // The release upload never deletes: the live install.sh may still pin a tarball.
     const releaseRsync = deploy.slice(deploy.lastIndexOf('rsync', releases), releases);
     expect(releaseRsync).not.toContain('--delete');
+    // The site sync deletes, but releases/ is outside it, and excluded files are not deleted.
+    const siteRsync = deploy.slice(deploy.lastIndexOf('rsync', site), site);
+    expect(siteRsync).toContain('--delete');
+    expect(siteRsync).toContain("--exclude '/releases/'");
+    expect(deploy).not.toContain('--delete-excluded');
+  });
+
+  test.skipIf(!has('rsync'))('PoC: deploying a site without an old release keeps that release on the host, and removes other stale pages', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-deploy-'));
+    roots.push(root);
+    const site = join(root, 'repo', 'site');
+    const remote = join(root, 'remote');
+    const shims = join(root, 'shims');
+    for (const dir of [join(site, 'deploy'), join(site, 'releases', '1.0.0-rc.2'), join(remote, 'releases', '1.0.0-rc.1'), shims]) mkdirSync(dir, { recursive: true });
+    copyFileSync(join(REPO, 'site', 'deploy', 'deploy.sh'), join(site, 'deploy', 'deploy.sh'));
+    writeFileSync(join(site, 'index.html'), 'new index');
+    writeFileSync(join(site, 'install.sh'), 'new installer');
+    writeFileSync(join(site, 'releases', '1.0.0-rc.2', 'olympus-1.0.0-rc.2.tgz'), 'rc.2');
+    writeFileSync(join(remote, 'releases', '1.0.0-rc.1', 'olympus-1.0.0-rc.1.tgz'), 'rc.1');
+    writeFileSync(join(remote, 'stale.html'), 'old page');
+    // The release check passes; ssh runs the remote command here, as the host would.
+    writeFileSync(join(shims, 'bun'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(join(shims, 'ssh'), [
+      '#!/bin/sh',
+      'while [ $# -gt 0 ]; do case "$1" in -i|-o|-l|-p) shift 2 ;; -*) shift ;; *) break ;; esac; done',
+      'shift',
+      'exec /bin/sh -c "$*"',
+      '',
+    ].join('\n'), { mode: 0o755 });
+    const result = spawnSync('bash', [join(site, 'deploy', 'deploy.sh')], {
+      encoding: 'utf8',
+      env: { PATH: `${shims}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: root, SITE_SSH_TARGET: 'deploy@site.test', SITE_REMOTE_DIR: remote, SITE_SSH_KEY: join(root, 'key') },
+    });
+    expect({ status: result.status, output: `${result.stdout}${result.stderr}` }).toEqual({ status: 0, output: `${result.stdout}${result.stderr}` });
+    expect(readFileSync(join(remote, 'releases', '1.0.0-rc.1', 'olympus-1.0.0-rc.1.tgz'), 'utf8')).toBe('rc.1');
+    expect(readFileSync(join(remote, 'releases', '1.0.0-rc.2', 'olympus-1.0.0-rc.2.tgz'), 'utf8')).toBe('rc.2');
+    expect(readFileSync(join(remote, 'install.sh'), 'utf8')).toBe('new installer');
+    expect(existsSync(join(remote, 'stale.html'))).toBe(false);
+    expect(existsSync(join(remote, 'deploy'))).toBe(false);
+  });
+});
+
+describe('the Bun program pin', () => {
+  const zipBun = (dir: string, program: string): string => {
+    mkdirSync(join(dir, 'bun-darwin-aarch64'), { recursive: true });
+    writeFileSync(join(dir, 'bun-darwin-aarch64', 'bun'), program, { mode: 0o755 });
+    const zip = join(dir, 'bun-darwin-aarch64.zip');
+    expect(spawnSync('zip', ['-qr', zip, 'bun-darwin-aarch64'], { cwd: dir }).status).toBe(0);
+    return zip;
+  };
+
+  test('the template pins the archive and the program inside it', () => {
+    const pins = readBunPins(TEMPLATE);
+    expect(pins).toBeDefined();
+    expect(pins!.zipSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(pins!.exeSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(pins!.exeSha256).not.toBe(pins!.zipSha256);
+  });
+
+  test.skipIf(!has('zip') || !has('unzip'))('computes the program digest only from the pinned archive, and writes it into the template', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-bun-pin-'));
+    roots.push(dir);
+    const zip = zipBun(dir, '#!/bin/sh\necho fake bun\n');
+    const zipPins = { zipSha256: createHash('sha256').update(readFileSync(zip)).digest('hex'), zipBytes: readFileSync(zip).length };
+    const program = createHash('sha256').update('#!/bin/sh\necho fake bun\n').digest('hex');
+    expect(bunExecutableDigest(zip, zipPins)).toBe(program);
+    expect(() => bunExecutableDigest(zip, { ...zipPins, zipSha256: '0'.repeat(64) })).toThrow('is not the pinned Bun archive');
+    expect(() => bunExecutableDigest(zip, { ...zipPins, zipBytes: zipPins.zipBytes + 1 })).toThrow('is not the pinned Bun archive');
+    const pinned = pinBunExecutable(TEMPLATE, program);
+    expect(readBunPins(pinned)?.exeSha256).toBe(program);
+    expect(pinned.split('\n').filter((line, index) => line !== TEMPLATE.split('\n')[index])).toEqual([`BUN_EXE_SHA256_DARWIN_AARCH64=${program}`]);
+    expect(() => pinBunExecutable(TEMPLATE, 'A'.repeat(64))).toThrow('64 lowercase hex');
   });
 });

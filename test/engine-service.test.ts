@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { engineStatusReport, parseInstallArgs, parseLogsArgs } from '../src/core/engine-cli.ts';
+import { engineStatusReport, parseInstallArgs, parseLogsArgs, parseVerifyArgs } from '../src/core/engine-cli.ts';
 import { engineHostServices, engineStatusPath, startEngineHost } from '../src/core/engine-host.ts';
 import {
   ENGINE_BUILD_ENV,
@@ -20,6 +20,7 @@ import {
   installedEngineBuild,
   installedProgram,
   parseLaunchctlPrint,
+  preflightEnginePaths,
   readEngineLogs,
   reconcileEngineConfig,
   renderEnginePlist,
@@ -720,18 +721,44 @@ describe('install and rollback succeed only on proof the new build is healthy', 
       .rejects.toThrow(/could not load the engine agent.*Putting back build .* failed too/);
   });
 
-  test('engine verify proves the build the installed agent names', async () => {
-    const { home, checkout, bun } = fixture();
+  test('PoC: engine verify proves the build it is given, never the one the installed agent names', async () => {
+    const { root, home, checkout, bun } = fixture();
     const launchctl = launchingLaunchctl(home);
     installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun });
-    const ok = await verifyEngine({ platform: 'darwin', homeDir: home, health: fastHealth() });
-    expect(ok).toMatchObject({ ok: true, health: { running_build: engineBuildIdentity(checkout) } });
-    writeFileSync(join(checkout, 'dist', 'cli.js'), '// v2\n');
-    installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: fakeLaunchctl().exec, fromCheckout: checkout, bunBin: bun });
-    // The plist now names a build no host has started.
-    const stale = await verifyEngine({ platform: 'darwin', homeDir: home, health: fastHealth() });
+    const oldBuild = engineBuildIdentity(checkout);
+    const ok = await verifyEngine({ platform: 'darwin', homeDir: home, expectPackage: checkout, health: fastHealth() });
+    expect(ok).toMatchObject({ ok: true, expected_build: oldBuild, installed_build: oldBuild, health: { running_build: oldBuild } });
+
+    // An upgrade cut short after the swap: the new files are in place, but the
+    // agent and the running host are still the old build. Checking against the
+    // agent would pass; checking against the new package does not.
+    const upgraded = makeCheckout(root, 'upgraded');
+    writeFileSync(join(upgraded, 'dist', 'cli.js'), '// v2\n');
+    const newBuild = engineBuildIdentity(upgraded);
+    const cutShort = await verifyEngine({ platform: 'darwin', homeDir: home, expectPackage: upgraded, health: fastHealth() });
+    expect(cutShort.ok).toBe(false);
+    expect(cutShort).toMatchObject({ expected_build: newBuild, installed_build: oldBuild });
+    expect(cutShort.reason).toBe(`The installed engine agent runs build ${oldBuild}, not ${newBuild}: run olympus engine install --restart.`);
+    expect(await verifyEngine({ platform: 'darwin', homeDir: home, expectedBuild: newBuild, health: fastHealth() })).toMatchObject({ ok: false, installed_build: oldBuild });
+
+    // The agent names the new build, but the host launchd runs is still the old one.
+    installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: fakeLaunchctl().exec, fromCheckout: upgraded, bunBin: bun });
+    const stale = await verifyEngine({ platform: 'darwin', homeDir: home, expectPackage: upgraded, health: fastHealth() });
     expect(stale.ok).toBe(false);
-    expect(stale.reason).toContain('not ' + engineBuildIdentity(checkout));
+    expect(stale.reason).toBe(`The engine is not healthy: the engine runs build ${oldBuild}, not ${newBuild}.`);
+  });
+
+  test('engine verify takes one expectation, and refuses a folder that is not a runnable Olympus package', async () => {
+    const { root, home, checkout, bun } = fixture();
+    installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: launchingLaunchctl(home).exec, fromCheckout: checkout, bunBin: bun });
+    await expect(verifyEngine({ platform: 'darwin', homeDir: home, expectPackage: checkout, expectedBuild: 'x', health: fastHealth() })).rejects.toThrow('not both');
+    await expect(verifyEngine({ platform: 'darwin', homeDir: home, expectPackage: join(root, 'runtime'), health: fastHealth() })).rejects.toThrow('is not an Olympus checkout or package');
+    await expect(verifyEngine({ platform: 'darwin', homeDir: home, expectedBuild: 'a b', health: fastHealth() })).rejects.toThrow('is not a build identity');
+    expect(parseVerifyArgs([])).toEqual({});
+    expect(parseVerifyArgs(['--expect-package', '/tmp/pkg'])).toEqual({ expectPackage: '/tmp/pkg' });
+    expect(parseVerifyArgs(['--expect-build=1.0.0+abc'])).toEqual({ expectedBuild: '1.0.0+abc' });
+    expect(() => parseVerifyArgs(['--expect-package'])).toThrow('needs a value');
+    expect(() => parseVerifyArgs(['--json'])).toThrow('Unknown engine verify option: --json');
   });
 });
 
@@ -802,6 +829,45 @@ describe('engine install preflight, policy seeding, and what uninstall keeps', (
     expect(existsSync(paths.sovereigntyPath)).toBe(false);
     expect(readdirSync(elsewhere)).toEqual([]);
     expect(launchctl.calls).toEqual([]);
+  });
+
+  test('PoC: a symlinked or foreign application folder fails before anything is written or loaded', () => {
+    for (const name of ['support', 'app', 'app.previous', 'runtime'] as const) {
+      const { root, home, checkout, bun } = fixture();
+      const paths = enginePaths(home);
+      const target = { support: paths.appSupportDir, app: paths.appDir, 'app.previous': paths.previousAppDir, runtime: paths.runtimeDir }[name];
+      const elsewhere = join(root, `elsewhere-${name}`);
+      mkdirSync(elsewhere);
+      mkdirSync(join(target, '..'), { recursive: true });
+      symlinkSync(elsewhere, target);
+      const launchctl = fakeLaunchctl();
+      expect(() => installEngine({ platform: 'darwin', homeDir: home, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun }))
+        .toThrow('Olympus cannot install here');
+      expect(existsSync(paths.plistPath)).toBe(false);
+      expect(existsSync(paths.configPath)).toBe(false);
+      expect(launchctl.calls).toEqual([]);
+    }
+    const { home } = fixture();
+    const paths = enginePaths(home);
+    mkdirSync(paths.appDir, { recursive: true });
+    const me = process.getuid?.() ?? 501;
+    expect(() => preflightEnginePaths(home, paths, me)).not.toThrow();
+    expect(() => preflightEnginePaths(home, paths, me + 1)).toThrow('belongs to another user');
+  });
+
+  test('rollback refuses a symlinked previous app before swapping anything', async () => {
+    const { root, home, bun } = fixture();
+    const paths = enginePaths(home);
+    mkdirSync(join(paths.appDir, 'dist'), { recursive: true });
+    writeFileSync(join(paths.appDir, 'package.json'), JSON.stringify({ name: 'olympus', version: '2.0.0' }));
+    writeFileSync(join(paths.appDir, 'dist', 'cli.js'), '// 2.0.0\n');
+    const launchctl = launchingLaunchctl(home);
+    installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec, fromCheckout: paths.appDir, bunBin: bun });
+    const elsewhere = makeCheckout(root, 'elsewhere');
+    symlinkSync(elsewhere, paths.previousAppDir);
+    await expect(rollbackEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec, health: fastHealth() }))
+      .rejects.toThrow('Olympus cannot install here');
+    expect(readFileSync(join(paths.appDir, 'dist', 'cli.js'), 'utf8')).toBe('// 2.0.0\n');
   });
 
   test('a directory where the plist goes fails before anything is written', () => {

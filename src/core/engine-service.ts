@@ -603,18 +603,61 @@ export function installedEngineBuild(plistPath: string): string | null {
 }
 
 /**
- * `olympus engine verify`: wait for proof that the engine runs the build its
- * installed agent names. The installer uses it to check a restored previous
- * version, whose own CLI may predate health checks.
+ * `olympus engine verify`: wait for proof that the engine runs the expected
+ * build, and that the installed agent names it. The expected build is given
+ * explicitly (`expectedBuild`, or `expectPackage`: the build of the package
+ * in that folder); without either it is the build of the package this command
+ * runs from. It is never taken from the installed agent: an upgrade cut short
+ * after the new files went in leaves the agent naming, and launchd running,
+ * the old build, and that must not pass as the new one. The installer passes
+ * the verified download, and uses it to check a restored previous version,
+ * whose own CLI may predate health checks.
  */
-export async function verifyEngine(options: EngineServiceOptions & { health?: EngineHealthDeps } = {}): Promise<{ ok: boolean; health: EngineHealthProof; reason?: string }> {
+export async function verifyEngine(
+  options: EngineServiceOptions & { health?: EngineHealthDeps; expectedBuild?: string; expectPackage?: string } = {},
+): Promise<{ ok: boolean; expected_build: string; installed_build: string | null; health?: EngineHealthProof; reason?: string }> {
   assertDarwin(options.platform);
   const paths = enginePaths(absolute(options.homeDir ?? homedir(), 'home directory'));
   if (!existsSync(paths.plistPath)) {
     throw new OperationError('config_error', 'The engine is not installed.', 'Run olympus engine install.');
   }
-  const health = await waitForEngineHealthy({ paths, expectedBuild: installedEngineBuild(paths.plistPath) }, options.health);
-  return health.ok ? { ok: true, health } : { ok: false, health, reason: `The engine is not healthy: ${health.reason}.` };
+  const expectedBuild = expectedEngineBuild(options);
+  const installedBuild = installedEngineBuild(paths.plistPath);
+  if (installedBuild !== expectedBuild) {
+    return {
+      ok: false,
+      expected_build: expectedBuild,
+      installed_build: installedBuild,
+      reason: `The installed engine agent runs build ${installedBuild ?? 'unknown'}, not ${expectedBuild}: run olympus engine install --restart.`,
+    };
+  }
+  const health = await waitForEngineHealthy({ paths, expectedBuild }, options.health);
+  return health.ok
+    ? { ok: true, expected_build: expectedBuild, installed_build: installedBuild, health }
+    : { ok: false, expected_build: expectedBuild, installed_build: installedBuild, health, reason: `The engine is not healthy: ${health.reason}.` };
+}
+
+function expectedEngineBuild(options: { expectedBuild?: string; expectPackage?: string }): string {
+  if (options.expectedBuild !== undefined && options.expectPackage !== undefined) {
+    throw new OperationError('invalid_params', 'Pass --expect-build or --expect-package, not both.');
+  }
+  if (options.expectedBuild !== undefined) {
+    if (!/^[0-9A-Za-z.+-]{1,96}$/.test(options.expectedBuild)) throw new OperationError('invalid_params', `--expect-build ${JSON.stringify(options.expectedBuild)} is not a build identity.`);
+    return options.expectedBuild;
+  }
+  let root: string;
+  if (options.expectPackage !== undefined) {
+    root = resolvePath(options.expectPackage);
+  } else {
+    try {
+      root = olympusPackageRoot();
+    } catch {
+      throw new OperationError('config_error', 'The Olympus package this command runs from could not be found.', 'Pass --expect-package <folder> or --expect-build <build>.');
+    }
+  }
+  assertOlympusPackage(root, '--expect-package');
+  assertFile(join(root, 'dist', 'cli.js'), `${root} has no dist/cli.js, so it is not a runnable Olympus package.`);
+  return engineBuildIdentity(root);
 }
 
 /**
@@ -625,7 +668,34 @@ export async function verifyEngine(options: EngineServiceOptions & { health?: En
  * policy, and the custody rules that guard them are shared with the worker
  * installer.
  */
-export function preflightEnginePaths(homeDir: string, paths: EnginePaths = enginePaths(homeDir)): void {
+export function preflightEnginePaths(homeDir: string, paths: EnginePaths = enginePaths(homeDir), ownerUid: number | undefined = process.getuid?.()): void {
+  // The folders scripts/install-macos.sh manages, which hold the Bun and the
+  // package launchd runs: real folders owned by this user, or absent.
+  const installed: Array<[string, string]> = [
+    [paths.appSupportDir, 'Olympus application'],
+    [paths.appDir, 'Olympus application'],
+    [`${paths.appDir}.next`, 'Olympus application'],
+    [paths.previousAppDir, 'Olympus application'],
+    [paths.runtimeDir, 'Olympus runtime'],
+  ];
+  for (const [dir, label] of installed) {
+    let problem: string | undefined;
+    try {
+      assertManagedPathParentsSync(homeDir, dir, label);
+      const stat = existsSync(dir) || isSymlink(dir) ? lstatSync(dir) : undefined;
+      if (stat && (stat.isSymbolicLink() || !stat.isDirectory())) problem = `${dir} is not a real folder (a symbolic link or a file).`;
+      else if (stat && ownerUid !== undefined && stat.uid !== ownerUid) problem = `${dir} belongs to another user.`;
+    } catch (error) {
+      problem = error instanceof Error ? error.message : String(error);
+    }
+    if (problem) {
+      throw new OperationError(
+        'config_error',
+        `Olympus cannot install here: ${problem}`,
+        `Olympus runs only from real folders that belong to you. Move ${dir} aside, then run the Olympus installer again. Nothing was changed.`,
+      );
+    }
+  }
   const managed: Array<[string, string]> = [
     [paths.plistPath, 'LaunchAgent'],
     [paths.logPath, 'engine log'],
@@ -928,6 +998,7 @@ export async function rollbackEngine(options: EngineServiceOptions & { bunBin?: 
       'Reinstall from the checkout or package you want with olympus engine install.',
     );
   }
+  preflightEnginePaths(homeDir, paths);
   assertOlympusPackage(paths.previousAppDir, 'The previous app');
   assertFile(join(paths.previousAppDir, 'dist', 'cli.js'), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
   const bunBin = options.bunBin ?? installed.runtimePath;
@@ -1262,6 +1333,14 @@ function resolveBun(explicit: string | undefined): string {
     }
   }
   throw new OperationError('config_error', 'Olympus needs Bun 1.2+ and could not find it.', 'Install Bun from https://bun.sh, or pass --bun <absolute path>.');
+}
+
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 function isBunName(path: string): boolean {

@@ -45,13 +45,18 @@ fi
 SSH_CMD="ssh -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes"
 echo "Publishing $SITE_DIR to $TARGET:$REMOTE_DIR"
 # Releases first, without --delete, so the tarball is live before the
-# install.sh that pins it.
+# install.sh that pins it. Published releases are never deleted
+# automatically: the rest of the site is synced with --delete, but releases/
+# is excluded from it, so a release this checkout no longer has stays
+# downloadable (an installer someone saved still pins it). Remove one on the
+# host by hand when it must go.
 rsync -rlt --itemize-changes ${DRY_RUN[@]+"${DRY_RUN[@]}"} \
   --exclude '.*' \
   -e "$SSH_CMD" \
   "$SITE_DIR/releases/" "$TARGET:$REMOTE_DIR/releases/"
 rsync -rlt --delete --itemize-changes ${DRY_RUN[@]+"${DRY_RUN[@]}"} \
   --exclude '/deploy/' \
+  --exclude '/releases/' \
   --exclude '.*' \
   -e "$SSH_CMD" \
   "$SITE_DIR/" "$TARGET:$REMOTE_DIR/"
