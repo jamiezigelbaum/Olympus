@@ -120,6 +120,9 @@ const KNOWN_READINESS_LABELS = new Set([
   'Waiting for the first sync',
 ]);
 
+/** Provider refusal codes the vocabulary words on their own; any other reads as a generic refusal. */
+const KNOWN_REFUSAL_CODES = new Set(['access_denied', 'redirect_uri_mismatch', 'invalid_redirect_uri', 'redirect_uri_not_registered']);
+
 const KNOWN_QUEUE_LABELS = new Set(['Needs attention', 'Working now', 'Waiting to catch up', 'Caught up']);
 
 export interface ChatGptDashboardOptions {
@@ -161,18 +164,24 @@ export function buildChatGptDashboardViewModel(
     const scrubbed = scrubCard(definition, card);
     const connecting = connectingFor(definition, card, now);
     const vocabularyStatus = dashboardStatus({ source: scrubbed, ...(degraded ? { degradedCredentials: degraded } : {}) });
-    const measured = connecting || vocabularyStatus === 'Off'
+    const credentials = credentialProblem(scrubbed, degraded);
+    // A first connect the provider refused has nothing behind it: no progress,
+    // exactly as an Off source has none, but it stays in Needs you.
+    const measured = connecting || vocabularyStatus === 'Off' || refusedFirstConnect(scrubbed)
       ? undefined
-      : measuredSourceProgress(card, scrubbed, embedding, vocabularyStatus, now);
+      : measuredSourceProgress(card, scrubbed, embedding, vocabularyStatus, credentials, now);
     const progress = measured?.progress;
     // Mid-sign-in reads Needs you whatever else the card says: the owner's
     // next step is finishing the sign-in.
-    let status: DashboardStatus = connecting ? 'Needs you' : honestStatus(vocabularyStatus, progress);
+    // A credential problem (a provider refusal, a degraded or expired sign-in)
+    // is Needs you whatever the progress or indexing state: its fix is the
+    // owner's, never the engine's.
+    let status: DashboardStatus = connecting || credentials ? 'Needs you' : honestStatus(vocabularyStatus, progress);
     // A source working normally (a stage unfinished, nothing stalled) offers
     // no action: the only fix this page had for it was "Check again", a
     // button over work that needs nothing (owner fresh-install test,
     // 2026-10-01). A real fix (reconnect, choose folders) still stands.
-    if (!connecting && (status === 'Needs you' || status === 'Failing') && progress && progress.stage !== 'done'
+    if (!connecting && !credentials && (status === 'Needs you' || status === 'Failing') && progress && progress.stage !== 'done'
       && !progress.stalled && attentionItem(definition, scrubbed, degraded, undefined, progress).fix?.tool === DASHBOARD_TOOL_NAME) {
       status = 'Working';
     }
@@ -306,12 +315,14 @@ function sourceEntry(
       ? STAGE_DETAIL[progress.stage as Exclude<SourceProgress['stage'], 'done'>]
       : dashboardSubLine(card, degraded ? { degradedCredentials: degraded } : undefined);
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
-  const reconnect = progress?.stalledReason === 'waiting_for_credentials' ? reconnectFix(definition) : undefined;
+  const reconnect = credentialProblem(card, degraded) || progress?.stalledReason === 'waiting_for_credentials'
+    ? reconnectFix(definition)
+    : undefined;
   const primary = connecting
     ? connecting.fix
     : status === 'Off'
       ? (actionKind === 'none' ? undefined : connectFix(definition))
-      : scopePending(card) ? scopeFix(definition, card) : reconnect;
+      : reconnect ?? (scopePending(card) ? scopeFix(definition, card) : undefined);
   const menu: DashboardFix[] = [];
   if (status !== 'Off' && card.scope_selection && !scopePending(card)) {
     const fix = scopeFix(definition, card);
@@ -351,9 +362,7 @@ function attentionItem(
   }
   const reason = dashboardAttentionLine(card, degraded ? { degradedCredentials: degraded } : undefined);
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
-  const reauth = card.connection.state === 'reauth_required'
-    || progress?.stalledReason === 'waiting_for_credentials'
-    || (card.connection.state !== 'connected' && card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card));
+  const reauth = credentialProblem(card, degraded) || progress?.stalledReason === 'waiting_for_credentials';
   const reconnect = reauth ? reconnectFix(definition) : undefined;
   // A source ChatGPT cannot sign in again (X, Readwise) is reconnected on the Mac.
   const fix = reconnect
@@ -385,6 +394,55 @@ function connectingFor(
     expiresAt,
     fix: { label: DASHBOARD_CHATGPT_PICKER_COPY.connectReopen, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } },
   };
+}
+
+/**
+ * The source's sign-in is the owner's to fix: the provider refused the last
+ * consent attempt, a worker credential for it is degraded, the connection
+ * needs reauthentication, or a source holding data has lost its connection.
+ * Read off the SCRUBBED card, so a refusal is only its presence and a fixed
+ * code, never the provider's words.
+ */
+function credentialProblem(
+  card: DashboardSourceCard,
+  degraded: readonly WorkerCredentialDegradation[] | undefined,
+): boolean {
+  return card.connection.provider_refusal !== undefined
+    || degradationMatches(card, degraded)
+    || card.connection.state === 'reauth_required'
+    || (card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card));
+}
+
+/** A refused connect on a source never connected: nothing behind it to measure. */
+function refusedFirstConnect(card: DashboardSourceCard): boolean {
+  return card.connection.provider_refusal !== undefined
+    && (card.connection.state === 'not_connected' || card.connection.state === 'needs_setup')
+    && card.coverage.indexed_items === 0;
+}
+
+/**
+ * Whether a worker credential degradation names this source. The same match
+ * vocabulary.ts makes for its status word (label, provider, source id or its
+ * family prefix, compared case- and punctuation-blind); the name is matched,
+ * never printed.
+ */
+function degradationMatches(
+  card: DashboardSourceCard,
+  degraded: readonly WorkerCredentialDegradation[] | undefined,
+): boolean {
+  if (!degraded || degraded.length === 0) return false;
+  const candidates = new Set([
+    normalizeName(card.label),
+    normalizeName(card.provider),
+    normalizeName(card.source_id),
+    normalizeName(card.source_id.split('.')[0] ?? ''),
+  ]);
+  candidates.delete('');
+  return degraded.some((entry) => candidates.has(normalizeName(entry.display_name)));
+}
+
+function normalizeName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
 function reconnectFix(definition: DashboardSupportedSourceDefinition): DashboardFix | undefined {
@@ -442,12 +500,11 @@ function measuredSourceProgress(
   scrubbed: DashboardSourceCard,
   embedding: DashboardViewModelV1['models']['embedding'],
   status: DashboardStatus,
+  credentials: boolean,
   now: Date,
 ): MeasuredSourceProgress {
   const unit = unitFor(scrubbed);
-  const credentialsMissing = status === 'Needs you'
-    && (scrubbed.connection.state === 'reauth_required'
-      || (scrubbed.coverage.indexed_items > 0 && !dashboardIsConnectedSource(scrubbed)));
+  const credentialsMissing = status === 'Needs you' && credentials;
   const found = count(scrubbed.coverage.indexed_items);
   if (scopePending(scrubbed)) {
     return {
@@ -745,6 +802,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
     ? card.freshness.label
     : '';
   const pending = card.connection.pending;
+  const refusal = card.connection.provider_refusal;
   return {
     corpus_id: definition.primary_corpus_id,
     source_id: definition.source_id,
@@ -813,6 +871,12 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       handles: [],
       ...(pending && finite(pending.expires_in_minutes)
         ? { pending: { started_at: '', expires_at: '', expires_in_minutes: count(pending.expires_in_minutes) } }
+        : {}),
+      // The refusal's presence and, from a closed set, the code vocabulary.ts
+      // words differently. The reason (which names a callback address and a
+      // provider setting) stays on the Mac.
+      ...(refusal
+        ? { provider_refusal: { code: KNOWN_REFUSAL_CODES.has(refusal.code) ? refusal.code : '', reason: '' } }
         : {}),
     },
     ...(card.progress && finite(card.progress.indexed_items_per_hour)

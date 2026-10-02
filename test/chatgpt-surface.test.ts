@@ -274,6 +274,100 @@ describe('dashboard view-model producer', () => {
     expect(vm.needsYou.map((item) => item.fix)).toEqual([reconnect]);
   });
 
+  test('a provider refusal reads Needs you with its plain sentence and Reconnect, never the provider\'s words', () => {
+    const reconnect = { label: 'Reconnect', tool: 'olympus_connect_source', args: { source: 'dropbox' } };
+    // A source mid-index whose last consent attempt was refused.
+    const midIndex = buildChatGptDashboardViewModel(view([card('dropbox.files', {
+      family: 'file',
+      connection: {
+        state: 'synced',
+        label: 'synced less than 1 hour ago',
+        provider_refusal: { code: 'access_denied', reason: S('REFUSAL') },
+      },
+      coverage: { indexed_items: 300, content_ready_items: 100, embedded_items: 0, embedded_files: 50 },
+      queue_health: { label: 'Working now', waiting: 10, active: 1 },
+      answer_readiness: { state: 'syncing', label: 'Syncing now' },
+      last_sync_at: NOW.toISOString(),
+      movement: { extraction_at: NOW.toISOString() } as never,
+    })]), { now: NOW });
+    const dropbox = midIndex.sources[0]!;
+    expect(dropbox.status).toBe('Needs you');
+    expect(dropbox.detail).toBe('sign-in was declined — connect again to retry');
+    expect(dropbox.primary).toEqual(reconnect);
+    expect(dropbox.progress).toMatchObject({ stalled: true, stalledReason: 'waiting_for_credentials' });
+    expect(midIndex.needsYou).toEqual([{
+      id: 'source:dropbox.files',
+      sentence: 'Dropbox — sign-in was declined — connect again to retry',
+      fix: reconnect,
+    }]);
+    expect(JSON.stringify(midIndex).match(SENTINEL_PATTERN)?.[0]).toBeUndefined();
+
+    // A first connect the provider refused: not Off, no progress, Reconnect.
+    // An unknown code reads as the generic refusal; the code is never printed.
+    const firstConnect = buildChatGptDashboardViewModel(view([{
+      ...offCard('dropbox.files'),
+      connection: {
+        ...offCard('dropbox.files').connection,
+        provider_refusal: { code: S('CODE'), reason: S('REFUSAL') },
+      },
+    }]), { now: NOW });
+    const refused = firstConnect.sources[0]!;
+    expect(refused.status).toBe('Needs you');
+    expect(refused.primary).toEqual(reconnect);
+    expect(refused.progress).toBeUndefined();
+    expect(firstConnect.progress).toBeUndefined();
+    expect(firstConnect.needsYou.map((item) => item.fix)).toEqual([reconnect]);
+    expect(firstConnect.needsYou[0]!.sentence.startsWith('Dropbox — ')).toBe(true);
+    expect(JSON.stringify(copyDashboardViewModel(firstConnect)).match(SENTINEL_PATTERN)?.[0]).toBeUndefined();
+  });
+
+  test('a degraded credential during unfinished progress stays Needs you with Reconnect, not Working', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
+      family: 'file',
+      connection: { state: 'synced', label: 'synced less than 1 hour ago' },
+      coverage: { indexed_items: 300, content_ready_items: 100, embedded_items: 0, embedded_files: 50 },
+      queue_health: { label: 'Working now', waiting: 10, active: 1 },
+      answer_readiness: { state: 'syncing', label: 'Syncing now' },
+      last_sync_at: NOW.toISOString(),
+      movement: { extraction_at: NOW.toISOString() } as never,
+    })], {
+      degraded_credentials: [{
+        kind: 'worker_credential_degraded',
+        display_name: 'Dropbox',
+        state: 'stopped',
+        status_label: 'Credential unavailable - needs your attention',
+        hint: S('CREDENTIAL_HINT'),
+        attempts: 3,
+        max_attempts: 3,
+      }],
+    }), { now: NOW });
+    const dropbox = vm.sources[0]!;
+    const reconnect = { label: 'Reconnect', tool: 'olympus_connect_source', args: { source: 'dropbox' } };
+    expect(dropbox.progress).toMatchObject({ stage: 'reading', stalled: true, stalledReason: 'waiting_for_credentials' });
+    expect(dropbox.status).toBe('Needs you');
+    expect(dropbox.primary).toEqual(reconnect);
+    expect(dropbox.detail?.startsWith('can\'t sign in')).toBe(true);
+    expect(vm.needsYou.map((item) => [item.id, item.fix])).toEqual([['source:dropbox.files', reconnect]]);
+    expect(JSON.stringify(vm).match(SENTINEL_PATTERN)?.[0]).toBeUndefined();
+  });
+
+  test('healthy unfinished progress stays Working with no fix', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
+      family: 'file',
+      connection: { state: 'synced', label: 'synced less than 1 hour ago' },
+      coverage: { indexed_items: 300, content_ready_items: 100, embedded_items: 0, embedded_files: 50 },
+      queue_health: { label: 'Working now', waiting: 10, active: 1 },
+      answer_readiness: { state: 'syncing', label: 'Syncing now' },
+      last_sync_at: NOW.toISOString(),
+      movement: { extraction_at: NOW.toISOString() } as never,
+    })]), { now: NOW });
+    const dropbox = vm.sources[0]!;
+    expect(dropbox.progress).toMatchObject({ stage: 'reading', stalled: false });
+    expect(dropbox.status).toBe('Working');
+    expect(dropbox.primary).toBeUndefined();
+    expect(vm.needsYou).toEqual([]);
+  });
+
   test('indexing waits on the built-in model download with a fixed reason', () => {
     const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
       family: 'file',
