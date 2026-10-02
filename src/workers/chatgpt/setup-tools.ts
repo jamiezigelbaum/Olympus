@@ -323,6 +323,7 @@ export const PRIVACY_SET_TOOL: ToolDefinition = {
       confirmation: { type: 'string', maxLength: 128, description: 'The panel\'s confirmation from olympus_privacy_get.' },
       revision: { type: 'string', maxLength: 64, description: 'The revision from olympus_privacy_get; a save against changed settings is refused.' },
     },
+    required: ['revision'],
     additionalProperties: false,
   },
   // Hidden from the model (review P-1, 2026-10-02): a privacy change is the
@@ -405,7 +406,9 @@ export async function callSetupTool(
       case PRIVACY_SET_TOOL_NAME: {
         const { confirmation, revision, ...fields } = args;
         if (confirmation !== undefined && typeof confirmation !== 'string') throw new ChatGptSurfaceError('invalid_params');
-        if (revision !== undefined && (typeof revision !== 'string' || !revision || revision.length > 64)) {
+        // Every save is a compare-and-swap: a caller that omits the revision
+        // could overwrite settings it never saw (review, 2026-10-03).
+        if (typeof revision !== 'string' || !revision || revision.length > 64) {
           throw new ChatGptSurfaceError('invalid_params');
         }
         let update: ReturnType<typeof parsePrivacyProfileInput>;
@@ -416,10 +419,8 @@ export async function callSetupTool(
         }
         const secrets = secretLocations(backend);
         // Compare-and-swap: read and write run with no await between them.
-        if (revision !== undefined) {
-          const current = backend.privacySettings();
-          if (current.revision !== revision) return privacyToolResult(visiblePrivacy(current, secrets), 'conflict');
-        }
+        const current = backend.privacySettings();
+        if (current.revision !== revision) return privacyToolResult(visiblePrivacy(current, secrets), 'conflict');
         // Lowering protection is the owner's alone: only with the panel's confirmation.
         const confirmed = confirmation !== undefined && privacyConfirmationValid(backend, confirmation);
         if (!confirmed && lowersPrivacy(update, visiblePrivacy(backend.privacySettings(), secrets))) {

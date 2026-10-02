@@ -435,6 +435,17 @@ async function connectClient(): Promise<Client> {
 type ToolResult = { content: Array<{ text: string }>; structuredContent?: Record<string, unknown>; _meta?: Record<string, unknown>; isError?: boolean };
 
 async function call(client: Client, name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  // Every privacy save is a compare-and-swap; tests that aren't about the
+  // revision send the current one, as the panel does.
+  if (name === 'olympus_privacy_set' && !('revision' in args)) {
+    const current = await client.callTool({ name: 'olympus_privacy_get', arguments: {} }) as unknown as ToolResult;
+    const meta = (current._meta?.['olympus/privacy'] ?? {}) as { revision?: string };
+    args = { ...args, revision: meta.revision };
+  }
+  return await client.callTool({ name, arguments: args }) as unknown as ToolResult;
+}
+
+async function callRaw(client: Client, name: string, args: Record<string, unknown>): Promise<ToolResult> {
   return await client.callTool({ name, arguments: args }) as unknown as ToolResult;
 }
 
@@ -926,6 +937,8 @@ describe('privacy settings (olympus_privacy_get / olympus_privacy_set)', () => {
       expect(retried.structuredContent).toMatchObject({ status: 'saved', description: 'Health.', ruleCount: 1 });
       // A malformed revision is invalid input.
       expect((await call(client, 'olympus_privacy_set', { revision: 7, description: 'x' })).isError).toBe(true);
+      // Omitting the revision is invalid: no save may skip the compare-and-swap.
+      expect((await callRaw(client, 'olympus_privacy_set', { rules: [] })).isError).toBe(true);
     } finally {
       await client.close();
     }
