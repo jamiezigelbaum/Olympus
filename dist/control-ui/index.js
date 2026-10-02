@@ -50,7 +50,7 @@ function mountDashboardController(options) {
     return "Request failed.";
   }
   function applyWriteCapability() {
-    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind]," + "form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind]").forEach((form) => {
+    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind],form[data-model-retry]," + "form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind],form[data-privacy-form]").forEach((form) => {
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
       form.querySelectorAll('button,input:not([type="hidden"])').forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
@@ -102,6 +102,8 @@ function mountDashboardController(options) {
         return "Starting sync…";
       case "set_embedding_priority":
         return "Saving…";
+      case "retry_model":
+        return "Starting the download again…";
       default:
         return "Working…";
     }
@@ -122,6 +124,8 @@ function mountDashboardController(options) {
         return "Disconnected. This card updates when Olympus confirms it.";
       case "unpair":
         return "Unpaired on this computer.";
+      case "retry_model":
+        return "Downloading again. This row updates as it goes.";
       default:
         return "Saved.";
     }
@@ -256,6 +260,10 @@ function mountDashboardController(options) {
     }
     if (form.hasAttribute("data-embedding-kind")) {
       return { action: "set_embedding_priority", on: body.on === "true" };
+    }
+    if (form.hasAttribute("data-model-retry")) {
+      const model = form.dataset.modelRetry;
+      return model === "embedding" || model === "answers" ? { action: "retry_model", model } : undefined;
     }
     if (form.hasAttribute("data-disconnect-kind")) {
       return {
@@ -585,7 +593,7 @@ function mountDashboardController(options) {
       return "";
     if (node.id)
       return `#${node.id}`;
-    const action = node.getAttribute("data-connect-kind") || node.getAttribute("data-sync-kind") || node.getAttribute("data-embedding-kind") || node.getAttribute("data-disconnect-kind") || node.getAttribute("data-unpair-kind");
+    const action = node.getAttribute("data-connect-kind") || node.getAttribute("data-sync-kind") || node.getAttribute("data-embedding-kind") || node.getAttribute("data-model-retry") || node.getAttribute("data-disconnect-kind") || node.getAttribute("data-unpair-kind");
     if (action)
       return `${node.tagName}:${action}`;
     return node.textContent?.trim().slice(0, 120) || "";
@@ -660,6 +668,8 @@ function mountDashboardController(options) {
       return;
     if (!force && query("[data-remote-terms]:not([hidden])"))
       return;
+    if (!force && query('form[data-privacy-form][data-dirty="true"],[data-privacy-panel]:not([hidden])'))
+      return;
     if (!force && hasDirtyInput())
       return;
     if (!force && hasFocusedControl()) {
@@ -690,6 +700,463 @@ function mountDashboardController(options) {
       refreshNow(false);
     }, pollIntervalMs) : undefined;
   }
+  const PRIVACY_EMAIL = /^[^\s@<>"(),;:]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
+  const PRIVACY_DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+  function privacyCopy(form) {
+    try {
+      return JSON.parse(form.dataset.copy || "{}");
+    } catch {
+      return {};
+    }
+  }
+  function privacyFill(template, values) {
+    let out = template || "";
+    for (const key of Object.keys(values))
+      out = out.split(`{${key}}`).join(values[key]);
+    return out;
+  }
+  function privacyFolderSources(form) {
+    try {
+      const list = JSON.parse(form.dataset.folderSources || "[]");
+      return Array.isArray(list) ? list.filter((entry) => entry && typeof entry.id === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+  function privacyRuleOf(row) {
+    try {
+      const rule = JSON.parse(row.getAttribute("data-privacy-rule") || "");
+      return rule && typeof rule.kind === "string" && typeof rule.source_id === "string" ? rule : undefined;
+    } catch {
+      return;
+    }
+  }
+  function privacyIdentity(rule) {
+    const matched = rule.kind === "sender" ? (rule.value || "").toLowerCase() : rule.key || "";
+    return `${rule.kind}\x00${rule.source_id}\x00${matched}`;
+  }
+  function privacyKept(form) {
+    return Array.from(form.querySelectorAll("[data-privacy-rule]")).filter((row) => !row.hasAttribute("data-removed")).map(privacyRuleOf).filter((rule) => rule !== undefined);
+  }
+  function privacyWords(form, rule) {
+    const copy = privacyCopy(form);
+    if (rule.kind === "sender")
+      return { name: rule.value || "", kind: copy.kindSender || "" };
+    if (rule.kind === "label")
+      return { name: rule.value || "", kind: copy.kindLabel || "" };
+    const source = privacyFolderSources(form).find((entry) => entry.id === rule.source_id);
+    return { name: rule.display || rule.key || "", kind: privacyFill(copy.kindFolder || "", { source: source ? source.label : rule.source_id }) };
+  }
+  function setPrivacyDirty(form) {
+    form.dataset.dirty = "true";
+    const empty = form.querySelector("[data-privacy-empty]");
+    if (empty)
+      empty.hidden = privacyKept(form).length > 0;
+  }
+  function privacyRow(form, rule) {
+    const words = privacyWords(form, rule);
+    const copy = privacyCopy(form);
+    const row = document.createElement("div");
+    row.className = "srow nodot prule";
+    row.setAttribute("data-privacy-rule", JSON.stringify(rule));
+    const main = document.createElement("div");
+    main.className = "smain";
+    const name = document.createElement("p");
+    name.className = "sline strong";
+    name.textContent = words.name;
+    const kind = document.createElement("p");
+    kind.className = "sline";
+    kind.textContent = words.kind;
+    main.append(name, kind);
+    const actions = document.createElement("div");
+    actions.className = "sact";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "btn";
+    remove.setAttribute("data-privacy-remove", "");
+    remove.setAttribute("aria-label", privacyFill(copy.removeFor || "", { name: words.name }));
+    remove.textContent = copy.remove || "Remove";
+    actions.append(remove);
+    row.append(main, actions);
+    return row;
+  }
+  function addPrivacyRule(form, rule) {
+    const identity = privacyIdentity(rule);
+    const rows = Array.from(form.querySelectorAll("[data-privacy-rule]"));
+    const existing = rows.find((row) => {
+      const current = privacyRuleOf(row);
+      return current !== undefined && privacyIdentity(current) === identity;
+    });
+    if (existing) {
+      if (!existing.hasAttribute("data-removed"))
+        return false;
+      togglePrivacyRemoved(form, existing);
+      return true;
+    }
+    form.querySelector("[data-privacy-rules]")?.append(privacyRow(form, rule));
+    setPrivacyDirty(form);
+    return true;
+  }
+  function togglePrivacyRemoved(form, row) {
+    const copy = privacyCopy(form);
+    const rule = privacyRuleOf(row);
+    const name = rule ? privacyWords(form, rule).name : "";
+    const button = row.querySelector("[data-privacy-remove]");
+    const removed = !row.hasAttribute("data-removed");
+    row.toggleAttribute("data-removed", removed);
+    row.classList.toggle("removed", removed);
+    if (button) {
+      button.textContent = removed ? copy.undo || "Undo" : copy.remove || "Remove";
+      button.setAttribute("aria-label", removed ? `${copy.undo || "Undo"}: ${name}` : privacyFill(copy.removeFor || "", { name }));
+    }
+    setPrivacyDirty(form);
+    say(form, removed ? privacyFill(copy.removed || "", { name }) : "");
+  }
+  function privacyPanel(form, kind) {
+    return form.querySelector(`[data-privacy-panel="${kind}"]`);
+  }
+  function panelSay(panel, message) {
+    const slot = panel.querySelector("[data-privacy-panel-message]");
+    if (slot)
+      slot.textContent = message;
+  }
+  function openPrivacyPanel(form, kind) {
+    form.querySelectorAll("[data-privacy-panel]").forEach((panel2) => {
+      panel2.hidden = panel2.dataset.privacyPanel !== kind;
+    });
+    const panel = privacyPanel(form, kind);
+    if (!panel)
+      return;
+    if (kind === "sender") {
+      panel.querySelector("[data-privacy-sender]")?.focus();
+      return;
+    }
+    if (kind === "label" && panel.dataset.loaded !== "true")
+      loadPrivacyLabels(form, panel);
+    if (kind === "folder") {
+      const sources = privacyFolderSources(form);
+      const holder = panel.querySelector("[data-privacy-folder-sources]");
+      if (holder && holder.childElementCount === 0 && sources.length > 1) {
+        for (const source of sources) {
+          const choose = document.createElement("button");
+          choose.type = "button";
+          choose.className = "btn";
+          choose.setAttribute("data-privacy-folder-source", source.id);
+          choose.textContent = source.label;
+          holder.append(choose);
+        }
+      }
+      if (!panel.dataset.source && sources[0])
+        loadPrivacyFolders(form, panel, sources[0].id, []);
+    }
+    if (!panel.hasAttribute("tabindex"))
+      panel.setAttribute("tabindex", "-1");
+    panel.focus();
+  }
+  function closePrivacyPanel(panel) {
+    panel.hidden = true;
+    panelSay(panel, "");
+    const form = panel.closest("form[data-privacy-form]");
+    const opener = form?.querySelector(`[data-privacy-add="${panel.dataset.privacyPanel}"]`);
+    opener?.focus();
+  }
+  function privacyPickRow(form, label, rule, open) {
+    const copy = privacyCopy(form);
+    const row = document.createElement("div");
+    row.className = "srow nodot";
+    const main = document.createElement("div");
+    main.className = "smain";
+    const name = document.createElement("p");
+    name.className = "sline strong";
+    name.textContent = label;
+    main.append(name);
+    const actions = document.createElement("div");
+    actions.className = "sact";
+    if (open) {
+      const inside = document.createElement("button");
+      inside.type = "button";
+      inside.className = "btn";
+      inside.setAttribute("data-privacy-folder-open", JSON.stringify(open));
+      inside.textContent = copy.folderOpen || "Open";
+      actions.append(inside);
+    }
+    const already = privacyKept(form).some((current) => privacyIdentity(current) === privacyIdentity(rule));
+    const make = document.createElement("button");
+    make.type = "button";
+    make.className = "btn";
+    make.setAttribute("data-privacy-make-private", JSON.stringify(rule));
+    make.textContent = already ? copy.alreadyPrivate || "Already private" : copy.makePrivate || "Make private";
+    make.disabled = already;
+    actions.append(make);
+    row.append(main, actions);
+    return row;
+  }
+  async function loadPrivacyLabels(form, panel) {
+    const copy = privacyCopy(form);
+    const list = panel.querySelector("[data-privacy-list]");
+    if (!list || panel.dataset.loading === "true")
+      return;
+    panel.dataset.loading = "true";
+    panelSay(panel, copy.loading || "");
+    let draft;
+    try {
+      draft = JSON.parse(form.dataset.mailDraft || "null");
+    } catch {
+      draft = null;
+    }
+    try {
+      const result = await options.transport.control({
+        action: "browse_mail_scope",
+        source_id: "gmail.email",
+        draft
+      });
+      if (disposed || !root.contains(form))
+        return;
+      const summary = result.body.summary && typeof result.body.summary === "object" ? result.body.summary : undefined;
+      const labels = summary && Array.isArray(summary.labels) ? summary.labels : undefined;
+      if (result.status < 200 || result.status >= 300 || !labels) {
+        panelSay(panel, copy.loadFailed || "");
+        return;
+      }
+      list.replaceChildren();
+      const own = labels.filter((label) => typeof label.id === "string" && typeof label.name === "string" && label.system !== true);
+      for (const label of own) {
+        list.append(privacyPickRow(form, String(label.name), {
+          kind: "label",
+          source_id: "gmail.email",
+          key: String(label.id),
+          value: String(label.name)
+        }));
+      }
+      panel.dataset.loaded = "true";
+      panelSay(panel, own.length === 0 ? copy.noLabels || "" : "");
+    } catch {
+      if (!disposed)
+        panelSay(panel, copy.loadFailed || "");
+    } finally {
+      delete panel.dataset.loading;
+    }
+  }
+  async function loadPrivacyFolders(form, panel, sourceId, path, cursor) {
+    const copy = privacyCopy(form);
+    const list = panel.querySelector("[data-privacy-list]");
+    if (!list || panel.dataset.loading === "true")
+      return;
+    panel.dataset.loading = "true";
+    panelSay(panel, copy.loading || "");
+    const parent = path.length > 0 ? path[path.length - 1].key : undefined;
+    try {
+      const result = await options.transport.control({
+        action: "browse_folder_scope",
+        source_id: sourceId,
+        ...parent ? { parent_key: parent } : {},
+        ...cursor ? { cursor } : {}
+      });
+      if (disposed || !root.contains(form))
+        return;
+      const page = result.body.scope_browser;
+      if (result.status < 200 || result.status >= 300 || !page || !Array.isArray(page.nodes)) {
+        panelSay(panel, copy.loadFailed || "");
+        return;
+      }
+      panel.dataset.source = sourceId;
+      panel.dataset.path = JSON.stringify(path);
+      panel.querySelectorAll("[data-privacy-folder-source]").forEach((choice) => {
+        choice.setAttribute("aria-pressed", choice.dataset.privacyFolderSource === sourceId ? "true" : "false");
+      });
+      if (!cursor)
+        list.replaceChildren();
+      list.querySelector("[data-privacy-folder-more]")?.remove();
+      const where = panel.querySelector("[data-privacy-folder-path]");
+      if (where) {
+        where.replaceChildren();
+        if (path.length > 0) {
+          const up = document.createElement("button");
+          up.type = "button";
+          up.className = "btn";
+          up.setAttribute("data-privacy-folder-up", "");
+          up.textContent = copy.folderUp || "Back";
+          const name = document.createElement("span");
+          name.textContent = ` ${path.map((step) => step.name).join(" / ")}`;
+          where.append(up, name);
+        }
+      }
+      for (const node of page.nodes) {
+        if (typeof node.key !== "string" || typeof node.name !== "string" || node.selectable === false)
+          continue;
+        list.append(privacyPickRow(form, node.name, { kind: "folder", source_id: sourceId, key: node.key, display: node.name }, node.has_children ? { key: node.key, name: node.name } : undefined));
+      }
+      if (page.next_cursor) {
+        const more = document.createElement("button");
+        more.type = "button";
+        more.className = "btn";
+        more.setAttribute("data-privacy-folder-more", page.next_cursor);
+        more.textContent = copy.folderMore || "Load more folders";
+        list.append(more);
+      }
+      panelSay(panel, list.querySelector("[data-privacy-make-private]") ? "" : copy.folderEmpty || "");
+    } catch {
+      if (!disposed)
+        panelSay(panel, copy.loadFailed || "");
+    } finally {
+      delete panel.dataset.loading;
+    }
+  }
+  function privacyPath(panel) {
+    try {
+      const path = JSON.parse(panel.dataset.path || "[]");
+      return Array.isArray(path) ? path : [];
+    } catch {
+      return [];
+    }
+  }
+  function addPrivacySender(form) {
+    const copy = privacyCopy(form);
+    const panel = privacyPanel(form, "sender");
+    const field = panel?.querySelector("[data-privacy-sender]");
+    if (!panel || !field)
+      return;
+    const value = field.value.trim().toLowerCase();
+    if (!PRIVACY_EMAIL.test(value) && !PRIVACY_DOMAIN.test(value)) {
+      panelSay(panel, copy.senderInvalid || "");
+      field.focus();
+      return;
+    }
+    if (!addPrivacyRule(form, { kind: "sender", source_id: "gmail.email", value })) {
+      panelSay(panel, copy.senderDuplicate || "");
+      return;
+    }
+    field.value = "";
+    panelSay(panel, "");
+    field.focus();
+  }
+  async function savePrivacy(form) {
+    const copy = privacyCopy(form);
+    if (!canWrite && !csrfToken) {
+      say(form, "Your OpenClaw connection has read-only access.");
+      return;
+    }
+    if (pendingForms.has(form))
+      return;
+    const field = form.querySelector('textarea[name="description"]');
+    const description = field ? field.value : undefined;
+    const rules = privacyKept(form);
+    setFormPending(form, true, copy.saving || "Saving…");
+    let result;
+    try {
+      result = await options.transport.control({
+        action: "save_privacy",
+        ...description !== undefined ? { description } : {},
+        rules
+      });
+    } catch {
+      say(form, copy.saveFailed || "Could not reach Olympus.");
+      return;
+    } finally {
+      setFormPending(form, false);
+    }
+    if (result.status === 401 || result.status === 403) {
+      if (options.authority === "worker-session") {
+        csrfToken = "";
+        say(form, "The control session expired — unlock controls in Setup, then try again.");
+      } else {
+        canWrite = false;
+        applyWriteCapability();
+        say(form, "Your write access expired. Reconnect with operator.write access, then try again.");
+      }
+      return;
+    }
+    if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+      say(form, result.status === 400 ? errorMessage(result) : copy.saveFailed || errorMessage(result));
+      return;
+    }
+    delete form.dataset.dirty;
+    if (field)
+      field.defaultValue = field.value;
+    say(form, copy.saved || "Saved.");
+    await refreshNow(true);
+    const next = query("form[data-privacy-form]");
+    if (next)
+      say(next, copy.saved || "Saved.");
+  }
+  function onPrivacyClick(target, event) {
+    const form = target.closest("form[data-privacy-form]");
+    if (!form)
+      return false;
+    const remove = target.closest("[data-privacy-remove]");
+    if (remove) {
+      const row = remove.closest("[data-privacy-rule]");
+      if (row)
+        togglePrivacyRemoved(form, row);
+      return true;
+    }
+    const add = target.closest("[data-privacy-add]");
+    if (add) {
+      openPrivacyPanel(form, add.dataset.privacyAdd || "");
+      return true;
+    }
+    const close = target.closest("[data-privacy-panel-close]");
+    if (close) {
+      const panel2 = close.closest("[data-privacy-panel]");
+      if (panel2)
+        closePrivacyPanel(panel2);
+      return true;
+    }
+    if (target.closest("[data-privacy-sender-add]")) {
+      addPrivacySender(form);
+      return true;
+    }
+    const make = target.closest("[data-privacy-make-private]");
+    if (make) {
+      try {
+        const rule = JSON.parse(make.dataset.privacyMakePrivate || "");
+        if (addPrivacyRule(form, rule)) {
+          make.textContent = privacyCopy(form).alreadyPrivate || "Already private";
+          make.disabled = true;
+        }
+      } catch {}
+      return true;
+    }
+    const panel = target.closest('[data-privacy-panel="folder"]');
+    if (panel) {
+      const source = target.closest("[data-privacy-folder-source]");
+      if (source) {
+        loadPrivacyFolders(form, panel, source.dataset.privacyFolderSource || "", []);
+        return true;
+      }
+      const open = target.closest("[data-privacy-folder-open]");
+      if (open && panel.dataset.source) {
+        try {
+          const step = JSON.parse(open.dataset.privacyFolderOpen || "");
+          loadPrivacyFolders(form, panel, panel.dataset.source, [...privacyPath(panel), step]);
+        } catch {}
+        return true;
+      }
+      if (target.closest("[data-privacy-folder-up]") && panel.dataset.source) {
+        loadPrivacyFolders(form, panel, panel.dataset.source, privacyPath(panel).slice(0, -1));
+        return true;
+      }
+      const more = target.closest("[data-privacy-folder-more]");
+      if (more && panel.dataset.source) {
+        loadPrivacyFolders(form, panel, panel.dataset.source, privacyPath(panel), more.dataset.privacyFolderMore || undefined);
+        return true;
+      }
+    }
+    const cancel = target.closest("[data-privacy-cancel]");
+    if (cancel) {
+      const field = form.querySelector('textarea[name="description"]');
+      const edited = form.dataset.dirty === "true" || field !== null && field.value !== field.defaultValue;
+      if (edited && !window.confirm(privacyCopy(form).discard || "Discard your changes?")) {
+        event.preventDefault();
+        return true;
+      }
+      delete form.dataset.dirty;
+      if (field)
+        field.value = field.defaultValue;
+      return false;
+    }
+    return false;
+  }
   function onSubmit(event) {
     const form = event.target instanceof HTMLFormElement ? event.target : null;
     if (!form || !root.contains(form))
@@ -707,7 +1174,12 @@ function mountDashboardController(options) {
       submitAgentControl(form);
       return;
     }
-    if (!form.matches("[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind],[data-model-check]"))
+    if (form.hasAttribute("data-privacy-form")) {
+      event.preventDefault();
+      savePrivacy(form);
+      return;
+    }
+    if (!form.matches("[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-model-retry],[data-disconnect-kind],[data-unpair-kind],[data-model-check]"))
       return;
     event.preventDefault();
     const submittedValues = formRecord(form);
@@ -751,6 +1223,8 @@ function mountDashboardController(options) {
       }
       return;
     }
+    if (onPrivacyClick(target, event))
+      return;
     if (target.closest("[data-remote-terms-cancel]")) {
       hideRemoteTerms();
       return;
@@ -2268,10 +2742,12 @@ var DASHBOARD_THEME_TOKENS = {
   t3: "#A9ABB3",
   t4: "#8C8E97",
   good: "#6CC08B",
-  warn: "#E3AA45",
-  run: "#AE9EF0",
+  warn: "#FB8C3C",
+  run: "#FACC15",
   bad: "#F08276",
   off: "#8C8E97",
+  runFill: "#FACC15",
+  warnFill: "#FB8C3C",
   warnBg: "#261E10",
   warnLine: "#8A6A2A",
   errBg: "#2B1614",
@@ -2282,6 +2758,34 @@ var DASHBOARD_THEME_TOKENS = {
   onAccent: "#FFFFFF",
   field: "#6A6D77",
   selected: "#2C4485"
+};
+var DASHBOARD_THEME_TOKENS_LIGHT = {
+  bg: "#FFFFFF",
+  panel: "#F7F7F8",
+  panel2: "#F0F0F2",
+  line: "#D9D9DE",
+  line2: "#E8E8EC",
+  t1: "#0D0D0D",
+  t2: "#353740",
+  t3: "#55575F",
+  t4: "#62646C",
+  good: "#22693F",
+  warn: "#A84A06",
+  run: "#735600",
+  bad: "#B42318",
+  off: "#6B6E76",
+  runFill: "#F5C518",
+  warnFill: "#EA6C0A",
+  warnBg: "#FFF4E5",
+  warnLine: "#B45309",
+  errBg: "#FDECEA",
+  errLine: "#B42318",
+  link: "#1F4FBF",
+  linkLine: "#3E63C8",
+  accent: "#3E63C8",
+  onAccent: "#FFFFFF",
+  field: "#767680",
+  selected: "#DCE5FB"
 };
 var DASHBOARD_PAGE_BACKDROP = DASHBOARD_THEME_TOKENS.bg;
 var DASHBOARD_TYPE_SCALE = {
@@ -2306,14 +2810,6 @@ var DASHBOARD_CONTRAST_PAIRS = [
   { fg: "errLine", bg: "bg", min: 3 },
   { fg: "good", bg: "bg", min: 3 }
 ];
-var DASHBOARD_STATUS_COLORS = {
-  Fresh: DASHBOARD_THEME_TOKENS.good,
-  Working: DASHBOARD_THEME_TOKENS.run,
-  Waiting: DASHBOARD_THEME_TOKENS.off,
-  "Needs you": DASHBOARD_THEME_TOKENS.warn,
-  Failing: DASHBOARD_THEME_TOKENS.bad,
-  Off: DASHBOARD_THEME_TOKENS.line
-};
 var CSS_VARIABLE_NAMES = {
   bg: "--bg",
   panel: "--panel",
@@ -2329,6 +2825,8 @@ var CSS_VARIABLE_NAMES = {
   run: "--run",
   bad: "--bad",
   off: "--off",
+  runFill: "--run-fill",
+  warnFill: "--warn-fill",
   warnBg: "--warn-bg",
   warnLine: "--warn-line",
   errBg: "--err-bg",
@@ -2340,10 +2838,22 @@ var CSS_VARIABLE_NAMES = {
   field: "--field",
   selected: "--selected"
 };
-var PAGE_BACKDROP = DASHBOARD_PAGE_BACKDROP;
+var DASHBOARD_STATUS_TOKENS = {
+  Fresh: "good",
+  Working: "runFill",
+  Waiting: "off",
+  "Needs you": "warnFill",
+  Failing: "bad",
+  Off: "off"
+};
+var DASHBOARD_STATUS_COLORS = Object.fromEntries(Object.keys(DASHBOARD_STATUS_TOKENS).map((status) => [status, `var(${dashboardThemeVariable(DASHBOARD_STATUS_TOKENS[status])})`]));
+function dashboardThemeVariable(token) {
+  return CSS_VARIABLE_NAMES[token];
+}
 var MONO_STACK = '"Berkeley Mono","SF Mono",Menlo,Consolas,monospace';
 var ROOT_BLOCK = [
   ":root {",
+  "  color-scheme: light dark;",
   ...Object.keys(CSS_VARIABLE_NAMES).map((key) => `  ${CSS_VARIABLE_NAMES[key]}: ${DASHBOARD_THEME_TOKENS[key]};`),
   `  --mono: ${MONO_STACK};`,
   `  --fs-title: ${DASHBOARD_TYPE_SCALE.title};`,
@@ -2351,12 +2861,17 @@ var ROOT_BLOCK = [
   `  --fs-row: ${DASHBOARD_TYPE_SCALE.row};`,
   `  --fs-body: ${DASHBOARD_TYPE_SCALE.body};`,
   `  --fs-caption: ${DASHBOARD_TYPE_SCALE.caption};`,
+  "}",
+  "@media (prefers-color-scheme: light) {",
+  "  :root {",
+  ...Object.keys(CSS_VARIABLE_NAMES).map((key) => `    ${CSS_VARIABLE_NAMES[key]}: ${DASHBOARD_THEME_TOKENS_LIGHT[key]};`),
+  "  }",
   "}"
 ].join(`
 `);
 var DASHBOARD_THEME_CSS = `${ROOT_BLOCK}
 * { box-sizing: border-box; }
-body { margin: 0; background: ${PAGE_BACKDROP}; color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
+body { margin: 0; background: var(--bg); color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
 a { color: var(--link); }
 /* No card around the page: the page is the surface, as wide as a reading
    layout allows, and every row below shares its left and right edges. */
@@ -2375,13 +2890,14 @@ a { color: var(--link); }
 .sect.sub { font-size: var(--fs-body); color: var(--t2); margin: 18px 0 8px; }
 .sect.sub.attn { color: var(--warn); }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.hollow { background: transparent; border: 2px solid var(--off); }
 /* Every row is the same shape: a 20px lead column (icon or dot), the text,
    then the controls, so names line up from section to section. */
 .attncard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 52px; }
 .attncard::before { content: ''; flex: 0 0 20px; align-self: center; }
 /* A problem is a tinted row with a 1px border and an icon, never a stripe. */
 .attncard:not(.plain) { background: var(--warn-bg); border-color: var(--warn-line); }
-.attncard:not(.plain)::before { content: '!'; height: 20px; border-radius: 50%; background: var(--warn); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
+.attncard:not(.plain)::before { content: '!'; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
 .attncard.error { background: var(--err-bg); border-color: var(--err-line); }
 .attncard.error::before { background: var(--bad); }
 .attncard.plain { background: var(--panel); border-color: var(--line); }
@@ -2460,7 +2976,7 @@ a.card.cardlink:hover { border-color: var(--link-line); }
 a.card.cardlink:hover .hd { color: var(--link); }
 a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .bar { height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-top: 9px; max-width: 420px; }
-.bar i { display: block; height: 100%; background: var(--run); }
+.bar i { display: block; height: 100%; background: var(--run-fill); }
 .foot { color: var(--t3); font-size: var(--fs-caption); margin-top: 24px; }
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0 22px; }
 .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
@@ -2499,10 +3015,13 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 table { border-collapse: collapse; width: 100%; font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
 th { text-align: left; color: var(--t3); font-size: var(--fs-caption); font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
 td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(--t2); }
-.setrow { display: grid; grid-template-columns: 20px minmax(140px, 200px) 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; min-height: 52px; }
+/* A not-connected source: one flat list row, like the source rows above it. */
+.setrow { display: grid; grid-template-columns: 20px minmax(140px, 200px) 1fr auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; min-height: 52px; }
 .setrow > .dot { justify-self: center; }
 .setrow.noblurb { grid-template-columns: 20px 1fr auto; }
 .setrow .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); }
+.setrow a.name { text-decoration: none; }
+.setrow a.name:hover { color: var(--link); text-decoration: underline; }
 .setrow .blurb { color: var(--t2); font-size: var(--fs-body); }
 .setrow .blurb .caveat { color: var(--warn); font-weight: 600; }
 .setrow .blurb details.howto { color: var(--t3); font-size: var(--fs-caption); }
@@ -2570,7 +3089,9 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 .bgrow:hover .go, .bgrow:focus-visible .go { color: var(--link); }
 .bgrow:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
 .minibar { display: block; width: 64px; height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; justify-self: end; }
-.minibar i { display: block; height: 100%; background: var(--run); }
+.minibar i { display: block; height: 100%; background: var(--run-fill); }
+/* Finished work is not in progress: a full bar reads ready, never yellow. */
+.minibar.done i { background: var(--good); }
 /* A bar always carries its number: the percent sits beside the track. */
 .labeledbar { display: flex; align-items: center; gap: 8px; justify-self: stretch; }
 .labeledbar .minibar { flex: 1; width: auto; }
@@ -2607,7 +3128,7 @@ var DASHBOARD_PROGRESS_CSS = `.phase { margin: 0 0 14px; max-width: 520px; }
 .phase.waiting .bar { background: var(--line2); }
 .phase.waiting .bar i { display: none; }
 .bar.indet.working { position: relative; }
-.bar.indet.working i { width: 34%; background: var(--run); animation: dashsweep 1.6s ease-in-out infinite; }
+.bar.indet.working i { width: 34%; background: var(--run-fill); animation: dashsweep 1.6s ease-in-out infinite; }
 @keyframes dashsweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(294%); } }
 .settled { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; color: var(--t2); font-size: var(--fs-body); max-width: 520px; }
 .banner { margin-bottom: 6px; }
@@ -2935,6 +3456,77 @@ var MODEL_SETUP_CSS = `
 .modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
 .modelextras{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 24px}
 `;
+var DASHBOARD_SOURCE_ROWS_CSS = `
+.srows { border-top: 1px solid var(--line); margin-bottom: 8px; }
+.srow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: start; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.srow .smain { grid-column: 1; grid-row: 1; min-width: 0; }
+.srow .sact { grid-column: 2; grid-row: 1; }
+.srow .smenu { grid-column: 3; grid-row: 1; }
+.srow .shead { display: flex; align-items: center; gap: 10px; }
+.srow .shead .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); text-decoration: none; }
+.srow .shead a.name:hover { color: var(--link); text-decoration: underline; }
+.srow .shead a.name:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; border-radius: 4px; }
+.srow .sneed { font-size: var(--fs-row); color: var(--t1); }
+.srow .sline { margin: 4px 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
+.srow .sline.strong { margin-left: 0; color: var(--t1); font-size: var(--fs-row); }
+.srow.nodot .sline { margin-left: 0; }
+.srow .sact { flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.srow .sact form { margin: 0; }
+.dot.tone-good { background: var(--good); }
+.dot.tone-run { background: var(--run-fill); }
+.dot.tone-warn { background: var(--warn-fill); }
+.dot.tone-bad { background: var(--bad); }
+.dot.tone-off { background: var(--off); }
+.sprog { margin: 0; }
+.srow .sprog .bar { max-width: none; height: 6px; margin: 8px 0 0 20px; }
+.sprog.overall .sline { margin: 0 0 8px; color: var(--t1); }
+.sprog.overall .bar { max-width: none; height: 6px; margin: 0 0 8px; }
+.sprog.stalled .sline { color: var(--t1); }
+.bar.stalled i { background: var(--warn-fill); }
+.sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+.modelsrow { margin: 28px 0 0; padding-top: 12px; border-top: 1px solid var(--line); }
+details.models > summary { font-size: var(--fs-section); font-weight: 600; color: var(--t1); cursor: pointer; padding: 4px 0; }
+details.models > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+details.models .modelsbody { margin-top: 12px; }
+.mlist { margin: 0 0 12px; padding-left: 20px; color: var(--t2); }
+.minstalls { display: grid; gap: 10px; margin: 8px 0 0; }
+.minstall .sline { margin: 0; color: var(--t2); font-size: var(--fs-body); }
+.minstall .bar { max-width: none; height: 6px; margin-top: 6px; }
+.minstall.failed .sline { color: var(--t1); font-weight: 600; }
+@media (max-width: 700px) {
+  .srow { grid-template-columns: minmax(0, 1fr) auto; }
+  .srow .sact { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; padding-left: 20px; }
+  .srow .smenu { grid-column: 2; grid-row: 1; }
+  .srow.nodot .sact { padding-left: 0; }
+  .srow .sact .rowlink { width: auto; justify-content: flex-start; }
+}
+`;
+var DASHBOARD_PRIVACY_CSS = `
+.privacy { max-width: 760px; }
+.ptitle { font-size: var(--fs-title); font-weight: 650; margin: 8px 0 6px; color: var(--t1); }
+.pintro { color: var(--t2); margin: 0 0 18px; max-width: 72ch; }
+.pnote { color: var(--t2); margin: 0 0 12px; }
+.plabel { display: block; font-weight: 600; font-size: var(--fs-body); color: var(--t1); margin: 0 0 6px; }
+.ptext { display: block; width: 100%; min-height: 120px; resize: vertical; background: var(--bg); border: 1px solid var(--field); border-radius: 8px; color: var(--t1); font: inherit; font-size: var(--fs-row); padding: 10px 12px; }
+.ptext:focus-visible, .ptextline:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.privacy .sect { margin-top: 24px; }
+.prule.removed .sline { text-decoration: line-through; color: var(--t3); }
+.pempty { margin: 8px 0 0; }
+.padd { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
+.ppanel { margin: 12px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.ppanel .srows { margin: 8px 0; }
+.ppanel .ppath { margin: 0 0 8px; color: var(--t2); }
+.ppanel .ppath:empty { display: none; }
+.psources { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
+.psources:empty { display: none; }
+.psources .btn[aria-pressed="true"] { background: var(--selected); border-color: var(--link-line); color: var(--t1); }
+.prow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ptextline { flex: 1 1 240px; width: auto; }
+.pfooter { margin: 24px 0 0; padding: 16px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 12px; }
+.pfooter p { margin: 0; color: var(--t1); }
+.pbuttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pbuttons a.btn { text-decoration: none; }
+`;
 
 // src/control-ui/styles.ts
 function forShadowRoot(css) {
@@ -2950,10 +3542,12 @@ var OLYMPUS_CONTROL_UI_CSS = forShadowRoot([
   MODEL_SETUP_CSS,
   AGENT_CONNECT_CSS,
   BACKGROUND_CSS,
-  DISPOSITIONS_CSS
+  DISPOSITIONS_CSS,
+  DASHBOARD_SOURCE_ROWS_CSS,
+  DASHBOARD_PRIVACY_CSS
 ].join(`
 `)) + `
-:host { display: block; min-width: 0; color-scheme: dark; contain: content; }
+:host { display: block; min-width: 0; color-scheme: light dark; contain: content; }
 .olympus-control-ui { min-height: 100%; }
 .olympus-control-ui [data-write-capability-note] { margin: 0 auto 12px; max-width: 1120px; }
 .olympus-control-ui .native-state { max-width: 1120px; margin: 24px auto; padding: 18px 20px;
@@ -2965,7 +3559,7 @@ function routeFromProps(props) {
   const view = props.view;
   if (view === "dispositions")
     return { view, ...props.source_id ? { source_id: props.source_id } : {} };
-  if (view === "setup" || view === "background" || view === "sensitivity")
+  if (view === "setup" || view === "background" || view === "sensitivity" || view === "privacy")
     return { view };
   if (view === "source" && props.source_id)
     return { view, source_id: props.source_id };
@@ -2995,6 +3589,8 @@ function routeFromHref(href) {
     return { view: "background" };
   if (url.searchParams.has("sensitivity"))
     return { view: "sensitivity" };
+  if (url.searchParams.has("privacy"))
+    return { view: "privacy" };
   return { view: "home" };
 }
 function targetFor(route) {

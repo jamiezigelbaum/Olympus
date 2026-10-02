@@ -6407,7 +6407,7 @@ var init_answer_ready_coverage = __esm(() => {
 });
 
 // src/workers/dashboard/vocabulary.ts
-var DASHBOARD_UNCONNECTED_STATES, REDIRECT_REFUSAL_CODES;
+var DASHBOARD_UNCONNECTED_STATES, REDIRECT_REFUSAL_CODES, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -6421,6 +6421,426 @@ var init_vocabulary = __esm(() => {
     "invalid_redirect_uri",
     "redirect_uri_not_registered"
   ]);
+  DASHBOARD_CHATGPT_VOCABULARY = {
+    installingNoSource: "Connect a source to begin",
+    installingModel: "Getting search ready on your Mac",
+    installingFirstIndex: "Indexing your sources for the first time",
+    connectOnMac: "Connect sources in Olympus on your Mac.",
+    reconnect: "Reconnect",
+    checkAgain: "Check again",
+    openOnMac: "Open Olympus on your Mac",
+    stageReading: "Reading",
+    stageSearchable: "Indexing",
+    embeddingNeedsAttention: "Search has stopped working on your Mac.",
+    answerModelNeedsAttention: "Answers have stopped working on your Mac.",
+    modelInstallFailed: {
+      embedding: {
+        disk_full: "Couldn't download the search model: the disk is full.",
+        network: "Couldn't download the search model: the network dropped.",
+        checksum: "Couldn't download the search model: the download was damaged.",
+        unknown: "Couldn't download the search model."
+      },
+      answers: {
+        disk_full: "Couldn't download the private model: the disk is full.",
+        network: "Couldn't download the private model: the network dropped.",
+        checksum: "Couldn't download the private model: the download was damaged.",
+        unknown: "Couldn't download the private model."
+      }
+    },
+    fixOnMac: "Open Olympus on your Mac to fix this.",
+    privateMatches: "Some matching items are private and stay on your Mac.",
+    changeModelsOnMac: "Change models in Olympus on your Mac."
+  };
+  DASHBOARD_CHATGPT_PAGE_COPY = {
+    title: "Olympus",
+    loading: "Checking your Mac…",
+    upToDate: "Olympus is up to date.",
+    needsYou: "Needs you",
+    sources: "Sources",
+    sourcesLocal: "On your Mac",
+    sourcesCloud: "Accounts",
+    sourcesOnMac: "Set up on your Mac",
+    sourcesOnMacHelp: "These connect on your Mac in Olympus. They'll show up here once connected.",
+    notConnected: "Not connected",
+    noSources: "No sources yet.",
+    progress: "Progress",
+    progressInitial: "First index",
+    progressRefresh: "Catching up",
+    percentDone: "{percent}% done",
+    left: "{count} {unit} left",
+    eta: "about {duration}",
+    stalled: "stalled",
+    progressPaused: "paused while your Mac is offline",
+    details: "Details",
+    stageLine: "{stage}: {done} of {total} {unit}",
+    models: "Models",
+    modelSearch: "Search",
+    modelAnswers: "Answers",
+    modelBuiltIn: "Built-in",
+    modelCustom: "Custom",
+    modelReady: "Ready",
+    modelDownloading: "Downloading {percent}%",
+    modelNotWorking: "Not working",
+    modelNotReady: "Not ready",
+    modelGettingReady: "Getting ready",
+    modelNeedsYou: "Needs you",
+    modelChecking: "Checking",
+    modelNames: { search: "the search model", answers: "the private model" },
+    modelInstallDownloading: "Downloading {model}",
+    modelInstallVerifying: "Checking {model}…",
+    modelInstallFailed: "Couldn't download {model}: {reason}",
+    modelInstallBytes: "{done} of {total}",
+    modelInstallReasons: {
+      disk_full: "the disk is full",
+      network: "the connection dropped",
+      checksum: "the download was damaged",
+      unknown: "something went wrong"
+    },
+    synced: "Synced {when}",
+    updated: "Updated {when}",
+    checkAgain: "Check again",
+    tryAgain: "Try again",
+    openOlympus: "Open Olympus",
+    moreActions: "More actions for {source}",
+    confirmPrompt: "Are you sure?",
+    confirm: "Yes, {label}",
+    cancel: "Cancel",
+    working: "Working…",
+    justNow: "just now",
+    minutesAgo: "{n} min ago",
+    hoursAgo: "{n} hr ago",
+    daysAgo: "{n} days ago",
+    dayAgo: "1 day ago",
+    durationMinutes: "{n} min",
+    durationHours: "{n} hr",
+    durationHoursMinutes: "{h} hr {m} min",
+    durationDays: "{n} days",
+    durationLessThanMinute: "less than a minute",
+    units: {
+      files: { one: "file", many: "files" },
+      messages: { one: "message", many: "messages" },
+      items: { one: "item", many: "items" }
+    },
+    sourceStages: { listing: "Finding items", reading: "Reading", indexing: "Indexing" },
+    findingItems: "Finding items",
+    sourceProgress: "{stage} — {percent}%, {done} of {total} {unit}",
+    stalledReasons: {
+      waiting_for_credentials: "Paused: Olympus needs you to sign in to {source} again",
+      scope_pending: "Paused until you choose folders",
+      provider_unavailable: "Paused: {source} isn't responding; Olympus will retry",
+      model_downloading: "Waiting for the search model to finish downloading"
+    },
+    linkExpires: "link expires in {n} min",
+    linkExpired: "link expired"
+  };
+  DASHBOARD_CHATGPT_SETUP_LABELS = {
+    connect: "Connect",
+    chooseFolders: "Choose folders",
+    chooseMail: "Choose mail",
+    disconnect: "Disconnect",
+    changeModels: "Change"
+  };
+  DASHBOARD_CHATGPT_PICKER_COPY = {
+    back: "Back to Olympus",
+    cancel: "Cancel",
+    tryAgain: "Try again",
+    checkAgain: "Check again",
+    connectTitle: "Connect {source}",
+    connectStarting: "Opening sign-in…",
+    connectWaiting: "Waiting for you to finish signing in…",
+    connectWaitingHelp: "Sign in to {source} in the window that opened. This page updates on its own when you are done.",
+    connectReopen: "Open sign-in again",
+    connectTimeout: "Olympus has not heard back from {source} yet. If you finished signing in, check again.",
+    connectFailed: "Olympus could not start signing in to {source}. Try again.",
+    connected: "{source} is connected.",
+    foldersTitle: "Choose folders",
+    foldersIntro: "Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.",
+    mailTitle: "Choose mail",
+    mailIntro: "Choose which {source} mail Olympus may read. Nothing starts until you save.",
+    loadingFolders: "Loading folders…",
+    loadingMail: "Reading your labels and senders…",
+    loadFailed: "Olympus could not load this list. Try again.",
+    up: "Back",
+    upTo: "Back to {name}",
+    pathMore: "…",
+    accountRow: "Everything in {source}",
+    exceptions: "Exceptions ({n})",
+    foldersHeading: "Folders",
+    thisFolder: "This folder",
+    unknownFolder: "A folder not opened yet",
+    insideFolder: "A folder inside {name}",
+    noFolders: "No folders here.",
+    loadMore: "Load more folders",
+    states: { ingest: "Fully indexed", metadata_only: "Names only", exclude: "Skipped" },
+    statesLower: { ingest: "fully indexed", metadata_only: "names only", exclude: "skipped" },
+    notIncluded: "Not included",
+    mixed: "Mixed",
+    mixedSome: "Mixed: some folders inside are {state}",
+    segments: { ingest: ["Full", "Full"], metadata_only: ["Names only", "Names"], exclude: ["Skip", "Skip"] },
+    choiceGroup: "Choice for {name}",
+    openFolder: "Open {name}",
+    cannotChoose: "Olympus cannot read this folder.",
+    wholeOnlyFull: "The whole account is all or nothing. Set Names only or Skip on folders instead.",
+    inheritedFrom: "Inherited from {parent}",
+    overridden: "This folder is set to {own}, but {parent} is {state}, which wins.",
+    notPossible: "Not possible while {parent} is {state}.",
+    capReached: "You have {max} folder choices, the most Olympus can save. Clear a folder's choice to choose another.",
+    folderFiles: { one: "{n} file", many: "{n} files" },
+    wholePrompt: "Olympus will read every folder in {source}, now and later, except folders you set to Names only or Skip.",
+    wholeConfirm: "Yes, use the entire account",
+    summaryTitle: "What happens when you save",
+    summaryNone: "Nothing chosen yet, so nothing will be read.",
+    summaryWhole: "Everything else in {source}: fully indexed, including folders added later.",
+    summaryFolder: { one: "folder", many: "folders" },
+    summaryIngest: "{n} fully indexed",
+    summaryMetadata: "{n} with names only",
+    summaryExclude: "{n} skipped",
+    summarySize: "about {size}",
+    needChoice: "Choose at least one folder first.",
+    needConfirm: "Confirm the entire account first.",
+    saveFolders: "Save and start",
+    saveNoStart: "Save",
+    saveMail: "Save and start",
+    saving: "Saving…",
+    saveFailed: "Olympus could not save. Your choices are still here. Try again.",
+    conflict: "These choices were changed somewhere else, so this view has been refreshed. Check it and save again.",
+    saved: "{source}: saved. Olympus is starting.",
+    discardPrompt: "Discard your changes?",
+    discard: "Discard changes",
+    keep: "Keep choosing",
+    mailWindow: "Read the full text of mail from",
+    mailWindowHelp: "For older mail Olympus keeps only the subject, sender, date and labels.",
+    mailWindows: {
+      "6m": "The last 6 months",
+      "1y": "The last year",
+      "2y": "The last 2 years",
+      "5y": "The last 5 years",
+      all: "All time"
+    },
+    mailRecommended: "Recommended",
+    mailCategories: "Gmail categories",
+    mailCategoriesHelp: "Checked categories are read. Promotions and Social are skipped at first.",
+    mailCategoryNames: {
+      primary: ["Primary", "Personal mail"],
+      updates: ["Updates", "Receipts, statements, confirmations"],
+      forums: ["Forums", "Mailing lists and groups"],
+      social: ["Social", "Social network notifications"],
+      promotions: ["Promotions", "Marketing and offers"]
+    },
+    mailCategoryCount: "{count} in your mailbox",
+    mailLabels: "Labels",
+    mailLabelsHelp: "Checked labels are read. Uncheck a label to skip all mail that has it.",
+    mailLabelsEmpty: "This mailbox has no labels of its own.",
+    mailSentLabel: "Sent",
+    mailSenders: "Senders",
+    mailPrivate: "Always private",
+    mailPrivateHelp: "One address or @domain per line. Their new mail is treated as private and never goes to the cloud.",
+    mailSkip: "Skip",
+    mailSkipHelp: "One address or @domain per line. Their new mail is never read.",
+    mailSuggestions: "Frequent senders in a sample of your recent mail",
+    mailSuggestionCount: "{n} of {total}",
+    mailEstimate: "About {content} messages read in full and {metadata} by subject and sender only.",
+    mailCost: "Indexing costs at most ${cost}.",
+    mailEstimateNote: "Counts are Gmail's own estimates. Nothing has been read yet.",
+    mailUpdateEstimate: "Update estimate",
+    mailSummaryWindow: "Full text from {window}",
+    mailSummarySkipped: { one: "{n} category or label skipped", many: "{n} categories and labels skipped" },
+    mailSummaryPrivate: { one: "{n} sender always private", many: "{n} senders always private" },
+    mailSummarySkipSenders: { one: "{n} sender skipped", many: "{n} senders skipped" }
+  };
+  DASHBOARD_CHATGPT_PRIVACY_COPY = {
+    back: "Back to Olympus",
+    title: "What's private for you?",
+    intro: "Olympus shares your items with ChatGPT unless you say they're private. Private items are answered on your Mac and never sent to ChatGPT. Passwords and other secrets are always kept on your Mac.",
+    loading: "Loading your privacy settings…",
+    loadFailed: "Olympus could not load your privacy settings. Try again.",
+    tryAgain: "Try again",
+    descriptionLabel: "In your own words",
+    descriptionPlaceholder: "For example: my health and therapy, money and taxes, anything about my kids, my divorce",
+    rulesTitle: "Always private (optional)",
+    rulesEmpty: "No folders, labels or senders yet.",
+    kindFolder: "Folder in {source}",
+    kindLabel: "Gmail label",
+    kindSender: "Sender",
+    remove: "Remove",
+    removeFor: "Remove {name}",
+    removed: "Removed: {name}",
+    undo: "Undo",
+    undoFor: "Undo removing {name}",
+    addFolder: "Add a folder",
+    addLabel: "Add a Gmail label",
+    addSender: "Add a sender",
+    needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
+    needGmail: "Connect Gmail to add a label.",
+    pending: {
+      one: "{n} item is waiting to be checked on your Mac.",
+      many: "{n} items are waiting to be checked on your Mac."
+    },
+    save: "Save",
+    saving: "Saving…",
+    cancel: "Cancel",
+    saveFailed: "Olympus could not save. Your changes are still here. Try again.",
+    saved: "Privacy saved.",
+    discardPrompt: "Discard your changes?",
+    discard: "Discard changes",
+    keep: "Keep editing",
+    backToPrivacy: "Back to privacy",
+    folderSourceTitle: "Add a folder",
+    folderSourceIntro: "Which account is the folder in?",
+    folderTitle: "Add a folder",
+    folderIntro: "Open a folder in {source} to look inside it. Make private covers everything in the folder.",
+    makePrivate: "Make private",
+    makePrivateFor: "Make {name} private",
+    alreadyPrivate: "Already private",
+    labelTitle: "Add a Gmail label",
+    labelIntro: "Mail with a private label is answered only on your Mac.",
+    loadingLabels: "Loading your labels…",
+    noLabels: "This mailbox has no labels of its own.",
+    sentLabel: "Sent",
+    senderTitle: "Add a sender",
+    senderIntro: "Mail from this sender is answered only on your Mac.",
+    senderLabel: "Email address or @domain",
+    senderPlaceholder: "name@example.com or @example.com",
+    senderAdd: "Add",
+    senderInvalid: "Enter an email address like name@example.com, or a domain like @example.com.",
+    senderDuplicate: "That sender is already private.",
+    section: "Privacy",
+    row: {
+      none: "Your description · no always-private rules",
+      one: "Your description · {n} always-private rule",
+      many: "Your description · {n} always-private rules"
+    },
+    rowNoCount: "Your description and always-private rules",
+    edit: "Edit",
+    editLabel: "Edit what's private",
+    dashboardPending: {
+      one: "{n} item waiting to be checked",
+      many: "{n} items waiting to be checked"
+    }
+  };
+  DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
+    sentence: "Tell Olympus what's private for you",
+    label: "Set up privacy"
+  };
+  DASHBOARD_LOCAL_COPY = {
+    needsYou: DASHBOARD_CHATGPT_PAGE_COPY.needsYou,
+    sources: DASHBOARD_CHATGPT_PAGE_COPY.sources,
+    sourcesLocal: "On this computer",
+    sourcesCloud: DASHBOARD_CHATGPT_PAGE_COPY.sourcesCloud,
+    notConnected: DASHBOARD_CHATGPT_PAGE_COPY.notConnected,
+    noSources: "No sources connected yet.",
+    progress: DASHBOARD_CHATGPT_PAGE_COPY.progress,
+    progressInitial: DASHBOARD_CHATGPT_PAGE_COPY.progressInitial,
+    progressRefresh: DASHBOARD_CHATGPT_PAGE_COPY.progressRefresh,
+    percentDone: DASHBOARD_CHATGPT_PAGE_COPY.percentDone,
+    left: DASHBOARD_CHATGPT_PAGE_COPY.left,
+    eta: DASHBOARD_CHATGPT_PAGE_COPY.eta,
+    stalled: DASHBOARD_CHATGPT_PAGE_COPY.stalled,
+    units: DASHBOARD_CHATGPT_PAGE_COPY.units,
+    sourceStages: DASHBOARD_CHATGPT_PAGE_COPY.sourceStages,
+    findingItems: DASHBOARD_CHATGPT_PAGE_COPY.findingItems,
+    sourceProgress: DASHBOARD_CHATGPT_PAGE_COPY.sourceProgress,
+    stalledReasons: {
+      waiting_for_credentials: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.waiting_for_credentials,
+      scope_pending: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.scope_pending,
+      scope_pending_mail: "Paused until you choose mail",
+      provider_unavailable: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.provider_unavailable,
+      model_downloading: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.model_downloading
+    },
+    connecting: "Finish signing in to {source}",
+    linkExpires: DASHBOARD_CHATGPT_PAGE_COPY.linkExpires,
+    openSignInAgain: DASHBOARD_CHATGPT_PICKER_COPY.connectReopen,
+    cancelSignIn: "Cancel sign-in",
+    chooseFolders: DASHBOARD_CHATGPT_SETUP_LABELS.chooseFolders,
+    chooseMail: DASHBOARD_CHATGPT_SETUP_LABELS.chooseMail,
+    syncNow: "Sync now",
+    seeModels: "See models",
+    models: DASHBOARD_CHATGPT_PAGE_COPY.models,
+    modelBuiltIn: DASHBOARD_CHATGPT_PAGE_COPY.modelBuiltIn,
+    modelCustom: DASHBOARD_CHATGPT_PAGE_COPY.modelCustom,
+    modelReady: DASHBOARD_CHATGPT_PAGE_COPY.modelReady,
+    modelGettingReady: DASHBOARD_CHATGPT_PAGE_COPY.modelGettingReady,
+    modelNeedsYou: DASHBOARD_CHATGPT_PAGE_COPY.modelNeedsYou,
+    modelNotReady: DASHBOARD_CHATGPT_PAGE_COPY.modelNotReady,
+    modelNotWorking: DASHBOARD_CHATGPT_PAGE_COPY.modelNotWorking,
+    modelChecking: DASHBOARD_CHATGPT_PAGE_COPY.modelChecking,
+    modelSearch: DASHBOARD_CHATGPT_PAGE_COPY.modelSearch,
+    modelAnswers: DASHBOARD_CHATGPT_PAGE_COPY.modelAnswers,
+    modelNames: DASHBOARD_CHATGPT_PAGE_COPY.modelNames,
+    modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
+    modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
+    modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,
+    modelInstallBytes: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallBytes,
+    modelInstallReasons: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallReasons,
+    modelTryAgain: DASHBOARD_CHATGPT_PICKER_COPY.tryAgain,
+    modelInstallFailedItem: DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed,
+    modelsNotReady: "Models are not ready, so sources stay locked.",
+    privacy: {
+      section: DASHBOARD_CHATGPT_PRIVACY_COPY.section,
+      row: DASHBOARD_CHATGPT_PRIVACY_COPY.row,
+      edit: DASHBOARD_CHATGPT_PRIVACY_COPY.edit,
+      editLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.editLabel,
+      setUpSentence: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.sentence,
+      setUp: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label,
+      pending: DASHBOARD_CHATGPT_PRIVACY_COPY.dashboardPending,
+      unreadable: "Olympus could not read your privacy settings."
+    }
+  };
+  DASHBOARD_LOCAL_PRIVACY_COPY = {
+    crumb: "Privacy",
+    back: "Back to Setup",
+    title: DASHBOARD_CHATGPT_PRIVACY_COPY.title,
+    intro: "Olympus may use a cloud model to answer from items you have not marked private. Private items are answered only on this computer and never sent to a cloud model. Passwords and other secrets are always kept on this computer.",
+    descriptionLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionLabel,
+    descriptionPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionPlaceholder,
+    rulesTitle: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesTitle,
+    rulesEmpty: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesEmpty,
+    kindFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.kindFolder,
+    kindLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.kindLabel,
+    kindSender: DASHBOARD_CHATGPT_PRIVACY_COPY.kindSender,
+    unnamedFolder: "A folder",
+    remove: DASHBOARD_CHATGPT_PRIVACY_COPY.remove,
+    removeFor: DASHBOARD_CHATGPT_PRIVACY_COPY.removeFor,
+    removed: DASHBOARD_CHATGPT_PRIVACY_COPY.removed,
+    undo: DASHBOARD_CHATGPT_PRIVACY_COPY.undo,
+    addFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.addFolder,
+    addLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.addLabel,
+    addSender: DASHBOARD_CHATGPT_PRIVACY_COPY.addSender,
+    needFolderSource: DASHBOARD_CHATGPT_PRIVACY_COPY.needFolderSource,
+    needGmail: DASHBOARD_CHATGPT_PRIVACY_COPY.needGmail,
+    folderIntro: "Open a folder to look inside it. Make private covers everything in the folder.",
+    folderUp: "Back",
+    folderOpen: "Open",
+    folderEmpty: "No folders here.",
+    folderMore: "Load more folders",
+    loading: "Loading…",
+    loadFailed: "Olympus could not load this list. Try again.",
+    makePrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.makePrivate,
+    alreadyPrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.alreadyPrivate,
+    labelIntro: "Mail with a private label is answered only on this computer.",
+    noLabels: DASHBOARD_CHATGPT_PRIVACY_COPY.noLabels,
+    senderIntro: "Mail from this sender is answered only on this computer.",
+    senderLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.senderLabel,
+    senderPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.senderPlaceholder,
+    senderAdd: DASHBOARD_CHATGPT_PRIVACY_COPY.senderAdd,
+    senderInvalid: DASHBOARD_CHATGPT_PRIVACY_COPY.senderInvalid,
+    senderDuplicate: DASHBOARD_CHATGPT_PRIVACY_COPY.senderDuplicate,
+    close: "Done",
+    pending: {
+      one: "{n} item is waiting to be checked on this computer.",
+      many: "{n} items are waiting to be checked on this computer."
+    },
+    nothingPending: "Nothing is waiting to be checked.",
+    save: DASHBOARD_CHATGPT_PRIVACY_COPY.save,
+    saving: DASHBOARD_CHATGPT_PRIVACY_COPY.saving,
+    cancel: DASHBOARD_CHATGPT_PRIVACY_COPY.cancel,
+    saveFailed: DASHBOARD_CHATGPT_PRIVACY_COPY.saveFailed,
+    saved: DASHBOARD_CHATGPT_PRIVACY_COPY.saved,
+    unchanged: "No changes to save.",
+    locked: "Unlock dashboard controls in Setup to see and change what is private.",
+    readOnly: "Your OpenClaw connection is read-only, so privacy can be read here but not changed.",
+    unavailable: "Privacy settings are not available from this worker."
+  };
 });
 
 // src/workers/dashboard/phases.ts
@@ -16879,6 +17299,7 @@ var OLYMPUS_DASHBOARD_VIEWS = [
   "setup",
   "background",
   "sensitivity",
+  "privacy",
   "source",
   "dispositions"
 ];
@@ -16894,6 +17315,8 @@ var OAUTH_CALLBACK_SOURCES = ["gmail", "google-drive", "dropbox", "x"];
 var OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000;
 var OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30;
 var OAUTH_CALLBACK_RATE_LIMIT_MAX_BUCKETS = 1024;
+var PRIVACY_DESCRIPTION_MAX = 2000;
+var PRIVACY_RULES_MAX = 100;
 
 class DashboardGatewayInvalidRequestError extends Error {
 }
@@ -17097,6 +17520,38 @@ function parseDashboardControlParams(value) {
       expected_scope_revision: boundedString(record.expected_scope_revision, 256, "expected_scope_revision", false),
       scope: parseMailScopeDraftParam(record.scope)
     };
+  }
+  if (action === "save_privacy") {
+    const record = exactRecord(outer, ["action", "description", "rules"]);
+    const description = record.description === undefined ? undefined : boundedText(record.description, PRIVACY_DESCRIPTION_MAX, "description");
+    let rules;
+    if (record.rules !== undefined) {
+      if (!Array.isArray(record.rules) || record.rules.length > PRIVACY_RULES_MAX) {
+        throw new DashboardGatewayInvalidRequestError(`rules must be a list of at most ${PRIVACY_RULES_MAX} rules.`);
+      }
+      rules = record.rules.map((value2) => {
+        const rule = exactRecord(value2, ["kind", "source_id", "key", "value", "display"]);
+        const key = optionalBoundedString(rule.key, 1024, "key", false);
+        const ruleValue = optionalBoundedString(rule.value, 240, "value", false);
+        const display = optionalBoundedString(rule.display, 200, "display", false);
+        return {
+          kind: enumValue(rule.kind, ["folder", "label", "sender"], "kind"),
+          source_id: enumValue(rule.source_id, ["dropbox.files", "google_drive.docs", "gmail.email"], "source_id"),
+          ...key ? { key } : {},
+          ...ruleValue ? { value: ruleValue } : {},
+          ...display ? { display } : {}
+        };
+      });
+    }
+    return {
+      action,
+      ...description !== undefined ? { description } : {},
+      ...rules ? { rules } : {}
+    };
+  }
+  if (action === "retry_model") {
+    const record = exactRecord(outer, ["action", "model"]);
+    return { action, model: enumValue(record.model, ["embedding", "answers"], "model") };
   }
   if (action === "browse_folder_scope") {
     const record = exactRecord(outer, ["action", "source_id", "parent_key", "cursor"]);
@@ -17547,6 +18002,16 @@ function dashboardControlWorkerRequest(params) {
       };
     case "set_embedding_priority":
       return { path: "/dashboard/embedding-priority", body: { on: params.on } };
+    case "save_privacy":
+      return {
+        path: "/dashboard/privacy",
+        body: {
+          ...params.description !== undefined ? { description: params.description } : {},
+          ...params.rules ? { rules: params.rules } : {}
+        }
+      };
+    case "retry_model":
+      return { path: "/dashboard/models/retry", body: { model: params.model } };
     case "disconnect":
       return { path: "/dashboard/disconnect", body: { source_id: params.source_id, acknowledge: true } };
     case "unpair":
@@ -17840,6 +18305,12 @@ function boundedString(value, maxLength, label, trim = true) {
     throw new DashboardGatewayInvalidRequestError(`${label} is invalid.`);
   }
   return normalized;
+}
+function boundedText(value, maxLength, label) {
+  if (typeof value !== "string" || value.length > maxLength || value.includes("\x00")) {
+    throw new DashboardGatewayInvalidRequestError(`${label} is invalid.`);
+  }
+  return value;
 }
 function optionalBoundedString(value, maxLength, label, trim = true) {
   if (value === undefined)
