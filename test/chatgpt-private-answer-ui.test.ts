@@ -146,6 +146,8 @@ interface MountOptions {
   pollCapMs?: number;
   fullPollCapMs?: number;
   requestTimeoutMs?: number;
+  /** Slow WebCrypto steps, in ms: the panel's decryption, and its key generation. */
+  slowCrypto?: { decrypt?: number; generateKey?: number };
   replies?: RelayReply[];
   plaintext?: unknown;
   idb?: FakeIdb;
@@ -193,7 +195,23 @@ function mount(options: MountOptions = {}): Host {
     },
   };
   Object.defineProperty(win, 'parent', { value: parent, configurable: true });
-  Object.defineProperty(win, 'crypto', { value: globalThis.crypto, configurable: true });
+  let crypto: unknown = globalThis.crypto;
+  if (options.slowCrypto) {
+    const real = globalThis.crypto.subtle;
+    const delays = options.slowCrypto;
+    const later = <V>(ms: number | undefined, work: () => Promise<V>) => (ms ? sleep(ms).then(work) : work());
+    crypto = {
+      subtle: {
+        generateKey: (...args: any[]) => later(delays.generateKey, () => (real.generateKey as any)(...args)),
+        exportKey: (...args: any[]) => (real.exportKey as any)(...args),
+        importKey: (...args: any[]) => (real.importKey as any)(...args),
+        deriveBits: (...args: any[]) => (real.deriveBits as any)(...args),
+        deriveKey: (...args: any[]) => (real.deriveKey as any)(...args),
+        decrypt: (...args: any[]) => later(delays.decrypt, () => (real.decrypt as any)(...args)),
+      },
+    };
+  }
+  Object.defineProperty(win, 'crypto', { value: crypto, configurable: true });
   if (options.idb) Object.defineProperty(win, 'indexedDB', { value: options.idb.factory, configurable: true });
   Object.defineProperty(win, 'fetch', {
     configurable: true,
@@ -583,6 +601,26 @@ describe('collecting the private answer', () => {
     host.button(W.tryAgain).click();
     await host.until(() => host.text().includes('31 March'), 'the answer');
     expect(new Set(host.fetched.map((call) => call.body.publicKey)).size).toBe(1);
+  });
+
+  test('a decryption that outlasts the deadline ends in Try again, and its late result is never shown', async () => {
+    const host = mount({ pollCapMs: 80, slowCrypto: { decrypt: 250 } });
+    host.push(ready());
+    await host.until(() => host.text().includes(W.slow), 'the slow notice');
+    expect(host.buttons().map((b) => b.textContent)).toEqual([W.tryAgain]);
+    await sleep(300);
+    expect(host.text()).not.toContain('31 March');
+    expect(host.text()).toContain(W.slow);
+  });
+
+  test('key preparation counts against the same deadline', async () => {
+    const host = mount({ pollCapMs: 60, slowCrypto: { generateKey: 250 } });
+    host.push(ready());
+    await host.until(() => host.text().includes(W.slow), 'the slow notice');
+    expect(host.fetched).toHaveLength(0);
+    await sleep(300);
+    expect(host.fetched).toHaveLength(0);
+    expect(host.text()).toContain(W.slow);
   });
 
   test('one hung request is aborted after its own timeout and the panel asks again', async () => {

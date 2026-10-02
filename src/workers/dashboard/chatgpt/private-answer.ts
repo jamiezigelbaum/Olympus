@@ -487,16 +487,26 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     canRetry = false;
     focusAfter = byUser ? 'status' : '';
     render();
-    // The outer deadline: however the requests behave, the panel stops waiting here.
+    // One collection deadline over everything (the key, every request, the
+    // decryption): whatever stalls, the panel stops waiting here, and a step
+    // that finishes later is ignored.
     const deadline = Date.now() + (info.full ? config.fullPollCapMs : config.pollCapMs);
+    const isTimeout = (error: unknown) => error instanceof Error && error.message === 'timeout';
     try {
-      const keys = await keyPair(jobId);
+      let keys: Awaited<ReturnType<typeof keyPair>>;
+      try {
+        keys = await bounded(keyPair(jobId), deadline - Date.now(), null);
+      } catch (error) {
+        if (mine !== run) return;
+        if (isTimeout(error)) return slow(byUser);
+        throw error;
+      }
       for (;;) {
         if (mine !== run) return;
         const left = deadline - Date.now();
         if (left <= 0) return slow(byUser);
-        // Each request gets its own timeout, never past the deadline.
-        const limit = Math.min(config.requestTimeoutMs, left);
+        // One request deadline over its response and its body, never past the collection's.
+        const requestEnd = Date.now() + Math.min(config.requestTimeoutMs, left);
         const controller = typeof (window as Any).AbortController === 'function' ? new (window as Any).AbortController() as AbortController : null;
         let response: Response;
         let body: Any = null;
@@ -510,19 +520,19 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
             referrerPolicy: 'no-referrer',
             mode: 'cors',
             signal: controller ? controller.signal : undefined,
-          }), limit, controller);
+          }), requestEnd - Date.now(), controller);
           if (mine !== run) return;
           try {
-            body = await bounded<Any>(response.json(), Math.min(config.requestTimeoutMs, deadline - Date.now()), controller);
+            body = await bounded<Any>(response.json(), requestEnd - Date.now(), controller);
           } catch (error) {
-            if (error instanceof Error && error.message === 'timeout') throw error;
+            if (isTimeout(error)) throw error;
             body = null;
           }
         } catch (error) {
           if (mine !== run) return;
           // A hung request is abandoned; the job may still be ready, so ask
           // again until the deadline, then offer Try again.
-          if (error instanceof Error && error.message === 'timeout') {
+          if (isTimeout(error)) {
             if (Date.now() >= deadline) return slow(byUser);
             continue;
           }
@@ -535,8 +545,10 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         if (code === 200 && status === 'ready') {
           let opened: ReturnType<typeof readAnswer> = null;
           try {
-            opened = readAnswer(await open(jobId, keys.privateKey, body));
-          } catch {
+            opened = readAnswer(await bounded(open(jobId, keys.privateKey, body), deadline - Date.now(), null));
+          } catch (error) {
+            if (mine !== run) return;
+            if (isTimeout(error)) return slow(byUser);
             opened = null;
           }
           if (mine !== run) return;
