@@ -46326,7 +46326,6 @@ var init_vocabulary = __esm(() => {
     loadMore: "Load more folders",
     states: { ingest: "Fully indexed", metadata_only: "Names only", exclude: "Skipped" },
     statesLower: { ingest: "fully indexed", metadata_only: "names only", exclude: "skipped" },
-    notIncluded: "Not included",
     mixed: "Mixed",
     mixedSome: "Mixed: some folders inside are {state}",
     segments: { ingest: ["Full", "Full"], metadata_only: ["Names only", "Names"], exclude: ["Skip", "Skip"] },
@@ -83435,11 +83434,11 @@ function mountDispositionsController(options) {
     return true;
   }
   function scopeMixed(draft, key) {
-    const own = shownScopeState(draft, key);
+    const own = effectiveScopeState(draft, key);
     for (const other of draft.selections.keys()) {
       if (other === key || !(draft.ancestors.get(other) || []).includes(key))
         continue;
-      const theirs = shownScopeState(draft, other);
+      const theirs = effectiveScopeState(draft, other);
       if (theirs !== own)
         return theirs;
     }
@@ -83496,7 +83495,7 @@ function mountDispositionsController(options) {
     const node = draft.catalog.get(key);
     const capped = !account && !own && draft.selections.size >= MAX_SCOPE_RULES;
     const group = scopeEl("div", "seg");
-    group.setAttribute("role", "radiogroup");
+    group.setAttribute("role", "group");
     group.setAttribute("aria-label", fillText(Q.choiceGroup, { name }));
     const buttons = [];
     for (const state of SCOPE_STATES) {
@@ -83725,9 +83724,14 @@ function mountDispositionsController(options) {
         });
       draft.focus = undefined;
       if (keep) {
-        const target = Array.from(view.querySelectorAll("[data-scope-focus]")).find((node) => node.dataset.scopeFocus === keep);
-        if (target && !target.disabled)
-          target.focus();
+        const controls = Array.from(view.querySelectorAll("button[data-scope-focus]"));
+        let target = controls.find((node) => node.dataset.scopeFocus === keep && !node.disabled);
+        if (!target && !draft.busy) {
+          const key = keep.startsWith("seg:") ? keep.slice(4, keep.lastIndexOf(":")) : "";
+          const same = controls.filter((node) => !node.disabled && key !== "" && node.dataset.scopeKey === key);
+          target = same.find((node) => node.classList.contains("inherited")) || same.find((node) => node.classList.contains("on")) || same[0] || controls.find((node) => !node.disabled);
+        }
+        target?.focus();
       }
     }
     scopeFooter(form, draft);
@@ -83875,7 +83879,7 @@ function mountDispositionsController(options) {
       else
         draft.selections.delete(key);
       draft.edited = true;
-      draft.focus = `seg:${key}:${state || draft.selections.get(key) || "ingest"}`;
+      draft.focus = `seg:${key}:${state || scopeInherited(draft, key).state || "ingest"}`;
     }
     renderScope(form, draft);
   }
@@ -90741,7 +90745,7 @@ function renderFolderScopeSource(source, locations, selected) {
       ${note}
       <div class="scope-view" data-scope-view${source.connected ? "" : " hidden"}>
         <div class="this-row account-row"><p class="this-label">${escapeHtml3(accountName)}</p>
-          <div class="seg" role="radiogroup" aria-label="${escapeHtml3(fillCopy(Q.choiceGroup, { name: accountName }))}">${segments}</div></div>
+          <div class="seg" role="group" aria-label="${escapeHtml3(fillCopy(Q.choiceGroup, { name: accountName }))}">${segments}</div></div>
       </div>
       <p class="fstate" data-scope-loading role="status" aria-live="polite"${unavailable ? " hidden" : ""}>${escapeHtml3(Q.loadingFolders)}</p>
       <section class="picker-footer" aria-label="${escapeHtml3(Q.summaryTitle)}"${source.connected ? "" : " hidden"}>

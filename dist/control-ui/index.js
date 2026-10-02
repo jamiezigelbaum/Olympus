@@ -1000,11 +1000,11 @@ function mountDispositionsController(options) {
     return true;
   }
   function scopeMixed(draft, key) {
-    const own = shownScopeState(draft, key);
+    const own = effectiveScopeState(draft, key);
     for (const other of draft.selections.keys()) {
       if (other === key || !(draft.ancestors.get(other) || []).includes(key))
         continue;
-      const theirs = shownScopeState(draft, other);
+      const theirs = effectiveScopeState(draft, other);
       if (theirs !== own)
         return theirs;
     }
@@ -1061,7 +1061,7 @@ function mountDispositionsController(options) {
     const node = draft.catalog.get(key);
     const capped = !account && !own && draft.selections.size >= MAX_SCOPE_RULES;
     const group = scopeEl("div", "seg");
-    group.setAttribute("role", "radiogroup");
+    group.setAttribute("role", "group");
     group.setAttribute("aria-label", fillText(Q.choiceGroup, { name }));
     const buttons = [];
     for (const state of SCOPE_STATES) {
@@ -1290,9 +1290,14 @@ function mountDispositionsController(options) {
         });
       draft.focus = undefined;
       if (keep) {
-        const target = Array.from(view.querySelectorAll("[data-scope-focus]")).find((node) => node.dataset.scopeFocus === keep);
-        if (target && !target.disabled)
-          target.focus();
+        const controls = Array.from(view.querySelectorAll("button[data-scope-focus]"));
+        let target = controls.find((node) => node.dataset.scopeFocus === keep && !node.disabled);
+        if (!target && !draft.busy) {
+          const key = keep.startsWith("seg:") ? keep.slice(4, keep.lastIndexOf(":")) : "";
+          const same = controls.filter((node) => !node.disabled && key !== "" && node.dataset.scopeKey === key);
+          target = same.find((node) => node.classList.contains("inherited")) || same.find((node) => node.classList.contains("on")) || same[0] || controls.find((node) => !node.disabled);
+        }
+        target?.focus();
       }
     }
     scopeFooter(form, draft);
@@ -1440,7 +1445,7 @@ function mountDispositionsController(options) {
       else
         draft.selections.delete(key);
       draft.edited = true;
-      draft.focus = `seg:${key}:${state || draft.selections.get(key) || "ingest"}`;
+      draft.focus = `seg:${key}:${state || scopeInherited(draft, key).state || "ingest"}`;
     }
     renderScope(form, draft);
   }
