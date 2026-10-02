@@ -47538,7 +47538,7 @@ function dashboardAttentionLine(source, options) {
     return clause ? `can't sign in · ${clause}` : `can't sign in`;
   }
   if (source.connection.provider_refusal)
-    return dashboardProviderRefusalLine(source);
+    return dashboardProviderRefusalLine(source, options);
   switch (source.connection.state) {
     case "reauth_required":
       return DASHBOARD_SIGNED_OUT;
@@ -47584,8 +47584,10 @@ function pausedReason(source) {
 function lowerFirst(value) {
   return value.length > 0 ? value[0].toLowerCase() + value.slice(1) : value;
 }
-function dashboardProviderRefusalLine(source) {
+function dashboardProviderRefusalLine(source, options) {
   const code = source.connection.provider_refusal?.code ?? "";
+  if (options?.surface === "chatgpt")
+    return DASHBOARD_CHATGPT_REFUSAL_COPY.line[chatgptRefusalKind(code)];
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `rejected the sign-in address — fix it in your ${source.label} app settings`;
   }
@@ -47593,14 +47595,23 @@ function dashboardProviderRefusalLine(source) {
     return "sign-in was declined — connect again to retry";
   return "refused the sign-in — see How to fix";
 }
-function dashboardProviderRefusalSentence(source) {
+function dashboardProviderRefusalSentence(source, options) {
   const code = source.connection.provider_refusal?.code ?? "";
+  if (options?.surface === "chatgpt")
+    return DASHBOARD_CHATGPT_REFUSAL_COPY.sentence[chatgptRefusalKind(code)](source.label);
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `${source.label} rejected the sign-in address. Fix it in your ${source.label} app settings, then connect again.`;
   }
   if (code === "access_denied")
     return `${source.label} sign-in was declined. Connect again to retry.`;
   return `${source.label} refused the sign-in. How to fix has the details.`;
+}
+function chatgptRefusalKind(code) {
+  if (REDIRECT_REFUSAL_CODES.has(code))
+    return "address";
+  if (code === "access_denied")
+    return "declined";
+  return "unfinished";
 }
 function dashboardProviderRefusalDetail(source) {
   return source.connection.provider_refusal?.reason;
@@ -47844,7 +47855,7 @@ function unknownStatus(value) {
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_PICKER_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
+var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_PICKER_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -47942,6 +47953,18 @@ var init_vocabulary = __esm(() => {
     fixOnMac: "Open Olympus on your Mac to fix this.",
     privateMatches: "Some matching items are private and stay on your Mac.",
     changeModelsOnMac: "Change models in Olympus on your Mac."
+  };
+  DASHBOARD_CHATGPT_REFUSAL_COPY = {
+    line: {
+      address: "sign-in didn't go through · try Reconnect",
+      declined: "sign-in was declined · try Reconnect",
+      unfinished: "didn't finish signing in · try Reconnect"
+    },
+    sentence: {
+      address: (source) => `${source} sign-in didn't go through. Try Reconnect.`,
+      declined: (source) => `${source} sign-in was declined. Try Reconnect.`,
+      unfinished: (source) => `${source} didn't finish signing in. Try Reconnect.`
+    }
   };
   DASHBOARD_CHATGPT_CONNECTION_COPY = {
     not_connected: {
@@ -92378,29 +92401,43 @@ var init_privacy = __esm(() => {
 });
 
 // src/workers/dashboard/index.ts
+function dashboardHtmlRoutePage(url) {
+  const params = url.searchParams;
+  if (params.get(DASHBOARD_DETAIL_QUERY_PARAM) !== null)
+    return "source";
+  if (params.has(DASHBOARD_BACKGROUND_QUERY_PARAM))
+    return "background";
+  if (params.has(DASHBOARD_SENSITIVITY_QUERY_PARAM))
+    return "sensitivity";
+  if (params.has(DASHBOARD_PRIVACY_QUERY_PARAM))
+    return "privacy";
+  if (params.has(DASHBOARD_SETUP_QUERY_PARAM))
+    return "setup";
+  return "home";
+}
 function renderDashboardHtmlRoute(input) {
   const { url, view } = input;
   const options = withTokenBasePath(url, input.options);
-  const sourceId = url.searchParams.get(DASHBOARD_DETAIL_QUERY_PARAM);
-  if (sourceId !== null) {
-    const html = renderDashboardDetailPage(view, sourceId, options);
-    if (html !== undefined)
-      return { html, status: 200 };
-    return { html: renderNotFound(view, options), status: 404 };
+  switch (dashboardHtmlRoutePage(url)) {
+    case "source": {
+      const html = renderDashboardDetailPage(view, url.searchParams.get(DASHBOARD_DETAIL_QUERY_PARAM) ?? "", options);
+      if (html !== undefined)
+        return { html, status: 200 };
+      return { html: renderNotFound(view, options), status: 404 };
+    }
+    case "background":
+      return { html: renderDashboardBackgroundPage(view, options), status: 200 };
+    case "sensitivity":
+      return { html: renderDashboardSensitivityPage(view, options), status: 200 };
+    case "privacy":
+      return { html: renderDashboardPrivacyPage(view, options), status: 200 };
+    case "setup":
+      return { html: renderDashboardSetupPage(view, options), status: 200 };
+    case "home":
+      if (servesSetupImplicitly(view))
+        return { html: renderDashboardSetupPage(view, options), status: 200 };
+      return { html: renderDashboardHomePage(view, options), status: 200 };
   }
-  if (url.searchParams.has(DASHBOARD_BACKGROUND_QUERY_PARAM)) {
-    return { html: renderDashboardBackgroundPage(view, options), status: 200 };
-  }
-  if (url.searchParams.has(DASHBOARD_SENSITIVITY_QUERY_PARAM)) {
-    return { html: renderDashboardSensitivityPage(view, options), status: 200 };
-  }
-  if (url.searchParams.has(DASHBOARD_PRIVACY_QUERY_PARAM)) {
-    return { html: renderDashboardPrivacyPage(view, options), status: 200 };
-  }
-  if (url.searchParams.has(DASHBOARD_SETUP_QUERY_PARAM) || servesSetupImplicitly(view)) {
-    return { html: renderDashboardSetupPage(view, options), status: 200 };
-  }
-  return { html: renderDashboardHomePage(view, options), status: 200 };
 }
 function renderDashboardControlUi(input) {
   if (input.params.view === "dispositions") {
@@ -95253,7 +95290,7 @@ function createEmailSourceWorker(options = {}) {
           const embeddingRuntime = await readEmbeddingRuntime({ env: process.env });
           const backgroundRuntime = readBackgroundRuntime({ env: process.env });
           const controlSessionCsrfToken = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
-          const dashboardPage = dashboardUi ? dashboardUi.params.view : url.searchParams.has("privacy") ? "privacy" : url.searchParams.has("sensitivity") ? "sensitivity" : url.searchParams.has("background") ? "background" : url.searchParams.has("source") ? "source" : url.searchParams.has("setup") ? "setup" : "home";
+          const dashboardPage = dashboardUi ? dashboardUi.params.view : dashboardHtmlRoutePage(url);
           const privacyShown = dashboardPage === "home" || dashboardPage === "setup" || dashboardPage === "sensitivity" || dashboardPage === "privacy";
           const writeAuthority = dashboardUi ? dashboardUi.canWrite : request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
           const privacySummary = sourceDashboard.privacy && privacyShown ? await sourceDashboard.privacy.summary().catch(() => {
@@ -114840,6 +114877,8 @@ function createDashboardPrivacyAdapter(options) {
         if (!settings)
           return { ok: false, code: "unavailable", message: "Olympus could not read your privacy settings." };
         const status = result.structuredContent?.status === "conflict" ? "conflict" : "saved";
+        if (status === "saved")
+          cached2 = undefined;
         const { confirmation: _issued, ...shown } = settings;
         return { ok: true, status, settings: shown };
       } catch (error2) {
