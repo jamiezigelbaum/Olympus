@@ -279,6 +279,43 @@ describe('connect', () => {
     expect(folders.toolCalls('olympus_dashboard').length).toBe(before + 1);
   });
 
+  test('Open sign-in again asks for a fresh link and opens it, never the spent one', async () => {
+    let issued = 0;
+    const host = mount({
+      openai: {},
+      pollMs: 10_000,
+      serve: {
+        [T.connectSource]: () => connectResult(`https://mcp.olympusplugin.ai/go/link${++issued}`),
+        olympus_dashboard: () => ({ structuredContent: offDropbox }),
+      },
+    });
+    host.push({ structuredContent: offDropbox });
+    host.button('Connect').click();
+    await host.settle();
+    expect(host.calls.filter(([name]) => name === 'openExternal')).toEqual([['openExternal', { href: 'https://mcp.olympusplugin.ai/go/link1' }]]);
+    host.button(Q.connectReopen).click();
+    await host.settle();
+    expect(host.toolCalls(T.connectSource)).toEqual([{ source: 'dropbox' }, { source: 'dropbox' }]);
+    expect(host.calls.filter(([name]) => name === 'openExternal').map(([, args]) => args)).toEqual([
+      { href: 'https://mcp.olympusplugin.ai/go/link1' },
+      { href: 'https://mcp.olympusplugin.ai/go/link2' },
+    ]);
+    expect(host.text()).toContain(Q.connectWaiting);
+  });
+
+  test('Open sign-in again after the wait ran out also renews the link, and a refused renewal says so', async () => {
+    const urls = ['https://mcp.olympusplugin.ai/go/first', 'https://evil.example/go/second'];
+    const host = mount({ openai: {}, pollMs: 2, pollCapMs: 15, serve: { [T.connectSource]: () => connectResult(urls.shift()!), olympus_dashboard: () => ({ structuredContent: offDropbox }) } });
+    host.push({ structuredContent: offDropbox });
+    host.button('Connect').click();
+    for (let i = 0; i < 50 && !host.hasButton('Check again'); i++) await sleep(3);
+    host.button(Q.connectReopen).click();
+    await host.settle();
+    expect(host.toolCalls(T.connectSource)).toHaveLength(2);
+    expect(host.calls.filter(([name]) => name === 'openExternal')).toEqual([['openExternal', { href: 'https://mcp.olympusplugin.ai/go/first' }]]);
+    expect(host.text()).toContain(Q.connectFailed.replace('{source}', 'Dropbox'));
+  });
+
   test('waiting is capped; Check again resumes', async () => {
     const host = mount({ openai: {}, pollMs: 2, pollCapMs: 15, serve: { [T.connectSource]: () => (connectResult('https://mcp.olympusplugin.ai/go/a')), olympus_dashboard: () => ({ structuredContent: offDropbox }) } });
     host.push({ structuredContent: offDropbox });

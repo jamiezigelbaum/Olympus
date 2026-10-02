@@ -273,6 +273,18 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     leave(fill(Q.connected, { source: p.label }), false);
   }
 
+  /**
+   * Open sign-in again: a sign-in link works once (opening it spends the
+   * hand-off), so this asks the connect tool for a fresh link and opens that,
+   * never the one already used. The wait starts over with the new link.
+   */
+  function reopen(): void {
+    if (!p || p.mode !== 'connect') return;
+    stopTimer();
+    session++;
+    startConnect(p.connectArgs, p.id, p.label, p.returnKey);
+  }
+
   function connectView(page: HTMLElement): void {
     add(page, el('h1', '', fill(Q.connectTitle, { source: p.label })));
     const box = el('div', 'picker-status');
@@ -285,7 +297,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       line.setAttribute('role', 'status');
       add(box, line, el('p', 'muted', fill(Q.connectWaitingHelp, { source: p.label })));
       add(box, add(el('div', 'actions'),
-        kit.button(Q.connectReopen, 'picker:connect:reopen', () => kit.openLink(p.href), 'plain'),
+        kit.button(Q.connectReopen, 'picker:connect:reopen', reopen, 'plain'),
         kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', true), 'plain')));
     } else if (p.phase === 'timeout') {
       const line = el('p', '', fill(Q.connectTimeout, { source: p.label }));
@@ -297,16 +309,13 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
           kit.render('picker:connect:cancel');
           schedulePoll();
         }, 'main'),
-        kit.button(Q.connectReopen, 'picker:connect:reopen', () => kit.openLink(p.href), 'plain'),
+        kit.button(Q.connectReopen, 'picker:connect:reopen', reopen, 'plain'),
         kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', true), 'plain')));
     } else {
       const line = el('p', '', p.errorText || fill(Q.connectFailed, { source: p.label }));
       line.setAttribute('role', 'alert');
       add(box, line, add(el('div', 'actions'),
-        kit.button(Q.tryAgain, 'picker:connect:retry', () => {
-          session++;
-          startConnect(p.connectArgs, p.id, p.label, p.returnKey);
-        }, 'main'),
+        kit.button(Q.tryAgain, 'picker:connect:retry', reopen, 'main'),
         kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', true), 'plain')));
     }
     add(page, box);
