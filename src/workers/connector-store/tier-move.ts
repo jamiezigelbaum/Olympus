@@ -218,6 +218,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   const flipped = ledger.completeMove(identity, {
     expectedGeneration: record.generation,
     destination: placement.copies,
+    embedHold: placement.embedHold === true,
     ...(decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {}),
   });
   const supersededCorpora = ledger.copies(identity)

@@ -185,12 +185,22 @@ contract (`src/workers/chatgpt/dashboard-contract.ts`).
 - **Answers: Olympus retrieves, ChatGPT reasons.** `olympus_search` returns
   the release-gated evidence for Public and Personal items (no Analyst on the
   Mac) and its description carries the generic Analyst instruction.
-  Its coverage is counts-only fixed sentences: matches in folders set to
-  Names only are said apart ("N matches are in folders set to Names only, so
-  Olympus has their names but not their contents. Switch those folders to
-  Full in the folder picker to let Olympus read them."), and "could not
-  read" is kept for genuine failed reads. No folder name rides a coverage
-  sentence.
+  Its coverage is counts in `structuredContent.coverage` (unreadable,
+  partly read, Names only, not yet sorted into privacy tiers) with a
+  model-facing `instruction`: "Mention coverage only if the user asks why
+  something is missing or the answer depends on it." (owner report
+  2026-10-02: ChatGPT recited "3 unreadable, 8 names-only, 6 await privacy
+  classification" as if they were errors). The tool text carries no coverage
+  line while the private answer panel is answering, and one terse line
+  otherwise. The Names-only sentence ("N matches are in folders set to Names
+  only, so Olympus has their names but not their contents. Switch those
+  folders to Full in the folder picker to let Olympus read them.") appears
+  only when Names-only matches are why nothing was answered (no released
+  item had readable text). No folder name rides a coverage line.
+  "Not yet sorted into privacy tiers" counts only items with an open tier
+  question (`tier_copies.embed_hold`); an item decided after such a question
+  is never left held (see the tier ledger's `completeMove` hold and its
+  settle-at-open of stale holds).
   `source_answer` is listed only when an answer model is set up on the Mac.
   A fresh install is keyless: `olympus engine install` seeds the
   `no-sensitive` preset (built-in embeddings for every tier, nothing to
@@ -253,7 +263,30 @@ panel (`ready`), the panel explains setup (`no_model`, `model_downloading`),
 or no panel came back in time but released coverage shows matches whose
 contents are tiered Private. Matches whose name is Personal and whose
 contents are Private are counted apart from Names-only and unreadable items,
-so no coverage note tells the user to change folder settings for them. The
+so no coverage note tells the user to change folder settings for them.
+
+**Names Personal, contents Private.** Owner ruling (2026-10-02): a Private
+item's *name* may remain Personal, and that name may appear in ChatGPT
+elsewhere (for example in a Personal listing, or as a Personal match for
+another question). What is left out is narrower: `olympus_search` and
+`source_answer` do not list a name-only copy as *evidence* when that item's
+contents are held Private (`EvidencePackBuildDetail.contentPrivateCandidateIndexes`,
+the `contentPrivate` content block). Such an entry has nothing behind it but
+a file name, and ChatGPT reported it as a finding ("found the file but
+returned only its filename"); its contents are answered in the panel
+instead. It is still counted (`coverage.content_private_items`), which is
+what lets the no-panel note say Private items matched. This is a
+presentation rule for evidence, not a change to what tier a name has.
+
+With the panel `ready`, the note steers ChatGPT to a short reply along the
+lines of "Olympus is preparing your answer privately on your Mac; it'll
+appear in the panel above, visible only to you (it can take up to a
+minute)", with no commentary on other search results unless they actually
+answer the question and no coverage counts, unread items or file names. A
+`detail: "full"` request says a full read can take a few minutes instead.
+The search text's leading instruction becomes "use this evidence only where
+it actually answers the question", and the held-back and Names-only
+sentences are left out: the reply is "see the panel". The
 count and state travel only in the widget-only `_meta`; with no match the
 panel renders nothing (zero height). With one,
 the panel says "N private items match", carries the badge **"Not sent to

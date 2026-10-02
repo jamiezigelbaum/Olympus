@@ -211,6 +211,7 @@ export class TierLedger {
       db = new Database(this.dbPath, { create: true });
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
+      settleStaleEmbedHolds(db, this.now().toISOString());
       if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
       if (db) closeSqliteStore(db);
@@ -1334,6 +1335,13 @@ export class TierLedger {
         TierDecision,
         'contentRead' | 'metadataPending' | 'contentPending' | 'metadataForced' | 'metadataFlagged' | 'engineVersion' | 'mapRevision'
       >;
+      /**
+       * The placement's embedding hold, applied to every copy the flip makes
+       * current. A source copy re-layered in place otherwise keeps the hold
+       * an earlier pending decision put on it, and a decided item stays
+       * "awaiting classification" and unembedded forever.
+       */
+      embedHold?: boolean;
     },
   ): TierLedgerRecord {
     for (const copy of options.destination) assertCopyPlan(copy);
@@ -1372,6 +1380,12 @@ export class TierLedger {
           UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, previous_layers = NULL, updated_at = ?
           WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
         `).run(generation, now, ...idParams(identity), source.corpusId);
+      }
+      if (options.embedHold !== undefined) {
+        this.db.query(`
+          UPDATE tier_copies SET embed_hold = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'
+        `).run(options.embedHold ? 1 : 0, ...idParams(identity));
       }
       this.flipTiers(identity, existing, {
         metadataTier: existing.targetMetadataTier,
@@ -2140,6 +2154,29 @@ function rowOf(record: TierLedgerRecord): EffectiveRow {
     metadataForced: record.metadataForced,
     metadataFlagged: record.metadataFlagged,
   };
+}
+
+/**
+ * An embedding hold belongs only to an item with an open question (state
+ * pending, or a pending flag): placementFor holds a copy for nothing else.
+ * Before completeMove applied the placement's hold, a move flip kept the hold
+ * an earlier pending decision had put on a re-layered source copy, so a
+ * decided item stayed held, unembedded and counted as "awaiting privacy
+ * classification" with nothing left to decide it. This settles such copies at
+ * open: idempotent, and it touches only decided items' current copies (the
+ * hold is cleared where the decision already placed the copy).
+ */
+function settleStaleEmbedHolds(db: Database, now: string): number {
+  return db.query(`
+    UPDATE tier_copies SET embed_hold = 0, updated_at = ?
+    WHERE embed_hold = 1 AND copy_state = 'current'
+      AND EXISTS (
+        SELECT 1 FROM tier_items t
+        WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+          AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
+      )
+  `).run(now).changes;
 }
 
 /** The reasons that say a question is still open: the flags, the borderline families and `sniffer:<id>:undecided`. */

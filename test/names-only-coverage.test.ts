@@ -132,16 +132,34 @@ describe('Names-only matches are counted apart from unreadable ones', () => {
     expect(raw.coverage.unreadable_items).toBe(1);
 
     const result = searchToolResult(raw);
-    const structured = result.structuredContent as { coverage: Record<string, number>; notes: string[] };
+    const structured = result.structuredContent as { coverage: Record<string, number | string>; notes: string[] };
     expect(structured.coverage).toMatchObject({ namesOnlyItems: 2, unreadableItems: 1 });
-    expect(structured.notes).toContain(
-      '2 matches are in folders set to Names only, so Olympus has their names but not their contents. '
-      + 'Switch those folders to Full in the folder picker to let Olympus read them.',
-    );
-    expect(structured.notes).toContain('Olympus could not read 1 matching item.');
+    // The readable note answered, so Names-only matches are not why nothing
+    // was answered: no folder-picker hint, and coverage stays counts with a
+    // terse line, never "could not read" sentences to recite.
+    expect(structured.notes.join(' ')).not.toMatch(/Names only|folder picker|could not read/);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain('1 unreadable, 2 names only.');
     // Counts only: no folder name reaches ChatGPT through the coverage notes.
-    expect(structured.notes.join(' ')).not.toContain('books');
+    expect(text).not.toContain('books');
     store.close();
+  });
+
+  test('the Names-only hint appears only when Names-only matches are why nothing was answered', () => {
+    const hint = '2 matches are in folders set to Names only, so Olympus has their names but not their contents. '
+      + 'Switch those folders to Full in the folder picker to let Olympus read them.';
+    // Only title-only matches: the hint explains the empty answer.
+    const namesOnly = searchToolResult({
+      evidence: [{ trust_domain: 'internal', family: 'file', provider: 'dropbox', title: 'orchard-plan.pdf' }],
+      coverage: { searched_corpora: 1, names_only_items: 2 },
+    });
+    expect((namesOnly.structuredContent as { notes: string[] }).notes).toEqual([hint]);
+    // A readable match answered: no hint.
+    const answered = searchToolResult({
+      evidence: [{ trust_domain: 'internal', family: 'file', provider: 'dropbox', title: 'orchard.txt', excerpt: 'Prune in winter.' }],
+      coverage: { searched_corpora: 1, names_only_items: 2 },
+    });
+    expect((answered.structuredContent as { notes: string[] }).notes).toEqual([]);
   });
 
   test('one Names-only match reads in the singular; none adds no sentence', () => {

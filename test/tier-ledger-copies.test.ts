@@ -293,3 +293,63 @@ describe('tier ledger copies (P1b)', () => {
     ])).toBe(true);
   });
 });
+
+// 2026-10-02 live (Dropbox): six items decided Personal after a pending
+// sniffer question kept embed_hold on their Personal copy. The move flip
+// re-layered that source copy in place and kept the hold, so each stayed
+// unembedded and counted as "awaiting privacy classification" with nothing
+// left to decide it.
+describe('embedding holds follow the decision through a move', () => {
+  const split: TierPlacementPlan['copies'] = [{ ...INTERNAL, layers: 'metadata' }, { ...SECURE, layers: 'content' }];
+
+  function heldThenDecidedPersonal(store: TierLedger): number {
+    store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secure' }), { copies: split, embedHold: false });
+    // A re-judgment with an open question holds the content (and every current copy).
+    expect(store.recordRoutedPlacement(ITEM, decision({ state: 'pending', contentPending: true }), { copies: split, embedHold: true }).outcome)
+      .toBe('updated');
+    expect(store.corpusCopyCounts(INTERNAL.corpusId).held).toBe(1);
+    // Answered Personal: the item moves to the Personal store, whole.
+    expect(store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL)).outcome).toBe('queued_move');
+    const generation = store.getCurrent(ITEM)!.generation;
+    store.stageMove(ITEM, {
+      expectedGeneration: generation,
+      target: { metadataTier: 'private', contentTier: 'private' },
+      destination: [{ ...INTERNAL, layers: 'both' }],
+      hideSource: false,
+    });
+    return generation;
+  }
+
+  test('the flip applies the placement\'s hold to the copies it makes current', () => {
+    const store = ledger();
+    const generation = heldThenDecidedPersonal(store);
+    const flipped = store.completeMove(ITEM, { expectedGeneration: generation, destination: [{ ...INTERNAL, layers: 'both' }], embedHold: false });
+    expect(flipped.state).toBe('current');
+    expect(store.copies(ITEM).find((copy) => copy.corpusId === INTERNAL.corpusId)).toMatchObject({ state: 'current', layers: 'both', embedHold: false });
+    expect(store.corpusCopyCounts(INTERNAL.corpusId).held).toBe(0);
+    store.close();
+  });
+
+  test('a decided item left held by an older flip is settled when the ledger opens; a pending one stays held', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-ledger-hold-'));
+    try {
+      const dbPath = join(dir, 'store.tier-ledger.sqlite');
+      const first = new TierLedger({ dbPath });
+      const generation = heldThenDecidedPersonal(first);
+      // The flip as it was before the fix: no hold passed, the re-layered copy keeps it.
+      first.completeMove(ITEM, { expectedGeneration: generation, destination: [{ ...INTERNAL, layers: 'both' }] });
+      const pending = { ...ITEM, providerItemId: 'item-2' };
+      first.recordRoutedPlacement(pending, decision({ state: 'pending', contentPending: true }), { copies: split, embedHold: true });
+      expect(first.corpusCopyCounts(INTERNAL.corpusId).held).toBe(2);
+      first.close();
+
+      const reopened = new TierLedger({ dbPath });
+      expect(reopened.copies(ITEM).find((copy) => copy.state === 'current')?.embedHold).toBe(false);
+      expect(reopened.copies(pending).every((copy) => copy.embedHold)).toBe(true);
+      expect(reopened.corpusCopyCounts(INTERNAL.corpusId).held).toBe(1);
+      reopened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

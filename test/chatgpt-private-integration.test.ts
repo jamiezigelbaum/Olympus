@@ -25,7 +25,14 @@ import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { openRemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
-import { copyDashboardViewModel, PRIVATE_MATCH_NOTE, PRIVATE_MATCH_PANEL_NOTE, searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
+import {
+  copyDashboardViewModel,
+  PRIVATE_MATCH_NOTE,
+  PRIVATE_MATCH_PANEL_NOTE,
+  SEARCH_COVERAGE_INSTRUCTION,
+  searchToolResult,
+} from '../src/workers/chatgpt/response-builder.ts';
+import { mintCredential } from '../connect-relay/shared/tokens.ts';
 import { PRIVATE_ANSWER_META_KEY, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI } from '../src/workers/chatgpt/private-answer-resource.ts';
 import {
@@ -45,7 +52,7 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
-import { searchPrivateEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { releaseAnalystAnswer, searchPrivateEvidence, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { buildEvidencePackDetailed } from '../src/core/evidence-pack.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
@@ -524,6 +531,111 @@ describe('a Personal name over Private contents', () => {
     expect((result.structuredContent as { notes: string[] }).notes).toEqual([PRIVATE_MATCH_NOTE]);
     expect(visible).not.toMatch(/Names only|Switch|folder picker|could not read/);
     expect(visible).not.toMatch(SENTINEL_PATTERN);
+  });
+});
+
+describe('content held Private is answered in the panel, not listed as name-only evidence', () => {
+  test('olympus_search and source_answer leave the name-only copy out of the evidence and count it apart', async () => {
+    const specs: FixtureSpec[] = [
+      { id: 'crown', name: 'dentist-crown-report.txt', text: 'SENTINEL_CROWN_7f3a: the molar crown was fitted and set.' },
+      { id: 'bridge', name: 'dentist-bridge-quote.txt', text: 'The dentist quoted the bridge at four hundred.' },
+    ];
+    const { dir, cleanup } = tempDir();
+    const fixture = openTierFixture(dir, { embed: false });
+    cleanups.push(() => {
+      fixture.close();
+      cleanup();
+    });
+    await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    await moveTieredItem({ set: fixture.set, identity: identityOf('crown'), target: { metadataTier: 'private', contentTier: 'secure' } });
+    await moveTieredItem({ set: fixture.set, identity: identityOf('bridge'), target: { metadataTier: 'private', contentTier: 'private' } });
+    // The crown's name matches by name (as a dated file name did live);
+    // the fixture's keyword lane reads text, so its name hit is added here.
+    const crownName = {
+      sourceItem: { family: 'file' as const, provider: 'fixture', accountScope: 'personal', providerItemId: 'crown', localItemId: 'personal:crown' },
+      rawExposed: false as const,
+    };
+    const lanes = () => {
+      const stores = fixture.set.openStores();
+      return {
+        registry: buildSourceIndexCorpusRegistry(stores.map((store) => defineConnectorCorpus({
+          corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain,
+        }))),
+        adapters: Object.fromEntries(stores.map((store) => {
+          const adapter = createConnectorStoreCorpusAdapter({ store });
+          return [store.corpusId, store.trustDomain === 'internal'
+            ? async (request: Parameters<typeof adapter>[0]) => {
+                const found = await adapter(request);
+                return { ...found, hits: [crownName, ...found.hits] };
+              }
+            : adapter];
+        })),
+        contentProviders: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreContentProvider({ store })])),
+        visibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }]),
+      };
+    };
+
+    // olympus_search: the crown's name matched, but its contents are Private,
+    // so it is counted and not listed; the readable Personal match is.
+    const released = await searchReleasedEvidence({ lanes, question: 'dentist', maxResults: 10 });
+    expect(released.coverage.content_private_items).toBe(1);
+    expect(released.evidence.map((item) => item.provider_item_id)).toEqual(['bridge']);
+    expect(released.evidence[0]!.excerpt).toContain('bridge at four hundred');
+    expect(JSON.stringify(released)).not.toMatch(/dentist-crown-report|SENTINEL_CROWN/);
+
+    // source_answer: the same name-only copy is neither appended as evidence
+    // nor reported as a file that "could not be read".
+    const personal = fixture.set.openStores().find((store) => store.trustDomain === 'internal')!;
+    const detail = await buildEvidencePackDetailed({
+      question: 'dentist crown report',
+      selectedItems: [{
+        corpusId: personal.corpusId,
+        sourceItem: { family: 'file', provider: 'fixture', accountScope: 'personal', providerItemId: 'crown', localItemId: 'personal:crown' },
+      }],
+      maxResults: 5,
+      searchContext: { allowedTrustDomains: ['internal'] },
+      registry: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: personal.corpusId, family: 'file', trustDomain: 'internal' })]),
+      adapters: {},
+      contentProviders: { [personal.corpusId]: createConnectorStoreContentProvider({ store: personal }) },
+    });
+    expect(detail.contentPrivateCandidateIndexes).toEqual([0]);
+    const answer = releaseAnalystAnswer({
+      detail,
+      result: { answer: 'Olympus found nothing it could read about this.', citations: [], unanswered: [] },
+      releaseSecureContent: false,
+    });
+    expect(answer.answer).not.toMatch(/could not be read|matched file/);
+  });
+
+  test('with the panel answering, the search text carries no coverage line; counts stay in structuredContent', () => {
+    const jobId = mintCredential('private', INSTALL);
+    const raw = {
+      evidence: [{ trust_domain: 'internal', family: 'file', provider: 'dropbox', title: 'Gym schedule', excerpt: 'Mondays at six.' }],
+      withheld: 2,
+      coverage: { searched_corpora: 3, unreadable_items: 3, names_only_items: 8, partially_read_items: 1, unclassified_items: 6, content_private_items: 1 },
+    };
+    const result = searchToolResult(raw, { privateMatch: { count: 2, panelState: 'ready', jobId } });
+    const structured = result.structuredContent as { coverage: Record<string, unknown>; notes: string[] };
+    expect(structured.coverage).toEqual({
+      searchedSources: 3,
+      unreadableItems: 3,
+      namesOnlyItems: 8,
+      partiallyReadItems: 1,
+      unclassifiedItems: 6,
+      instruction: SEARCH_COVERAGE_INSTRUCTION,
+    });
+    // Exactly the one Private note: no held-back, Names-only or coverage sentence.
+    expect(structured.notes).toEqual([PRIVATE_MATCH_PANEL_NOTE]);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toStartWith('Use this evidence only where it actually answers the question');
+    expect(text).not.toMatch(/Coverage|unreadable|names only|privacy tiers|folder picker|held back|could not read/);
+    expect(text.split(PRIVATE_MATCH_PANEL_NOTE).length - 1).toBe(1);
+
+    // Without a panel: one terse coverage line, prefixed by when to mention it.
+    const plain = (searchToolResult(raw).content[0] as { text: string }).text;
+    expect(plain).toContain('Coverage, to mention only if the user asks why something is missing or the answer depends on it: '
+      + '3 unreadable, 1 partly read, 8 names only, 6 not yet sorted into privacy tiers.');
+    expect(plain).not.toContain('folder picker');
   });
 });
 

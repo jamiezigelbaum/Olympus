@@ -35,6 +35,7 @@ import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceMeta } from
 import {
   copyPrivateMatch,
   PRIVATE_MATCH_NOTE,
+  PRIVATE_MATCH_PANEL_FULL_NOTE,
   PRIVATE_MATCH_PANEL_NOTE,
   PRIVATE_MATCH_PANEL_SETUP_NOTE,
   privateMatchNote,
@@ -501,7 +502,8 @@ describe('the response builder', () => {
     expect(privateMatchNote(undefined, 3)).toBe(PRIVATE_MATCH_NOTE);
     expect(privateMatchNote(undefined, 0)).toBeUndefined();
     expect(privateMatchNote({ count: 0, panelState: 'ready', jobId })).toBeUndefined();
-    for (const note of [PRIVATE_MATCH_PANEL_NOTE, PRIVATE_MATCH_PANEL_SETUP_NOTE, PRIVATE_MATCH_NOTE]) {
+    expect(privateMatchNote({ count: 7, panelState: 'ready', jobId, detail: 'full' })).toBe(PRIVATE_MATCH_PANEL_FULL_NOTE);
+    for (const note of [PRIVATE_MATCH_PANEL_NOTE, PRIVATE_MATCH_PANEL_FULL_NOTE, PRIVATE_MATCH_PANEL_SETUP_NOTE, PRIVATE_MATCH_NOTE]) {
       // The same text whatever the count: nothing to probe holdings with.
       expect(note).not.toMatch(/\d/);
       expect(note).not.toContain(SECRET_ANSWER);
@@ -513,6 +515,14 @@ describe('the response builder', () => {
     expect(PRIVATE_MATCH_PANEL_NOTE).toContain("Don't ask the user to upload, attach or paste those files");
     expect(PRIVATE_MATCH_PANEL_NOTE).toContain('Follow-up questions about them are answered privately in the panel the same way');
     expect(PRIVATE_MATCH_PANEL_NOTE).toContain('set the detail argument to full when the user asks for all the details');
+    // 2026-10-02 live: with the panel answering, ChatGPT still recited
+    // coverage counts and a name-only match ("returned only its filename").
+    // The ready note steers it to a short "see the panel" reply instead.
+    expect(PRIVATE_MATCH_PANEL_NOTE).toContain('Olympus is preparing your answer privately on your Mac; '
+      + "it'll appear in the panel above, visible only to you (it can take up to a minute).");
+    expect(PRIVATE_MATCH_PANEL_NOTE).toContain("Don't comment on other search results unless they actually answer the question");
+    expect(PRIVATE_MATCH_PANEL_NOTE).toContain("don't mention coverage counts, unread items or file names");
+    expect(PRIVATE_MATCH_PANEL_FULL_NOTE).toContain('reading the full report can take a few minutes');
   });
 
   test('the resource declares the relay as its one connect domain', () => {

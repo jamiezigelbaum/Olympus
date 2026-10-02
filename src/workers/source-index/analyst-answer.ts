@@ -2344,8 +2344,12 @@ function appendUnreadableMatchedEvidence(
 
 function unreadableMatchedCandidateIndexes(detail: EvidencePackBuildDetail): number[] {
   if (detail.pack.coverage.extractionGaps.length === 0) return [];
+  // Contents tiered Private are not unreadable: they are answered from their
+  // Private copy, and a name-only copy adds nothing as evidence.
+  const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
   return detail.pack.candidates
     .map((candidate, index) => ({ candidate, index }))
+    .filter(({ index }) => !contentPrivate.has(index))
     .filter(({ candidate }) => candidate.provenance.sourceItem.family === 'file')
     .filter(({ candidate }) => {
       return candidate.chunks.length === 0
@@ -2488,7 +2492,14 @@ export async function searchReleasedEvidence(input: {
   const evidence: ReleasedEvidenceItem[] = [];
   let withheld = 0;
   const seen = new Set<string>();
+  // A match whose name is Personal but whose contents are tiered Private is
+  // answered from its Private copy (the private answer panel); here it would
+  // be a name with nothing behind it. Its name is not hidden by this (names
+  // may stay Personal): it is just not listed as evidence. It is still
+  // counted in coverage.content_private_items.
+  const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
   detail.pack.candidates.forEach((candidate, index) => {
+    if (contentPrivate.has(index)) return;
     if (candidate.trustDomain !== 'public_safe' && candidate.trustDomain !== 'internal') {
       withheld += 1;
       return;

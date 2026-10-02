@@ -499,8 +499,16 @@ export interface SearchResult {
     /** Matches in folders the owner set to Names only (contents not read on purpose). */
     namesOnlyItems: number;
     partiallyReadItems: number;
+    /** Items in the searched sources whose privacy tier is still open (held from search until decided). */
     unclassifiedItems: number;
+    /** Model-facing: when to bring these counts up (only if asked why something is missing, or the answer depends on it). */
+    instruction: string;
   };
-  /** Fixed sentences: coverage gaps, a Private match, items held back. */
+  /**
+   * Fixed sentences the reply may need: a Private match, items held back,
+   * instruction-like excerpts, and the Names-only hint only when Names-only
+   * matches are why nothing could be answered. Coverage counts are not
+   * recited here; they sit in `coverage`.
+   */
   notes: string[];
 }
