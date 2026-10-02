@@ -48,6 +48,7 @@ import {
 import { OperationError } from '../core/operation-error.ts';
 import { DASHBOARD_THEME_CSS } from './dashboard/theme.ts';
 import { dashboardPageSignature } from './dashboard/components.ts';
+import { DASHBOARD_PICKER_COPY } from './dashboard/vocabulary.ts';
 import type {
   OlympusDashboardReadResult,
   OlympusFolderScopeSourceId,
@@ -564,12 +565,8 @@ export function renderSourceDispositionsFragment(view: SourceDispositionsView, s
       ${renderDashboardNav('home')}
       <header class="picker-header">
         <p class="eyebrow">Olympus / Sources</p>
-        <h1>Choose folders</h1>
-        <p>Connecting an account does not start indexing. Choose what Olympus may use,
-        then press <strong>Save scope and start</strong>. Unselected folders stay out. Choose <strong>Names only</strong>
-        for large photo or video folders — or anything you want searchable by name and date without
-        reading its contents. Choose <strong>Skipped</strong> to keep a folder out of Olympus
-        entirely. New files inherit the nearest folder choice.</p>
+        <h1>${escapeHtml(DASHBOARD_PICKER_COPY.foldersTitle)}</h1>
+        <p>${escapeHtml(DASHBOARD_PICKER_COPY.foldersIntro)}</p>
       </header>
       ${sources}
       <p class="action-message" id="save-message" role="status" aria-live="polite"></p>
@@ -711,49 +708,58 @@ function mailDraftSummary(draft: OlympusMailScopeDraft): string {
 }
 
 function renderFolderScopeSource(source: SourceFolderScopeSummary, locations: readonly SourceFolderScopeSummary[], selected: boolean): string {
+  const Q = DASHBOARD_PICKER_COPY;
   const unavailable = !source.connected || Boolean(source.error);
-  return `<section class="source-dispositions" data-scope-panel="${escapeHtml(source.source_id)}"${selected ? '' : ' hidden'}>
-    <p class="scope-back"><a href="/dashboard?source=${encodeURIComponent(source.source_id)}">← Back to ${escapeHtml(source.label)}</a></p>
-    <form data-folder-scope-source="${escapeHtml(source.source_id)}"
+  const label = escapeHtml(source.label);
+  // Locations only earn a row when there is somewhere else to go.
+  const switcher = locations.length > 1
+    ? `<nav class="scope-locations" aria-label="${escapeHtml(Q.locations)}">${renderScopeLocations(locations, source)}</nav>`
+    : '';
+  const note = source.error
+    ? `<p class="scope-browser-note" role="alert">${escapeHtml(source.error)}</p>`
+    : source.connected
+      ? ''
+      : `<p class="scope-browser-note">${escapeHtml(Q.connectFirst)}</p>
+          <p><a class="scope-connect" href="/dashboard?source=${encodeURIComponent(source.source_id)}">${escapeHtml(fillCopy(Q.connect, { source: source.label }))} →</a></p>`;
+  // The first paint, before the browser controller takes over: the whole-account
+  // row with its control (inert until the folders load) and the loading line.
+  // The controller re-renders this region from its own state on every change.
+  const segments = (['ingest', 'metadata_only', 'exclude'] as const).map((state) => {
+    const [long, short] = Q.segments[state];
+    return `<button type="button" class="seg-opt" aria-pressed="false" aria-label="${escapeHtml(long)}" disabled>`
+      + `<span class="seg-long">${escapeHtml(long)}</span><span class="seg-short">${escapeHtml(short)}</span></button>`;
+  }).join('');
+  const accountName = fillCopy(Q.accountRow, { source: source.label });
+  return `<section class="source-dispositions scope-picker" data-scope-panel="${escapeHtml(source.source_id)}"${selected ? '' : ' hidden'}>
+    <p class="scope-back"><a href="/dashboard?source=${encodeURIComponent(source.source_id)}">← ${escapeHtml(fillCopy(Q.backTo, { source: source.label }))}</a></p>
+    ${switcher}
+    <form data-folder-scope-source="${escapeHtml(source.source_id)}" data-scope-label="${label}"
       data-connected="${source.connected}" data-account-generation="${escapeHtml(source.account_generation ?? '')}"
       data-scope-revision="${escapeHtml(source.scope_revision ?? '')}"
-      data-scope-selections="${escapeHtml(JSON.stringify(source.selections ?? []))}">
-      <div class="finder-window">
-        <aside class="finder-sidebar"><p class="sidebar-label">Locations</p>${renderScopeLocations(locations, source)}
-          <p class="scope-connection">${source.connected ? source.status === 'approved' ? 'Scope approved' : 'Waiting for your selection' : 'Disconnected'}</p>
-        </aside>
-        <section class="finder-main">
-          <div class="finder-toolbar"><input type="search" data-scope-search placeholder="Search listed folders" aria-label="Search listed folders"></div>
-          <div class="scope-browser-toolbar"><span data-scope-location>Folders</span>
-            <button type="button" data-scope-browse-root${unavailable ? ' disabled' : ''}>Update</button>
-            <span data-scope-loading role="status" aria-live="polite" hidden>Loading folders…</span></div>
-          <p class="scope-browser-note">${source.error ? escapeHtml(source.error) : source.connected
-            ? 'Opening this page loads folder names only. No file contents are read or indexed until you confirm your scope.'
-            : 'Connect this account first, then return here to choose folders. Connecting will not start indexing.'}</p>
-          ${source.connected ? '' : `<a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml(source.label)} →</a>`}
-          <div class="tree-viewport scope-browser-list" data-scope-nodes role="list" aria-label="Folders"></div>
-          <button type="button" data-scope-more hidden>Show more folders</button>
-          <label class="scope-whole-account"><input type="checkbox" data-scope-whole-account${source.whole_account_selected ? ' checked' : ''}${unavailable ? ' disabled' : ''}> Use the entire account, including future folders, except choices below</label>
-          <label class="scope-whole-confirm"${source.whole_account_selected ? '' : ' hidden'}><input type="checkbox" data-scope-whole-confirm${unavailable ? ' disabled' : ''}> I explicitly approve using the entire account</label>
-          <details class="scope-review"><summary>Review your folder choices</summary><ul data-scope-selections></ul></details>
-        </section>
-        <aside class="finder-inspector" aria-label="Folder choice">
-          <div data-scope-inspector-empty><div class="inspector-folder">▱</div><p>Select a folder</p></div>
-          <div data-scope-inspector-content hidden><div class="inspector-folder">▰</div>
-          <h3 data-scope-selected-name></h3><p class="inspector-path" data-scope-selected-path></p>
-          <div class="choice-stack" aria-label="Indexing choice">
-            <button type="button" data-scope-state="ingest" disabled>Fully indexed<span>Read and index contents</span></button>
-            <button type="button" data-scope-state="metadata_only" disabled>Names only<span>Searchable by name and date</span></button>
-            <button type="button" data-scope-state="exclude" disabled>Skipped<span>Keep this folder out</span></button>
-          </div><p class="inspector-note" data-scope-selected-note></p></div>
-        </aside>
-        <footer class="finder-footer"><span data-scope-summary>No folders selected.</span>
-          <span class="footer-actions"><button type="button" class="secondary" data-scope-cancel>Cancel changes</button>
-            <button type="submit" data-scope-start disabled>Save scope and start</button></span></footer>
+      data-scope-selections="${escapeHtml(JSON.stringify(source.selections ?? []))}"
+      data-scope-copy="${escapeHtml(JSON.stringify(Q))}">
+      ${note}
+      <div class="scope-view" data-scope-view${source.connected ? '' : ' hidden'}>
+        <div class="this-row account-row"><p class="this-label">${escapeHtml(accountName)}</p>
+          <div class="seg" role="radiogroup" aria-label="${escapeHtml(fillCopy(Q.choiceGroup, { name: accountName }))}">${segments}</div></div>
       </div>
-      <p class="action-message" data-scope-message role="status" aria-live="polite">Nothing starts until you confirm.</p>
+      <p class="fstate" data-scope-loading role="status" aria-live="polite"${unavailable ? ' hidden' : ''}>${escapeHtml(Q.loadingFolders)}</p>
+      <section class="picker-footer" aria-label="${escapeHtml(Q.summaryTitle)}"${source.connected ? '' : ' hidden'}>
+        <div class="summary" aria-live="polite" data-scope-summary><p>${escapeHtml(Q.summaryNone)}</p></div>
+        <div class="save"><div class="actions">
+          <button type="submit" class="primary" data-scope-start disabled>${escapeHtml(Q.saveNoStart)}</button>
+          <button type="button" class="secondary" data-scope-cancel disabled>${escapeHtml(Q.discard)}</button></div>
+          <p class="reason" data-scope-reason>${unavailable ? '' : escapeHtml(Q.needChoice)}</p></div>
+      </section>
+      <p class="action-message" data-scope-message role="status" aria-live="polite"></p>
     </form>
   </section>`;
+}
+
+function fillCopy(template: string, values: Record<string, string | number>): string {
+  let out = template;
+  for (const [key, value] of Object.entries(values)) out = out.replaceAll(`{${key}}`, String(value));
+  return out;
 }
 
 export function renderSourceDispositionsControlUi(
