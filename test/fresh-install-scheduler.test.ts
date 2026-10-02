@@ -100,7 +100,9 @@ describe('fresh install worker scheduler', () => {
       }
       expect(error).toBeInstanceOf(OperationError);
       const message = (error as OperationError).message;
-      expect(message).toContain('(status inactive)');
+      // Which check sees the exit first depends on timing: the settle read
+      // ("worker status is inactive") or the qualification read ("(status inactive)").
+      expect(message).toMatch(/status is inactive|\(status inactive\)/);
       expect(message).toContain("worker's last log line");
       expect(message).toContain('must contain at least one source');
       expect((error as OperationError).suggestion).toContain(paths.errorLogPath);
