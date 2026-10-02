@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.0-rc.1 - unreleased
+
+First release candidate of Olympus 1.0, the ChatGPT plugin release (see the
+release plan, docs/V0_4_RELEASE.md). The 0.4 beta line ended at beta.11.
+
+- **One-line Mac installer.** `curl -fsSL https://olympusplugin.ai/install.sh | sh`
+  installs Olympus for the current macOS user (Apple silicon, macOS 13 or
+  later; no administrator password), verifies Bun and the Olympus release
+  against pinned SHA-256 digests before using them, starts the engine as a
+  LaunchAgent and waits for proof it is healthy, and adds the `olympus`
+  command. Re-running repairs; a new release upgrades and puts the previous
+  version back if it does not start. `curl -fsSL https://olympusplugin.ai/uninstall.sh | sh`
+  removes it and keeps your data.
+
 ## 0.4.0-beta.11 - 2026-10-01
 
 Re-reading PDFs now works while another file source is still waiting for
