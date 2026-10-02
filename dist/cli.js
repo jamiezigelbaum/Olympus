@@ -105635,10 +105635,10 @@ function chatgptPrivacyProgram(kit) {
     });
   }
   function identity(rule) {
+    const matched = rule.kind === "sender" ? typeof rule.value === "string" ? rule.value.trim().toLowerCase() : "" : typeof rule.key === "string" ? rule.key.trim() : "";
     return rule.kind + `
 ` + rule.source_id + `
-` + (typeof rule.key === "string" ? rule.key : "") + `
-` + (typeof rule.value === "string" ? rule.value : "");
+` + matched;
   }
   function kept() {
     return s.rules.filter((rule) => !rule.removed);
