@@ -106888,10 +106888,11 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     const scrubbed = scrubCard(definition, card);
     const connecting = connectingFor(definition, card, now);
     const vocabularyStatus = dashboardStatus({ source: scrubbed, ...degraded ? { degradedCredentials: degraded } : {} });
-    const measured = connecting || vocabularyStatus === "Off" ? undefined : measuredSourceProgress(card, scrubbed, embedding, vocabularyStatus, now);
+    const credentials = credentialProblem(scrubbed, degraded);
+    const measured = connecting || vocabularyStatus === "Off" || refusedFirstConnect(scrubbed) ? undefined : measuredSourceProgress(card, scrubbed, embedding, vocabularyStatus, credentials, now);
     const progress2 = measured?.progress;
-    let status = connecting ? "Needs you" : honestStatus(vocabularyStatus, progress2);
-    if (!connecting && (status === "Needs you" || status === "Failing") && progress2 && progress2.stage !== "done" && !progress2.stalled && attentionItem(definition, scrubbed, degraded, undefined, progress2).fix?.tool === DASHBOARD_TOOL_NAME) {
+    let status = connecting || credentials ? "Needs you" : honestStatus(vocabularyStatus, progress2);
+    if (!connecting && !credentials && (status === "Needs you" || status === "Failing") && progress2 && progress2.stage !== "done" && !progress2.stalled && attentionItem(definition, scrubbed, degraded, undefined, progress2).fix?.tool === DASHBOARD_TOOL_NAME) {
       status = "Working";
     }
     return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress: progress2, counts: measured?.counts };
@@ -106976,8 +106977,8 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   const inFlight = progress && progress.stage !== "done" && status !== "Needs you" && status !== "Failing";
   const detail = connecting ? CONNECTING_DETAIL : inFlight ? STAGE_DETAIL[progress.stage] : dashboardSubLine(card, degraded ? { degradedCredentials: degraded } : undefined);
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
-  const reconnect = progress?.stalledReason === "waiting_for_credentials" ? reconnectFix(definition) : undefined;
-  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect;
+  const reconnect = credentialProblem(card, degraded) || progress?.stalledReason === "waiting_for_credentials" ? reconnectFix(definition) : undefined;
+  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : reconnect ?? (scopePending(card) ? scopeFix(definition, card) : undefined);
   const menu = [];
   if (status !== "Off" && card.scope_selection && !scopePending(card)) {
     const fix = scopeFix(definition, card);
@@ -107011,7 +107012,7 @@ function attentionItem(definition, card, degraded, connecting, progress) {
   }
   const reason = dashboardAttentionLine(card, degraded ? { degradedCredentials: degraded } : undefined);
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
-  const reauth = card.connection.state === "reauth_required" || progress?.stalledReason === "waiting_for_credentials" || card.connection.state !== "connected" && card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card);
+  const reauth = credentialProblem(card, degraded) || progress?.stalledReason === "waiting_for_credentials";
   const reconnect = reauth ? reconnectFix(definition) : undefined;
   const fix = reconnect ?? (reauth ? checkAgainFix(onMacHelp("reconnect")) : undefined) ?? (scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
@@ -107028,6 +107029,27 @@ function connectingFor(definition, card, now) {
     fix: { label: DASHBOARD_CHATGPT_PICKER_COPY.connectReopen, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
   };
 }
+function credentialProblem(card, degraded) {
+  return card.connection.provider_refusal !== undefined || degradationMatches(card, degraded) || card.connection.state === "reauth_required" || card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card);
+}
+function refusedFirstConnect(card) {
+  return card.connection.provider_refusal !== undefined && (card.connection.state === "not_connected" || card.connection.state === "needs_setup") && card.coverage.indexed_items === 0;
+}
+function degradationMatches(card, degraded) {
+  if (!degraded || degraded.length === 0)
+    return false;
+  const candidates = new Set([
+    normalizeName3(card.label),
+    normalizeName3(card.provider),
+    normalizeName3(card.source_id),
+    normalizeName3(card.source_id.split(".")[0] ?? "")
+  ]);
+  candidates.delete("");
+  return degraded.some((entry) => candidates.has(normalizeName3(entry.display_name)));
+}
+function normalizeName3(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
 function reconnectFix(definition) {
   const source = oauthSource(definition);
   return source ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : undefined;
@@ -107041,9 +107063,9 @@ function honestStatus(status, progress) {
     return status;
   return "Working";
 }
-function measuredSourceProgress(card, scrubbed, embedding, status, now) {
+function measuredSourceProgress(card, scrubbed, embedding, status, credentials, now) {
   const unit = unitFor2(scrubbed);
-  const credentialsMissing = status === "Needs you" && (scrubbed.connection.state === "reauth_required" || scrubbed.coverage.indexed_items > 0 && !dashboardIsConnectedSource(scrubbed));
+  const credentialsMissing = status === "Needs you" && credentials;
   const found = count(scrubbed.coverage.indexed_items);
   if (scopePending(scrubbed)) {
     return {
@@ -107273,6 +107295,7 @@ function scrubCard(definition, card) {
   const connectionLabel = KNOWN_CONNECTION_LABELS.has(card.connection.label) || SYNCED_RELATIVE.test(card.connection.label) ? card.connection.label : "";
   const freshnessLabel2 = card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || card.freshness.label.startsWith("Answer lane:") ? card.freshness.label : "";
   const pending = card.connection.pending;
+  const refusal2 = card.connection.provider_refusal;
   return {
     corpus_id: definition.primary_corpus_id,
     source_id: definition.source_id,
@@ -107328,7 +107351,8 @@ function scrubCard(definition, card) {
       label: connectionLabel,
       action: { kind: "none" },
       handles: [],
-      ...pending && finite(pending.expires_in_minutes) ? { pending: { started_at: "", expires_at: "", expires_in_minutes: count(pending.expires_in_minutes) } } : {}
+      ...pending && finite(pending.expires_in_minutes) ? { pending: { started_at: "", expires_at: "", expires_in_minutes: count(pending.expires_in_minutes) } } : {},
+      ...refusal2 ? { provider_refusal: { code: KNOWN_REFUSAL_CODES.has(refusal2.code) ? refusal2.code : "", reason: "" } } : {}
     },
     ...card.progress && finite(card.progress.indexed_items_per_hour) ? {
       progress: {
@@ -107387,7 +107411,7 @@ function isoOrUndefined(value) {
 function isoOrNow(value, now) {
   return isoOrUndefined(value) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, FIXABLE_STALLS, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE, ON_MAC_HELP_URL = "https://olympusplugin.ai/help/on-your-mac/", PRIVATE_MODEL_INSTALLING;
+var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, FIXABLE_STALLS, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE, ON_MAC_HELP_URL = "https://olympusplugin.ai/help/on-your-mac/", PRIVATE_MODEL_INSTALLING;
 var init_dashboard_view_model = __esm(() => {
   init_phases();
   init_source_dashboard();
@@ -107430,6 +107454,7 @@ var init_dashboard_view_model = __esm(() => {
     "Preparing answer-ready text",
     "Waiting for the first sync"
   ]);
+  KNOWN_REFUSAL_CODES = new Set(["access_denied", "redirect_uri_mismatch", "invalid_redirect_uri", "redirect_uri_not_registered"]);
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
   STAGE_FOR_PHASE = {
     metadata_sync: "listing",
