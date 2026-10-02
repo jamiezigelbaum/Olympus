@@ -57,7 +57,7 @@
  * dropped with it.
  */
 import { randomBytes } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { lstatSync } from 'node:fs';
 import {
   PRIVATE_ANSWER_MAX_REQUEST_BYTES,
   isPanelOrigin,
@@ -308,7 +308,8 @@ export function isPrivateEligible(item: PrivateEvidenceItem): boolean {
   if (domain !== undefined && domain !== 'secure_local') return false;
   for (const key of ['trust_tier', 'trustTier', 'tier', 'content_tier', 'contentTier', 'metadata_tier', 'metadataTier']) {
     const tier = item[key];
-    if (typeof tier === 'string' && /secret/i.test(tier)) return false;
+    // Secret by name, or by trust tier: S5 is Secrets (sensitivity-map.ts USER_FACING_TIER_MAPPING).
+    if (typeof tier === 'string' && (/secret/i.test(tier) || tier.trim().toUpperCase() === 'S5')) return false;
   }
   return true;
 }
@@ -521,9 +522,10 @@ export class PrivateAnswerJobs {
     const path = job.opens?.get(token);
     if (!path || !this.options.openFile) return gone();
     if (!this.takeOpen(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: 5 };
+    // The final path as it is now: a regular file, never a symlink swapped in since the token was minted.
     let isFile = false;
     try {
-      isFile = statSync(path).isFile();
+      isFile = lstatSync(path).isFile();
     } catch {
       isFile = false;
     }

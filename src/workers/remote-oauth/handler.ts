@@ -9,7 +9,8 @@
  *   loopback address. Approval is accepted ONLY from a direct loopback visit:
  *   a request that came through the relay carries `x-olympus-relay` (the relay
  *   child sets it on everything it forwards and strips inbound copies) and is
- *   refused, and the Host must be a loopback name. Being at the Mac is the
+ *   refused, the Host must be a loopback name, the peer a loopback address,
+ *   and the approve POST the browser's own navigation. Being at the Mac is the
  *   proof of ownership, so approval is one click, with no pairing code. Codes
  *   and tokens name this install (`oly2c.<id>.…`, connect-relay/shared/tokens.ts)
  *   so the relay can route them. No registration endpoint is advertised: the
@@ -51,14 +52,15 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mintCredential } from '../../../connect-relay/shared/tokens.ts';
 import { sanitizeCallerDisplayName } from '../../core/operation-caller.ts';
-import { isRelayedRequest } from '../../core/remote-access.ts';
+import { carriesRelayMarker } from '../../core/remote-access.ts';
+import { isLoopbackAddress, requestPeerAddress } from '../../core/request-peer.ts';
 import type { RemoteConnectionStore } from '../../core/remote-connections.ts';
 import { normalizePairingCode } from '../../core/remote-oauth-store.ts';
 import { currentRemotePublicUrls, isConfiguredResource, type RemotePublicUrls, type RemotePublicUrlsSource } from '../../core/remote-public-url.ts';
 import { isClientIdMetadataUrl, pinnedClient } from './pinned-clients.ts';
 import { readBoundedRequestText } from '../remote-request-body.ts';
 import { renderConsentErrorPage, renderConsentPage, renderDemoSignInPage, renderLoopbackConsentPage } from './consent-page.ts';
-import { demoSignInLimiter, verifyDemoSignIn, type DemoConsentSettings } from './demo-consent.ts';
+import { demoGrantDisplayName, demoSignInLimiter, verifyDemoSignIn, type DemoConsentSettings } from './demo-consent.ts';
 import { isAcceptableRedirectUri, isLoopbackRedirectUri, redirectHost, redirectUriMatches } from './redirect-uris.ts';
 
 export const REMOTE_OAUTH_PATHS = {
@@ -101,8 +103,13 @@ const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
 export interface RemoteOAuthHandlerOptions {
   /** The configured public URLs (or a live source); undefined when OAuth is off. */
   publicUrls: RemotePublicUrlsSource;
-  /** Whether a request came through the relay (default: it carries `x-olympus-relay`). */
+  /**
+   * Whether a request may have come through the relay (default: it carries
+   * `x-olympus-relay`, whatever its value, so a forged marker fails closed).
+   */
   isRelayed?: (request: Request) => boolean;
+  /** The request's network peer (default: what the server recorded, core/request-peer.ts). */
+  peerAddress?: (request: Request) => string | undefined;
   /** Active demo sign-in settings, asked per request; undefined on every real install. */
   demoConsent?: () => DemoConsentSettings | undefined;
   /** The connection store; OAuth may create the database (registration precedes pairing). */
@@ -196,7 +203,8 @@ export function authorizationServerMetadata(urls: RemotePublicUrls): Record<stri
 
 export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (request: Request) => Promise<Response> {
   const now = options.now ?? Date.now;
-  const isRelayed = options.isRelayed ?? isRelayedRequest;
+  const isRelayed = options.isRelayed ?? carriesRelayMarker;
+  const peerAddress = options.peerAddress ?? requestPeerAddress;
   const demoAttempts = demoSignInLimiter(now);
   /** Demo sign-in is active only in relay mode, and only where the settings resolve. */
   const demoSettings = (u: RemotePublicUrls): DemoConsentSettings | undefined =>
@@ -242,9 +250,13 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
 
   /**
    * Relay mode accepts approval only from a direct visit on this Mac: not
-   * through the relay, and with a loopback Host.
+   * through the relay, with a loopback Host, from a loopback peer (review
+   * 2026-10-02: the Host alone let a LAN caller approve when the worker was
+   * bound to a non-loopback address). A process on this Mac still can; see
+   * docs/design/chatgpt-plugin.md, "Open decision: an owner-held approval".
    */
-  const directLoopback = (request: Request): boolean => !isRelayed(request) && loopbackHost(request);
+  const directLoopback = (request: Request): boolean =>
+    !isRelayed(request) && loopbackHost(request) && isLoopbackAddress(peerAddress(request));
   const notOnThisMac = (): Response =>
     errorPage(403, 'Approve on the Mac where Olympus runs: open the link from ChatGPT on that Mac.');
 
@@ -321,7 +333,8 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     const code = u.installId ? mintCredential('code', u.installId) : randomBytes(32).toString('base64url');
     codes.set(sha256(code), {
       clientId: entry.client.clientId,
-      displayName: entry.client.clientName,
+      // A demo grant is named as one, which gives it the read-only surface (demo-consent.ts isDemoGrant).
+      displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
       redirectUri: entry.redirectUri,
       codeChallenge: entry.codeChallenge,
       resource: entry.resource,
@@ -355,7 +368,10 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     }
     if (action !== 'approve') return errorPage(400, 'The sign-in form was malformed.');
     if (!demoAttempts.take()) return demoPage(requestId, entry, 'Too many sign-in attempts. Wait a few minutes, then try again.');
-    if (!await verifyDemoSignIn(settings, form.get('username') ?? '', form.get('password') ?? '')) {
+    if (await verifyDemoSignIn(settings, form.get('username') ?? '', form.get('password') ?? '')) {
+      // Only wrong sign-ins spend the shared budget.
+      demoAttempts.refund();
+    } else {
       entry.attempts += 1;
       if (entry.attempts >= CONSENT_MAX_ATTEMPTS) {
         pending.delete(requestId);
@@ -381,6 +397,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
         verifiedHost: entry.client.verifiedHost,
         redirectHost: redirectHost(entry.redirectUri),
         redirectOrigin: new URL(entry.redirectUri).origin,
+        loopbackRedirect: isLoopbackRedirectUri(entry.redirectUri),
       })
       : renderConsentPage({
       requestId,
@@ -400,7 +417,11 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
 
   const authorizePost = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
     if (u.installId && !directLoopback(request)) return notOnThisMac();
-    if (!sameOriginFormPost(request)) return errorPage(403, 'This approval did not come from the Olympus page.');
+    // Relay mode approves with one click, so the click must be a browser's own
+    // navigation from the page (Sec-Fetch-*); a tunnel's page also needs a pairing code.
+    if (!(u.installId ? browserNavigationPost(request) : sameOriginFormPost(request))) {
+      return errorPage(403, 'This approval did not come from the Olympus page.');
+    }
     const form = await readForm(request);
     if (!form) return errorPage(400, 'The approval form was malformed.');
     const requestId = form.get('request_id') ?? '';
@@ -673,6 +694,16 @@ function hostAllowed(request: Request, urls: RemotePublicUrls): boolean {
     return false;
   }
   return LOOPBACK_HOSTNAMES.has(hostname);
+}
+
+/**
+ * Relay mode's one-click approval: the browser's own top-level form
+ * submission from the page (Sec-Fetch-Site same-origin, Sec-Fetch-Mode
+ * navigate). Browsers set these and pages cannot; a local script can, which
+ * is the residual risk docs/design/chatgpt-plugin.md records.
+ */
+function browserNavigationPost(request: Request): boolean {
+  return request.headers.get('sec-fetch-site') === 'same-origin' && request.headers.get('sec-fetch-mode') === 'navigate';
 }
 
 /** The approval POST must come from the approval page itself. */

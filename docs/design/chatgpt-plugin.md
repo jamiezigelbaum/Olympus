@@ -92,8 +92,22 @@ ChatGPT ──HTTPS──> mcp.olympusplugin.ai (Caddy: TLS, Let's Encrypt HTTP-
   Olympus" fallback if nothing answers. The engine accepts authorize/consent
   only from DIRECT loopback requests: the relay client marks every relayed
   request with a per-boot secret header and strips any incoming copy, and the
-  engine refuses consent for marked requests. Possession of the Mac plus a
-  click is the proof of ownership: no pairing code, no account. The engine
+  engine refuses consent for marked requests, whatever the marker's value. A
+  direct request must also come from a loopback peer address (not only a
+  loopback Host), and the approve POST must be the browser's own navigation
+  from the page (`Sec-Fetch-Site: same-origin`, `Sec-Fetch-Mode: navigate`).
+  Possession of the Mac plus a click is the proof of ownership: no pairing
+  code, no account. See "Open decision: an owner-held approval" below.
+- **The ChatGPT surface is chosen by a verified marker and a pinned grant.**
+  The relay child writes its per-boot secret 0600 to the remote-access
+  directory (`connect-relay/relay-secret`, removed when it stops); the worker
+  compares the marker to it in constant time. The ChatGPT surface (setup
+  tools, the private answer panel) and `/private/<job>` are served only when
+  the marker carries that secret AND the request's credential is an OAuth
+  grant to a pinned ChatGPT client. A bearer connection or a tunnel-token
+  holder that adds the header gets the remote operation surface. A demo
+  sign-in grant (named "ChatGPT (demo sign-in)") gets only the read-only
+  tools. The engine
   redirects to ChatGPT's `redirect_uri` with `code=oly2c.<installId>.<…>` and
   `iss=https://mcp.olympusplugin.ai`.
 - **Clients are pinned.** Only ChatGPT's published client metadata URL(s) (and
@@ -223,6 +237,15 @@ contract (`src/workers/chatgpt/dashboard-contract.ts`).
   configured on the Mac only; `olympus_model_set` switches between models
   already set up there and never takes a key. Models are status only in the
   panel.
+- **Privacy is the owner's** (review P-1, 2026-10-02): `olympus_privacy_set`
+  is hidden from the model (`openai/visibility: private`, `ui.visibility:
+  ["app"]`, widget-accessible) and marked destructive. The engine also
+  refuses any save that removes a saved rule or changes the owner's
+  description unless it carries the confirmation `olympus_privacy_get` hands
+  the widget in `_meta` (30 minutes, single use; `_meta` never reaches the
+  model). Adding rules needs no confirmation. The model reads the settings
+  with `olympus_privacy_get` and sends the owner to the panel's Set up
+  privacy to change them.
 - **Folders and mail** (`olympus_scope_list`, `olympus_scope_set`): the Mac
   picker's data and compare-and-swap through the worker's own routes. Names,
   keys and cursors travel only in those results' `_meta` (owner decision:
@@ -670,6 +693,44 @@ the release plan: [Olympus 1.0 (ChatGPT)](../V0_4_RELEASE.md#olympus-10-chatgpt)
 5. Ask questions in ChatGPT.
 
 ## Security posture and residual risk
+
+### Open decision: an owner-held approval (for Jamie)
+
+Relay-mode approval today proves "a browser on this Mac clicked Connect":
+the request must come from a loopback peer with a loopback Host, carry no
+relay marker, and be a same-origin navigation POST with the page's CSRF
+token and cookie. That stops a page on the web, the LAN, and naive scripts.
+It does not stop a process on this Mac that can reach `127.0.0.1:<port>`:
+it can fetch the page, read the CSRF token and cookie, and POST with forged
+`Sec-Fetch-*` headers. That includes a process running as a different macOS
+user, which can reach loopback but cannot read the owner's files.
+
+Proposed owner-held factor: the engine shows a native macOS dialog, "Allow
+ChatGPT to connect to Olympus?", on the owner's console session when an
+approval is posted, and issues the code only on Allow. A process without the
+owner's session cannot click it. Cost: one more click for the owner, and a
+dialog path to build for the standalone engine and the Gateway. Not built;
+no new confirmation step was added on 2026-10-02.
+
+### Accepted and proposed residual risks (2026-10-02)
+
+- **`/go` hand-off can link the wrong account.** A one-time connect link
+  (`/go/oly2g.…`) is a bearer capability for 10 minutes: whoever opens it
+  first signs in with their own Google or Dropbox account, and the engine
+  stores that account's grant. If the link leaks (shared screen, chat log),
+  an attacker can link their own account so the owner's Olympus indexes the
+  attacker's data, which could carry injected text. Proposed: before the
+  first sync, show the linked account's address in the panel and on the Mac
+  dashboard and ask the owner to confirm it. Not built.
+- **Consent phishing with an attacker-made authorize URL (accepted).** An
+  attacker can start a connect flow in their own ChatGPT account and send
+  the owner the authorize link it produced. If the owner opens it on their
+  Mac and clicks Connect, the code returns to ChatGPT's registered redirect,
+  where the attacker's ChatGPT session holds the PKCE verifier, so the
+  attacker's ChatGPT gets a grant to the owner's Olympus. The consent page
+  says to connect only if the owner just chose to connect Olympus in ChatGPT
+  themselves, signed in to their own account, and the connection appears in
+  the owner's list with revoke. Accepted as residual risk for 1.0.
 
 - A compromised relay can read traffic in transit and replay bearer tokens it
   sees, but cannot mint tokens, approve new clients (consent is loopback-only),

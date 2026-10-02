@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RELAY_HEADER as CLIENT_RELAY_HEADER } from '../connect-relay/client/forward.ts';
@@ -8,13 +8,17 @@ import { configFromPluginConfig } from '../src/core/config.ts';
 import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
 import {
   DEFAULT_RELAY_HOST,
+  carriesRelayMarker,
+  clearRelaySecret,
+  createRelayedRequestCheck,
   createRemotePublicUrlSource,
   emptyRemoteAccessStatus,
-  isRelayedRequest,
+  RELAY_SECRET_FILE,
   RELAYED_REQUEST_HEADER,
   relayProcessRunning,
   remoteAccessDir,
   resolveRemoteAccessMode,
+  writeRelaySecret,
   writeRemoteAccessStatus,
   type RemoteAccessStatusFile,
 } from '../src/core/remote-access.ts';
@@ -160,12 +164,39 @@ describe('public base URL propagation to the worker', () => {
 });
 
 describe('relayed requests', () => {
-  test('a request carrying the relay marker, whatever its value, counts as relayed', () => {
-    const request = (headers: Record<string, string>) => new Request('http://127.0.0.1:8010/connect/authorize', { headers });
-    expect(isRelayedRequest(request({}))).toBe(false);
-    expect(isRelayedRequest(request({ 'x-olympus-relay': 'anything' }))).toBe(true);
-    expect(isRelayedRequest(request({ 'X-Olympus-Relay': '' }))).toBe(true);
+  const request = (headers: Record<string, string>) => new Request('http://127.0.0.1:8010/connect/authorize', { headers });
+
+  test('any relay marker, whatever its value, refuses what only a direct visit may do', () => {
+    expect(carriesRelayMarker(request({}))).toBe(false);
+    expect(carriesRelayMarker(request({ 'x-olympus-relay': 'anything' }))).toBe(true);
+    expect(carriesRelayMarker(request({ 'X-Olympus-Relay': '' }))).toBe(true);
     expect(RELAYED_REQUEST_HEADER).toBe(CLIENT_RELAY_HEADER);
+  });
+
+  test('a request counts as relayed only when its marker is the relay child\'s per-boot secret', () => {
+    const { dir } = home();
+    const relayed = createRelayedRequestCheck({ dir: () => dir });
+    const secret = 'a'.repeat(43);
+    // No secret file: nothing is relayed, whatever the marker says.
+    expect(relayed(request({ 'x-olympus-relay': secret }))).toBe(false);
+    writeRelaySecret(dir, secret);
+    expect((statSync(join(dir, RELAY_SECRET_FILE)).mode & 0o777).toString(8)).toBe('600');
+    expect(relayed(request({ 'x-olympus-relay': secret }))).toBe(true);
+    // A local caller presenting the header (an olympus_conn_ bearer or a tunnel token holder) does not know it.
+    expect(relayed(request({ 'x-olympus-relay': 'b'.repeat(43) }))).toBe(false);
+    expect(relayed(request({ 'x-olympus-relay': 'anything' }))).toBe(false);
+    expect(relayed(request({}))).toBe(false);
+    // A restarted relay child's new secret takes effect at once; the old one stops working.
+    const next = 'c'.repeat(43);
+    writeRelaySecret(dir, next);
+    expect(relayed(request({ 'x-olympus-relay': next }))).toBe(true);
+    expect(relayed(request({ 'x-olympus-relay': secret }))).toBe(false);
+    // A stopping child removes only its own secret.
+    clearRelaySecret(dir, secret);
+    expect(relayed(request({ 'x-olympus-relay': next }))).toBe(true);
+    clearRelaySecret(dir, next);
+    expect(relayed(request({ 'x-olympus-relay': next }))).toBe(false);
+    expect(() => writeRelaySecret(dir, 'short')).toThrow();
   });
 });
 

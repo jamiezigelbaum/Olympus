@@ -84,6 +84,11 @@ export interface ChatGptSurfaceOptions {
    * Absent counts as yes; false hides source_answer and source_answer_result.
    */
   answerModelAvailable?: () => boolean;
+  /**
+   * Read-only tools only (a demo sign-in grant): every tool whose
+   * annotations are not read-only is neither listed nor callable.
+   */
+  readOnly?: boolean;
 }
 
 export interface PrivateMatchProbeResult {
@@ -254,11 +259,11 @@ export const CHATGPT_TOOLS: readonly ChatGptToolDefinition[] = [
   ...SETUP_TOOLS,
 ];
 
-export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSurfaceOptions, 'answerModelAvailable'> = {}): ChatGptToolDefinition[] {
+export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSurfaceOptions, 'answerModelAvailable' | 'readOnly'> = {}): ChatGptToolDefinition[] {
   const tools: ChatGptToolDefinition[] = [DASHBOARD_TOOL, SEARCH_TOOL, SOURCE_STATUS_TOOL];
   if (answerToolsListed(ctx, options)) tools.push(...ANSWER_TOOLS);
   tools.push(...SETUP_TOOLS);
-  return tools;
+  return options.readOnly ? tools.filter((tool) => tool.annotations.readOnlyHint) : tools;
 }
 
 /** source_answer works only with an answer model on the Mac and the operation exposed remotely. */
@@ -284,6 +289,9 @@ export async function callChatGptTool(
 ): Promise<ChatGptToolResult> {
   const later = detachedContext ?? (() => ctx);
   try {
+    if (options.readOnly && !CHATGPT_TOOLS.some((tool) => tool.name === name && tool.annotations.readOnlyHint)) {
+      throw new ChatGptSurfaceError('unknown_tool');
+    }
     switch (name) {
       case DASHBOARD_TOOL_NAME:
         return dashboardToolResult(await dashboardViewModel(options, signal));
@@ -338,7 +346,7 @@ export async function callChatGptTool(
           // Handed off: the private job is created only when the answered
           // result is built (source_answer_result), so its id is never valid
           // before ChatGPT can see it.
-          rememberPrivateMatch(jobId, pending);
+          rememberPrivateMatch(privateCaller(ctx), jobId, pending);
           return answerToolResult(raw);
         }
         const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
@@ -350,8 +358,9 @@ export async function callChatGptTool(
         if (!jobId) throw new ChatGptSurfaceError('invalid_params');
         const raw = await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId });
         const done = pendingJobId(raw) === undefined;
-        const pending = privateMatchForJob(jobId, done);
-        const privateMatch = done && pending ? beginPrivateAnswer(pending, options) : undefined;
+        // Only this connection's own handed-off question, and only once it is answered.
+        const pending = privateMatchForJob(privateCaller(ctx), jobId, done);
+        const privateMatch = done && isAnswered(raw) && pending ? beginPrivateAnswer(pending, options) : undefined;
         return answerToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       default:
@@ -472,7 +481,7 @@ const PROBE_HITS_PER_CORPUS = 10;
 const PROBE_QUERY_MAX_CHARS = 500;
 const PROBE_TIMEOUT_MS = 20_000;
 
-/** A handed-off answer's probe result, until its source_answer_result collects it. */
+/** A handed-off answer's probe result, until its source_answer_result collects it; keyed by caller and job id. */
 const privateMatchByJob = new Map<string, { match: PendingPrivateMatch | undefined; expiresAt: number }>();
 const PRIVATE_MATCH_TTL_MS = 30 * 60_000;
 const PRIVATE_MATCH_MAX_JOBS = 1_000;
@@ -482,7 +491,17 @@ function pendingJobId(raw: unknown): string | undefined {
   return record?.status === 'working' && typeof record.job_id === 'string' ? record.job_id : undefined;
 }
 
-function rememberPrivateMatch(jobId: string, match: PendingPrivateMatch | undefined): void {
+/** An answered source_answer outcome (not a pending handle, an error, or another shape). */
+function isAnswered(raw: unknown): boolean {
+  const record = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : undefined;
+  return typeof record?.answer === 'string';
+}
+
+function privateMatchKey(caller: string | undefined, jobId: string): string {
+  return `${caller ?? ''}\u0000${jobId}`;
+}
+
+function rememberPrivateMatch(caller: string | undefined, jobId: string, match: PendingPrivateMatch | undefined): void {
   const now = Date.now();
   for (const [id, entry] of privateMatchByJob) if (entry.expiresAt <= now) privateMatchByJob.delete(id);
   while (privateMatchByJob.size >= PRIVATE_MATCH_MAX_JOBS) {
@@ -490,12 +509,13 @@ function rememberPrivateMatch(jobId: string, match: PendingPrivateMatch | undefi
     if (oldest === undefined) break;
     privateMatchByJob.delete(oldest);
   }
-  privateMatchByJob.set(jobId, { match, expiresAt: now + PRIVATE_MATCH_TTL_MS });
+  privateMatchByJob.set(privateMatchKey(caller, jobId), { match, expiresAt: now + PRIVATE_MATCH_TTL_MS });
 }
 
-function privateMatchForJob(jobId: string, done: boolean): PendingPrivateMatch | undefined {
-  const entry = privateMatchByJob.get(jobId);
-  if (done) privateMatchByJob.delete(jobId);
+function privateMatchForJob(caller: string | undefined, jobId: string, done: boolean): PendingPrivateMatch | undefined {
+  const key = privateMatchKey(caller, jobId);
+  const entry = privateMatchByJob.get(key);
+  if (done) privateMatchByJob.delete(key);
   return entry !== undefined && entry.expiresAt > Date.now() ? entry.match : undefined;
 }
 

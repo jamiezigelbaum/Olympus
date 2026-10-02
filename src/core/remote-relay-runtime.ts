@@ -12,13 +12,17 @@
  *
  * Every forwarded request carries a secret minted at this boot in
  * `x-olympus-relay`; the worker refuses approval for any request that carries
- * the header (see workers/remote-oauth/handler.ts).
+ * the header (see workers/remote-oauth/handler.ts), and serves the ChatGPT
+ * surface and `/private` only when its value is this secret, which the child
+ * writes 0600 to the remote-access directory (`relay-secret`) for the worker
+ * to check, and removes when it stops.
  */
 import { randomBytes } from 'node:crypto';
 import { loadOrCreateIdentity } from '../../connect-relay/client/identity.ts';
 import { RelayClient, type RelayClientStatus } from '../../connect-relay/client/relay-client.ts';
 import { DEMO_AUTHORIZE_PATH, FORWARDED_PATHS } from '../../connect-relay/client/forward.ts';
 import {
+  clearRelaySecret,
   demoInstallMarked,
   emptyRemoteAccessStatus,
   loopbackWorkerOrigin,
@@ -26,6 +30,7 @@ import {
   readRemoteAccessStatus,
   remoteAccessDir,
   writeRemoteAccessStatus,
+  writeRelaySecret,
   type RemoteAccessStatusFile,
 } from './remote-access.ts';
 
@@ -89,14 +94,17 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
     write();
   };
 
+  // Minted per boot; written only to the worker's 0600 secret file, so only
+  // this process, the worker and the requests it forwards know it.
+  const relaySecret = randomBytes(32).toString('base64url');
+  writeRelaySecret(dir, relaySecret);
+
   const client = new RelayClient({
     relayHost,
     ...(options.relayUrl ? { relayUrl: options.relayUrl } : {}),
     identity,
     target,
-    // Minted per boot and never written down: only this process and the
-    // requests it forwards carry it.
-    relaySecret: randomBytes(32).toString('base64url'),
+    relaySecret,
     // A demo install also forwards reviewer sign-in; every other install never does.
     forwardedPaths: demoInstallMarked(dir) ? [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH] : FORWARDED_PATHS,
     onStatus,
@@ -130,6 +138,7 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
       stopped = true;
       clearInterval(reassert);
       await client.stop();
+      clearRelaySecret(dir, relaySecret);
       status.relay = { state: 'stopped', reason: null, retry_in_ms: null };
       write();
     },

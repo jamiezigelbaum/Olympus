@@ -450,6 +450,12 @@ export interface PrivacySettings {
   rules: PrivacyRuleView[];
   /** Items waiting for the privacy check (held Private, keyword-searchable, not embedded). */
   pendingCount: number;
+  /**
+   * olympus_privacy_get only: the panel's confirmation for a save that
+   * lowers protection (see PrivacySetInput). In `_meta`, so the model never
+   * sees it.
+   */
+  confirmation?: string;
 }
 
 /** A privacy tool's `structuredContent`: the description and counts, never a rule. */
@@ -467,10 +473,17 @@ export interface PrivacySummary {
  * every rule it shows). Validated and size-capped (description 2000
  * characters, 100 rules, display 200); `invalid_params` otherwise. Saving
  * applies the rules to classification at the next sync.
+ *
+ * Owner-only (review P-1, 2026-10-02): the tool is hidden from the model, and
+ * a save that removes a saved rule or changes the description is refused
+ * (`privacy_owner_only`) unless it carries `confirmation` from a recent
+ * olympus_privacy_get (30 minutes, spent by the save). Adding rules needs
+ * no confirmation.
  */
 export interface PrivacySetInput {
   description?: string;
   rules?: PrivacyRuleView[];
+  confirmation?: string;
 }
 
 /* ------------------------------------------------------------------ */

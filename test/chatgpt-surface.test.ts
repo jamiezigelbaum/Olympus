@@ -559,6 +559,7 @@ let dashboardMode: 'ok' | 'throw';
 let privateContextUsed: boolean;
 let privateProbe: boolean;
 let servesChatGpt: boolean;
+let readOnlySurface: boolean;
 let answerRequests: Array<Record<string, unknown>>;
 
 beforeEach(() => {
@@ -569,6 +570,7 @@ beforeEach(() => {
   privateContextUsed = false;
   privateProbe = true;
   servesChatGpt = true;
+  readOnlySurface = false;
   answerRequests = [];
   const worker = createEmailSourceWorker({
     sourceAnswer: {
@@ -592,6 +594,7 @@ beforeEach(() => {
     }),
     chatgpt: {
       servesRequest: () => servesChatGpt,
+      readOnlyFor: () => readOnlySurface,
       async privateMatchProbe() { return privateProbe; },
       async dashboardView() {
         if (dashboardMode === 'throw') throw new Error(S('DASHBOARD_ERROR'));
@@ -653,7 +656,8 @@ describe('ChatGPT MCP surface over the remote handler', () => {
           expect(tool.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
         } else {
           expect(tool.annotations?.readOnlyHint).toBe(false);
-          expect(tool.annotations?.destructiveHint).toBe(tool.name === 'olympus_disconnect_source');
+          // Disconnecting, and a privacy save (which can remove protection), are destructive.
+          expect(tool.annotations?.destructiveHint).toBe(tool.name === 'olympus_disconnect_source' || tool.name === 'olympus_privacy_set');
         }
       }
       const dashboard = tools.find((tool) => tool.name === DASHBOARD_TOOL_NAME)!;
@@ -823,6 +827,31 @@ describe('ChatGPT MCP surface over the remote handler', () => {
       const result = await client.callTool({ name: 'source_answer', arguments: { question: 'budget?' } });
       // The fixture's Gmail item is tiered Private, so it still triggers the sentence.
       expect((result.structuredContent as { notes?: string[] }).notes).toEqual(['Some matching items are private and stay on your Mac.']);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('a read-only grant (demo sign-in) lists and runs only the read-only tools', async () => {
+    readOnlySurface = true;
+    const client = await connectClient();
+    try {
+      const { tools } = await client.listTools();
+      expect(tools.map((tool) => tool.name)).toEqual([
+        DASHBOARD_TOOL_NAME,
+        'olympus_search',
+        'source_index_status',
+        'source_answer',
+        'source_answer_result',
+        'olympus_scope_list',
+        'olympus_privacy_get',
+      ]);
+      for (const name of ['olympus_connect_source', 'olympus_scope_set', 'olympus_disconnect_source', 'olympus_model_set', 'olympus_privacy_set']) {
+        const result = await client.callTool({ name, arguments: {} });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toEqual({ error: 'unknown_tool' });
+      }
+      expect((await client.callTool({ name: DASHBOARD_TOOL_NAME, arguments: {} })).isError).toBeFalsy();
     } finally {
       await client.close();
     }

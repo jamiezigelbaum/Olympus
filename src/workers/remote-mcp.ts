@@ -64,8 +64,21 @@ export interface RemoteMcpHandlerOptions {
    * Served only to requests `servesRequest` accepts; every other caller keeps
    * the remote operation surface unchanged.
    */
-  chatgpt?: ChatGptSurfaceOptions & { servesRequest: (request: Request) => boolean };
+  /**
+   * Whether a request came through this Mac's relay child (default: its
+   * marker carries the child's per-boot secret, core/remote-access.ts).
+   */
+  isRelayed?: (request: Request) => boolean;
+  chatgpt?: ChatGptSurfaceOptions & {
+    /** Whether this request, from this connection, gets the ChatGPT surface. */
+    servesRequest: (request: Request, connection: RemoteMcpConnection) => boolean;
+    /** Whether this connection gets only the surface's read-only tools (a demo grant). */
+    readOnlyFor?: (connection: RemoteMcpConnection) => boolean;
+  };
 }
+
+/** The verified connection behind a remote request; `clientId` for OAuth grants. */
+export type RemoteMcpConnection = Pick<RemoteConnectionRecord, 'id' | 'displayName'> & { clientId?: string | null };
 
 export function isRemoteMcpRequest(request: Request): boolean {
   const { pathname } = new URL(request.url);
@@ -84,17 +97,18 @@ export function withRemoteMcpRoute(
 }
 
 export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (request: Request) => Promise<Response> {
+  const isRelayed = options.isRelayed ?? isRelayedRequest;
   return async (request: Request): Promise<Response> => {
     const verification = authenticateRemoteRequest(request, options);
     if (!verification.ok) return verification.response;
     const response = await serveAuthenticated(request, verification);
     // Only the relay reads the mark; a direct caller never sees it.
-    return isRelayedRequest(request) ? markAuthenticated(response) : response;
+    return isRelayed(request) ? markAuthenticated(response) : response;
   };
 
   async function serveAuthenticated(
     request: Request,
-    verification: { connection: Pick<RemoteConnectionRecord, 'id' | 'displayName'> },
+    verification: { connection: RemoteMcpConnection },
   ): Promise<Response> {
     if (request.method !== 'POST') {
       // Stateless server: no standalone SSE stream (GET) and no session to end
@@ -116,8 +130,11 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     }
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
-    const server = options.chatgpt?.servesRequest(request)
-      ? createChatGptMcpServer(() => ctx, options.chatgpt, () => options.makeOperationContext(caller, new AbortController().signal))
+    const chatgpt = options.chatgpt?.servesRequest(request, verification.connection)
+      ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true }
+      : undefined;
+    const server = chatgpt
+      ? createChatGptMcpServer(() => ctx, chatgpt, () => options.makeOperationContext(caller, new AbortController().signal))
       : createOlympusMcpServer('remote', () => ctx);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
@@ -160,7 +177,7 @@ function markAuthenticated(response: Response): Response {
 export function authenticateRemoteRequest(
   request: Request,
   options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls'>,
-): { ok: true; connection: Pick<RemoteConnectionRecord, 'id' | 'displayName'> } | { ok: false; response: Response } {
+): { ok: true; connection: RemoteMcpConnection } | { ok: false; response: Response } {
   const urls = currentRemotePublicUrls(options.publicUrls);
   const refuse = (error?: 'invalid_token') => ({ ok: false as const, response: unauthorized(error, urls) });
   const token = bearerToken(request.headers.get('Authorization'));

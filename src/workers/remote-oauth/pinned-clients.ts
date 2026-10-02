@@ -34,6 +34,15 @@ export function isClientIdMetadataUrl(clientId: string): boolean {
   return clientId.startsWith('https://');
 }
 
+/**
+ * Whether a connection is an OAuth grant to a pinned ChatGPT client: only
+ * those get the ChatGPT surface (setup tools, private answers). A bearer
+ * connection or a self-registered client keeps the operation surface.
+ */
+export function isChatGptGrant(connection: { clientId?: string | null }): boolean {
+  return typeof connection.clientId === 'string' && pinnedClient(connection.clientId) !== undefined;
+}
+
 export function pinnedClient(clientId: string): PinnedClient | undefined {
   // Plugins installed in the ChatGPT desktop app sign in as its Codex native
   // client, whose published document registers loopback callbacks (any port,

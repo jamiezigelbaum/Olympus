@@ -4189,7 +4189,10 @@ export async function main(): Promise<void> {
   } = await import('../remote-mcp.ts');
   const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
   const { resolveRemotePublicUrls } = await import('../../core/remote-public-url.ts');
-  const { createRemotePublicUrlSource, isRelayedRequest } = await import('../../core/remote-access.ts');
+  const { carriesRelayMarker, createRemotePublicUrlSource, isRelayedRequest } = await import('../../core/remote-access.ts');
+  const { withRequestPeer } = await import('../../core/request-peer.ts');
+  const { isChatGptGrant } = await import('../remote-oauth/pinned-clients.ts');
+  const { isDemoGrant } = await import('../remote-oauth/demo-consent.ts');
   const { createRemoteOAuthHandler, withRemoteOAuthRoutes } = await import('../remote-oauth/handler.ts');
   const { resolveDemoConsent } = await import('../remote-oauth/demo-consent.ts');
   // OAuth for hosted agents is on only with a public base URL: a manual
@@ -4213,9 +4216,10 @@ export async function main(): Promise<void> {
   // The panel's remote-access line: the address this worker serves right now,
   // explained by the relay status `olympus connections status` prints.
   const { demoInstallMarked, readRemoteAccessStatus, remoteAccessDir, remoteAccessStatusView, resolveRemoteAccessUrls } = await import('../../core/remote-access.ts');
-  // Seam for the standalone engine (its host detection lands separately):
-  // which commands the owner is told to run.
-  const remoteAccessHostKind: 'openclaw' | 'standalone' = 'openclaw';
+  // Which commands the owner is told to run: the standalone engine's
+  // LaunchAgent sets OLYMPUS_ENGINE_HOST=1 (engine-service.ts); otherwise the
+  // OpenClaw Gateway runs this worker.
+  const remoteAccessHostKind: 'openclaw' | 'standalone' = process.env.OLYMPUS_ENGINE_HOST === '1' ? 'standalone' : 'openclaw';
   dashboardRemoteAccess = () => {
     let status: ReturnType<typeof remoteAccessStatusView> | undefined;
     try {
@@ -4235,9 +4239,17 @@ export async function main(): Promise<void> {
   // own config write.
   if (authToken) {
     dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      // Under OpenClaw the Gateway writes; the standalone engine's writer
-      // (its own config file and restart) is wired with its host detection.
-      setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
+      // Under OpenClaw the Gateway writes. The standalone engine has no
+      // config writer yet: it says how to change engine.json instead of
+      // calling a Gateway that is not there.
+      setEnabled: remoteAccessHostKind === 'standalone'
+        ? async (enabled: boolean) => ({
+            ok: false as const,
+            status: 501,
+            code: 'config_write_unsupported',
+            message: `Set "remote": {"enabled": ${enabled}} in ~/.olympus/engine.json, then run: olympus engine restart`,
+          })
+        : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
     });
   }
   // Slow source_answer calls from remote agents hand off to in-memory jobs
@@ -4263,7 +4275,7 @@ export async function main(): Promise<void> {
   const { PrivateAnswerJobs, createPrivateAnswerHandler, withPrivateAnswerRoute } = await import('../chatgpt/private-answer-jobs.ts');
   const { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } = await import('../chatgpt/private-answer-model.ts');
   const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
-  const { createDropboxOpenTargets } = await import('../dropbox-files/open-target.ts');
+  const { createDropboxOpenTargets, localDropboxRoots, localOpenArguments } = await import('../dropbox-files/open-target.ts');
   // Where each cited source opens, by the connector that holds it: the
   // provider's own resolver turns the item's locator into a web address and,
   // when the file is synced to this Mac, its local path (kept here; the
@@ -4299,11 +4311,18 @@ export async function main(): Promise<void> {
     // ready/failed, the sniffer stays off the shared model.
     activity: answerActivity,
     // The panel's "open on this Mac": macOS `open`, on a path this engine
-    // resolved for a cited source (never a path from the request).
+    // resolved for a cited source (never a path from the request), checked
+    // again now: no symlink, still inside a Dropbox folder, and only a
+    // document type opens; anything else is revealed in Finder.
     ...(process.platform === 'darwin'
       ? {
           openFile: (path: string) => new Promise<void>((resolve, reject) => {
-            execFile('/usr/bin/open', [path], { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+            const args = localOpenArguments(path, localDropboxRoots());
+            if (!args) {
+              reject(new Error('open refused'));
+              return;
+            }
+            execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
           }),
         }
       : {}),
@@ -4431,14 +4450,17 @@ export async function main(): Promise<void> {
     // `/go/<id>` sign-in links answer their stored redirect once
     // (workers/chatgpt/handoff.ts); `/private/<id>` is the private answer
     // panel's one-time sealed collection (workers/chatgpt/private-answer-jobs.ts).
-    fetch: withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
+    // Each request's peer address is recorded for the routes that check it
+    // (relay-mode OAuth approval: core/request-peer.ts).
+    fetch: withRequestPeer(withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
       jobs: privateAnswers,
       isRelayed: isRelayedRequest,
       extraOrigins: () => [DASHBOARD_UI_DOMAIN],
     }), withRemoteOAuthRoutes(
       createRemoteOAuthHandler({
         publicUrls: remotePublicUrls,
-        isRelayed: isRelayedRequest,
+        // Any marker, verified or not, refuses approval (fails closed).
+        isRelayed: carriesRelayMarker,
         // Demo installs only: inert without remote.demoConsent AND the demo marker.
         demoConsent: () => resolveDemoConsent(olympusConfig.remote, () => demoInstallMarked(remoteAccessDir(process.env))),
         connections: () => remoteConnections({ create: true })!,
@@ -4447,12 +4469,15 @@ export async function main(): Promise<void> {
         createRemoteMcpHandler({
           ...remoteAgentOptions,
           // Relayed requests get the ChatGPT surface (docs/design/chatgpt-plugin.md):
-          // the hosted relay is the ChatGPT path, and only the relay's local
-          // endpoint can present the per-install relay secret. Direct and
-          // bearer connections keep the remote operation surface. The
-          // dashboard tool reads the view `/dashboard.json` serves, in-process.
+          // the hosted relay is the ChatGPT path, and the relay marker must
+          // carry the relay child's per-boot secret (isRelayedRequest), from
+          // an OAuth grant to a pinned ChatGPT client. Direct, bearer and
+          // self-registered connections keep the remote operation surface; a
+          // demo sign-in grant gets the read-only tools. The dashboard tool
+          // reads the view `/dashboard.json` serves, in-process.
           chatgpt: {
-            servesRequest: isRelayedRequest,
+            servesRequest: (request: Request, connection: { clientId?: string | null }) => isRelayedRequest(request) && isChatGptGrant(connection),
+            readOnlyFor: isDemoGrant,
             privateAnswers,
             dashboardView: async (signal?: AbortSignal) => {
               const response = await worker.fetch(new Request(
@@ -4487,7 +4512,7 @@ export async function main(): Promise<void> {
         }),
         withWorkerBearerAuth(worker.fetch, { authToken }),
       )),
-    ))),
+    )))),
   });
   sourceScheduler?.start();
   await reconcileCaptures();

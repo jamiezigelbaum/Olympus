@@ -30,7 +30,8 @@ import {
   toBase64Url,
   type SealedPrivateAnswer,
 } from '../src/workers/chatgpt/private-answer-crypto.ts';
-import { PrivateAnswerJobs, createPrivateAnswerHandler } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { PrivateAnswerJobs, createPrivateAnswerHandler, isPrivateEligible } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
 import {
   copyPrivateMatch,
@@ -622,6 +623,120 @@ describe('sentinel: over the real MCP surface', () => {
     const sealed = JSON.parse(sealedText) as SealedPrivateAnswer;
     expect(toChatGpt).not.toContain(sealed.macPublicKey);
     expect(JSON.parse(await openPrivateAnswer(String(meta.jobId), panel.privateKey, sealed)).answer).toBe(SECRET_ANSWER);
+  });
+});
+
+describe('a handed-off answer starts its private panel job only for its own connection, once answered', () => {
+  let dir: string;
+  let store: RemoteConnectionStore;
+  let server: ReturnType<typeof Bun.serve>;
+  let base: string;
+  let jobs: PrivateAnswerJobs;
+  let release: () => void;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'olympus-private-handoff-'));
+    store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
+    jobs = makeJobs(readyModel());
+    let held = new Promise<void>((resolve) => { release = resolve; });
+    const worker = createEmailSourceWorker({
+      sourceAnswer: {
+        async answer() {
+          await held;
+          held = Promise.resolve();
+          return {
+            answer: 'The released evidence does not answer this.',
+            evidence: [],
+            audit: { searched_corpora: [], skipped_corpora: [], lane_audits: [], latency_ms: 1, raw_source_exposed: false },
+            policy: { raw_source_exposed: false, source_packets_exposed: false, internal_content_exposed: false, secure_local_content_exposed: false, castor_safe_bridge: true },
+          } as unknown as SourceIndexAnswerResult;
+        },
+      },
+    });
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 20, resultWaitMs: 0 } });
+    const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
+    const handler = createRemoteMcpHandler({
+      connections: () => store,
+      makeOperationContext: (caller, signal) => createInProcessOperationContext({
+        config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal, sourceAnswerJobs: registry,
+      }),
+      chatgpt: {
+        servesRequest: () => true,
+        privateAnswers: jobs,
+        async privateMatchProbe() { return { count: 2, evidence: EVIDENCE }; },
+        async dashboardView() { throw new Error('unused'); },
+      },
+    });
+    server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: handler });
+    base = `http://127.0.0.1:${server.port}`;
+  });
+
+  afterEach(() => {
+    release();
+    server.stop(true);
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function connect(name: string): Promise<Client> {
+    const { token } = store.create(name);
+    const client = new Client({ name: 'private-handoff-test', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    }) as unknown as Parameters<Client['connect']>[0]);
+    return client;
+  }
+
+  test('another connection, an error or a still-working result never takes the pending match', async () => {
+    const owner = await connect('ChatGPT');
+    const other = await connect('Other');
+    try {
+      const handed = await owner.callTool({ name: 'source_answer', arguments: { question: 'When does the lease end?' } }) as Record<string, unknown>;
+      const jobId = (handed.structuredContent as { job_id?: string }).job_id!;
+      expect((handed.structuredContent as { status?: string }).status).toBe('working');
+      expect(handed._meta).toBeUndefined();
+
+      // Another connection naming this job: an error, and no panel job for it.
+      const stolen = await other.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
+      expect(stolen.isError).toBe(true);
+      expect(stolen._meta).toBeUndefined();
+      // Still working for its owner: no panel job yet, and the match is kept.
+      const working = await owner.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
+      expect((working.structuredContent as { status?: string }).status).toBe('working');
+      expect(working._meta).toBeUndefined();
+
+      release();
+      await Bun.sleep(50);
+      const answered = await owner.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
+      expect((answered.structuredContent as { status?: string }).status).toBe('answered');
+      const meta = (answered._meta as Record<string, unknown>)[PRIVATE_ANSWER_META_KEY] as Record<string, unknown>;
+      expect(meta).toMatchObject({ v: 1, count: 2, state: 'ready' });
+      expect(String(meta.jobId)).toMatch(/^oly2p\./);
+      // Collected once: a second collection starts no second panel job.
+      const again = await owner.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
+      expect(again._meta).toBeUndefined();
+    } finally {
+      await owner.close();
+      await other.close();
+    }
+  });
+});
+
+describe('the Secret backstop on private evidence', () => {
+  test('a hit naming a Secret tier, by word or as S5, never feeds a private answer', () => {
+    expect(isPrivateEligible({ trust_domain: 'secure_local', trust_tier: 'S4' })).toBe(true);
+    expect(isPrivateEligible({ trust_domain: 'secure_local', trust_tier: 'S4+' })).toBe(true);
+    expect(isPrivateEligible({ trust_domain: 'secure_local' })).toBe(true);
+    for (const item of [
+      { trust_domain: 'secure_local', trust_tier: 'S5' },
+      { trustTier: 's5' },
+      { tier: 'S5' },
+      { content_tier: 'secrets' },
+      { metadataTier: 'Secret' },
+      { trust_domain: 'internal', trust_tier: 'S3' },
+    ]) {
+      expect(isPrivateEligible(item), JSON.stringify(item)).toBe(false);
+    }
   });
 });
 

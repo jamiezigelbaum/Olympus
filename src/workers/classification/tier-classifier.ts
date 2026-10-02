@@ -39,6 +39,7 @@ import {
   namesLookPossiblyPrivate,
 } from './engine.ts';
 import { ownerSenderRuleMatches } from '../../core/sender-rules.ts';
+import { pathPrefixMatches } from '../../core/location-rules.ts';
 
 export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // 2026-10-01.p2: vocabulary-only detector hits go to the privacy-safe model
@@ -912,7 +913,7 @@ export function ownerRuleMatches(
   if (!value) return false;
   switch (rule.match.kind) {
     case 'pathPrefix':
-      return (signals.path ?? '').trim().toLowerCase().startsWith(value);
+      return pathPrefixMatches(signals.path, value);
     case 'folderKey':
     case 'chat':
       return (signals.folderKeys ?? []).some((key) => key.trim().toLowerCase() === value);

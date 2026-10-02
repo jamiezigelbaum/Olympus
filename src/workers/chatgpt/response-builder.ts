@@ -722,7 +722,12 @@ export function modelRetryToolResult(result: ModelRetryResult): ChatGptToolResul
  * names, keys, senders) go only to `_meta`, like the picker; the model sees
  * the owner's description (owner-approved) and counts.
  */
-export function privacyToolResult(settings: PrivacySettings, status: PrivacySummary['status']): ChatGptToolResult {
+export function privacyToolResult(
+  settings: PrivacySettings,
+  status: PrivacySummary['status'],
+  /** olympus_privacy_get's panel confirmation (dashboard-contract.ts PrivacySetInput); `_meta` only. */
+  confirmation?: string,
+): ChatGptToolResult {
   const copy = copyPrivacySettings(settings);
   const summary: PrivacySummary = {
     status: status === 'saved' ? 'saved' : 'current',
@@ -739,7 +744,7 @@ export function privacyToolResult(settings: PrivacySettings, status: PrivacySumm
   return {
     content: [{ type: 'text', text: parts.join(' ') }],
     structuredContent: summary as unknown as Record<string, unknown>,
-    _meta: { [PRIVACY_META_KEY]: copy },
+    _meta: { [PRIVACY_META_KEY]: confirmation ? { ...copy, confirmation } : copy },
   };
 }
 
@@ -895,6 +900,7 @@ type SurfaceOnlyErrorCode =
   | 'not_linked'
   | 'picker_unavailable'
   | 'confirm_whole_account'
+  | 'privacy_owner_only'
   | 'embedding_change_needs_approval'
   | 'model_not_configured'
   | 'sign_in_failed'
@@ -932,6 +938,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   disconnect_incomplete: 'Olympus couldn\'t finish disconnecting this source. Try again.',
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',
   confirm_whole_account: 'Choosing the whole account needs the owner\'s confirmation in the Olympus panel.',
+  privacy_owner_only: 'Only the owner can remove a privacy rule or change what they said is private, in the Olympus panel.',
   embedding_change_needs_approval: 'Changing the search model re-indexes every source and needs the owner\'s approval on the Mac.',
   model_not_configured: 'That model is not set up on the Mac. Set it up in Olympus on the Mac first.',
   unknown_tool: 'Olympus does not have that tool.',

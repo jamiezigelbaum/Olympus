@@ -20,7 +20,9 @@
  *   whose saved choices are kept when the picker saves.
  */
 import { parseMailScopeDraft } from '../../core/mail-source-scope.ts';
-import { parsePrivacyProfileInput } from '../classification/privacy-profile.ts';
+// A distinct local name keeps the bundler from renumbering other `node:crypto` bindings in dist/.
+import { randomBytes as setupRandomBytes } from 'node:crypto';
+import { parsePrivacyProfileInput, privacyRuleId } from '../classification/privacy-profile.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import type {
   OlympusFolderScopeBrowseResult,
@@ -191,6 +193,8 @@ export const SCOPE_LIST_TOOL: ToolDefinition = {
     properties: {
       source_id: { type: 'string', enum: [...SCOPE_SOURCE_IDS] },
       parent_key: { type: 'string', maxLength: 4096 },
+      /** Root-to-parent keys above parent_key, so a folder inside a Secrets location is never listed. */
+      ancestor_keys: { type: 'array', items: { type: 'string', maxLength: 4096 }, maxItems: 64 },
       cursor: { type: 'string', maxLength: 4096 },
       draft: MAIL_DRAFT_SCHEMA,
     },
@@ -292,8 +296,8 @@ export const PRIVACY_GET_TOOL: ToolDefinition = {
   description: [
     'Read what the user told Olympus is private for them: their own description, and how many folders, labels or',
     'senders they marked as always Private (the panel shows which). Use it during setup, or when the user asks',
-    'about their privacy settings. If nothing is set yet, ask the user in their own words what is private for them',
-    'and save it with olympus_privacy_set. Takes no arguments. Read-only.',
+    'about their privacy settings. Only the owner changes these settings, in the Olympus panel: if nothing is set yet,',
+    'suggest they open the Olympus panel and choose Set up privacy. Takes no arguments. Read-only.',
   ].join(' '),
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -309,18 +313,23 @@ export const PRIVACY_SET_TOOL: ToolDefinition = {
     '"What\'s private for you?" (for example health, money, family matters); Olympus\'s private classifier on the Mac',
     'reads it to keep matching items Private, so they never reach ChatGPT. `rules` is the full list of folders,',
     'labels and senders that are always Private; the Olympus panel builds it. Each field given replaces the saved one.',
+    'Only the Olympus panel calls this: removing a rule or changing the description needs the panel\'s confirmation.',
   ].join(' '),
   inputSchema: {
     type: 'object',
     properties: {
       description: { type: 'string', maxLength: 2000, description: 'The user\'s own words about what is private for them.' },
       rules: { type: 'array', items: PRIVACY_RULE_SCHEMA, maxItems: 100 },
+      confirmation: { type: 'string', maxLength: 128, description: 'The panel\'s confirmation from olympus_privacy_get.' },
     },
     additionalProperties: false,
   },
-  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  // Hidden from the model (review P-1, 2026-10-02): a privacy change is the
+  // owner's, made in the panel. The engine also refuses a change that lowers
+  // protection without the panel's confirmation (lowersPrivacy below).
+  annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   securitySchemes: OAUTH2_REQUIRED,
-  _meta: WIDGET_AND_MODEL,
+  _meta: WIDGET_ONLY,
 };
 
 export const SETUP_TOOLS: readonly ToolDefinition[] = [
@@ -387,16 +396,26 @@ export async function callSetupTool(
         if (!backend.retryModel(model)) throw new ChatGptSurfaceError('model_not_configured');
         return modelRetryToolResult({ status: 'retrying', model });
       }
-      case PRIVACY_GET_TOOL_NAME:
-        return privacyToolResult(visiblePrivacy(backend.privacySettings(), secretLocations(backend)), 'current');
+      case PRIVACY_GET_TOOL_NAME: {
+        const visible = visiblePrivacy(backend.privacySettings(), secretLocations(backend));
+        // The confirmation rides `_meta`, which reaches the widget only, never the model.
+        return privacyToolResult(visible, 'current', issuePrivacyConfirmation(backend));
+      }
       case PRIVACY_SET_TOOL_NAME: {
+        const { confirmation, ...fields } = args;
+        if (confirmation !== undefined && typeof confirmation !== 'string') throw new ChatGptSurfaceError('invalid_params');
         let update: ReturnType<typeof parsePrivacyProfileInput>;
         try {
-          update = parsePrivacyProfileInput(args);
+          update = parsePrivacyProfileInput(fields);
         } catch {
           throw new ChatGptSurfaceError('invalid_params');
         }
         const secrets = secretLocations(backend);
+        // Lowering protection is the owner's alone: only with the panel's confirmation.
+        const confirmed = confirmation !== undefined && privacyConfirmationValid(backend, confirmation);
+        if (!confirmed && lowersPrivacy(update, visiblePrivacy(backend.privacySettings(), secrets))) {
+          throw new ChatGptSurfaceError('privacy_owner_only');
+        }
         // Rules on Secrets locations are never shown, so a save keeps them as saved.
         const rules = update.rules
           ? [
@@ -408,6 +427,7 @@ export async function callSetupTool(
           ...(update.description !== undefined ? { description: update.description } : {}),
           ...(rules ? { rules: rules as PrivacyRuleView[] } : {}),
         });
+        if (confirmed) spendPrivacyConfirmation(backend, confirmation);
         return privacyToolResult(visiblePrivacy(saved, secrets), 'saved');
       }
       default:
@@ -416,6 +436,59 @@ export async function callSetupTool(
   } catch (error) {
     throw surfaceError(error);
   }
+}
+
+/**
+ * Whether a save would lower the owner's protection: it removes a saved rule
+ * or changes the owner's description (which the private classifier reads).
+ * Adding rules, or saving the description unchanged, never lowers it.
+ */
+function lowersPrivacy(update: ReturnType<typeof parsePrivacyProfileInput>, current: PrivacySettings): boolean {
+  if (update.description !== undefined && update.description !== current.description) return true;
+  if (!update.rules) return false;
+  const kept = new Set(update.rules.map((rule) => privacyRuleId(rule)));
+  return current.rules.some((rule) => !kept.has(privacyRuleId(rule)));
+}
+
+/**
+ * Panel confirmations for privacy changes that lower protection. One is
+ * issued with every olympus_privacy_get, in its result `_meta` (which reaches
+ * the widget only, never the model), lives PRIVACY_CONFIRMATION_TTL_MS and is
+ * spent by the save it confirms. Per backend, so each engine has its own.
+ */
+export const PRIVACY_CONFIRMATION_TTL_MS = 30 * 60_000;
+const PRIVACY_CONFIRMATIONS_MAX = 32;
+const privacyConfirmations = new WeakMap<ChatGptSetupBackend, Map<string, number>>();
+
+function confirmationsFor(backend: ChatGptSetupBackend): Map<string, number> {
+  let issued = privacyConfirmations.get(backend);
+  if (!issued) {
+    issued = new Map();
+    privacyConfirmations.set(backend, issued);
+  }
+  const now = Date.now();
+  for (const [token, expiresAt] of issued) if (expiresAt <= now) issued.delete(token);
+  return issued;
+}
+
+function issuePrivacyConfirmation(backend: ChatGptSetupBackend): string {
+  const issued = confirmationsFor(backend);
+  while (issued.size >= PRIVACY_CONFIRMATIONS_MAX) {
+    const oldest = issued.keys().next().value;
+    if (oldest === undefined) break;
+    issued.delete(oldest);
+  }
+  const token = `opc_${setupRandomBytes(24).toString('base64url')}`;
+  issued.set(token, Date.now() + PRIVACY_CONFIRMATION_TTL_MS);
+  return token;
+}
+
+function privacyConfirmationValid(backend: ChatGptSetupBackend, token: string): boolean {
+  return confirmationsFor(backend).has(token);
+}
+
+function spendPrivacyConfirmation(backend: ChatGptSetupBackend, token: string): void {
+  confirmationsFor(backend).delete(token);
 }
 
 /** The settings without any rule on a Secrets location (scope-privacy.ts): those never leave the Mac. */
@@ -437,10 +510,11 @@ async function scopeList(backend: ChatGptSetupBackend, args: Record<string, unkn
     return mailList(await backend.browseMail(draft), secrets);
   }
   const parentKey = optionalString(args.parent_key);
+  const ancestorKeys = optionalKeys(args.ancestor_keys);
   const after = args.cursor === undefined ? undefined : decodeSortedCursor(requiredString(args.cursor), parentKey);
-  // Never list inside a Secrets location, even by its key.
-  if (parentKey && isSecretFolder(secrets, parentKey)) throw new ChatGptSurfaceError('invalid_params');
-  return sortedFolderPage(await browseWholeLevel(backend, sourceId, parentKey), secrets, parentKey, after);
+  // Never list inside a Secrets location, even by its key or under one of its folders.
+  if (parentKey && isSecretFolder(secrets, parentKey, ancestorKeys)) throw new ChatGptSurfaceError('invalid_params');
+  return sortedFolderPage(await browseWholeLevel(backend, sourceId, parentKey), secrets, parentKey, after, ancestorKeys);
 }
 
 /** Folders per page of `olympus_scope_list`, after sorting. */
@@ -498,8 +572,9 @@ function sortedFolderPage(
   secrets: SecretLocations,
   parentKey: string | undefined,
   after: SortPosition | undefined,
+  ancestorKeys: readonly string[] = [],
 ): FolderScopeList {
-  const list = folderList(browse, secrets);
+  const list = folderList(browse, secrets, ancestorKeys);
   const sorted = [...list.nodes].sort(compareFolders);
   const rest = after ? sorted.filter((node) => compareFolders(node, after) > 0) : sorted;
   const page = rest.slice(0, SCOPE_LIST_PAGE_SIZE);
@@ -567,7 +642,7 @@ async function scopeSet(backend: ChatGptSetupBackend, args: Record<string, unkno
   }
 }
 
-function folderList(browse: OlympusFolderScopeBrowseResult, secrets: SecretLocations): FolderScopeList {
+function folderList(browse: OlympusFolderScopeBrowseResult, secrets: SecretLocations, ancestorKeys: readonly string[] = []): FolderScopeList {
   return {
     kind: 'folders',
     source_id: browse.source_id,
@@ -575,7 +650,7 @@ function folderList(browse: OlympusFolderScopeBrowseResult, secrets: SecretLocat
     scope_revision: browse.scope_revision,
     status: browse.status,
     nodes: browse.nodes
-      .filter((node) => !isSecretFolder(secrets, node.key, node.parent_key ? [node.parent_key] : []))
+      .filter((node) => !isSecretFolder(secrets, node.key, node.parent_key ? [...ancestorKeys, node.parent_key] : ancestorKeys))
       .map((node) => ({
         key: node.key,
         ...(node.parent_key ? { parent_key: node.parent_key } : {}),
@@ -671,6 +746,12 @@ function oneOf<const T extends readonly string[]>(value: unknown, allowed: T): T
 function requiredString(value: unknown): string {
   if (typeof value === 'string' && value.length > 0 && value.length <= 4096) return value;
   throw new ChatGptSurfaceError('invalid_params');
+}
+
+function optionalKeys(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 64) throw new ChatGptSurfaceError('invalid_params');
+  return value.map(requiredString);
 }
 
 function optionalString(value: unknown): string | undefined {
