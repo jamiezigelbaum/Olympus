@@ -230,7 +230,8 @@ describe('connection states', () => {
     const host = mount();
     host.push({ structuredContent: model({ connection: { state: 'installing', progress: { percent: 37.4, label: 'Getting search ready on your Mac' } } }) });
     const banner = host.win.document.querySelector('.banner')!;
-    expect(banner.textContent).toContain('Installing Olympus on your Mac…');
+    expect(banner.textContent).toContain('Olympus is setting up on your Mac…');
+    expect(banner.textContent).not.toContain('Installing');
     expect(banner.textContent).toContain('Getting search ready on your Mac · 37%');
     expect(banner.querySelectorAll('button').length).toBe(0);
     expect(banner.querySelector('[role=progressbar]')!.getAttribute('aria-valuenow')).toBe('37');
@@ -287,6 +288,8 @@ describe('connection states', () => {
     const host = mount();
     host.push({ isError: true, content: [{ type: 'text', text: 'Your Mac is offline' }] });
     expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
+    // The banner promises nothing the page does not do.
+    expect(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title).not.toMatch(/retry/i);
   });
 });
 

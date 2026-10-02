@@ -1109,8 +1109,9 @@ export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
     title: 'Olympus isn\'t on your Mac yet',
     disabledReason: 'Install Olympus first',
   },
+  /** Linked to this ChatGPT account, first-run setup (models, first index) not finished. */
   installing: {
-    title: 'Installing Olympus on your Mac…',
+    title: 'Olympus is setting up on your Mac…',
     disabledReason: 'Available once Olympus is set up',
   },
   mac_offline: {
@@ -1119,7 +1120,7 @@ export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
     disabledReason: 'Your Mac is offline',
   },
   relay_unavailable: {
-    title: 'Olympus can\'t reach your Mac right now; retrying',
+    title: 'Olympus can\'t reach your Mac right now.',
     disabledReason: 'Can\'t reach your Mac',
   },
   /** Labels for `connection.action.id`; `help` is shown as text when the action has no link. */
