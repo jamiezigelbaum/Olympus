@@ -129,7 +129,7 @@ describe('dashboard view-model producer', () => {
       // Review 2026-10-02 #16: the repair is named, not only refused.
       href: 'https://olympusplugin.ai/help/on-your-mac/#models',
     });
-    expect(copyDashboardViewModel(vm).models.change.href).toBe('https://olympusplugin.ai/help/on-your-mac/#models');
+    expect(copyDashboardViewModel(vm).models.change!.href).toBe('https://olympusplugin.ai/help/on-your-mac/#models');
     expect(vm.needsYou).toEqual([]);
     expect(vm.progress).toBeUndefined();
     expect(vm.generatedAt).toBe(NOW.toISOString());

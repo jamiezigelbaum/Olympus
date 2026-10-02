@@ -676,8 +676,10 @@ function folderList(browse: OlympusFolderScopeBrowseResult, secrets: SecretLocat
     nodes: browse.nodes
       .filter((node) => !isSecretFolder(secrets, node.key, node.parent_key ? [...ancestorKeys, node.parent_key] : ancestorKeys))
       .map((node) => {
-        const sizeBytes = measurement(node.size_bytes);
-        const fileCount = measurement(node.file_count);
+        // Optional provider measurements; the Mac picker's node type does not carry them.
+        const measured = node as { size_bytes?: unknown; file_count?: unknown };
+        const sizeBytes = measurement(measured.size_bytes);
+        const fileCount = measurement(measured.file_count);
         return {
           key: node.key,
           ...(node.parent_key ? { parent_key: node.parent_key } : {}),
