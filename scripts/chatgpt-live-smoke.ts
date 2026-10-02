@@ -50,6 +50,7 @@ export const SUMMARY_BUDGET_MS = PANEL_POLL_CAP_MS;
 export const FULL_BUDGET_MS = PANEL_FULL_POLL_CAP_MS;
 const TOOL_TIMEOUT_MS = 180_000;
 const SMOKE_CLIENT_NAME = 'Olympus live smoke';
+const CHATGPT_DESKTOP_CLIENT_ID = 'https://chatgpt.com/oauth/codex/client.json';
 const SMOKE_REDIRECT_URI = 'http://127.0.0.1:53682/olympus-live-smoke/callback';
 /** The only fields the response builder copies into the panel's `_meta`. */
 const PANEL_META_FIELDS = new Set(['v', 'count', 'state', 'jobId', 'percent', 'detail']);
@@ -463,13 +464,12 @@ export async function obtainSmokeGrant(options: Pick<SmokeOptions, 'engine' | 'r
     return fetch(`${options.engine}/connect/authorize?${query}`, { redirect: 'manual' });
   };
 
-  let client = readState(options.stateFile) ?? await registerSmokeClient(options.engine, options.stateFile);
-  let page = await authorize(client);
-  if (page.status === 400) {
-    // The engine forgot the client (a fresh connection store): register again once.
-    client = await registerSmokeClient(options.engine, options.stateFile);
-    page = await authorize(client);
-  }
+  // Only grants to a pinned ChatGPT client get the ChatGPT surface (setup
+  // tools, private answers), so the smoke signs in exactly as the ChatGPT
+  // desktop app does: its published Codex client, with a loopback callback
+  // (any port, RFC 8252). Approval still happens only on this Mac's loopback.
+  const client: SmokeClientState = { clientId: CHATGPT_DESKTOP_CLIENT_ID, redirectUri: 'http://127.0.0.1:53682/callback' };
+  const page = await authorize(client);
   if (page.status !== 200) throw new Error(`the loopback approval page answered ${page.status}`);
   const html = await page.text();
   const requestId = /name="request_id" value="([a-f0-9]{32})"/.exec(html)?.[1];
@@ -483,7 +483,8 @@ export async function obtainSmokeGrant(options: Pick<SmokeOptions, 'engine' | 'r
   const approved = await fetch(`${options.engine}/connect/authorize`, {
     method: 'POST',
     redirect: 'manual',
-    headers: { ...approve.headers, cookie, origin: options.engine },
+    // The consent page accepts approval only as a same-origin form navigation.
+    headers: { ...approve.headers, cookie, origin: options.engine, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' },
     body: approve.body,
   });
   const location = approved.headers.get('location');
