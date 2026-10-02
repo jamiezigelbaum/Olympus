@@ -107670,6 +107670,7 @@ __export(exports_private_answer_jobs, {
   PrivateAnswerJobs: () => PrivateAnswerJobs,
   PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS: () => PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS,
   PRIVATE_ANSWER_DEDUPE_MS: () => PRIVATE_ANSWER_DEDUPE_MS,
+  PRIVATE_ANSWER_CLAIM_HOLD_MS: () => PRIVATE_ANSWER_CLAIM_HOLD_MS,
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
 import { randomBytes as randomBytes17 } from "node:crypto";
@@ -107846,7 +107847,18 @@ class PrivateAnswerJobs {
     }
     if (job.claimKey === undefined) {
       job.claimKey = panel.raw;
-      this.startClaim(job, panel.key);
+      const settled = this.startClaim(job, panel.key);
+      const holdMs = this.options.claimHoldMs ?? PRIVATE_ANSWER_CLAIM_HOLD_MS;
+      if (holdMs > 0) {
+        let timer;
+        await Promise.race([settled, new Promise((resolve10) => {
+          timer = setTimeout(resolve10, holdMs);
+          timer.unref?.();
+        })]);
+        clearTimeout(timer);
+      }
+      if (this.jobs.get(jobId) !== job)
+        return gone();
     }
     const outcome = job.outcome;
     if (!outcome) {
@@ -108095,6 +108107,12 @@ class PrivateAnswerJobs {
     }
   }
   startClaim(job, panelKey) {
+    let claimSettled = () => {
+      return;
+    };
+    const done = new Promise((resolve10) => {
+      claimSettled = resolve10;
+    });
     const abort = new AbortController;
     job.claimAbort = abort;
     const claimedAt = this.now();
@@ -108117,6 +108135,7 @@ class PrivateAnswerJobs {
       timing.totalMs = this.now() - claimedAt;
       this.endActivity();
       this.logTiming(timing);
+      claimSettled();
     };
     const deadlineTimer = setTimeout(() => {
       if (settled)
@@ -108200,6 +108219,7 @@ class PrivateAnswerJobs {
     run().catch(() => {
       settle({ kind: "failed" }, "error");
     });
+    return done;
   }
   beginActivity() {
     try {
@@ -108394,7 +108414,7 @@ async function boundedText(request, max) {
 }
 var AnalysisStop, defaultLog = (line) => {
   console.log(line);
-}, MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_UNANSWERED = 10, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, UNSAFE_CHARS2, defaultAudit = (event) => {
+}, MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_UNANSWERED = 10, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, UNSAFE_CHARS2, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
 };
 var init_private_answer_jobs = __esm(() => {
@@ -108619,7 +108639,7 @@ var PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MAX_PAS
 var init_private_answer_model = __esm(() => {
   PANEL_ANSWER_LIMITS = {
     maxItems: 4,
-    relevanceMargin: 0.06,
+    relevanceMargin: 0.04,
     maxPassageChars: 2400,
     maxPromptBytes: 11000,
     maxAnswerChars: 1000,
