@@ -8321,6 +8321,24 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
+// src/workers/connector-store/tier-names-only-settle.ts
+var init_tier_names_only_settle = __esm(() => {
+  init_tier_ledger();
+});
+
+// src/workers/connector-store/tier-rejudge.ts
+var init_tier_rejudge = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+});
+
+// src/workers/connector-store/tier-rules-sweep.ts
+var init_tier_rules_sweep = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
   init_types();
@@ -8329,6 +8347,8 @@ var init_tiered_store_set = __esm(() => {
   init_tier_ledger();
   init_local_index();
   init_tier_placement();
+  init_tier_names_only_settle();
+  init_tier_rules_sweep();
 });
 
 // src/workers/readwise/live-sync.ts
