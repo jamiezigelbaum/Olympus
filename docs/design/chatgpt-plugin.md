@@ -143,18 +143,27 @@ ChatGPT ──HTTPS──> mcp.olympusplugin.ai (Caddy: TLS, Let's Encrypt HTTP-
   - **Uploads** are charged as bytes arrive (a declared length reserves at
     most a 16 KiB first block), with a per-address byte cap of at most a
     sixteenth of the relay-wide one, and a 64 KiB cap for the relay's own
-    credential-less `/mcp` answers.
+    credential-less `/mcp` answers. A body stays charged, trimmed to its
+    size, for as long as the relay holds it: while it waits for an admission
+    slot, is forwarded, and until the install's stream is over (Codex review
+    2026-10-02); a body that does not fit is a 503. `admin status` shows the
+    bytes held.
   - **Sessions.** Unauthenticated sockets have their own pool (1,024); when
     it is full the oldest is closed, so stalled sockets cannot keep a real
     install out, and they never count against session capacity. Connect
     attempts and registrations are keyed by IPv6 /48.
-  - **Registrations** need a proof of work bound to the session nonce
-    (16 bits, about 0.1-0.3 s on a Mac); returning installs (registered
-    here before, since expired) draw on a budget of their own; a
+  - **Registrations** of an install id the relay has never registered
+    need a proof of work bound to the session nonce (16 bits, about 0.1-0.3
+    s on a Mac); a registered or returning install (registered here before,
+    since expired) re-registers without one, and returning installs draw on
+    a budget of their own; an install answers one challenge per session and
+    its solver stops when the handshake times out, closes, or the client
+    stops; a
     registration never confirmed by a later `hello` (and not online) expires
     after a day; an exhausted relay-wide budget logs `budget_exhausted` once.
   - **Signatures** bind the relay host the install dialed, so a challenge
-    from one relay cannot be answered through another.
+    from one relay cannot be answered through another (signature scheme 3;
+    see "Relay protocol compatibility" for the migration from scheme 2).
   - **Egress.** Response bytes are budgeted per caller address (generous:
     ChatGPT calls from shared addresses) and relay-wide, in every lane: the
     owner lane rests on a marker the install sets itself.
@@ -167,6 +176,78 @@ ChatGPT ──HTTPS──> mcp.olympusplugin.ai (Caddy: TLS, Let's Encrypt HTTP-
 - **Issuer.** `https://mcp.olympusplugin.ai` for every install; resource
   `https://mcp.olympusplugin.ai/mcp`. Configured on the engine by
   `remote.relayHost`; never derived from request headers.
+
+### Relay protocol compatibility (added 2026-10-02)
+
+The relay and the Mac's relay client ship separately (the relay by
+`connect-relay/deploy/deploy.sh`, the client inside each Olympus release), so
+any pairing of a current and a previous release must connect, whichever is
+deployed first. Both still speak wire protocol `v: 2`; what changed on
+2026-10-02 is the session signature, and that is negotiated on its own:
+
+| Signature scheme | Signed payload | Who speaks it |
+|---|---|---|
+| 2 (legacy) | domain, kind, nonce, install id | relays and installs from before 2026-10-02 |
+| 3 (bound) | the same plus the relay host the install dialed | current relays and installs |
+
+- **The relay advertises; the install names.** A current relay's
+  `challenge` carries `auth: 3`; a current install's `hello`/`register`
+  carries `auth: 3`. A relay from before negotiation advertises nothing.
+- **Current install, old relay.** The install always answers with scheme 3
+  first. If a relay that advertised no scheme rejects it (`bad_signature`),
+  the install retries at once with the scheme-2 form (no `auth`, no proof of
+  work: byte for byte what an old install sends), and keeps using it for
+  that relay until a challenge advertises a scheme. A rejected scheme-2
+  answer clears the fallback, so it is never a loop. A relay that advertises
+  scheme 3 never gets a scheme-2 answer.
+- **Old install, current relay.** The relay accepts scheme 3 always (also
+  without the `auth` field, from installs released between the binding and
+  negotiation). It accepts scheme 2 only from an install id it already knows
+  (registered, or registered before and expired) and only while the legacy
+  window is open (`acceptLegacyAuth`, default on; `RELAY_LEGACY_AUTH=off`
+  closes it). A scheme-2 session logs `session_ready` with
+  `legacy_auth: true`.
+- **Proof of work is for new ids only.** A `register` of an id the relay has
+  never registered needs the proof of work and scheme 3. A registered or
+  returning id re-registers without it (the id is derived from the key, so
+  only its holder can claim it; returning ids keep their own budget). An old
+  install can therefore re-register a known id, but cannot register a
+  brand-new one: new installs run current releases.
+- **What the window costs.** While it is open, the attack the host binding
+  exists to stop is still possible against an install the relay knows: a
+  hostile relay that an install dials (one it is configured for) can pass
+  the real relay's challenge through and replay the unbound answer. An old
+  install answers unbound anyway; a current one does so only after the
+  relay it dialed advertised nothing and rejected scheme 3, which a hostile
+  relay can fake. Closing the window on the real relay ends this for every
+  install, which is why it has a sunset.
+
+**Sunset.** The window closes (`RELAY_LEGACY_AUTH=off` in the relay unit,
+then the scheme-2 acceptance in the relay and the client's scheme-2
+fallback are deleted in a later release) at the first
+relay deploy after both hold: no `legacy_auth` session in the relay log for
+14 consecutive days, and the oldest supported Olympus release is one that
+speaks scheme 3. Target: no later than 2026-12-31; if `legacy_auth` sessions
+are still seen then, the owner decides between extending the window and
+cutting those installs off (they recover by updating Olympus).
+
+**Rollback policy.** Either side may be rolled back independently, at any
+time, with no coordinated step:
+
+- Relay rolled back to a pre-negotiation build: current installs fall back
+  to scheme 2 on their next connect (one extra round trip); registrations
+  made by the current relay stay valid (the registry format is unchanged).
+- Client rolled back (`olympus engine rollback`, or the installer restoring
+  `app.previous`): the pre-binding client reconnects with scheme 2, which a
+  current relay accepts for its already-registered id while the window is
+  open. After the sunset, rolling a Mac back to a pre-binding release is
+  not supported; update it instead.
+- Re-deploying a current relay after a relay rollback needs nothing: clients
+  see the advertisement again and answer with scheme 3.
+
+The mixed-version handshake is proven in
+`connect-relay/test/relay-compat-and-budgets.test.ts` (an old install against
+the current relay, and a current install against a scheme-2-only relay).
 
 ### What changes in the repo
 
