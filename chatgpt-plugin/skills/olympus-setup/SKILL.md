@@ -1,70 +1,62 @@
 ---
 name: olympus-setup
-description: Install the Olympus engine on the user's Mac from the ChatGPT desktop app and link it to ChatGPT. Use when the user wants to set up Olympus, when the Olympus dashboard says "Install on your Mac", or when Olympus tools report that the Mac is not set up.
+description: Help the user get Olympus running on their Mac and connected to ChatGPT, and say plainly what is not available yet. Use when the user wants to set up Olympus, when the Olympus dashboard says Olympus isn't on the Mac, or when Olympus tools report that Olympus is not connected.
 ---
 
 # Set up Olympus on a Mac
 
 Olympus answers from the user's own sources with an engine that runs on their
-Mac. ChatGPT reaches it through `https://mcp.olympusplugin.ai/mcp`. Setup puts
-the engine on the Mac and approves ChatGPT on the Mac with one click.
+Mac. ChatGPT reaches it through `https://mcp.olympusplugin.ai/mcp`, and the
+user approves ChatGPT on the Mac with one click.
 
-This needs the ChatGPT desktop app on macOS, in a mode that can run shell
-commands with the user's approval. On the web or on a phone, tell the user to
-open the ChatGPT desktop app on their Mac and ask again there.
+## The installer is not available yet
 
-## 1. Check whether it is already installed
+There is no supported one-step installer for the Olympus engine yet
+(https://olympusplugin.ai/install/ says so too). Do not write, search for,
+suggest or run any install command for Olympus: no `curl … | sh`, no
+`npm`, `bun` or `git clone`, and nothing from another site. Never use
+`sudo`, and never edit files on the Mac by hand.
 
-Call `olympus_dashboard`. If it answers with `connection.state` `ready` or
-`installing`, the engine is installed and linked: show the dashboard and stop.
-If the call fails with "Your Mac is offline", the engine is installed but the
-Mac is asleep or Olympus is not running: ask the user to wake the Mac or open
-Olympus, then try again. Only continue when the dashboard says Olympus is not
-installed or the tools are not linked yet.
+## 1. Check what is already there
 
-## 2. Show the install command, then wait for approval
+Call `olympus_dashboard`.
 
-<!-- TODO(packaging): replace with the signed installer once it ships. The
-     command below is a placeholder until install.sh and the .pkg exist. -->
+- `connection.state` `ready` or `installing`: Olympus is installed and
+  connected. Show the dashboard and stop.
+- The call fails with "Your Mac is offline": Olympus is installed but the Mac
+  is asleep or Olympus is not running. Ask the user to wake the Mac, and point
+  them to https://olympusplugin.ai/help/mac-offline/. Then try again.
+- The dashboard says Olympus isn't on the Mac, or a tool says Olympus is not
+  connected: ChatGPT is not connected to an Olympus engine yet. That is also
+  what it says when Olympus is installed but not yet connected, so continue
+  with step 2.
 
-Show the user exactly what will run, and what it does, before running
-anything:
+## 2. Connect, or explain that it is not available yet
 
-```sh
-curl -fsSL https://olympusplugin.ai/install.sh | sh
-```
+Ask whether Olympus is already on their Mac (for example, they are testing a
+build they were given).
 
-Say, in plain words:
+- **It is:** ChatGPT asks to connect Olympus (sign in) the first time a tool
+  needs it. The page that opens must be in a browser on the Mac running
+  Olympus: it asks to connect ChatGPT, and the user clicks **Approve**. That
+  click on their own Mac is the only proof of ownership: there is no code to
+  copy and no account to create. If they want to check that Olympus is
+  running, they can run `olympus engine status` in Terminal on the Mac (it
+  prints `"ok": true` when it is); in a mode that can run commands, offer to
+  run it for them and run it only after a clear yes.
+- **It isn't:** say plainly that the Mac installer for Olympus is not
+  available yet, link https://olympusplugin.ai/install/, and stop.
 
-- It installs Olympus for this macOS user only. No administrator password and
-  no other apps or accounts are needed.
-- It starts Olympus in the background (a per-user LaunchAgent) and opens an
-  approval page on this Mac.
-- Nothing from the user's files leaves the Mac during install.
-- It downloads a built-in search model (about 225 MB) and, on a Mac with
-  Apple silicon, a private answer model that stays on the Mac (about 1.3 GB
-  with 8 GB of memory, about 2.7 GB with 16 GB or more). The private model
-  waits while the disk has less than its size plus 2 GB free.
+## 3. Confirm
 
-Ask: "Run this now?" Run it only after a clear yes. Never run it without that
-answer, and never change the command.
-
-## 3. Approve ChatGPT on the Mac
-
-When the install finishes, Olympus opens a page on the Mac asking to connect
-ChatGPT. Tell the user to click **Approve** there. That click, on their own
-Mac, is the only proof of ownership: there is no code to copy and no account
-to create.
-
-## 4. Confirm
-
-Call `olympus_dashboard` again. When it answers, tell the user Olympus is set
-up and point them to the Olympus dashboard in the ChatGPT sidebar to connect
-their first sources (local files and notes first, then accounts like Gmail,
-Google Drive or Dropbox). Indexing starts on its own.
+Call `olympus_dashboard` again. When it answers, tell the user Olympus is
+connected and point them to the Olympus dashboard in the ChatGPT sidebar to
+connect their first sources: Dropbox, Gmail or Google Drive, signing in with
+accounts they already have. Other sources the dashboard lists (such as X
+bookmarks, Readwise, Telegram or WhatsApp) are connected in Olympus on the
+Mac. Indexing starts on its own.
 
 ## If something fails
 
-Report the installer's last few lines of output in plain language and stop.
-Do not retry with different flags, do not use `sudo`, and do not edit files on
-the Mac by hand.
+Report what the dashboard or the error says, in plain language, and stop. Do
+not retry with different commands or flags.
