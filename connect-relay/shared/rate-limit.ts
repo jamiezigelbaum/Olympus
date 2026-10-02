@@ -14,25 +14,26 @@ export class KeyedTokenBuckets {
     private readonly now: () => number = Date.now,
   ) {}
 
-  take(key: string): boolean {
+  /** Takes `amount` tokens (default one), or none when fewer are left. */
+  take(key: string, amount = 1): boolean {
     const now = this.now();
     const bucket = this.buckets.get(key) ?? { tokens: this.spec.capacity, at: now };
     bucket.tokens = Math.min(this.spec.capacity, bucket.tokens + ((now - bucket.at) / 1000) * this.spec.refillPerSecond);
     bucket.at = now;
-    if (bucket.tokens < 1) {
+    if (bucket.tokens < amount) {
       this.buckets.set(key, bucket);
       return false;
     }
-    bucket.tokens -= 1;
+    bucket.tokens -= amount;
     this.buckets.set(key, bucket);
     if (this.buckets.size > 10_000) this.sweep(now);
     return true;
   }
 
-  /** Gives back one token taken by `take` (never above capacity). */
-  refund(key: string): void {
+  /** Gives back tokens taken by `take` (never above capacity). */
+  refund(key: string, amount = 1): void {
     const bucket = this.buckets.get(key);
-    if (bucket) bucket.tokens = Math.min(this.spec.capacity, bucket.tokens + 1);
+    if (bucket) bucket.tokens = Math.min(this.spec.capacity, bucket.tokens + amount);
   }
 
   private sweep(now: number): void {
@@ -82,4 +83,14 @@ export function addressKey(address: string | undefined): string {
   const right = tail ? tail.split(':') : [];
   const groups = address.includes('::') ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right] : left;
   return `${groups.slice(0, 4).map((group) => (group || '0').toLowerCase().replace(/^0+(?=.)/, '')).join(':')}::/64`;
+}
+
+/**
+ * A coarser key for limits a whole allocation should share: native IPv6 by
+ * its /48 (the usual end-site allocation, so a subscriber cannot rotate
+ * through its 65,536 /64s), IPv4 unchanged. Takes an `addressKey` result.
+ */
+export function prefixKey(key: string): string {
+  if (!key.endsWith('::/64')) return key;
+  return `${key.slice(0, -'::/64'.length).split(':').slice(0, 3).join(':')}::/48`;
 }

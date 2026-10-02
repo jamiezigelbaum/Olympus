@@ -9,7 +9,8 @@
 #
 # What it does:
 #   1. bun build --compile for linux-x64, named by commit SHA;
-#   2. copies the binary, systemd unit, Caddyfile and remote-install.sh to a
+#   2. copies the binary, systemd unit, Caddyfile (and its systemd drop-in
+#      for Caddy's admin socket) and remote-install.sh to a
 #      fresh directory on the host;
 #   3. runs remote-install.sh with sudo there: installs Caddy from Ubuntu's
 #      apt repository if missing, installs the binary under /opt/olympus-relay
@@ -33,7 +34,7 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 
 echo "Building olympus-relay ${SHORT} for linux-x64"
 bun build --compile --target=bun-linux-x64 "$ROOT/connect-relay/server/main.ts" --outfile "$BUILD_DIR/olympus-relay-${SHORT}"
-cp "$DEPLOY_DIR/olympus-relay.service" "$DEPLOY_DIR/Caddyfile" "$DEPLOY_DIR/remote-install.sh" "$BUILD_DIR/"
+cp "$DEPLOY_DIR/olympus-relay.service" "$DEPLOY_DIR/Caddyfile" "$DEPLOY_DIR/caddy-admin.conf" "$DEPLOY_DIR/remote-install.sh" "$BUILD_DIR/"
 cp "$ROOT/site/deploy/Caddyfile.site" "$BUILD_DIR/olympus-site.caddy"
 printf '%s\n' "$SHA" > "$BUILD_DIR/BUILD_SHA"
 

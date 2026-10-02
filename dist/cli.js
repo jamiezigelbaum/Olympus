@@ -73075,12 +73075,49 @@ function installIdForPublicKey(spkiDer) {
 function spkiOf(key) {
   return key.export({ format: "der", type: "spki" });
 }
-function signedPayload(kind, nonce, installId) {
-  return Buffer.from([SIGNATURE_DOMAIN, kind, nonce, installId].join(`
+function signedPayload(kind, nonce, installId, relayHost) {
+  return Buffer.from([SIGNATURE_DOMAIN, kind, nonce, installId, relayHost.toLowerCase()].join(`
 `), "utf8");
 }
-function signInstallMessage(privateKey, kind, nonce, installId) {
-  return base64url2(sign(null, signedPayload(kind, nonce, installId), privateKey));
+function signInstallMessage(privateKey, kind, nonce, installId, relayHost) {
+  return base64url2(sign(null, signedPayload(kind, nonce, installId, relayHost), privateKey));
+}
+function powDigest(nonce, installId, relayHost, counter) {
+  return createHash41("sha256").update(`${POW_DOMAIN}
+${nonce}
+${installId}
+${relayHost.toLowerCase()}
+${counter}`).digest();
+}
+function leadingZeroBits(digest2) {
+  let bits = 0;
+  for (const byte of digest2) {
+    if (byte === 0) {
+      bits += 8;
+      continue;
+    }
+    return bits + Math.clz32(byte) - 24;
+  }
+  return bits;
+}
+async function solveRegistrationPow(bits, nonce, installId, relayHost) {
+  if (!Number.isInteger(bits) || bits < 0 || bits > MAX_REGISTRATION_POW_BITS)
+    throw new Error("the relay asked for an unreasonable registration proof of work");
+  for (let counter = 0;; counter += 1) {
+    const candidate = String(counter);
+    if (bits === 0 || leadingZeroBits(powDigest(nonce, installId, relayHost, candidate)) >= bits)
+      return candidate;
+    if (counter % 4096 === 4095)
+      await new Promise((resolve8) => setTimeout(resolve8, 0));
+  }
+}
+async function installAuthMessage(input) {
+  const { kind, identity, nonce, relayHost } = input;
+  const sig = signInstallMessage(identity.privateKey, kind, nonce, identity.installId, relayHost);
+  if (kind === "hello")
+    return { type: "hello", v: PROTOCOL_VERSION, installId: identity.installId, sig };
+  const pow = await solveRegistrationPow(input.powBits, nonce, identity.installId, relayHost);
+  return { type: "register", v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig, pow };
 }
 function parseTextFrame(data) {
   if (data.length > MAX_TEXT_FRAME_BYTES)
@@ -73126,7 +73163,7 @@ function parseHeaderList(value, maxEntries = 64) {
 function streamId(value) {
   return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 4294967295 ? value : undefined;
 }
-var PROTOCOL_VERSION = 2, CONNECT_PATH = "/v2/connect", MAX_TEXT_FRAME_BYTES, MAX_BODY_CHUNK_BYTES, SIGNATURE_DOMAIN = "olympus-connect-relay/v2", BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
+var PROTOCOL_VERSION = 2, CONNECT_PATH = "/v2/connect", MAX_TEXT_FRAME_BYTES, MAX_BODY_CHUNK_BYTES, SIGNATURE_DOMAIN = "olympus-connect-relay/v2", POW_DOMAIN = "olympus-connect-relay/v2/register-pow", MAX_REGISTRATION_POW_BITS = 22, BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 var init_protocol2 = __esm(() => {
   MAX_TEXT_FRAME_BYTES = 16 * 1024;
   MAX_BODY_CHUNK_BYTES = 64 * 1024;
@@ -73390,10 +73427,17 @@ class RelayClient {
         return socket.close(4002, "protocol_error");
       switch (message.type) {
         case "challenge": {
-          const nonce = String(message.nonce);
           const kind = this.register ? "register" : "hello";
-          const sig = signInstallMessage(identity.privateKey, kind, nonce, identity.installId);
-          this.send(kind === "register" ? { type: "register", v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig } : { type: "hello", v: PROTOCOL_VERSION, installId: identity.installId, sig });
+          installAuthMessage({
+            kind,
+            identity,
+            nonce: String(message.nonce),
+            powBits: typeof message.pow === "number" ? message.pow : 0,
+            relayHost: this.options.relayHost
+          }).then((auth) => {
+            if (this.socket === socket)
+              this.send(auth);
+          }, () => abandon(4002, "protocol_error", "the relay asked for an unreasonable registration proof of work"));
           return;
         }
         case "ready":

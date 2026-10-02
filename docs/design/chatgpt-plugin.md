@@ -68,7 +68,8 @@ ChatGPT ──HTTPS──> mcp.olympusplugin.ai (Caddy: TLS, Let's Encrypt HTTP-
 - **One outbound session per install.** The engine dials
   `wss://mcp.olympusplugin.ai/v2/connect`, proves its Ed25519 install key with
   the existing challenge/hello/register signatures (`connect-relay/shared/protocol.ts`,
-  domain-separated as v2), and keeps the socket open with pings. The relay
+  domain-separated as v2 and bound to the relay host), and keeps the socket
+  open with pings. The relay
   multiplexes HTTP requests over it as framed messages
   (`request` → `response-head` → `body-chunk`* → `end`, plus `cancel`), so
   Streamable HTTP and SSE responses stream. No separate data connections.
@@ -123,6 +124,43 @@ ChatGPT ──HTTPS──> mcp.olympusplugin.ai (Caddy: TLS, Let's Encrypt HTTP-
   rate and concurrency caps, request/response size caps, idle and total
   timeouts, a reserved concurrency slot for the owner's own dashboard tool.
   Revocation is durable (fsync'd append-only registry) before it is reported.
+  Hardened after the 2026-10-02 review (`connect-relay/server/limits.ts`,
+  `server/response-policy.ts`):
+  - **Install answers are untrusted content on the relay origin.** Every one
+    gets `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`
+    and a relay Content-Security-Policy beside the install's own:
+    `sandbox; default-src 'none'` (opaque origin, no script) everywhere but
+    the operator's demo sign-in, which keeps its origin and may submit its
+    form but runs no script. API routes serve JSON, event streams or text
+    and never redirect; browser routes (`/go/…`, `/oauth/callback/…`) serve
+    HTML, text or JSON and redirect only to Google's and Dropbox's sign-in,
+    the engine's loopback port, or the relay. Anything else, and any header
+    the platform would refuse, is a 502 and the install is told to stop. A
+    `Service-Worker: script` request is refused on every route.
+  - **Uploads** are charged as bytes arrive (a declared length reserves at
+    most a 16 KiB first block), with a per-address byte cap of at most a
+    sixteenth of the relay-wide one, and a 64 KiB cap for the relay's own
+    credential-less `/mcp` answers.
+  - **Sessions.** Unauthenticated sockets have their own pool (1,024); when
+    it is full the oldest is closed, so stalled sockets cannot keep a real
+    install out, and they never count against session capacity. Connect
+    attempts and registrations are keyed by IPv6 /48.
+  - **Registrations** need a proof of work bound to the session nonce
+    (16 bits, about 0.1-0.3 s on a Mac); returning installs (registered
+    here before, since expired) draw on a budget of their own; a
+    registration never confirmed by a later `hello` (and not online) expires
+    after a day; an exhausted relay-wide budget logs `budget_exhausted` once.
+  - **Signatures** bind the relay host the install dialed, so a challenge
+    from one relay cannot be answered through another.
+  - **Egress.** Response bytes are budgeted per caller address (generous:
+    ChatGPT calls from shared addresses) and relay-wide, in every lane: the
+    owner lane rests on a marker the install sets itself.
+  - **Accepted: install presence is observable.** Anyone holding an install
+    id (it is in every token and hand-off link the install issues) can tell
+    whether it is unknown, registered but offline, or online, from which of
+    the relay's or the engine's answers comes back. Ids are 160-bit and not
+    enumerable, the answers name nothing about the owner, and hiding presence
+    would cost the offline fallback ChatGPT relies on, so this stays.
 - **Issuer.** `https://mcp.olympusplugin.ai` for every install; resource
   `https://mcp.olympusplugin.ai/mcp`. Configured on the engine by
   `remote.relayHost`; never derived from request headers.
@@ -521,11 +559,15 @@ relay), `busy` (503), and `opened` (204, no body, `/open` only).
   a 512-byte body cap, and a per-address rate limit (`privateFetchesPerIp`,
   30 burst, 1/s) on top of the per-install admission lanes.
 - CORS is answered by the relay, for ChatGPT widget origins only:
-  `https://web-sandbox.oaiusercontent.com`, one DNS label under it, and the
-  plugin's dedicated `_meta.ui.domain` (the relay origin). OpenAI documents
-  the sandbox default; the exact per-app origin when a dedicated domain is
-  set is not documented, so this list must be confirmed against a live
-  panel before directory submission. CORS keeps other web pages out; it
+  `https://web-sandbox.oaiusercontent.com` and one DNS label under it. The
+  plugin's dedicated `_meta.ui.domain` is the relay origin, but ChatGPT
+  serves the panel from its own sandbox domain, never from a domain it does
+  not host, so the relay origin is not accepted by default (review
+  2026-10-02: a page on the relay origin is the relay's own or a sandboxed
+  install answer; `panelOrigins` can add an origin if a live panel ever
+  shows one). OpenAI documents the sandbox default; the exact per-app origin
+  must be confirmed against a live panel before directory submission
+  (`panel_origin_refused` logs the origins it refuses). CORS keeps other web pages out; it
   does not stop a non-browser caller, and nothing below relies on it to.
 - Logs carry only the install's hashed tag, never the job id.
 - Mac offline: the relay answers `503 mac_offline` (with CORS) and the panel

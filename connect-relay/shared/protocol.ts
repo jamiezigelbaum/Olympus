@@ -4,8 +4,11 @@
  * Each install keeps one WebSocket session to the relay (`wss://<relay>/v2/connect`).
  * The relay opens with a `challenge`; the install answers `hello` (or
  * `register` the first time), signed with its Ed25519 install key over the
- * relay's fresh nonce, so a captured signature cannot be replayed on another
- * session. The relay answers `ready`, or `error` and closes.
+ * relay's fresh nonce and the relay host the install meant to reach, so a
+ * captured signature cannot be replayed on another session or relayed to
+ * another relay. A `register` also carries a small proof of work over the
+ * same nonce (the challenge's `pow` bits), so registrations cost the caller
+ * real time. The relay answers `ready`, or `error` and closes.
  *
  * After `ready`, the session multiplexes HTTP requests from the public
  * internet to the install's loopback worker:
@@ -32,13 +35,20 @@ export const MAX_TEXT_FRAME_BYTES = 16 * 1024;
 /** Body chunks are at most this large (the sender splits larger ones). */
 export const MAX_BODY_CHUNK_BYTES = 64 * 1024;
 const SIGNATURE_DOMAIN = 'olympus-connect-relay/v2';
+const POW_DOMAIN = 'olympus-connect-relay/v2/register-pow';
+/**
+ * Most proof-of-work bits an install will spend on one registration. A relay
+ * asking for more is refused, so a hostile relay cannot make an install spin.
+ */
+export const MAX_REGISTRATION_POW_BITS = 22;
 
 /** Install ids are 32 lowercase base32 characters: the first 160 bits of SHA-256 over the install's SPKI. */
 export const INSTALL_ID_PATTERN = /^[a-z2-7]{32}$/;
 
-export type ChallengeMessage = { type: 'challenge'; v: number; nonce: string };
+/** `pow`: leading zero bits a `register` must show (registration proof of work, below). */
+export type ChallengeMessage = { type: 'challenge'; v: number; nonce: string; pow: number };
 export type HelloMessage = { type: 'hello'; v: number; installId: string; sig: string };
-export type RegisterMessage = { type: 'register'; v: number; installId: string; publicKey: string; sig: string };
+export type RegisterMessage = { type: 'register'; v: number; installId: string; publicKey: string; sig: string; pow: string };
 export type ReadyMessage = { type: 'ready'; installId: string };
 export type PingMessage = { type: 'ping' };
 export type PongMessage = { type: 'pong' };
@@ -108,12 +118,18 @@ export function spkiOf(key: KeyObject): Buffer {
   return key.export({ format: 'der', type: 'spki' }) as Buffer;
 }
 
-function signedPayload(kind: 'hello' | 'register', nonce: string, installId: string): Buffer {
-  return Buffer.from([SIGNATURE_DOMAIN, kind, nonce, installId].join('\n'), 'utf8');
+/**
+ * What an install signs: the domain, the message kind, the relay's nonce, the
+ * install id, and the relay host the install dialed (its configured
+ * `relayHost`, lowercased), so a relay cannot pass a challenge from another
+ * relay through and use the answer there.
+ */
+function signedPayload(kind: 'hello' | 'register', nonce: string, installId: string, relayHost: string): Buffer {
+  return Buffer.from([SIGNATURE_DOMAIN, kind, nonce, installId, relayHost.toLowerCase()].join('\n'), 'utf8');
 }
 
-export function signInstallMessage(privateKey: KeyObject, kind: 'hello' | 'register', nonce: string, installId: string): string {
-  return base64url(sign(null, signedPayload(kind, nonce, installId), privateKey));
+export function signInstallMessage(privateKey: KeyObject, kind: 'hello' | 'register', nonce: string, installId: string, relayHost: string): string {
+  return base64url(sign(null, signedPayload(kind, nonce, installId, relayHost), privateKey));
 }
 
 export function verifyInstallMessage(
@@ -121,14 +137,69 @@ export function verifyInstallMessage(
   kind: 'hello' | 'register',
   nonce: string,
   installId: string,
+  relayHost: string,
   sig: string,
 ): boolean {
   if (typeof sig !== 'string' || sig.length > 128) return false;
   try {
-    return verify(null, signedPayload(kind, nonce, installId), publicKey, Buffer.from(sig, 'base64url'));
+    return verify(null, signedPayload(kind, nonce, installId, relayHost), publicKey, Buffer.from(sig, 'base64url'));
   } catch {
     return false;
   }
+}
+
+/**
+ * Registration proof of work: a decimal counter whose SHA-256, over the
+ * domain, nonce, install id, relay host and the counter, starts with `bits`
+ * zero bits. The relay checks it with one hash; the install spends about
+ * 2^bits hashes (16 bits: roughly 0.1-0.3 s on a Mac). It is bound to the
+ * session's nonce, so it cannot be computed ahead or reused.
+ */
+function powDigest(nonce: string, installId: string, relayHost: string, counter: string): Buffer {
+  return createHash('sha256').update(`${POW_DOMAIN}\n${nonce}\n${installId}\n${relayHost.toLowerCase()}\n${counter}`).digest();
+}
+
+function leadingZeroBits(digest: Uint8Array): number {
+  let bits = 0;
+  for (const byte of digest) {
+    if (byte === 0) {
+      bits += 8;
+      continue;
+    }
+    return bits + Math.clz32(byte) - 24;
+  }
+  return bits;
+}
+
+export function verifyRegistrationPow(bits: number, nonce: string, installId: string, relayHost: string, pow: unknown): boolean {
+  if (bits <= 0) return true;
+  if (typeof pow !== 'string' || !/^[0-9]{1,16}$/.test(pow)) return false;
+  return leadingZeroBits(powDigest(nonce, installId, relayHost, pow)) >= bits;
+}
+
+/** Finds a registration proof of work, yielding to the event loop between batches. */
+export async function solveRegistrationPow(bits: number, nonce: string, installId: string, relayHost: string): Promise<string> {
+  if (!Number.isInteger(bits) || bits < 0 || bits > MAX_REGISTRATION_POW_BITS) throw new Error('the relay asked for an unreasonable registration proof of work');
+  for (let counter = 0; ; counter += 1) {
+    const candidate = String(counter);
+    if (bits === 0 || leadingZeroBits(powDigest(nonce, installId, relayHost, candidate)) >= bits) return candidate;
+    if (counter % 4096 === 4095) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+/** The install's answer to a challenge: `hello`, or `register` with its key and proof of work. */
+export async function installAuthMessage(input: {
+  kind: 'hello' | 'register';
+  identity: { readonly installId: string; readonly publicKeySpki: string; readonly privateKey: KeyObject };
+  nonce: string;
+  powBits: number;
+  relayHost: string;
+}): Promise<ClientAuthMessage> {
+  const { kind, identity, nonce, relayHost } = input;
+  const sig = signInstallMessage(identity.privateKey, kind, nonce, identity.installId, relayHost);
+  if (kind === 'hello') return { type: 'hello', v: PROTOCOL_VERSION, installId: identity.installId, sig };
+  const pow = await solveRegistrationPow(input.powBits, nonce, identity.installId, relayHost);
+  return { type: 'register', v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig, pow };
 }
 
 export function newNonce(): string {

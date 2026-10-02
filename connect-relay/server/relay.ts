@@ -48,11 +48,13 @@ import {
   spkiOf,
   streamId,
   verifyInstallMessage,
+  verifyRegistrationPow,
+  type ChallengeMessage,
   type ErrorMessage,
   type RelayErrorCode,
 } from '../shared/protocol.ts';
 import { INSTALL_URL } from '../shared/dashboard-contract.ts';
-import { KeyedCounter, KeyedTokenBuckets, addressKey } from '../shared/rate-limit.ts';
+import { KeyedCounter, KeyedTokenBuckets, addressKey, prefixKey } from '../shared/rate-limit.ts';
 import { HANDOFF_PATH_PREFIX, OAUTH_HANDBACK_PATHS, credentialInstallId, oauthHandbackInstallId } from '../shared/tokens.ts';
 import {
   PRIVATE_ANSWER_MAX_REQUEST_BYTES,
@@ -84,6 +86,7 @@ import {
 } from './oauth-metadata.ts';
 import { isDashboardCall, relayMcpResponse } from './relay-mcp.ts';
 import { publicKeyOf, type MemoryInstallRegistry, type RegistryCounts } from './registry.ts';
+import { createResponsePolicies, type RouteKind } from './response-policy.ts';
 import { InstallSession } from './session.ts';
 
 export interface RelayConfig {
@@ -110,8 +113,10 @@ export interface RelayConfig {
   readonly trustProxy?: boolean;
   /**
    * Panel origins accepted for `/private/<id>` beyond ChatGPT's widget
-   * sandbox (shared/private-answer.ts). Defaults to the relay's own origin,
-   * which the panel declares as its dedicated `_meta.ui.domain`.
+   * sandbox (shared/private-answer.ts). None by default: ChatGPT serves the
+   * panel from its own sandbox domain, never from the relay origin (which
+   * only names the panel, as its `_meta.ui.domain`), and a page on the relay
+   * origin is the relay's own or a sandboxed install answer.
    */
   readonly panelOrigins?: readonly string[];
   readonly limits?: Partial<RelayLimits>;
@@ -197,6 +202,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const log: RelayLog = config.log ?? (() => {});
   const registry = config.registry;
   const origin = relayOrigin(config.publicHost);
+  /** What installs sign their session messages for (shared/protocol.ts). */
+  const relayHost = config.publicHost.toLowerCase();
   if (config.demoInstallId !== undefined && !INSTALL_ID_PATTERN.test(config.demoInstallId)) {
     throw new Error('demoInstallId must be an install id');
   }
@@ -209,15 +216,48 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const admission = createInstallAdmission(limits, now);
   const registrationsPerIp = new KeyedTokenBuckets(limits.registrationsPerIp, now);
   const registrationsGlobal = new KeyedTokenBuckets(limits.registrationsGlobal, now);
+  const reregistrationsPerIp = new KeyedTokenBuckets(limits.reregistrationsPerIp, now);
+  const reregistrationsGlobal = new KeyedTokenBuckets(limits.reregistrationsGlobal, now);
   const sessionAttempts = new KeyedTokenBuckets(limits.sessionAttemptsPerIp, now);
   const publicRequests = new KeyedTokenBuckets(limits.publicRequestsPerIp, now);
   const privateFetches = new KeyedTokenBuckets(limits.privateFetchesPerIp, now);
-  const panelOrigins = config.panelOrigins ?? [origin.origin];
+  const egressPerIp = new KeyedTokenBuckets(limits.egressBytesPerIp, now);
+  const egressGlobal = new KeyedTokenBuckets(limits.egressBytesGlobal, now);
+  const panelOrigins = config.panelOrigins ?? [];
+  const policies = createResponsePolicies({ relayOrigin: origin.origin, enginePort: bridge.enginePort });
   const sessionsPerIp = new KeyedCounter();
   const uploads = new UploadBudget(limits);
   const queueBudget = new QueueBudget(limits.maxQueuedBytes);
   const confirmed = new ConfirmedCredentials(CONFIRMED_CREDENTIAL_TTL_MS, MAX_CONFIRMED_CREDENTIALS, now);
-  let pendingSockets = 0;
+  /** Sockets that have not authenticated yet, oldest first. */
+  const pendingSockets = new Set<ServerWebSocket<SocketData>>();
+  /** A relay-wide registration budget ran dry: logged once per episode, for the operator. */
+  const exhausted = { registrations: false, reregistrations: false, egress: false };
+  const takeGlobal = (bucket: KeyedTokenBuckets, which: 'registrations' | 'reregistrations'): boolean => {
+    if (bucket.take('relay')) {
+      exhausted[which] = false;
+      return true;
+    }
+    if (!exhausted[which]) {
+      exhausted[which] = true;
+      log('budget_exhausted', { budget: which });
+    }
+    return false;
+  };
+  /** Response bytes to one caller address and across the relay, every lane. */
+  const chargeEgress = (ip: string, bytes: number): boolean => {
+    if (!egressPerIp.take(ip, bytes)) return false;
+    if (egressGlobal.take('relay', bytes)) {
+      exhausted.egress = false;
+      return true;
+    }
+    egressPerIp.refund(ip, bytes);
+    if (!exhausted.egress) {
+      exhausted.egress = true;
+      log('budget_exhausted', { budget: 'egress' });
+    }
+    return false;
+  };
 
   const clientIp = (request: Request, server: Server<SocketData>): string => {
     const peer = server.requestIP(request)?.address;
@@ -237,10 +277,11 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
 
   /**
    * Reads a capped request body. Before the first byte is read it takes an
-   * upload ticket (relay-wide and per-address upload counts); bytes are
-   * charged to the relay-wide upload budget as the buffer grows; the upload
-   * has an absolute and an idle deadline. None of this depends on the route
-   * or on what the credential looks like.
+   * upload ticket (relay-wide and per-address upload counts); the buffer
+   * grows only with bytes that actually arrived (a declared length reserves
+   * nothing), and each growth is charged to the relay-wide and per-address
+   * upload budgets; the upload has an absolute and an idle deadline. None of
+   * this depends on the route or on what the credential looks like.
    */
   const readBody = async (
     request: Request,
@@ -266,8 +307,13 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       let total = 0;
       const ensure = (needed: number): boolean => {
         if (needed <= buffer.byteLength) return true;
-        let size = Math.max(buffer.byteLength * 2, Number.isFinite(declared) && declared > 0 ? declared : INITIAL_BODY_BUFFER_BYTES, needed);
-        size = Math.min(size, max);
+        // At most twice what arrived, or a first small block (no larger than a
+        // smaller declared length): a declared Content-Length the caller never
+        // sends reserves nothing beyond that block.
+        const first = buffer.byteLength === 0
+          ? Math.min(INITIAL_BODY_BUFFER_BYTES, Number.isFinite(declared) && declared > 0 ? declared : INITIAL_BODY_BUFFER_BYTES)
+          : 0;
+        const size = Math.min(max, Math.max(buffer.byteLength * 2, first, needed));
         if (!ticket.charge(size - buffer.byteLength)) return false;
         const grown = new Uint8Array(size);
         grown.set(buffer.subarray(0, total));
@@ -338,6 +384,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     body: Uint8Array;
     lane: AdmissionLane;
     dashboard: boolean;
+    /** What the install may answer on this route (response-policy.ts). */
+    route: RouteKind;
     /** The caller's address: the key the unverified and control pools share fairly by. */
     ip: string;
     /** Set for an access token: confirmation is tracked for it. */
@@ -372,6 +420,13 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         headers: forwardHeaders(input.request),
         body: input.body,
         signal: input.request.signal,
+        policy: policies[input.route],
+        chargeEgress: (bytes) => {
+          if (chargeEgress(input.ip, bytes)) return true;
+          log('request_refused', { install: installTag(installId), reason: 'egress_budget' });
+          return false;
+        },
+        onRefused: (reason) => log('request_refused', { install: installTag(installId), reason: `response_${reason}` }),
         onHead: (_status, authenticated) => {
           if (authenticated) {
             if (input.credentialKey) confirmed.add(input.credentialKey);
@@ -394,7 +449,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     // No credential at all: the relay's own not-installed surface. A caller
     // without a token never reaches an engine.
     if (authorization === null) {
-      const anonymous = await readBody(request, limits.maxRequestBodyBytes, ip);
+      const anonymous = await readBody(request, Math.min(limits.maxAnonymousRequestBodyBytes, limits.maxRequestBodyBytes), ip);
       if (!anonymous.ok) return anonymous.response;
       return relayMcpResponse({
         method: request.method,
@@ -429,6 +484,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       path,
       body,
       lane,
+      route: 'api',
       ip,
       // Only an owner-lane call may take the reserved dashboard slot.
       dashboard: lane === 'owner' && isDashboardCall(text),
@@ -475,6 +531,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       path,
       body,
       lane: 'control',
+      route: 'api',
       ip,
       dashboard: false,
       offline: () => json(503, { error: 'temporarily_unavailable', error_description: 'Olympus on your Mac is offline. Try again when your Mac is awake.' }, { 'Retry-After': '30' }),
@@ -514,6 +571,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       body: new Uint8Array(),
       // Owner browser hand-offs: the control lane, paced per address.
       lane: 'control',
+      route: 'browser',
       ip,
       dashboard: false,
       offline: macOffline,
@@ -538,6 +596,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       body: new Uint8Array(),
       // Owner browser hand-offs: the control lane, paced per address.
       lane: 'control',
+      route: 'browser',
       ip,
       dashboard: false,
       offline: macOffline,
@@ -557,7 +616,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       status: 503,
       headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '60' },
     });
-    return toInstall({ installId: demoInstallId, request, path, body, lane: 'control', ip, dashboard: false, offline: unavailable, unknown: unavailable });
+    return toInstall({ installId: demoInstallId, request, path, body, lane: 'control', route: 'demo', ip, dashboard: false, offline: unavailable, unknown: unavailable });
   };
 
   /**
@@ -594,6 +653,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       path: url.pathname,
       body: read.body,
       lane: 'unverified',
+      route: 'api',
       ip,
       dashboard: false,
       offline: () => reply(503, { status: 'mac_offline' }, { 'Retry-After': '30' }),
@@ -632,20 +692,31 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         return fail(ws, 'bad_request', 'publicKey must be an Ed25519 SPKI', 'malformed');
       }
       if (installIdForPublicKey(spkiOf(key)) !== installId) return fail(ws, 'id_mismatch', 'installId is not derived from publicKey', 'id_mismatch');
-      if (!verifyInstallMessage(key, 'register', ws.data.nonce, installId, sig)) return fail(ws, 'bad_signature', 'register signature rejected', 'signature');
+      // One hash, before the signature and before any budget is spent.
+      if (!verifyRegistrationPow(limits.registrationPowBits, ws.data.nonce, installId, relayHost, message.pow)) {
+        return fail(ws, 'bad_request', 'registration proof of work missing or too weak', 'pow');
+      }
+      if (!verifyInstallMessage(key, 'register', ws.data.nonce, installId, relayHost, sig)) return fail(ws, 'bad_signature', 'register signature rejected', 'signature');
       if (!registry.get(installId)) {
-        if (!registrationsPerIp.take(ws.data.ip) || !registrationsGlobal.take('relay')) {
-          return fail(ws, 'rate_limited', 'too many registrations; try again later', 'register_rate');
-        }
+        // A returning install (registered here before, since expired) and a
+        // new one draw on separate budgets, both keyed by the address's
+        // allocation (IPv6 /48), so a flood of new ids cannot lock either out.
+        const returning = registry.wasRemoved(installId);
+        const allocation = prefixKey(ws.data.ip);
+        const admitted = returning
+          ? reregistrationsPerIp.take(allocation) && takeGlobal(reregistrationsGlobal, 'reregistrations')
+          : registrationsPerIp.take(allocation) && takeGlobal(registrationsGlobal, 'registrations');
+        if (!admitted) return fail(ws, 'rate_limited', 'too many registrations; try again later', 'register_rate');
         if (!registry.register(installId, publicKey)) return fail(ws, 'capacity', 'relay registry is full', 'registry_full');
-        log('register', { install: installTag(installId) });
+        log('register', { install: installTag(installId), returning });
       }
     } else if (message.type === 'hello') {
       const record = registry.get(installId);
       if (!record) return fail(ws, 'unregistered', 'install is not registered', 'unregistered');
-      if (!verifyInstallMessage(publicKeyOf(record), 'hello', ws.data.nonce, installId, sig)) {
+      if (!verifyInstallMessage(publicKeyOf(record), 'hello', ws.data.nonce, installId, relayHost, sig)) {
         return fail(ws, 'bad_signature', 'hello signature rejected', 'signature');
       }
+      registry.confirm(installId);
     } else {
       return fail(ws, 'bad_request', 'expected hello or register', 'malformed');
     }
@@ -664,6 +735,14 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     log('session_ready', { install: installTag(installId) });
   };
 
+  /** A socket leaves the pending pool: it authenticated, failed, closed, or was evicted. */
+  const unpend = (ws: ServerWebSocket<SocketData>): boolean => {
+    if (!ws.data.pending) return false;
+    ws.data.pending = false;
+    pendingSockets.delete(ws);
+    return true;
+  };
+
   const server = Bun.serve<SocketData, never>({
     hostname: config.listen?.host ?? '127.0.0.1',
     port: config.listen?.port ?? 8787,
@@ -679,9 +758,16 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       const path = url.pathname;
       const ip = clientIp(request, server);
 
+      // No service worker is ever registered from the relay origin: a script
+      // fetch for one is refused whatever the route (install answers could
+      // otherwise be offered as a worker script).
+      if (request.headers.has('service-worker')) return json(403, { error: 'forbidden' });
+
       if (path === CONNECT_PATH) {
-        if (!sessionAttempts.take(ip)) return tooMany();
-        if (sessions.size + pendingSockets >= limits.maxSessions) return json(503, { error: 'capacity' });
+        if (!sessionAttempts.take(prefixKey(ip))) return tooMany();
+        // Only authenticated sessions count here; sockets still
+        // authenticating have their own pool (websocket.open).
+        if (sessions.size >= limits.maxSessions) return json(503, { error: 'capacity' });
         const releaseIp = sessionsPerIp.tryAcquire(ip, limits.sessionsPerIp);
         if (!releaseIp) return tooMany();
         const upgraded = server.upgrade(request, { data: { ip, nonce: newNonce(), releaseIp, pending: false } });
@@ -740,10 +826,19 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       backpressureLimit: 16 * 1024 * 1024,
       closeOnBackpressureLimit: true,
       open(ws) {
-        pendingSockets += 1;
+        // The pending pool is full: the oldest unauthenticated socket makes
+        // room. A real install answers its challenge within a round trip, so
+        // stalled sockets cannot keep it out; they only push each other out.
+        while (pendingSockets.size >= Math.max(1, limits.maxPendingSockets)) {
+          const oldest = pendingSockets.values().next().value!;
+          unpend(oldest);
+          clearTimeout(oldest.data.authTimer);
+          oldest.close(4000, 'pending_capacity');
+        }
         ws.data.pending = true;
+        pendingSockets.add(ws);
         ws.data.authTimer = setTimeout(() => ws.close(4000, 'auth_timeout'), limits.authTimeoutMs);
-        ws.send(JSON.stringify({ type: 'challenge', v: PROTOCOL_VERSION, nonce: ws.data.nonce }));
+        ws.send(JSON.stringify({ type: 'challenge', v: PROTOCOL_VERSION, nonce: ws.data.nonce, pow: limits.registrationPowBits } satisfies ChallengeMessage));
       },
       message(ws, data) {
         const session = ws.data.session;
@@ -759,9 +854,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         }
         if (!session) {
           // One authentication attempt per socket: a failure closes it.
-          if (!ws.data.pending) return;
-          ws.data.pending = false;
-          pendingSockets -= 1;
+          if (!unpend(ws)) return;
           authenticate(ws, message);
           return;
         }
@@ -770,10 +863,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       },
       close(ws) {
         clearTimeout(ws.data.authTimer);
-        if (ws.data.pending) {
-          ws.data.pending = false;
-          pendingSockets -= 1;
-        }
+        unpend(ws);
         ws.data.releaseIp();
         const session = ws.data.session;
         if (!session) return;
@@ -788,7 +878,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
 
   const startedAt = new Date(now()).toISOString();
   const sweep = (at = now()): string[] => {
-    const expired = registry.expire(at, limits.inactiveRegistrationTtlMs, (installId) => sessions.has(installId));
+    const expired = registry.expire(at, limits.inactiveRegistrationTtlMs, (installId) => sessions.has(installId), limits.unconfirmedRegistrationTtlMs);
     for (const installId of expired) log('registration_expired', { install: installTag(installId) });
     return expired;
   };

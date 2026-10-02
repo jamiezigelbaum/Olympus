@@ -17,7 +17,9 @@ export type RelayEvent =
   | 'request_failed'
   | 'install_revoked'
   | 'install_restored'
-  | 'registration_expired';
+  | 'registration_expired'
+  /** A relay-wide budget (registrations, returning registrations, egress) ran dry; once per episode. */
+  | 'budget_exhausted';
 
 export type RelayLog = (event: RelayEvent, fields?: Record<string, string | number | boolean>) => void;
 

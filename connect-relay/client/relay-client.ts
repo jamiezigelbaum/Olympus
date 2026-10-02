@@ -17,9 +17,9 @@ import {
   chunks,
   decodeBodyFrame,
   encodeBodyFrame,
+  installAuthMessage,
   parseHeaderList,
   parseTextFrame,
-  signInstallMessage,
   streamId,
   type ClientToRelayMessage,
 } from '../shared/protocol.ts';
@@ -34,7 +34,10 @@ export type RelayClientStatus =
   | { state: 'stopped' };
 
 export interface RelayClientOptions {
-  /** e.g. `mcp.olympusplugin.ai`; the client dials `wss://<relayHost>/v2/connect`. */
+  /**
+   * e.g. `mcp.olympusplugin.ai`; the client dials `wss://<relayHost>/v2/connect`
+   * and binds its session signature to this name.
+   */
   readonly relayHost: string;
   /** Test seam: the full session URL (e.g. `ws://127.0.0.1:<port>/v2/connect`). */
   readonly relayUrl?: string;
@@ -227,13 +230,20 @@ export class RelayClient {
       if (!message) return socket.close(4002, 'protocol_error');
       switch (message.type) {
         case 'challenge': {
-          const nonce = String(message.nonce);
           const kind = this.register ? 'register' : 'hello';
-          const sig = signInstallMessage(identity.privateKey, kind, nonce, identity.installId);
-          this.send(
-            kind === 'register'
-              ? { type: 'register', v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig }
-              : { type: 'hello', v: PROTOCOL_VERSION, installId: identity.installId, sig },
+          // A register solves the relay's proof of work first (a fraction of
+          // a second); a relay asking for an unreasonable one is given up on.
+          void installAuthMessage({
+            kind,
+            identity,
+            nonce: String(message.nonce),
+            powBits: typeof message.pow === 'number' ? message.pow : 0,
+            relayHost: this.options.relayHost,
+          }).then(
+            (auth) => {
+              if (this.socket === socket) this.send(auth);
+            },
+            () => abandon(4002, 'protocol_error', 'the relay asked for an unreasonable registration proof of work'),
           );
           return;
         }

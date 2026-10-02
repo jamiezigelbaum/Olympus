@@ -7,16 +7,39 @@ import type { BucketSpec } from '../shared/rate-limit.ts';
 import { KeyedCounter, KeyedTokenBuckets } from '../shared/rate-limit.ts';
 
 export interface RelayLimits {
-  /** New install registrations per address (burst, refill). */
+  /** New install registrations per address (IPv6 by /48; burst, refill). */
   readonly registrationsPerIp: BucketSpec;
   /** New registrations across the relay. */
   readonly registrationsGlobal: BucketSpec;
-  /** Session attempts (WebSocket upgrades) per address. */
+  /**
+   * Registrations of ids this relay registered before and has since expired
+   * (a Mac back after a long sleep), per address: a budget of their own, so a
+   * flood of new registrations cannot lock returning installs out.
+   */
+  readonly reregistrationsPerIp: BucketSpec;
+  /** Returning registrations across the relay. */
+  readonly reregistrationsGlobal: BucketSpec;
+  /** Leading zero bits a `register` must prove (shared/protocol.ts); 0 turns it off. */
+  readonly registrationPowBits: number;
+  /**
+   * A registration whose install never authenticated again (`hello`) and is
+   * not online is dropped after this long, so one-shot registrations cannot
+   * fill the registry.
+   */
+  readonly unconfirmedRegistrationTtlMs: number;
+  /** Session attempts (WebSocket upgrades) per address (IPv6 by /48). */
   readonly sessionAttemptsPerIp: BucketSpec;
   /** Live sessions per address. */
   readonly sessionsPerIp: number;
-  /** Live sessions across the relay. */
+  /** Live (authenticated) sessions across the relay. */
   readonly maxSessions: number;
+  /**
+   * Sockets that have not authenticated yet, across the relay: a pool of
+   * their own, never counted against `maxSessions`. When it is full the
+   * oldest pending socket is closed for the new one, so stalled sockets
+   * cannot keep a real install from connecting.
+   */
+  readonly maxPendingSockets: number;
   /** Time a new session has to authenticate. */
   readonly authTimeoutMs: number;
   /**
@@ -58,6 +81,8 @@ export interface RelayLimits {
    */
   readonly privateFetchesPerIp: BucketSpec;
   readonly maxRequestBodyBytes: number;
+  /** Body cap for `/mcp` without any credential (the relay's own not-installed answers). */
+  readonly maxAnonymousRequestBodyBytes: number;
   readonly maxResponseBodyBytes: number;
   /** Request bodies being uploaded at once, across the relay. */
   readonly maxConcurrentUploads: number;
@@ -65,6 +90,8 @@ export interface RelayLimits {
   readonly uploadsPerIp: number;
   /** Bytes of request bodies the relay holds while they upload, across the relay. */
   readonly maxUploadBufferedBytes: number;
+  /** The same, per address: at most a sixteenth of the relay-wide budget. */
+  readonly maxUploadBufferedBytesPerIp: number;
   /** Longest one request body may take to upload. */
   readonly uploadTimeoutMs: number;
   /** Longest silence inside one request body upload. */
@@ -83,14 +110,27 @@ export interface RelayLimits {
   readonly responseTotalTimeoutMs: number;
   /** Registrations with no session for this long are dropped. */
   readonly inactiveRegistrationTtlMs: number;
+  /**
+   * Response bytes the relay sends to one address, every lane included (the
+   * owner lane rests on a marker the install itself sets). Generous: ChatGPT
+   * calls from a shared pool of addresses.
+   */
+  readonly egressBytesPerIp: BucketSpec;
+  /** Response bytes the relay sends, across the relay. */
+  readonly egressBytesGlobal: BucketSpec;
 }
 
 export const DEFAULT_LIMITS: RelayLimits = {
   registrationsPerIp: { capacity: 5, refillPerSecond: 5 / 3600 },
   registrationsGlobal: { capacity: 200, refillPerSecond: 200 / 3600 },
+  reregistrationsPerIp: { capacity: 5, refillPerSecond: 5 / 3600 },
+  reregistrationsGlobal: { capacity: 500, refillPerSecond: 500 / 3600 },
+  registrationPowBits: 16,
+  unconfirmedRegistrationTtlMs: 24 * 60 * 60_000,
   sessionAttemptsPerIp: { capacity: 30, refillPerSecond: 0.5 },
   sessionsPerIp: 20,
   maxSessions: 20_000,
+  maxPendingSockets: 1_024,
   authTimeoutMs: 10_000,
   requestsPerInstall: { capacity: 60, refillPerSecond: 10 },
   concurrentPerInstall: 8,
@@ -103,10 +143,12 @@ export const DEFAULT_LIMITS: RelayLimits = {
   publicRequestsPerIp: { capacity: 120, refillPerSecond: 20 },
   privateFetchesPerIp: { capacity: 30, refillPerSecond: 1 },
   maxRequestBodyBytes: 1024 * 1024,
+  maxAnonymousRequestBodyBytes: 64 * 1024,
   maxResponseBodyBytes: 8 * 1024 * 1024,
   maxConcurrentUploads: 512,
   uploadsPerIp: 64,
   maxUploadBufferedBytes: 64 * 1024 * 1024,
+  maxUploadBufferedBytesPerIp: 4 * 1024 * 1024,
   uploadTimeoutMs: 30_000,
   uploadIdleTimeoutMs: 10_000,
   maxSessionQueuedBytes: 16 * 1024 * 1024,
@@ -116,6 +158,8 @@ export const DEFAULT_LIMITS: RelayLimits = {
   responseIdleTimeoutMs: 5 * 60_000,
   responseTotalTimeoutMs: 30 * 60_000,
   inactiveRegistrationTtlMs: 90 * 24 * 60 * 60_000,
+  egressBytesPerIp: { capacity: 1024 * 1024 * 1024, refillPerSecond: 16 * 1024 * 1024 },
+  egressBytesGlobal: { capacity: 4 * 1024 * 1024 * 1024, refillPerSecond: 64 * 1024 * 1024 },
 };
 
 /**
@@ -329,13 +373,15 @@ export class ConfirmedCredentials {
 
 /**
  * Request bodies while they upload: a global and a per-address count of
- * uploads, and a global byte budget charged as bytes arrive. A ticket is taken
- * before any body byte is read.
+ * uploads, and a global and a per-address byte budget charged as the body
+ * buffer grows with bytes that actually arrived (never by a declared length).
+ * A ticket is taken before any body byte is read.
  */
 export class UploadBudget {
   private uploads = 0;
   private bytes = 0;
   private readonly perAddress = new KeyedCounter();
+  private readonly bytesPerAddress = new Map<string, number>();
 
   constructor(private readonly limits: RelayLimits) {}
 
@@ -355,10 +401,13 @@ export class UploadBudget {
     this.uploads += 1;
     let charged = 0;
     let done = false;
+    const perAddressCap = Math.min(this.limits.maxUploadBufferedBytesPerIp, Math.floor(this.limits.maxUploadBufferedBytes / 16));
     return {
       charge: (n) => {
-        if (done || this.bytes + n > this.limits.maxUploadBufferedBytes) return false;
+        const held = this.bytesPerAddress.get(address) ?? 0;
+        if (done || this.bytes + n > this.limits.maxUploadBufferedBytes || held + n > perAddressCap) return false;
         this.bytes += n;
+        this.bytesPerAddress.set(address, held + n);
         charged += n;
         return true;
       },
@@ -366,6 +415,9 @@ export class UploadBudget {
         if (done) return;
         done = true;
         this.bytes -= charged;
+        const held = (this.bytesPerAddress.get(address) ?? 0) - charged;
+        if (held > 0) this.bytesPerAddress.set(address, held);
+        else this.bytesPerAddress.delete(address);
         this.uploads -= 1;
         releaseAddress();
       },
@@ -374,7 +426,7 @@ export class UploadBudget {
 }
 
 export interface UploadTicket {
-  /** Charges `n` more buffered bytes; false when the relay-wide budget is spent. */
+  /** Charges `n` more buffered bytes; false when the relay-wide or this address's budget is spent. */
   charge(n: number): boolean;
   /** Releases the ticket and every byte it charged; one-shot. */
   end(): void;

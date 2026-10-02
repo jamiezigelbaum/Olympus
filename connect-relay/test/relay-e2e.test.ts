@@ -562,16 +562,16 @@ describe('private answer collection', () => {
     expect(workerA.requests[0]!.headers['x-olympus-relay']).toBe(a.secret);
     expect(workerA.requests[0]!.headers.origin).toBe(PANEL);
     expect(workerB.requests).toHaveLength(0);
-    // The relay's own origin is the panel's dedicated domain.
-    expect((await collect(relay, jobId, { origin: `https://${PUBLIC_HOST}` })).status).toBe(200);
 
-    for (const origin of ['https://evil.example', 'null', '', 'https://x.y.web-sandbox.oaiusercontent.com']) {
+    // The relay's own origin only names the panel (`_meta.ui.domain`); ChatGPT
+    // never serves it from there, and install answers on it are sandboxed.
+    for (const origin of [`https://${PUBLIC_HOST}`, 'https://evil.example', 'null', '', 'https://x.y.web-sandbox.oaiusercontent.com']) {
       const refused = await collect(relay, jobId, { origin });
       expect(refused.status, origin).toBe(403);
       expect(refused.headers.get('access-control-allow-origin')).toBeNull();
     }
     expect((await collect(relay, jobId, { method: 'GET' })).status).toBe(405);
-    expect(workerA.requests).toHaveLength(2);
+    expect(workerA.requests).toHaveLength(1);
 
     // Wrong shapes and unknown installs never reach any engine.
     expect((await collect(relay, 'nope')).status).toBe(404);
@@ -582,7 +582,7 @@ describe('private answer collection', () => {
     expect(await unknown.json()).toEqual({ status: 'gone' });
     expect(unknown.headers.get('access-control-allow-origin')).toBe(PANEL);
     expect((await collect(relay, jobId, { body: 'x'.repeat(600) })).status).toBe(413);
-    expect(workerA.requests).toHaveLength(2);
+    expect(workerA.requests).toHaveLength(1);
     expect(workerB.requests).toHaveLength(0);
 
     const logs = logLines.join('\n');
@@ -753,7 +753,7 @@ describe('sessions and revocation', () => {
       const message = JSON.parse(String(event.data));
       messages.push(message.type === 'error' ? message.code : message.type);
       if (message.type === 'challenge') {
-        socket.send(JSON.stringify({ type: 'hello', v: PROTOCOL_VERSION, installId: victim.installId, sig: signInstallMessage(impostorKey, 'hello', message.nonce, victim.installId) }));
+        socket.send(JSON.stringify({ type: 'hello', v: PROTOCOL_VERSION, installId: victim.installId, sig: signInstallMessage(impostorKey, 'hello', message.nonce, victim.installId, PUBLIC_HOST) }));
       }
     });
     await closed;
@@ -777,7 +777,7 @@ describe('sessions and revocation', () => {
           v: PROTOCOL_VERSION,
           installId: other,
           publicKey: base64url(spkiOf(publicKey)),
-          sig: signInstallMessage(privateKey, 'register', message.nonce, other),
+          sig: signInstallMessage(privateKey, 'register', message.nonce, other, PUBLIC_HOST),
         }));
       }
     });

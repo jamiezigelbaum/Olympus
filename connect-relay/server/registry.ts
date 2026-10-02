@@ -27,6 +27,11 @@ export interface InstallRecord {
   readonly publicKey: string;
   readonly registeredAt: number;
   lastSeenAt: number;
+  /**
+   * The install authenticated again after registering (a `hello`), or was
+   * online at a sweep. An unconfirmed registration expires after a day.
+   */
+  confirmed: boolean;
 }
 
 /** Aggregate numbers only: safe to print, names no install. */
@@ -40,9 +45,17 @@ export type OperatorChangeState = 'none' | 'pending' | 'failed' | 'durable';
 
 type OperatorOp = 'revoke' | 'restore';
 
+/**
+ * `register` entries written before confirmation existed carry no
+ * `unconfirmed` flag and load as confirmed: installs already in a registry
+ * keep their 90-day expiry.
+ */
 export type LogEntry =
-  | { op: 'register'; installId: string; publicKey: string; at: number }
-  | { op: 'seen' | 'remove' | 'revoke' | 'restore'; installId: string; at: number };
+  | { op: 'register'; installId: string; publicKey: string; at: number; unconfirmed?: true }
+  | { op: 'seen' | 'confirm' | 'remove' | 'revoke' | 'restore'; installId: string; at: number };
+
+/** Expired ids remembered, so their return is told apart from a new registration. */
+const MAX_REMEMBERED_REMOVALS = 20_000;
 
 /** Rewrites of `seen` are throttled: a daily resolution is enough for a 90-day expiry. */
 const SEEN_RESOLUTION_MS = 24 * 60 * 60_000;
@@ -50,6 +63,8 @@ const SEEN_RESOLUTION_MS = 24 * 60 * 60_000;
 export class MemoryInstallRegistry {
   protected readonly records = new Map<string, InstallRecord>();
   protected readonly revoked = new Set<string>();
+  /** Ids that were registered here and expired, oldest first (bounded). */
+  protected readonly removed = new Set<string>();
   /** Operator changes whose write has not finished. */
   private readonly pendingChanges = new Map<string, { op: OperatorOp; promise: Promise<boolean> }>();
   /** Operator changes whose write failed and was not retried successfully since. */
@@ -69,10 +84,24 @@ export class MemoryInstallRegistry {
     if (this.revoked.has(installId)) return false;
     if (this.records.has(installId)) return true;
     if (this.records.size >= this.maxInstalls) return false;
-    const entry: LogEntry = { op: 'register', installId, publicKey, at: this.now() };
+    const entry: LogEntry = { op: 'register', installId, publicKey, at: this.now(), unconfirmed: true };
     this.apply(entry);
     void this.append(entry).catch(() => {});
     return true;
+  }
+
+  /** True when this id was registered here before and expired since (a returning install). */
+  wasRemoved(installId: string): boolean {
+    return this.removed.has(installId);
+  }
+
+  /** The install authenticated with `hello`: its registration keeps the long expiry from now on. */
+  confirm(installId: string): void {
+    const record = this.records.get(installId);
+    if (!record || record.confirmed) return;
+    const entry: LogEntry = { op: 'confirm', installId, at: this.now() };
+    this.apply(entry);
+    void this.append(entry).catch(() => {});
   }
 
   /** Records a session start or heartbeat. */
@@ -85,11 +114,29 @@ export class MemoryInstallRegistry {
     if (stale) void this.append({ op: 'seen', installId, at }).catch(() => {});
   }
 
-  /** Removes registrations with no session for `inactiveMs` and returns their ids. */
-  expire(now: number, inactiveMs: number, isLive: (installId: string) => boolean = () => false): string[] {
-    const expired = [...this.records.values()]
-      .filter((record) => now - record.lastSeenAt > inactiveMs && !isLive(record.installId))
-      .map((record) => record.installId);
+  /**
+   * Removes registrations with no session for `inactiveMs`, and unconfirmed
+   * ones older than `unconfirmedMs` with no session, and returns their ids.
+   * An unconfirmed install that is online is confirmed instead.
+   */
+  expire(
+    now: number,
+    inactiveMs: number,
+    isLive: (installId: string) => boolean = () => false,
+    unconfirmedMs = Number.POSITIVE_INFINITY,
+  ): string[] {
+    const expired: string[] = [];
+    for (const record of [...this.records.values()]) {
+      const live = isLive(record.installId);
+      if (!record.confirmed && live) {
+        this.confirm(record.installId);
+        continue;
+      }
+      if (live) continue;
+      if (now - record.lastSeenAt > inactiveMs || (!record.confirmed && now - record.registeredAt > unconfirmedMs)) {
+        expired.push(record.installId);
+      }
+    }
     for (const installId of expired) {
       const entry: LogEntry = { op: 'remove', installId, at: now };
       this.apply(entry);
@@ -179,8 +226,15 @@ export class MemoryInstallRegistry {
           publicKey: entry.publicKey,
           registeredAt: entry.at,
           lastSeenAt: entry.at,
+          confirmed: entry.unconfirmed !== true,
         });
+        this.removed.delete(entry.installId);
         return;
+      case 'confirm': {
+        const record = this.records.get(entry.installId);
+        if (record) record.confirmed = true;
+        return;
+      }
       case 'seen': {
         const record = this.records.get(entry.installId);
         if (record) record.lastSeenAt = Math.max(record.lastSeenAt, entry.at);
@@ -188,6 +242,9 @@ export class MemoryInstallRegistry {
       }
       case 'remove':
         this.records.delete(entry.installId);
+        this.removed.delete(entry.installId);
+        this.removed.add(entry.installId);
+        if (this.removed.size > MAX_REMEMBERED_REMOVALS) this.removed.delete(this.removed.values().next().value!);
         return;
       case 'revoke':
         this.records.delete(entry.installId);
@@ -234,8 +291,19 @@ export class FileInstallRegistry extends MemoryInstallRegistry {
 
   private compact(): void {
     const lines: string[] = [];
+    // Remembered removals (expired ids), oldest first, so a returning
+    // install is still told apart after a restart.
+    for (const installId of this.removed) {
+      lines.push(JSON.stringify({ op: 'remove', installId, at: 0 }));
+    }
     for (const record of this.records.values()) {
-      lines.push(JSON.stringify({ op: 'register', installId: record.installId, publicKey: record.publicKey, at: record.registeredAt }));
+      lines.push(JSON.stringify({
+        op: 'register',
+        installId: record.installId,
+        publicKey: record.publicKey,
+        at: record.registeredAt,
+        ...(record.confirmed ? {} : { unconfirmed: true }),
+      }));
       if (record.lastSeenAt !== record.registeredAt) lines.push(JSON.stringify({ op: 'seen', installId: record.installId, at: record.lastSeenAt }));
     }
     for (const installId of this.revoked) lines.push(JSON.stringify({ op: 'revoke', installId, at: 0 }));
