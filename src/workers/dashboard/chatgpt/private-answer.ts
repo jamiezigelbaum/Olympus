@@ -52,6 +52,8 @@ export interface ChatGptPrivateAnswerConfig {
   secondMs: number;
   /** How long one collection keeps polling before offering Try again. */
   pollCapMs: number;
+  /** The same, for a full-detail answer (`detail: 'full'`). */
+  fullPollCapMs: number;
   /** How long "Opened on your Mac" (or its failure) stays beside a source. */
   noteMs: number;
   /** The handshake: re-send the height this long after initialized, and send anyway if the host never answers. */
@@ -65,6 +67,7 @@ export interface ChatGptPrivateAnswerPageOptions {
   relayOrigin: string;
   secondMs?: number;
   pollCapMs?: number;
+  fullPollCapMs?: number;
   noteMs?: number;
   heightResendMs?: number;
   initFallbackMs?: number;
@@ -73,6 +76,8 @@ export interface ChatGptPrivateAnswerPageOptions {
 }
 
 export const CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS = 2 * 60_000;
+/** A full-detail answer reads the whole report: the engine allows it 180 s, the panel waits a little longer. */
+export const CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 190_000;
 /** The panel's IndexedDB: one key pair per job id (key path: the job id). */
 export const CHATGPT_PRIVATE_ANSWER_KEY_STORE = {
   database: 'olympus-private-answer',
@@ -97,7 +102,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
   // What the tool result said; null renders nothing.
-  let info: { count: number; state: string; jobId: string; percent: number } | null = null;
+  let info: { count: number; state: string; jobId: string; percent: number; full: boolean } | null = null;
   // idle | working | slow | revealed | hidden | error. A ready job starts
   // collecting as soon as it arrives; idle lasts only until then.
   let phase = 'idle';
@@ -195,10 +200,11 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         state: value.state,
         jobId: value.state === 'ready' && typeof value.jobId === 'string' ? value.jobId : '',
         percent: value.state === 'model_downloading' ? percent : -1,
+        full: value.detail === 'full',
       };
     }
     const same = !!info && !!next && info.count === next.count && info.state === next.state
-      && info.jobId === next.jobId && info.percent === next.percent;
+      && info.jobId === next.jobId && info.percent === next.percent && info.full === next.full;
     if (same || (!info && !next)) return;
     if (!next || !info || next.jobId !== info.jobId) {
       // Another result: forget everything about the last one.
@@ -512,7 +518,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         if (!keepWaiting) return fail(T.generic, false, byUser);
         const header = Number(response.headers && response.headers.get ? response.headers.get('retry-after') : NaN);
         const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
-        if (Date.now() - started + seconds * config.secondMs > config.pollCapMs) {
+        if (Date.now() - started + seconds * config.secondMs > (info && info.full ? config.fullPollCapMs : config.pollCapMs)) {
           phase = 'slow';
           errorText = T.slow;
           canRetry = true;
@@ -752,7 +758,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     // idle (about to start) and working: the answer is on its way.
     line.className = 'sub working';
     line.appendChild(el('span', 'spinner'));
-    line.appendChild(doc.createTextNode(T.preparing));
+    line.appendChild(doc.createTextNode(info && info.full ? T.preparingFull : T.preparing));
     return view.card;
   }
 
@@ -957,6 +963,7 @@ export function chatgptPrivateAnswerPageHtml(options: ChatGptPrivateAnswerPageOp
     copy: DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY,
     secondMs: options.secondMs ?? 1000,
     pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
+    fullPollCapMs: options.fullPollCapMs ?? CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS,
     noteMs: options.noteMs ?? 4000,
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,

@@ -46203,6 +46203,7 @@ var init_vocabulary = __esm(() => {
     downloadingUnknown: "The private model is downloading…",
     downloadingLabel: "Private model download",
     preparing: "Preparing the answer on your Mac…",
+    preparingFull: "Reading the full report on your Mac…",
     slow: "Your Mac is taking longer than usual to prepare the answer.",
     failed: "Olympus couldn't answer this on your Mac.",
     claimed: "This answer was already opened in another window.",
@@ -104467,10 +104468,11 @@ function chatgptPrivateAnswerProgram(config2) {
         count: Math.floor(value.count),
         state: value.state,
         jobId: value.state === "ready" && typeof value.jobId === "string" ? value.jobId : "",
-        percent: value.state === "model_downloading" ? percent : -1
+        percent: value.state === "model_downloading" ? percent : -1,
+        full: value.detail === "full"
       };
     }
-    const same = !!info && !!next && info.count === next.count && info.state === next.state && info.jobId === next.jobId && info.percent === next.percent;
+    const same = !!info && !!next && info.count === next.count && info.state === next.state && info.jobId === next.jobId && info.percent === next.percent && info.full === next.full;
     if (same || !info && !next)
       return;
     if (!next || !info || next.jobId !== info.jobId) {
@@ -104777,7 +104779,7 @@ function chatgptPrivateAnswerProgram(config2) {
           return fail(T.generic, false, byUser);
         const header = Number(response.headers && response.headers.get ? response.headers.get("retry-after") : NaN);
         const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
-        if (Date.now() - started + seconds * config2.secondMs > config2.pollCapMs) {
+        if (Date.now() - started + seconds * config2.secondMs > (info && info.full ? config2.fullPollCapMs : config2.pollCapMs)) {
           phase = "slow";
           errorText = T.slow;
           canRetry = true;
@@ -105013,7 +105015,7 @@ function chatgptPrivateAnswerProgram(config2) {
     }
     line.className = "sub working";
     line.appendChild(el("span", "spinner"));
-    line.appendChild(doc2.createTextNode(T.preparing));
+    line.appendChild(doc2.createTextNode(info && info.full ? T.preparingFull : T.preparing));
     return view.card;
   }
   function revealedView(shown) {
@@ -105159,6 +105161,7 @@ function chatgptPrivateAnswerPageHtml(options) {
     copy: DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY,
     secondMs: options.secondMs ?? 1000,
     pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
+    fullPollCapMs: options.fullPollCapMs ?? CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS,
     noteMs: options.noteMs ?? 4000,
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,
@@ -105185,7 +105188,7 @@ function chatgptPrivateAnswerPageHtml(options) {
 function scriptJson2(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
+var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 190000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
 var init_private_answer2 = __esm(() => {
   init_vocabulary();
   init_private_answer_contract();

@@ -143,6 +143,7 @@ interface Claim { key?: string }
 interface MountOptions {
   openai?: Record<string, any>;
   pollCapMs?: number;
+  fullPollCapMs?: number;
   replies?: RelayReply[];
   plaintext?: unknown;
   idb?: FakeIdb;
@@ -164,6 +165,7 @@ function mount(options: MountOptions = {}): Host {
     relayOrigin: RELAY,
     secondMs: 1,
     pollCapMs: options.pollCapMs ?? 5_000,
+    fullPollCapMs: options.fullPollCapMs ?? 5_000,
     keyStore: { timeoutMs: 30 },
     noteMs: 60_000,
     heightResendMs: options.heightResendMs ?? 400,
@@ -534,6 +536,22 @@ describe('collecting the private answer', () => {
   test('a busy Mac (503 busy) keeps polling', async () => {
     const host = mount({ replies: [{ status: 503, body: { status: 'busy' }, retryAfter: '1' }, 'ready'] });
     await reveal(host);
+  });
+
+  test('a full-detail answer says it is reading the full report and waits longer', async () => {
+    const host = mount({ pollCapMs: 30, fullPollCapMs: 5_000, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }] });
+    host.push({ content: [], structuredContent: { results: [] }, _meta: meta({ v: 1, count: 2, state: 'ready', jobId: JOB, detail: 'full' }) });
+    expect(host.text()).toContain(W.preparingFull);
+    await sleep(120);
+    expect(host.text()).not.toContain(W.slow);
+    expect(host.text()).toContain(W.preparingFull);
+  });
+
+  test('a summary answer keeps the usual copy and cap', async () => {
+    const host = mount({ pollCapMs: 30, fullPollCapMs: 5_000, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }] });
+    host.push(ready());
+    expect(host.text()).toContain(W.preparing);
+    await host.until(() => host.text().includes(W.slow), 'the slow notice');
   });
 
   test('polling stops at the cap and offers Try again', async () => {

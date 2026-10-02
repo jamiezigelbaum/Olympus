@@ -1457,6 +1457,7 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   downloadingUnknown: 'The private model is downloading…',
   downloadingLabel: 'Private model download',
   preparing: 'Preparing the answer on your Mac…',
+  preparingFull: 'Reading the full report on your Mac…',
   slow: 'Your Mac is taking longer than usual to prepare the answer.',
   failed: 'Olympus couldn\'t answer this on your Mac.',
   claimed: 'This answer was already opened in another window.',
