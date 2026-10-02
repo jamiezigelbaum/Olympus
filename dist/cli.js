@@ -109392,7 +109392,7 @@ async function callSetupTool(name, args, backend) {
         const { confirmation, revision, ...fields } = args;
         if (confirmation !== undefined && typeof confirmation !== "string")
           throw new ChatGptSurfaceError("invalid_params");
-        if (revision !== undefined && (typeof revision !== "string" || !revision || revision.length > 64)) {
+        if (typeof revision !== "string" || !revision || revision.length > 64) {
           throw new ChatGptSurfaceError("invalid_params");
         }
         let update;
@@ -109402,11 +109402,9 @@ async function callSetupTool(name, args, backend) {
           throw new ChatGptSurfaceError("invalid_params");
         }
         const secrets = secretLocations(backend);
-        if (revision !== undefined) {
-          const current = backend.privacySettings();
-          if (current.revision !== revision)
-            return privacyToolResult(visiblePrivacy(current, secrets), "conflict");
-        }
+        const current = backend.privacySettings();
+        if (current.revision !== revision)
+          return privacyToolResult(visiblePrivacy(current, secrets), "conflict");
         const confirmed = confirmation !== undefined && privacyConfirmationValid(backend, confirmation);
         if (!confirmed && lowersPrivacy(update, visiblePrivacy(backend.privacySettings(), secrets))) {
           throw new ChatGptSurfaceError("privacy_owner_only");
@@ -109899,6 +109897,7 @@ var init_setup_tools = __esm(() => {
         confirmation: { type: "string", maxLength: 128, description: "The panel's confirmation from olympus_privacy_get." },
         revision: { type: "string", maxLength: 64, description: "The revision from olympus_privacy_get; a save against changed settings is refused." }
       },
+      required: ["revision"],
       additionalProperties: false
     },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },

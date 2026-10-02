@@ -740,6 +740,9 @@
             "description": "The revision from olympus_privacy_get; a save against changed settings is refused."
           }
         },
+        "required": [
+          "revision"
+        ],
         "additionalProperties": false
       },
       "annotations": {
