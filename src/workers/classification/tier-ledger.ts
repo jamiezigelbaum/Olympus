@@ -38,7 +38,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 3;
+export const TIER_LEDGER_SCHEMA_VERSION = 4;
 
 export type TierLedgerState = 'pending' | 'current' | 'moving';
 
@@ -170,6 +170,26 @@ export type TierRoutedOutcome =
 export interface TierLedgerOptions {
   dbPath: string;
   now?: () => Date;
+}
+
+/** Ledger rows one `rejudgeCandidatePage` call reads at most. */
+export const DEFAULT_REJUDGE_SCAN_ROWS = 2_000;
+
+/**
+ * An open re-judge question (`openRejudgeQuestion`): the decision the
+ * sniffer's answer completes. The item stays where it is until then.
+ */
+export interface TierRejudgeQuestion {
+  /** The re-judge's decision, its content question open (`contentPending`). */
+  decision: TierDecision;
+  /** A raise the answer needs is queued without hiding (moves wait for the owner-approved migration). */
+  keepVisible: boolean;
+}
+
+interface StoredRejudgeQuestion extends TierRejudgeQuestion {
+  /** The row's generation and decision time when asked: a newer decision makes the question stale. */
+  generation: number;
+  decidedAt: string;
 }
 
 export class TierLedgerGenerationConflictError extends Error {
@@ -347,6 +367,13 @@ export class TierLedger {
     this.db.transaction(() => {
       const existing = this.readRow(identity);
       if (!existing) return;
+      if (verdict.pass === 'content') {
+        const question = this.rejudgeQuestion(identity);
+        if (question) {
+          outcome = this.answerRejudgeQuestion(identity, question, verdict, options);
+          return;
+        }
+      }
       if (existing.state === 'moving') {
         outcome = 'held_moving';
         return;
@@ -421,6 +448,48 @@ export class TierLedger {
       `).run(verdict.modelId, ...idParams(identity));
     })();
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity)! };
+  }
+
+  /**
+   * A re-judge question answered: the decision it kept is completed with the
+   * verdict and recorded like any routed decision. The item was visible all
+   * along, so only a Private verdict raises it (hidden first, unless the
+   * question said to keep it visible for the owner-approved migration); a
+   * Personal verdict on a Personal item changes nothing but its reasons.
+   */
+  private answerRejudgeQuestion(
+    identity: TierLedgerIdentity,
+    question: TierRejudgeQuestion,
+    verdict: { tier: 'private' | 'secure'; reason: string; modelId: string; mapRevision?: string },
+    options: { placementFor?: (decision: TierDecision) => TierPlacementPlan },
+  ): SnifferVerdictOutcome {
+    const base = question.decision;
+    if (verdict.mapRevision !== undefined && verdict.mapRevision !== base.mapRevision) return 'stale_map';
+    if (!options.placementFor) return 'needs_placement';
+    const contentTier = maxTier(base.contentTier, verdict.tier);
+    const decision: TierDecision = {
+      ...base,
+      contentTier,
+      decidedBy: contentTier !== base.contentTier ? 'sniffer' : base.decidedBy,
+      reasons: [...base.reasons.filter((reason) => !isOpenSnifferReason(reason, 'content')), verdict.reason],
+      contentPending: false,
+      state: base.metadataPending ? 'pending' : 'current',
+    };
+    this.db.query(`
+      UPDATE tier_items SET rejudge_json = NULL
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(identity));
+    const outcome = this.recordRoutedPlacement(
+      identity,
+      decision,
+      options.placementFor(decision),
+      question.keepVisible ? { queueWithoutHiding: true } : {},
+    ).outcome;
+    this.db.query(`
+      UPDATE tier_items SET model_id = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(verdict.modelId, ...idParams(identity));
+    return outcome;
   }
 
   private writeRow(
@@ -535,7 +604,7 @@ export class TierLedger {
     assertTier(target.metadataTier);
     assertTier(target.contentTier);
     const result = this.db.query(`
-      UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?
+      UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?, move_attempts = 0
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
         AND state != 'moving'
     `).run(target.metadataTier, target.contentTier, ...idParams(identity), expectedGeneration);
@@ -605,15 +674,43 @@ export class TierLedger {
     return flipped!;
   }
 
-  /** Items with a queued move (state `moving`), oldest decision first. */
+  /**
+   * Items with a queued move (state `moving`): the fewest failed attempts
+   * first (`recordMoveFailure`), then the oldest decision. A move that keeps
+   * failing goes to the back of the queue, so it never holds the head of a
+   * bounded page while moves behind it could land.
+   */
   listMoving(options: { limit?: number } = {}): TierLedgerRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
     const rows = this.db.query(`
       SELECT * FROM tier_items WHERE state = 'moving'
-      ORDER BY decided_at, provider, account_scope, provider_item_id, conversation_key
+      ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `).all(limit);
     return (rows as TierItemRow[]).map(recordFromRow);
+  }
+
+  /**
+   * Count one failed attempt of an item's queued move (still `moving` at the
+   * expected generation); the count resets whenever a new move is queued.
+   * Returns the new count, or 0 when the row is no longer that move.
+   */
+  recordMoveFailure(identity: TierLedgerIdentity, options: { expectedGeneration: number }): number {
+    this.db.query(`
+      UPDATE tier_items SET move_attempts = move_attempts + 1
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND generation = ? AND state = 'moving'
+    `).run(...idParams(identity), options.expectedGeneration);
+    return this.moveAttempts(identity);
+  }
+
+  /** Failed attempts of the item's queued move (0 when none, or no move is queued). */
+  moveAttempts(identity: TierLedgerIdentity): number {
+    const row = this.db.query(`
+      SELECT move_attempts FROM tier_items
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND state = 'moving'
+    `).get(...idParams(identity)) as { move_attempts: number } | null;
+    return row?.move_attempts ?? 0;
   }
 
   /**
@@ -626,51 +723,165 @@ export class TierLedger {
    * text is below Private without that sniffer's own content verdict, or
    * whose content verdict came from another sniffer prompt (an item whose
    * names an owner map category matched is re-judged on a classifier change
-   * only: the owner's category may have settled it). Paged by identity
-   * after `after`.
+   * only: the owner's category may have settled it). A row a re-judge
+   * already settled under this classifier and sniffer (`markRejudged`), or
+   * whose re-judge question is still open (`openRejudgeQuestion`), is not a
+   * candidate again.
+   *
+   * Bounded: one call reads at most `scanLimit` rows of the ledger, in key
+   * order after `after`, and returns at most `limit` candidates from them.
+   * `next` is where the following call continues; absent once the ledger was
+   * read to its end.
    */
-  listRejudgeCandidates(options: {
+  rejudgeCandidatePage(options: {
     engineVersion: string;
     /** The configured sniffer's id; absent: only the classifier version counts. */
     snifferId?: string;
     after?: TierLedgerIdentity;
     limit?: number;
-  }): TierLedgerRecord[] {
+    /** Ledger rows read per call (default DEFAULT_REJUDGE_SCAN_ROWS). */
+    scanLimit?: number;
+  }): { records: TierLedgerRecord[]; next?: TierLedgerIdentity } {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
+    const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50_000));
     const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
+    const key = rejudgeKey(options.engineVersion, options.snifferId);
     const after = options.after
-      ? [options.after.provider, options.after.accountScope, options.after.providerItemId, tierLedgerConversationKey(options.after)]
+      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
       : null;
     const rows = this.db.query(`
-      SELECT i.* FROM tier_items i
-      WHERE i.routed = 1 AND i.content_read = 1 AND i.state = 'current'
-        AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
-        AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move')
-        AND instr(i.reasons_json, '"override:') = 0
-        AND instr(i.reasons_json, '"metadata:owner_rule:') = 0
-        AND NOT EXISTS (
-          SELECT 1 FROM tier_overrides o
-          WHERE o.provider = i.provider AND o.account_scope = i.account_scope
-            AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
-        )
-        AND (
-          i.engine_version != ?
-          OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
-            AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
-            AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
-        )
-        AND (? IS NULL OR (i.provider, i.account_scope, i.provider_item_id, i.conversation_key) > (?, ?, ?, ?))
-      ORDER BY i.provider, i.account_scope, i.provider_item_id, i.conversation_key
-      LIMIT ?
+      WITH win AS (
+        SELECT * FROM tier_items
+        WHERE (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+        ORDER BY provider, account_scope, conversation_key, provider_item_id
+        LIMIT ?
+      )
+      SELECT i.*, CASE WHEN
+          i.routed = 1 AND i.content_read = 1 AND i.state = 'current'
+          AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
+          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move')
+          AND (i.rejudged_key IS NULL OR i.rejudged_key != ?)
+          AND NOT (i.rejudge_json IS NOT NULL
+            AND json_extract(i.rejudge_json, '$.generation') = i.generation
+            AND json_extract(i.rejudge_json, '$.decidedAt') = i.decided_at)
+          AND instr(i.reasons_json, '"override:') = 0
+          AND instr(i.reasons_json, '"metadata:owner_rule:') = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_overrides o
+            WHERE o.provider = i.provider AND o.account_scope = i.account_scope
+              AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+          )
+          AND (
+            i.engine_version != ?
+            OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
+              AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
+              AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
+          )
+        THEN 1 ELSE 0 END AS rejudge_candidate
+      FROM win i
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
     `).all(
+      after ? 1 : null,
+      ...(after ?? [null, null, null, null]),
+      scanLimit,
+      key,
       options.engineVersion,
       snifferMarker,
       snifferMarker ?? '',
-      after ? 1 : null,
-      ...(after ?? [null, null, null, null]),
-      limit,
-    );
-    return (rows as TierItemRow[]).map(recordFromRow);
+    ) as Array<TierItemRow & { rejudge_candidate: number }>;
+    const records: TierLedgerRecord[] = [];
+    let last: TierItemRow | undefined;
+    for (const row of rows) {
+      last = row;
+      if (row.rejudge_candidate !== 1) continue;
+      records.push(recordFromRow(row));
+      if (records.length >= limit) break;
+    }
+    const more = records.length >= limit || rows.length >= scanLimit;
+    return {
+      records,
+      ...(more && last ? { next: identityOfRow(last) } : {}),
+    };
+  }
+
+  /** The candidates of `rejudgeCandidatePage` over the whole ledger (status and tests), at most `limit`. */
+  listRejudgeCandidates(options: { engineVersion: string; snifferId?: string; limit?: number }): TierLedgerRecord[] {
+    const records: TierLedgerRecord[] = [];
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
+    let after: TierLedgerIdentity | undefined;
+    do {
+      const page = this.rejudgeCandidatePage({ ...options, limit: limit - records.length, ...(after ? { after } : {}) });
+      records.push(...page.records);
+      after = page.next;
+    } while (after && records.length < limit);
+    return records;
+  }
+
+  /**
+   * Stamp that a re-judge settled the row under this classifier and sniffer
+   * with no question left open (no change, nothing to re-read, or a decision
+   * recorded), so it is not re-read on every tick. Nothing else changes.
+   */
+  markRejudged(identity: TierLedgerIdentity, key: { engineVersion: string; snifferId?: string }): void {
+    this.db.query(`
+      UPDATE tier_items SET rejudged_key = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(rejudgeKey(key.engineVersion, key.snifferId), ...idParams(identity));
+  }
+
+  /**
+   * A re-judge asked the sniffer about an item that was visible under its
+   * previous decision: the item stays EXACTLY where it is (tiers, copies,
+   * embedding) and the question is recorded beside the row with the
+   * decision its answer completes. `applySnifferVerdict` settles it; any
+   * newer decision of the row (a sync, a landing, an override) makes it stale.
+   * Refused (false) unless the row is `current` at the expected generation.
+   */
+  openRejudgeQuestion(
+    identity: TierLedgerIdentity,
+    options: {
+      expectedGeneration: number;
+      decision: TierDecision;
+      /** Queue a raise the answer needs without hiding (moves wait for the owner-approved migration). */
+      keepVisible: boolean;
+    },
+  ): boolean {
+    let opened = false;
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state !== 'current'
+        || existing.decidedBy === 'override') return;
+      const question: StoredRejudgeQuestion = {
+        generation: existing.generation,
+        decidedAt: existing.decidedAt,
+        decision: options.decision,
+        keepVisible: options.keepVisible,
+      };
+      // Not stamped `rejudged_key`: while the question is open the row is no
+      // candidate anyway, and once a newer decision makes it stale the row
+      // must be a candidate again.
+      opened = this.db.query(`
+        UPDATE tier_items SET rejudge_json = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
+      `).run(
+        JSON.stringify(question),
+        ...idParams(identity),
+        existing.generation,
+      ).changes === 1;
+    })();
+    return opened;
+  }
+
+  /**
+   * The item's open re-judge question, or undefined when none is open or the
+   * row was decided again since it was asked (the newer decision stands).
+   */
+  rejudgeQuestion(identity: TierLedgerIdentity): TierRejudgeQuestion | undefined {
+    const row = this.db.query(`
+      SELECT * FROM tier_items
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity)) as (TierItemRow & { rejudge_json: string | null }) | null;
+    return row ? openRejudgeQuestionOf(row) : undefined;
   }
 
   /** Items waiting on an unanswered sniffer question, oldest first. */
@@ -838,6 +1049,40 @@ export class TierLedger {
     return row.value;
   }
 
+  /** A small named value kept beside the ledger (a background pass's resume point); never item content. */
+  readMeta(key: string): string | undefined {
+    if (key === 'ledger_id') return undefined;
+    const row = this.db.query('SELECT value FROM tier_ledger_meta WHERE key = ?').get(key) as { value: string } | null;
+    return row?.value;
+  }
+
+  writeMeta(key: string, value: string): void {
+    if (key === 'ledger_id') throw new Error('The ledger identity is never rewritten.');
+    this.db.query(`
+      INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, value);
+  }
+
+  /**
+   * Routed rows in key order after `after`, at most `limit`: a bounded page
+   * for background passes that read every routed item (owner-rule sweeps).
+   */
+  listRouted(options: { after?: TierLedgerIdentity; limit?: number } = {}): TierLedgerRecord[] {
+    const limit = Math.max(1, Math.min(options.limit ?? 500, 50_000));
+    const after = options.after
+      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
+      : null;
+    const rows = this.db.query(`
+      SELECT * FROM tier_items
+      WHERE routed = 1
+        AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?
+    `).all(after ? 1 : null, ...(after ?? [null, null, null, null]), limit);
+    return (rows as TierItemRow[]).map(recordFromRow);
+  }
+
   isRouted(identity: TierLedgerIdentity): boolean {
     return this.readRow(identity)?.routed === true;
   }
@@ -908,6 +1153,14 @@ export class TierLedger {
        * an unchanged placement into a queued move.
        */
       stagedLandingAllowed?: boolean;
+      /**
+       * Queue a RAISE without hiding the current copies first: the item stays
+       * visible where it is until the move runs (the move primitive hides its
+       * source first itself). Only for a decision nobody acts on at once: a
+       * background re-judge on an install whose moves wait for the
+       * owner-approved migration (it becomes that migration's proposal).
+       */
+      queueWithoutHiding?: boolean;
     } = {},
   ): { outcome: TierRoutedOutcome; record: TierLedgerRecord; previousCopies: TierCopy[]; raise: boolean } {
     const decidedAt = this.now().toISOString();
@@ -1060,7 +1313,7 @@ export class TierLedger {
         UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?,
           decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?,
           content_read = MAX(content_read, ?), metadata_pending = ?, content_pending = ?,
-          metadata_forced = ?, metadata_flagged = ?
+          metadata_forced = ?, metadata_flagged = ?, move_attempts = 0
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(
         decision.metadataTier,
@@ -1074,7 +1327,7 @@ export class TierLedger {
         ...idParams(identity),
       );
       this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, 'moving', decidedAt);
-      if (raise) this.supersedeCurrentCopies(identity, existing.generation + 1, decidedAt);
+      if (raise && options.queueWithoutHiding !== true) this.supersedeCurrentCopies(identity, existing.generation + 1, decidedAt);
       outcome = 'queued_move';
     })();
     return { outcome, record: this.getCurrent(identity)!, previousCopies, raise };
@@ -1297,7 +1550,8 @@ export class TierLedger {
       const nextGeneration = existing.generation + 1;
       const sources = this.moveSources(identity, nextGeneration);
       this.db.query(`
-        UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?
+        UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?,
+          move_attempts = CASE WHEN state = 'moving' THEN move_attempts ELSE 0 END
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(options.target.metadataTier, options.target.contentTier, ...idParams(identity));
       if (options.hideSource) this.supersedeCurrentCopies(identity, nextGeneration, now);
@@ -2087,6 +2341,32 @@ function copyFromRow(row: TierCopyRow): TierCopy {
   };
 }
 
+function rejudgeKey(engineVersion: string, snifferId: string | undefined): string {
+  return `${engineVersion}\u0000${snifferId ?? ''}`;
+}
+
+function identityOfRow(row: Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'>): TierLedgerIdentity {
+  return {
+    provider: row.provider,
+    accountScope: row.account_scope,
+    providerItemId: row.provider_item_id,
+    ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+  };
+}
+
+/** A row's re-judge question, only while it is still open on the row exactly as it was asked. */
+function openRejudgeQuestionOf(row: TierItemRow & { rejudge_json?: string | null }): TierRejudgeQuestion | undefined {
+  if (!row.rejudge_json || row.state !== 'current' || row.decided_by === 'override') return undefined;
+  let stored: StoredRejudgeQuestion;
+  try {
+    stored = JSON.parse(row.rejudge_json) as StoredRejudgeQuestion;
+  } catch {
+    return undefined;
+  }
+  if (stored.generation !== row.generation || stored.decidedAt !== row.decided_at || !stored.decision) return undefined;
+  return { decision: stored.decision, keepVisible: stored.keepVisible === true };
+}
+
 /** Stable map key for an item identity in ledger lookups. */
 export function tierLedgerIdentityKey(identity: TierLedgerIdentity): string {
   return `${identity.provider}\u0000${identity.accountScope}\u0000${tierLedgerConversationKey(identity)}\u0000${identity.providerItemId}`;
@@ -2524,7 +2804,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // P3: the migration's PROPOSED tiers (design section 4.6, M0). A
       // proposal never changes an item's current tiers or its copies; only an
       // approved run (tier-migration.ts) acts on it. Additive only.
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 3,
       name: 'tier_migration_proposals',
       up(db) {
         db.exec(`
@@ -2556,6 +2836,28 @@ function tierLedgerMigrations(): SqliteMigration[] {
           );
           CREATE INDEX IF NOT EXISTS tier_migration_proposals_status
             ON tier_migration_proposals (plan_id, status, batch_id);
+        `);
+      },
+    },
+    {
+      // Background re-judging and automatic moves (review fixes 2026-10-02).
+      // Additive only: every existing row reads as "never re-judged, no
+      // open re-judge question, no failed move attempt".
+      // - move_attempts: failed attempts of the row's queued move, so a move
+      //   that keeps failing goes to the back of the queue (listMoving).
+      // - rejudged_key: the classifier and sniffer a re-judge last settled the
+      //   row under, so a row the re-judge left as it was is not re-read on
+      //   every tick (rejudgeCandidatePage).
+      // - rejudge_json: an open re-judge question. The item stays exactly
+      //   where it is (it was visible under its previous decision) until the
+      //   sniffer answers; the decision the answer completes is kept here.
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'tier_rejudge_and_move_attempts',
+      up(db) {
+        db.exec(`
+          ALTER TABLE tier_items ADD COLUMN move_attempts INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE tier_items ADD COLUMN rejudged_key TEXT;
+          ALTER TABLE tier_items ADD COLUMN rejudge_json TEXT;
         `);
       },
     },

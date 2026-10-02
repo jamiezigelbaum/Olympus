@@ -94,6 +94,7 @@ import {
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
 import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { secretsDisposition } from './secrets-disposition.ts';
+import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 
 
 /** Legs run in this order, least private first. */
@@ -401,6 +402,7 @@ export class TieredStoreSet {
     } = {},
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
+    this.applyNewOwnerRuleRaises();
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];
@@ -435,6 +437,7 @@ export class TieredStoreSet {
     entries: ReadonlyArray<{ trustDomain: SourceTrustDomain; connector: SourceConnector; sync?: ConnectorStoreSyncOptions }>,
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
+    this.applyNewOwnerRuleRaises();
     const run = new TieredRoutingRun(this, 'per_leg');
     const legRuns: TieredStoreLegRun[] = [];
     for (const entry of entries) {
@@ -445,6 +448,21 @@ export class TieredStoreSet {
       run.finalize();
     }
     return tieredRun(legRuns, run.counts, undefined);
+  }
+
+  /**
+   * A listing re-judges only what it lists, and an incremental one never
+   * re-lists an unchanged item: a newly saved raising owner rule (an
+   * "always Private" folder) is applied to items already stored first
+   * (tier-rules-sweep.ts, a bounded page per run; the sniffer's tick runs it
+   * too). Never fails the sync.
+   */
+  private applyNewOwnerRuleRaises(): void {
+    try {
+      sweepOwnerRuleRaises({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
   }
 
   /**

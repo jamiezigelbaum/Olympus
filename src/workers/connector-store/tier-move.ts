@@ -79,6 +79,17 @@ export interface TierMoveOptions {
   secretsDisposition?: SecretsDisposition;
   /** Where to record the move. Omitted: nothing is appended (tests only). */
   embeddingLedger?: { path: string; approvedBy: EmbeddingLedgerApprovedBy; why?: string };
+  /**
+   * A destination store keeping a SUPERSEDED copy of this item that an
+   * earlier move of the same item superseded (a round trip: Personal, held,
+   * Personal again) may be replaced by this move, even when its text differs
+   * (the item's text changed meanwhile). Only the automatic moves set this,
+   * and only while every embedding involved is the built-in local model, so
+   * the older text's vectors it replaces cost nothing to make again. The
+   * replaced chunks are named in the move's embedding-ledger entry. Without
+   * it such a destination refuses the move (an approved purge comes first).
+   */
+  replaceOwnSupersededCopy?: boolean;
 }
 
 export interface TierMoveDestination {
@@ -154,15 +165,23 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   // very text the move would write loses nothing (the store keeps identical
   // chunks and their vectors in place), so a move back to the store an
   // earlier move left (a held item judged Personal, then held again) proceeds.
+  // A copy an earlier move of this very item superseded may be replaced
+  // when the caller says so (`replaceOwnSupersededCopy`): its chunks are
+  // counted for the ledger entry.
   const kept = ledger.copies(identity);
+  const replacedSuperseded: Record<string, number> = {};
   for (const planned of placement.copies) {
     if (sources.some((source) => source.corpusId === planned.corpusId)) continue;
     const keptHere = kept.find((copy) => copy.corpusId === planned.corpusId && copy.state === 'superseded');
     if (!keptHere) continue;
     const source = copyServingLayer(sources, 'content') ?? sources[0]!;
-    if (!sameText(exportFrom(keptHere), exportFrom(source))) {
-      throw new TierMoveRefusedError('The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.');
+    const keptCopy = exportFrom(keptHere);
+    if (sameText(keptCopy, exportFrom(source))) continue;
+    if (options.replaceOwnSupersededCopy === true && keptHere.supersededByGeneration !== null) {
+      replacedSuperseded[planned.corpusId] = keptCopy?.chunks.length ?? 0;
+      continue;
     }
+    throw new TierMoveRefusedError('The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.');
   }
 
   // 1. Stage (a raise hides the source first).
@@ -242,7 +261,11 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
         + `to ${destinations.map((destination) => `${destination.corpusId} (${destination.layers})`).join(', ')}: `
         + `${chunkCount} chunk(s) at the destination, ${vectorsCopied} vector(s) copied with no provider call, `
         + `${toEmbed} chunk(s) left for the destination's own embedding model. `
-        + `Superseded copies are kept and hidden: ${supersededCorpora.join(', ') || 'none'}.`,
+        + `Superseded copies are kept and hidden: ${supersededCorpora.join(', ') || 'none'}.`
+        + (Object.keys(replacedSuperseded).length > 0
+          ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replacedSuperseded)
+            .map(([corpusId, chunks]) => `${corpusId} (${chunks} chunk(s) of older text)`).join(', ')}.`
+          : ''),
       scope: {
         corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((destination) => destination.corpusId)])],
         chunks: Object.fromEntries(destinations.map((destination) => [

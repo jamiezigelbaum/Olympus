@@ -1123,7 +1123,7 @@ function createWorkerBuiltInAnalystModel(env: Record<string, string | undefined>
  */
 function createWorkerSharedBuiltInModel(
   env: Record<string, string | undefined>,
-): { model: BuiltInAnalystModel; available: () => boolean } | undefined {
+): { model: BuiltInAnalystModel; available: () => boolean; startIfIdle: () => void } | undefined {
   const base = createWorkerBuiltInAnalystModel(env);
   if (!base) return undefined;
   let prepared = false;
@@ -1149,7 +1149,12 @@ function createWorkerSharedBuiltInModel(
   // be trusted and stay there forever. prepare() re-verifies the pinned
   // checksums, resumes or restarts a download, and ends ready or failed.
   if (base.status().state !== 'not_started') void model.prepare();
-  return { model, available: () => prepared && installedOnDisk() };
+  // A fresh install's first download, started by the tier sniffer when it
+  // has items waiting for this model (prepare() is shared and deduplicated).
+  const startIfIdle = (): void => {
+    if (base.status().state === 'not_started') void model.prepare();
+  };
+  return { model, available: () => prepared && installedOnDisk(), startIfIdle };
 }
 
 /**
@@ -1708,7 +1713,7 @@ export async function main(): Promise<void> {
   // sniffer before its runtime is resolved below.
   const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env);
   registerBuiltInPrivateModel(workerBuiltInModel
-    ? { model: workerBuiltInModel.model, available: workerBuiltInModel.available }
+    ? { model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle }
     : undefined);
   // Four-tier classification inputs for every lane: the owner's map, tier
   // rules, their own words about privacy, and the privacy-safe sniffer. The
@@ -4413,11 +4418,13 @@ export async function main(): Promise<void> {
   };
   const chatgptEvidenceSearch = sourceAnswerLanes
     ? async (input: { question: string; limit?: number }) => {
-        return answerActivity.run(() => searchReleasedEvidence({
+        // Not an answer: it never uses the private model, so it never
+        // preempts the sniffer (answerActivity is for the private pool).
+        return searchReleasedEvidence({
           lanes: sourceAnswerLanes!,
           question: input.question,
           ...(input.limit ? { maxResults: input.limit } : {}),
-        }));
+        });
       }
     : undefined;
   // Which Private items match, for the private answer panel: the shared
@@ -4533,7 +4540,7 @@ export async function main(): Promise<void> {
         model: snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
-        ...(snifferRuntime.source === 'built_in' ? { modelAvailable: () => snifferRuntime.builtIn.available() } : {}),
+        ...(snifferRuntime.source === 'built_in' ? { modelAvailable: () => snifferRuntime.builtIn.available(), startModel: () => snifferRuntime.builtIn.startIfIdle?.() } : {}),
         ownerContext: privacyOwnerWords,
         budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,
