@@ -31,7 +31,8 @@ describe('the relay dashboard copy follows the contract', () => {
     expect(RELAY_TOOL_NAME).toBe(DASHBOARD_TOOL_NAME);
     expect(RELAY_RESOURCE_URI).toBe(DASHBOARD_RESOURCE_URI);
     expect(DASHBOARD_TOOL.name).toBe(DASHBOARD_TOOL_NAME);
-    expect(DASHBOARD_TOOL._meta?.['openai/outputTemplate']).toBe(DASHBOARD_RESOURCE_URI);
+    // The engine advertises a content-versioned URI: `<base>?v=<12 hex>`.
+    expect(String(DASHBOARD_TOOL._meta?.['openai/outputTemplate'])).toMatch(new RegExp(`^${DASHBOARD_RESOURCE_URI.replace(/[/:]/g, '\\$&')}(\\?v=[0-9a-f]{12})?$`));
   });
 
   test('both relay states produce contract values with exactly the contract keys', () => {
