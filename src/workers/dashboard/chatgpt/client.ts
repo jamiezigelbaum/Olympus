@@ -148,7 +148,11 @@ export function chatgptDashboardClient(
       else entry.resolve(message.result);
       return;
     }
-    if (message.method === 'ui/notifications/tool-result') acceptResult(message.params, true);
+    if (message.method === 'ui/notifications/tool-result') {
+      // The host's result is the newest word: anything requested before it is stale.
+      supersede();
+      acceptResult(message.params, true);
+    }
     else if (message.method === 'ui/notifications/host-context-changed') applyHostContext(message.params);
   });
 
@@ -195,6 +199,25 @@ export function chatgptDashboardClient(
       && !!value.connection && typeof value.connection.state === 'string';
   }
 
+  // ---- generations -------------------------------------------------------
+  // Every dashboard request remembers the generation it was sent in. An
+  // interaction (Connect, a picker, Privacy, a confirmation, a control's own
+  // call) or a newer authoritative result starts a new generation, and a
+  // response from an older one is dropped, so a slow background read can
+  // never undo what the person just did.
+  let generation = 0;
+  function supersede(): number {
+    return ++generation;
+  }
+
+  /** The picker or the Privacy screen is open: data is kept but the editor is never redrawn under the person. */
+  function editorOpen(): boolean {
+    return (!!picker && picker.active()) || (!!privacy && privacy.active());
+  }
+  function redraw(): void {
+    if (!editorOpen()) render();
+  }
+
   /** A tool result: render it when it is the dashboard, else fetch the dashboard. */
   function acceptResult(result: Any, fromHost: boolean): boolean {
     if (resultTimer) {
@@ -203,21 +226,23 @@ export function chatgptDashboardClient(
     }
     if (!result || result.isError) {
       state.relayDown = true;
-      render();
+      redraw();
       return false;
     }
     const content = result.structuredContent;
     if (isDashboard(content)) {
       state.data = content;
       state.relayDown = false;
-      render();
+      // Any good dashboard, from any path, ends a failure streak.
+      refreshFailures = 0;
+      redraw();
       // Fresh data from any path restarts the periodic wait from now.
       if (!refreshing) scheduleRefresh();
       return true;
     }
     if (fromHost) {
       state.relayDown = true;
-      render();
+      redraw();
     }
     return false;
   }
@@ -233,13 +258,18 @@ export function chatgptDashboardClient(
   }
 
   function callTool(name: string, args: Any, key: string): void {
+    const mine = supersede();
     state.busy = key;
     state.confirming = '';
     state.notice = '';
     state.actionError = null;
     render();
     request('tools/call', { name, arguments: args || {} }, config.resultTimeoutMs).then((result) => {
-      state.busy = '';
+      if (state.busy === key) state.busy = '';
+      if (mine !== generation) {
+        redraw();
+        return;
+      }
       const failed = inlineError(result);
       if (failed) {
         state.actionError = { key, text: failed };
@@ -249,9 +279,9 @@ export function chatgptDashboardClient(
       if (acceptResult(result, false)) return;
       if (!state.relayDown && name !== config.toolName) refresh();
     }, () => {
-      state.busy = '';
-      state.relayDown = true;
-      render();
+      if (state.busy === key) state.busy = '';
+      if (mine === generation) state.relayDown = true;
+      redraw();
     });
   }
 
@@ -408,6 +438,7 @@ export function chatgptDashboardClient(
     } else if (picker && picker.handles(fix)) {
       // Connect, Choose folders and Choose mail open in place, never as a plain tool call.
       action = () => {
+        supersede();
         state.notice = '';
         state.confirming = '';
         picker!.start(fix, source ? source.id : '', source ? source.label : '', key);
@@ -431,6 +462,7 @@ export function chatgptDashboardClient(
         return wrap;
       }
       return add(wrap, button(fix.label, key, () => {
+        supersede();
         state.confirming = key;
         render(key + ':no');
       }, 'plain'), errorNote(failure));
@@ -736,6 +768,7 @@ export function chatgptDashboardClient(
   function openPrivacy(returnKey: string): void {
     if (!privacy) return;
     state.notice = '';
+    supersede();
     state.confirming = '';
     privacy.start(returnKey);
   }
@@ -975,6 +1008,11 @@ export function chatgptDashboardClient(
   function render(focusKey?: string): void {
     const active = doc.activeElement as HTMLElement | null;
     const keepFocus = focusKey || (active && active.getAttribute ? active.getAttribute('data-key') : '') || '';
+    // A text field redrawn under the person keeps its caret and selection.
+    const field = active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT') && keepFocus === active.getAttribute('data-key')
+      ? active as HTMLInputElement : null;
+    const selection = field && typeof field.selectionStart === 'number'
+      ? [field.selectionStart, field.selectionEnd === null ? field.selectionStart : field.selectionEnd] : null;
     const theme = state.theme;
     if (theme) doc.documentElement.setAttribute('data-theme', theme);
     else doc.documentElement.removeAttribute('data-theme');
@@ -993,6 +1031,9 @@ export function chatgptDashboardClient(
         const node = nodes[i] as HTMLElement;
         if (node.getAttribute('data-key') === keepFocus) {
           node.focus();
+          if (selection && (node.tagName === 'TEXTAREA' || node.tagName === 'INPUT')) {
+            try { (node as HTMLInputElement).setSelectionRange(selection[0]!, selection[1]!); } catch { /* not a text field */ }
+          }
           break;
         }
       }
@@ -1026,8 +1067,11 @@ export function chatgptDashboardClient(
     errorText: inlineError,
     setDashboard: (value: Any) => {
       if (!isDashboard(value)) return;
+      // The Connect flow's own read is newer than anything still in flight.
+      supersede();
       state.data = value;
       state.relayDown = false;
+      refreshFailures = 0;
     },
     close: (notice: string, again: boolean, focusKey: string) => closeScreen(notice, again, focusKey),
   }) : null;
@@ -1037,15 +1081,17 @@ export function chatgptDashboardClient(
     state.notice = notice;
     if (again) {
       // The dashboard re-renders from the refreshed result; the notice stays until the next action.
+      const mine = supersede();
       state.busy = 'refresh';
       render(focusKey);
       request('tools/call', { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
-        state.busy = '';
+        if (state.busy === 'refresh') state.busy = '';
+        if (mine !== generation) return redraw();
         acceptResult(result, false);
-        render(focusKey);
+        if (!editorOpen()) render(focusKey);
       }, () => {
-        state.busy = '';
-        render(focusKey);
+        if (state.busy === 'refresh') state.busy = '';
+        if (!editorOpen()) render(focusKey);
       });
       return;
     }
@@ -1122,22 +1168,27 @@ export function chatgptDashboardClient(
     // The picker polls on its own while sign-in finishes, and the picker and
     // Privacy screens re-read the dashboard when they close; a control's own
     // call is in flight while busy. None of them gets a second poller.
-    if ((picker && picker.active()) || (privacy && privacy.active()) || state.busy) {
+    // A destructive confirmation waits for the person, undisturbed.
+    if (editorOpen() || state.busy || state.confirming) {
       scheduleRefresh();
       return;
     }
     refreshing = true;
+    const mine = generation;
     request('tools/call', { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
       refreshing = false;
+      // Something newer happened while this was in flight: its answer is stale.
+      if (mine !== generation) return scheduleRefresh();
       const ok = !!result && !result.isError && isDashboard(result.structuredContent);
-      refreshFailures = ok ? 0 : refreshFailures + 1;
+      if (!ok) refreshFailures++;
       acceptResult(result, true);
       scheduleRefresh();
     }, () => {
       refreshing = false;
+      if (mine !== generation) return scheduleRefresh();
       refreshFailures++;
       state.relayDown = true;
-      render();
+      redraw();
       scheduleRefresh();
     });
   }
@@ -1158,7 +1209,7 @@ export function chatgptDashboardClient(
 
   /** Redraws when the "Updated … ago" line would read differently, with or without new data. */
   function tickStale(): void {
-    if (pageHidden() || compact() || (picker && picker.active()) || (privacy && privacy.active())) return;
+    if (pageHidden() || compact() || editorOpen()) return;
     if (staleWords() !== drawnStale) render();
   }
   setInterval(tickStale, R.staleTickMs);

@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, jest, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
+import { CHATGPT_PRIVACY_META_KEY, CHATGPT_PRIVACY_TOOLS } from '../src/workers/dashboard/chatgpt/privacy.ts';
 import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import {
   CHATGPT_DASHBOARD_CSS,
@@ -794,6 +795,113 @@ describe('freshness: the page re-reads the dashboard while it is visible', () =>
     expect(dashboardCalls(host)).toBe(0);
     host.button('Cancel').click();
     expect(dashboardCalls(host)).toBe(1);
+  }));
+
+  /** The latest tools/call of this tool still waiting for its answer. */
+  const pendingCall = (host: Host, name: string) => [...host.sent].reverse()
+    .find((message) => message.method === 'tools/call' && message.params.name === name)!;
+  const answer = (host: Host, message: { id?: number }, result: unknown, error?: unknown) =>
+    host.win.dispatchEvent(new host.win.MessageEvent('message', {
+      data: error ? { jsonrpc: '2.0', id: message.id, error } : { jsonrpc: '2.0', id: message.id, result },
+      source: host.win.parent as any,
+    }));
+
+  test('a background read sent before Connect can never undo it: its late Off answer is dropped', withFakeTimers(async () => {
+    const off = model({ sources: [{ id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Off', primary: { label: 'Connect', tool: 'olympus_connect_source', args: { source: 'dropbox' } } }] });
+    const fresh = model({ sources: [{ id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Fresh', lastSyncAt: ago(0) }] });
+    const host = mount({ html: chatgptDashboardPageHtml({ resultTimeoutMs: 5_000, connectPollMs: 1_000 }) });
+    host.push({ structuredContent: off });
+    await advance(60_000);
+    const background = pendingCall(host, 'olympus_dashboard');
+    expect(dashboardCalls(host)).toBe(1);
+    host.button('Connect').click();
+    answer(host, pendingCall(host, 'olympus_connect_source'), { structuredContent: { status: 'open_link', source: 'dropbox', openUrl: 'https://mcp.olympusplugin.ai/go/abc' } });
+    await flush();
+    await advance(1_000);
+    const poll = pendingCall(host, 'olympus_dashboard');
+    expect(poll).not.toBe(background);
+    answer(host, poll, { structuredContent: fresh });
+    await flush();
+    expect(host.text()).toContain('Dropbox is connected.');
+    // The stale background answer arrives last.
+    answer(host, background, { structuredContent: off });
+    await flush();
+    expect(host.text()).toContain('Dropbox is connected.');
+    expect(host.text()).not.toContain('Not connected');
+    expect(host.buttons().some((node) => node.textContent === 'Connect')).toBe(false);
+  }));
+
+  test('no background read while a destructive confirmation waits', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [SOURCES[0]!] }) });
+    host.button('Disconnect').click();
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.confirmPrompt);
+    await advance(10 * MIN);
+    expect(dashboardCalls(host)).toBe(0);
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.confirmPrompt);
+  }));
+
+  test('a confirmation opened while a background read is in flight is not redrawn away by its answer', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [SOURCES[0]!] }) });
+    await advance(60_000);
+    const background = pendingCall(host, 'olympus_dashboard');
+    host.button('Disconnect').click();
+    answer(host, background, { structuredContent: model({ sources: [SOURCES[0]!] }) });
+    await flush();
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.confirmPrompt);
+  }));
+
+  test('Privacy opened while a background read is in flight keeps its text box, caret and selection when the answer lands', withFakeTimers(async () => {
+    const data = model({ privacy: { configured: true, ruleCount: 0, pendingCount: 0 } } as Partial<DashboardViewModelV1>);
+    const host = mount();
+    host.push({ structuredContent: data });
+    await advance(60_000);
+    const background = pendingCall(host, 'olympus_dashboard');
+    host.button('Edit').click();
+    answer(host, pendingCall(host, CHATGPT_PRIVACY_TOOLS.get), {
+      structuredContent: { rules: 0, pendingCount: 0, described: true },
+      _meta: { [CHATGPT_PRIVACY_META_KEY]: { description: 'my health and money', rules: [], pendingCount: 0 } },
+    });
+    await flush();
+    const area = host.win.document.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    area.focus();
+    area.setSelectionRange(3, 8);
+    answer(host, background, { structuredContent: { ...data, generatedAt: ago(0) } });
+    await flush();
+    // A host-delivered result while the screen is open is kept, not drawn over it.
+    host.push({ structuredContent: data });
+    await flush();
+    const now = host.win.document.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    expect(now).toBe(area);
+    expect([now.selectionStart, now.selectionEnd]).toEqual([3, 8]);
+    await advance(10 * MIN);
+    expect(dashboardCalls(host)).toBe(1);
+  }));
+
+  test('any good dashboard ends a failure streak: a host result, and Try again', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: working() });
+    await advance(15_000);
+    host.respond('tools/call', undefined, { code: -32000, message: 'unreachable' });
+    await flush();
+    await advance(30_000);
+    expect(dashboardCalls(host)).toBe(2);
+    host.respond('tools/call', undefined, { code: -32000, message: 'unreachable' });
+    await flush();
+    // Backed off to 60 s; a host-delivered dashboard resets the pace to 15 s.
+    host.push({ structuredContent: working() });
+    await advance(15_000);
+    expect(dashboardCalls(host)).toBe(3);
+    host.respond('tools/call', undefined, { code: -32000, message: 'unreachable' });
+    await flush();
+    // Backed off to 30 s; Try again succeeds in the foreground and resets it too.
+    host.button('Try again').click();
+    expect(dashboardCalls(host)).toBe(4);
+    host.respond('tools/call', { structuredContent: working() });
+    await flush();
+    await advance(15_000);
+    expect(dashboardCalls(host)).toBe(5);
   }));
 
   test('"Updated … ago" appears and moves on by itself, with no new data and no tool call', withFakeTimers(async () => {
