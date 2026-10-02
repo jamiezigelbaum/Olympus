@@ -1197,7 +1197,7 @@ function mountDashboardController(options) {
         action: "save_privacy",
         ...description !== undefined ? { description } : {},
         rules: privacyRulesOut(form, logic),
-        ...revision ? { revision } : {},
+        revision,
         ...lowers ? { confirm: true } : {}
       });
     } catch {

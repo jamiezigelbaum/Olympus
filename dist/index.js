@@ -6854,7 +6854,10 @@ var init_vocabulary = __esm(() => {
     saved: DASHBOARD_CHATGPT_PRIVACY_COPY.saved,
     unchanged: "No changes to save.",
     locked: "Unlock dashboard controls in Setup to see and change what is private.",
-    readOnly: "Your OpenClaw connection is read-only, so privacy can be read here but not changed.",
+    readOnly: "Your OpenClaw connection is read-only. What is private is shown only to a connection that can change it.",
+    counts: "Your description and {n} always-private rules are set.",
+    countsOne: "Your description and 1 always-private rule are set.",
+    countsUnset: "Nothing is set as private yet.",
     unavailable: "Privacy settings are not available from this worker.",
     confirmRemoves: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmRemove,
     confirmDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmDescription,
@@ -17644,7 +17647,7 @@ function parseDashboardControlParams(value) {
   }
   if (action === "save_privacy") {
     const record = exactRecord(outer, ["action", "description", "rules", "revision", "confirm"]);
-    const revision = optionalBoundedString(record.revision, 64, "revision", false);
+    const revision = boundedString(record.revision, 64, "revision", false);
     if (record.confirm !== undefined && typeof record.confirm !== "boolean") {
       throw new DashboardGatewayInvalidRequestError("confirm must be true or false.");
     }
@@ -17676,7 +17679,7 @@ function parseDashboardControlParams(value) {
       action,
       ...description !== undefined ? { description } : {},
       ...rules ? { rules } : {},
-      ...revision ? { revision } : {},
+      revision,
       ...record.confirm === true ? { confirm: true } : {}
     };
   }
@@ -18139,7 +18142,7 @@ function dashboardControlWorkerRequest(params) {
         body: {
           ...params.description !== undefined ? { description: params.description } : {},
           ...params.rules ? { rules: params.rules } : {},
-          ...params.revision ? { revision: params.revision } : {},
+          revision: params.revision,
           ...params.confirm === true ? { confirm: true } : {}
         }
       };

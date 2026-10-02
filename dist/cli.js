@@ -47561,6 +47561,9 @@ function dashboardAttentionLine(source, options) {
     return "a sync is retrying on its own";
   return "";
 }
+function dashboardCredentialAttention(source, options) {
+  return source.connection.provider_refusal !== undefined || source.connection.state === "reauth_required" || degradationForSource(source, options?.degradedCredentials) !== undefined;
+}
 function dashboardActionLabel(label) {
   return /^re-?auth/i.test(label.trim()) ? DASHBOARD_RECONNECT_LABEL : label;
 }
@@ -48459,7 +48462,10 @@ var init_vocabulary = __esm(() => {
     saved: DASHBOARD_CHATGPT_PRIVACY_COPY.saved,
     unchanged: "No changes to save.",
     locked: "Unlock dashboard controls in Setup to see and change what is private.",
-    readOnly: "Your OpenClaw connection is read-only, so privacy can be read here but not changed.",
+    readOnly: "Your OpenClaw connection is read-only. What is private is shown only to a connection that can change it.",
+    counts: "Your description and {n} always-private rules are set.",
+    countsOne: "Your description and 1 always-private rule are set.",
+    countsUnset: "Nothing is set as private yet.",
     unavailable: "Privacy settings are not available from this worker.",
     confirmRemoves: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmRemove,
     confirmDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmDescription,
@@ -85504,7 +85510,7 @@ function mountDashboardController(options) {
         action: "save_privacy",
         ...description !== undefined ? { description } : {},
         rules: privacyRulesOut(form, logic),
-        ...revision ? { revision } : {},
+        revision,
         ...lowers ? { confirm: true } : {}
       });
     } catch {
@@ -89342,22 +89348,6 @@ var init_shared_status = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
-var exports_dashboard_contract = {};
-__export(exports_dashboard_contract, {
-  SEARCH_TOOL_NAME: () => SEARCH_TOOL_NAME,
-  SCOPE_UI_META_KEY: () => SCOPE_UI_META_KEY,
-  SCOPE_SET_TOOL_NAME: () => SCOPE_SET_TOOL_NAME,
-  SCOPE_LIST_TOOL_NAME: () => SCOPE_LIST_TOOL_NAME,
-  PRIVACY_SET_TOOL_NAME: () => PRIVACY_SET_TOOL_NAME,
-  PRIVACY_META_KEY: () => PRIVACY_META_KEY,
-  PRIVACY_GET_TOOL_NAME: () => PRIVACY_GET_TOOL_NAME,
-  MODEL_SET_TOOL_NAME: () => MODEL_SET_TOOL_NAME,
-  MODEL_RETRY_TOOL_NAME: () => MODEL_RETRY_TOOL_NAME,
-  DISCONNECT_SOURCE_TOOL_NAME: () => DISCONNECT_SOURCE_TOOL_NAME,
-  DASHBOARD_TOOL_NAME: () => DASHBOARD_TOOL_NAME,
-  DASHBOARD_RESOURCE_URI: () => DASHBOARD_RESOURCE_URI,
-  CONNECT_SOURCE_TOOL_NAME: () => CONNECT_SOURCE_TOOL_NAME
-});
 var DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 
 // src/workers/chatgpt/dashboard-view-model.ts
@@ -90310,13 +90300,16 @@ function dashboardSourceStates(view, options = {}) {
   const rows = view.sources.map((source) => {
     const entry = engine.get(source.source_id);
     const connecting = connectingFor2(source, now);
-    const progress = !connecting && entry?.progress && (entry.progress.stage !== "done" || entry.progress.stalled) ? entry.progress : undefined;
+    const credential = !connecting && dashboardCredentialAttention(source, degraded ? { degradedCredentials: degraded } : {});
+    const progress = !connecting && !credential && entry?.progress && (entry.progress.stage !== "done" || entry.progress.stalled) ? entry.progress : undefined;
     const local = dashboardHonestStatus(dashboardStatus({ source, ...degraded ? { degradedCredentials: degraded } : {} }), progress);
     let status = entry?.status ?? local;
     const working = progress !== undefined && progress.stage !== "done" && !progress.stalled;
     if ((local === "Needs you" || local === "Failing") && status !== "Needs you" && status !== "Failing" && !working) {
       status = local;
     }
+    if (credential)
+      status = "Needs you";
     if (connecting)
       status = "Needs you";
     return {
@@ -90441,6 +90434,15 @@ function dashboardReconnectAction(source, view, options) {
       return { action: lockedAction(label2, options?.basePath) };
     const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view, action));
     return { action: { label: label2, kind: "none", sheet: sheetId, ...blocked }, sheet };
+  }
+  if (action.kind === "none" && dashboardCredentialAttention(source, options?.degradedCredentials ? { degradedCredentials: options.degradedCredentials } : {})) {
+    const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
+    const route = definition?.connect_action;
+    if (route?.kind !== "oauth" && route?.kind !== "api_key")
+      return;
+    if (!dashboardControlsAvailable(options))
+      return { action: lockedAction(DASHBOARD_RECONNECT_LABEL, options?.basePath) };
+    return { action: { label: DASHBOARD_RECONNECT_LABEL, kind: route.kind, source: route.source, ...blocked } };
   }
   if (action.kind !== "oauth" && action.kind !== "api_key")
     return;
@@ -90569,7 +90571,9 @@ function rowBody(state, options) {
   }
   return line.trim() === "" ? "" : `<p class="sline">${escapeHtml2(capitalise(line))}</p>`;
 }
-function dashboardSourceRow(state, view, options, withMenu) {
+function dashboardSourceRow(state, view, pageOptions, withMenu) {
+  const degraded = pageOptions?.degradedCredentials ?? view.degraded_credentials;
+  const options = { ...pageOptions, ...degraded ? { degradedCredentials: degraded } : {} };
   const source = state.source;
   const href = safeHref(detailHref2(source, options?.basePath));
   const fix = dashboardSourceRowFix(state, view, options, withMenu);
@@ -92283,8 +92287,11 @@ function renderDashboardPrivacyPage(view, options) {
 }
 function renderPrivacyBody(view, options) {
   const head = `<h2 class="ptitle">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.title)}</h2><p class="pintro">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.intro)}</p>`;
-  if (options?.readOnly === true && options.controlMode !== "native") {
-    return `<div class="privacy" data-privacy-locked>${head}<p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.locked)} ` + `<a href="${escapeHtml2(`${setupHref(options.basePath)}#${DASHBOARD_CONTROL_GATE_ID}`)}">Setup →</a></p></div>`;
+  if (!dashboardControlsAvailable(options)) {
+    const summary = options?.privacy !== undefined && options.privacy !== "unreadable" ? options.privacy : undefined;
+    const counts = summary ? `<p class="pnote" data-privacy-counts>${escapeHtml2(summary.configured ? fill(summary.ruleCount === 1 ? DASHBOARD_LOCAL_PRIVACY_COPY.countsOne : DASHBOARD_LOCAL_PRIVACY_COPY.counts, { n: summary.ruleCount.toLocaleString("en-US") }) : DASHBOARD_LOCAL_PRIVACY_COPY.countsUnset)}</p>` : "";
+    const unlock = options?.controlMode === "native" ? `<p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.readOnly)}</p>` : `<p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.locked)} <a href="${escapeHtml2(`${setupHref(options?.basePath)}#${DASHBOARD_CONTROL_GATE_ID}`)}">Setup →</a></p>`;
+    return `<div class="privacy" data-privacy-locked>${head}${counts}${unlock}</div>`;
   }
   const settings = options?.privacySettings;
   if (!settings) {
@@ -95246,10 +95253,15 @@ function createEmailSourceWorker(options = {}) {
           const embeddingRuntime = await readEmbeddingRuntime({ env: process.env });
           const backgroundRuntime = readBackgroundRuntime({ env: process.env });
           const controlSessionCsrfToken = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
-          const privacyRead = sourceDashboard.privacy ? await sourceDashboard.privacy.read().catch(() => {
+          const dashboardPage = dashboardUi ? dashboardUi.params.view : url.searchParams.has("privacy") ? "privacy" : url.searchParams.has("sensitivity") ? "sensitivity" : url.searchParams.has("background") ? "background" : url.searchParams.has("source") ? "source" : url.searchParams.has("setup") ? "setup" : "home";
+          const privacyShown = dashboardPage === "home" || dashboardPage === "setup" || dashboardPage === "sensitivity" || dashboardPage === "privacy";
+          const writeAuthority = dashboardUi ? dashboardUi.canWrite : request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+          const privacySummary = sourceDashboard.privacy && privacyShown ? await sourceDashboard.privacy.summary().catch(() => {
             return;
           }) : undefined;
-          const privacyWanted = url.searchParams.has("privacy") || dashboardUi?.params.view === "privacy";
+          const privacyRead = sourceDashboard.privacy && dashboardPage === "privacy" && writeAuthority ? await sourceDashboard.privacy.read().catch(() => {
+            return;
+          }) : undefined;
           let modelInstalls;
           try {
             modelInstalls = sourceDashboard.modelInstalls?.();
@@ -95258,14 +95270,8 @@ function createEmailSourceWorker(options = {}) {
           }
           const options2 = {
             ...modelInstalls ? { modelInstalls } : {},
-            ...sourceDashboard.privacy ? {
-              privacy: privacyRead?.ok ? {
-                configured: privacyRead.settings.configured,
-                pendingCount: privacyRead.settings.pendingCount,
-                ruleCount: privacyRead.settings.rules.length
-              } : "unreadable"
-            } : {},
-            ...privacyWanted && privacyRead?.ok ? { privacySettings: privacyRead.settings } : {},
+            ...sourceDashboard.privacy && privacyShown ? { privacy: privacySummary?.ok ? privacySummary.summary : "unreadable" } : {},
+            ...privacyRead?.ok ? { privacySettings: privacyRead.settings } : {},
             embeddingRuntime,
             backgroundRuntime,
             ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
@@ -109831,37 +109837,6 @@ var init_private_answer_resource = __esm(() => {
 });
 
 // src/workers/chatgpt/response-builder.ts
-var exports_response_builder = {};
-__export(exports_response_builder, {
-  withPrivateAnswerMeta: () => withPrivateAnswerMeta,
-  sourceStatusToolResult: () => sourceStatusToolResult,
-  searchToolResult: () => searchToolResult,
-  scopeSavedToolResult: () => scopeSavedToolResult,
-  scopeListToolResult: () => scopeListToolResult,
-  scopeConflictToolResult: () => scopeConflictToolResult,
-  privateMatchNote: () => privateMatchNote,
-  privacyToolResult: () => privacyToolResult,
-  modelSetToolResult: () => modelSetToolResult,
-  modelRetryToolResult: () => modelRetryToolResult,
-  errorToolResult: () => errorToolResult,
-  errorMessage: () => errorMessage3,
-  errorCode: () => errorCode,
-  disconnectToolResult: () => disconnectToolResult,
-  dashboardToolResult: () => dashboardToolResult,
-  dashboardToolMeta: () => dashboardToolMeta,
-  copyPrivateMatch: () => copyPrivateMatch,
-  copyDashboardViewModel: () => copyDashboardViewModel,
-  connectSourceToolResult: () => connectSourceToolResult,
-  answerToolResult: () => answerToolResult,
-  answerToolMeta: () => answerToolMeta,
-  SEARCH_COVERAGE_INSTRUCTION: () => SEARCH_COVERAGE_INSTRUCTION,
-  PRIVATE_MATCH_PANEL_SETUP_NOTE: () => PRIVATE_MATCH_PANEL_SETUP_NOTE,
-  PRIVATE_MATCH_PANEL_NOTE: () => PRIVATE_MATCH_PANEL_NOTE,
-  PRIVATE_MATCH_PANEL_FULL_NOTE: () => PRIVATE_MATCH_PANEL_FULL_NOTE,
-  PRIVATE_MATCH_NOTE: () => PRIVATE_MATCH_NOTE,
-  PRIVATE_ANSWER_WITHHELD: () => PRIVATE_ANSWER_WITHHELD,
-  ChatGptSurfaceError: () => ChatGptSurfaceError
-});
 function dashboardToolResult(view) {
   const structured = copyDashboardViewModel(view);
   return {
@@ -110711,16 +110686,6 @@ var init_scope_privacy = __esm(() => {
 });
 
 // src/workers/dashboard/shared-privacy.ts
-var exports_shared_privacy = {};
-__export(exports_shared_privacy, {
-  visiblePrivacy: () => visiblePrivacy,
-  privacyRuleIdentity: () => privacyRuleIdentity,
-  privacyRemovedRules: () => privacyRemovedRules,
-  privacyLogic: () => privacyLogic,
-  lowersPrivacy: () => lowersPrivacy,
-  isSecretPrivacyRule: () => isSecretPrivacyRule,
-  PRIVACY_FOLDER_SOURCE_NAMES: () => PRIVACY_FOLDER_SOURCE_NAMES
-});
 function privacyRuleIdentity(rule) {
   if (rule.kind === "sender") {
     return privacyRuleId({ kind: "sender", source_id: rule.source_id, value: (rule.value ?? "").trim().toLowerCase() });
@@ -110755,27 +110720,6 @@ var init_shared_privacy = __esm(() => {
 });
 
 // src/workers/chatgpt/setup-tools.ts
-var exports_setup_tools = {};
-__export(exports_setup_tools, {
-  visiblePrivacy: () => visiblePrivacy,
-  lowersPrivacy: () => lowersPrivacy,
-  isSetupTool: () => isSetupTool,
-  isSecretPrivacyRule: () => isSecretPrivacyRule,
-  callSetupTool: () => callSetupTool,
-  SetupBackendError: () => SetupBackendError,
-  SETUP_TOOLS: () => SETUP_TOOLS,
-  SCOPE_SET_TOOL: () => SCOPE_SET_TOOL,
-  SCOPE_LIST_TOOL: () => SCOPE_LIST_TOOL,
-  SCOPE_LIST_PAGE_SIZE: () => SCOPE_LIST_PAGE_SIZE,
-  PRIVACY_SET_TOOL: () => PRIVACY_SET_TOOL,
-  PRIVACY_GET_TOOL: () => PRIVACY_GET_TOOL,
-  PRIVACY_CONFIRMATION_TTL_MS: () => PRIVACY_CONFIRMATION_TTL_MS,
-  MODEL_SET_TOOL: () => MODEL_SET_TOOL,
-  MODEL_RETRY_TOOL: () => MODEL_RETRY_TOOL,
-  MAX_PROVIDER_PAGES: () => MAX_PROVIDER_PAGES,
-  DISCONNECT_SOURCE_TOOL: () => DISCONNECT_SOURCE_TOOL,
-  CONNECT_SOURCE_TOOL: () => CONNECT_SOURCE_TOOL
-});
 import { randomBytes as setupRandomBytes } from "node:crypto";
 function isSetupTool(name) {
   return SETUP_TOOL_NAMES.has(name);
@@ -114827,6 +114771,90 @@ var init_setup_backend = __esm(() => {
   };
 });
 
+// src/workers/email-source/dashboard-privacy.ts
+var exports_dashboard_privacy = {};
+__export(exports_dashboard_privacy, {
+  createDashboardPrivacyAdapter: () => createDashboardPrivacyAdapter,
+  DASHBOARD_PRIVACY_PENDING_TTL_MS: () => DASHBOARD_PRIVACY_PENDING_TTL_MS
+});
+function createDashboardPrivacyAdapter(options) {
+  const now = options.now ?? Date.now;
+  const ttl = options.pendingTtlMs ?? DASHBOARD_PRIVACY_PENDING_TTL_MS;
+  let cached2;
+  const pending = () => {
+    const at = now();
+    if (!cached2 || at - cached2.at >= ttl) {
+      let count2 = 0;
+      try {
+        count2 = Math.max(0, Math.floor(options.pendingCount()));
+      } catch {
+        count2 = 0;
+      }
+      cached2 = { at, count: count2 };
+    }
+    return cached2.count;
+  };
+  const failure = (error2) => ({
+    ok: false,
+    code: error2 instanceof ChatGptSurfaceError ? error2.code : "unavailable",
+    message: errorMessage3(error2)
+  });
+  const visible = () => visiblePrivacy(options.readSettings(pending()), options.backend.secretLocations());
+  return {
+    async summary() {
+      try {
+        const settings = visible();
+        return { ok: true, summary: { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length } };
+      } catch (error2) {
+        return failure(error2);
+      }
+    },
+    async read() {
+      try {
+        return { ok: true, status: "current", settings: visible() };
+      } catch (error2) {
+        return failure(error2);
+      }
+    },
+    async save(update) {
+      try {
+        const { confirm, ...fields } = update;
+        if (typeof fields.revision !== "string" || fields.revision.trim() === "") {
+          return { ok: false, code: "invalid_params", message: NEEDS_REVISION };
+        }
+        const args = { ...fields };
+        if (confirm === true) {
+          const draft = {
+            ...typeof fields.description === "string" ? { description: fields.description.trim() } : {},
+            ...Array.isArray(fields.rules) ? { rules: fields.rules } : {}
+          };
+          if (lowersPrivacy(draft, visible())) {
+            const issued = await callSetupTool(PRIVACY_GET_TOOL_NAME, {}, options.backend);
+            const token = issued._meta?.[PRIVACY_META_KEY]?.confirmation;
+            if (token)
+              args.confirmation = token;
+          }
+        }
+        const result = await callSetupTool(PRIVACY_SET_TOOL_NAME, args, options.backend);
+        const settings = result._meta?.[PRIVACY_META_KEY];
+        if (!settings)
+          return { ok: false, code: "unavailable", message: "Olympus could not read your privacy settings." };
+        const status = result.structuredContent?.status === "conflict" ? "conflict" : "saved";
+        const { confirmation: _issued, ...shown } = settings;
+        return { ok: true, status, settings: shown };
+      } catch (error2) {
+        return failure(error2);
+      }
+    }
+  };
+}
+var DASHBOARD_PRIVACY_PENDING_TTL_MS = 60000, NEEDS_REVISION = "A privacy save needs the revision the editor was built from. Reload the page and try again.";
+var init_dashboard_privacy = __esm(() => {
+  init_response_builder();
+  init_setup_tools();
+  init_shared_privacy();
+});
+
 // src/workers/email-source/server.ts
 var exports_server2 = {};
 __export(exports_server2, {
@@ -117317,6 +117345,7 @@ async function main() {
         checkModelSetup: () => modelSetup.checkLocalModels(),
         connectModelKey,
         privacy: {
+          summary: () => dashboardPrivacy.summary(),
           read: () => dashboardPrivacy.read(),
           save: (update) => dashboardPrivacy.save(update)
         },
@@ -117530,52 +117559,12 @@ async function main() {
       return builtIn.length > 0;
     }
   });
-  const { callSetupTool: callSetupTool2 } = await Promise.resolve().then(() => (init_setup_tools(), exports_setup_tools));
-  const { ChatGptSurfaceError: ChatGptSurfaceError2, errorMessage: chatgptErrorMessage } = await Promise.resolve().then(() => (init_response_builder(), exports_response_builder));
-  const { PRIVACY_GET_TOOL_NAME: PRIVACY_GET_TOOL_NAME2, PRIVACY_SET_TOOL_NAME: PRIVACY_SET_TOOL_NAME2, PRIVACY_META_KEY: PRIVACY_META_KEY2 } = await Promise.resolve().then(() => exports_dashboard_contract);
-  const { lowersPrivacy: lowersPrivacy2, visiblePrivacy: visiblePrivacy2 } = await Promise.resolve().then(() => (init_shared_privacy(), exports_shared_privacy));
-  const privacyFailure = (error2) => ({
-    ok: false,
-    code: error2 instanceof ChatGptSurfaceError2 ? error2.code : "unavailable",
-    message: chatgptErrorMessage(error2)
+  const { createDashboardPrivacyAdapter: createDashboardPrivacyAdapter2 } = await Promise.resolve().then(() => (init_dashboard_privacy(), exports_dashboard_privacy));
+  const dashboardPrivacy = createDashboardPrivacyAdapter2({
+    backend: chatgptSetup,
+    readSettings: (pending) => readChatGptPrivacySettings2(process.env, pending),
+    pendingCount: pendingClassificationCount
   });
-  const dashboardPrivacy = {
-    read: async () => {
-      try {
-        return { ok: true, status: "current", settings: visiblePrivacy2(chatgptSetup.privacySettings(), chatgptSetup.secretLocations()) };
-      } catch (error2) {
-        return privacyFailure(error2);
-      }
-    },
-    save: async (update) => {
-      try {
-        const { confirm, ...fields } = update;
-        const args = { ...fields };
-        if (confirm === true) {
-          const visible = visiblePrivacy2(chatgptSetup.privacySettings(), chatgptSetup.secretLocations());
-          const draft = {
-            ...typeof fields.description === "string" ? { description: fields.description.trim() } : {},
-            ...Array.isArray(fields.rules) ? { rules: fields.rules } : {}
-          };
-          if (lowersPrivacy2(draft, visible)) {
-            const issued = await callSetupTool2(PRIVACY_GET_TOOL_NAME2, {}, chatgptSetup);
-            const token = issued._meta?.[PRIVACY_META_KEY2]?.confirmation;
-            if (token)
-              args.confirmation = token;
-          }
-        }
-        const result = await callSetupTool2(PRIVACY_SET_TOOL_NAME2, args, chatgptSetup);
-        const settings = result._meta?.[PRIVACY_META_KEY2];
-        const status = result.structuredContent?.status === "conflict" ? "conflict" : "saved";
-        if (!settings)
-          return { ok: false, code: "unavailable", message: "Olympus could not read your privacy settings." };
-        const { confirmation: _issued, ...shown } = settings;
-        return { ok: true, status, settings: shown };
-      } catch (error2) {
-        return privacyFailure(error2);
-      }
-    }
-  };
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === "1";
   const chatgptAnswerModelAvailable = () => {
     if (!sourceAnswer || !getModelSetup().ready)
