@@ -16,6 +16,7 @@ import { AUTHENTICATED_RESPONSE_HEADER, mintCredential } from '../shared/tokens.
 import { createOAuthRelayNonce, signOAuthRelayState } from '../../src/core/oauth-relay.ts';
 import type { RelayLimits } from '../server/limits.ts';
 import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
+import { NOT_CONNECTED_MESSAGE } from '../server/relay-mcp.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
 import generatedDashboard from '../server/generated/chatgpt-dashboard.json';
 import generatedSurface from '../server/generated/chatgpt-tools.json';
@@ -24,6 +25,11 @@ import generatedPrivateAnswer from '../server/generated/chatgpt-private-answer.j
 setDefaultTimeout(15_000);
 
 const PUBLIC_HOST = 'mcp.olympus.test';
+/** The account-linking challenge every tool sends a caller without a token. */
+const LINKING_CHALLENGE = [
+  `Bearer resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp", error="invalid_token", `
+    + 'error_description="Connect Olympus on your Mac to use this tool."',
+];
 
 interface WorkerRecord {
   method: string;
@@ -281,7 +287,7 @@ describe('routing', () => {
     expect((await fetch(`${relay.url}/dashboard`)).status).toBe(404);
   });
 
-  test('a caller with no token gets the relay\'s not-installed surface and never reaches an engine', async () => {
+  test('a caller with no token gets the relay\'s not-connected surface and never reaches an engine', async () => {
     const relay = await makeRelay();
     const worker = fakeWorker('A');
     cleanups.push(worker.stop);
@@ -289,6 +295,7 @@ describe('routing', () => {
     const anonymous = (body: string) => fetch(`${relay.url}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
     const init = await (await anonymous(rpc('initialize', { protocolVersion: '2025-11-25' }))).json();
     expect(init.result.protocolVersion).toBe('2025-11-25');
+    expect(init.result.instructions).toBe(NOT_CONNECTED_MESSAGE);
     const list = await (await anonymous(rpc('tools/list'))).json();
     // The engine's full ChatGPT tool set, so ChatGPT's model can pick an
     // answer tool and so start linking.
@@ -338,11 +345,14 @@ describe('routing', () => {
     const dashboard = await (await anonymous(rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }))).json();
     expect(dashboard.result.structuredContent).toMatchObject({
       v: 1,
-      connection: { state: 'not_installed', action: { id: 'install', href: 'https://olympusplugin.ai/install/' } },
+      connection: { state: 'not_connected', action: { id: 'connect' }, installHref: 'https://olympusplugin.ai/install/' },
       needsYou: [],
       sources: [],
     });
-    expect(dashboard.result._meta).toEqual(generatedSurface.tools[0]!._meta);
+    expect(dashboard.result.content).toEqual([{ type: 'text', text: NOT_CONNECTED_MESSAGE }]);
+    // The tool's own UI metadata, plus the same linking challenge the
+    // protected tools send, so ChatGPT offers Connect beside the dashboard.
+    expect(dashboard.result._meta).toEqual({ ...generatedSurface.tools[0]!._meta, 'mcp/www_authenticate': LINKING_CHALLENGE });
     expect(dashboard.result.isError).toBeUndefined();
     // Every oauth2 tool, called without a token: the documented linking
     // trigger (isError + _meta["mcp/www_authenticate"]) on an HTTP 200.
@@ -351,10 +361,7 @@ describe('routing', () => {
       expect(call.status).toBe(200);
       const engineTool = await call.json();
       expect(engineTool.result.isError).toBe(true);
-      expect(engineTool.result._meta['mcp/www_authenticate']).toEqual([
-        `Bearer resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp", error="invalid_token", `
-          + 'error_description="Connect Olympus on your Mac to use this tool."',
-      ]);
+      expect(engineTool.result._meta['mcp/www_authenticate']).toEqual(LINKING_CHALLENGE);
     }
     expect((await fetch(`${relay.url}/mcp`)).status).toBe(405);
     expect(worker.requests).toHaveLength(0);

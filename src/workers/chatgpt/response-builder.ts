@@ -115,8 +115,8 @@ const FIX_HREF_HOST = 'olympusplugin.ai';
 /** Every hand-off link: the relay's own host, the plugin's one redirect domain. */
 const HANDOFF_URL = /^https:\/\/mcp\.olympusplugin\.ai\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
 
-const CONNECTION_STATES = new Set<ConnectionState>(['not_installed', 'installing', 'ready', 'mac_offline', 'relay_unavailable']);
-const CONNECTION_ACTIONS = new Set(['install', 'open_olympus', 'wake_mac', 'retry']);
+const CONNECTION_STATES = new Set<ConnectionState>(['not_connected', 'not_installed', 'installing', 'ready', 'mac_offline', 'relay_unavailable']);
+const CONNECTION_ACTIONS = new Set(['connect', 'install', 'open_olympus', 'wake_mac', 'retry']);
 const STATUSES = new Set(['Fresh', 'Working', 'Waiting', 'Needs you', 'Failing', 'Off']);
 const UNITS = new Set(['files', 'messages', 'items']);
 const EMBEDDING_STATES = new Set(['downloading', 'verifying', 'ready', 'failed']);
@@ -146,6 +146,10 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
   if (view.connection.action && CONNECTION_ACTIONS.has(view.connection.action.id)) {
     const href = safeHref(view.connection.action.href);
     connection.action = { id: view.connection.action.id, ...(href ? { href } : {}) };
+  }
+  if (state === 'not_connected') {
+    const installHref = safeHref(view.connection.installHref);
+    if (installHref) connection.installHref = installHref;
   }
   if (state === 'installing' && view.connection.progress) {
     connection.progress = {

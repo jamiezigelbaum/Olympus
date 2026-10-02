@@ -96,7 +96,7 @@ export interface RelayConfig {
   readonly listen?: { readonly host?: string; readonly port?: number };
   /** The engine worker's loopback port, for the authorize bridge (Olympus default 8010). */
   readonly enginePort?: number;
-  /** Where the bridge's and the not-installed dashboard's "Install Olympus" lead. */
+  /** Where the bridge's and the not-connected dashboard's "Install Olympus" lead. */
   readonly installUrl?: string;
   /**
    * The demo install (synthetic sample data) directory reviewers sign in to.
@@ -446,7 +446,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
 
   const mcp = async (request: Request, path: string, ip: string): Promise<Response> => {
     const authorization = request.headers.get('authorization');
-    // No credential at all: the relay's own not-installed surface. A caller
+    // No credential at all: the relay's own not-connected surface. A caller
     // without a token never reaches an engine.
     if (authorization === null) {
       const anonymous = await readBody(request, Math.min(limits.maxAnonymousRequestBodyBytes, limits.maxRequestBodyBytes), ip);
@@ -455,7 +455,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         method: request.method,
         body: new TextDecoder().decode(anonymous.body),
         now: now(),
-        state: 'not_installed',
+        state: 'not_connected',
         installUrl: bridge.installUrl,
         protectedResourceMetadataUrl: origin.protectedResourceMetadataUrl,
       });

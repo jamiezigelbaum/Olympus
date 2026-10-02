@@ -1,25 +1,30 @@
 /**
  * The ChatGPT dashboard view-model, version 1: `structuredContent` of the
  * `olympus_dashboard` tool, rendered by `ui://olympus/dashboard`. The engine
- * produces every state except `mac_offline` and `not_installed` (the relay
+ * produces every state except `mac_offline` and `not_connected` (the relay
  * answers those) and `relay_unavailable` (the UI derives it when a tool call
  * fails). See docs/design/chatgpt-plugin.md.
  *
- * Copy: the UI owns the wording of the five connection states (the relay
- * renders two of them without vocabulary.ts). Every other sentence comes from
+ * `not_connected` is a caller with no Olympus token: the relay cannot tell an
+ * owner who installed Olympus but has not linked ChatGPT from one who has no
+ * install, so it offers Connect and carries the install link beside it.
+ * `not_installed` stays in the union for UI compatibility; nothing produces it.
+ *
+ * Copy: the UI owns the wording of the connection states (the relay renders
+ * two of them without vocabulary.ts). Every other sentence comes from
  * src/workers/dashboard/vocabulary.ts, which the dashboard lane owns. Nothing
  * tiered Private or Secret is ever included, folder names included: every
  * value passes the allowlisted response builder before it leaves the engine
  * (structuredContent, _meta, errors alike).
  *
  * Not states here, by design: OAuth revoked (ChatGPT itself shows reconnect on
- * 401); installed but not linked (shown on the Mac, where linking happens).
+ * 401).
  * Stale status is derived by the UI from `generatedAt`. Multiple Macs per
  * ChatGPT account is v2.
  */
 import type { DashboardStatus } from '../dashboard/vocabulary.ts';
 
-export type ConnectionState = 'not_installed' | 'installing' | 'ready' | 'mac_offline' | 'relay_unavailable';
+export type ConnectionState = 'not_connected' | 'not_installed' | 'installing' | 'ready' | 'mac_offline' | 'relay_unavailable';
 
 export interface DashboardFix {
   label: string;
@@ -116,7 +121,13 @@ export interface DashboardViewModelV1 {
     state: ConnectionState;
     /** ISO time; `mac_offline` only. */
     lastSeenAt?: string;
-    action?: { id: 'install' | 'open_olympus' | 'wake_mac' | 'retry'; href?: string };
+    /**
+     * `connect` (`not_connected` only) has no href: the dashboard result
+     * carries `_meta["mcp/www_authenticate"]`, ChatGPT's own linking trigger.
+     */
+    action?: { id: 'connect' | 'install' | 'open_olympus' | 'wake_mac' | 'retry'; href?: string };
+    /** `not_connected` only: where to install Olympus when it is not on the Mac yet. */
+    installHref?: string;
     /** `installing` only: model download, first index. */
     progress?: { percent: number; label: string };
   };

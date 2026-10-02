@@ -10,7 +10,7 @@ import {
   DASHBOARD_RESOURCE_URI as RELAY_RESOURCE_URI,
   DASHBOARD_TOOL_NAME as RELAY_TOOL_NAME,
   INSTALL_URL,
-  notInstalledDashboard,
+  notConnectedDashboard,
   offlineDashboard,
   type RelayDashboardViewModel,
 } from '../connect-relay/shared/dashboard-contract.ts';
@@ -52,10 +52,23 @@ describe('the relay dashboard copy follows the contract', () => {
     });
     expect(assignable(offlineDashboard(undefined, now)).connection)
       .toEqual({ state: 'mac_offline', action: { id: 'wake_mac', href: 'https://olympusplugin.ai/help/mac-offline/' } });
-    const notInstalled = assignable(notInstalledDashboard(INSTALL_URL, now));
-    expect(notInstalled.connection).toEqual({ state: 'not_installed', action: { id: 'install', href: 'https://olympusplugin.ai/install/' } });
+    const notConnected = assignable(notConnectedDashboard(INSTALL_URL, now));
+    expect(notConnected.connection).toEqual({
+      state: 'not_connected',
+      action: { id: 'connect' },
+      installHref: 'https://olympusplugin.ai/install/',
+    });
     // Both survive the engine's allowlisted response builder unchanged.
     expect(copyDashboardViewModel(offline)).toEqual(offline);
-    expect(copyDashboardViewModel(notInstalled)).toEqual(notInstalled);
+    expect(copyDashboardViewModel(notConnected)).toEqual(notConnected);
+  });
+
+  test('the builder keeps installHref only for not_connected and only on the Olympus site', () => {
+    const now = Date.parse('2026-10-01T12:00:00.000Z');
+    const base = notConnectedDashboard(INSTALL_URL, now) as DashboardViewModelV1;
+    const foreign = copyDashboardViewModel({ ...base, connection: { ...base.connection, installHref: 'https://example.com/install/' } });
+    expect(foreign.connection).toEqual({ state: 'not_connected', action: { id: 'connect' } });
+    const otherState = copyDashboardViewModel({ ...base, connection: { ...base.connection, state: 'mac_offline' } });
+    expect(otherState.connection.installHref).toBeUndefined();
   });
 });

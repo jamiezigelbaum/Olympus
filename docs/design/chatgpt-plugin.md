@@ -193,8 +193,11 @@ Three things the directory requires that the design above did not cover:
 1. **Add before install (mixed auth).** A user adds the plugin before the
    engine exists. The relay serves a no-auth MCP surface for callers without a
    token: `initialize`, `tools/list`, the dashboard resource, and
-   `olympus_dashboard` returning `connection.state = "not_installed"` with the
-   install action. Tools that need the engine declare an OAuth security scheme
+   `olympus_dashboard` returning `connection.state = "not_connected"` with the
+   `connect` action and an `installHref` (a caller without a token cannot be
+   told apart from an owner who installed Olympus but has not linked ChatGPT
+   yet), plus the same `_meta["mcp/www_authenticate"]` challenge the protected
+   tools send, so ChatGPT offers Connect. Tools that need the engine declare an OAuth security scheme
    (`securitySchemes: [{type:"oauth2", scopes:[...]}]`; `olympus_dashboard`
    also declares `noauth`), so ChatGPT starts the OAuth linking only when the
    user connects, after the engine is installed. Unlinked callers never

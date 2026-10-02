@@ -120,7 +120,7 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: f
 
 /** Needs the owner's Olympus connection (an OAuth token issued by their engine). */
 const OAUTH2_REQUIRED = [{ type: 'oauth2', scopes: [] }] as const;
-/** Callable anonymously (the relay answers "not installed"), richer once connected. */
+/** Callable anonymously (the relay answers "not connected"), richer once connected. */
 const OAUTH2_OPTIONAL = [{ type: 'noauth' }, { type: 'oauth2', scopes: [] }] as const;
 
 /** One source_answer handoff budget, as the operation's own description asks callers to pass. */

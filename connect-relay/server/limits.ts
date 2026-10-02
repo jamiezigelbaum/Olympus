@@ -81,7 +81,7 @@ export interface RelayLimits {
    */
   readonly privateFetchesPerIp: BucketSpec;
   readonly maxRequestBodyBytes: number;
-  /** Body cap for `/mcp` without any credential (the relay's own not-installed answers). */
+  /** Body cap for `/mcp` without any credential (the relay's own not-connected answers). */
   readonly maxAnonymousRequestBodyBytes: number;
   readonly maxResponseBodyBytes: number;
   /** Request bodies being uploaded at once, across the relay. */
