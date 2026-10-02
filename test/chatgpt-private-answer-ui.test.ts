@@ -12,6 +12,8 @@ import { PRIVATE_ANSWER_META_KEY } from '../src/workers/chatgpt/private-answer-c
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PRIVATE_ANSWER_RELAY_ORIGIN, privateAnswerPageHtml, privateAnswerResourceHtml, privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
+import { PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS } from '../src/workers/dashboard/chatgpt/private-answer.ts';
 
 const RELAY = PRIVATE_ANSWER_RELAY_ORIGIN;
 const JOB = `oly2p.${'a'.repeat(32)}.${'B'.repeat(43)}`;
@@ -567,6 +569,12 @@ describe('collecting the private answer', () => {
     await sleep(120);
     expect(host.text()).not.toContain(W.slow);
     expect(host.text()).toContain(W.preparingFull);
+  });
+
+  test('the full-detail wait outlasts the engine\'s full-detail deadline (240 s), and the page ships it', () => {
+    expect(CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS).toBe(250_000);
+    expect(CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS).toBeGreaterThan(PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS);
+    expect(privateAnswerPageHtml({ relayOrigin: RELAY })).toContain('"fullPollCapMs":250000');
   });
 
   test('a summary answer keeps the usual copy and cap', async () => {

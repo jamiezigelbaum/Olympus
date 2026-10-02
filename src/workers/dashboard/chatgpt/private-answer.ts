@@ -79,8 +79,8 @@ export interface ChatGptPrivateAnswerPageOptions {
 }
 
 export const CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS = 2 * 60_000;
-/** A full-detail answer reads the whole report: the engine allows it 180 s, the panel waits a little longer. */
-export const CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 190_000;
+/** A full-detail answer reads selected parts more closely: the engine allows it 240 s, the panel waits a little longer. */
+export const CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 250_000;
 /** The relay answers a poll at once (202 with Retry-After); a request this slow has hung. */
 export const CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS = 20_000;
 /** The panel's IndexedDB: one key pair per job id (key path: the job id). */
