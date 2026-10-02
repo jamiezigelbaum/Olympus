@@ -903,11 +903,33 @@ function mountDispositionsController(options) {
     metadata_only: "Names only",
     exclude: "Skipped"
   };
+  const SCOPE_STATES = ["ingest", "metadata_only", "exclude"];
+  const MAX_SCOPE_RULES = 100;
+  const ACCOUNT_KEY = "@account";
   const scopeDrafts = new Map;
+  const scopeCopies = new WeakMap;
   function scopeMessage(form, text) {
     const slot = form.querySelector("[data-scope-message]");
     if (slot)
       slot.textContent = text;
+  }
+  function scopeCopy(form) {
+    let copy = scopeCopies.get(form);
+    if (!copy) {
+      try {
+        copy = JSON.parse(form.dataset.scopeCopy || "{}");
+      } catch {
+        copy = {};
+      }
+      scopeCopies.set(form, copy);
+    }
+    return copy;
+  }
+  function fillText(template, values) {
+    let out = template || "";
+    for (const key of Object.keys(values))
+      out = out.split(`{${key}}`).join(String(values[key]));
+    return out;
   }
   function scopeDraft(form) {
     let draft = scopeDrafts.get(form);
@@ -916,20 +938,21 @@ function mountDispositionsController(options) {
         generation: form.dataset.accountGeneration || "",
         revision: form.dataset.scopeRevision || "",
         selections: new Map,
-        names: new Map,
         ancestors: new Map,
         nodes: [],
         catalog: new Map,
         branches: new Map,
         branchCursors: new Map,
-        expanded: new Set,
+        path: [],
         loaded: false,
         loadAttempted: false,
         loading: false,
         busy: false,
+        saving: false,
         invalid: false,
         edited: false,
-        whole: form.querySelector("[data-scope-whole-account]")?.checked === true
+        whole: false,
+        wholeConfirmed: false
       };
       scopeDrafts.set(form, draft);
     }
@@ -938,21 +961,26 @@ function mountDispositionsController(options) {
   function scopeAllowed(form, draft) {
     return canWrite && form.dataset.connected === "true" && !draft.busy && !draft.invalid;
   }
-  function inheritedScopeState(draft, key) {
-    let state = draft.whole ? "ingest" : undefined;
+  function scopeInherited(draft, key) {
+    let state = draft.whole ? "ingest" : "";
+    let from = draft.whole ? ACCOUNT_KEY : "";
     for (const ancestor of draft.ancestors.get(key) || []) {
       const choice = draft.selections.get(ancestor);
-      if (choice === "exclude")
-        return "exclude";
-      if (choice === "metadata_only")
+      if (choice === "exclude") {
+        state = "exclude";
+        from = ancestor;
+      } else if (choice === "metadata_only" && state !== "exclude") {
         state = "metadata_only";
-      else if (choice === "ingest" && state === undefined)
+        from = ancestor;
+      } else if (choice === "ingest" && (state === "" || state === "ingest")) {
         state = "ingest";
+        from = ancestor;
+      }
     }
-    return state;
+    return { state, from };
   }
   function effectiveScopeState(draft, key) {
-    const inherited = inheritedScopeState(draft, key);
+    const inherited = scopeInherited(draft, key).state;
     const own = draft.selections.get(key);
     if (inherited === "exclude" || own === "exclude")
       return "exclude";
@@ -960,193 +988,334 @@ function mountDispositionsController(options) {
       return "metadata_only";
     return own || inherited || "exclude";
   }
-  function scopeChoiceAllowed(draft, state) {
-    if (!draft.selected?.selectable)
-      return false;
-    const inherited = inheritedScopeState(draft, draft.selected.key);
+  function shownScopeState(draft, key) {
+    return draft.selections.has(key) || scopeInherited(draft, key).state ? effectiveScopeState(draft, key) : "";
+  }
+  function scopeChoiceAllowed(draft, key, state) {
+    const inherited = scopeInherited(draft, key).state;
     if (inherited === "exclude")
       return state === "exclude";
     if (inherited === "metadata_only")
-      return state === "metadata_only" || state === "exclude";
-    return state === "ingest" || state === "metadata_only" || state === "exclude";
+      return state !== "ingest";
+    return true;
   }
-  function scopeControls(form, draft) {
+  function scopeMixed(draft, key) {
+    const own = shownScopeState(draft, key);
+    for (const other of draft.selections.keys()) {
+      if (other === key || !(draft.ancestors.get(other) || []).includes(key))
+        continue;
+      const theirs = shownScopeState(draft, other);
+      if (theirs !== own)
+        return theirs;
+    }
+    return "";
+  }
+  function scopeExceptions(draft) {
+    return Array.from(draft.selections.keys()).filter((key) => draft.selections.get(key) !== scopeInherited(draft, key).state);
+  }
+  function scopeAnyChosen(draft) {
+    return Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== "exclude");
+  }
+  function scopeNameOf(form, draft, key) {
+    const Q = scopeCopy(form);
+    if (key === ACCOUNT_KEY)
+      return fillText(Q.accountRow, { source: form.dataset.scopeLabel || "" });
+    const node = draft.catalog.get(key);
+    if (node?.name)
+      return node.name;
+    const above = (draft.ancestors.get(key) || []).filter((ancestor) => draft.catalog.get(ancestor)?.name);
+    return above.length ? fillText(Q.insideFolder, { name: draft.catalog.get(above[above.length - 1]).name }) : Q.unknownFolder;
+  }
+  function scopeShortPath(form, draft, key) {
+    const node = draft.catalog.get(key);
+    if (!node?.name)
+      return scopeNameOf(form, draft, key);
+    const ancestors = draft.ancestors.get(key) || [];
+    const parent = ancestors.length ? draft.catalog.get(ancestors[ancestors.length - 1]) : undefined;
+    return parent?.name ? `${parent.name} / ${node.name}` : node.name;
+  }
+  function scopeTrail(draft, key) {
+    return [...draft.ancestors.get(key) || [], key];
+  }
+  function scopeEl(tag, className = "", text) {
+    const node = root.ownerDocument.createElement(tag);
+    if (className)
+      node.className = className;
+    if (text !== undefined)
+      node.textContent = text;
+    return node;
+  }
+  function scopeButton(className, text, focusKey, enabled) {
+    const button = scopeEl("button", className, text);
+    button.type = "button";
+    button.dataset.scopeFocus = focusKey;
+    button.disabled = !enabled;
+    return button;
+  }
+  function scopeSegments(form, draft, key, name, enabled) {
+    const Q = scopeCopy(form);
+    const account = key === ACCOUNT_KEY;
+    const own = account ? draft.whole ? "ingest" : "" : draft.selections.get(key) || "";
+    const from = account ? { state: "", from: "" } : scopeInherited(draft, key);
+    const now = account ? own : shownScopeState(draft, key);
+    const node = draft.catalog.get(key);
+    const capped = !account && !own && draft.selections.size >= MAX_SCOPE_RULES;
+    const group = scopeEl("div", "seg");
+    group.setAttribute("role", "radiogroup");
+    group.setAttribute("aria-label", fillText(Q.choiceGroup, { name }));
+    const buttons = [];
+    for (const state of SCOPE_STATES) {
+      const [long, short] = Q.segments[state];
+      const pressed = own === state;
+      const inherited = !pressed && (own ? now !== own && now === state : from.state === state);
+      const button = scopeButton(`seg-opt${pressed ? " on" : inherited ? " inherited" : ""}`, "", `seg:${key}:${state}`, enabled);
+      button.dataset.scopeKey = key;
+      button.dataset.scopeState = state;
+      button.setAttribute("aria-label", long);
+      button.setAttribute("aria-pressed", String(pressed));
+      button.append(scopeEl("span", "seg-long", long), scopeEl("span", "seg-short", short));
+      const fromName = from.from ? scopeNameOf(form, draft, from.from) : "";
+      const blocked = pressed ? "" : account ? state === "ingest" ? "" : Q.wholeOnlyFull : node && !node.selectable ? Q.cannotChoose : from.state && !scopeChoiceAllowed(draft, key, state) ? fillText(Q.notPossible, { parent: fromName, state: Q.statesLower[from.state] }) : capped ? fillText(Q.capReached, { max: MAX_SCOPE_RULES }) : "";
+      const note = blocked || (own === state && now && now !== own ? fillText(Q.overridden, { own: Q.states[own], parent: fromName, state: Q.states[now] }) : "") || (!own && from.from && from.state === state ? fillText(Q.inheritedFrom, { parent: fromName }) : "");
+      if (note) {
+        button.setAttribute("aria-description", note);
+        button.title = note;
+      }
+      if (blocked)
+        button.disabled = true;
+      buttons.push(button);
+      group.appendChild(button);
+    }
+    const live = buttons.filter((button) => !button.disabled);
+    const home = live.find((button) => button.dataset.scopeFocus === draft.focus) || live.find((button) => button.classList.contains("on")) || live.find((button) => button.classList.contains("inherited")) || live[0] || buttons[0];
+    for (const button of buttons)
+      button.tabIndex = button === home ? 0 : -1;
+    return group;
+  }
+  function scopeNameCell(form, draft, node, enabled) {
+    const Q = scopeCopy(form);
+    let label;
+    if (node.has_children) {
+      const open = scopeButton("fname", "", `open:${node.key}`, enabled && !draft.loading);
+      open.dataset.scopeOpen = node.key;
+      open.setAttribute("aria-label", fillText(Q.openFolder, { name: node.name }));
+      const chevron = scopeEl("span", "fopen", "›");
+      chevron.setAttribute("aria-hidden", "true");
+      open.appendChild(chevron);
+      label = open;
+    } else {
+      label = scopeEl("p", "fname leaf");
+      const gap = scopeEl("span", "fopen-gap");
+      gap.setAttribute("aria-hidden", "true");
+      label.appendChild(gap);
+    }
+    label.title = node.name;
+    const main = scopeEl("span", "fname-main");
+    main.appendChild(scopeEl("span", "fname-text", node.name));
+    const differs = scopeMixed(draft, node.key);
+    if (differs) {
+      const tag = scopeEl("span", "ftag", Q.mixed);
+      tag.title = fillText(Q.mixedSome, { state: Q.statesLower[differs] });
+      main.appendChild(tag);
+    }
+    label.appendChild(main);
+    return label;
+  }
+  function scopeLevelList(form, draft, parent, nodes, more, enabled) {
+    const Q = scopeCopy(form);
+    const list = scopeEl("ul", "flist");
+    list.dataset.scopeNodes = parent;
+    list.setAttribute("aria-busy", String(draft.loading));
+    const seen = new Set;
+    for (const node of nodes) {
+      if (seen.has(node.key))
+        continue;
+      seen.add(node.key);
+      const row = scopeEl("li", "frow seg-row");
+      row.dataset.scopeRow = node.key;
+      row.append(scopeNameCell(form, draft, node, enabled), scopeSegments(form, draft, node.key, node.name, enabled && !draft.saving));
+      list.appendChild(row);
+    }
+    if (!nodes.length && draft.loaded && !draft.loading)
+      list.appendChild(scopeEl("li", "fempty", Q.noFolders));
+    if (more) {
+      const item = scopeEl("li", "fmore");
+      const button = scopeButton("secondary", draft.loading ? Q.loadingFolders : Q.loadMore, `more:${parent}`, enabled && !draft.loading);
+      button.dataset.scopeMore = parent;
+      item.appendChild(button);
+      list.appendChild(item);
+    }
+    return list;
+  }
+  function scopeTopRow(text, control, className = "") {
+    const row = scopeEl("div", `this-row${className ? ` ${className}` : ""}`);
+    row.append(scopeEl("p", "this-label", text), control);
+    return row;
+  }
+  function scopeRootScreen(form, draft, view, enabled) {
+    const Q = scopeCopy(form);
+    const source = form.dataset.scopeLabel || "";
+    const accountName = fillText(Q.accountRow, { source });
+    view.appendChild(scopeTopRow(accountName, scopeSegments(form, draft, ACCOUNT_KEY, accountName, enabled && draft.loaded && !draft.saving), "account-row"));
+    if (draft.whole && !draft.wholeConfirmed) {
+      const box = scopeEl("div", "confirm-box");
+      box.dataset.scopeConfirm = "";
+      const actions = scopeEl("div", "actions");
+      const yes = scopeButton("danger", Q.wholeConfirm, "whole-yes", enabled && !draft.saving);
+      yes.dataset.scopeWholeConfirm = "";
+      const no = scopeButton("secondary", Q.wholeCancel, "whole-no", enabled && !draft.saving);
+      no.dataset.scopeWholeCancel = "";
+      actions.append(yes, no);
+      box.append(scopeEl("p", "strong", fillText(Q.wholePrompt, { source })), actions);
+      view.appendChild(box);
+    }
+    const exceptions = draft.loaded ? scopeExceptions(draft) : [];
+    if (exceptions.length) {
+      const section = scopeEl("section", "fsection exceptions");
+      section.appendChild(scopeEl("h2", "", fillText(Q.exceptions, { n: exceptions.length })));
+      const list = scopeEl("ul", "flist");
+      for (const key of exceptions) {
+        const state = draft.selections.get(key);
+        const jump = scopeButton("jump-btn", "", `jump:${key}`, enabled && !draft.loading);
+        jump.dataset.scopeJump = key;
+        jump.title = scopeShortPath(form, draft, key);
+        const chevron = scopeEl("span", "chev", "›");
+        chevron.setAttribute("aria-hidden", "true");
+        jump.append(scopeEl("span", "fname-text", scopeShortPath(form, draft, key)), scopeEl("span", `jtag jtag-${state}`, Q.segments[state][0]), chevron);
+        const item = scopeEl("li", "frow jump");
+        item.appendChild(jump);
+        list.appendChild(item);
+      }
+      section.appendChild(list);
+      view.appendChild(section);
+    }
+    const folders = scopeEl("section", "fsection");
+    folders.appendChild(scopeEl("h2", "", Q.foldersHeading));
+    folders.appendChild(scopeLevelList(form, draft, "", draft.nodes, !!draft.nextCursor, enabled));
+    view.appendChild(folders);
+  }
+  function scopeFolderScreen(form, draft, view, enabled) {
+    const Q = scopeCopy(form);
+    const key = draft.path[draft.path.length - 1];
+    const up = scopeButton("secondary back", Q.up, "up", !draft.saving);
+    up.dataset.scopeUp = "";
+    view.appendChild(up);
+    const names = [form.dataset.scopeLabel || "", ...draft.path.map((entry) => scopeNameOf(form, draft, entry))];
+    const shown = names.length > 3 ? [Q.pathMore, ...names.slice(-2)] : names;
+    const head = scopeEl("h2", "fpath");
+    shown.forEach((name, index) => {
+      head.appendChild(index === shown.length - 1 ? scopeEl("span", "fpath-here", name) : scopeEl("span", "fpath-up", `${name} / `));
+    });
+    view.appendChild(head);
+    view.appendChild(scopeTopRow(Q.thisFolder, scopeSegments(form, draft, key, scopeNameOf(form, draft, key), enabled && !draft.saving)));
+    view.appendChild(scopeLevelList(form, draft, key, draft.branches.get(key) || [], draft.branchCursors.has(key), enabled));
+  }
+  function scopeFooter(form, draft) {
+    const Q = scopeCopy(form);
+    const allowed = scopeAllowed(form, draft);
+    const totals = { ingest: 0, metadata_only: 0, exclude: 0 };
+    for (const key of draft.selections.keys())
+      totals[effectiveScopeState(draft, key)] += 1;
+    const parts = [];
+    for (const [state, template] of [["ingest", Q.summaryIngest], ["metadata_only", Q.summaryMetadata], ["exclude", Q.summaryExclude]]) {
+      const n = totals[state];
+      if (!n)
+        continue;
+      parts.push(fillText(template, { n: parts.length ? String(n) : `${n} ${n === 1 ? Q.summaryFolder.one : Q.summaryFolder.many}` }));
+    }
+    const lines = [];
+    if (draft.whole)
+      lines.push(fillText(Q.summaryWhole, { source: form.dataset.scopeLabel || "" }));
+    if (parts.length)
+      lines.push(parts.join(", "));
+    else if (!draft.whole)
+      lines.push(Q.summaryNone);
+    if (draft.selections.size >= MAX_SCOPE_RULES)
+      lines.push(fillText(Q.capReached, { max: MAX_SCOPE_RULES }));
+    const summary = form.querySelector("[data-scope-summary]");
+    if (summary)
+      summary.replaceChildren(...lines.map((line) => scopeEl("p", "", line)));
+    const chosen = scopeAnyChosen(draft);
+    const ready = allowed && draft.loaded && !!draft.generation && !!draft.revision && draft.selections.size <= MAX_SCOPE_RULES;
+    const blocker = draft.whole && !draft.wholeConfirmed ? Q.needConfirm : !draft.whole && !chosen && !draft.edited ? Q.needChoice : "";
+    const submit = form.querySelector("[data-scope-start]");
+    if (submit) {
+      submit.disabled = !ready || blocker !== "";
+      submit.textContent = draft.saving ? Q.saving : draft.whole || chosen ? Q.saveFolders : Q.saveNoStart;
+      submit.setAttribute("aria-busy", String(draft.saving));
+    }
+    const reason = form.querySelector("[data-scope-reason]");
+    if (reason)
+      reason.textContent = draft.saving || form.dataset.connected !== "true" ? "" : blocker;
+    const cancel = form.querySelector("[data-scope-cancel]");
+    if (cancel)
+      cancel.disabled = !canWrite || draft.busy || !draft.edited && !draft.invalid;
+  }
+  function renderScope(form, draft) {
+    const Q = scopeCopy(form);
     const allowed = scopeAllowed(form, draft);
     const loading = form.querySelector("[data-scope-loading]");
     if (loading)
       loading.hidden = !draft.loading;
-    form.querySelector("[data-scope-nodes]")?.setAttribute("aria-busy", String(draft.loading));
-    form.querySelectorAll("button").forEach((button) => {
-      button.disabled = !allowed;
-    });
-    form.querySelectorAll("input").forEach((input) => {
-      input.disabled = !allowed || !draft.loaded;
-    });
-    form.querySelectorAll("[data-scope-state]").forEach((button) => {
-      button.disabled = !allowed || !scopeChoiceAllowed(draft, button.dataset.scopeState || "");
-      button.classList.toggle("on", draft.selected !== undefined && effectiveScopeState(draft, draft.selected.key) === button.dataset.scopeState);
-    });
-    const hasSelection = Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== "exclude");
-    const confirmation = form.querySelector("[data-scope-whole-confirm]");
-    const submit = form.querySelector("[data-scope-start]");
-    if (submit)
-      submit.disabled = !allowed || !draft.loaded || !draft.generation || !draft.revision || !draft.whole && !hasSelection && !draft.edited || draft.whole && confirmation?.checked !== true;
-    if (submit)
-      submit.textContent = draft.whole || hasSelection ? "Save scope and start" : "Save scope (nothing indexed)";
-    const cancel = form.querySelector("[data-scope-cancel]");
-    if (cancel)
-      cancel.disabled = draft.busy;
-    const confirmationLabel = form.querySelector(".scope-whole-confirm");
-    if (confirmationLabel)
-      confirmationLabel.hidden = !draft.whole;
-  }
-  function scopeMixed(draft, key) {
-    const own = effectiveScopeState(draft, key);
-    for (const other of draft.selections.keys()) {
-      if (other !== key && (draft.ancestors.get(other) || []).includes(key) && effectiveScopeState(draft, other) !== own)
-        return true;
-    }
-    return false;
-  }
-  function scopeStatusText(draft, key) {
-    if (scopeMixed(draft, key))
-      return "Mixed";
-    const inherited = inheritedScopeState(draft, key);
-    const chosen = draft.selections.has(key);
-    return chosen || inherited ? `${labels[effectiveScopeState(draft, key)]}${inherited && !chosen ? " · inherited" : ""}` : "Not selected";
-  }
-  function scopeConsequence(draft) {
-    const counts = { ingest: 0, metadata_only: 0, exclude: 0 };
-    for (const key of draft.selections.keys())
-      counts[effectiveScopeState(draft, key)] += 1;
-    const folders = (count) => `${count} ${count === 1 ? "folder" : "folders"}`;
-    const entries = [["fully indexed", counts.ingest], ["names only", counts.metadata_only], ["skipped", counts.exclude]];
-    const phrase = (list) => list.filter(([, count]) => count > 0).map(([what, count], index) => `${index === 0 ? folders(count) : count} ${what}`);
-    if (draft.whole) {
-      const exceptions = phrase(entries.slice(1));
-      return `Entire account, including future folders, fully indexed${exceptions.length > 0 ? `; ${exceptions.join(", ")}` : ""}.`;
-    }
-    const parts = phrase(entries);
-    if (counts.ingest + counts.metadata_only === 0)
-      return "No folders selected. Nothing will be indexed.";
-    return `${parts.join(", ")}. All other folders stay out.`;
-  }
-  function renderScopeReview(form, draft) {
-    const summary = form.querySelector("[data-scope-summary]");
-    if (summary)
-      summary.textContent = scopeConsequence(draft);
-    const list = form.querySelector("[data-scope-selections]");
-    if (list) {
-      list.replaceChildren();
-      for (const [key, state] of draft.selections) {
-        const item = root.ownerDocument.createElement("li");
-        item.textContent = `${labels[effectiveScopeState(draft, key)]} — ${draft.names.get(key) || key}`;
-        list.appendChild(item);
+    const back = form.closest("[data-scope-panel]")?.querySelector(".scope-back");
+    if (back)
+      back.hidden = draft.path.length > 0;
+    const view = form.querySelector("[data-scope-view]");
+    const connected = form.dataset.connected === "true";
+    if (view)
+      view.hidden = !connected;
+    const footer = form.querySelector(".picker-footer");
+    if (footer)
+      footer.hidden = !connected;
+    if (view && connected) {
+      const tree = root.getRootNode();
+      const active = tree instanceof ShadowRoot ? tree.activeElement : root.ownerDocument.activeElement;
+      const keep = draft.focus || (active instanceof HTMLElement && view.contains(active) ? active.dataset.scopeFocus : undefined);
+      view.replaceChildren();
+      if (draft.retry && !draft.loading) {
+        const banner = scopeEl("div", "scope-error");
+        banner.setAttribute("role", "alert");
+        const retry = scopeButton("secondary", Q.tryAgain, "retry", canWrite && !draft.invalid);
+        retry.dataset.scopeBrowseRoot = "";
+        banner.append(scopeEl("p", "", Q.loadFailed), retry);
+        view.appendChild(banner);
+      }
+      if (draft.path.length)
+        scopeFolderScreen(form, draft, view, allowed);
+      else
+        scopeRootScreen(form, draft, view, allowed);
+      if (!allowed)
+        view.querySelectorAll("button:not([data-scope-up])").forEach((button) => {
+          button.disabled = true;
+        });
+      draft.focus = undefined;
+      if (keep) {
+        const target = Array.from(view.querySelectorAll("[data-scope-focus]")).find((node) => node.dataset.scopeFocus === keep);
+        if (target && !target.disabled)
+          target.focus();
       }
     }
-    scopeControls(form, draft);
-  }
-  function updateScopeRows(form, draft) {
-    form.querySelectorAll(".scope-folder").forEach((row) => {
-      const key = row.querySelector("[data-scope-select]")?.dataset.scopeSelect;
-      if (!key)
-        return;
-      row.classList.toggle("selected", draft.selected?.key === key);
-      const status = row.querySelector(".scope-folder-status");
-      if (status) {
-        status.textContent = scopeStatusText(draft, key);
-        status.classList.toggle("mixed", status.textContent === "Mixed");
-      }
-    });
-    renderScopeReview(form, draft);
-  }
-  function scopeTrail(draft, key) {
-    return [...draft.ancestors.get(key) || [], key].map((ancestor) => ({ key: ancestor, name: draft.catalog.get(ancestor)?.name || ancestor }));
-  }
-  function renderScopeNodes(form, draft) {
-    const list = form.querySelector("[data-scope-nodes]");
-    if (!list)
-      return;
-    list.replaceChildren();
-    const appendNodes = (host, nodes, seen = new Set) => {
-      const sorted = [...nodes].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.key.localeCompare(b.key));
-      for (const node of sorted) {
-        if (seen.has(node.key))
-          continue;
-        const wrapper = root.ownerDocument.createElement("div");
-        wrapper.className = "node";
-        const row = root.ownerDocument.createElement("div");
-        row.className = "folder-row scope-folder";
-        row.setAttribute("role", "listitem");
-        row.classList.toggle("selected", draft.selected?.key === node.key);
-        const disclosure = root.ownerDocument.createElement(node.has_children ? "button" : "span");
-        disclosure.className = "disclosure";
-        if (disclosure instanceof HTMLButtonElement) {
-          disclosure.type = "button";
-          disclosure.dataset.scopeOpen = node.key;
-          disclosure.textContent = draft.expanded.has(node.key) ? "▾" : "▸";
-          disclosure.setAttribute("aria-label", `${draft.expanded.has(node.key) ? "Collapse" : "Expand"} ${node.name}`);
-          disclosure.setAttribute("aria-expanded", String(draft.expanded.has(node.key)));
-        }
-        const select = root.ownerDocument.createElement("button");
-        select.type = "button";
-        select.dataset.scopeSelect = node.key;
-        select.textContent = node.name;
-        const status = root.ownerDocument.createElement("span");
-        status.className = "scope-folder-status";
-        status.textContent = scopeStatusText(draft, node.key);
-        status.classList.toggle("mixed", status.textContent === "Mixed");
-        const icon = root.ownerDocument.createElement("span");
-        icon.className = "folder-icon";
-        icon.textContent = "▰";
-        row.append(disclosure, icon, select, status);
-        wrapper.appendChild(row);
-        if (draft.expanded.has(node.key)) {
-          const children = root.ownerDocument.createElement("div");
-          children.className = "children";
-          children.setAttribute("role", "group");
-          children.setAttribute("aria-label", node.name);
-          appendNodes(children, draft.branches.get(node.key) || [], new Set([...seen, node.key]));
-          if (draft.branchCursors.has(node.key)) {
-            const more2 = root.ownerDocument.createElement("button");
-            more2.type = "button";
-            more2.dataset.scopeMore = node.key;
-            more2.textContent = (draft.branches.get(node.key)?.length || 0) >= 20 ? "Show more folders" : "Continue loading folders";
-            children.appendChild(more2);
-          }
-          wrapper.appendChild(children);
-        }
-        host.appendChild(wrapper);
-      }
-    };
-    appendNodes(list, draft.nodes);
-    if (draft.nodes.length === 0) {
-      const empty = root.ownerDocument.createElement("p");
-      empty.textContent = "No folders returned in this page.";
-      list.appendChild(empty);
-    }
-    const needle = form.querySelector("[data-scope-search]")?.value.trim().toLowerCase() || "";
-    list.querySelectorAll(".scope-folder").forEach((row) => {
-      row.hidden = !!needle && !(row.textContent || "").toLowerCase().includes(needle);
-    });
-    const more = form.querySelector('[data-scope-more=""]');
-    if (more) {
-      more.hidden = !draft.nextCursor;
-      more.textContent = draft.nodes.length >= 20 ? "Show more folders" : "Continue loading folders";
-    }
-    renderScopeReview(form, draft);
+    scopeFooter(form, draft);
   }
   async function browseScope(form, trail, append = false) {
     const draft = scopeDraft(form);
+    const Q = scopeCopy(form);
     if (!scopeAllowed(form, draft) || !options.transport.read)
-      return;
-    const parent = trail.at(-1)?.key;
+      return false;
+    const parent = trail.at(-1);
     const cursor = append ? parent ? draft.branchCursors.get(parent) : draft.nextCursor : undefined;
     draft.loadAttempted = true;
     draft.loading = true;
     draft.busy = true;
-    scopeControls(form, draft);
-    scopeMessage(form, "Loading folders…");
+    draft.retry = undefined;
+    scopeMessage(form, "");
+    renderScope(form, draft);
+    let listed = false;
+    const again = parent && !append ? () => {
+      drillScope(form, draft, parent);
+    } : () => {
+      browseScope(form, trail, append);
+    };
     try {
       const result = await options.transport.read({
         view: "dispositions",
@@ -1156,21 +1325,26 @@ function mountDispositionsController(options) {
         ...cursor ? { cursor } : {}
       });
       if (disposed || options.signal.aborted || !root.contains(form))
-        return;
+        return false;
       if (result.status === 401 || result.status === 403 || !result.can_write) {
         canWrite = false;
-        scopeMessage(form, "Write access expired. Reconnect before browsing private folders.");
-        return;
+        scopeMessage(form, Q.readOnly);
+        return false;
       }
       const page = result.scope_browser;
       if (result.status < 200 || result.status >= 300 || !page || page.source_id !== form.dataset.folderScopeSource || !page.account_generation || !page.scope_revision || !Array.isArray(page.nodes) || page.nodes.some((node) => typeof node.key !== "string" || typeof node.name !== "string" || node.kind !== "folder" || typeof node.selectable !== "boolean")) {
-        scopeMessage(form, "Could not list folders. Check the connection and reopen this picker.");
-        return;
+        draft.retry = again;
+        return false;
       }
       if (draft.loaded && (draft.generation !== page.account_generation || draft.revision !== page.scope_revision)) {
         draft.invalid = true;
-        scopeMessage(form, "The account or saved scope changed. Reopen this picker before applying choices.");
-        return;
+        scopeMessage(form, Q.conflict);
+        return false;
+      }
+      if (page.nodes.some((node) => trail.includes(node.key))) {
+        draft.invalid = true;
+        scopeMessage(form, Q.cycle);
+        return false;
       }
       if (!draft.loaded) {
         draft.generation = page.account_generation;
@@ -1178,21 +1352,14 @@ function mountDispositionsController(options) {
         draft.selections = new Map(page.selections.map((selection) => [selection.key, selection.state]));
         page.selections.forEach((selection) => draft.ancestors.set(selection.key, selection.ancestor_keys || []));
         draft.whole = page.whole_account_selected;
-        const whole = form.querySelector("[data-scope-whole-account]");
-        if (whole)
-          whole.checked = draft.whole;
-      }
-      if (page.nodes.some((node) => trail.some((ancestor) => ancestor.key === node.key))) {
-        scopeMessage(form, "The folder listing contains a cycle. Reopen the picker before continuing.");
-        draft.invalid = true;
-        return;
+        draft.wholeConfirmed = false;
       }
       draft.loaded = true;
-      const previous = parent ? draft.branches.get(parent) || [] : draft.nodes;
-      const nodes = append ? [...previous, ...page.nodes.filter((node) => !previous.some((old) => old.key === node.key))] : page.nodes;
+      const previous = append ? parent ? draft.branches.get(parent) || [] : draft.nodes : [];
+      const fresh = page.nodes.filter((node) => !previous.some((old) => old.key === node.key));
+      const nodes = [...previous, ...fresh].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.key.localeCompare(b.key));
       if (parent) {
         draft.branches.set(parent, nodes);
-        draft.expanded.add(parent);
         if (page.next_cursor)
           draft.branchCursors.set(parent, page.next_cursor);
         else
@@ -1203,37 +1370,91 @@ function mountDispositionsController(options) {
         if (!append) {
           draft.branches.clear();
           draft.branchCursors.clear();
-          draft.expanded.clear();
-          draft.catalog.clear();
+          draft.path = [];
         }
       }
       page.nodes.forEach((node) => {
         draft.catalog.set(node.key, node);
-        draft.names.set(node.key, [...trail.map((entry) => entry.name), node.name].join(" / "));
-        draft.ancestors.set(node.key, trail.map((entry) => entry.key));
+        draft.ancestors.set(node.key, trail.slice());
       });
-      renderScopeNodes(form, draft);
-      scopeMessage(form, "Only folder names were listed. Review your choices, then save and start.");
+      listed = true;
+      return true;
     } catch {
-      if (!disposed && root.contains(form))
-        scopeMessage(form, "Folder browsing failed. Your choices are still here; retry when the connection is ready.");
+      if (!disposed && root.contains(form)) {
+        draft.retry = again;
+        scopeMessage(form, Q.browseFailed);
+      }
+      return false;
     } finally {
       draft.loading = false;
       draft.busy = false;
-      if (!disposed && root.contains(form))
-        scopeControls(form, draft);
+      if (!disposed && root.contains(form) && (!listed || !parent || append)) {
+        if (listed && append)
+          draft.focus = `more:${parent || ""}`;
+        renderScope(form, draft);
+      }
     }
+  }
+  async function drillScope(form, draft, key) {
+    const trail = scopeTrail(draft, key);
+    if (!draft.branches.has(key) && !await browseScope(form, trail))
+      return;
+    if (disposed || !root.contains(form))
+      return;
+    draft.path = trail;
+    draft.focus = "up";
+    renderScope(form, draft);
+  }
+  async function jumpScope(form, draft, key) {
+    const trail = scopeTrail(draft, key);
+    for (let index = 0;index < trail.length; index += 1) {
+      if (draft.branches.has(trail[index]))
+        continue;
+      if (!await browseScope(form, trail.slice(0, index + 1)))
+        return;
+      if (disposed || !root.contains(form))
+        return;
+    }
+    draft.path = trail;
+    draft.focus = "up";
+    renderScope(form, draft);
+  }
+  function chooseScope(form, draft, key, state) {
+    if (draft.saving)
+      return;
+    if (key === ACCOUNT_KEY) {
+      const whole = state === "ingest";
+      if (whole === draft.whole)
+        return;
+      draft.whole = whole;
+      draft.wholeConfirmed = false;
+      draft.edited = true;
+      draft.focus = whole ? "whole-yes" : `seg:${ACCOUNT_KEY}:ingest`;
+    } else {
+      if (state && (!scopeChoiceAllowed(draft, key, state) || draft.catalog.get(key)?.selectable === false))
+        return;
+      if (state && !draft.selections.has(key) && draft.selections.size >= MAX_SCOPE_RULES)
+        return;
+      if (state)
+        draft.selections.set(key, state);
+      else
+        draft.selections.delete(key);
+      draft.edited = true;
+      draft.focus = `seg:${key}:${state || draft.selections.get(key) || "ingest"}`;
+    }
+    renderScope(form, draft);
   }
   async function approveScope(form) {
     const draft = scopeDraft(form);
-    const confirmation = form.querySelector("[data-scope-whole-confirm]")?.checked === true;
-    if (!scopeAllowed(form, draft) || !draft.loaded || !draft.generation || !draft.revision || !draft.whole && !draft.edited && !Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== "exclude") || draft.whole && !confirmation) {
-      scopeMessage(form, "Choose folders first. Entire-account access also needs explicit confirmation.");
+    const Q = scopeCopy(form);
+    if (!scopeAllowed(form, draft) || !draft.loaded || !draft.generation || !draft.revision || draft.selections.size > MAX_SCOPE_RULES || !draft.whole && !draft.edited && !scopeAnyChosen(draft) || draft.whole && !draft.wholeConfirmed) {
+      scopeMessage(form, draft.whole && !draft.wholeConfirmed ? Q.needConfirm : Q.needChoice);
       return;
     }
     draft.busy = true;
-    scopeControls(form, draft);
-    scopeMessage(form, "Saving your approved scope…");
+    draft.saving = true;
+    scopeMessage(form, "");
+    renderScope(form, draft);
     try {
       const result = await options.transport.control({
         action: "approve_source_scope_and_start",
@@ -1242,7 +1463,7 @@ function mountDispositionsController(options) {
         expected_scope_revision: draft.revision,
         selections: Array.from(draft.selections.keys(), (key) => ({ key, state: effectiveScopeState(draft, key), ancestor_keys: draft.ancestors.get(key) || [] })),
         whole_account: draft.whole,
-        explicit_whole_account_confirmation: confirmation
+        explicit_whole_account_confirmation: draft.whole && draft.wholeConfirmed
       });
       if (disposed || options.signal.aborted || !root.contains(form))
         return;
@@ -1253,22 +1474,132 @@ function mountDispositionsController(options) {
           draft.invalid = true;
         const error = result.body.error;
         const message2 = error && typeof error === "object" ? error.message : undefined;
-        scopeMessage(form, typeof message2 === "string" ? message2 : "Scope was not activated. Your choices are still here.");
+        scopeMessage(form, typeof message2 === "string" ? message2 : Q.saveFailed);
         return;
       }
       draft.edited = false;
-      scopeMessage(form, "Scope saved. Opening the source status…");
+      scopeMessage(form, Q.saved);
       if (!dirty && !Array.from(scopeDrafts.values()).some((other) => other.edited)) {
         options.navigate(`/dashboard?source=${encodeURIComponent(form.dataset.folderScopeSource || "")}`);
       }
     } catch {
       if (!disposed && root.contains(form))
-        scopeMessage(form, "Could not confirm the result. Reopen the picker to check saved scope before retrying.");
+        scopeMessage(form, Q.unconfirmed);
     } finally {
       draft.busy = false;
+      draft.saving = false;
       if (!disposed && root.contains(form))
-        scopeControls(form, draft);
+        renderScope(form, draft);
     }
+  }
+  function scopeClick(target) {
+    const form = target.closest("form[data-folder-scope-source]");
+    if (!form || !root.contains(form))
+      return false;
+    const draft = scopeDraft(form);
+    const Q = scopeCopy(form);
+    const control = target.closest("button");
+    if (control?.disabled)
+      return true;
+    if (target.closest("[data-scope-cancel]")) {
+      if (draft.busy)
+        return true;
+      scopeDrafts.delete(form);
+      const fresh = scopeDraft(form);
+      renderScope(form, fresh);
+      scopeMessage(form, Q.discarded);
+      browseScope(form, []);
+      return true;
+    }
+    if (target.closest("[data-scope-up]")) {
+      if (draft.saving)
+        return true;
+      const left = draft.path.pop();
+      draft.focus = left ? `open:${left}` : undefined;
+      renderScope(form, draft);
+      return true;
+    }
+    if (!scopeAllowed(form, draft))
+      return true;
+    if (target.closest("[data-scope-browse-root]")) {
+      if (draft.retry)
+        draft.retry();
+      else
+        browseScope(form, []);
+      return true;
+    }
+    const more = target.closest("[data-scope-more]");
+    if (more) {
+      const key2 = more.dataset.scopeMore || "";
+      if (key2 && draft.branchCursors.has(key2))
+        browseScope(form, scopeTrail(draft, key2), true);
+      else if (!key2 && draft.nextCursor)
+        browseScope(form, [], true);
+      return true;
+    }
+    const open = target.closest("[data-scope-open]");
+    if (open?.dataset.scopeOpen) {
+      drillScope(form, draft, open.dataset.scopeOpen);
+      return true;
+    }
+    const jump = target.closest("[data-scope-jump]");
+    if (jump?.dataset.scopeJump) {
+      jumpScope(form, draft, jump.dataset.scopeJump);
+      return true;
+    }
+    if (target.closest("[data-scope-whole-confirm]")) {
+      draft.wholeConfirmed = true;
+      draft.focus = `seg:${ACCOUNT_KEY}:ingest`;
+      renderScope(form, draft);
+      return true;
+    }
+    if (target.closest("[data-scope-whole-cancel]")) {
+      chooseScope(form, draft, ACCOUNT_KEY, "");
+      return true;
+    }
+    const segment = target.closest("[data-scope-key][data-scope-state]");
+    const key = segment?.dataset.scopeKey;
+    const state = segment?.dataset.scopeState;
+    if (key && state && SCOPE_STATES.includes(state)) {
+      const own = key === ACCOUNT_KEY ? draft.whole ? "ingest" : "" : draft.selections.get(key) || "";
+      chooseScope(form, draft, key, own === state ? "" : state);
+    }
+    return true;
+  }
+  function scopeKeydown(event) {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const form = target?.closest("form[data-folder-scope-source]");
+    if (!target || !form || !root.contains(form))
+      return;
+    const draft = scopeDraft(form);
+    if (event.key === "Escape" && draft.path.length && !draft.saving) {
+      event.preventDefault();
+      const left = draft.path.pop();
+      draft.focus = left ? `open:${left}` : undefined;
+      renderScope(form, draft);
+      return;
+    }
+    const group = target.closest(".seg");
+    if (!group || !target.matches(".seg-opt"))
+      return;
+    const live = Array.from(group.querySelectorAll(".seg-opt")).filter((button) => !button.disabled);
+    const at = live.indexOf(target);
+    let next;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown")
+      next = live[(at + 1) % live.length];
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp")
+      next = live[(at - 1 + live.length) % live.length];
+    else if (event.key === "Home")
+      next = live[0];
+    else if (event.key === "End")
+      next = live[live.length - 1];
+    if (!next)
+      return;
+    event.preventDefault();
+    group.querySelectorAll(".seg-opt").forEach((button) => {
+      button.tabIndex = button === next ? 0 : -1;
+    });
+    next.focus();
   }
   const mailDrafts = new Map;
   function mailState(form) {
@@ -1535,96 +1866,6 @@ function mountDispositionsController(options) {
     }
     return false;
   }
-  function scopeClick(target) {
-    const form = target.closest("form[data-folder-scope-source]");
-    if (!form || !root.contains(form))
-      return false;
-    const draft = scopeDraft(form);
-    if (target.closest("[data-scope-cancel]")) {
-      if (draft.busy)
-        return true;
-      scopeDrafts.delete(form);
-      const list = form.querySelector("[data-scope-nodes]");
-      list?.replaceChildren();
-      form.querySelectorAll("input").forEach((input) => {
-        input.checked = input.defaultChecked;
-      });
-      const empty = form.querySelector("[data-scope-inspector-empty]");
-      if (empty)
-        empty.hidden = false;
-      const content = form.querySelector("[data-scope-inspector-content]");
-      if (content)
-        content.hidden = true;
-      form.querySelectorAll("[data-scope-more]").forEach((element) => {
-        element.hidden = true;
-      });
-      const location = form.querySelector("[data-scope-location]");
-      if (location)
-        location.textContent = "Folders";
-      const fresh = scopeDraft(form);
-      renderScopeReview(form, fresh);
-      scopeMessage(form, "Changes cancelled. Loading saved folders…");
-      browseScope(form, []);
-      return true;
-    }
-    if (!scopeAllowed(form, draft))
-      return true;
-    if (target.closest("[data-scope-browse-root]")) {
-      browseScope(form, []);
-      return true;
-    }
-    const more = target.closest("[data-scope-more]");
-    if (more) {
-      const key = more.dataset.scopeMore;
-      if (key && draft.branchCursors.has(key))
-        browseScope(form, scopeTrail(draft, key), true);
-      else if (!key && draft.nextCursor)
-        browseScope(form, [], true);
-      return true;
-    }
-    const open = target.closest("[data-scope-open]");
-    if (open) {
-      const node = draft.catalog.get(open.dataset.scopeOpen || "");
-      if (node && draft.expanded.has(node.key)) {
-        draft.expanded.delete(node.key);
-        renderScopeNodes(form, draft);
-      } else if (node && draft.branches.has(node.key)) {
-        draft.expanded.add(node.key);
-        renderScopeNodes(form, draft);
-      } else if (node)
-        browseScope(form, scopeTrail(draft, node.key));
-      return true;
-    }
-    const select = target.closest("[data-scope-select]");
-    if (select) {
-      draft.selected = draft.catalog.get(select.dataset.scopeSelect || "");
-      const empty = form.querySelector("[data-scope-inspector-empty]");
-      if (empty)
-        empty.hidden = !!draft.selected;
-      const content = form.querySelector("[data-scope-inspector-content]");
-      if (content)
-        content.hidden = !draft.selected;
-      const name = form.querySelector("[data-scope-selected-name]");
-      if (name)
-        name.textContent = draft.selected?.name || "";
-      const path = form.querySelector("[data-scope-selected-path]");
-      if (path)
-        path.textContent = draft.selected ? draft.names.get(draft.selected.key) || draft.selected.name : "";
-      const note = form.querySelector("[data-scope-selected-note]");
-      if (note)
-        note.textContent = "This choice applies to this folder and its contents. Review narrower choices before starting.";
-      updateScopeRows(form, draft);
-      return true;
-    }
-    const choice = target.closest("[data-scope-state]");
-    const state = choice?.dataset.scopeState;
-    if (draft.selected?.selectable && state && scopeChoiceAllowed(draft, state) && (state === "ingest" || state === "metadata_only" || state === "exclude")) {
-      draft.selections.set(draft.selected.key, state);
-      draft.edited = true;
-      updateScopeRows(form, draft);
-    }
-    return true;
-  }
   function query(selector) {
     return root.querySelector(selector);
   }
@@ -1672,7 +1913,7 @@ function mountDispositionsController(options) {
   function applyWriteCapability() {
     root.querySelectorAll("form[data-folder-scope-source]").forEach((form) => {
       const draft = scopeDraft(form);
-      scopeControls(form, draft);
+      renderScope(form, draft);
       if (presented && !form.closest("[data-scope-panel]")?.hidden && !draft.loadAttempted && scopeAllowed(form, draft))
         browseScope(form, []);
     });
@@ -1824,8 +2065,11 @@ function mountDispositionsController(options) {
     navigator.clipboard.writeText(source.value);
   }
   function onKeydown(event) {
-    if (event.target instanceof Element && event.target.closest("form[data-folder-scope-source]"))
+    if (event.target instanceof Element && event.target.closest("form[data-folder-scope-source]")) {
+      if (event instanceof KeyboardEvent)
+        scopeKeydown(event);
       return;
+    }
     if (!(event instanceof KeyboardEvent) || event.key !== "Enter" && event.key !== " ")
       return;
     const row = event.target instanceof Element ? event.target.closest(".folder-row") : null;
@@ -1841,27 +2085,6 @@ function mountDispositionsController(options) {
       state.edited = true;
       mailControls(mailForm, state);
       return;
-    }
-    if (event.target instanceof HTMLInputElement && root.contains(event.target)) {
-      const form2 = event.target.closest("form[data-folder-scope-source]");
-      if (form2 && event.target.matches("[data-scope-search]")) {
-        renderScopeNodes(form2, scopeDraft(form2));
-        return;
-      }
-      if (form2 && (event.target.matches("[data-scope-whole-account]") || event.target.matches("[data-scope-whole-confirm]"))) {
-        const draft = scopeDraft(form2);
-        if (!scopeAllowed(form2, draft) || !draft.loaded)
-          return;
-        draft.whole = form2.querySelector("[data-scope-whole-account]")?.checked === true;
-        if (!draft.whole) {
-          const confirm = form2.querySelector("[data-scope-whole-confirm]");
-          if (confirm)
-            confirm.checked = false;
-        }
-        draft.edited = true;
-        renderScopeReview(form2, draft);
-        return;
-      }
     }
     const input = event.target instanceof HTMLInputElement && event.target.matches("[data-folder-search]") ? event.target : null;
     if (!input || !root.contains(input))
@@ -2555,23 +2778,78 @@ var DISPOSITIONS_CSS = `
       .finder-footer button.secondary { background: transparent; color: var(--t2); border-color: var(--line); }
       .action-message { color: var(--t3); min-height: 18px; margin-top: 8px; }
       .scope-connection, .scope-browser-note { color: var(--t3); font-size: var(--fs-caption); padding: 8px 12px; }
-      .scope-browser-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line2); }
-      .scope-browser-toolbar button, .scope-browser-list button, [data-scope-more] { color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; padding: 6px 10px; cursor: pointer; }
-      .scope-browser-list .scope-folder { display: flex; align-items: center; gap: 8px; padding: 4px 8px; }
-      .scope-folder [data-scope-select] { flex: 1; border: 0; background: transparent; padding: 0; color: inherit; text-align: left; overflow-wrap: anywhere; }
-      .scope-folder.selected [data-scope-select] { background: transparent; }
-      .scope-folder [data-scope-open] { padding: 0; width: 14px; border: 0; background: transparent; color: inherit; }
-      .scope-folder-status { color: var(--t3); font-size: var(--fs-caption); }
-      .scope-folder.selected .scope-folder-status { color: var(--t1); }
-      .scope-folder-status.mixed, .node-state.mixed { color: var(--warn); font-weight: 600; }
-      .scope-whole-account, .scope-whole-confirm { margin: 12px; font-size: var(--fs-caption); color: var(--t2); }
-      .scope-whole-account { display: block; }
-      .scope-whole-confirm:not([hidden]) { display: block; color: var(--warn); }
-      [data-folder-scope-source] input[type="checkbox"] { width: auto; display: inline-block; margin: 0 6px 0 0; vertical-align: middle; }
-      [data-folder-scope-source] [hidden] { display: none !important; }
-      .scope-review { border-top: 1px solid var(--line2); margin: 12px; padding-top: 12px; font-size: var(--fs-caption); }
-      .scope-review li { overflow-wrap: anywhere; margin: 5px 0; }
-      [data-folder-scope-source] button:disabled { opacity: .4; cursor: not-allowed; }
+      /* The folder picker (Dropbox, Google Drive): the approved ChatGPT
+         layout. One level per screen, one thin line per folder with the
+         drill-in chevron beside the name, and one pill control flush right. */
+      .scope-picker { max-width: 760px; }
+      .scope-picker form { display: block; container-type: inline-size; }
+      .scope-picker [hidden] { display: none !important; }
+      .scope-back a, .scope-picker button.back { display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--t1); font-size: var(--fs-caption); font-weight: 500; text-decoration: none; }
+      .scope-picker button.back::before { content: "\\2190\\00a0"; }
+      .scope-locations { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+      .scope-locations .location { padding: 5px 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--t2); text-decoration: none; }
+      .scope-locations .location.selected { border-color: var(--field); background: var(--panel2); color: var(--t1); }
+      .scope-locations .folder-icon { display: none; }
+      .scope-picker .scope-browser-note { padding: 0; margin: 0 0 8px; }
+      .scope-picker .fpath { margin: 14px 0 12px; color: var(--t1); font-size: var(--fs-section); font-weight: 600; }
+      .scope-picker .fpath-up { color: var(--t3); font-weight: 400; }
+      .scope-picker .this-row { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 4px 4px 4px 12px; margin: 0 0 12px; background: var(--panel); border-radius: 12px; }
+      .scope-picker .this-label { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--t1); font-weight: 600; }
+      .scope-picker .fsection { margin-top: 18px; }
+      .scope-picker .fsection h2 { margin: 0 0 6px; color: var(--t1); font-size: var(--fs-row); }
+      .scope-picker .flist { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line2); }
+      .scope-picker .frow { display: flex; align-items: center; gap: 4px; min-height: 48px; border-bottom: 1px solid var(--line2); }
+      .scope-picker .fname { position: relative; flex: 1 1 auto; display: flex; align-items: center; gap: 0 8px; min-width: 44px; height: 44px; margin: 0; padding: 0 0 0 23px; border: 0; border-radius: 8px; background: none; color: var(--t1); font: inherit; font-weight: 500; text-align: left; white-space: nowrap; overflow: hidden; cursor: pointer; }
+      .scope-picker .fname.leaf { cursor: default; }
+      .scope-picker .fopen, .scope-picker .fopen-gap { position: absolute; left: 0; top: 0; width: 18px; height: 44px; line-height: 44px; text-align: center; }
+      .scope-picker .fopen { color: var(--t3); font-size: var(--fs-title); }
+      .scope-picker button.fname:hover:not(:disabled) .fopen { color: var(--t1); }
+      .scope-picker button.fname:disabled { cursor: default; }
+      .scope-picker .fname-main { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+      .scope-picker .fname-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .scope-picker .ftag { flex: none; padding: 0 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--t3); font-size: var(--fs-caption); font-weight: 500; line-height: 20px; }
+      .scope-picker .seg { flex: none; margin-left: auto; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); }
+      .scope-picker .seg-opt { position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: 44px; height: 32px; margin: 0; padding: 0 12px; border: 0; border-radius: 999px; background: none; color: var(--t1); font: inherit; font-size: var(--fs-caption); font-weight: 500; white-space: nowrap; cursor: pointer; }
+      .scope-picker .seg-opt::before { content: ""; position: absolute; inset: -7px 0; }
+      .scope-picker .seg-opt + .seg-opt::after { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 1px; background: var(--line); }
+      .scope-picker .seg-opt.on::after, .scope-picker .seg-opt.on + .seg-opt::after, .scope-picker .seg-opt.inherited::after, .scope-picker .seg-opt.inherited + .seg-opt::after { display: none; }
+      .scope-picker .seg-opt:hover:not(:disabled):not(.on) { background: var(--panel2); }
+      .scope-picker .seg-opt.on { background: var(--t1); color: var(--bg); font-weight: 600; }
+      .scope-picker .seg-opt.inherited { background: var(--panel2); box-shadow: inset 0 0 0 1px var(--t3); }
+      .scope-picker .seg-opt:disabled { color: var(--t3); opacity: .5; cursor: not-allowed; }
+      .scope-picker .seg-opt:disabled.inherited, .scope-picker .seg-opt:disabled.on { opacity: 1; }
+      .scope-picker .seg-short { display: none; }
+      @container (max-width: 420px) {
+        .scope-picker .seg-long { display: none; }
+        .scope-picker .seg-short { display: inline; }
+        .scope-picker .seg-opt { padding: 0 8px; }
+        .scope-picker .picker-footer { padding: 12px; }
+        .scope-picker :is(.actions, .fmore, .scope-error) button { padding: 0 12px; }
+      }
+      @media (max-width: 720px) {
+        .picker-page { padding: 20px 16px 56px; }
+      }
+      .scope-picker .jump-btn { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 48px; margin: 0; padding: 0; border: 0; background: none; color: var(--t1); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
+      .scope-picker .jtag { flex: none; margin-left: auto; color: var(--t3); font-size: var(--fs-caption); font-weight: 400; }
+      .scope-picker .chev { flex: none; color: var(--t3); font-size: var(--fs-title); line-height: 1; }
+      .scope-picker .fstate, .scope-picker .fempty { margin: 0; padding: 12px 0; color: var(--t3); }
+      .scope-picker .fmore { padding: 8px 0; }
+      .scope-picker .confirm-box { display: flex; flex-direction: column; gap: 8px; margin: -4px 0 12px; padding: 12px; border: 1px solid var(--warn-line); border-radius: 12px; background: var(--warn-bg); }
+      .scope-picker .confirm-box .strong { color: var(--t1); font-weight: 600; }
+      .scope-picker .scope-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 12px; padding: 12px; border: 1px solid var(--err-line); border-radius: 12px; background: var(--err-bg); }
+      .scope-picker .scope-error p { color: var(--t1); }
+      .scope-picker .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+      .scope-picker :is(.actions, .fmore, .scope-error) button { min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--t1); font-size: var(--fs-body); font-weight: 500; }
+      .scope-picker :is(.actions, .fmore, .scope-error) button:hover:not(:disabled) { background: var(--panel2); }
+      .scope-picker .actions button.primary { border-color: var(--accent-fill); background: var(--accent-fill); color: var(--on-accent); }
+      .scope-picker .actions button.danger { border-color: var(--bad); color: var(--bad); }
+      .scope-picker :is(.actions, .fmore, .scope-error) button:disabled { border-style: dashed; background: var(--panel); color: var(--t3); cursor: not-allowed; }
+      .scope-picker .picker-footer { margin-top: 24px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); display: flex; flex-direction: column; gap: 12px; }
+      .scope-picker .summary { display: flex; flex-direction: column; gap: 4px; }
+      .scope-picker .summary p { color: var(--t1); }
+      .scope-picker .save { display: flex; flex-direction: column; gap: 6px; }
+      .scope-picker .reason { color: var(--t3); font-size: var(--fs-caption); }
+      .scope-picker .reason:empty, .scope-picker .action-message:empty { display: none; }
       .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
       /* Mail scope picker: the same Finder frame, with form groups where the
          folder tree sits and the estimate where the inspector sits. */
@@ -2603,6 +2881,9 @@ var DISPOSITIONS_CSS = `
       .mail-scope-figures dt { color: var(--t3); font-size: var(--fs-caption); }
       .mail-scope-figures dd { margin: 0; color: var(--t1); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; text-align: right; }
       .mail-scope-estimate button { justify-self: start; padding: 6px 12px; font-size: var(--fs-caption); color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 6px; }
+      /* The same pill buttons and footer rhythm as the folder picker. */
+      .mail-scope-window .finder-footer { padding: 12px 16px; }
+      .mail-scope-window .finder-footer button, .mail-scope-estimate button { min-height: 36px; padding: 0 14px; border-radius: 999px; font-size: var(--fs-body); }
       [data-mail-scope-source] [hidden] { display: none !important; }
       [data-mail-scope-source] button:disabled, [data-mail-scope-source] input:disabled, [data-mail-scope-source] textarea:disabled { opacity: .45; cursor: not-allowed; }
       @media (max-width: 860px) {

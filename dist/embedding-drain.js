@@ -22618,6 +22618,7 @@ init_source_ingestion_exclusions();
 
 // src/workers/source-dispositions.ts
 init_operation_error();
+init_vocabulary();
 init_mail_source_scope();
 init_source_ingestion_exclusions();
 var NOT_EDITABLE_BY_PATH_REASON = "This source names folders by identity rather than by path, " + "so the folder tree cannot edit its rules.";
