@@ -11,6 +11,10 @@ dist/control-ui/*
 coverage/
 release-artifacts/
 .release/
+# The served installer and its release tarball: build products of
+# scripts/publish-release-to-site.ts, published by site/deploy/deploy.sh.
+site/install.sh
+site/releases/
 .env
 .env.*
 !.env.example
