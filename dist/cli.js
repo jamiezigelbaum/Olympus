@@ -103068,9 +103068,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         entry.resolve(message.result);
       return;
     }
-    if (message.method === "ui/notifications/tool-result")
+    if (message.method === "ui/notifications/tool-result") {
+      supersede();
       acceptResult(message.params, true);
-    else if (message.method === "ui/notifications/host-context-changed")
+    } else if (message.method === "ui/notifications/host-context-changed")
       applyHostContext(message.params);
   });
   function applyHostContext(context) {
@@ -103117,6 +103118,17 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function isDashboard(value) {
     return !!value && typeof value === "object" && value.v === 1 && !!value.connection && typeof value.connection.state === "string";
   }
+  let generation = 0;
+  function supersede() {
+    return ++generation;
+  }
+  function editorOpen() {
+    return !!picker && picker.active() || !!privacy && privacy.active();
+  }
+  function redraw() {
+    if (!editorOpen())
+      render();
+  }
   function acceptResult(result, fromHost) {
     if (resultTimer) {
       clearTimeout(resultTimer);
@@ -103124,21 +103136,22 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     if (!result || result.isError) {
       state.relayDown = true;
-      render();
+      redraw();
       return false;
     }
     const content = result.structuredContent;
     if (isDashboard(content)) {
       state.data = content;
       state.relayDown = false;
-      render();
+      refreshFailures = 0;
+      redraw();
       if (!refreshing)
         scheduleRefresh();
       return true;
     }
     if (fromHost) {
       state.relayDown = true;
-      render();
+      redraw();
     }
     return false;
   }
@@ -103153,13 +103166,19 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return text ? String(text.text) : "";
   }
   function callTool(name, args, key) {
+    const mine = supersede();
     state.busy = key;
     state.confirming = "";
     state.notice = "";
     state.actionError = null;
     render();
     request("tools/call", { name, arguments: args || {} }, config2.resultTimeoutMs).then((result) => {
-      state.busy = "";
+      if (state.busy === key)
+        state.busy = "";
+      if (mine !== generation) {
+        redraw();
+        return;
+      }
       const failed = inlineError(result);
       if (failed) {
         state.actionError = { key, text: failed };
@@ -103171,9 +103190,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       if (!state.relayDown && name !== config2.toolName)
         refresh();
     }, () => {
-      state.busy = "";
-      state.relayDown = true;
-      render();
+      if (state.busy === key)
+        state.busy = "";
+      if (mine === generation)
+        state.relayDown = true;
+      redraw();
     });
   }
   function refresh() {
@@ -103346,6 +103367,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       action = () => openPrivacy(key);
     } else if (picker && picker.handles(fix)) {
       action = () => {
+        supersede();
         state.notice = "";
         state.confirming = "";
         picker.start(fix, source ? source.id : "", source ? source.label : "", key);
@@ -103367,6 +103389,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         return wrap;
       }
       return add(wrap, button(fix.label, key, () => {
+        supersede();
         state.confirming = key;
         render(key + ":no");
       }, "plain"), errorNote(failure));
@@ -103652,6 +103675,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!privacy)
       return;
     state.notice = "";
+    supersede();
     state.confirming = "";
     privacy.start(returnKey);
   }
@@ -103879,6 +103903,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function render(focusKey) {
     const active = doc2.activeElement;
     const keepFocus = focusKey || (active && active.getAttribute ? active.getAttribute("data-key") : "") || "";
+    const field = active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT") && keepFocus === active.getAttribute("data-key") ? active : null;
+    const selection = field && typeof field.selectionStart === "number" ? [field.selectionStart, field.selectionEnd === null ? field.selectionStart : field.selectionEnd] : null;
     const theme = state.theme;
     if (theme)
       doc2.documentElement.setAttribute("data-theme", theme);
@@ -103899,6 +103925,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         const node = nodes[i];
         if (node.getAttribute("data-key") === keepFocus) {
           node.focus();
+          if (selection && (node.tagName === "TEXTAREA" || node.tagName === "INPUT")) {
+            try {
+              node.setSelectionRange(selection[0], selection[1]);
+            } catch {}
+          }
           break;
         }
       }
@@ -103931,23 +103962,32 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     setDashboard: (value) => {
       if (!isDashboard(value))
         return;
+      supersede();
       state.data = value;
       state.relayDown = false;
+      refreshFailures = 0;
     },
     close: (notice, again, focusKey) => closeScreen(notice, again, focusKey)
   }) : null;
   function closeScreen(notice, again, focusKey) {
     state.notice = notice;
     if (again) {
+      const mine = supersede();
       state.busy = "refresh";
       render(focusKey);
       request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
-        state.busy = "";
+        if (state.busy === "refresh")
+          state.busy = "";
+        if (mine !== generation)
+          return redraw();
         acceptResult(result, false);
-        render(focusKey);
+        if (!editorOpen())
+          render(focusKey);
       }, () => {
-        state.busy = "";
-        render(focusKey);
+        if (state.busy === "refresh")
+          state.busy = "";
+        if (!editorOpen())
+          render(focusKey);
       });
       return;
     }
@@ -104015,22 +104055,28 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     refreshTimer = null;
     if (pageHidden() || refreshing)
       return;
-    if (picker && picker.active() || privacy && privacy.active() || state.busy) {
+    if (editorOpen() || state.busy || state.confirming) {
       scheduleRefresh();
       return;
     }
     refreshing = true;
+    const mine = generation;
     request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
       refreshing = false;
+      if (mine !== generation)
+        return scheduleRefresh();
       const ok = !!result && !result.isError && isDashboard(result.structuredContent);
-      refreshFailures = ok ? 0 : refreshFailures + 1;
+      if (!ok)
+        refreshFailures++;
       acceptResult(result, true);
       scheduleRefresh();
     }, () => {
       refreshing = false;
+      if (mine !== generation)
+        return scheduleRefresh();
       refreshFailures++;
       state.relayDown = true;
-      render();
+      redraw();
       scheduleRefresh();
     });
   }
@@ -104051,7 +104097,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     tickStale();
   });
   function tickStale() {
-    if (pageHidden() || compact() || picker && picker.active() || privacy && privacy.active())
+    if (pageHidden() || compact() || editorOpen())
       return;
     if (staleWords() !== drawnStale)
       render();
@@ -107280,15 +107326,25 @@ function chatgptPrivateAnswerProgram(config2) {
     focusAfter = byUser ? "status" : "";
     render();
     const deadline = Date.now() + (info.full ? config2.fullPollCapMs : config2.pollCapMs);
+    const isTimeout = (error2) => error2 instanceof Error && error2.message === "timeout";
     try {
-      const keys = await keyPair(jobId);
+      let keys;
+      try {
+        keys = await bounded(keyPair(jobId), deadline - Date.now(), null);
+      } catch (error2) {
+        if (mine !== run)
+          return;
+        if (isTimeout(error2))
+          return slow(byUser);
+        throw error2;
+      }
       for (;; ) {
         if (mine !== run)
           return;
         const left = deadline - Date.now();
         if (left <= 0)
           return slow(byUser);
-        const limit = Math.min(config2.requestTimeoutMs, left);
+        const requestEnd = Date.now() + Math.min(config2.requestTimeoutMs, left);
         const controller = typeof window.AbortController === "function" ? new window.AbortController : null;
         let response;
         let body = null;
@@ -107302,20 +107358,20 @@ function chatgptPrivateAnswerProgram(config2) {
             referrerPolicy: "no-referrer",
             mode: "cors",
             signal: controller ? controller.signal : undefined
-          }), limit, controller);
+          }), requestEnd - Date.now(), controller);
           if (mine !== run)
             return;
           try {
-            body = await bounded(response.json(), Math.min(config2.requestTimeoutMs, deadline - Date.now()), controller);
+            body = await bounded(response.json(), requestEnd - Date.now(), controller);
           } catch (error2) {
-            if (error2 instanceof Error && error2.message === "timeout")
+            if (isTimeout(error2))
               throw error2;
             body = null;
           }
         } catch (error2) {
           if (mine !== run)
             return;
-          if (error2 instanceof Error && error2.message === "timeout") {
+          if (isTimeout(error2)) {
             if (Date.now() >= deadline)
               return slow(byUser);
             continue;
@@ -107330,8 +107386,12 @@ function chatgptPrivateAnswerProgram(config2) {
         if (code === 200 && status === "ready") {
           let opened = null;
           try {
-            opened = readAnswer(await open6(jobId, keys.privateKey, body));
-          } catch {
+            opened = readAnswer(await bounded(open6(jobId, keys.privateKey, body), deadline - Date.now(), null));
+          } catch (error2) {
+            if (mine !== run)
+              return;
+            if (isTimeout(error2))
+              return slow(byUser);
             opened = null;
           }
           if (mine !== run)
