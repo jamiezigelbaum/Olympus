@@ -279,6 +279,43 @@ describe('connect', () => {
     expect(folders.toolCalls('olympus_dashboard').length).toBe(before + 1);
   });
 
+  test('Open sign-in again asks for a fresh link and opens it, never the spent one', async () => {
+    let issued = 0;
+    const host = mount({
+      openai: {},
+      pollMs: 10_000,
+      serve: {
+        [T.connectSource]: () => connectResult(`https://mcp.olympusplugin.ai/go/link${++issued}`),
+        olympus_dashboard: () => ({ structuredContent: offDropbox }),
+      },
+    });
+    host.push({ structuredContent: offDropbox });
+    host.button('Connect').click();
+    await host.settle();
+    expect(host.calls.filter(([name]) => name === 'openExternal')).toEqual([['openExternal', { href: 'https://mcp.olympusplugin.ai/go/link1' }]]);
+    host.button(Q.connectReopen).click();
+    await host.settle();
+    expect(host.toolCalls(T.connectSource)).toEqual([{ source: 'dropbox' }, { source: 'dropbox' }]);
+    expect(host.calls.filter(([name]) => name === 'openExternal').map(([, args]) => args)).toEqual([
+      { href: 'https://mcp.olympusplugin.ai/go/link1' },
+      { href: 'https://mcp.olympusplugin.ai/go/link2' },
+    ]);
+    expect(host.text()).toContain(Q.connectWaiting);
+  });
+
+  test('Open sign-in again after the wait ran out also renews the link, and a refused renewal says so', async () => {
+    const urls = ['https://mcp.olympusplugin.ai/go/first', 'https://evil.example/go/second'];
+    const host = mount({ openai: {}, pollMs: 2, pollCapMs: 15, serve: { [T.connectSource]: () => connectResult(urls.shift()!), olympus_dashboard: () => ({ structuredContent: offDropbox }) } });
+    host.push({ structuredContent: offDropbox });
+    host.button('Connect').click();
+    for (let i = 0; i < 50 && !host.hasButton('Check again'); i++) await sleep(3);
+    host.button(Q.connectReopen).click();
+    await host.settle();
+    expect(host.toolCalls(T.connectSource)).toHaveLength(2);
+    expect(host.calls.filter(([name]) => name === 'openExternal')).toEqual([['openExternal', { href: 'https://mcp.olympusplugin.ai/go/first' }]]);
+    expect(host.text()).toContain(Q.connectFailed.replace('{source}', 'Dropbox'));
+  });
+
   test('waiting is capped; Check again resumes', async () => {
     const host = mount({ openai: {}, pollMs: 2, pollCapMs: 15, serve: { [T.connectSource]: () => (connectResult('https://mcp.olympusplugin.ai/go/a')), olympus_dashboard: () => ({ structuredContent: offDropbox }) } });
     host.push({ structuredContent: offDropbox });
@@ -361,7 +398,7 @@ describe('folder picker', () => {
       expect(name.tagName).toBe(opens ? 'BUTTON' : 'P');
       expect(Array.from(name.children).slice(0, 2).map((child) => child.className)).toEqual([opens ? 'fopen' : 'fopen-gap', 'fname-main']);
       expect(name.firstElementChild!.getAttribute('aria-hidden')).toBe('true');
-      expect(row.lastElementChild!.getAttribute('role')).toBe('radiogroup');
+      expect(row.lastElementChild!.getAttribute('role')).toBe('group');
       expect(Array.from(row.querySelectorAll('.seg-opt .seg-long')).map((node) => node.textContent)).toEqual(['Full', 'Names only', 'Skip']);
       expect(Array.from(row.querySelectorAll('.seg-opt .seg-short')).map((node) => node.textContent)).toEqual(['Full', 'Names', 'Skip']);
     }
@@ -379,10 +416,11 @@ describe('folder picker', () => {
     expectNoJargon(host);
   });
 
-  test('accessibility: a labelled radiogroup per row, aria-pressed segments, one tab stop, and arrow keys move between segments', async () => {
+  test('accessibility: a labelled group of toggle buttons per row (not radios), aria-pressed segments, one tab stop, and arrow keys move between segments', async () => {
     const host = await openFolders();
     const group = rowOf(host, 'Medical Records').querySelector('.seg')!;
-    expect(group.getAttribute('role')).toBe('radiogroup');
+    expect(group.getAttribute('role')).toBe('group');
+    expect(doc(host).querySelector('[role=radiogroup], [role=radio]')).toBeNull();
     expect(group.getAttribute('aria-label')).toBe('Choice for Medical Records');
     const segs = () => Array.from(rowOf(host, 'Medical Records').querySelectorAll('.seg-opt')) as unknown as HTMLButtonElement[];
     expect(segs().map((button) => button.tagName)).toEqual(['BUTTON', 'BUTTON', 'BUTTON']);
@@ -416,6 +454,43 @@ describe('folder picker', () => {
     tap(host, 'Medical Records', 'metadata_only');
     expect(focused(host)).toBe('picker:seg:k-b:metadata_only');
     expect(segs().map((button) => button.tabIndex)).toEqual([-1, 0, -1]);
+    // Tapping it again clears it; a toggle, so focus stays put.
+    tap(host, 'Medical Records', 'metadata_only');
+    expect(segs().map((button) => button.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false']);
+    expect(focused(host)).toBe('picker:seg:k-b:metadata_only');
+  });
+
+  test('Mixed follows access: Skip inside a folder that is not included is not Mixed; Full inside it is', async () => {
+    const host = await openFolders();
+    openFolder(host, 'Tax Returns 2024');
+    await host.settle();
+    tap(host, 'Therapy Notes', 'exclude');
+    tap(host, 'Divorce', 'exclude');
+    host.button(Q.up).click();
+    expect(rowShows(host, 'Tax Returns 2024')).toEqual({ pressed: '', inherited: '' });
+    expect(mixedTag(host, 'Tax Returns 2024')).toBeNull();
+    openFolder(host, 'Tax Returns 2024');
+    tap(host, 'Divorce', 'ingest');
+    host.button(Q.up).click();
+    expect(mixedTag(host, 'Tax Returns 2024')!.getAttribute('title')).toBe('Mixed: some folders inside are fully indexed');
+  });
+
+  test('clearing a choice the parent overrides keeps focus on an enabled segment: the inherited one', async () => {
+    const host = await openFolders({
+      selections: [
+        { key: 'k-a', state: 'exclude', ancestor_keys: [] },
+        { key: 'k-a1', state: 'metadata_only', ancestor_keys: ['k-a'] },
+      ],
+    });
+    openFolder(host, 'Tax Returns 2024');
+    await host.settle();
+    expect(rowShows(host, 'Therapy Notes')).toEqual({ pressed: 'metadata_only', inherited: 'exclude' });
+    seg(host, 'Therapy Notes', 'metadata_only').focus();
+    tap(host, 'Therapy Notes', 'metadata_only');
+    expect(rowShows(host, 'Therapy Notes')).toEqual({ pressed: '', inherited: 'exclude' });
+    expect(seg(host, 'Therapy Notes', 'metadata_only').disabled).toBe(true);
+    expect(focused(host)).toBe('picker:seg:k-a1:exclude');
+    expect(seg(host, 'Therapy Notes', 'exclude').tabIndex).toBe(0);
   });
 
   test('folders are listed alphabetically, numbers in numeric order', async () => {
@@ -610,6 +685,30 @@ describe('folder picker', () => {
     expect(host.text()).toContain('Kids Photos');
     expect(host.text()).toContain('Tax Returns 2024');
     expect(host.hasButton(Q.loadMore)).toBe(false);
+  });
+
+  test('sizes and counts show beside a folder; Load more says how many follow; an incomplete level says so', async () => {
+    const host = await openFolders({ remaining: 1, truncated: true });
+    const row = rowOf(host, 'Tax Returns 2024');
+    expect(row.querySelector('.fsize')!.textContent).toBe('2 GB');
+    expect(row.querySelector('.fcount')!.textContent).toBe('· 1,200 files');
+    expect(rowOf(host, 'Medical Records').querySelector('.fcount')!.textContent).toBe('· 1 file');
+    expect(host.hasButton(Q.loadMore)).toBe(false);
+    host.button('Load 1 more folder').click();
+    await host.settle();
+    expect(host.text()).toContain('Kids Photos');
+    expect(host.hasButton('Load 1 more folder')).toBe(false);
+    // Truncated: some folders were never listed, and the list says so.
+    expect(host.text()).toContain(Q.truncated);
+    openFolder(host, 'Tax Returns 2024');
+    await host.settle();
+    expect(host.text()).toContain(Q.truncated);
+    expect(Q.loadMoreCount.many.replace('{n}', '3')).toBe('Load 3 more folders');
+  });
+
+  test('a complete level has no incomplete-list note', async () => {
+    const host = await openFolders();
+    expect(host.text()).not.toContain(Q.truncated);
   });
 
   test('Everything in Dropbox: Full asks for an inline confirmation before Save, every folder then inherits it, and a second tap turns it off', async () => {

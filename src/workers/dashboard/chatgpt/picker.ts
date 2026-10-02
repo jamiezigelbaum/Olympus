@@ -273,6 +273,18 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     leave(fill(Q.connected, { source: p.label }), false);
   }
 
+  /**
+   * Open sign-in again: a sign-in link works once (opening it spends the
+   * hand-off), so this asks the connect tool for a fresh link and opens that,
+   * never the one already used. The wait starts over with the new link.
+   */
+  function reopen(): void {
+    if (!p || p.mode !== 'connect') return;
+    stopTimer();
+    session++;
+    startConnect(p.connectArgs, p.id, p.label, p.returnKey);
+  }
+
   function connectView(page: HTMLElement): void {
     add(page, el('h1', '', fill(Q.connectTitle, { source: p.label })));
     const box = el('div', 'picker-status');
@@ -285,7 +297,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       line.setAttribute('role', 'status');
       add(box, line, el('p', 'muted', fill(Q.connectWaitingHelp, { source: p.label })));
       add(box, add(el('div', 'actions'),
-        kit.button(Q.connectReopen, 'picker:connect:reopen', () => kit.openLink(p.href), 'plain'),
+        kit.button(Q.connectReopen, 'picker:connect:reopen', reopen, 'plain'),
         kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', true), 'plain')));
     } else if (p.phase === 'timeout') {
       const line = el('p', '', fill(Q.connectTimeout, { source: p.label }));
@@ -297,16 +309,13 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
           kit.render('picker:connect:cancel');
           schedulePoll();
         }, 'main'),
-        kit.button(Q.connectReopen, 'picker:connect:reopen', () => kit.openLink(p.href), 'plain'),
+        kit.button(Q.connectReopen, 'picker:connect:reopen', reopen, 'plain'),
         kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', true), 'plain')));
     } else {
       const line = el('p', '', p.errorText || fill(Q.connectFailed, { source: p.label }));
       line.setAttribute('role', 'alert');
       add(box, line, add(el('div', 'actions'),
-        kit.button(Q.tryAgain, 'picker:connect:retry', () => {
-          session++;
-          startConnect(p.connectArgs, p.id, p.label, p.returnKey);
-        }, 'main'),
+        kit.button(Q.tryAgain, 'picker:connect:retry', reopen, 'main'),
         kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', true), 'plain')));
     }
     add(page, box);
@@ -332,6 +341,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       edited: false, saving: false, saveError: '', discarding: false,
       // folders
       roots: [], rootCursor: '', branches: new Map(), cursors: new Map(), catalog: new Map(),
+      // Per level ('' is the root): how many more folders follow ("N more"), and levels Olympus could not list in full.
+      remaining: new Map(), truncated: new Set(),
       ancestors: new Map(), own: new Map(), whole: false, wholeConfirmed: false,
       path: [], lastSeg: '',
       // mail
@@ -444,6 +455,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const nodes = previous.concat(fresh).sort((a: Any, b: Any) =>
       String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
     const next = typeof page.next_cursor === 'string' && page.next_cursor ? page.next_cursor : '';
+    const more = typeof page.remaining === 'number' && isFinite(page.remaining) && page.remaining > 0 ? Math.round(page.remaining) : 0;
+    if (next && more) p.remaining.set(parentKey, more);
+    else p.remaining.delete(parentKey);
+    if (page.truncated === true) p.truncated.add(parentKey);
     if (parentKey) {
       p.branches.set(parentKey, nodes);
       if (next) p.cursors.set(parentKey, next);
@@ -526,12 +541,18 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return out;
   }
 
-  /** Derived from the known rules below a folder, never stored: the first effective choice that differs. */
+  /**
+   * Derived from the known rules below a folder, never stored: the first
+   * choice inside that gives different access. Not included and Skip both
+   * mean Olympus reads nothing, so an unchosen folder whose folders are only
+   * skipped is not Mixed.
+   */
   function mixed(key: string): string {
-    const mine = effective(key);
+    const access = (state: string) => (state === 'exclude' ? '' : state);
+    const mine = access(effective(key));
     for (const other of descendants(key)) {
       const theirs = effective(other);
-      if (theirs !== mine) return theirs;
+      if (access(theirs) !== mine) return theirs || 'exclude';
     }
     return '';
   }
@@ -594,6 +615,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       if (value) p.own.set(key, value);
       else p.own.delete(key);
       p.edited = true;
+      // Cleared under a stricter parent, the tapped segment is no longer
+      // possible (so disabled): focus moves to the choice it now inherits.
+      const tapped = focus.slice(focus.lastIndexOf(':') + 1);
+      if (!value && tapped && !allowed(key, tapped)) focus = 'picker:seg:' + key + ':' + effective(key);
     }
     // The connect line is a one-time hello; a refreshed-view warning stays until the next save.
     if (p.notice && p.notice !== Q.conflict) p.notice = '';
@@ -798,12 +823,13 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   /**
-   * One pill of three segments (Full, Names only, Skip): buttons with
-   * aria-pressed in a radiogroup, one tab stop, arrow keys between segments.
+   * One pill of three segments (Full, Names only, Skip): a labelled group of
+   * toggle buttons (aria-pressed), not radios, since tapping the chosen one
+   * clears it. One tab stop; arrow keys only move focus between segments.
    */
   function segControl(name: string, focusBase: string, model: SegModel): HTMLElement {
     const group = el('div', 'seg');
-    group.setAttribute('role', 'radiogroup');
+    group.setAttribute('role', 'group');
     group.setAttribute('aria-label', fill(Q.choiceGroup, { name }));
     const buttons: HTMLButtonElement[] = [];
     for (const state of STATES) {
@@ -959,7 +985,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
 
   function loadMore(parentKey: string): HTMLElement {
     const busy = p.loading === (parentKey || 'root');
-    return kit.button(busy ? Q.loadingFolders : Q.loadMore, 'picker:more:' + parentKey, busy || p.loading ? null : () => list(parentKey, true), 'plain');
+    const more = p.remaining.get(parentKey) || 0;
+    const label = more ? fill(more === 1 ? Q.loadMoreCount.one : Q.loadMoreCount.many, { n: kit.count(more) }) : Q.loadMore;
+    return kit.button(busy ? Q.loadingFolders : label, 'picker:more:' + parentKey, busy || p.loading ? null : () => list(parentKey, true), 'plain');
   }
 
   function levelList(parentKey: string, nodes: Any[], hasMore: boolean): HTMLElement {
@@ -967,6 +995,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     for (const node of nodes) add(listNode, folderRow(node));
     if (!nodes.length) add(listNode, el('li', 'muted fempty', Q.noFolders));
     if (hasMore) add(listNode, add(el('li', 'fmore'), loadMore(parentKey)));
+    // Some folders here were never listed: say so rather than imply this is all of them.
+    if (p.truncated.has(parentKey)) add(listNode, el('li', 'muted fmore', Q.truncated));
     return listNode;
   }
 

@@ -110,6 +110,13 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     s = {
       screen: 'main', returnKey, loaded: false, loading: true, error: '',
       description: '', rules: [], pendingCount: 0,
+      // The saved settings this view started from: the compare-and-swap revision,
+      // the saved description, and the owner's confirmation for a save that lowers protection.
+      revision: '', savedDescription: '', confirmation: '', confirmedAt: 0, confirmStep: false,
+      // Loaded rules the page cannot show (an unexpected shape): never shown, always saved back as they came.
+      hidden: [],
+      // Settings changed elsewhere while this draft was open: the current saved ones, until the person picks.
+      server: null,
       edited: false, saving: false, saveError: '', discarding: false, picking: false,
       labels: [], labelsLoading: false, labelsError: '',
       sender: '', senderError: '',
@@ -133,21 +140,59 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     return data;
   }
 
+  const text = (value: Any) => typeof value === 'string' && value.trim() !== '';
+
+  /**
+   * One rule exactly as the engine serializes it (dashboard-contract.ts
+   * PrivacyRuleView, response-builder.ts copyPrivacySettings): a sender is
+   * {gmail.email, value}; a label {gmail.email, key, value}; a folder
+   * {dropbox.files | google_drive.docs, key, display?}. `display` is only
+   * ever a folder's, and optional.
+   */
   function validRule(rule: Any): boolean {
-    return !!rule && KINDS.indexOf(rule.kind) >= 0 && typeof rule.source_id === 'string' && !!rule.source_id
-      && typeof rule.display === 'string' && (typeof rule.key === 'string' || typeof rule.value === 'string');
+    if (!rule || typeof rule !== 'object' || KINDS.indexOf(rule.kind) < 0) return false;
+    if (rule.kind === 'sender') return rule.source_id === kit.config.mailSourceId && text(rule.value);
+    if (rule.kind === 'label') return rule.source_id === kit.config.mailSourceId && text(rule.key) && text(rule.value);
+    return Object.prototype.hasOwnProperty.call(kit.config.folderSources, rule.source_id) && text(rule.key)
+      && (rule.display === undefined || typeof rule.display === 'string');
   }
 
+  /** What the page prints for a rule: the sender, the label's name, the folder's name or "A folder in Dropbox". */
+  function displayOf(rule: Any): string {
+    if (rule.kind === 'sender' || rule.kind === 'label') return String(rule.value);
+    return text(rule.display) ? String(rule.display) : fill(W.folderUnnamed, { source: sourceLabel(rule.source_id) });
+  }
+
+  /** A loaded rule for the view: `raw` is what the engine sent, saved back unchanged unless removed. */
+  function viewRule(rule: Any): Any {
+    const raw: Any = {};
+    for (const field of Object.keys(rule)) raw[field] = rule[field];
+    const copy: Any = { kind: rule.kind, source_id: rule.source_id, display: displayOf(rule), removed: false, saved: true, raw };
+    if (typeof rule.key === 'string') copy.key = rule.key;
+    if (typeof rule.value === 'string') copy.value = rule.value;
+    return copy;
+  }
+
+  /**
+   * The saved settings, replacing whatever the view held. A result without a
+   * confirmation (a save or a conflict) keeps the one already held: it is
+   * spent only by the save that uses it.
+   */
   function take(data: Any): void {
     s.description = typeof data.description === 'string' ? data.description : '';
-    s.rules = data.rules.filter(validRule).map((rule: Any) => {
-      const copy: Any = { kind: rule.kind, source_id: rule.source_id, display: rule.display, removed: false };
-      if (typeof rule.key === 'string') copy.key = rule.key;
-      if (typeof rule.value === 'string') copy.value = rule.value;
-      return copy;
-    });
+    s.savedDescription = s.description;
+    s.revision = typeof data.revision === 'string' ? data.revision : '';
+    s.edited = false;
+    s.confirmStep = false;
+    // `saved`: removing it lowers protection, so the save needs the owner's confirmation.
+    s.rules = data.rules.filter(validRule).map(viewRule);
+    s.hidden = data.rules.filter((rule: Any) => !validRule(rule));
+    s.server = null;
     s.pendingCount = typeof data.pendingCount === 'number' && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
-    s.confirmation = typeof data.confirmation === 'string' ? data.confirmation : '';
+    if (typeof data.confirmation === 'string' && data.confirmation) {
+      s.confirmation = data.confirmation;
+      s.confirmedAt = Date.now();
+    }
   }
 
   function load(): void {
@@ -175,20 +220,45 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     });
   }
 
+  /**
+   * A rule's identity as the engine matches it (privacy-profile.ts
+   * privacyRuleId): a folder or label by its key, a sender by its address,
+   * trimmed and lower-cased. A label's name can change; it is the same rule.
+   */
   function identity(rule: Any): string {
-    return rule.kind + '\n' + rule.source_id + '\n' + (typeof rule.key === 'string' ? rule.key : '') + '\n' + (typeof rule.value === 'string' ? rule.value : '');
+    const matched = rule.kind === 'sender'
+      ? (typeof rule.value === 'string' ? rule.value.trim().toLowerCase() : '')
+      : (typeof rule.key === 'string' ? rule.key.trim() : '');
+    return rule.kind + '\n' + rule.source_id + '\n' + matched;
   }
 
   function kept(): Any[] {
     return s.rules.filter((rule: Any) => !rule.removed);
   }
 
-  /** Exactly what the save sends: no display names, no local flags. */
+  /**
+   * Exactly what the save sends: a loaded rule as the engine sent it; a new
+   * one in the contract's shape (a folder with its name as `display`, which
+   * the contract keeps for the panel). No local flags.
+   */
   function ruleOut(rule: Any): ChatGptPrivacyRuleOut {
-    const out: ChatGptPrivacyRuleOut = { kind: rule.kind, source_id: rule.source_id };
+    if (rule.raw) return rule.raw;
+    const out: Any = { kind: rule.kind, source_id: rule.source_id };
     if (typeof rule.key === 'string') out.key = rule.key;
     if (typeof rule.value === 'string') out.value = rule.value;
+    if (rule.kind === 'folder' && text(rule.display)) out.display = rule.display;
     return out;
+  }
+
+  /** The whole rule list a save sends: every kept rule, and every loaded rule the page cannot show. */
+  function rulesOut(): Any[] {
+    return kept().map(ruleOut).concat(s.hidden);
+  }
+
+  /** Any change to the draft closes an open confirmation step: what it named may no longer be true. */
+  function changed(): void {
+    s.edited = true;
+    s.confirmStep = false;
   }
 
   function addRule(rule: Any): void {
@@ -196,29 +266,70 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     const existing = s.rules.filter((other: Any) => identity(other) === id)[0];
     if (existing) existing.removed = false;
     else s.rules.push(rule);
-    s.edited = true;
+    changed();
     s.saveError = '';
   }
 
+  /** Saved rules this save would drop, and whether it changes the saved description: both lower protection. */
+  function lowering(): { removed: Any[]; described: boolean } {
+    return {
+      removed: s.rules.filter((rule: Any) => rule.saved && rule.removed),
+      described: s.description.trim() !== s.savedDescription,
+    };
+  }
+  function lowers(): boolean {
+    const change = lowering();
+    return change.removed.length > 0 || change.described;
+  }
+
+  /** Save: a save that lowers protection first asks inline, then carries the owner's confirmation. */
   function save(): void {
-    if (!s || !s.loaded || s.saving) return;
-    const rules = kept();
-    const args: Any = { description: s.description.trim(), rules: rules.map(ruleOut) };
-    // The owner's confirmation from olympus_privacy_get: removals and new words need it.
-    if (s.confirmation) args.confirmation = s.confirmation;
+    if (!s || !s.loaded || s.saving || s.server) return;
+    if (lowers()) {
+      s.confirmStep = true;
+      s.saveError = '';
+      kit.render('privacy:confirm:yes');
+      return;
+    }
+    send(false, false);
+  }
+
+  /** The olympus_privacy_get confirmation lives 30 minutes; one older than this is fetched again first. */
+  const CONFIRMATION_FRESH_MS = 25 * 60_000;
+
+  function send(confirmed: boolean, retried: boolean): void {
+    if (confirmed && (!s.confirmation || Date.now() - s.confirmedAt > CONFIRMATION_FRESH_MS)) {
+      renewConfirmation(() => send(true, true));
+      return;
+    }
+    const args: Any = { description: s.description.trim(), rules: rulesOut() };
+    // Always the revision the view was built from: a save over changed settings is refused.
+    if (s.revision) args.revision = s.revision;
+    // Only a save that lowers protection carries the confirmation, which it spends.
+    if (confirmed) args.confirmation = s.confirmation;
     s.saving = true;
     s.saveError = '';
+    s.confirmStep = false;
     kit.render('privacy:save');
     const mine = session;
     kit.call(T.set, args).then((result) => {
       if (mine !== session || !s) return;
       s.saving = false;
+      const content = result && result.structuredContent && typeof result.structuredContent === 'object' ? result.structuredContent : null;
+      if (confirmed && result && result.isError && content && content.error === 'privacy_owner_only' && !retried) {
+        // The confirmation expired or was spent elsewhere: fetch a fresh one once.
+        s.confirmation = '';
+        renewConfirmation(() => send(true, true));
+        return;
+      }
       const data = settings(result);
-      if (!data) {
+      if (data && content && content.status === 'conflict') return conflict(data);
+      if (!data || result.isError) {
         s.saveError = W.saveFailed;
         kit.render('privacy:save');
         return;
       }
+      if (confirmed) s.confirmation = '';
       kit.remember(data.rules.filter(validRule).length);
       leave(W.saved, true);
     }, () => {
@@ -227,6 +338,106 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
       s.saveError = W.saveFailed;
       kit.render('privacy:save');
     });
+  }
+
+  /**
+   * The settings changed somewhere else and nothing was saved. The draft
+   * stays as it is; the current saved settings are shown beside it until the
+   * person applies their changes to them again or discards their changes.
+   */
+  function conflict(data: Any): void {
+    s.server = data;
+    s.confirmStep = false;
+    s.saveError = '';
+    kit.render('privacy:conflict:apply');
+  }
+
+  /** The person's changes, re-applied to the current saved settings, then saved (asking first if they lower protection). */
+  function applyAgain(): void {
+    const server = s.server;
+    if (!server) return;
+    const removed: Record<string, boolean> = {};
+    for (const rule of s.rules) if (rule.saved && rule.removed) removed[identity(rule)] = true;
+    const added = s.rules.filter((rule: Any) => !rule.saved && !rule.removed);
+    const described = s.description.trim() !== s.savedDescription ? s.description : null;
+    take(server);
+    for (const rule of s.rules) if (removed[identity(rule)]) rule.removed = true;
+    for (const rule of added) addRule(rule);
+    if (described !== null) s.description = described;
+    s.edited = true;
+    save();
+    if (!s.saving && !s.confirmStep) kit.render('privacy:save');
+  }
+
+  function discardMine(): void {
+    const server = s.server;
+    if (!server) return;
+    take(server);
+    kit.render('privacy:description');
+  }
+
+  /** The conflict box: what happened, what is saved now, and the two ways on. */
+  function conflictBox(): HTMLElement {
+    const box = el('div', 'confirm-box');
+    box.setAttribute('role', 'alert');
+    add(box, el('p', 'strong', W.conflict), el('p', '', W.conflictNow));
+    const list = el('ul', 'plain');
+    const description = typeof s.server.description === 'string' ? s.server.description.trim() : '';
+    add(list, el('li', '', description ? fill(W.conflictDescription, { text: description }) : W.conflictNoDescription));
+    const rules = s.server.rules.filter(validRule);
+    if (!rules.length) add(list, el('li', '', W.rulesEmpty));
+    for (const rule of rules) add(list, el('li', '', displayOf(rule) + ' · ' + kindText(rule)));
+    add(box, list, add(el('div', 'actions'),
+      kit.button(W.applyAgain, 'privacy:conflict:apply', applyAgain, 'main'),
+      kit.button(W.discardMine, 'privacy:conflict:discard', discardMine, 'plain')));
+    return box;
+  }
+
+  /** olympus_privacy_get again for a fresh confirmation; settings changed meanwhile are a conflict. */
+  function renewConfirmation(then: () => void): void {
+    s.saving = true;
+    s.saveError = '';
+    s.confirmStep = false;
+    kit.render('privacy:save');
+    const mine = session;
+    kit.call(T.get, {}).then((result) => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      const data = settings(result);
+      if (!data || typeof data.confirmation !== 'string' || !data.confirmation) {
+        s.saveError = W.saveFailed;
+        kit.render('privacy:save');
+        return;
+      }
+      if (s.revision && typeof data.revision === 'string' && data.revision !== s.revision) return conflict(data);
+      s.confirmation = data.confirmation;
+      s.confirmedAt = Date.now();
+      then();
+    }, () => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      s.saveError = W.saveFailed;
+      kit.render('privacy:save');
+    });
+  }
+
+  /** The inline step before a save that lowers protection: what it removes, Confirm or Cancel. */
+  function confirmBox(): HTMLElement {
+    const change = lowering();
+    const box = el('div', 'confirm-box');
+    box.setAttribute('role', 'alert');
+    if (change.removed.length) {
+      add(box, el('p', 'strong', fill(W.confirmRemove, { list: change.removed.map((rule: Any) => rule.display).join(', ') })));
+    }
+    if (change.described) add(box, el('p', change.removed.length ? '' : 'strong', W.confirmDescription));
+    add(box, add(el('div', 'actions'),
+      // Lowering is decided again from the draft as it is now: an additive save never carries the confirmation.
+      kit.button(W.confirm, 'privacy:confirm:yes', () => send(lowers(), false), 'danger'),
+      kit.button(W.cancel, 'privacy:confirm:no', () => {
+        s.confirmStep = false;
+        kit.render('privacy:save');
+      }, 'plain')));
+    return box;
   }
 
   // ---- sources -----------------------------------------------------------
@@ -356,7 +567,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
       add(li, el('p', 'fname leaf muted', fill(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, 'privacy:rule:' + index, s.saving ? null : () => {
         rule.removed = false;
-        s.edited = true;
+        changed();
         kit.render('privacy:rule:' + index);
       }, 'plain');
       undo.setAttribute('aria-label', fill(W.undoFor, { name: rule.display }));
@@ -365,7 +576,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     add(li, add(el('p', 'fname leaf two-line'), el('span', 'two-top', rule.display), el('span', 'two-bottom', kindText(rule))));
     const remove = kit.button(W.remove, 'privacy:rule:' + index, s.saving ? null : () => {
       rule.removed = true;
-      s.edited = true;
+      changed();
       s.saveError = '';
       kit.render('privacy:rule:' + index);
     }, 'plain');
@@ -376,6 +587,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
   function mainView(page: HTMLElement): void {
     add(page, el('h1', '', W.title));
     add(page, el('p', 'muted intro', W.intro));
+    if (s.server) add(page, conflictBox());
     if (s.error) {
       const error = el('div', 'banner');
       error.setAttribute('role', 'alert');
@@ -399,11 +611,17 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     area.value = s.description;
     area.disabled = s.saving;
     area.setAttribute('data-key', 'privacy:description');
+    area.setAttribute('aria-describedby', 'privacy-description-shared');
     area.addEventListener('input', () => {
       s.description = area.value;
-      s.edited = true;
+      const open = s.confirmStep;
+      changed();
+      if (open) kit.render('privacy:description');
     });
     add(page, add(field, area));
+    const shared = el('p', 'reason field-note', W.descriptionShared);
+    shared.id = 'privacy-description-shared';
+    add(page, shared);
 
     const rules = add(el('section', 'fsection'), el('h2', '', W.rulesTitle));
     if (s.rules.length) {
@@ -419,18 +637,24 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
       kit.button(W.addSender, 'privacy:add:sender', s.saving ? null : addSender, 'plain')));
     if (!folders) add(rules, el('p', 'reason', W.needFolderSource));
     if (!gmail) add(rules, el('p', 'reason', W.needGmail));
+    add(rules, el('p', 'reason', W.namesShared));
     add(page, rules);
 
     const footer = el('section', 'picker-footer');
     if (s.pendingCount > 0) {
       add(footer, el('p', '', fill(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
     }
+    // The confirmation step stands in for Save while it is open (and while the change still lowers protection).
+    if (s.confirmStep && !s.saving && lowers()) {
+      add(page, add(footer, confirmBox()));
+      return;
+    }
     const row = el('div', 'actions');
     if (s.saving) {
       const busy = kit.button(W.saving, 'privacy:save', null, 'main');
       busy.setAttribute('aria-busy', 'true');
       add(row, busy);
-    } else add(row, kit.button(W.save, 'privacy:save', save, 'main'));
+    } else add(row, kit.button(W.save, 'privacy:save', s.server ? null : save, 'main'));
     add(row, kit.button(W.cancel, 'privacy:cancel', s.saving ? null : backOut, 'plain'));
     const wrap = add(el('div', 'save'), row);
     if (s.saveError) {

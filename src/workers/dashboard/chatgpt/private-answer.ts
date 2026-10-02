@@ -54,6 +54,8 @@ export interface ChatGptPrivateAnswerConfig {
   pollCapMs: number;
   /** The same, for a full-detail answer (`detail: 'full'`). */
   fullPollCapMs: number;
+  /** One relay request (response and body) is abandoned after this long; polling continues until the cap. */
+  requestTimeoutMs: number;
   /** How long "Opened on your Mac" (or its failure) stays beside a source. */
   noteMs: number;
   /** The handshake: re-send the height this long after initialized, and send anyway if the host never answers. */
@@ -68,6 +70,7 @@ export interface ChatGptPrivateAnswerPageOptions {
   secondMs?: number;
   pollCapMs?: number;
   fullPollCapMs?: number;
+  requestTimeoutMs?: number;
   noteMs?: number;
   heightResendMs?: number;
   initFallbackMs?: number;
@@ -76,8 +79,10 @@ export interface ChatGptPrivateAnswerPageOptions {
 }
 
 export const CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS = 2 * 60_000;
-/** A full-detail answer reads the whole report: the engine allows it 180 s, the panel waits a little longer. */
-export const CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 190_000;
+/** A full-detail answer reads selected parts more closely: the engine allows it 240 s, the panel waits a little longer. */
+export const CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 250_000;
+/** The relay answers a poll at once (202 with Retry-After); a request this slow has hung. */
+export const CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS = 20_000;
 /** The panel's IndexedDB: one key pair per job id (key path: the job id). */
 export const CHATGPT_PRIVATE_ANSWER_KEY_STORE = {
   database: 'olympus-private-answer',
@@ -425,6 +430,29 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  /**
+   * Settles with `work`, or rejects with 'timeout' after `ms` and aborts the
+   * request: a fetch (or its body) that never settles cannot hold the panel,
+   * even where the abort signal is ignored.
+   */
+  function bounded<V>(work: Promise<V>, ms: number, controller: AbortController | null): Promise<V> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (controller) try { controller.abort(); } catch { /* already done */ }
+        reject(new Error('timeout'));
+      }, Math.max(0, ms));
+      work.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
+    });
+  }
+
+  function slow(byUser: boolean): void {
+    phase = 'slow';
+    errorText = T.slow;
+    canRetry = true;
+    focusAfter = byUser ? 'retry' : '';
+    render();
+  }
+
   function fail(text: string, retry: boolean, byUser: boolean): void {
     phase = 'error';
     errorText = text;
@@ -459,14 +487,31 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     canRetry = false;
     focusAfter = byUser ? 'status' : '';
     render();
-    const started = Date.now();
+    // One collection deadline over everything (the key, every request, the
+    // decryption): whatever stalls, the panel stops waiting here, and a step
+    // that finishes later is ignored.
+    const deadline = Date.now() + (info.full ? config.fullPollCapMs : config.pollCapMs);
+    const isTimeout = (error: unknown) => error instanceof Error && error.message === 'timeout';
     try {
-      const keys = await keyPair(jobId);
+      let keys: Awaited<ReturnType<typeof keyPair>>;
+      try {
+        keys = await bounded(keyPair(jobId), deadline - Date.now(), null);
+      } catch (error) {
+        if (mine !== run) return;
+        if (isTimeout(error)) return slow(byUser);
+        throw error;
+      }
       for (;;) {
         if (mine !== run) return;
+        const left = deadline - Date.now();
+        if (left <= 0) return slow(byUser);
+        // One request deadline over its response and its body, never past the collection's.
+        const requestEnd = Date.now() + Math.min(config.requestTimeoutMs, left);
+        const controller = typeof (window as Any).AbortController === 'function' ? new (window as Any).AbortController() as AbortController : null;
         let response: Response;
+        let body: Any = null;
         try {
-          response = await (window as Any).fetch(config.relayOrigin + '/private/' + jobId, {
+          response = await bounded<Response>((window as Any).fetch(config.relayOrigin + '/private/' + jobId, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
@@ -474,17 +519,25 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
             cache: 'no-store',
             referrerPolicy: 'no-referrer',
             mode: 'cors',
-          });
-        } catch {
-          if (mine === run) fail(T.unreachable, true, byUser);
+            signal: controller ? controller.signal : undefined,
+          }), requestEnd - Date.now(), controller);
+          if (mine !== run) return;
+          try {
+            body = await bounded<Any>(response.json(), requestEnd - Date.now(), controller);
+          } catch (error) {
+            if (isTimeout(error)) throw error;
+            body = null;
+          }
+        } catch (error) {
+          if (mine !== run) return;
+          // A hung request is abandoned; the job may still be ready, so ask
+          // again until the deadline, then offer Try again.
+          if (isTimeout(error)) {
+            if (Date.now() >= deadline) return slow(byUser);
+            continue;
+          }
+          fail(T.unreachable, true, byUser);
           return;
-        }
-        if (mine !== run) return;
-        let body: Any = null;
-        try {
-          body = await response.json();
-        } catch {
-          body = null;
         }
         if (mine !== run) return;
         const status = body && typeof body.status === 'string' ? body.status : '';
@@ -492,8 +545,10 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         if (code === 200 && status === 'ready') {
           let opened: ReturnType<typeof readAnswer> = null;
           try {
-            opened = readAnswer(await open(jobId, keys.privateKey, body));
-          } catch {
+            opened = readAnswer(await bounded(open(jobId, keys.privateKey, body), deadline - Date.now(), null));
+          } catch (error) {
+            if (mine !== run) return;
+            if (isTimeout(error)) return slow(byUser);
             opened = null;
           }
           if (mine !== run) return;
@@ -518,14 +573,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         if (!keepWaiting) return fail(T.generic, false, byUser);
         const header = Number(response.headers && response.headers.get ? response.headers.get('retry-after') : NaN);
         const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
-        if (Date.now() - started + seconds * config.secondMs > (info && info.full ? config.fullPollCapMs : config.pollCapMs)) {
-          phase = 'slow';
-          errorText = T.slow;
-          canRetry = true;
-          focusAfter = byUser ? 'retry' : '';
-          render();
-          return;
-        }
+        if (Date.now() + seconds * config.secondMs > deadline) return slow(byUser);
         await wait(seconds * config.secondMs);
       }
     } catch {
@@ -964,6 +1012,7 @@ export function chatgptPrivateAnswerPageHtml(options: ChatGptPrivateAnswerPageOp
     secondMs: options.secondMs ?? 1000,
     pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
     fullPollCapMs: options.fullPollCapMs ?? CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS,
+    requestTimeoutMs: options.requestTimeoutMs ?? CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS,
     noteMs: options.noteMs ?? 4000,
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,

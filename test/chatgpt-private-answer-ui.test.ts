@@ -12,6 +12,8 @@ import { PRIVATE_ANSWER_META_KEY } from '../src/workers/chatgpt/private-answer-c
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PRIVATE_ANSWER_RELAY_ORIGIN, privateAnswerPageHtml, privateAnswerResourceHtml, privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
+import { PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS } from '../src/workers/dashboard/chatgpt/private-answer.ts';
 
 const RELAY = PRIVATE_ANSWER_RELAY_ORIGIN;
 const JOB = `oly2p.${'a'.repeat(32)}.${'B'.repeat(43)}`;
@@ -20,7 +22,8 @@ const SECRET_TITLES = ['Orchard lease.pdf', 'Landlord email', 'Renewal terms', '
 const SECRET_GAP = 'the monthly rent';
 const PLAINTEXT = { v: 1, answer: SECRET_ANSWER, citations: SECRET_TITLES.map((title) => ({ title, source: 'Dropbox' })), unanswered: [SECRET_GAP] };
 
-type RelayReply = { status: number; body?: unknown; retryAfter?: string } | 'ready' | 'throw';
+/** 'hang': the request never settles and ignores its abort signal (a stalled connection). */
+type RelayReply = { status: number; body?: unknown; retryAfter?: string } | 'ready' | 'throw' | 'hang';
 
 interface Fetched {
   url: string;
@@ -144,6 +147,9 @@ interface MountOptions {
   openai?: Record<string, any>;
   pollCapMs?: number;
   fullPollCapMs?: number;
+  requestTimeoutMs?: number;
+  /** Slow WebCrypto steps, in ms: the panel's decryption, and its key generation. */
+  slowCrypto?: { decrypt?: number; generateKey?: number };
   replies?: RelayReply[];
   plaintext?: unknown;
   idb?: FakeIdb;
@@ -166,6 +172,7 @@ function mount(options: MountOptions = {}): Host {
     secondMs: 1,
     pollCapMs: options.pollCapMs ?? 5_000,
     fullPollCapMs: options.fullPollCapMs ?? 5_000,
+    ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
     keyStore: { timeoutMs: 30 },
     noteMs: 60_000,
     heightResendMs: options.heightResendMs ?? 400,
@@ -190,7 +197,23 @@ function mount(options: MountOptions = {}): Host {
     },
   };
   Object.defineProperty(win, 'parent', { value: parent, configurable: true });
-  Object.defineProperty(win, 'crypto', { value: globalThis.crypto, configurable: true });
+  let crypto: unknown = globalThis.crypto;
+  if (options.slowCrypto) {
+    const real = globalThis.crypto.subtle;
+    const delays = options.slowCrypto;
+    const later = <V>(ms: number | undefined, work: () => Promise<V>) => (ms ? sleep(ms).then(work) : work());
+    crypto = {
+      subtle: {
+        generateKey: (...args: any[]) => later(delays.generateKey, () => (real.generateKey as any)(...args)),
+        exportKey: (...args: any[]) => (real.exportKey as any)(...args),
+        importKey: (...args: any[]) => (real.importKey as any)(...args),
+        deriveBits: (...args: any[]) => (real.deriveBits as any)(...args),
+        deriveKey: (...args: any[]) => (real.deriveKey as any)(...args),
+        decrypt: (...args: any[]) => later(delays.decrypt, () => (real.decrypt as any)(...args)),
+      },
+    };
+  }
+  Object.defineProperty(win, 'crypto', { value: crypto, configurable: true });
   if (options.idb) Object.defineProperty(win, 'indexedDB', { value: options.idb.factory, configurable: true });
   Object.defineProperty(win, 'fetch', {
     configurable: true,
@@ -208,6 +231,7 @@ function mount(options: MountOptions = {}): Host {
       }
       const reply = replies.length > 1 ? replies.shift()! : replies[0]!;
       if (reply === 'throw') throw new TypeError('Failed to fetch');
+      if (reply === 'hang') return new Promise<Response>(() => undefined);
       if (reply === 'ready') {
         const panel = await importPanelPublicKey(body.publicKey);
         const plaintext = padPrivateAnswerPlaintext(JSON.stringify(options.plaintext ?? PLAINTEXT));
@@ -355,7 +379,7 @@ describe('the card while the answer is prepared', () => {
   test('no private model: the sentence, no button, no request', async () => {
     const host = mount();
     host.push({ content: [], _meta: meta({ v: 1, count: 4, state: 'no_model' }) });
-    expect(host.doc.querySelector('.sub')?.textContent).toBe('Private answers need the private model on your Mac.');
+    expect(host.doc.querySelector('.sub')?.textContent).toBe('Private answers need the private model on your Mac. Open the Olympus dashboard to finish setup, then ask again.');
     expect(host.buttons()).toHaveLength(0);
     await sleep(10);
     expect(host.fetched).toHaveLength(0);
@@ -365,11 +389,11 @@ describe('the card while the answer is prepared', () => {
   test('model downloading: the percent, a thin bar, no button', () => {
     const host = mount();
     host.push({ content: [], _meta: meta({ v: 1, count: 2, state: 'model_downloading', percent: 40 }) });
-    expect(host.doc.querySelector('.sub')?.textContent).toBe('The private model is downloading (40%)…');
+    expect(host.doc.querySelector('.sub')?.textContent).toBe('The private model is downloading (40%). Ask again when it\'s ready.');
     expect(host.doc.querySelector('[role=progressbar]')?.getAttribute('aria-valuenow')).toBe('40');
     expect(host.buttons()).toHaveLength(0);
     host.push({ content: [], _meta: meta({ v: 1, count: 2, state: 'model_downloading' }) });
-    expect(host.text()).toContain('The private model is downloading…');
+    expect(host.text()).toContain('The private model is downloading. Ask again when it\'s ready.');
     expect(host.doc.querySelector('[role=progressbar]')).toBeNull();
     expect(host.fetched).toHaveLength(0);
     expectNoJargon(host);
@@ -538,13 +562,19 @@ describe('collecting the private answer', () => {
     await reveal(host);
   });
 
-  test('a full-detail answer says it is reading the full report and waits longer', async () => {
+  test('a full-detail answer says it is reading in more detail and waits longer', async () => {
     const host = mount({ pollCapMs: 30, fullPollCapMs: 5_000, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }] });
     host.push({ content: [], structuredContent: { results: [] }, _meta: meta({ v: 1, count: 2, state: 'ready', jobId: JOB, detail: 'full' }) });
     expect(host.text()).toContain(W.preparingFull);
     await sleep(120);
     expect(host.text()).not.toContain(W.slow);
     expect(host.text()).toContain(W.preparingFull);
+  });
+
+  test('the full-detail wait outlasts the engine\'s full-detail deadline (240 s), and the page ships it', () => {
+    expect(CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS).toBe(250_000);
+    expect(CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS).toBeGreaterThan(PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS);
+    expect(privateAnswerPageHtml({ relayOrigin: RELAY })).toContain('"fullPollCapMs":250000');
   });
 
   test('a summary answer keeps the usual copy and cap', async () => {
@@ -565,6 +595,49 @@ describe('collecting the private answer', () => {
     host.button(W.tryAgain).click();
     await host.until(() => host.text().includes('31 March'), 'the answer');
     expect(new Set(host.fetched.map((call) => call.body.publicKey)).size).toBe(1);
+  });
+
+  test('a request that never answers cannot hold "Preparing…": the deadline ends it with Try again', async () => {
+    const host = mount({ pollCapMs: 40, replies: ['hang'] });
+    host.push(ready());
+    expect(host.text()).toContain(W.preparing);
+    await host.until(() => host.text().includes(W.slow), 'the slow notice');
+    expect(host.doc.querySelector('.card .sub.warn')?.textContent).toBe(W.slow);
+    expect(host.buttons().map((b) => b.textContent)).toEqual([W.tryAgain]);
+    expect(host.fetched[0]!.init.signal.aborted).toBe(true);
+    host.replies.splice(0, host.replies.length, 'ready');
+    host.button(W.tryAgain).click();
+    await host.until(() => host.text().includes('31 March'), 'the answer');
+    expect(new Set(host.fetched.map((call) => call.body.publicKey)).size).toBe(1);
+  });
+
+  test('a decryption that outlasts the deadline ends in Try again, and its late result is never shown', async () => {
+    const host = mount({ pollCapMs: 80, slowCrypto: { decrypt: 250 } });
+    host.push(ready());
+    await host.until(() => host.text().includes(W.slow), 'the slow notice');
+    expect(host.buttons().map((b) => b.textContent)).toEqual([W.tryAgain]);
+    await sleep(300);
+    expect(host.text()).not.toContain('31 March');
+    expect(host.text()).toContain(W.slow);
+  });
+
+  test('key preparation counts against the same deadline', async () => {
+    const host = mount({ pollCapMs: 60, slowCrypto: { generateKey: 250 } });
+    host.push(ready());
+    await host.until(() => host.text().includes(W.slow), 'the slow notice');
+    expect(host.fetched).toHaveLength(0);
+    await sleep(300);
+    expect(host.fetched).toHaveLength(0);
+    expect(host.text()).toContain(W.slow);
+  });
+
+  test('one hung request is aborted after its own timeout and the panel asks again', async () => {
+    const host = mount({ pollCapMs: 5_000, requestTimeoutMs: 20, replies: ['hang', 'ready'] });
+    host.push(ready());
+    await host.until(() => host.text().includes('31 March'), 'the answer');
+    expect(host.fetched).toHaveLength(2);
+    expect(host.fetched[0]!.init.signal.aborted).toBe(true);
+    expect(host.fetched[1]!.init.signal.aborted).toBe(false);
   });
 
   test('a sealed answer that does not open is a plain error, not a crash', async () => {

@@ -36,6 +36,14 @@ export interface ChatGptDashboardClientConfig {
   /** No tool result within this long means the relay cannot reach the Mac. */
   resultTimeoutMs: number;
   staleAfterMs: number;
+  /**
+   * Re-reading the dashboard while the page is visible: every `activeMs`
+   * while something is moving (a source working or signing in, setup
+   * unfinished, the Mac unreachable), every `idleMs` otherwise, doubling
+   * after each failure up to `maxBackoffMs`. The "Updated … ago" line is
+   * redrawn every `staleTickMs` even when nothing new arrives.
+   */
+  refresh: { activeMs: number; idleMs: number; maxBackoffMs: number; staleTickMs: number };
   /** The in-place Connect flow and folder/mail pickers (picker.ts). */
   picker: ChatGptPickerConfig;
   /** The privacy setup screen and the dashboard's Privacy row (privacy.ts). */
@@ -70,7 +78,7 @@ export function chatgptDashboardClient(
   const root = doc.getElementById('app') as HTMLElement;
   const P = config.page;
   const C = config.connection;
-  const GLOBAL_STATES = ['not_installed', 'installing', 'mac_offline', 'relay_unavailable'];
+  const GLOBAL_STATES = ['not_connected', 'installing', 'mac_offline', 'relay_unavailable'];
 
   const state: {
     data: Any;
@@ -140,7 +148,11 @@ export function chatgptDashboardClient(
       else entry.resolve(message.result);
       return;
     }
-    if (message.method === 'ui/notifications/tool-result') acceptResult(message.params, true);
+    if (message.method === 'ui/notifications/tool-result') {
+      // The host's result is the newest word: anything requested before it is stale.
+      supersede();
+      acceptResult(message.params, true);
+    }
     else if (message.method === 'ui/notifications/host-context-changed') applyHostContext(message.params);
   });
 
@@ -187,6 +199,25 @@ export function chatgptDashboardClient(
       && !!value.connection && typeof value.connection.state === 'string';
   }
 
+  // ---- generations -------------------------------------------------------
+  // Every dashboard request remembers the generation it was sent in. An
+  // interaction (Connect, a picker, Privacy, a confirmation, a control's own
+  // call) or a newer authoritative result starts a new generation, and a
+  // response from an older one is dropped, so a slow background read can
+  // never undo what the person just did.
+  let generation = 0;
+  function supersede(): number {
+    return ++generation;
+  }
+
+  /** The picker or the Privacy screen is open: data is kept but the editor is never redrawn under the person. */
+  function editorOpen(): boolean {
+    return (!!picker && picker.active()) || (!!privacy && privacy.active());
+  }
+  function redraw(): void {
+    if (!editorOpen()) render();
+  }
+
   /** A tool result: render it when it is the dashboard, else fetch the dashboard. */
   function acceptResult(result: Any, fromHost: boolean): boolean {
     if (resultTimer) {
@@ -195,19 +226,23 @@ export function chatgptDashboardClient(
     }
     if (!result || result.isError) {
       state.relayDown = true;
-      render();
+      redraw();
       return false;
     }
     const content = result.structuredContent;
     if (isDashboard(content)) {
       state.data = content;
       state.relayDown = false;
-      render();
+      // Any good dashboard, from any path, ends a failure streak.
+      refreshFailures = 0;
+      redraw();
+      // Fresh data from any path restarts the periodic wait from now.
+      if (!refreshing) scheduleRefresh();
       return true;
     }
     if (fromHost) {
       state.relayDown = true;
-      render();
+      redraw();
     }
     return false;
   }
@@ -223,13 +258,18 @@ export function chatgptDashboardClient(
   }
 
   function callTool(name: string, args: Any, key: string): void {
+    const mine = supersede();
     state.busy = key;
     state.confirming = '';
     state.notice = '';
     state.actionError = null;
     render();
     request('tools/call', { name, arguments: args || {} }, config.resultTimeoutMs).then((result) => {
-      state.busy = '';
+      if (state.busy === key) state.busy = '';
+      if (mine !== generation) {
+        redraw();
+        return;
+      }
       const failed = inlineError(result);
       if (failed) {
         state.actionError = { key, text: failed };
@@ -239,9 +279,9 @@ export function chatgptDashboardClient(
       if (acceptResult(result, false)) return;
       if (!state.relayDown && name !== config.toolName) refresh();
     }, () => {
-      state.busy = '';
-      state.relayDown = true;
-      render();
+      if (state.busy === key) state.busy = '';
+      if (mine === generation) state.relayDown = true;
+      redraw();
     });
   }
 
@@ -365,7 +405,32 @@ export function chatgptDashboardClient(
   // ---- state helpers -----------------------------------------------------
   function connectionState(): string {
     if (state.relayDown) return 'relay_unavailable';
-    return state.data ? String(state.data.connection.state) : '';
+    const current = state.data ? String(state.data.connection.state) : '';
+    // Nothing produces not_installed any more; an old relay's reads as not connected.
+    return current === 'not_installed' ? 'not_connected' : current;
+  }
+
+  /** A fix's help page, when it is an https page on olympusplugin.ai (the only domain the host opens for us), else ''. */
+  function helpHref(href: Any): string {
+    if (typeof href !== 'string' || !href) return '';
+    let parsed: URL;
+    try {
+      parsed = new URL(href);
+    } catch {
+      return '';
+    }
+    const host = parsed.hostname;
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return '';
+    return host === 'olympusplugin.ai' || host === 'www.olympusplugin.ai' ? parsed.href : '';
+  }
+
+  /** "How to fix this on your Mac": the fix's help page, beside its control (not on the inline card). */
+  function howLink(fix: Any, key: string): HTMLElement | null {
+    const href = helpHref(fix && fix.href);
+    if (!href || compact()) return null;
+    const link = button(P.howOnMac, key + ':how', () => openLink(href), 'plain');
+    link.className = 'btn link';
+    return link;
   }
   function globalReason(): string {
     const current = connectionState();
@@ -383,6 +448,8 @@ export function chatgptDashboardClient(
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
       add(wrap, button(fix.label, key, null, style), el('span', 'reason', blocked || String(fix.disabledReason)));
+      // A repair only the Mac can make still says how, unless the whole page is waiting.
+      if (!blocked) add(wrap, howLink(fix, key));
       return wrap;
     }
     if (state.busy === key) {
@@ -398,12 +465,16 @@ export function chatgptDashboardClient(
     } else if (picker && picker.handles(fix)) {
       // Connect, Choose folders and Choose mail open in place, never as a plain tool call.
       action = () => {
+        supersede();
         state.notice = '';
         state.confirming = '';
         picker!.start(fix, source ? source.id : '', source ? source.label : '', key);
       };
     } else if (typeof fix.tool === 'string' && fix.tool) action = () => callTool(fix.tool, fix.args || {}, key);
-    else if (typeof fix.href === 'string' && fix.href) action = () => openLink(fix.href);
+    else if (helpHref(fix.href)) {
+      // No tool, only a help page: the control is the link to it.
+      return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
+    }
     if (fix.destructive && action) {
       if (!allowConfirm) return wrap;
       if (state.confirming === key) {
@@ -421,11 +492,12 @@ export function chatgptDashboardClient(
         return wrap;
       }
       return add(wrap, button(fix.label, key, () => {
+        supersede();
         state.confirming = key;
         render(key + ':no');
       }, 'plain'), errorNote(failure));
     }
-    return add(wrap, button(fix.label, key, action, style), errorNote(failure));
+    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key) : null, errorNote(failure));
   }
 
   function errorNote(text: string): HTMLElement | null {
@@ -459,6 +531,14 @@ export function chatgptDashboardClient(
       add(actions, state.busy === 'refresh'
         ? button(P.working, 'refresh', null, 'main')
         : button(C.actions.retry.label, 'refresh', refresh, 'main'));
+    } else if (current === 'not_connected') {
+      // Connect re-reads the dashboard: its result carries ChatGPT's own connect prompt.
+      add(actions, state.busy === 'connection-action'
+        ? button(P.working, 'connection-action', null, 'main')
+        : button(C.actions.connect.label, 'connection-action', () => callTool(config.toolName, {}, 'connection-action'), 'main'));
+      // The inline card keeps to Connect and Open Olympus; the install link waits for the full page.
+      const install = compact() ? '' : helpHref(conn.installHref);
+      if (install) add(actions, button(C.not_connected.install, 'connection-install', () => openLink(install), 'plain'));
     } else if (current !== 'installing' && conn.action && (C.actions as Any)[conn.action.id]) {
       const words = (C.actions as Any)[conn.action.id];
       const href = conn.action.href;
@@ -496,12 +576,20 @@ export function chatgptDashboardClient(
     return add(banner, body);
   }
 
-  function staleLine(): HTMLElement | null {
+  /** The stale line's words as drawn now, '' when it is not shown (the freshness tick compares it). */
+  function staleWords(): string {
     const data = state.data;
-    if (!data || state.relayDown) return null;
+    if (!data || state.relayDown) return '';
     const at = Date.parse(data.generatedAt);
-    if (!isFinite(at) || Date.now() - at < config.staleAfterMs) return null;
-    const line = add(el('p', 'stale'), el('span', 'muted', fill(P.updated, { when: ago(data.generatedAt) })));
+    if (!isFinite(at) || Date.now() - at < config.staleAfterMs) return '';
+    return fill(P.updated, { when: ago(data.generatedAt) });
+  }
+
+  function staleLine(): HTMLElement | null {
+    const words = staleWords();
+    drawnStale = words;
+    if (!words) return null;
+    const line = add(el('p', 'stale'), el('span', 'muted', words));
     return add(line, state.busy === 'refresh'
       ? button(P.working, 'refresh', null, 'plain')
       : button(P.checkAgain, 'refresh', refresh, 'plain'));
@@ -708,6 +796,12 @@ export function chatgptDashboardClient(
     }
     if (onMac.length) {
       add(section, el('h3', '', P.sourcesOnMac), el('p', 'muted mac-help', P.sourcesOnMacHelp));
+      const how = onMac.map((source) => helpHref(source.primary && source.primary.href)).filter((href) => !!href)[0];
+      if (how && !globalReason()) {
+        const link = button(P.howConnectOnMac, 'mac-only:how', () => openLink(how), 'plain');
+        link.className = 'btn link';
+        add(section, link);
+      }
       const rows = el('ul', 'rows mac-only');
       for (const source of onMac) add(rows, add(el('li', 'row source mac'), el('span', 'source-name', String(source.label || source.id || ''))));
       add(section, rows);
@@ -718,6 +812,7 @@ export function chatgptDashboardClient(
   function openPrivacy(returnKey: string): void {
     if (!privacy) return;
     state.notice = '';
+    supersede();
     state.confirming = '';
     privacy.start(returnKey);
   }
@@ -957,6 +1052,11 @@ export function chatgptDashboardClient(
   function render(focusKey?: string): void {
     const active = doc.activeElement as HTMLElement | null;
     const keepFocus = focusKey || (active && active.getAttribute ? active.getAttribute('data-key') : '') || '';
+    // A text field redrawn under the person keeps its caret and selection.
+    const field = active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT') && keepFocus === active.getAttribute('data-key')
+      ? active as HTMLInputElement : null;
+    const selection = field && typeof field.selectionStart === 'number'
+      ? [field.selectionStart, field.selectionEnd === null ? field.selectionStart : field.selectionEnd] : null;
     const theme = state.theme;
     if (theme) doc.documentElement.setAttribute('data-theme', theme);
     else doc.documentElement.removeAttribute('data-theme');
@@ -975,6 +1075,9 @@ export function chatgptDashboardClient(
         const node = nodes[i] as HTMLElement;
         if (node.getAttribute('data-key') === keepFocus) {
           node.focus();
+          if (selection && (node.tagName === 'TEXTAREA' || node.tagName === 'INPUT')) {
+            try { (node as HTMLInputElement).setSelectionRange(selection[0]!, selection[1]!); } catch { /* not a text field */ }
+          }
           break;
         }
       }
@@ -1008,8 +1111,11 @@ export function chatgptDashboardClient(
     errorText: inlineError,
     setDashboard: (value: Any) => {
       if (!isDashboard(value)) return;
+      // The Connect flow's own read is newer than anything still in flight.
+      supersede();
       state.data = value;
       state.relayDown = false;
+      refreshFailures = 0;
     },
     close: (notice: string, again: boolean, focusKey: string) => closeScreen(notice, again, focusKey),
   }) : null;
@@ -1019,15 +1125,17 @@ export function chatgptDashboardClient(
     state.notice = notice;
     if (again) {
       // The dashboard re-renders from the refreshed result; the notice stays until the next action.
+      const mine = supersede();
       state.busy = 'refresh';
       render(focusKey);
       request('tools/call', { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
-        state.busy = '';
+        if (state.busy === 'refresh') state.busy = '';
+        if (mine !== generation) return redraw();
         acceptResult(result, false);
-        render(focusKey);
+        if (!editorOpen()) render(focusKey);
       }, () => {
-        state.busy = '';
-        render(focusKey);
+        if (state.busy === 'refresh') state.busy = '';
+        if (!editorOpen()) render(focusKey);
       });
       return;
     }
@@ -1055,9 +1163,105 @@ export function chatgptDashboardClient(
     close: (notice: string, again: boolean, focusKey: string) => closeScreen(notice, again, focusKey),
   }) : null;
 
+  // ---- freshness ---------------------------------------------------------
+  // While the page is visible it re-reads the dashboard on its own, so
+  // progress, an offline Mac coming back and "Updated … ago" never freeze.
+  // Hidden pages do nothing until they are shown again.
+  const R = config.refresh;
+  let refreshTimer: Any = null;
+  let refreshing = false;
+  let refreshFailures = 0;
+  let nextRefreshAt = 0;
+  let drawnStale = '';
+
+  function pageHidden(): boolean {
+    return doc.visibilityState === 'hidden' || doc.hidden === true;
+  }
+
+  /** Something is moving or not settled, so the page checks often. */
+  function moving(): boolean {
+    const data = state.data;
+    if (!data || state.relayDown || String(data.connection.state) !== 'ready') return true;
+    const sources = Array.isArray(data.sources) ? data.sources : [];
+    if (sources.some((source: Any) => {
+      if (!source || typeof source !== 'object') return false;
+      if (source.connecting || source.status === 'Working') return true;
+      const progress = sourceProgress(source);
+      return !!progress && !progress.stalled;
+    })) return true;
+    if (data.progress && !data.progress.stalled && !progressFinished(data.progress)) return true;
+    return !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== 'failed');
+  }
+
+  function refreshDelay(): number {
+    const base = moving() ? R.activeMs : R.idleMs;
+    return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
+  }
+
+  function scheduleRefresh(): void {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = null;
+    const wait = refreshDelay();
+    nextRefreshAt = Date.now() + wait;
+    if (!pageHidden()) refreshTimer = setTimeout(backgroundRefresh, wait);
+  }
+
+  function backgroundRefresh(): void {
+    refreshTimer = null;
+    if (pageHidden() || refreshing) return;
+    // The picker polls on its own while sign-in finishes, and the picker and
+    // Privacy screens re-read the dashboard when they close; a control's own
+    // call is in flight while busy. None of them gets a second poller.
+    // A destructive confirmation waits for the person, undisturbed.
+    if (editorOpen() || state.busy || state.confirming) {
+      scheduleRefresh();
+      return;
+    }
+    refreshing = true;
+    const mine = generation;
+    request('tools/call', { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+      refreshing = false;
+      // Something newer happened while this was in flight: its answer is stale.
+      if (mine !== generation) return scheduleRefresh();
+      const ok = !!result && !result.isError && isDashboard(result.structuredContent);
+      if (!ok) refreshFailures++;
+      acceptResult(result, true);
+      scheduleRefresh();
+    }, () => {
+      refreshing = false;
+      if (mine !== generation) return scheduleRefresh();
+      refreshFailures++;
+      state.relayDown = true;
+      redraw();
+      scheduleRefresh();
+    });
+  }
+
+  doc.addEventListener('visibilitychange', () => {
+    if (pageHidden()) {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = null;
+      return;
+    }
+    // Back in view: check at once when a check fell due while hidden.
+    if (refreshing || refreshTimer) return;
+    const left = nextRefreshAt - Date.now();
+    if (left <= 0) backgroundRefresh();
+    else refreshTimer = setTimeout(backgroundRefresh, left);
+    tickStale();
+  });
+
+  /** Redraws when the "Updated … ago" line would read differently, with or without new data. */
+  function tickStale(): void {
+    if (pageHidden() || compact() || editorOpen()) return;
+    if (staleWords() !== drawnStale) render();
+  }
+  setInterval(tickStale, R.staleTickMs);
+
   // ---- start -------------------------------------------------------------
   readOpenAiGlobals();
   render();
+  scheduleRefresh();
   request('ui/initialize', {
     protocolVersion: '2026-01-26',
     appInfo: { name: 'olympus-dashboard', version: '1' },

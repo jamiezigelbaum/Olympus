@@ -1105,12 +1105,19 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
  * beside every other control while the state holds.
  */
 export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
-  not_installed: {
-    title: 'Olympus isn\'t on your Mac yet',
-    disabledReason: 'Install Olympus first',
+  /**
+   * No Olympus link for this ChatGPT account. The relay cannot tell an owner
+   * who has not linked yet from one with no install, so the page offers
+   * Connect first and the install link beside it.
+   */
+  not_connected: {
+    title: 'Olympus isn\'t connected to ChatGPT yet',
+    disabledReason: 'Connect Olympus first',
+    install: 'Not installed yet?',
   },
+  /** Linked to this ChatGPT account, first-run setup (models, first index) not finished. */
   installing: {
-    title: 'Installing Olympus on your Mac…',
+    title: 'Olympus is setting up on your Mac…',
     disabledReason: 'Available once Olympus is set up',
   },
   mac_offline: {
@@ -1119,12 +1126,13 @@ export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
     disabledReason: 'Your Mac is offline',
   },
   relay_unavailable: {
-    title: 'Olympus can\'t reach your Mac right now; retrying',
+    title: 'Olympus can\'t reach your Mac right now.',
     disabledReason: 'Can\'t reach your Mac',
   },
   /** Labels for `connection.action.id`; `help` is shown as text when the action has no link. */
   actions: {
-    install: { label: 'Install on your Mac', help: 'In ChatGPT on your Mac, ask: Install Olympus on my Mac.' },
+    /** Re-reads the dashboard, whose result carries ChatGPT's own connect prompt. */
+    connect: { label: 'Connect Olympus', help: '' },
     open_olympus: { label: 'Open Olympus on your Mac', help: 'Open Olympus on your Mac, then check again here.' },
     wake_mac: {
       label: 'How to keep it available',
@@ -1219,6 +1227,10 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   },
   linkExpires: 'link expires in {n} min',
   linkExpired: 'link expired',
+  /** Beside a control whose fix only the Mac can make: the fix's olympusplugin.ai help page. */
+  howOnMac: 'How to fix this on your Mac',
+  /** Under "Set up on your Mac": the help page those sources' fixes name. */
+  howConnectOnMac: 'How to connect these on your Mac',
 } as const;
 
 /**
@@ -1271,6 +1283,9 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
   insideFolder: 'A folder inside {name}',
   noFolders: 'No folders here.',
   loadMore: 'Load more folders',
+  loadMoreCount: { one: 'Load 1 more folder', many: 'Load {n} more folders' },
+  /** The level has more folders than Olympus reads at once; some are not listed. */
+  truncated: 'This folder has more folders than Olympus can list here, so this list is incomplete.',
   states: { ingest: 'Fully indexed', metadata_only: 'Names only', exclude: 'Skipped' },
   statesLower: { ingest: 'fully indexed', metadata_only: 'names only', exclude: 'skipped' },
   notIncluded: 'Not included',
@@ -1366,8 +1381,12 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   tryAgain: 'Try again',
   descriptionLabel: 'In your own words',
   descriptionPlaceholder: 'For example: my health and therapy, money and taxes, anything about my kids, my divorce',
+  /** Under the description box: the description is saved through ChatGPT, so it sees it. */
+  descriptionShared: 'ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.',
   rulesTitle: 'Always private (optional)',
   rulesEmpty: 'No folders, labels or senders yet.',
+  /** Under the always-private rules: their names travel through ChatGPT to be listed and saved. */
+  namesShared: 'Folder and label names and senders you add here are shown to ChatGPT.',
   kindFolder: 'Folder in {source}',
   kindLabel: 'Gmail label',
   kindSender: 'Sender',
@@ -1390,6 +1409,19 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   cancel: 'Cancel',
   saveFailed: 'Olympus could not save. Your changes are still here. Try again.',
   saved: 'Privacy saved.',
+  /** The inline step before a save that lowers protection; {list} names the removed rules. */
+  confirmRemove: 'This removes protection from {list}.',
+  confirmDescription: 'This changes your description, which decides what Olympus keeps private.',
+  confirm: 'Confirm',
+  /** A save refused because the settings changed elsewhere: the draft stays until the person picks. */
+  conflict: 'Your changes weren\'t saved because the privacy settings changed elsewhere.',
+  conflictNow: 'What is saved now:',
+  conflictDescription: 'Your description: {text}',
+  conflictNoDescription: 'No description',
+  applyAgain: 'Apply my changes again',
+  discardMine: 'Discard my changes',
+  /** A folder rule saved without its name. */
+  folderUnnamed: 'A folder in {source}',
   discardPrompt: 'Discard your changes?',
   discard: 'Discard changes',
   keep: 'Keep editing',
@@ -1452,12 +1484,14 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   hide: 'Hide',
   hideLabel: 'Hide private answer',
   tryAgain: 'Try again',
-  noModel: 'Private answers need the private model on your Mac.',
-  downloading: 'The private model is downloading ({percent}%)…',
-  downloadingUnknown: 'The private model is downloading…',
+  /** No job exists in these two states, so the panel can only say what to do and to ask again. */
+  noModel: 'Private answers need the private model on your Mac. Open the Olympus dashboard to finish setup, then ask again.',
+  downloading: 'The private model is downloading ({percent}%). Ask again when it\'s ready.',
+  downloadingUnknown: 'The private model is downloading. Ask again when it\'s ready.',
   downloadingLabel: 'Private model download',
   preparing: 'Preparing the answer on your Mac…',
-  preparingFull: 'Reading the full report on your Mac…',
+  /** A full-detail answer reads selected parts more closely, not necessarily every page. */
+  preparingFull: 'Reading your report in more detail on your Mac…',
   slow: 'Your Mac is taking longer than usual to prepare the answer.',
   failed: 'Olympus couldn\'t answer this on your Mac.',
   claimed: 'This answer was already opened in another window.',

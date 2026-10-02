@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=87a1f56a3107"
+          "resourceUri": "ui://olympus/dashboard?v=0859f4e1926d"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=87a1f56a3107",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=0859f4e1926d",
         "openai/ui": {
           "entrypoints": [
             {
@@ -81,9 +81,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=dd69f11844c9"
+          "resourceUri": "ui://olympus/private-answer?v=bcc59a79c21d"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=dd69f11844c9"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=bcc59a79c21d"
       }
     },
     {
@@ -145,9 +145,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=dd69f11844c9"
+          "resourceUri": "ui://olympus/private-answer?v=bcc59a79c21d"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=dd69f11844c9"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=bcc59a79c21d"
       }
     },
     {
@@ -180,9 +180,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=dd69f11844c9"
+          "resourceUri": "ui://olympus/private-answer?v=bcc59a79c21d"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=dd69f11844c9"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=bcc59a79c21d"
       }
     },
     {
@@ -766,12 +766,12 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=87a1f56a3107",
+      "uri": "ui://olympus/dashboard?v=0859f4e1926d",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-answer?v=dd69f11844c9",
+      "uri": "ui://olympus/private-answer?v=bcc59a79c21d",
       "name": "Olympus private answer",
       "mimeType": "text/html;profile=mcp-app"
     }

@@ -47929,12 +47929,13 @@ var init_vocabulary = __esm(() => {
     changeModelsOnMac: "Change models in Olympus on your Mac."
   };
   DASHBOARD_CHATGPT_CONNECTION_COPY = {
-    not_installed: {
-      title: "Olympus isn't on your Mac yet",
-      disabledReason: "Install Olympus first"
+    not_connected: {
+      title: "Olympus isn't connected to ChatGPT yet",
+      disabledReason: "Connect Olympus first",
+      install: "Not installed yet?"
     },
     installing: {
-      title: "Installing Olympus on your Mac…",
+      title: "Olympus is setting up on your Mac…",
       disabledReason: "Available once Olympus is set up"
     },
     mac_offline: {
@@ -47943,11 +47944,11 @@ var init_vocabulary = __esm(() => {
       disabledReason: "Your Mac is offline"
     },
     relay_unavailable: {
-      title: "Olympus can't reach your Mac right now; retrying",
+      title: "Olympus can't reach your Mac right now.",
       disabledReason: "Can't reach your Mac"
     },
     actions: {
-      install: { label: "Install on your Mac", help: "In ChatGPT on your Mac, ask: Install Olympus on my Mac." },
+      connect: { label: "Connect Olympus", help: "" },
       open_olympus: { label: "Open Olympus on your Mac", help: "Open Olympus on your Mac, then check again here." },
       wake_mac: {
         label: "How to keep it available",
@@ -48036,7 +48037,9 @@ var init_vocabulary = __esm(() => {
       model_downloading: "Waiting for the search model to finish downloading"
     },
     linkExpires: "link expires in {n} min",
-    linkExpired: "link expired"
+    linkExpired: "link expired",
+    howOnMac: "How to fix this on your Mac",
+    howConnectOnMac: "How to connect these on your Mac"
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
@@ -48076,6 +48079,8 @@ var init_vocabulary = __esm(() => {
     insideFolder: "A folder inside {name}",
     noFolders: "No folders here.",
     loadMore: "Load more folders",
+    loadMoreCount: { one: "Load 1 more folder", many: "Load {n} more folders" },
+    truncated: "This folder has more folders than Olympus can list here, so this list is incomplete.",
     states: { ingest: "Fully indexed", metadata_only: "Names only", exclude: "Skipped" },
     statesLower: { ingest: "fully indexed", metadata_only: "names only", exclude: "skipped" },
     notIncluded: "Not included",
@@ -48162,8 +48167,10 @@ var init_vocabulary = __esm(() => {
     tryAgain: "Try again",
     descriptionLabel: "In your own words",
     descriptionPlaceholder: "For example: my health and therapy, money and taxes, anything about my kids, my divorce",
+    descriptionShared: 'ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.',
     rulesTitle: "Always private (optional)",
     rulesEmpty: "No folders, labels or senders yet.",
+    namesShared: "Folder and label names and senders you add here are shown to ChatGPT.",
     kindFolder: "Folder in {source}",
     kindLabel: "Gmail label",
     kindSender: "Sender",
@@ -48186,6 +48193,16 @@ var init_vocabulary = __esm(() => {
     cancel: "Cancel",
     saveFailed: "Olympus could not save. Your changes are still here. Try again.",
     saved: "Privacy saved.",
+    confirmRemove: "This removes protection from {list}.",
+    confirmDescription: "This changes your description, which decides what Olympus keeps private.",
+    confirm: "Confirm",
+    conflict: "Your changes weren't saved because the privacy settings changed elsewhere.",
+    conflictNow: "What is saved now:",
+    conflictDescription: "Your description: {text}",
+    conflictNoDescription: "No description",
+    applyAgain: "Apply my changes again",
+    discardMine: "Discard my changes",
+    folderUnnamed: "A folder in {source}",
     discardPrompt: "Discard your changes?",
     discard: "Discard changes",
     keep: "Keep editing",
@@ -48237,12 +48254,12 @@ var init_vocabulary = __esm(() => {
     hide: "Hide",
     hideLabel: "Hide private answer",
     tryAgain: "Try again",
-    noModel: "Private answers need the private model on your Mac.",
-    downloading: "The private model is downloading ({percent}%)…",
-    downloadingUnknown: "The private model is downloading…",
+    noModel: "Private answers need the private model on your Mac. Open the Olympus dashboard to finish setup, then ask again.",
+    downloading: "The private model is downloading ({percent}%). Ask again when it's ready.",
+    downloadingUnknown: "The private model is downloading. Ask again when it's ready.",
     downloadingLabel: "Private model download",
     preparing: "Preparing the answer on your Mac…",
-    preparingFull: "Reading the full report on your Mac…",
+    preparingFull: "Reading your report in more detail on your Mac…",
     slow: "Your Mac is taking longer than usual to prepare the answer.",
     failed: "Olympus couldn't answer this on your Mac.",
     claimed: "This answer was already opened in another window.",
@@ -103306,7 +103323,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   const root = doc2.getElementById("app");
   const P = config2.page;
   const C = config2.connection;
-  const GLOBAL_STATES = ["not_installed", "installing", "mac_offline", "relay_unavailable"];
+  const GLOBAL_STATES = ["not_connected", "installing", "mac_offline", "relay_unavailable"];
   const state = {
     data: null,
     relayDown: false,
@@ -103361,9 +103378,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         entry.resolve(message.result);
       return;
     }
-    if (message.method === "ui/notifications/tool-result")
+    if (message.method === "ui/notifications/tool-result") {
+      supersede();
       acceptResult(message.params, true);
-    else if (message.method === "ui/notifications/host-context-changed")
+    } else if (message.method === "ui/notifications/host-context-changed")
       applyHostContext(message.params);
   });
   function applyHostContext(context) {
@@ -103410,6 +103428,17 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function isDashboard(value) {
     return !!value && typeof value === "object" && value.v === 1 && !!value.connection && typeof value.connection.state === "string";
   }
+  let generation = 0;
+  function supersede() {
+    return ++generation;
+  }
+  function editorOpen() {
+    return !!picker && picker.active() || !!privacy && privacy.active();
+  }
+  function redraw() {
+    if (!editorOpen())
+      render();
+  }
   function acceptResult(result, fromHost) {
     if (resultTimer) {
       clearTimeout(resultTimer);
@@ -103417,19 +103446,22 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     if (!result || result.isError) {
       state.relayDown = true;
-      render();
+      redraw();
       return false;
     }
     const content = result.structuredContent;
     if (isDashboard(content)) {
       state.data = content;
       state.relayDown = false;
-      render();
+      refreshFailures = 0;
+      redraw();
+      if (!refreshing)
+        scheduleRefresh();
       return true;
     }
     if (fromHost) {
       state.relayDown = true;
-      render();
+      redraw();
     }
     return false;
   }
@@ -103444,13 +103476,19 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return text ? String(text.text) : "";
   }
   function callTool(name, args, key) {
+    const mine = supersede();
     state.busy = key;
     state.confirming = "";
     state.notice = "";
     state.actionError = null;
     render();
     request("tools/call", { name, arguments: args || {} }, config2.resultTimeoutMs).then((result) => {
-      state.busy = "";
+      if (state.busy === key)
+        state.busy = "";
+      if (mine !== generation) {
+        redraw();
+        return;
+      }
       const failed = inlineError(result);
       if (failed) {
         state.actionError = { key, text: failed };
@@ -103462,9 +103500,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       if (!state.relayDown && name !== config2.toolName)
         refresh();
     }, () => {
-      state.busy = "";
-      state.relayDown = true;
-      render();
+      if (state.busy === key)
+        state.busy = "";
+      if (mine === generation)
+        state.relayDown = true;
+      redraw();
     });
   }
   function refresh() {
@@ -103606,7 +103646,30 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function connectionState() {
     if (state.relayDown)
       return "relay_unavailable";
-    return state.data ? String(state.data.connection.state) : "";
+    const current = state.data ? String(state.data.connection.state) : "";
+    return current === "not_installed" ? "not_connected" : current;
+  }
+  function helpHref(href) {
+    if (typeof href !== "string" || !href)
+      return "";
+    let parsed;
+    try {
+      parsed = new URL(href);
+    } catch {
+      return "";
+    }
+    const host = parsed.hostname;
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password)
+      return "";
+    return host === "olympusplugin.ai" || host === "www.olympusplugin.ai" ? parsed.href : "";
+  }
+  function howLink(fix, key) {
+    const href = helpHref(fix && fix.href);
+    if (!href || compact())
+      return null;
+    const link = button(P.howOnMac, key + ":how", () => openLink(href), "plain");
+    link.className = "btn link";
+    return link;
   }
   function globalReason() {
     const current = connectionState();
@@ -103624,6 +103687,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
       add(wrap, button(fix.label, key, null, style), el("span", "reason", blocked || String(fix.disabledReason)));
+      if (!blocked)
+        add(wrap, howLink(fix, key));
       return wrap;
     }
     if (state.busy === key) {
@@ -103637,14 +103702,16 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       action = () => openPrivacy(key);
     } else if (picker && picker.handles(fix)) {
       action = () => {
+        supersede();
         state.notice = "";
         state.confirming = "";
         picker.start(fix, source ? source.id : "", source ? source.label : "", key);
       };
     } else if (typeof fix.tool === "string" && fix.tool)
       action = () => callTool(fix.tool, fix.args || {}, key);
-    else if (typeof fix.href === "string" && fix.href)
-      action = () => openLink(fix.href);
+    else if (helpHref(fix.href)) {
+      return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
+    }
     if (fix.destructive && action) {
       if (!allowConfirm)
         return wrap;
@@ -103658,11 +103725,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         return wrap;
       }
       return add(wrap, button(fix.label, key, () => {
+        supersede();
         state.confirming = key;
         render(key + ":no");
       }, "plain"), errorNote(failure));
     }
-    return add(wrap, button(fix.label, key, action, style), errorNote(failure));
+    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key) : null, errorNote(failure));
   }
   function errorNote(text) {
     if (!text)
@@ -103693,6 +103761,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const actions = el("div", "actions");
     if (current === "relay_unavailable") {
       add(actions, state.busy === "refresh" ? button(P.working, "refresh", null, "main") : button(C.actions.retry.label, "refresh", refresh, "main"));
+    } else if (current === "not_connected") {
+      add(actions, state.busy === "connection-action" ? button(P.working, "connection-action", null, "main") : button(C.actions.connect.label, "connection-action", () => callTool(config2.toolName, {}, "connection-action"), "main"));
+      const install = compact() ? "" : helpHref(conn.installHref);
+      if (install)
+        add(actions, button(C.not_connected.install, "connection-install", () => openLink(install), "plain"));
     } else if (current !== "installing" && conn.action && C.actions[conn.action.id]) {
       const words = C.actions[conn.action.id];
       const href = conn.action.href;
@@ -103733,14 +103806,21 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(body, add(el("div", "actions"), fixControl(item.fix, key, "main", allowConfirm, itemSource(item))));
     return add(banner, body);
   }
-  function staleLine() {
+  function staleWords() {
     const data = state.data;
     if (!data || state.relayDown)
-      return null;
+      return "";
     const at = Date.parse(data.generatedAt);
     if (!isFinite(at) || Date.now() - at < config2.staleAfterMs)
+      return "";
+    return fill(P.updated, { when: ago(data.generatedAt) });
+  }
+  function staleLine() {
+    const words = staleWords();
+    drawnStale = words;
+    if (!words)
       return null;
-    const line = add(el("p", "stale"), el("span", "muted", fill(P.updated, { when: ago(data.generatedAt) })));
+    const line = add(el("p", "stale"), el("span", "muted", words));
     return add(line, state.busy === "refresh" ? button(P.working, "refresh", null, "plain") : button(P.checkAgain, "refresh", refresh, "plain"));
   }
   function needsYouSection(items) {
@@ -103925,6 +104005,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     if (onMac.length) {
       add(section, el("h3", "", P.sourcesOnMac), el("p", "muted mac-help", P.sourcesOnMacHelp));
+      const how = onMac.map((source) => helpHref(source.primary && source.primary.href)).filter((href) => !!href)[0];
+      if (how && !globalReason()) {
+        const link = button(P.howConnectOnMac, "mac-only:how", () => openLink(how), "plain");
+        link.className = "btn link";
+        add(section, link);
+      }
       const rows = el("ul", "rows mac-only");
       for (const source of onMac)
         add(rows, add(el("li", "row source mac"), el("span", "source-name", String(source.label || source.id || ""))));
@@ -103936,6 +104022,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!privacy)
       return;
     state.notice = "";
+    supersede();
     state.confirming = "";
     privacy.start(returnKey);
   }
@@ -104163,6 +104250,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function render(focusKey) {
     const active = doc2.activeElement;
     const keepFocus = focusKey || (active && active.getAttribute ? active.getAttribute("data-key") : "") || "";
+    const field = active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT") && keepFocus === active.getAttribute("data-key") ? active : null;
+    const selection = field && typeof field.selectionStart === "number" ? [field.selectionStart, field.selectionEnd === null ? field.selectionStart : field.selectionEnd] : null;
     const theme = state.theme;
     if (theme)
       doc2.documentElement.setAttribute("data-theme", theme);
@@ -104183,6 +104272,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         const node = nodes[i];
         if (node.getAttribute("data-key") === keepFocus) {
           node.focus();
+          if (selection && (node.tagName === "TEXTAREA" || node.tagName === "INPUT")) {
+            try {
+              node.setSelectionRange(selection[0], selection[1]);
+            } catch {}
+          }
           break;
         }
       }
@@ -104215,23 +104309,32 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     setDashboard: (value) => {
       if (!isDashboard(value))
         return;
+      supersede();
       state.data = value;
       state.relayDown = false;
+      refreshFailures = 0;
     },
     close: (notice, again, focusKey) => closeScreen(notice, again, focusKey)
   }) : null;
   function closeScreen(notice, again, focusKey) {
     state.notice = notice;
     if (again) {
+      const mine = supersede();
       state.busy = "refresh";
       render(focusKey);
       request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
-        state.busy = "";
+        if (state.busy === "refresh")
+          state.busy = "";
+        if (mine !== generation)
+          return redraw();
         acceptResult(result, false);
-        render(focusKey);
+        if (!editorOpen())
+          render(focusKey);
       }, () => {
-        state.busy = "";
-        render(focusKey);
+        if (state.busy === "refresh")
+          state.busy = "";
+        if (!editorOpen())
+          render(focusKey);
       });
       return;
     }
@@ -104255,8 +104358,101 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     },
     close: (notice, again, focusKey) => closeScreen(notice, again, focusKey)
   }) : null;
+  const R = config2.refresh;
+  let refreshTimer = null;
+  let refreshing = false;
+  let refreshFailures = 0;
+  let nextRefreshAt = 0;
+  let drawnStale = "";
+  function pageHidden() {
+    return doc2.visibilityState === "hidden" || doc2.hidden === true;
+  }
+  function moving() {
+    const data = state.data;
+    if (!data || state.relayDown || String(data.connection.state) !== "ready")
+      return true;
+    const sources = Array.isArray(data.sources) ? data.sources : [];
+    if (sources.some((source) => {
+      if (!source || typeof source !== "object")
+        return false;
+      if (source.connecting || source.status === "Working")
+        return true;
+      const progress = sourceProgress(source);
+      return !!progress && !progress.stalled;
+    }))
+      return true;
+    if (data.progress && !data.progress.stalled && !progressFinished(data.progress))
+      return true;
+    return !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== "failed");
+  }
+  function refreshDelay() {
+    const base = moving() ? R.activeMs : R.idleMs;
+    return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
+  }
+  function scheduleRefresh() {
+    if (refreshTimer)
+      clearTimeout(refreshTimer);
+    refreshTimer = null;
+    const wait = refreshDelay();
+    nextRefreshAt = Date.now() + wait;
+    if (!pageHidden())
+      refreshTimer = setTimeout(backgroundRefresh, wait);
+  }
+  function backgroundRefresh() {
+    refreshTimer = null;
+    if (pageHidden() || refreshing)
+      return;
+    if (editorOpen() || state.busy || state.confirming) {
+      scheduleRefresh();
+      return;
+    }
+    refreshing = true;
+    const mine = generation;
+    request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
+      refreshing = false;
+      if (mine !== generation)
+        return scheduleRefresh();
+      const ok = !!result && !result.isError && isDashboard(result.structuredContent);
+      if (!ok)
+        refreshFailures++;
+      acceptResult(result, true);
+      scheduleRefresh();
+    }, () => {
+      refreshing = false;
+      if (mine !== generation)
+        return scheduleRefresh();
+      refreshFailures++;
+      state.relayDown = true;
+      redraw();
+      scheduleRefresh();
+    });
+  }
+  doc2.addEventListener("visibilitychange", () => {
+    if (pageHidden()) {
+      if (refreshTimer)
+        clearTimeout(refreshTimer);
+      refreshTimer = null;
+      return;
+    }
+    if (refreshing || refreshTimer)
+      return;
+    const left = nextRefreshAt - Date.now();
+    if (left <= 0)
+      backgroundRefresh();
+    else
+      refreshTimer = setTimeout(backgroundRefresh, left);
+    tickStale();
+  });
+  function tickStale() {
+    if (pageHidden() || compact() || editorOpen())
+      return;
+    if (staleWords() !== drawnStale)
+      render();
+  }
+  setInterval(tickStale, R.staleTickMs);
   readOpenAiGlobals();
   render();
+  scheduleRefresh();
   request("ui/initialize", {
     protocolVersion: "2026-01-26",
     appInfo: { name: "olympus-dashboard", version: "1" },
@@ -104420,6 +104616,13 @@ function chatgptPickerProgram(kit) {
     }
     leave(fill(Q.connected, { source: p.label }), false);
   }
+  function reopen() {
+    if (!p || p.mode !== "connect")
+      return;
+    stopTimer();
+    session++;
+    startConnect(p.connectArgs, p.id, p.label, p.returnKey);
+  }
   function connectView(page) {
     add(page, el("h1", "", fill(Q.connectTitle, { source: p.label })));
     const box = el("div", "picker-status");
@@ -104431,7 +104634,7 @@ function chatgptPickerProgram(kit) {
       const line = el("p", "strong", Q.connectWaiting);
       line.setAttribute("role", "status");
       add(box, line, el("p", "muted", fill(Q.connectWaitingHelp, { source: p.label })));
-      add(box, add(el("div", "actions"), kit.button(Q.connectReopen, "picker:connect:reopen", () => kit.openLink(p.href), "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+      add(box, add(el("div", "actions"), kit.button(Q.connectReopen, "picker:connect:reopen", reopen, "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     } else if (p.phase === "timeout") {
       const line = el("p", "", fill(Q.connectTimeout, { source: p.label }));
       line.setAttribute("role", "alert");
@@ -104440,14 +104643,11 @@ function chatgptPickerProgram(kit) {
         p.startedAt = Date.now();
         kit.render("picker:connect:cancel");
         schedulePoll();
-      }, "main"), kit.button(Q.connectReopen, "picker:connect:reopen", () => kit.openLink(p.href), "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+      }, "main"), kit.button(Q.connectReopen, "picker:connect:reopen", reopen, "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     } else {
       const line = el("p", "", p.errorText || fill(Q.connectFailed, { source: p.label }));
       line.setAttribute("role", "alert");
-      add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", () => {
-        session++;
-        startConnect(p.connectArgs, p.id, p.label, p.returnKey);
-      }, "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+      add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", reopen, "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     }
     add(page, box);
   }
@@ -104484,6 +104684,8 @@ function chatgptPickerProgram(kit) {
       branches: new Map,
       cursors: new Map,
       catalog: new Map,
+      remaining: new Map,
+      truncated: new Set,
       ancestors: new Map,
       own: new Map,
       whole: false,
@@ -104592,6 +104794,13 @@ function chatgptPickerProgram(kit) {
     }
     const nodes = previous.concat(fresh2).sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
     const next = typeof page.next_cursor === "string" && page.next_cursor ? page.next_cursor : "";
+    const more = typeof page.remaining === "number" && isFinite(page.remaining) && page.remaining > 0 ? Math.round(page.remaining) : 0;
+    if (next && more)
+      p.remaining.set(parentKey, more);
+    else
+      p.remaining.delete(parentKey);
+    if (page.truncated === true)
+      p.truncated.add(parentKey);
     if (parentKey) {
       p.branches.set(parentKey, nodes);
       if (next)
@@ -104675,11 +104884,12 @@ function chatgptPickerProgram(kit) {
     return out;
   }
   function mixed(key) {
-    const mine = effective(key);
+    const access = (state) => state === "exclude" ? "" : state;
+    const mine = access(effective(key));
     for (const other of descendants(key)) {
       const theirs = effective(other);
-      if (theirs !== mine)
-        return theirs;
+      if (access(theirs) !== mine)
+        return theirs || "exclude";
     }
     return "";
   }
@@ -104741,6 +104951,9 @@ function chatgptPickerProgram(kit) {
       else
         p.own.delete(key);
       p.edited = true;
+      const tapped = focus.slice(focus.lastIndexOf(":") + 1);
+      if (!value && tapped && !allowed(key, tapped))
+        focus = "picker:seg:" + key + ":" + effective(key);
     }
     if (p.notice && p.notice !== Q.conflict)
       p.notice = "";
@@ -104946,7 +105159,7 @@ function chatgptPickerProgram(kit) {
   }
   function segControl(name, focusBase, model) {
     const group2 = el("div", "seg");
-    group2.setAttribute("role", "radiogroup");
+    group2.setAttribute("role", "group");
     group2.setAttribute("aria-label", fill(Q.choiceGroup, { name }));
     const buttons = [];
     for (const state of STATES) {
@@ -105095,7 +105308,9 @@ function chatgptPickerProgram(kit) {
   }
   function loadMore(parentKey) {
     const busy = p.loading === (parentKey || "root");
-    return kit.button(busy ? Q.loadingFolders : Q.loadMore, "picker:more:" + parentKey, busy || p.loading ? null : () => list(parentKey, true), "plain");
+    const more = p.remaining.get(parentKey) || 0;
+    const label = more ? fill(more === 1 ? Q.loadMoreCount.one : Q.loadMoreCount.many, { n: kit.count(more) }) : Q.loadMore;
+    return kit.button(busy ? Q.loadingFolders : label, "picker:more:" + parentKey, busy || p.loading ? null : () => list(parentKey, true), "plain");
   }
   function levelList(parentKey, nodes, hasMore) {
     const listNode = el("ul", "flist");
@@ -105105,6 +105320,8 @@ function chatgptPickerProgram(kit) {
       add(listNode, el("li", "muted fempty", Q.noFolders));
     if (hasMore)
       add(listNode, add(el("li", "fmore"), loadMore(parentKey)));
+    if (p.truncated.has(parentKey))
+      add(listNode, el("li", "muted fmore", Q.truncated));
     return listNode;
   }
   function loadingLine() {
@@ -105611,6 +105828,13 @@ function chatgptPrivacyProgram(kit) {
       description: "",
       rules: [],
       pendingCount: 0,
+      revision: "",
+      savedDescription: "",
+      confirmation: "",
+      confirmedAt: 0,
+      confirmStep: false,
+      hidden: [],
+      server: null,
       edited: false,
       saving: false,
       saveError: "",
@@ -105638,21 +105862,46 @@ function chatgptPrivacyProgram(kit) {
       return null;
     return data;
   }
+  const text = (value) => typeof value === "string" && value.trim() !== "";
   function validRule(rule) {
-    return !!rule && KINDS.indexOf(rule.kind) >= 0 && typeof rule.source_id === "string" && !!rule.source_id && typeof rule.display === "string" && (typeof rule.key === "string" || typeof rule.value === "string");
+    if (!rule || typeof rule !== "object" || KINDS.indexOf(rule.kind) < 0)
+      return false;
+    if (rule.kind === "sender")
+      return rule.source_id === kit.config.mailSourceId && text(rule.value);
+    if (rule.kind === "label")
+      return rule.source_id === kit.config.mailSourceId && text(rule.key) && text(rule.value);
+    return Object.prototype.hasOwnProperty.call(kit.config.folderSources, rule.source_id) && text(rule.key) && (rule.display === undefined || typeof rule.display === "string");
+  }
+  function displayOf(rule) {
+    if (rule.kind === "sender" || rule.kind === "label")
+      return String(rule.value);
+    return text(rule.display) ? String(rule.display) : fill(W.folderUnnamed, { source: sourceLabel3(rule.source_id) });
+  }
+  function viewRule(rule) {
+    const raw = {};
+    for (const field of Object.keys(rule))
+      raw[field] = rule[field];
+    const copy = { kind: rule.kind, source_id: rule.source_id, display: displayOf(rule), removed: false, saved: true, raw };
+    if (typeof rule.key === "string")
+      copy.key = rule.key;
+    if (typeof rule.value === "string")
+      copy.value = rule.value;
+    return copy;
   }
   function take(data) {
     s.description = typeof data.description === "string" ? data.description : "";
-    s.rules = data.rules.filter(validRule).map((rule) => {
-      const copy = { kind: rule.kind, source_id: rule.source_id, display: rule.display, removed: false };
-      if (typeof rule.key === "string")
-        copy.key = rule.key;
-      if (typeof rule.value === "string")
-        copy.value = rule.value;
-      return copy;
-    });
+    s.savedDescription = s.description;
+    s.revision = typeof data.revision === "string" ? data.revision : "";
+    s.edited = false;
+    s.confirmStep = false;
+    s.rules = data.rules.filter(validRule).map(viewRule);
+    s.hidden = data.rules.filter((rule) => !validRule(rule));
+    s.server = null;
     s.pendingCount = typeof data.pendingCount === "number" && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
-    s.confirmation = typeof data.confirmation === "string" ? data.confirmation : "";
+    if (typeof data.confirmation === "string" && data.confirmation) {
+      s.confirmation = data.confirmation;
+      s.confirmedAt = Date.now();
+    }
   }
   function load() {
     s.loading = true;
@@ -105681,21 +105930,32 @@ function chatgptPrivacyProgram(kit) {
     });
   }
   function identity(rule) {
+    const matched = rule.kind === "sender" ? typeof rule.value === "string" ? rule.value.trim().toLowerCase() : "" : typeof rule.key === "string" ? rule.key.trim() : "";
     return rule.kind + `
 ` + rule.source_id + `
-` + (typeof rule.key === "string" ? rule.key : "") + `
-` + (typeof rule.value === "string" ? rule.value : "");
+` + matched;
   }
   function kept() {
     return s.rules.filter((rule) => !rule.removed);
   }
   function ruleOut(rule) {
+    if (rule.raw)
+      return rule.raw;
     const out = { kind: rule.kind, source_id: rule.source_id };
     if (typeof rule.key === "string")
       out.key = rule.key;
     if (typeof rule.value === "string")
       out.value = rule.value;
+    if (rule.kind === "folder" && text(rule.display))
+      out.display = rule.display;
     return out;
+  }
+  function rulesOut() {
+    return kept().map(ruleOut).concat(s.hidden);
+  }
+  function changed() {
+    s.edited = true;
+    s.confirmStep = false;
   }
   function addRule(rule) {
     const id = identity(rule);
@@ -105704,30 +105964,66 @@ function chatgptPrivacyProgram(kit) {
       existing.removed = false;
     else
       s.rules.push(rule);
-    s.edited = true;
+    changed();
     s.saveError = "";
   }
+  function lowering() {
+    return {
+      removed: s.rules.filter((rule) => rule.saved && rule.removed),
+      described: s.description.trim() !== s.savedDescription
+    };
+  }
+  function lowers() {
+    const change = lowering();
+    return change.removed.length > 0 || change.described;
+  }
   function save() {
-    if (!s || !s.loaded || s.saving)
+    if (!s || !s.loaded || s.saving || s.server)
       return;
-    const rules = kept();
-    const args = { description: s.description.trim(), rules: rules.map(ruleOut) };
-    if (s.confirmation)
+    if (lowers()) {
+      s.confirmStep = true;
+      s.saveError = "";
+      kit.render("privacy:confirm:yes");
+      return;
+    }
+    send(false, false);
+  }
+  const CONFIRMATION_FRESH_MS = 25 * 60000;
+  function send(confirmed, retried) {
+    if (confirmed && (!s.confirmation || Date.now() - s.confirmedAt > CONFIRMATION_FRESH_MS)) {
+      renewConfirmation(() => send(true, true));
+      return;
+    }
+    const args = { description: s.description.trim(), rules: rulesOut() };
+    if (s.revision)
+      args.revision = s.revision;
+    if (confirmed)
       args.confirmation = s.confirmation;
     s.saving = true;
     s.saveError = "";
+    s.confirmStep = false;
     kit.render("privacy:save");
     const mine = session;
     kit.call(T.set, args).then((result) => {
       if (mine !== session || !s)
         return;
       s.saving = false;
+      const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
+      if (confirmed && result && result.isError && content && content.error === "privacy_owner_only" && !retried) {
+        s.confirmation = "";
+        renewConfirmation(() => send(true, true));
+        return;
+      }
       const data = settings(result);
-      if (!data) {
+      if (data && content && content.status === "conflict")
+        return conflict(data);
+      if (!data || result.isError) {
         s.saveError = W.saveFailed;
         kit.render("privacy:save");
         return;
       }
+      if (confirmed)
+        s.confirmation = "";
       kit.remember(data.rules.filter(validRule).length);
       leave(W.saved, true);
     }, () => {
@@ -105737,6 +106033,101 @@ function chatgptPrivacyProgram(kit) {
       s.saveError = W.saveFailed;
       kit.render("privacy:save");
     });
+  }
+  function conflict(data) {
+    s.server = data;
+    s.confirmStep = false;
+    s.saveError = "";
+    kit.render("privacy:conflict:apply");
+  }
+  function applyAgain() {
+    const server = s.server;
+    if (!server)
+      return;
+    const removed = {};
+    for (const rule of s.rules)
+      if (rule.saved && rule.removed)
+        removed[identity(rule)] = true;
+    const added = s.rules.filter((rule) => !rule.saved && !rule.removed);
+    const described = s.description.trim() !== s.savedDescription ? s.description : null;
+    take(server);
+    for (const rule of s.rules)
+      if (removed[identity(rule)])
+        rule.removed = true;
+    for (const rule of added)
+      addRule(rule);
+    if (described !== null)
+      s.description = described;
+    s.edited = true;
+    save();
+    if (!s.saving && !s.confirmStep)
+      kit.render("privacy:save");
+  }
+  function discardMine() {
+    const server = s.server;
+    if (!server)
+      return;
+    take(server);
+    kit.render("privacy:description");
+  }
+  function conflictBox() {
+    const box = el("div", "confirm-box");
+    box.setAttribute("role", "alert");
+    add(box, el("p", "strong", W.conflict), el("p", "", W.conflictNow));
+    const list = el("ul", "plain");
+    const description = typeof s.server.description === "string" ? s.server.description.trim() : "";
+    add(list, el("li", "", description ? fill(W.conflictDescription, { text: description }) : W.conflictNoDescription));
+    const rules = s.server.rules.filter(validRule);
+    if (!rules.length)
+      add(list, el("li", "", W.rulesEmpty));
+    for (const rule of rules)
+      add(list, el("li", "", displayOf(rule) + " · " + kindText(rule)));
+    add(box, list, add(el("div", "actions"), kit.button(W.applyAgain, "privacy:conflict:apply", applyAgain, "main"), kit.button(W.discardMine, "privacy:conflict:discard", discardMine, "plain")));
+    return box;
+  }
+  function renewConfirmation(then) {
+    s.saving = true;
+    s.saveError = "";
+    s.confirmStep = false;
+    kit.render("privacy:save");
+    const mine = session;
+    kit.call(T.get, {}).then((result) => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      const data = settings(result);
+      if (!data || typeof data.confirmation !== "string" || !data.confirmation) {
+        s.saveError = W.saveFailed;
+        kit.render("privacy:save");
+        return;
+      }
+      if (s.revision && typeof data.revision === "string" && data.revision !== s.revision)
+        return conflict(data);
+      s.confirmation = data.confirmation;
+      s.confirmedAt = Date.now();
+      then();
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      s.saveError = W.saveFailed;
+      kit.render("privacy:save");
+    });
+  }
+  function confirmBox() {
+    const change = lowering();
+    const box = el("div", "confirm-box");
+    box.setAttribute("role", "alert");
+    if (change.removed.length) {
+      add(box, el("p", "strong", fill(W.confirmRemove, { list: change.removed.map((rule) => rule.display).join(", ") })));
+    }
+    if (change.described)
+      add(box, el("p", change.removed.length ? "" : "strong", W.confirmDescription));
+    add(box, add(el("div", "actions"), kit.button(W.confirm, "privacy:confirm:yes", () => send(lowers(), false), "danger"), kit.button(W.cancel, "privacy:confirm:no", () => {
+      s.confirmStep = false;
+      kit.render("privacy:save");
+    }, "plain")));
+    return box;
   }
   function sources() {
     const data = kit.data();
@@ -105855,7 +106246,7 @@ function chatgptPrivacyProgram(kit) {
       add(li, el("p", "fname leaf muted", fill(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, "privacy:rule:" + index, s.saving ? null : () => {
         rule.removed = false;
-        s.edited = true;
+        changed();
         kit.render("privacy:rule:" + index);
       }, "plain");
       undo.setAttribute("aria-label", fill(W.undoFor, { name: rule.display }));
@@ -105864,7 +106255,7 @@ function chatgptPrivacyProgram(kit) {
     add(li, add(el("p", "fname leaf two-line"), el("span", "two-top", rule.display), el("span", "two-bottom", kindText(rule))));
     const remove = kit.button(W.remove, "privacy:rule:" + index, s.saving ? null : () => {
       rule.removed = true;
-      s.edited = true;
+      changed();
       s.saveError = "";
       kit.render("privacy:rule:" + index);
     }, "plain");
@@ -105874,6 +106265,8 @@ function chatgptPrivacyProgram(kit) {
   function mainView(page) {
     add(page, el("h1", "", W.title));
     add(page, el("p", "muted intro", W.intro));
+    if (s.server)
+      add(page, conflictBox());
     if (s.error) {
       const error2 = el("div", "banner");
       error2.setAttribute("role", "alert");
@@ -105896,11 +106289,18 @@ function chatgptPrivacyProgram(kit) {
     area.value = s.description;
     area.disabled = s.saving;
     area.setAttribute("data-key", "privacy:description");
+    area.setAttribute("aria-describedby", "privacy-description-shared");
     area.addEventListener("input", () => {
       s.description = area.value;
-      s.edited = true;
+      const open6 = s.confirmStep;
+      changed();
+      if (open6)
+        kit.render("privacy:description");
     });
     add(page, add(field, area));
+    const shared = el("p", "reason field-note", W.descriptionShared);
+    shared.id = "privacy-description-shared";
+    add(page, shared);
     const rules = add(el("section", "fsection"), el("h2", "", W.rulesTitle));
     if (s.rules.length) {
       const listNode = el("ul", "flist");
@@ -105915,10 +106315,15 @@ function chatgptPrivacyProgram(kit) {
       add(rules, el("p", "reason", W.needFolderSource));
     if (!gmail)
       add(rules, el("p", "reason", W.needGmail));
+    add(rules, el("p", "reason", W.namesShared));
     add(page, rules);
     const footer = el("section", "picker-footer");
     if (s.pendingCount > 0) {
       add(footer, el("p", "", fill(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
+    }
+    if (s.confirmStep && !s.saving && lowers()) {
+      add(page, add(footer, confirmBox()));
+      return;
     }
     const row = el("div", "actions");
     if (s.saving) {
@@ -105926,7 +106331,7 @@ function chatgptPrivacyProgram(kit) {
       busy.setAttribute("aria-busy", "true");
       add(row, busy);
     } else
-      add(row, kit.button(W.save, "privacy:save", save, "main"));
+      add(row, kit.button(W.save, "privacy:save", s.server ? null : save, "main"));
     add(row, kit.button(W.cancel, "privacy:cancel", s.saving ? null : backOut, "plain"));
     const wrap = add(el("div", "save"), row);
     if (s.saveError) {
@@ -106131,6 +106536,7 @@ function chatgptDashboardPageHtml(options = {}) {
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
     staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
+    refresh: { ...CHATGPT_DASHBOARD_REFRESH, ...options.refresh },
     picker: {
       tools: CHATGPT_PICKER_TOOLS,
       mailArgs: CHATGPT_PICKER_MAIL_ARGS,
@@ -106173,13 +106579,19 @@ function chatgptDashboardPageHtml(options = {}) {
 function scriptJson(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
 var init_page = __esm(() => {
   init_vocabulary();
   init_picker();
   init_privacy();
   CHATGPT_INLINE_ERROR_CODES = ["sign_in_failed", "source_not_connected", "source_busy", "disconnect_incomplete"];
   CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60000;
+  CHATGPT_DASHBOARD_REFRESH = {
+    activeMs: 15000,
+    idleMs: 60000,
+    maxBackoffMs: 5 * 60000,
+    staleTickMs: 30000
+  };
   STATUS_TONE = Object.fromEntries(Object.keys(DASHBOARD_STATUS_PRESENTATION).map((status) => [status, DASHBOARD_STATUS_PRESENTATION[status].colorToken]));
   CHATGPT_DASHBOARD_LIGHT = {
     bg: "#ffffff",
@@ -106281,6 +106693,8 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.08)}
 .btn.danger{border-color:var(--danger);color:var(--danger)}
+.btn.link{border-color:transparent;background:none;color:var(--muted);padding:0.375rem 0.5rem}
+.btn.link:hover:not(:disabled){color:var(--text)}
 .btn:disabled{cursor:not-allowed;color:var(--muted);background:var(--surface);border-style:dashed}
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 summary{cursor:pointer;border-radius:0.375rem}
@@ -106311,6 +106725,7 @@ summary{cursor:pointer;border-radius:0.375rem}
 .picker-status{display:flex;flex-direction:column;gap:0.75rem;margin-top:1rem}
 .field{display:flex;flex-direction:column;gap:0.25rem;margin:0.75rem 0}
 .field-label{font-weight:600;font-size:0.875rem}
+.field+.field-note{margin:-0.5rem 0 0.75rem}
 .text{font:inherit;font-size:1rem;width:100%;min-height:2.25rem;padding:0.375rem 0.625rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
 textarea.text{resize:vertical;min-height:4.5rem}
 .picker-body{display:flex;flex-direction:column;container-type:inline-size}
@@ -107402,6 +107817,31 @@ function chatgptPrivateAnswerProgram(config2) {
   function wait(ms) {
     return new Promise((resolve10) => setTimeout(resolve10, ms));
   }
+  function bounded(work, ms, controller) {
+    return new Promise((resolve10, reject) => {
+      const timer = setTimeout(() => {
+        if (controller)
+          try {
+            controller.abort();
+          } catch {}
+        reject(new Error("timeout"));
+      }, Math.max(0, ms));
+      work.then((value) => {
+        clearTimeout(timer);
+        resolve10(value);
+      }, (error2) => {
+        clearTimeout(timer);
+        reject(error2);
+      });
+    });
+  }
+  function slow(byUser) {
+    phase = "slow";
+    errorText = T.slow;
+    canRetry = true;
+    focusAfter = byUser ? "retry" : "";
+    render();
+  }
   function fail(text, retry, byUser) {
     phase = "error";
     errorText = text;
@@ -107430,35 +107870,59 @@ function chatgptPrivateAnswerProgram(config2) {
     canRetry = false;
     focusAfter = byUser ? "status" : "";
     render();
-    const started = Date.now();
+    const deadline = Date.now() + (info.full ? config2.fullPollCapMs : config2.pollCapMs);
+    const isTimeout = (error2) => error2 instanceof Error && error2.message === "timeout";
     try {
-      const keys = await keyPair(jobId);
+      let keys;
+      try {
+        keys = await bounded(keyPair(jobId), deadline - Date.now(), null);
+      } catch (error2) {
+        if (mine !== run)
+          return;
+        if (isTimeout(error2))
+          return slow(byUser);
+        throw error2;
+      }
       for (;; ) {
         if (mine !== run)
           return;
+        const left = deadline - Date.now();
+        if (left <= 0)
+          return slow(byUser);
+        const requestEnd = Date.now() + Math.min(config2.requestTimeoutMs, left);
+        const controller = typeof window.AbortController === "function" ? new window.AbortController : null;
         let response;
+        let body = null;
         try {
-          response = await window.fetch(config2.relayOrigin + "/private/" + jobId, {
+          response = await bounded(window.fetch(config2.relayOrigin + "/private/" + jobId, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
             credentials: "omit",
             cache: "no-store",
             referrerPolicy: "no-referrer",
-            mode: "cors"
-          });
-        } catch {
-          if (mine === run)
-            fail(T.unreachable, true, byUser);
+            mode: "cors",
+            signal: controller ? controller.signal : undefined
+          }), requestEnd - Date.now(), controller);
+          if (mine !== run)
+            return;
+          try {
+            body = await bounded(response.json(), requestEnd - Date.now(), controller);
+          } catch (error2) {
+            if (isTimeout(error2))
+              throw error2;
+            body = null;
+          }
+        } catch (error2) {
+          if (mine !== run)
+            return;
+          if (isTimeout(error2)) {
+            if (Date.now() >= deadline)
+              return slow(byUser);
+            continue;
+          }
+          fail(T.unreachable, true, byUser);
           return;
-        }
-        if (mine !== run)
-          return;
-        let body = null;
-        try {
-          body = await response.json();
-        } catch {
-          body = null;
         }
         if (mine !== run)
           return;
@@ -107467,8 +107931,12 @@ function chatgptPrivateAnswerProgram(config2) {
         if (code === 200 && status === "ready") {
           let opened = null;
           try {
-            opened = readAnswer(await open6(jobId, keys.privateKey, body));
-          } catch {
+            opened = readAnswer(await bounded(open6(jobId, keys.privateKey, body), deadline - Date.now(), null));
+          } catch (error2) {
+            if (mine !== run)
+              return;
+            if (isTimeout(error2))
+              return slow(byUser);
             opened = null;
           }
           if (mine !== run)
@@ -107500,14 +107968,8 @@ function chatgptPrivateAnswerProgram(config2) {
           return fail(T.generic, false, byUser);
         const header = Number(response.headers && response.headers.get ? response.headers.get("retry-after") : NaN);
         const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
-        if (Date.now() - started + seconds * config2.secondMs > (info && info.full ? config2.fullPollCapMs : config2.pollCapMs)) {
-          phase = "slow";
-          errorText = T.slow;
-          canRetry = true;
-          focusAfter = byUser ? "retry" : "";
-          render();
-          return;
-        }
+        if (Date.now() + seconds * config2.secondMs > deadline)
+          return slow(byUser);
         await wait(seconds * config2.secondMs);
       }
     } catch {
@@ -107883,6 +108345,7 @@ function chatgptPrivateAnswerPageHtml(options) {
     secondMs: options.secondMs ?? 1000,
     pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
     fullPollCapMs: options.fullPollCapMs ?? CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS,
+    requestTimeoutMs: options.requestTimeoutMs ?? CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS,
     noteMs: options.noteMs ?? 4000,
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,
@@ -107909,7 +108372,7 @@ function chatgptPrivateAnswerPageHtml(options) {
 function scriptJson2(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 190000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
+var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 250000, CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS = 20000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
 var init_private_answer2 = __esm(() => {
   init_vocabulary();
   init_private_answer_contract();

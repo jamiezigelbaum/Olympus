@@ -45,6 +45,8 @@ export interface ChatGptDashboardPageOptions {
   connectPollMs?: number;
   /** How long the Connect flow waits before offering Check again. */
   connectPollCapMs?: number;
+  /** The dashboard's own periodic re-read (tests shorten it). */
+  refresh?: Partial<ChatGptDashboardClientConfig['refresh']>;
 }
 
 export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
@@ -56,6 +58,13 @@ export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
  */
 export const CHATGPT_INLINE_ERROR_CODES = ['sign_in_failed', 'source_not_connected', 'source_busy', 'disconnect_incomplete'] as const;
 export const CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60_000;
+/** Visible-page refresh: often while something moves, rarely when settled, backing off on failure. */
+export const CHATGPT_DASHBOARD_REFRESH = {
+  activeMs: 15_000,
+  idleMs: 60_000,
+  maxBackoffMs: 5 * 60_000,
+  staleTickMs: 30_000,
+} as const;
 
 const STATUS_TONE = Object.fromEntries(
   (Object.keys(DASHBOARD_STATUS_PRESENTATION) as DashboardStatus[])
@@ -148,6 +157,8 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.08)}
 .btn.danger{border-color:var(--danger);color:var(--danger)}
+.btn.link{border-color:transparent;background:none;color:var(--muted);padding:0.375rem 0.5rem}
+.btn.link:hover:not(:disabled){color:var(--text)}
 .btn:disabled{cursor:not-allowed;color:var(--muted);background:var(--surface);border-style:dashed}
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 summary{cursor:pointer;border-radius:0.375rem}
@@ -178,6 +189,7 @@ summary{cursor:pointer;border-radius:0.375rem}
 .picker-status{display:flex;flex-direction:column;gap:0.75rem;margin-top:1rem}
 .field{display:flex;flex-direction:column;gap:0.25rem;margin:0.75rem 0}
 .field-label{font-weight:600;font-size:0.875rem}
+.field+.field-note{margin:-0.5rem 0 0.75rem}
 .text{font:inherit;font-size:1rem;width:100%;min-height:2.25rem;padding:0.375rem 0.625rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
 textarea.text{resize:vertical;min-height:4.5rem}
 .picker-body{display:flex;flex-direction:column;container-type:inline-size}
@@ -276,6 +288,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
     staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
+    refresh: { ...CHATGPT_DASHBOARD_REFRESH, ...options.refresh },
     picker: {
       tools: CHATGPT_PICKER_TOOLS,
       mailArgs: CHATGPT_PICKER_MAIL_ARGS,

@@ -4,9 +4,10 @@
  * document whose parent is a fake MCP Apps host (JSON-RPC over postMessage),
  * optionally with `window.openai`.
  */
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, jest, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
+import { CHATGPT_PRIVACY_META_KEY, CHATGPT_PRIVACY_TOOLS } from '../src/workers/dashboard/chatgpt/privacy.ts';
 import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import {
   CHATGPT_DASHBOARD_CSS,
@@ -209,28 +210,44 @@ describe('vocabulary', () => {
 });
 
 describe('connection states', () => {
-  test('not installed: one banner, Install on your Mac, everything else disabled with a reason', () => {
-    const host = mount();
-    host.push({ structuredContent: model({ connection: { state: 'not_installed', action: { id: 'install' } }, sources: SOURCES }) });
-    expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.not_installed.title);
-    const install = host.button('Install on your Mac');
-    expect(install.disabled).toBe(false);
-    expect(install.className).toContain('primary');
+  test('not connected: Connect Olympus re-reads the dashboard, Not installed yet? opens the install page, everything else waits', async () => {
+    const host = mount({ openai: {} });
+    const data = model({ connection: { state: 'not_connected', action: { id: 'connect' }, installHref: 'https://olympusplugin.ai/install/' }, sources: SOURCES });
+    host.push({ structuredContent: data });
+    expect(host.text()).toContain("Olympus isn't connected to ChatGPT yet");
+    const connect = host.button('Connect Olympus');
+    expect(connect.disabled).toBe(false);
+    expect(connect.className).toContain('primary');
+    const install = host.button('Not installed yet?');
+    expect(install.className).not.toContain('primary');
+    for (const other of host.buttons().filter((node) => node !== connect && node !== install)) expect(other.disabled).toBe(true);
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.not_connected.disabledReason);
     install.click();
-    // No link: the help is selectable text, never the clipboard.
-    expect(host.text()).toContain('Install Olympus on my Mac.');
-    for (const other of host.buttons().filter((node) => node !== host.button('Install on your Mac'))) {
-      expect(other.disabled).toBe(true);
-    }
-    expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.not_installed.disabledReason);
+    expect(host.calls).toContainEqual(['openExternal', { href: 'https://olympusplugin.ai/install/' }]);
+    connect.click();
+    expect(host.toolCalls().at(-1)).toEqual({ name: 'olympus_dashboard', arguments: {} });
+    expect(host.button('Working…').disabled).toBe(true);
+    host.respond('tools/call', { structuredContent: data });
+    await sleep(0);
+    expect(host.button('Connect Olympus').disabled).toBe(false);
+    expect(host.text()).not.toMatch(/install on your mac/i);
     expectNoJargon(host);
+  });
+
+  test('an old relay\'s not_installed reads as not connected; an install link off olympusplugin.ai is not offered', () => {
+    const host = mount();
+    host.push({ structuredContent: model({ connection: { state: 'not_installed', installHref: 'https://evil.example/install' } as any }) });
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.not_connected.title);
+    expect(host.button('Connect Olympus').disabled).toBe(false);
+    expect(host.buttons().some((node) => node.textContent === 'Not installed yet?')).toBe(false);
   });
 
   test('installing: progress label and percent, no button', () => {
     const host = mount();
     host.push({ structuredContent: model({ connection: { state: 'installing', progress: { percent: 37.4, label: 'Getting search ready on your Mac' } } }) });
     const banner = host.win.document.querySelector('.banner')!;
-    expect(banner.textContent).toContain('Installing Olympus on your Mac…');
+    expect(banner.textContent).toContain('Olympus is setting up on your Mac…');
+    expect(banner.textContent).not.toContain('Installing');
     expect(banner.textContent).toContain('Getting search ready on your Mac · 37%');
     expect(banner.querySelectorAll('button').length).toBe(0);
     expect(banner.querySelector('[role=progressbar]')!.getAttribute('aria-valuenow')).toBe('37');
@@ -287,10 +304,49 @@ describe('connection states', () => {
     const host = mount();
     host.push({ isError: true, content: [{ type: 'text', text: 'Your Mac is offline' }] });
     expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
+    // The banner promises nothing the page does not do.
+    expect(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title).not.toMatch(/retry/i);
   });
 });
 
 describe('ready page', () => {
+  test('a fix only the Mac can make links its help page beside the control: How to fix this on your Mac', () => {
+    const help = (section: string) => `https://olympusplugin.ai/help/on-your-mac/#${section}`;
+    const host = mount({ openai: {} });
+    host.push({ structuredContent: model({
+      needsYou: [{ id: 'search', sentence: 'Search has stopped working on your Mac.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {}, href: help('search') } }],
+      sources: [{ id: 'x.posts', label: 'X', group: 'cloud', status: 'Off', primary: { label: 'Connect', tool: 'olympus_dashboard', args: {}, disabledReason: 'Connect sources in Olympus on your Mac.', href: help('connect') } }],
+      models: {
+        embedding: { kind: 'built_in', state: 'ready' },
+        change: { label: 'Change', tool: 'olympus_dashboard', args: {}, disabledReason: 'Change models in Olympus on your Mac.', href: help('models') },
+      },
+    }) });
+    const links = host.buttons().filter((node) => node.className === 'btn link');
+    expect(links.map((node) => node.textContent)).toEqual([DASHBOARD_CHATGPT_PAGE_COPY.howOnMac, DASHBOARD_CHATGPT_PAGE_COPY.howConnectOnMac, DASHBOARD_CHATGPT_PAGE_COPY.howOnMac]);
+    // Check again still runs its tool; the link sits beside it.
+    expect(host.button('Check again').disabled).toBe(false);
+    links[0]!.click();
+    links[1]!.click();
+    links[2]!.click();
+    expect(host.calls.filter(([name]) => name === 'openExternal').map(([, args]) => args)).toEqual([
+      { href: help('search') }, { href: help('connect') }, { href: help('models') },
+    ]);
+  });
+
+  test('a fix with only a help page is that link; pages off olympusplugin.ai are never linked', () => {
+    const host = mount({ openai: {} });
+    host.push({ structuredContent: model({
+      needsYou: [
+        { id: 'a', sentence: 'Answers have stopped working on your Mac.', fix: { label: 'Open', href: 'https://olympusplugin.ai/help/on-your-mac/#answers' } },
+        { id: 'b', sentence: 'Something else.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {}, href: 'https://evil.example/help' } },
+        { id: 'c', sentence: 'Plain http.', fix: { label: 'Open', href: 'http://olympusplugin.ai/help' } },
+      ],
+    }) });
+    expect(host.buttons().filter((node) => node.textContent === DASHBOARD_CHATGPT_PAGE_COPY.howOnMac)).toHaveLength(1);
+    host.button(DASHBOARD_CHATGPT_PAGE_COPY.howOnMac).click();
+    expect(host.calls.filter(([name]) => name === 'openExternal')).toEqual([['openExternal', { href: 'https://olympusplugin.ai/help/on-your-mac/#answers' }]]);
+  });
+
   test('blocker, needs-you, sources, progress and models in that order', () => {
     const host = mount();
     host.push({
@@ -644,7 +700,7 @@ describe('host integration', () => {
 
 describe('inline card', () => {
   const fixtures: Array<[string, DashboardViewModelV1]> = [
-    ['not installed', model({ connection: { state: 'not_installed', action: { id: 'install' } }, sources: SOURCES })],
+    ['not connected', model({ connection: { state: 'not_connected', action: { id: 'connect' }, installHref: 'https://olympusplugin.ai/install/' }, sources: SOURCES })],
     ['mac offline', model({ connection: { state: 'mac_offline', action: { id: 'wake_mac', href: 'https://olympusplugin.ai/a' } }, progress: PROGRESS })],
     ['blocker', model({ blocker: { id: 'b', sentence: 'Search has stopped working on your Mac.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {} } }, needsYou: [{ id: 'n', sentence: 'Gmail — signed out', fix: { label: 'Reconnect', disabledReason: 'x' } }], sources: SOURCES, progress: PROGRESS })],
     ['needs you', model({ needsYou: [{ id: 'n', sentence: 'Gmail — signed out', fix: { label: 'Disconnect', tool: 't', destructive: true } }], sources: SOURCES })],
@@ -677,6 +733,239 @@ describe('inline card', () => {
     host.button('Open Olympus').click();
     expect(host.sent.find((message) => message.method === 'ui/request-display-mode')!.params).toEqual({ mode: 'fullscreen' });
   });
+});
+
+describe('freshness: the page re-reads the dashboard while it is visible', () => {
+  const working = () => model({ sources: [{ id: 'notes', label: 'Notes', group: 'local', status: 'Working' }] });
+  const settled = () => model({ sources: [{ id: 'gmail', label: 'Gmail', group: 'cloud', status: 'Fresh', lastSyncAt: ago(MIN) }] });
+  const dashboardCalls = (host: Host) => host.toolCalls().filter((call) => call.name === 'olympus_dashboard').length;
+  /** Settles promise callbacks after a fake-timer step. */
+  const flush = async () => {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+  const advance = async (ms: number) => {
+    jest.advanceTimersByTime(ms);
+    await flush();
+  };
+  const setHidden = (host: Host, hidden: boolean) => {
+    Object.defineProperty(host.win.document, 'visibilityState', { value: hidden ? 'hidden' : 'visible', configurable: true });
+    Object.defineProperty(host.win.document, 'hidden', { value: hidden, configurable: true });
+    host.win.document.dispatchEvent(new host.win.Event('visibilitychange'));
+  };
+  /** Fake timers for the body only: happy-dom's own teardown needs real ones. */
+  const withFakeTimers = (body: () => Promise<void>) => async () => {
+    jest.useFakeTimers();
+    try {
+      await body();
+    } finally {
+      jest.useRealTimers();
+    }
+  };
+
+  test('every 15 s while a source is working, every 60 s once settled', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: working() });
+    await advance(14_999);
+    expect(dashboardCalls(host)).toBe(0);
+    await advance(1);
+    expect(dashboardCalls(host)).toBe(1);
+    // A background check shows no Working… on any control.
+    expect(host.buttons().some((node) => node.textContent === DASHBOARD_CHATGPT_PAGE_COPY.working)).toBe(false);
+    host.respond('tools/call', { structuredContent: settled() });
+    await flush();
+    await advance(59_999);
+    expect(dashboardCalls(host)).toBe(1);
+    await advance(1);
+    expect(dashboardCalls(host)).toBe(2);
+  }));
+
+  test('a connecting source or unfinished setup counts as moving', withFakeTimers(async () => {
+    const connecting = mount();
+    connecting.push({ structuredContent: model({ sources: [{ id: 'drive', label: 'Google Drive', group: 'cloud', status: 'Needs you', connecting: { expiresAt: new Date(Date.now() + 600_000).toISOString() } }] }) });
+    const setup = mount();
+    setup.push({ structuredContent: model({ connection: { state: 'installing' } }) });
+    await advance(15_000);
+    expect(dashboardCalls(connecting)).toBe(1);
+    expect(dashboardCalls(setup)).toBe(1);
+  }));
+
+  test('failures back off, doubling up to 5 min, and a success resets the pace', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: working() });
+    await advance(15_000);
+    expect(dashboardCalls(host)).toBe(1);
+    let calls = 1;
+    for (const wait of [30_000, 60_000, 120_000, 240_000, 300_000, 300_000]) {
+      host.respond('tools/call', undefined, { code: -32000, message: 'unreachable' });
+      await flush();
+      expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
+      await advance(wait - 1);
+      expect(dashboardCalls(host)).toBe(calls);
+      await advance(1);
+      expect(dashboardCalls(host)).toBe(++calls);
+    }
+    host.respond('tools/call', { structuredContent: working() });
+    await flush();
+    expect(host.text()).not.toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
+    await advance(15_000);
+    expect(dashboardCalls(host)).toBe(calls + 1);
+  }));
+
+  test('a hidden page does not poll; shown again, it checks at once when a check fell due', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: settled() });
+    await advance(30_000);
+    setHidden(host, true);
+    await advance(10 * MIN);
+    expect(dashboardCalls(host)).toBe(0);
+    setHidden(host, false);
+    await flush();
+    expect(dashboardCalls(host)).toBe(1);
+  }));
+
+  test('shown again before a check is due, it waits out the rest of the interval', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: settled() });
+    await advance(20_000);
+    setHidden(host, true);
+    await advance(10_000);
+    setHidden(host, false);
+    await advance(29_999);
+    expect(dashboardCalls(host)).toBe(0);
+    await advance(1);
+    expect(dashboardCalls(host)).toBe(1);
+  }));
+
+  test('no second poller while the Connect flow waits for sign-in; leaving it re-reads once', withFakeTimers(async () => {
+    const host = mount({ html: chatgptDashboardPageHtml({ resultTimeoutMs: 5_000, connectPollMs: 60 * MIN, connectPollCapMs: 120 * MIN }) });
+    host.push({ structuredContent: model({ sources: [{ id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Off', primary: { label: 'Connect', tool: 'olympus_connect_source', args: { source: 'dropbox' } } }] }) });
+    host.button('Connect').click();
+    host.respond('tools/call', { structuredContent: { status: 'open_link', source: 'dropbox', openUrl: 'https://mcp.olympusplugin.ai/go/abc' } });
+    await flush();
+    expect(host.text()).toContain('Waiting for you to finish signing in');
+    await advance(10 * MIN);
+    expect(dashboardCalls(host)).toBe(0);
+    host.button('Cancel').click();
+    expect(dashboardCalls(host)).toBe(1);
+  }));
+
+  /** The latest tools/call of this tool still waiting for its answer. */
+  const pendingCall = (host: Host, name: string) => [...host.sent].reverse()
+    .find((message) => message.method === 'tools/call' && message.params.name === name)!;
+  const answer = (host: Host, message: { id?: number }, result: unknown, error?: unknown) =>
+    host.win.dispatchEvent(new host.win.MessageEvent('message', {
+      data: error ? { jsonrpc: '2.0', id: message.id, error } : { jsonrpc: '2.0', id: message.id, result },
+      source: host.win.parent as any,
+    }));
+
+  test('a background read sent before Connect can never undo it: its late Off answer is dropped', withFakeTimers(async () => {
+    const off = model({ sources: [{ id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Off', primary: { label: 'Connect', tool: 'olympus_connect_source', args: { source: 'dropbox' } } }] });
+    const fresh = model({ sources: [{ id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Fresh', lastSyncAt: ago(0) }] });
+    const host = mount({ html: chatgptDashboardPageHtml({ resultTimeoutMs: 5_000, connectPollMs: 1_000 }) });
+    host.push({ structuredContent: off });
+    await advance(60_000);
+    const background = pendingCall(host, 'olympus_dashboard');
+    expect(dashboardCalls(host)).toBe(1);
+    host.button('Connect').click();
+    answer(host, pendingCall(host, 'olympus_connect_source'), { structuredContent: { status: 'open_link', source: 'dropbox', openUrl: 'https://mcp.olympusplugin.ai/go/abc' } });
+    await flush();
+    await advance(1_000);
+    const poll = pendingCall(host, 'olympus_dashboard');
+    expect(poll).not.toBe(background);
+    answer(host, poll, { structuredContent: fresh });
+    await flush();
+    expect(host.text()).toContain('Dropbox is connected.');
+    // The stale background answer arrives last.
+    answer(host, background, { structuredContent: off });
+    await flush();
+    expect(host.text()).toContain('Dropbox is connected.');
+    expect(host.text()).not.toContain('Not connected');
+    expect(host.buttons().some((node) => node.textContent === 'Connect')).toBe(false);
+  }));
+
+  test('no background read while a destructive confirmation waits', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [SOURCES[0]!] }) });
+    host.button('Disconnect').click();
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.confirmPrompt);
+    await advance(10 * MIN);
+    expect(dashboardCalls(host)).toBe(0);
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.confirmPrompt);
+  }));
+
+  test('a confirmation opened while a background read is in flight is not redrawn away by its answer', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [SOURCES[0]!] }) });
+    await advance(60_000);
+    const background = pendingCall(host, 'olympus_dashboard');
+    host.button('Disconnect').click();
+    answer(host, background, { structuredContent: model({ sources: [SOURCES[0]!] }) });
+    await flush();
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.confirmPrompt);
+  }));
+
+  test('Privacy opened while a background read is in flight keeps its text box, caret and selection when the answer lands', withFakeTimers(async () => {
+    const data = model({ privacy: { configured: true, ruleCount: 0, pendingCount: 0 } } as Partial<DashboardViewModelV1>);
+    const host = mount();
+    host.push({ structuredContent: data });
+    await advance(60_000);
+    const background = pendingCall(host, 'olympus_dashboard');
+    host.button('Edit').click();
+    answer(host, pendingCall(host, CHATGPT_PRIVACY_TOOLS.get), {
+      structuredContent: { rules: 0, pendingCount: 0, described: true },
+      _meta: { [CHATGPT_PRIVACY_META_KEY]: { description: 'my health and money', rules: [], pendingCount: 0 } },
+    });
+    await flush();
+    const area = host.win.document.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    area.focus();
+    area.setSelectionRange(3, 8);
+    answer(host, background, { structuredContent: { ...data, generatedAt: ago(0) } });
+    await flush();
+    // A host-delivered result while the screen is open is kept, not drawn over it.
+    host.push({ structuredContent: data });
+    await flush();
+    const now = host.win.document.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    expect(now).toBe(area);
+    expect([now.selectionStart, now.selectionEnd]).toEqual([3, 8]);
+    await advance(10 * MIN);
+    expect(dashboardCalls(host)).toBe(1);
+  }));
+
+  test('any good dashboard ends a failure streak: a host result, and Try again', withFakeTimers(async () => {
+    const host = mount();
+    host.push({ structuredContent: working() });
+    await advance(15_000);
+    host.respond('tools/call', undefined, { code: -32000, message: 'unreachable' });
+    await flush();
+    await advance(30_000);
+    expect(dashboardCalls(host)).toBe(2);
+    host.respond('tools/call', undefined, { code: -32000, message: 'unreachable' });
+    await flush();
+    // Backed off to 60 s; a host-delivered dashboard resets the pace to 15 s.
+    host.push({ structuredContent: working() });
+    await advance(15_000);
+    expect(dashboardCalls(host)).toBe(3);
+    host.respond('tools/call', undefined, { code: -32000, message: 'unreachable' });
+    await flush();
+    // Backed off to 30 s; Try again succeeds in the foreground and resets it too.
+    host.button('Try again').click();
+    expect(dashboardCalls(host)).toBe(4);
+    host.respond('tools/call', { structuredContent: working() });
+    await flush();
+    await advance(15_000);
+    expect(dashboardCalls(host)).toBe(5);
+  }));
+
+  test('"Updated … ago" appears and moves on by itself, with no new data and no tool call', withFakeTimers(async () => {
+    const host = mount({ html: chatgptDashboardPageHtml({ resultTimeoutMs: 5_000, refresh: { idleMs: 24 * 60 * MIN } }) });
+    host.push({ structuredContent: { ...settled(), generatedAt: ago(9.5 * MIN) } });
+    expect(host.text()).not.toContain('Updated');
+    await advance(30_000);
+    expect(host.text()).toContain('Updated 10 min ago');
+    await advance(60_000);
+    expect(host.text()).toContain('Updated 11 min ago');
+    expect(dashboardCalls(host)).toBe(0);
+  }));
 });
 
 function rgb(hex: string): [number, number, number] {
