@@ -7945,7 +7945,6 @@ var init_engine = __esm(() => {
   ]);
   CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
 });
-
 // src/workers/classification/tier-classifier.ts
 var UNDECIDED_TIER_SNIFFER;
 var init_tier_classifier = __esm(() => {
@@ -13490,7 +13489,7 @@ import { isAbsolute as relayIsAbsolute } from "node:path";
 import { fileURLToPath as relayFileURLToPath } from "node:url";
 
 // src/core/remote-access.ts
-import { randomBytes as raRandomBytes } from "node:crypto";
+import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
 import {
   chmodSync as raChmodSync,
   lstatSync as raLstatSync,
@@ -13498,6 +13497,7 @@ import {
   readFileSync as raReadFileSync,
   renameSync as raRenameSync,
   statSync as raStatSync,
+  unlinkSync as raUnlinkSync,
   writeFileSync as raWriteFileSync
 } from "node:fs";
 import { homedir as raHomedir } from "node:os";

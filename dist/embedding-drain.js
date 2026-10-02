@@ -8348,6 +8348,20 @@ var init_sender_rules = __esm(() => {
   DOMAIN_CHAR = /[a-z0-9.-]/i;
 });
 
+// src/core/location-rules.ts
+function normalizeLocationPath(value) {
+  return value.trim().toLowerCase().replace(/\/+$/, "");
+}
+function pathPrefixMatches(path, prefix) {
+  if (!prefix.trim() || path === undefined || !path.trim())
+    return false;
+  const folder = normalizeLocationPath(prefix);
+  if (folder === "")
+    return true;
+  const value = normalizeLocationPath(path);
+  return value === folder || value.startsWith(`${folder}/`);
+}
+
 // src/workers/classification/tier-classifier.ts
 function tierRank(tier) {
   return TIER_RANK[tier];
@@ -8741,7 +8755,7 @@ function ownerRuleMatches(rule, signals, provider) {
     return false;
   switch (rule.match.kind) {
     case "pathPrefix":
-      return (signals.path ?? "").trim().toLowerCase().startsWith(value);
+      return pathPrefixMatches(signals.path, value);
     case "folderKey":
     case "chat":
       return (signals.folderKeys ?? []).some((key) => key.trim().toLowerCase() === value);

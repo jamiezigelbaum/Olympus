@@ -13489,6 +13489,26 @@ var init_sender_rules = __esm(() => {
   DOMAIN_CHAR = /[a-z0-9.-]/i;
 });
 
+// src/core/location-rules.ts
+function normalizeLocationPath(value) {
+  return value.trim().toLowerCase().replace(/\/+$/, "");
+}
+function pathPrefixMatches(path, prefix) {
+  if (!prefix.trim() || path === undefined || !path.trim())
+    return false;
+  const folder = normalizeLocationPath(prefix);
+  if (folder === "")
+    return true;
+  const value = normalizeLocationPath(path);
+  return value === folder || value.startsWith(`${folder}/`);
+}
+function locationKeyMatches(keys, value) {
+  const wanted = value.trim().toLowerCase();
+  if (!wanted)
+    return false;
+  return keys.some((key) => key.trim().toLowerCase() === wanted);
+}
+
 // src/workers/classification/tier-classifier.ts
 function tierRank(tier) {
   return TIER_RANK[tier];
@@ -13882,7 +13902,7 @@ function ownerRuleMatches(rule, signals, provider) {
     return false;
   switch (rule.match.kind) {
     case "pathPrefix":
-      return (signals.path ?? "").trim().toLowerCase().startsWith(value);
+      return pathPrefixMatches(signals.path, value);
     case "folderKey":
     case "chat":
       return (signals.folderKeys ?? []).some((key) => key.trim().toLowerCase() === value);
@@ -57620,6 +57640,7 @@ var init_native_worker_service = __esm(() => {
 var exports_remote_access = {};
 __export(exports_remote_access, {
   writeRemoteAccessStatus: () => writeRemoteAccessStatus,
+  writeRelaySecret: () => writeRelaySecret,
   resolveRemoteAccessUrls: () => resolveRemoteAccessUrls,
   resolveRemoteAccessMode: () => resolveRemoteAccessMode,
   remoteAccessStatusView: () => remoteAccessStatusView,
@@ -57634,14 +57655,18 @@ __export(exports_remote_access, {
   emptyRemoteAccessStatus: () => emptyRemoteAccessStatus,
   demoInstallMarked: () => demoInstallMarked,
   createRemotePublicUrlSource: () => createRemotePublicUrlSource,
+  createRelayedRequestCheck: () => createRelayedRequestCheck,
+  clearRelaySecret: () => clearRelaySecret,
+  carriesRelayMarker: () => carriesRelayMarker,
   REMOTE_ACCESS_STATUS_SCHEMA: () => REMOTE_ACCESS_STATUS_SCHEMA,
   REMOTE_ACCESS_DIR_NAME: () => REMOTE_ACCESS_DIR_NAME,
+  RELAY_SECRET_FILE: () => RELAY_SECRET_FILE,
   RELAYED_REQUEST_HEADER: () => RELAYED_REQUEST_HEADER,
   DEMO_INSTALL_MARKER_TEXT: () => DEMO_INSTALL_MARKER_TEXT,
   DEMO_INSTALL_MARKER_FILE: () => DEMO_INSTALL_MARKER_FILE,
   DEFAULT_RELAY_HOST: () => DEFAULT_RELAY_HOST
 });
-import { randomBytes as raRandomBytes } from "node:crypto";
+import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
 import {
   chmodSync as raChmodSync,
   lstatSync as raLstatSync,
@@ -57649,6 +57674,7 @@ import {
   readFileSync as raReadFileSync,
   renameSync as raRenameSync,
   statSync as raStatSync,
+  unlinkSync as raUnlinkSync,
   writeFileSync as raWriteFileSync
 } from "node:fs";
 import { homedir as raHomedir } from "node:os";
@@ -57799,8 +57825,45 @@ function demoInstallMarked(dir) {
   return text !== undefined && text.split(`
 `, 1)[0].trim() === DEMO_INSTALL_MARKER_TEXT;
 }
-function isRelayedRequest(request) {
+function carriesRelayMarker(request) {
   return request.headers.has(RELAYED_REQUEST_HEADER);
+}
+function writeRelaySecret(dir, secret) {
+  if (!RELAY_SECRET_PATTERN.test(secret))
+    throw new Error("relay secret must be 32 random bytes, base64url");
+  ensureRemoteAccessDir(dir);
+  writePrivateText(raJoin(dir, RELAY_SECRET_FILE), `${secret}
+`);
+}
+function clearRelaySecret(dir, secret) {
+  const path = raJoin(dir, RELAY_SECRET_FILE);
+  if (readPrivateFile(path)?.trim() !== secret)
+    return;
+  try {
+    raUnlinkSync(path);
+  } catch {}
+}
+function createRelayedRequestCheck(options = {}) {
+  const read = cachedFileReader(() => raJoin(options.dir ? options.dir() : remoteAccessDir(process.env), RELAY_SECRET_FILE), (text) => {
+    const secret = text.trim();
+    return RELAY_SECRET_PATTERN.test(secret) ? Buffer.from(secret, "utf8") : undefined;
+  }, 0, options.now ?? Date.now);
+  return (request) => {
+    const value = request.headers.get(RELAYED_REQUEST_HEADER);
+    if (!value)
+      return false;
+    const secret = read();
+    if (!secret)
+      return false;
+    const given = Buffer.from(value, "utf8");
+    return given.length === secret.length && raTimingSafeEqual(given, secret);
+  };
+}
+function isRelayedRequest(request) {
+  if (!request.headers.has(RELAYED_REQUEST_HEADER))
+    return false;
+  defaultRelayedCheck ??= createRelayedRequestCheck();
+  return defaultRelayedCheck(request);
 }
 function resolveRemoteAccessUrls(input) {
   const local = localWorkerOrigin(input);
@@ -57923,13 +57986,14 @@ function processIsAlive(pid) {
     return error.code === "EPERM";
   }
 }
-var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v2", REMOTE_ACCESS_DIR_NAME = "connect-relay", RELAYED_REQUEST_HEADER = "x-olympus-relay", STATUS_FILE = "status.json", DNS_NAME, INSTALL_ID, LOOPBACK_HOSTNAMES2, DEFAULT_RELAY_HOST = "mcp.olympusplugin.ai", DEMO_INSTALL_MARKER_FILE = "demo-install", DEMO_INSTALL_MARKER_TEXT = "olympus demo install: synthetic sample data only";
+var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v2", REMOTE_ACCESS_DIR_NAME = "connect-relay", RELAYED_REQUEST_HEADER = "x-olympus-relay", STATUS_FILE = "status.json", DNS_NAME, INSTALL_ID, LOOPBACK_HOSTNAMES2, DEFAULT_RELAY_HOST = "mcp.olympusplugin.ai", DEMO_INSTALL_MARKER_FILE = "demo-install", DEMO_INSTALL_MARKER_TEXT = "olympus demo install: synthetic sample data only", RELAY_SECRET_FILE = "relay-secret", RELAY_SECRET_PATTERN, defaultRelayedCheck;
 var init_remote_access = __esm(() => {
   init_remote_public_url();
   init_worker_auth();
   DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
   INSTALL_ID = /^[a-z2-7]{32}$/;
   LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
+  RELAY_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 });
 
 // src/core/native-relay-service.ts
@@ -73620,12 +73684,14 @@ async function startRelayRuntime(options) {
       status.last_connected_at = new Date(next.connectedAt).toISOString();
     write();
   };
+  const relaySecret = randomBytes12(32).toString("base64url");
+  writeRelaySecret(dir, relaySecret);
   const client = new RelayClient({
     relayHost,
     ...options.relayUrl ? { relayUrl: options.relayUrl } : {},
     identity,
     target,
-    relaySecret: randomBytes12(32).toString("base64url"),
+    relaySecret,
     forwardedPaths: demoInstallMarked(dir) ? [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH] : FORWARDED_PATHS,
     onStatus,
     ...options.heartbeatMs ? { heartbeatMs: options.heartbeatMs } : {},
@@ -73651,6 +73717,7 @@ async function startRelayRuntime(options) {
       stopped = true;
       clearInterval(reassert);
       await client.stop();
+      clearRelaySecret(dir, relaySecret);
       status.relay = { state: "stopped", reason: null, retry_in_ms: null };
       write();
     }
@@ -80806,6 +80873,7 @@ function renderLoopbackConsentPage(input) {
 ${input.verifiedHost ? `<div class="host">${escapeHtml(input.verifiedHost)}</div>` : '<div class="host unverified">Not verified</div><p class="meta">A program on this computer named itself</p>'}
 <p class="meta">After you approve, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
 </div>
+${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : ""}
 <p><strong>Connecting links Olympus on this Mac to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
 <p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
 <p><strong>${name} never sees the text of your Private items or any Secret.</strong> For Private items it gets only answers that Venice or a model on this Mac reasoned out, with each item's title and source.</p>
@@ -102304,6 +102372,8 @@ function chatgptPickerProgram(kit) {
     const args = { source_id: p.id };
     if (parentKey)
       args.parent_key = parentKey;
+    if (parentKey && (p.ancestors.get(parentKey) || []).length)
+      args.ancestor_keys = p.ancestors.get(parentKey).slice(0, 64);
     if (cursor)
       args.cursor = cursor;
     p.loading = parentKey || "root";
@@ -103417,6 +103487,7 @@ function chatgptPrivacyProgram(kit) {
       return copy;
     });
     s.pendingCount = typeof data.pendingCount === "number" && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
+    s.confirmation = typeof data.confirmation === "string" ? data.confirmation : "";
   }
   function load() {
     s.loading = true;
@@ -103476,6 +103547,8 @@ function chatgptPrivacyProgram(kit) {
       return;
     const rules = kept();
     const args = { description: s.description.trim(), rules: rules.map(ruleOut) };
+    if (s.confirmation)
+      args.confirmation = s.confirmation;
     s.saving = true;
     s.saveError = "";
     kit.render("privacy:save");
@@ -106189,7 +106262,7 @@ function modelRetryToolResult(result) {
   const text = model === "answers" ? "Olympus is installing its built-in answer model again on the Mac." : "Olympus is installing its built-in search model again on the Mac.";
   return { content: [{ type: "text", text }], structuredContent: structured };
 }
-function privacyToolResult(settings, status) {
+function privacyToolResult(settings, status, confirmation) {
   const copy = copyPrivacySettings(settings);
   const summary = {
     status: status === "saved" ? "saved" : "current",
@@ -106208,7 +106281,7 @@ function privacyToolResult(settings, status) {
   return {
     content: [{ type: "text", text: parts.join(" ") }],
     structuredContent: summary,
-    _meta: { [PRIVACY_META_KEY]: copy }
+    _meta: { [PRIVACY_META_KEY]: confirmation ? { ...copy, confirmation } : copy }
   };
 }
 function copyPrivacySettings(settings) {
@@ -106505,6 +106578,7 @@ var init_response_builder = __esm(() => {
     disconnect_incomplete: "Olympus couldn't finish disconnecting this source. Try again.",
     picker_unavailable: "Olympus could not list this source right now. Try again shortly.",
     confirm_whole_account: "Choosing the whole account needs the owner's confirmation in the Olympus panel.",
+    privacy_owner_only: "Only the owner can remove a privacy rule or change what they said is private, in the Olympus panel.",
     embedding_change_needs_approval: "Changing the search model re-indexes every source and needs the owner's approval on the Mac.",
     model_not_configured: "That model is not set up on the Mac. Set it up in Olympus on the Mac first.",
     unknown_tool: "Olympus does not have that tool.",
@@ -106532,13 +106606,14 @@ function secretLocationsFromRules(rules) {
     const value = rule.match.value;
     switch (rule.match.kind) {
       case "folderKey":
-        folderKeys.add(value);
+        folderKeys.add(value.trim().toLowerCase());
         break;
       case "pathPrefix":
-        pathPrefixes.push(normalizePath2(value));
+        if (value.trim())
+          pathPrefixes.push(normalizeLocationPath(value));
         break;
       case "label":
-        labelIds.add(value);
+        labelIds.add(value.trim().toLowerCase());
         break;
       case "sender":
         senders.push(value.trim().toLowerCase());
@@ -106553,25 +106628,26 @@ function loadSecretLocations(env = process.env) {
   return secretLocationsFromRules(loadOwnerTierRules({ env, allowMissing: true }));
 }
 function isSecretFolder(locations, key, ancestorKeys = []) {
-  if (locations.folderKeys.has(key) || ancestorKeys.some((ancestor) => locations.folderKeys.has(ancestor)))
-    return true;
+  const keys = [key, ...ancestorKeys];
+  for (const folderKey of locations.folderKeys)
+    if (locationKeyMatches(keys, folderKey))
+      return true;
   if (!key.startsWith("/"))
     return false;
-  const path = normalizePath2(key);
-  return locations.pathPrefixes.some((prefix) => prefix === "" || path === prefix || path.startsWith(`${prefix}/`));
+  return locations.pathPrefixes.some((prefix) => pathPrefixMatches(key, prefix === "" ? "/" : prefix));
 }
 function isSecretLabel(locations, labelId) {
-  return locations.labelIds.has(labelId);
+  for (const label of locations.labelIds)
+    if (locationKeyMatches([labelId], label))
+      return true;
+  return false;
 }
 function isSecretSender(locations, sender) {
-  const value = sender.trim().toLowerCase();
-  return locations.senders.some((rule) => rule.startsWith("@") ? value.endsWith(rule) : value === rule);
-}
-function normalizePath2(value) {
-  return value.trim().toLowerCase().replace(/\/+$/, "");
+  return locations.senders.some((rule) => ownerSenderRuleMatches(sender, rule, true));
 }
 var NO_SECRET_LOCATIONS;
 var init_scope_privacy = __esm(() => {
+  init_sender_rules();
   init_tier_rules();
   NO_SECRET_LOCATIONS = {
     folderKeys: new Set,
@@ -106582,6 +106658,7 @@ var init_scope_privacy = __esm(() => {
 });
 
 // src/workers/chatgpt/setup-tools.ts
+import { randomBytes as setupRandomBytes } from "node:crypto";
 function isSetupTool(name) {
   return SETUP_TOOL_NAMES.has(name);
 }
@@ -106631,16 +106708,25 @@ async function callSetupTool(name, args, backend) {
           throw new ChatGptSurfaceError("model_not_configured");
         return modelRetryToolResult({ status: "retrying", model });
       }
-      case PRIVACY_GET_TOOL_NAME:
-        return privacyToolResult(visiblePrivacy(backend.privacySettings(), secretLocations(backend)), "current");
+      case PRIVACY_GET_TOOL_NAME: {
+        const visible = visiblePrivacy(backend.privacySettings(), secretLocations(backend));
+        return privacyToolResult(visible, "current", issuePrivacyConfirmation(backend));
+      }
       case PRIVACY_SET_TOOL_NAME: {
+        const { confirmation, ...fields } = args;
+        if (confirmation !== undefined && typeof confirmation !== "string")
+          throw new ChatGptSurfaceError("invalid_params");
         let update;
         try {
-          update = parsePrivacyProfileInput(args);
+          update = parsePrivacyProfileInput(fields);
         } catch {
           throw new ChatGptSurfaceError("invalid_params");
         }
         const secrets = secretLocations(backend);
+        const confirmed = confirmation !== undefined && privacyConfirmationValid(backend, confirmation);
+        if (!confirmed && lowersPrivacy(update, visiblePrivacy(backend.privacySettings(), secrets))) {
+          throw new ChatGptSurfaceError("privacy_owner_only");
+        }
         const rules = update.rules ? [
           ...update.rules.filter((rule) => !isSecretPrivacyRule(secrets, rule)),
           ...backend.privacySettings().rules.filter((rule) => isSecretPrivacyRule(secrets, rule))
@@ -106649,6 +106735,8 @@ async function callSetupTool(name, args, backend) {
           ...update.description !== undefined ? { description: update.description } : {},
           ...rules ? { rules } : {}
         });
+        if (confirmed)
+          spendPrivacyConfirmation(backend, confirmation);
         return privacyToolResult(visiblePrivacy(saved, secrets), "saved");
       }
       default:
@@ -106657,6 +106745,44 @@ async function callSetupTool(name, args, backend) {
   } catch (error2) {
     throw surfaceError(error2);
   }
+}
+function lowersPrivacy(update, current) {
+  if (update.description !== undefined && update.description !== current.description)
+    return true;
+  if (!update.rules)
+    return false;
+  const kept = new Set(update.rules.map((rule) => privacyRuleId(rule)));
+  return current.rules.some((rule) => !kept.has(privacyRuleId(rule)));
+}
+function confirmationsFor(backend) {
+  let issued = privacyConfirmations.get(backend);
+  if (!issued) {
+    issued = new Map;
+    privacyConfirmations.set(backend, issued);
+  }
+  const now = Date.now();
+  for (const [token, expiresAt] of issued)
+    if (expiresAt <= now)
+      issued.delete(token);
+  return issued;
+}
+function issuePrivacyConfirmation(backend) {
+  const issued = confirmationsFor(backend);
+  while (issued.size >= PRIVACY_CONFIRMATIONS_MAX) {
+    const oldest = issued.keys().next().value;
+    if (oldest === undefined)
+      break;
+    issued.delete(oldest);
+  }
+  const token = `opc_${setupRandomBytes(24).toString("base64url")}`;
+  issued.set(token, Date.now() + PRIVACY_CONFIRMATION_TTL_MS);
+  return token;
+}
+function privacyConfirmationValid(backend, token) {
+  return confirmationsFor(backend).has(token);
+}
+function spendPrivacyConfirmation(backend, token) {
+  confirmationsFor(backend).delete(token);
 }
 function visiblePrivacy(settings, secrets) {
   return { ...settings, rules: settings.rules.filter((rule) => !isSecretPrivacyRule(secrets, rule)) };
@@ -106676,10 +106802,11 @@ async function scopeList(backend, args) {
     return mailList(await backend.browseMail(draft), secrets);
   }
   const parentKey = optionalString11(args.parent_key);
+  const ancestorKeys = optionalKeys2(args.ancestor_keys);
   const after = args.cursor === undefined ? undefined : decodeSortedCursor(requiredString6(args.cursor), parentKey);
-  if (parentKey && isSecretFolder(secrets, parentKey))
+  if (parentKey && isSecretFolder(secrets, parentKey, ancestorKeys))
     throw new ChatGptSurfaceError("invalid_params");
-  return sortedFolderPage(await browseWholeLevel(backend, sourceId, parentKey), secrets, parentKey, after);
+  return sortedFolderPage(await browseWholeLevel(backend, sourceId, parentKey), secrets, parentKey, after, ancestorKeys);
 }
 async function browseWholeLevel(backend, sourceId, parentKey) {
   const first = await backend.browseFolders({ sourceId, ...parentKey ? { parentKey } : {} });
@@ -106702,8 +106829,8 @@ async function browseWholeLevel(backend, sourceId, parentKey) {
 function compareFolders(a, b) {
   return FOLDER_COLLATOR.compare(a.name, b.name) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 }
-function sortedFolderPage(browse, secrets, parentKey, after) {
-  const list = folderList(browse, secrets);
+function sortedFolderPage(browse, secrets, parentKey, after, ancestorKeys = []) {
+  const list = folderList(browse, secrets, ancestorKeys);
   const sorted = [...list.nodes].sort(compareFolders);
   const rest = after ? sorted.filter((node) => compareFolders(node, after) > 0) : sorted;
   const page = rest.slice(0, SCOPE_LIST_PAGE_SIZE);
@@ -106767,14 +106894,14 @@ async function scopeSet(backend, args) {
     return scopeConflictToolResult(current);
   }
 }
-function folderList(browse, secrets) {
+function folderList(browse, secrets, ancestorKeys = []) {
   return {
     kind: "folders",
     source_id: browse.source_id,
     account_generation: browse.account_generation,
     scope_revision: browse.scope_revision,
     status: browse.status,
-    nodes: browse.nodes.filter((node) => !isSecretFolder(secrets, node.key, node.parent_key ? [node.parent_key] : [])).map((node) => ({
+    nodes: browse.nodes.filter((node) => !isSecretFolder(secrets, node.key, node.parent_key ? [...ancestorKeys, node.parent_key] : ancestorKeys)).map((node) => ({
       key: node.key,
       ...node.parent_key ? { parent_key: node.parent_key } : {},
       name: node.name,
@@ -106856,6 +106983,13 @@ function requiredString6(value) {
     return value;
   throw new ChatGptSurfaceError("invalid_params");
 }
+function optionalKeys2(value) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value) || value.length > 64)
+    throw new ChatGptSurfaceError("invalid_params");
+  return value.map(requiredString6);
+}
 function optionalString11(value) {
   if (value === undefined)
     return;
@@ -106872,7 +107006,7 @@ function surfaceError(error2) {
     return new ChatGptSurfaceError("internal");
   return new ChatGptSurfaceError("internal");
 }
-var SetupBackendError, OAUTH2_REQUIRED, OAUTH_SOURCES2, FOLDER_SOURCE_IDS, SCOPE_SOURCE_IDS3, DISCONNECT_SOURCE_IDS3, WIDGET_AND_MODEL, WIDGET_ONLY, SELECTION_SCHEMA, MAIL_DRAFT_SCHEMA, CONNECT_SOURCE_TOOL, SCOPE_LIST_TOOL, SCOPE_SET_TOOL, DISCONNECT_SOURCE_TOOL, MODEL_SET_TOOL, MODEL_RETRY_TOOL, PRIVACY_RULE_SCHEMA, PRIVACY_GET_TOOL, PRIVACY_SET_TOOL, SETUP_TOOLS, SETUP_TOOL_NAMES, SCOPE_LIST_PAGE_SIZE = 100, MAX_PROVIDER_PAGES = 50, FOLDER_COLLATOR, SORTED_CURSOR_PREFIX = "olysort1.", BACKEND_CODES;
+var SetupBackendError, OAUTH2_REQUIRED, OAUTH_SOURCES2, FOLDER_SOURCE_IDS, SCOPE_SOURCE_IDS3, DISCONNECT_SOURCE_IDS3, WIDGET_AND_MODEL, WIDGET_ONLY, SELECTION_SCHEMA, MAIL_DRAFT_SCHEMA, CONNECT_SOURCE_TOOL, SCOPE_LIST_TOOL, SCOPE_SET_TOOL, DISCONNECT_SOURCE_TOOL, MODEL_SET_TOOL, MODEL_RETRY_TOOL, PRIVACY_RULE_SCHEMA, PRIVACY_GET_TOOL, PRIVACY_SET_TOOL, SETUP_TOOLS, SETUP_TOOL_NAMES, PRIVACY_CONFIRMATION_TTL_MS, PRIVACY_CONFIRMATIONS_MAX = 32, privacyConfirmations, SCOPE_LIST_PAGE_SIZE = 100, MAX_PROVIDER_PAGES = 50, FOLDER_COLLATOR, SORTED_CURSOR_PREFIX = "olysort1.", BACKEND_CODES;
 var init_setup_tools = __esm(() => {
   init_mail_source_scope();
   init_privacy_profile();
@@ -106948,6 +107082,7 @@ var init_setup_tools = __esm(() => {
       properties: {
         source_id: { type: "string", enum: [...SCOPE_SOURCE_IDS3] },
         parent_key: { type: "string", maxLength: 4096 },
+        ancestor_keys: { type: "array", items: { type: "string", maxLength: 4096 }, maxItems: 64 },
         cursor: { type: "string", maxLength: 4096 },
         draft: MAIL_DRAFT_SCHEMA
       },
@@ -107042,8 +107177,8 @@ var init_setup_tools = __esm(() => {
     description: [
       "Read what the user told Olympus is private for them: their own description, and how many folders, labels or",
       "senders they marked as always Private (the panel shows which). Use it during setup, or when the user asks",
-      "about their privacy settings. If nothing is set yet, ask the user in their own words what is private for them",
-      "and save it with olympus_privacy_set. Takes no arguments. Read-only."
+      "about their privacy settings. Only the owner changes these settings, in the Olympus panel: if nothing is set yet,",
+      "suggest they open the Olympus panel and choose Set up privacy. Takes no arguments. Read-only."
     ].join(" "),
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -107057,19 +107192,21 @@ var init_setup_tools = __esm(() => {
       "Save what is private for the user. `description` is the user's answer, in their own words, to",
       `"What's private for you?" (for example health, money, family matters); Olympus's private classifier on the Mac`,
       "reads it to keep matching items Private, so they never reach ChatGPT. `rules` is the full list of folders,",
-      "labels and senders that are always Private; the Olympus panel builds it. Each field given replaces the saved one."
+      "labels and senders that are always Private; the Olympus panel builds it. Each field given replaces the saved one.",
+      "Only the Olympus panel calls this: removing a rule or changing the description needs the panel's confirmation."
     ].join(" "),
     inputSchema: {
       type: "object",
       properties: {
         description: { type: "string", maxLength: 2000, description: "The user's own words about what is private for them." },
-        rules: { type: "array", items: PRIVACY_RULE_SCHEMA, maxItems: 100 }
+        rules: { type: "array", items: PRIVACY_RULE_SCHEMA, maxItems: 100 },
+        confirmation: { type: "string", maxLength: 128, description: "The panel's confirmation from olympus_privacy_get." }
       },
       additionalProperties: false
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     securitySchemes: OAUTH2_REQUIRED,
-    _meta: WIDGET_AND_MODEL
+    _meta: WIDGET_ONLY
   };
   SETUP_TOOLS = [
     CONNECT_SOURCE_TOOL,
@@ -107082,6 +107219,8 @@ var init_setup_tools = __esm(() => {
     PRIVACY_SET_TOOL
   ];
   SETUP_TOOL_NAMES = new Set(SETUP_TOOLS.map((tool) => tool.name));
+  PRIVACY_CONFIRMATION_TTL_MS = 30 * 60000;
+  privacyConfirmations = new WeakMap;
   FOLDER_COLLATOR = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
   BACKEND_CODES = {
     model_setup_required: "models_not_ready",
@@ -107109,7 +107248,7 @@ function listChatGptTools(ctx, options = {}) {
   if (answerToolsListed(ctx, options))
     tools.push(...ANSWER_TOOLS);
   tools.push(...SETUP_TOOLS);
-  return tools;
+  return options.readOnly ? tools.filter((tool) => tool.annotations.readOnlyHint) : tools;
 }
 function answerToolsListed(ctx, options) {
   if (options.answerModelAvailable && !options.answerModelAvailable())
@@ -107122,6 +107261,9 @@ function answerToolsListed(ctx, options) {
 async function callChatGptTool(name, args, ctx, options, signal, detachedContext) {
   const later = detachedContext ?? (() => ctx);
   try {
+    if (options.readOnly && !CHATGPT_TOOLS.some((tool) => tool.name === name && tool.annotations.readOnlyHint)) {
+      throw new ChatGptSurfaceError("unknown_tool");
+    }
     switch (name) {
       case DASHBOARD_TOOL_NAME:
         return dashboardToolResult(await dashboardViewModel(options, signal));
@@ -107167,7 +107309,7 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
         const pending = match.count > 0 ? { question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx), detail } : undefined;
         const jobId = pendingJobId(raw);
         if (jobId) {
-          rememberPrivateMatch(jobId, pending);
+          rememberPrivateMatch(privateCaller(ctx), jobId, pending);
           return answerToolResult(raw);
         }
         const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
@@ -107181,8 +107323,8 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
           throw new ChatGptSurfaceError("invalid_params");
         const raw = await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId });
         const done = pendingJobId(raw) === undefined;
-        const pending = privateMatchForJob(jobId, done);
-        const privateMatch = done && pending ? beginPrivateAnswer(pending, options) : undefined;
+        const pending = privateMatchForJob(privateCaller(ctx), jobId, done);
+        const privateMatch = done && isAnswered(raw) && pending ? beginPrivateAnswer(pending, options) : undefined;
         return answerToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       default:
@@ -107259,7 +107401,14 @@ function pendingJobId(raw) {
   const record3 = typeof raw === "object" && raw !== null ? raw : undefined;
   return record3?.status === "working" && typeof record3.job_id === "string" ? record3.job_id : undefined;
 }
-function rememberPrivateMatch(jobId, match) {
+function isAnswered(raw) {
+  const record3 = typeof raw === "object" && raw !== null ? raw : undefined;
+  return typeof record3?.answer === "string";
+}
+function privateMatchKey(caller, jobId) {
+  return `${caller ?? ""}\x00${jobId}`;
+}
+function rememberPrivateMatch(caller, jobId, match) {
   const now = Date.now();
   for (const [id, entry] of privateMatchByJob)
     if (entry.expiresAt <= now)
@@ -107270,12 +107419,13 @@ function rememberPrivateMatch(jobId, match) {
       break;
     privateMatchByJob.delete(oldest);
   }
-  privateMatchByJob.set(jobId, { match, expiresAt: now + PRIVATE_MATCH_TTL_MS });
+  privateMatchByJob.set(privateMatchKey(caller, jobId), { match, expiresAt: now + PRIVATE_MATCH_TTL_MS });
 }
-function privateMatchForJob(jobId, done) {
-  const entry = privateMatchByJob.get(jobId);
+function privateMatchForJob(caller, jobId, done) {
+  const key = privateMatchKey(caller, jobId);
+  const entry = privateMatchByJob.get(key);
   if (done)
-    privateMatchByJob.delete(jobId);
+    privateMatchByJob.delete(key);
   return entry !== undefined && entry.expiresAt > Date.now() ? entry.match : undefined;
 }
 async function runOperation(name, ctx, params) {
@@ -107574,12 +107724,13 @@ function withRemoteMcpRoute(remoteMcp, rest) {
   return (request) => isRemoteMcpRequest(request) ? remoteMcp(request) : rest(request);
 }
 function createRemoteMcpHandler(options) {
+  const isRelayed = options.isRelayed ?? isRelayedRequest;
   return async (request) => {
     const verification = authenticateRemoteRequest(request, options);
     if (!verification.ok)
       return verification.response;
     const response = await serveAuthenticated(request, verification);
-    return isRelayedRequest(request) ? markAuthenticated(response) : response;
+    return isRelayed(request) ? markAuthenticated(response) : response;
   };
   async function serveAuthenticated(request, verification) {
     if (request.method !== "POST") {
@@ -107595,7 +107746,8 @@ function createRemoteMcpHandler(options) {
     } catch {}
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
-    const server = options.chatgpt?.servesRequest(request) ? createChatGptMcpServer(() => ctx, options.chatgpt, () => options.makeOperationContext(caller, new AbortController().signal)) : createOlympusMcpServer("remote", () => ctx);
+    const chatgpt = options.chatgpt?.servesRequest(request, verification.connection) ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true } : undefined;
+    const server = chatgpt ? createChatGptMcpServer(() => ctx, chatgpt, () => options.makeOperationContext(caller, new AbortController().signal)) : createOlympusMcpServer("remote", () => ctx);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);
@@ -107740,9 +107892,58 @@ var init_remote_mcp = __esm(() => {
   init_tokens();
 });
 
+// src/core/request-peer.ts
+var exports_request_peer = {};
+__export(exports_request_peer, {
+  withRequestPeer: () => withRequestPeer,
+  requestPeerAddress: () => requestPeerAddress,
+  recordRequestPeer: () => recordRequestPeer,
+  isLoopbackAddress: () => isLoopbackAddress
+});
+function recordRequestPeer(request, address) {
+  if (address)
+    peers.set(request, address);
+}
+function requestPeerAddress(request) {
+  return peers.get(request);
+}
+function isLoopbackAddress(address) {
+  if (!address)
+    return false;
+  const value = address.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (value === "::1" || value === "0:0:0:0:0:0:0:1")
+    return true;
+  const v4 = value.startsWith("::ffff:") ? value.slice("::ffff:".length) : value;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4);
+}
+function withRequestPeer(handler) {
+  return (request, server) => {
+    try {
+      recordRequestPeer(request, server?.requestIP(request)?.address);
+    } catch {}
+    return handler(request);
+  };
+}
+var peers;
+var init_request_peer = __esm(() => {
+  peers = new WeakMap;
+});
+
 // src/workers/remote-oauth/pinned-clients.ts
+var exports_pinned_clients = {};
+__export(exports_pinned_clients, {
+  pinnedClient: () => pinnedClient,
+  isClientIdMetadataUrl: () => isClientIdMetadataUrl,
+  isChatGptGrant: () => isChatGptGrant,
+  CHATGPT_REDIRECT_URI: () => CHATGPT_REDIRECT_URI,
+  CHATGPT_CODEX_CLIENT_ID: () => CHATGPT_CODEX_CLIENT_ID,
+  CHATGPT_CLIENT_ID: () => CHATGPT_CLIENT_ID
+});
 function isClientIdMetadataUrl(clientId) {
   return clientId.startsWith("https://");
+}
+function isChatGptGrant(connection) {
+  return typeof connection.clientId === "string" && pinnedClient(connection.clientId) !== undefined;
 }
 function pinnedClient(clientId) {
   if (clientId === CHATGPT_CODEX_CLIENT_ID) {
@@ -107773,7 +107974,9 @@ var exports_demo_consent = {};
 __export(exports_demo_consent, {
   verifyDemoSignIn: () => verifyDemoSignIn,
   resolveDemoConsent: () => resolveDemoConsent,
+  isDemoGrant: () => isDemoGrant,
   demoSignInLimiter: () => demoSignInLimiter,
+  demoGrantDisplayName: () => demoGrantDisplayName,
   DEMO_SIGN_IN_WINDOW_MS: () => DEMO_SIGN_IN_WINDOW_MS,
   DEMO_SIGN_IN_BURST: () => DEMO_SIGN_IN_BURST
 });
@@ -107801,20 +108004,35 @@ async function verifyDemoSignIn(settings, username, password) {
 function demoSignInLimiter(now) {
   let tokens = DEMO_SIGN_IN_BURST;
   let last = now();
+  const refill = () => {
+    const at = now();
+    tokens = Math.min(DEMO_SIGN_IN_BURST, tokens + (at - last) / DEMO_SIGN_IN_WINDOW_MS * DEMO_SIGN_IN_BURST);
+    last = at;
+  };
   return {
     take() {
-      const at = now();
-      tokens = Math.min(DEMO_SIGN_IN_BURST, tokens + (at - last) / DEMO_SIGN_IN_WINDOW_MS * DEMO_SIGN_IN_BURST);
-      last = at;
+      refill();
       if (tokens < 1)
         return false;
       tokens -= 1;
       return true;
+    },
+    refund() {
+      refill();
+      tokens = Math.min(DEMO_SIGN_IN_BURST, tokens + 1);
     }
   };
 }
+function demoGrantDisplayName(clientName) {
+  return `${clientName} (demo sign-in)`;
+}
+function isDemoGrant(connection) {
+  const pinned = connection.clientId ? pinnedClient(connection.clientId) : undefined;
+  return pinned !== undefined && connection.displayName === demoGrantDisplayName(pinned.clientName);
+}
 var DEMO_SIGN_IN_BURST = 10, DEMO_SIGN_IN_WINDOW_MS;
 var init_demo_consent = __esm(() => {
+  init_pinned_clients();
   DEMO_SIGN_IN_WINDOW_MS = 15 * 60000;
 });
 
@@ -107916,7 +108134,8 @@ function authorizationServerMetadata(urls) {
 }
 function createRemoteOAuthHandler(options) {
   const now = options.now ?? Date.now;
-  const isRelayed = options.isRelayed ?? isRelayedRequest;
+  const isRelayed = options.isRelayed ?? carriesRelayMarker;
+  const peerAddress = options.peerAddress ?? requestPeerAddress;
   const demoAttempts = demoSignInLimiter(now);
   const demoSettings = (u) => u.installId ? options.demoConsent?.() : undefined;
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3600000, now);
@@ -107957,7 +108176,7 @@ function createRemoteOAuthHandler(options) {
       verifiedHost: undefined
     };
   };
-  const directLoopback = (request) => !isRelayed(request) && loopbackHost(request);
+  const directLoopback = (request) => !isRelayed(request) && loopbackHost(request) && isLoopbackAddress(peerAddress(request));
   const notOnThisMac = () => errorPage(403, "Approve on the Mac where Olympus runs: open the link from ChatGPT on that Mac.");
   const authorizeGet = async (request, u, demo = false) => {
     if (demo && !demoSettings(u))
@@ -108033,7 +108252,7 @@ function createRemoteOAuthHandler(options) {
     const code = u.installId ? mintCredential("code", u.installId) : randomBytes16(32).toString("base64url");
     codes.set(sha2566(code), {
       clientId: entry.client.clientId,
-      displayName: entry.client.clientName,
+      displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
       redirectUri: entry.redirectUri,
       codeChallenge: entry.codeChallenge,
       resource: entry.resource,
@@ -108068,7 +108287,9 @@ function createRemoteOAuthHandler(options) {
       return errorPage(400, "The sign-in form was malformed.");
     if (!demoAttempts.take())
       return demoPage(requestId, entry, "Too many sign-in attempts. Wait a few minutes, then try again.");
-    if (!await verifyDemoSignIn(settings, form.get("username") ?? "", form.get("password") ?? "")) {
+    if (await verifyDemoSignIn(settings, form.get("username") ?? "", form.get("password") ?? "")) {
+      demoAttempts.refund();
+    } else {
       entry.attempts += 1;
       if (entry.attempts >= CONSENT_MAX_ATTEMPTS) {
         pending.delete(requestId);
@@ -108085,7 +108306,8 @@ function createRemoteOAuthHandler(options) {
       clientName: entry.client.clientName,
       verifiedHost: entry.client.verifiedHost,
       redirectHost: redirectHost(entry.redirectUri),
-      redirectOrigin: new URL(entry.redirectUri).origin
+      redirectOrigin: new URL(entry.redirectUri).origin,
+      loopbackRedirect: isLoopbackRedirectUri(entry.redirectUri)
     }) : renderConsentPage({
       requestId,
       csrf: entry.csrf,
@@ -108104,8 +108326,9 @@ function createRemoteOAuthHandler(options) {
   const authorizePost = async (request, u) => {
     if (u.installId && !directLoopback(request))
       return notOnThisMac();
-    if (!sameOriginFormPost(request))
+    if (!(u.installId ? browserNavigationPost(request) : sameOriginFormPost(request))) {
       return errorPage(403, "This approval did not come from the Olympus page.");
+    }
     const form = await readForm(request);
     if (!form)
       return errorPage(400, "The approval form was malformed.");
@@ -108374,6 +108597,9 @@ function hostAllowed(request, urls) {
   }
   return LOOPBACK_HOSTNAMES4.has(hostname);
 }
+function browserNavigationPost(request) {
+  return request.headers.get("sec-fetch-site") === "same-origin" && request.headers.get("sec-fetch-mode") === "navigate";
+}
 function sameOriginFormPost(request) {
   const site = request.headers.get("sec-fetch-site");
   if (site !== null && site !== "same-origin")
@@ -108509,6 +108735,7 @@ var init_handler = __esm(() => {
   init_tokens();
   init_operation_caller();
   init_remote_access();
+  init_request_peer();
   init_remote_oauth_store();
   init_remote_public_url();
   init_pinned_clients();
@@ -108601,7 +108828,7 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
 import { randomBytes as randomBytes17 } from "node:crypto";
-import { statSync as statSync18 } from "node:fs";
+import { lstatSync as lstatSync20 } from "node:fs";
 function formatAnalysisTiming(timing) {
   const fields = [`outcome=${timing.outcome}`];
   if (timing.outcome === "failed")
@@ -108649,7 +108876,7 @@ function isPrivateEligible(item) {
     return false;
   for (const key of ["trust_tier", "trustTier", "tier", "content_tier", "contentTier", "metadata_tier", "metadataTier"]) {
     const tier = item[key];
-    if (typeof tier === "string" && /secret/i.test(tier))
+    if (typeof tier === "string" && (/secret/i.test(tier) || tier.trim().toUpperCase() === "S5"))
       return false;
   }
   return true;
@@ -108825,7 +109052,7 @@ class PrivateAnswerJobs {
       return { status: 429, body: { status: "rate_limited" }, retryAfterSeconds: 5 };
     let isFile = false;
     try {
-      isFile = statSync18(path).isFile();
+      isFile = lstatSync20(path).isFile();
     } catch {
       isFile = false;
     }
@@ -109752,13 +109979,15 @@ var init_private_answer_model = __esm(() => {
 // src/workers/dropbox-files/open-target.ts
 var exports_open_target = {};
 __export(exports_open_target, {
+  localOpenArguments: () => localOpenArguments,
   localDropboxRoots: () => localDropboxRoots,
   dropboxPreviewUrl: () => dropboxPreviewUrl,
-  createDropboxOpenTargets: () => createDropboxOpenTargets
+  createDropboxOpenTargets: () => createDropboxOpenTargets,
+  OPENABLE_EXTENSIONS: () => OPENABLE_EXTENSIONS
 });
-import { existsSync as existsSync47, readFileSync as readFileSync45, readdirSync as readdirSync6, realpathSync as realpathSync2, statSync as statSync19 } from "node:fs";
+import { existsSync as existsSync47, lstatSync as lstatSync21, readFileSync as readFileSync45, readdirSync as readdirSync6, realpathSync as realpathSync2, statSync as statSync18 } from "node:fs";
 import { homedir as homedir53 } from "node:os";
-import { join as join72, sep as sep7 } from "node:path";
+import { extname as extname2, join as join72, sep as sep7 } from "node:path";
 function dropboxPreviewUrl(displayPath) {
   const segments = dropboxSegments(displayPath);
   if (!segments || segments.length === 0)
@@ -109804,7 +110033,7 @@ function localDropboxRoots(options = {}) {
   for (const candidate of candidates) {
     try {
       const real = realpathSync2.native(candidate);
-      if (statSync19(real).isDirectory() && !roots.includes(real))
+      if (statSync18(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
   }
@@ -109832,6 +110061,23 @@ function createDropboxOpenTargets(options = {}) {
     return { url };
   };
 }
+function localOpenArguments(path, roots) {
+  if (!path.startsWith("/") || path.includes("\x00"))
+    return;
+  try {
+    const link = lstatSync21(path);
+    if (link.isSymbolicLink() || !link.isFile())
+      return;
+    if (realpathSync2.native(path) !== path)
+      return;
+  } catch {
+    return;
+  }
+  if (!roots.some((root) => path.startsWith(root.endsWith(sep7) ? root : `${root}${sep7}`)))
+    return;
+  const extension = extname2(path).slice(1).toLowerCase();
+  return OPENABLE_EXTENSIONS.has(extension) ? [path] : ["-R", path];
+}
 function localFileUnder(root, segments) {
   const path = join72(root, ...segments);
   try {
@@ -109840,7 +110086,7 @@ function localFileUnder(root, segments) {
     const real = realpathSync2.native(path);
     if (!real.startsWith(root.endsWith(sep7) ? root : `${root}${sep7}`))
       return;
-    return statSync19(real).isFile() ? real : undefined;
+    return statSync18(real).isFile() ? real : undefined;
   } catch {
     return;
   }
@@ -109854,7 +110100,51 @@ function dropboxSegments(displayPath) {
     return;
   return segments;
 }
-var init_open_target = () => {};
+var OPENABLE_EXTENSIONS;
+var init_open_target = __esm(() => {
+  OPENABLE_EXTENSIONS = new Set([
+    "pdf",
+    "txt",
+    "md",
+    "markdown",
+    "rtf",
+    "csv",
+    "tsv",
+    "epub",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "ppt",
+    "pptx",
+    "odt",
+    "ods",
+    "odp",
+    "pages",
+    "numbers",
+    "key",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "heic",
+    "heif",
+    "tif",
+    "tiff",
+    "bmp",
+    "webp",
+    "mp3",
+    "m4a",
+    "aac",
+    "wav",
+    "aiff",
+    "aif",
+    "flac",
+    "mp4",
+    "m4v",
+    "mov"
+  ]);
+});
 
 // src/workers/remote-openapi.ts
 var exports_remote_openapi = {};
@@ -112927,7 +113217,10 @@ async function main() {
   } = await Promise.resolve().then(() => (init_remote_mcp(), exports_remote_mcp));
   const { resolveRemoteConnectionsDbPath: resolveRemoteConnectionsDbPath2, openRemoteConnectionStore: openRemoteConnectionStore2 } = await Promise.resolve().then(() => (init_remote_connections(), exports_remote_connections));
   const { resolveRemotePublicUrls: resolveRemotePublicUrls2 } = await Promise.resolve().then(() => (init_remote_public_url(), exports_remote_public_url));
-  const { createRemotePublicUrlSource: createRemotePublicUrlSource2, isRelayedRequest: isRelayedRequest2 } = await Promise.resolve().then(() => (init_remote_access(), exports_remote_access));
+  const { carriesRelayMarker: carriesRelayMarker2, createRemotePublicUrlSource: createRemotePublicUrlSource2, isRelayedRequest: isRelayedRequest2 } = await Promise.resolve().then(() => (init_remote_access(), exports_remote_access));
+  const { withRequestPeer: withRequestPeer2 } = await Promise.resolve().then(() => (init_request_peer(), exports_request_peer));
+  const { isChatGptGrant: isChatGptGrant2 } = await Promise.resolve().then(() => (init_pinned_clients(), exports_pinned_clients));
+  const { isDemoGrant: isDemoGrant2 } = await Promise.resolve().then(() => (init_demo_consent(), exports_demo_consent));
   const { createRemoteOAuthHandler: createRemoteOAuthHandler2, withRemoteOAuthRoutes: withRemoteOAuthRoutes2 } = await Promise.resolve().then(() => (init_handler(), exports_handler));
   const { resolveDemoConsent: resolveDemoConsent2 } = await Promise.resolve().then(() => (init_demo_consent(), exports_demo_consent));
   const remotePublic = resolveRemotePublicUrls2(process.env);
@@ -112943,7 +113236,7 @@ async function main() {
   const remoteConnections = lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2);
   dashboardAgentStore = remoteConnections;
   const { demoInstallMarked: demoInstallMarked2, readRemoteAccessStatus: readRemoteAccessStatus2, remoteAccessDir: remoteAccessDir2, remoteAccessStatusView: remoteAccessStatusView2, resolveRemoteAccessUrls: resolveRemoteAccessUrls2 } = await Promise.resolve().then(() => (init_remote_access(), exports_remote_access));
-  const remoteAccessHostKind = "openclaw";
+  const remoteAccessHostKind = process.env.OLYMPUS_ENGINE_HOST === "1" ? "standalone" : "openclaw";
   dashboardRemoteAccess = () => {
     let status;
     try {
@@ -112961,7 +113254,12 @@ async function main() {
   };
   if (authToken) {
     dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env })
+      setEnabled: remoteAccessHostKind === "standalone" ? async (enabled) => ({
+        ok: false,
+        status: 501,
+        code: "config_write_unsupported",
+        message: `Set "remote": {"enabled": ${enabled}} in ~/.olympus/engine.json, then run: olympus engine restart`
+      }) : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env })
     });
   }
   const { SourceAnswerJobRegistry: SourceAnswerJobRegistry2, sourceAnswerJobLimitsFromEnv: sourceAnswerJobLimitsFromEnv2 } = await Promise.resolve().then(() => (init_source_answer_jobs(), exports_source_answer_jobs));
@@ -112980,7 +113278,7 @@ async function main() {
   const { PrivateAnswerJobs: PrivateAnswerJobs2, createPrivateAnswerHandler: createPrivateAnswerHandler2, withPrivateAnswerRoute: withPrivateAnswerRoute2 } = await Promise.resolve().then(() => (init_private_answer_jobs(), exports_private_answer_jobs));
   const { createBuiltInPrivateAnswerModel: createBuiltInPrivateAnswerModel2, embeddingPanelRelevance: embeddingPanelRelevance2 } = await Promise.resolve().then(() => (init_private_answer_model(), exports_private_answer_model));
   const { DASHBOARD_UI_DOMAIN: DASHBOARD_UI_DOMAIN2 } = await Promise.resolve().then(() => (init_dashboard_resource(), exports_dashboard_resource));
-  const { createDropboxOpenTargets: createDropboxOpenTargets2 } = await Promise.resolve().then(() => (init_open_target(), exports_open_target));
+  const { createDropboxOpenTargets: createDropboxOpenTargets2, localDropboxRoots: localDropboxRoots2, localOpenArguments: localOpenArguments2 } = await Promise.resolve().then(() => (init_open_target(), exports_open_target));
   const sourceOpenTargets = {
     dropbox: createDropboxOpenTargets2()
   };
@@ -113005,7 +113303,12 @@ async function main() {
     activity: answerActivity,
     ...process.platform === "darwin" ? {
       openFile: (path) => new Promise((resolve10, reject) => {
-        execFile("/usr/bin/open", [path], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve10());
+        const args = localOpenArguments2(path, localDropboxRoots2());
+        if (!args) {
+          reject(new Error("open refused"));
+          return;
+        }
+        execFile("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve10());
       })
     } : {}
   });
@@ -113103,19 +113406,20 @@ async function main() {
     hostname,
     port,
     idleTimeout: 0,
-    fetch: withChatGptHandoffRoutes2(createChatGptHandoffHandler2(chatgptHandoffs), withPrivateAnswerRoute2(createPrivateAnswerHandler2({
+    fetch: withRequestPeer2(withChatGptHandoffRoutes2(createChatGptHandoffHandler2(chatgptHandoffs), withPrivateAnswerRoute2(createPrivateAnswerHandler2({
       jobs: privateAnswers,
       isRelayed: isRelayedRequest2,
       extraOrigins: () => [DASHBOARD_UI_DOMAIN2]
     }), withRemoteOAuthRoutes2(createRemoteOAuthHandler2({
       publicUrls: remotePublicUrls,
-      isRelayed: isRelayedRequest2,
+      isRelayed: carriesRelayMarker2,
       demoConsent: () => resolveDemoConsent2(olympusConfig.remote, () => demoInstallMarked2(remoteAccessDir2(process.env))),
       connections: () => remoteConnections({ create: true })
     }), withRemoteOpenApiRoutes2(remoteOpenApi, withRemoteMcpRoute2(createRemoteMcpHandler2({
       ...remoteAgentOptions,
       chatgpt: {
-        servesRequest: isRelayedRequest2,
+        servesRequest: (request, connection) => isRelayedRequest2(request) && isChatGptGrant2(connection),
+        readOnlyFor: isDemoGrant2,
         privateAnswers,
         dashboardView: async (signal) => {
           const response = await worker.fetch(new Request("http://olympus-worker.internal/dashboard.json", signal ? { signal } : {}));
@@ -113147,7 +113451,7 @@ async function main() {
           return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
         }
       }
-    }), withWorkerBearerAuth(worker.fetch, { authToken }))))))
+    }), withWorkerBearerAuth(worker.fetch, { authToken })))))))
   });
   sourceScheduler?.start();
   await reconcileCaptures();
