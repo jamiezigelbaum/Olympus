@@ -5,9 +5,9 @@ description: Answer questions from the user's own mail, files, notes, chats and 
 
 # Ask Olympus
 
-Olympus searches the sources the user connected on their Mac and answers with
-citations. It is the right tool for the user's own information, not for general
-knowledge or the open web.
+Olympus searches the sources the user connected on their Mac and returns
+evidence with citations. It is the right tool for the user's own information,
+not for general knowledge or the open web.
 
 ## When to use it
 
@@ -20,27 +20,40 @@ knowledge or the open web.
 
 ## How to ask
 
-1. Call `source_answer` with the user's question in their own words, keeping
-   any names, dates and places they gave. One question per call; wait for each
-   answer before asking the next.
-2. If it returns `status: "working"` with a `job_id`, the answer is still being
-   prepared on the Mac. Call `source_answer_result` with that `job_id`, and
-   again while it says working. Do not ask the question again.
-3. If a call fails, tell the user what the error says. If it says the Mac is
+1. Call `olympus_search` with the user's question in their own words,
+   keeping any names, dates and places they gave. Set `detail` to `"full"`
+   only when the user asks for all the details, the full results or every
+   value; leave it out otherwise.
+2. Answer only from the returned evidence, and cite each claim with its
+   evidence id in brackets, like [E2], linking the url when there is one. If
+   the evidence does not answer the question, say briefly what you could not
+   find. Search again with different words if the first results miss.
+3. If you use `source_answer` instead (it is offered only when the user set
+   up an answer model on their Mac) and it returns `status: "working"` with a
+   `job_id`, call `source_answer_result` with that `job_id`, and again while
+   it says working. Do not ask the question again.
+4. If a call fails, tell the user what the error says. If it says the Mac is
    offline, ask them to wake the Mac or open Olympus.
 
-## How to answer and cite
+## Private items
 
-- Present Olympus's `answer` faithfully. It has already applied the user's
-  privacy rules; do not add details it did not give.
-- Cite with the numbered `citations` it returns: source name, and title, date
-  and link when present. Some items are cited by source name only because the
-  user keeps them private; never guess their titles.
-- If Olympus says it could not find something, say so plainly and suggest
-  connecting the source or checking the dashboard, rather than guessing.
+Olympus never gives you the contents of items the user keeps Private. When a
+result's notes say some matching items are Private and Olympus is answering
+privately in the panel:
+
+- Keep your reply short: Olympus is preparing the answer privately on the
+  user's Mac, and it will appear in the panel, visible only to them.
+- Do not guess at what those items say, do not report their file names as
+  findings, and do not ask the user to upload, attach or paste them: Olympus
+  already has them.
+- For a follow-up about them, search again with the follow-up as a complete
+  question (name the item, its date or subject); the panel answers it the
+  same way.
 
 ## Status and setup
 
-- "Is my Gmail connected?", "how far is indexing?" → `source_index_status`, or
-  `olympus_dashboard` for the full view.
+- "Is my Dropbox connected?", "how far is indexing?" → `source_index_status`,
+  or `olympus_dashboard` for the full view.
+- Mention coverage (unread or not-yet-sorted items) only if the user asks why
+  something is missing or the answer depends on it.
 - If Olympus is not installed or not linked, follow the `olympus-setup` skill.

@@ -183,7 +183,8 @@ other dashboard. The UI lane renders it; this lane owns the tools and the
 contract (`src/workers/chatgpt/dashboard-contract.ts`).
 
 - **Answers: Olympus retrieves, ChatGPT reasons.** `olympus_search` returns
-  the release-gated evidence for Public and Personal items (no Analyst on the
+  the release-gated evidence for Personal items, and Public items on a
+  policy that still has a Public tier (no Analyst on the
   Mac) and its description carries the generic Analyst instruction.
   Its coverage is counts in `structuredContent.coverage` (unreadable,
   partly read, Names only, not yet sorted into privacy tiers) with a
@@ -242,7 +243,8 @@ private answer into the normal chat. Secret items are never answered from.
 
 ChatGPT calls `olympus_search` (the primary answer tool) or `source_answer`;
 both carry the same hook and link the `ui://olympus/private-answer` panel on
-every result. ChatGPT's model gets Public and Personal evidence as before and
+every result. ChatGPT's model gets Personal (and, where the policy keeps it,
+Public) evidence as before and
 **one bit** about a private match: a fixed note that some matching items are
 Private and that Olympus answers from them only to the user, in the panel
 (owner decision, Jamie, 2026-10-02, superseding the 2026-10-01 "nothing"
@@ -288,10 +290,14 @@ The search text's leading instruction becomes "use this evidence only where
 it actually answers the question", and the held-back and Names-only
 sentences are left out: the reply is "see the panel". The
 count and state travel only in the widget-only `_meta`; with no match the
-panel renders nothing (zero height). With one,
-the panel says "N private items match", carries the badge **"Not sent to
-ChatGPT"**, and offers **Show private answer**. On click, the panel fetches
-the answer itself, from the relay, and shows it as text.
+panel renders nothing (zero height). With one, the panel is a compact card,
+**"Private answer from your Mac"**, that collects the answer itself, from
+the relay, as soon as a `ready` result renders (no Show button,
+since 2026-10-01), and shows it as text under the badge
+**"Not sent to ChatGPT"**. **Hide** folds it to "Private answer hidden";
+**Show** re-opens the in-memory answer without a refetch. The panel keeps
+its key pair per job id in its own IndexedDB (non-extractable), so ChatGPT's
+re-mounts of the widget claim with the same key.
 
 The `_meta` state is `ready` (a private model is ready; a job exists),
 `no_model` (no private model set up; counts only, no job) or
@@ -336,8 +342,9 @@ percent when known; counts only, no job).
    content or `structuredContent`; the only match signal there is the fixed
    Private note above. There is no key and no fetch token in
    `_meta`, or anywhere in any tool output.
-4. **Claim.** On click the panel generates an ephemeral **ECDH P-256** key
-   pair with WebCrypto (private key non-extractable) and POSTs only its
+4. **Claim.** When a `ready` result renders, the panel generates an ephemeral
+   **ECDH P-256** key pair with WebCrypto (private key non-extractable; kept
+   per job id in the frame's IndexedDB for re-mounts) and POSTs only its
    public key, directly to `https://mcp.olympusplugin.ai/private/<job id>`
    (`fetch`, allowed by the resource's `_meta.ui.csp.connectDomains`), not
    through `tools/call`. The first public key to arrive claims the job;
@@ -645,6 +652,10 @@ claim, poll and decrypt loop against a fake relay, and the leak checks.
    engine, domain verification, listing pages, ZIP upload.
 
 Later: signed .pkg + installer skill (journey below), MCP Events.
+
+Steps 1-6 are done. What remains for 1.0 (logo, install command, integration
+merge, `1.0.0-rc.1`, submission) and what is deferred after it are tracked in
+the release plan: [Olympus 1.0 (ChatGPT)](../V0_4_RELEASE.md#olympus-10-chatgpt).
 
 ## Target user journey
 

@@ -1,6 +1,7 @@
 # Olympus: ChatGPT directory submission kit
 
-Status: draft, 2026-10-01. Publisher: **Open Coordination Unlimited, Inc.**
+Status: draft, 2026-10-01; tools, tiers and the private answer panel updated
+2026-10-02. Publisher: **Open Coordination Unlimited, Inc.**
 (verified OpenAI platform organization). Submit at
 platform.openai.com/plugins. Platform rules referenced here come from the
 OpenAI Plugins docs (deploy/submission, deploy/app-review, plugin-guidelines)
@@ -26,34 +27,39 @@ out of the uploaded ZIP (see the checklist).
 ### Long description (proposed; ≤4000)
 
 > Olympus is a private knowledge engine that runs on your Mac. It indexes the
-> sources you choose, starting with files and notes on your Mac and then
-> accounts you already have such as Gmail, Google Drive and Dropbox, and
-> answers your questions in ChatGPT with citations to your own items.
+> sources you choose, such as your files in Dropbox and Google Drive and your
+> Gmail, using accounts you already have, and answers your questions in
+> ChatGPT with citations to your own items.
 >
-> Your index stays on your Mac. Olympus labels every item Public, Personal,
-> Private or Secret. ChatGPT only ever receives answers and excerpts built
-> from Public and Personal items; Private items are answered on your Mac or
-> withheld, and Secrets such as passwords are never read by any model.
+> Your index stays on your Mac. Olympus sorts every item, one by one, into
+> Personal, Private or Secret, and you can tell it in your own words what is
+> private for you. ChatGPT receives excerpts only from Personal items.
+> Questions that match Private items are answered on your Mac and shown only
+> to you, in a private Olympus panel; that answer is never sent to ChatGPT.
+> Secrets such as passwords are never read by any model.
 >
 > ChatGPT reaches your Mac through one secure connection that you approve with
-> a click on the Mac itself: no Olympus account, no password. The Olympus
-> dashboard in the ChatGPT sidebar shows what is connected, how far indexing
-> has got and anything that needs you.
+> a click on the Mac itself: no Olympus account, no password and no API keys.
+> The Olympus dashboard in the ChatGPT sidebar shows what is connected, how far
+> indexing has got and anything that needs you.
 >
-> Olympus is read-only. It never sends mail, edits files or changes anything
-> in your accounts. Requires a Mac that is awake and online when you ask.
+> Olympus never sends mail, edits files or changes anything in your accounts.
+> Requires a Mac that is awake and online when you ask.
 
-The current `longDescription` in `plugin.json` says the same without the tier
-paragraph or the read-only sentence; update it to this text if accepted.
+The current `longDescription` in `plugin.json` predates the tier, private
+panel and no-keys paragraphs; update it to this text if accepted.
 
 ### Capabilities (proposed `capabilities`, ≤20 entries of ≤120 characters)
 
 - Answers questions from your own mail, files and notes, with numbered citations
 - Shows which sources are connected and how far indexing has got
-- Keeps Private and Secret items out of ChatGPT; they stay on your Mac
-- Read-only: never sends, edits or deletes anything
+- Answers from Private items only in a private panel, never sent to ChatGPT
+- Never sends, edits or deletes anything in your accounts
 
-(`plugin.json` has `["Read"]` today.)
+(`plugin.json` has `["Read"]` today. Some setup tools change Olympus's own
+settings on the Mac (folder choices, disconnect, model choice, privacy); none
+writes to the user's accounts. Check whether the platform expects a write
+capability for them before submitting.)
 
 ### Default prompts (current, ≤3 of ≤128 characters)
 
@@ -61,14 +67,25 @@ paragraph or the read-only sentence; update it to this text if accepted.
 - Use Olympus to find what Sam sent me about the lease.
 - Show my Olympus dashboard.
 
-### Tools (all `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false`)
+### Tools
 
-| Tool | Purpose | Auth |
-|---|---|---|
-| `olympus_dashboard` | Sidebar dashboard (`ui://olympus/dashboard`); install/offline states | noauth + oauth2 |
-| `source_index_status` | One-line status per source | oauth2 |
-| `source_answer` | Answer a question with citations; may return a `job_id` | oauth2 |
-| `source_answer_result` | Collect a pending answer by `job_id` | oauth2 |
+Annotations as generated in `connect-relay/server/generated/chatgpt-tools.json`
+(R = `readOnlyHint`, D = `destructiveHint`, O = `openWorldHint`). Tools marked
+"panel" are `openai/visibility: private`: the dashboard calls them, the model
+does not see them.
+
+| Tool | Purpose | R / D / O | Auth |
+|---|---|---|---|
+| `olympus_dashboard` | Sidebar dashboard (`ui://olympus/dashboard`); install/offline states | yes / no / no | noauth + oauth2 |
+| `olympus_search` | Primary answer tool: Personal evidence with citations, plus the one-bit Private note; links the private answer panel (`ui://olympus/private-answer`) | yes / no / no | oauth2 |
+| `source_index_status` | One-line status per source | yes / no / no | oauth2 |
+| `source_answer` | Answer a question with citations; may return a `job_id`. Listed only when an answer model is set up on the Mac | yes / no / no | oauth2 |
+| `source_answer_result` | Collect a pending answer by `job_id` (listed with `source_answer`) | yes / no / no | oauth2 |
+| `olympus_connect_source` | One-time sign-in link for Gmail, Google Drive or Dropbox | no / no / yes | oauth2 |
+| `olympus_privacy_get` / `olympus_privacy_set` | Read or save what is private for the user | yes / no / no; no / no / no | oauth2 |
+| `olympus_scope_list` / `olympus_scope_set` (panel) | Folder and mail choices | yes / no / no; no / no / no | oauth2 |
+| `olympus_disconnect_source` (panel) | Stop reading a source; indexed data stays on the Mac | no / yes / no | oauth2 |
+| `olympus_model_set` / `olympus_model_retry` (panel) | Switch between models already set up on the Mac (never takes a key); retry a failed built-in install | no / no / no | oauth2 |
 
 ## 2. Reviewer instructions
 
@@ -96,11 +113,12 @@ or credentials). Credentials live in 1Password, never in this repository.
 > notes and documents covering a lease renewal, a kitchen renovation budget, a
 > dentist appointment, a trip to Lisbon and a book club. A few items are
 > deliberately Private (clinic visit, lab results, bank notice, tax notes) or
-> Secret (fake router recovery codes) so you can see that Olympus withholds
-> them. Nothing in the demo is real.
+> Secret (fake router recovery codes). Private items are never sent to
+> ChatGPT: when a question matches them, a small Olympus panel under
+> ChatGPT's reply shows the answer, marked "Not sent to ChatGPT". Secret items
+> are never answered from. Nothing in the demo is real.
 >
-> Answers can take up to a minute. If ChatGPT gets `status: "working"`, it
-> calls `source_answer_result` to collect the answer.
+> Answers, and private answers in the panel, can take up to a minute.
 
 ## 3. Test cases
 
@@ -110,9 +128,14 @@ Data: `demo-data/` (README has the file-to-tier map). Field names follow
 
 ### Positive
 
+Answer tool: `olympus_search` is the primary answer tool; ChatGPT writes
+the reply from its evidence. `source_answer` (with `source_answer_result`
+while it says working) is listed only when the demo engine has an answer
+model set up; either satisfies "answer tool" below.
+
 **P1. Lease renewal (mail + document)**
 - Prompt: `What did Sam say about renewing my lease?`
-- Tools: `source_answer` (then `source_answer_result` if working)
+- Tools: answer tool
 - Expected: Sam offers a 12-month renewal from 1 December 2026; rent rises
   from $2,150 to $2,215 a month (3%); answer needed by 15 October; he will
   replace the dishwasher before the new term and lets Robin keep the bike in
@@ -121,14 +144,14 @@ Data: `demo-data/` (README has the file-to-tier map). Field names follow
 
 **P2. Appointment lookup**
 - Prompt: `When is my next dentist appointment?`
-- Tools: `source_answer`
+- Tools: answer tool
 - Expected: Wednesday 21 October 2026 at 9:30 with Dr. Mendes at Brightside
   Dental, 220 Harbour Road; arrive 10 minutes early. Cites the Brightside
   Dental confirmation email.
 
 **P3. Decision across sources (default prompt)**
 - Prompt: `Ask Olympus what I decided about the budget last month.`
-- Tools: `source_answer`
+- Tools: answer tool
 - Expected: On 2 September Robin and Priya capped the kitchen renovation at
   $18,000 and accepted the Hollis & Daughters quote of $16,400; savings rise
   from $600 to $750 a month from October; Lisbon budget $3,200; no new car
@@ -150,15 +173,18 @@ Data: `demo-data/` (README has the file-to-tier map). Field names follow
 
 ### Negative
 
-**N1. Private items are withheld**
+**N1. Private items stay out of the chat**
 - Prompt: `What did my blood test results say?`
-- Tools: `source_answer`
-- Expected: Olympus withholds the answer: either the fixed answer "Olympus
-  can answer this only from private items, which stay on your Mac." or a
-  not-found answer with the fixed note "Some matching items are private and
-  stay on your Mac." ChatGPT relays that the answer stays on the Mac. No
-  result values, no clinic or doctor name, no item titles and no citations
-  for the Private items reach the conversation.
+- Tools: answer tool (the private answer panel renders with its result)
+- Expected: ChatGPT's reply is short and says Olympus is answering privately
+  on the Mac, in the panel; it contains no result values, no clinic or
+  doctor name and no content from the Private items, cites none of them as
+  evidence, and does not ask the user to upload or paste the files. The
+  Olympus panel appears under the reply on its own, titled "Private answer
+  from your Mac" and marked "Not sent to ChatGPT", and shows the answer from
+  the lab results and clinic note (or, while the demo's private model is not
+  ready, says so). A Private item's name may be visible to ChatGPT when the
+  name itself is Personal; its contents never are.
 
 **N2. No actions on the user's behalf**
 - Prompt: `Email Sam and tell him I accept the lease renewal.`
@@ -192,7 +218,7 @@ recording of ChatGPT on the web, with captions, no voice needed.
 | 4 | 30-45 s | P1 lease question | Answer with numbered citations; hover/open one citation |
 | 5 | 45-55 s | P3 budget question | Answer pulling note + email |
 | 6 | 55-65 s | Sidebar dashboard (P4) | Sources ready, indexing complete |
-| 7 | 65-78 s | N1 lab results | Fixed "stays on your Mac" sentence; caption: "Private and Secret items never go to ChatGPT." |
+| 7 | 65-78 s | N1 lab results | Short ChatGPT reply; the private answer panel opens under it with the answer and "Not sent to ChatGPT"; caption: "Private answers appear only in this panel. Secrets are never answered." |
 | 8 | 78-88 s | End card | olympusplugin.ai · Privacy · Support |
 
 Upload unlisted; paste the URL as `demo_recording_url` in the form.
@@ -240,8 +266,13 @@ Server and UI
       `openWorldHint`; responses carry no request ids, traces or timestamps
       that are not needed.
 - [ ] Mixed auth works from a fresh ChatGPT account: dashboard before
-      linking, OAuth prompt on `source_answer`, PKCE S256, `resource` echoed.
-- [ ] Works on desktop and mobile ChatGPT (dashboard included).
+      linking, OAuth prompt on the answer tool (`olympus_search`), PKCE S256,
+      `resource` echoed.
+- [ ] Works on desktop and mobile ChatGPT (dashboard and private answer panel
+      included).
+- [ ] The relay's CORS list for the private answer panel (ChatGPT widget
+      origins) is confirmed against a live panel in the web and desktop apps
+      (design: "Private answer panel", Relay).
 
 Reviewer demo
 - [ ] Demo engine holds only `demo-data/`, carries the demo marker, and has
@@ -250,7 +281,8 @@ Reviewer demo
 - [ ] Sign-in works immediately with no MFA, email code, magic link or
       private network.
 - [ ] Each intended tier in `demo-data/README.md` is confirmed on the demo
-      engine, especially the Private items behind N1.
+      engine, especially the Private items behind N1, and the demo engine's
+      built-in private model is ready so N1's panel shows an answer.
 - [ ] All 5 positive and 3 negative cases pass on the demo engine through the
       relay, from a fresh ChatGPT account.
 - [ ] Demo video recorded last, from the tested dashboard.

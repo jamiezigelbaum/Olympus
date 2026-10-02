@@ -12,6 +12,11 @@ Read the current step in full before carrying it out. Immediately before an
 operator-facing transition, read its required message block directly; do not
 use a remembered summary of this guide as the user-facing copy.
 
+This guide is the OpenClaw install path. If your operator wants Olympus in
+ChatGPT, stop here: the ChatGPT plugin's own `olympus-setup` skill installs
+the standalone engine on their Mac, and the README's "Olympus for ChatGPT"
+section is the user guide. That path needs no OpenClaw.
+
 ## Normal setup sequence
 
 Choose the privacy posture with the operator, run setup (which registers and
@@ -2112,12 +2117,11 @@ Only when the operator asks for it. Do not offer it as part of installation.
 - Agents in a vendor's cloud need remote access. If the panel says remote
   access is off, say so plainly and send the operator to **Turn on remote
   access** in the same Agents section. That button is the normal path: it
-  shows Let's Encrypt's subscriber agreement, records the operator's own
-  acceptance, and changes `remote.enabled` through OpenClaw's config write, so
-  the operator needs no terminal. Never accept the agreement for them (do not
-  run `olympus connections terms --accept` on their behalf), and do not turn
-  remote access on yourself without its own consent (Rule one). The relay
-  (`connect.olympusplugin.ai`) is the default; `remote.publicBaseUrl` is only
+  changes `remote.enabled` through OpenClaw's config write, so the operator
+  needs no terminal. There is no certificate agreement to accept: the relay
+  holds the only certificate. Do not turn remote access on yourself without
+  its own consent (Rule one). The relay
+  (`mcp.olympusplugin.ai`) is the default; `remote.publicBaseUrl` is only
   for an operator who runs their own tunnel, set with `openclaw config set`
   and the validate-then-restart order in Step 5.
   `olympus connections status` says what remote access that is on is waiting

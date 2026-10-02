@@ -269,7 +269,11 @@ work, ordinary cloud models for Public material, or a mix.
 A data class describes what kind of information is being handled. User-facing
 language is Public, Personal, Private, and Secrets; internally those map to the
 existing granular trust scale (`public_safe`, `internal`, `secure_local`, and
-S5) through the legacy stored keys shown below.
+S5) through the legacy stored keys shown below. A policy with no `public_safe`
+route and no `public_safe` retrieval policy has no Public class: the
+`no-sensitive` preset, which `olympus engine install` seeds for every ChatGPT
+install, is written that way, and Public verdicts become Personal (see
+[TRUST_MODEL.md](TRUST_MODEL.md#product-tier-names)).
 
 | User-facing data class | Legacy stored key | Granular trust scale |
 |---|---|---|
