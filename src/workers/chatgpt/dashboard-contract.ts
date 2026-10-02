@@ -30,7 +30,12 @@ export interface DashboardFix {
    */
   tool?: string;
   args?: Record<string, unknown>;
-  /** olympusplugin.ai only: openExternal needs the plugin's redirect domains. */
+  /**
+   * olympusplugin.ai only: openExternal needs the plugin's redirect domains.
+   * Beside a tool, it is the help page naming a repair only the Mac can make
+   * (help/on-your-mac/#connect, #reconnect, #answers, #search, #models): the
+   * UI links it next to the control ("How to fix this on your Mac").
+   */
   href?: string;
   /** Shown on a disabled control. */
   disabledReason?: string;

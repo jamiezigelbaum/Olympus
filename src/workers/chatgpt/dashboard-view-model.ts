@@ -200,7 +200,7 @@ export function buildChatGptDashboardViewModel(
       sentence: embedding.kind === 'built_in'
         ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.embedding[embedding.failedReason ?? 'unknown']
         : DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention,
-      fix: embedding.kind === 'built_in' ? retryFix('embedding') : checkAgainFix(),
+      fix: embedding.kind === 'built_in' ? retryFix('embedding') : checkAgainFix(onMacHelp('search')),
     });
   }
   const answers = answersFromModelSetup(view.model_setup) ?? builtInAnswers(options.privateModel);
@@ -213,7 +213,7 @@ export function buildChatGptDashboardViewModel(
       sentence: answers.kind === 'built_in'
         ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.answers[options.privateModel?.failedReason ?? 'unknown']
         : DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention,
-      fix: answers.kind === 'built_in' ? retryFix('answers') : checkAgainFix(),
+      fix: answers.kind === 'built_in' ? retryFix('answers') : checkAgainFix(onMacHelp('answers')),
     });
   }
 
@@ -246,6 +246,7 @@ export function buildChatGptDashboardViewModel(
         tool: DASHBOARD_TOOL_NAME,
         args: {},
         disabledReason: DASHBOARD_CHATGPT_VOCABULARY.changeModelsOnMac,
+        href: onMacHelp('models'),
       },
     },
     ...(options.privacy
@@ -354,7 +355,9 @@ function attentionItem(
     || progress?.stalledReason === 'waiting_for_credentials'
     || (card.connection.state !== 'connected' && card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card));
   const reconnect = reauth ? reconnectFix(definition) : undefined;
+  // A source ChatGPT cannot sign in again (X, Readwise) is reconnected on the Mac.
   const fix = reconnect
+    ?? (reauth ? checkAgainFix(onMacHelp('reconnect')) : undefined)
     ?? (scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
@@ -523,8 +526,19 @@ function stalledReason(input: {
   return undefined;
 }
 
-function checkAgainFix(): DashboardFix {
-  return { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {} };
+function checkAgainFix(href?: string): DashboardFix {
+  return { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {}, ...(href ? { href } : {}) };
+}
+
+/**
+ * The help page naming a repair that only the Mac can make (a key, a pairing,
+ * a model server). A Fix carries it as `href` beside its own control, so the
+ * panel can link "how" next to Check again or a disabled control.
+ */
+export const ON_MAC_HELP_URL = 'https://olympusplugin.ai/help/on-your-mac/';
+
+function onMacHelp(section: 'connect' | 'reconnect' | 'answers' | 'search' | 'models'): string {
+  return `${ON_MAC_HELP_URL}#${section}`;
 }
 
 /** Starts a failed built-in install again. */
@@ -547,7 +561,13 @@ function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFi
   const source = oauthSource(definition);
   return source
     ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
-    : { label: CHATGPT_SETUP_LABELS.connect, tool: DASHBOARD_TOOL_NAME, args: {}, disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac };
+    : {
+        label: CHATGPT_SETUP_LABELS.connect,
+        tool: DASHBOARD_TOOL_NAME,
+        args: {},
+        disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac,
+        href: onMacHelp('connect'),
+      };
 }
 
 function scopePending(card: DashboardSourceCard): boolean {

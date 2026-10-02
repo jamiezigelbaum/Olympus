@@ -126,7 +126,10 @@ describe('dashboard view-model producer', () => {
       tool: DASHBOARD_TOOL_NAME,
       args: {},
       disabledReason: 'Change models in Olympus on your Mac.',
+      // Review 2026-10-02 #16: the repair is named, not only refused.
+      href: 'https://olympusplugin.ai/help/on-your-mac/#models',
     });
+    expect(copyDashboardViewModel(vm).models.change.href).toBe('https://olympusplugin.ai/help/on-your-mac/#models');
     expect(vm.needsYou).toEqual([]);
     expect(vm.progress).toBeUndefined();
     expect(vm.generatedAt).toBe(NOW.toISOString());
@@ -369,6 +372,11 @@ describe('dashboard view-model producer', () => {
       expect(fix.args).toBeDefined();
       expect(fix.label).not.toBe('Open Olympus on your Mac');
     }
+    // A repair only the Mac can make names its help section beside the control.
+    const help = 'https://olympusplugin.ai/help/on-your-mac/';
+    expect(vm.sources.find((source) => source.id === 'x.bookmarks')!.primary!.href).toBe(`${help}#connect`);
+    expect(vm.needsYou.find((item) => item.id === 'source:readwise.library')!.fix.href).toBe(`${help}#reconnect`);
+    expect(vm.needsYou.find((item) => item.id === 'source:gmail.email')!.fix.href).toBeUndefined();
     expect(copyDashboardViewModel(vm)).toEqual(vm);
   });
 
@@ -410,6 +418,10 @@ describe('dashboard view-model producer', () => {
     // A custom model that stopped is not an install: it keeps the generic sentence.
     const custom = buildChatGptDashboardViewModel(view([card('gmail.email')]), { now: NOW, embedding: { kind: 'custom', state: 'failed' } });
     expect(custom.needsYou.find((item) => item.id === 'model:embedding')!.sentence).toBe('Search has stopped working on your Mac.');
+    // Check again, plus the help section naming the repair on the Mac.
+    expect(custom.needsYou.find((item) => item.id === 'model:embedding')!.fix).toEqual({
+      label: 'Check again', tool: 'olympus_dashboard', args: {}, href: 'https://olympusplugin.ai/help/on-your-mac/#search',
+    });
   });
 
   test('cards off the product roster and model lanes never appear', () => {
