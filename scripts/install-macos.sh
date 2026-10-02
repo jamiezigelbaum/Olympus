@@ -244,7 +244,17 @@ holds_lock() {
 }
 
 release_lock() {
-  [ "$LOCKED" = 1 ] || return 0
+  if [ "$LOCKED" != 1 ]; then
+    # Interrupted while taking the lock: the helper may still be waiting on
+    # the pipe this installer never opened. It is this installer's own child;
+    # ending it is safe, and frees the lock if it had just been granted.
+    if [ -n "${LOCK_HELPER:-}" ]; then
+      kill "$LOCK_HELPER" 2>/dev/null || true
+      wait "$LOCK_HELPER" 2>/dev/null || true
+      LOCK_HELPER=""
+    fi
+    return 0
+  fi
   LOCKED=0
   exec 8>&-
   wait "$LOCK_HELPER" 2>/dev/null || true
