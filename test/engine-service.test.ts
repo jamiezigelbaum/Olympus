@@ -210,7 +210,7 @@ describe('olympus engine install/uninstall', () => {
     const other = makeCheckout(root, 'other-checkout');
     const result = installEngine({ ...base, fromCheckout: other });
     expect(result.action).toBe('reloaded');
-    expect(launchctl.calls.map((call) => call[1])).toEqual(['print', 'bootout', 'enable', 'bootstrap']);
+    expect(launchctl.calls.map((call) => call[1])).toEqual(['print', 'bootout', 'enable', 'print', 'bootstrap']);
     expect(launchctl.loaded()).toBe(true);
   });
 
@@ -460,7 +460,7 @@ describe('engine upgrades restart the engine on the new build', () => {
     expect(second.program.build).toMatch(/^0\.5\.0\+[0-9a-f]{16}$/);
     expect(second.program.build).not.toBe(first.program.build);
     expect(second.action).toBe('reloaded');
-    expect(launchctl.calls.map((call) => call[1])).toEqual(['print', 'bootout', 'enable', 'bootstrap']);
+    expect(launchctl.calls.map((call) => call[1])).toEqual(['print', 'bootout', 'enable', 'print', 'bootstrap']);
     expect(engineBuildIdentity(checkout)).toBe(second.program.build!);
   });
 
@@ -519,7 +519,7 @@ describe('engine upgrades restart the engine on the new build', () => {
     expect(back.running_build).toMatch(/^1\.0\.0\+/);
     expect(back.previous_build).toMatch(/^2\.0\.0\+/);
     expect(back.action).toBe('reloaded');
-    expect(launchctl.calls.map((call) => call[1])).toEqual(['print', 'bootout', 'enable', 'bootstrap']);
+    expect(launchctl.calls.map((call) => call[1])).toEqual(['print', 'bootout', 'enable', 'print', 'bootstrap']);
     expect(readFileSync(join(paths.appDir, 'dist', 'cli.js'), 'utf8')).toBe('// 1.0.0\n');
     expect(readFileSync(join(paths.previousAppDir, 'dist', 'cli.js'), 'utf8')).toBe('// 2.0.0\n');
     expect(readFileSync(paths.plistPath, 'utf8')).toContain(back.running_build);
@@ -551,7 +551,8 @@ describe('engine upgrades restart the engine on the new build', () => {
     const flaky: EngineExec = (command, args) => {
       if (args[0] === 'bootstrap' && failBootstrap) {
         failBootstrap = false;
-        return { status: 5, stdout: '', stderr: 'Bootstrap failed: 5: Input/output error' };
+        // A non-transient failure (error 5 alone is retried; see the next test).
+        return { status: 1, stdout: '', stderr: 'Bootstrap failed: 125: Domain does not support specified action' };
       }
       return launchctl.exec(command, args);
     };
@@ -559,6 +560,26 @@ describe('engine upgrades restart the engine on the new build', () => {
     expect(readFileSync(join(paths.appDir, 'dist', 'cli.js'), 'utf8')).toBe('// 2.0.0\n');
     expect(readFileSync(join(paths.previousAppDir, 'dist', 'cli.js'), 'utf8')).toBe('// 1.0.0\n');
     expect(readFileSync(paths.plistPath, 'utf8')).toContain('2.0.0+');
+    expect(launchctl.loaded()).toBe(true);
+  });
+
+  test('a bootstrap racing the previous bootout (error 5) is retried and loads the agent', async () => {
+    const { home, bun, checkout } = fixture();
+    const launchctl = launchingLaunchctl(home);
+    installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun });
+    // A new build at the same path changes the plist, so install boots out and bootstraps again.
+    writeFileSync(join(checkout, 'dist', 'cli.js'), '// a newer build\n');
+    let transient = 2;
+    const racing: EngineExec = (command, args) => {
+      if (args[0] === 'bootstrap' && transient > 0) {
+        transient -= 1;
+        return { status: 5, stdout: '', stderr: 'Bootstrap failed: 5: Input/output error' };
+      }
+      return launchctl.exec(command, args);
+    };
+    const result = installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: racing, fromCheckout: checkout, bunBin: bun });
+    expect(result.action).toBe('reloaded');
+    expect(transient).toBe(0);
     expect(launchctl.loaded()).toBe(true);
   });
 

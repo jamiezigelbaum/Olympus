@@ -413,7 +413,7 @@ export function installEngine(options: EngineInstallOptions = {}): EngineInstall
   if (action === 'bootstrapped' || action === 'reloaded') {
     // A label an owner once disabled refuses bootstrap; enabling is idempotent.
     exec('launchctl', ['enable', target]);
-    mustSucceed(exec('launchctl', ['bootstrap', guiDomain(options.uid), paths.plistPath]), 'load the engine agent');
+    bootstrapAgent(exec, target, guiDomain(options.uid), paths.plistPath, action === 'reloaded');
   }
   return {
     ...base,
@@ -877,7 +877,7 @@ export function startEngine(options: EngineServiceOptions = {}): { ok: true; act
   const target = serviceTarget(options.uid);
   mustSucceed(exec('launchctl', ['enable', target]), 'enable the engine agent');
   if (launchctlLoaded(exec, target)) return { ok: true, action: 'already_running' };
-  mustSucceed(exec('launchctl', ['bootstrap', guiDomain(options.uid), paths.plistPath]), 'load the engine agent');
+  bootstrapAgent(exec, target, guiDomain(options.uid), paths.plistPath, false);
   return { ok: true, action: 'started' };
 }
 
@@ -1175,6 +1175,28 @@ function guiDomain(uid: number | undefined): string {
 
 function serviceTarget(uid: number | undefined): string {
   return `${guiDomain(uid)}/${ENGINE_LABEL}`;
+}
+
+/**
+ * Loads the agent. `launchctl bootout` returns before launchd has finished
+ * removing the job, and a bootstrap in that window fails with
+ * "Bootstrap failed: 5: Input/output error" (seen live 2026-10-02, which left
+ * the engine unloaded). Wait until the label is gone, then bootstrap, retrying
+ * that one transient error briefly.
+ */
+function bootstrapAgent(exec: EngineExec, target: string, domain: string, plistPath: string, afterBootout: boolean, sleep: (ms: number) => void = sleepSync): void {
+  if (afterBootout) for (let waited = 0; waited < 10_000 && launchctlLoaded(exec, target); waited += 250) sleep(250);
+  let result = exec('launchctl', ['bootstrap', domain, plistPath]);
+  for (let attempt = 1; result.status !== 0 && attempt < 8 && /\b5: Input\/output error\b/.test(`${result.stderr ?? ''}`); attempt += 1) {
+    sleep(500);
+    if (launchctlLoaded(exec, target)) return;
+    result = exec('launchctl', ['bootstrap', domain, plistPath]);
+  }
+  mustSucceed(result, 'load the engine agent');
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function launchctlLoaded(exec: EngineExec, target: string): boolean {
