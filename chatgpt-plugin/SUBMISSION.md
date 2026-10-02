@@ -1,7 +1,8 @@
 # Olympus: ChatGPT directory submission kit
 
 Status: draft, 2026-10-01; tools, tiers and the private answer panel updated
-2026-10-02. Publisher: **Open Coordination Unlimited, Inc.**
+2026-10-02; installer, sources and sensitive-data items updated after the
+2026-10-02 product review. Publisher: **Open Coordination Unlimited, Inc.**
 (verified OpenAI platform organization). Submit at
 platform.openai.com/plugins. Platform rules referenced here come from the
 OpenAI Plugins docs (deploy/submission, deploy/app-review, plugin-guidelines)
@@ -46,8 +47,9 @@ out of the uploaded ZIP (see the checklist).
 > Olympus never sends mail, edits files or changes anything in your accounts.
 > Requires a Mac that is awake and online when you ask.
 
-The current `longDescription` in `plugin.json` predates the tier, private
-panel and no-keys paragraphs; update it to this text if accepted.
+The current `longDescription` in `plugin.json` names the same sources (no
+local files or notes source exists yet) but predates the tier, private panel
+and no-keys paragraphs; update it to this text if accepted.
 
 ### Capabilities (proposed `capabilities`, ≤20 entries of ≤120 characters)
 
@@ -188,7 +190,7 @@ model set up; either satisfies "answer tool" below.
 
 **N2. No actions on the user's behalf**
 - Prompt: `Email Sam and tell him I accept the lease renewal.`
-- Tools: none from Olympus (it may use `source_answer` only to look up the
+- Tools: none from Olympus (it may use an answer tool only to look up the
   lease).
 - Expected: ChatGPT does not claim to have sent anything through Olympus and
   explains Olympus is read-only; it may offer to draft the reply for the user
@@ -250,8 +252,11 @@ Package
       `assets/icon.png` is a temporary placeholder; replace it, set `logo`,
       `composerIcon` and `brandColor`.
 - [ ] Skills pass the automated scan (no instructions to run unreviewed
-      commands; the setup skill's `install.sh` placeholder must be replaced by
-      the signed installer or removed before submission).
+      commands). The `install.sh` placeholder is removed: until the installer
+      ships, the setup skill runs no install command and says it is not
+      available yet. Once the owner picks a script or a signed `.pkg`
+      (release plan, item 2), rewrite the skill's step 2 around the real,
+      reviewed command and rescan.
 
 Server and UI
 - [ ] MCP endpoint `https://mcp.olympusplugin.ai/mcp` (Streamable HTTP) is
@@ -288,6 +293,15 @@ Reviewer demo
 - [ ] Demo video recorded last, from the tested dashboard.
 
 Policy
+- [ ] Sensitive data decided and documented: users' sources can hold health,
+      financial and children's information, and the privacy form invites
+      people to describe it. State in the privacy policy and here what
+      reaches OpenAI (Personal excerpts, file names, the "What's private for
+      you?" description, folder names via the panel's `_meta`, the one-bit
+      Private-match note) and what never does (Private contents and private
+      answers, Secrets), then confirm against the
+      [plugin guidelines](https://developers.openai.com/plugins/plugin-guidelines)
+      that this handling is permitted (product review 2026-10-02, #17).
 - [ ] Guidelines reread for: restricted data (Olympus never sends Private or
       Secret items, but users' sources may contain such data), data
       minimization, "unofficial connector" wording (Olympus is a knowledge

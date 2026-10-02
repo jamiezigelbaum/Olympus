@@ -62,25 +62,26 @@ keeps your index there; ChatGPT asks it questions through one secure
 connection that you approve on the Mac. You need a Mac and ChatGPT. You do
 not need OpenClaw, Tailscale, an API key or a new account.
 
-> The one-command installer is still being finished; see the
+> The Mac installer is not available yet: whether it is a script or a signed
+> `.pkg` is still open in the
 > [release plan](docs/V0_4_RELEASE.md#olympus-10-chatgpt). Until it ships,
-> steps 1 and 2 are for testers.
+> step 1 is for testers who already have the engine on their Mac, and
+> ChatGPT's setup skill says so instead of running any install command.
 
 ### 1. Add Olympus and install the engine on your Mac
 
-1. Open the ChatGPT desktop app on your Mac and switch to **Work** mode (it
-   can run commands on your Mac when you approve them).
+1. Open the ChatGPT desktop app on your Mac.
 2. Add **Olympus** from ChatGPT's plugin directory.
-3. Say *"Set up Olympus on my Mac."* ChatGPT shows the install command and
-   what it does, and runs it only after you say yes. Olympus installs for
-   your macOS user only (no administrator password) and runs in the
-   background as a login item (a LaunchAgent). It downloads its built-in
-   models once.
+3. Install the engine. When the installer ships, it installs Olympus for
+   your macOS user only (no administrator password), runs it in the
+   background as a login item (a LaunchAgent), and downloads its built-in
+   models once. Testers set it up from the build they were given; ask
+   *"Set up Olympus on my Mac"* and ChatGPT checks whether it is there.
 
 ### 2. Approve ChatGPT on your Mac
 
-When the install finishes, an Olympus page opens on your Mac asking to
-connect ChatGPT. Click **Approve**. That click, on your own Mac, is how
+The first time ChatGPT connects to Olympus, an Olympus page opens in your
+Mac's browser asking to connect ChatGPT. Click **Approve**. That click, on your own Mac, is how
 Olympus knows the Mac is yours: there is no code to copy and no account to
 create. To check on it later, run `olympus engine status` in Terminal.
 
