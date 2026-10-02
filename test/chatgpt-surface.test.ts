@@ -153,8 +153,9 @@ describe('dashboard view-model producer', () => {
     expect(vm.progress).toEqual({
       unit: 'files',
       phase: 'initial',
-      percent: 25,
-      itemsLeft: 150,
+      // Searchable (indexed) items, not items read: 20 of 200.
+      percent: 10,
+      itemsLeft: 180,
       etaSeconds: 5400,
       stalled: false,
       details: [
@@ -185,12 +186,28 @@ describe('dashboard view-model producer', () => {
     // Honesty rule: never Fresh, never "synced …", while a stage is unfinished.
     expect(dropbox.status).toBe('Working');
     expect(dropbox.detail).toBe('Reading');
-    expect(vm.progress).toMatchObject({ unit: 'files', percent: 75, itemsLeft: 50, stalled: false });
+    // The headline counts searchable items (indexed), not items read.
+    expect(vm.progress).toMatchObject({ unit: 'files', percent: 60, itemsLeft: 80, stalled: false });
     expect(vm.progress!.details).toEqual([
       { stage: 'Reading', unit: 'files', done: 150, total: 200 },
       { stage: 'Indexing', unit: 'files', done: 120, total: 200 },
     ]);
     expect(copyDashboardViewModel(vm)).toEqual(vm);
+  });
+
+  test('everything read but nothing indexed is not complete: completion counts searchable items', () => {
+    // Review 2026-10-02 #8 probe: 100 readable files, 0 indexed read as 100%, 0 left.
+    const vm = buildChatGptDashboardViewModel(view([card('dropbox.files', {
+      family: 'file',
+      connection: { state: 'synced', label: 'synced less than 1 hour ago' },
+      coverage: { indexed_items: 100, content_ready_items: 100, embedded_items: 0, embedded_files: 0 },
+      queue_health: { label: 'Working now', waiting: 10, active: 1 },
+      answer_readiness: { state: 'syncing', label: 'Syncing now' },
+      last_sync_at: NOW.toISOString(),
+      movement: { extraction_at: NOW.toISOString() } as never,
+    })]), { now: NOW });
+    expect(vm.sources[0]!.progress).toMatchObject({ stage: 'indexing', done: 0, total: 100 });
+    expect(vm.progress).toMatchObject({ unit: 'files', percent: 0, itemsLeft: 100 });
   });
 
   test('a source working normally offers no action: no "Check again" while a stage runs', () => {

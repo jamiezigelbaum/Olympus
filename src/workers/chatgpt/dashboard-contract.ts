@@ -126,6 +126,7 @@ export interface DashboardViewModelV1 {
     /** What is being counted, and whether this is the first build or a refresh. */
     unit: 'files' | 'messages' | 'items';
     phase: 'initial' | 'refresh';
+    /** Searchable (indexed) items over the in-scope total: read but unindexed is not done. */
     percent: number;
     itemsLeft: number;
     /** Only once a rate has been measured. */

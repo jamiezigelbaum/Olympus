@@ -413,6 +413,13 @@ interface StageCounts {
   found: number;
   reading?: { done: number; total: number };
   indexing?: { done: number; total: number };
+  /**
+   * Items a question can find now, over the in-scope population: indexed
+   * (embedded) items, or read items for a keyword-only source whose
+   * embedding stage does not apply. Zero when the store publishes no
+   * per-item embedding count: unknown is never claimed as searchable.
+   */
+  searchable?: { done: number; total: number };
 }
 
 interface MeasuredSourceProgress {
@@ -458,6 +465,9 @@ function measuredSourceProgress(
     if (phase.id === 'extraction') counts.reading = entry;
     if (phase.id === 'embedding') counts.indexing = entry;
   }
+  const embeddingApplies = !phases.some((phase) => phase.id === 'embedding' && phase.not_applicable === true);
+  if (counts.indexing) counts.searchable = counts.indexing;
+  else if (counts.reading) counts.searchable = embeddingApplies ? { done: 0, total: counts.reading.total } : counts.reading;
   // An embedding row whose store publishes no per-item count is finished when
   // the chunk backlog says nothing is missing; otherwise it is still indexing.
   const embeddingBehind = (scrubbed.embedding_backlog?.missing_chunks ?? 0) > 0
@@ -637,8 +647,10 @@ function unitFor(card: DashboardSourceCard): Unit {
  * One progress block over every connected source that is not done. Each
  * stage's row sums that stage's counts across those sources (listing: items
  * found so far, no total until a first listing finishes). The headline
- * percentage is reading's when anything has a known in-scope total, else the
- * sum of the sources' own stage counts. Absent once every source is done.
+ * percentage and items left count what is searchable (indexed, or read for a
+ * keyword-only source) when anything has a known in-scope total, else the
+ * sum of the sources' own stage counts: read but not yet indexed is not done.
+ * Absent once every source is done.
  */
 function overallProgress(
   rows: ReadonlyArray<{ card: DashboardSourceCard; progress?: SourceProgress | undefined; counts?: StageCounts | undefined }>,
@@ -653,6 +665,7 @@ function overallProgress(
   const listing = { done: 0, any: false };
   const reading = { done: 0, total: 0, any: false };
   const indexing = { done: 0, total: 0, any: false };
+  const searchable = { done: 0, total: 0 };
   let ownDone = 0;
   let ownTotal = 0;
   for (const { card, progress, counts } of open) {
@@ -670,6 +683,10 @@ function overallProgress(
       indexing.done += counts.indexing.done;
       indexing.total += counts.indexing.total;
     }
+    if (counts.searchable) {
+      searchable.done += Math.min(counts.searchable.done, counts.searchable.total);
+      searchable.total += counts.searchable.total;
+    }
     ownTotal += progress.total;
     ownDone += progress.total > 0 ? Math.min(progress.done, progress.total) : 0;
     if (card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || progress.stage === 'listing') initial = true;
@@ -682,7 +699,7 @@ function overallProgress(
   if (listing.any) details.push({ stage: STAGE_DETAIL.listing, unit, done: listing.done, total: 0 });
   if (reading.any) details.push({ stage: STAGE_DETAIL.reading, unit, done: reading.done, total: reading.total });
   if (indexing.any) details.push({ stage: STAGE_DETAIL.indexing, unit, done: indexing.done, total: indexing.total });
-  const [done, total] = reading.total > 0 ? [reading.done, reading.total] : [ownDone, ownTotal];
+  const [done, total] = searchable.total > 0 ? [searchable.done, searchable.total] : [ownDone, ownTotal];
   return {
     unit,
     phase: initial ? 'initial' : 'refresh',
