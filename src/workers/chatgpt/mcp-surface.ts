@@ -288,7 +288,7 @@ export async function callChatGptTool(
         // only once ChatGPT can see it.
         const match = normalizeProbe(probed);
         const privateMatch = match.count > 0
-          ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later) }, options)
+          ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx) }, options)
           : undefined;
         return searchToolResult(raw, privateMatch ? { privateMatch } : {});
       }
@@ -310,7 +310,7 @@ export async function callChatGptTool(
         ]);
         const match = normalizeProbe(probed);
         const pending: PendingPrivateMatch | undefined = match.count > 0
-          ? { question, match, refresh: privateRefresh(question, probe, later) }
+          ? { question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx) }
           : undefined;
         const jobId = pendingJobId(raw);
         if (jobId) {
@@ -372,6 +372,14 @@ interface PendingPrivateMatch {
   question: string;
   match: PrivateMatchProbeResult;
   refresh: PrivateEvidenceRefresh;
+  /** The connection that asked: its newer job supersedes its older precomputes. */
+  caller?: string | undefined;
+}
+
+/** The asking connection's id, when the caller has one. */
+function privateCaller(ctx: OperationContext): string | undefined {
+  const id = ctx.caller?.connectionId;
+  return id ? `${ctx.caller?.surface ?? 'remote'}:${id}` : undefined;
 }
 
 /** The same Private search again, at claim time, so evidence is judged at its current tier. */
@@ -388,10 +396,10 @@ function privateRefresh(
  * ready, else counts and state. Called as the answered result is built.
  */
 function beginPrivateAnswer(pending: PendingPrivateMatch, options: ChatGptSurfaceOptions): PrivateMatchSummary & { jobId?: string } {
-  const { question, match, refresh } = pending;
+  const { question, match, refresh, caller } = pending;
   if (!options.privateAnswers) return { count: match.count, panelState: 'no_model' };
   try {
-    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence, refresh });
+    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence, refresh, ...(caller ? { caller } : {}) });
   } catch {
     return { count: match.count, panelState: 'no_model' };
   }

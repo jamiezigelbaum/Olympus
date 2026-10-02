@@ -73,8 +73,13 @@ export type PrivateEvidenceItem = Readonly<Record<string, unknown>>;
  * sizes and milliseconds only, never content.
  */
 export interface PrivateAnswerObserver {
-  /** The evidence the model reads: items kept, items without readable text, their text bytes. */
-  evidence?(stats: { items: number; unreadable: number; bytes: number }): void;
+  /**
+   * The evidence the model reads: items kept, items without readable text,
+   * their text bytes, and (`used`) which input items it reads, as indexes
+   * into the evidence passed in. The claim-time check revalidates exactly
+   * those; without `used`, every input item is revalidated.
+   */
+  evidence?(stats: { items: number; unreadable: number; bytes: number; used?: readonly number[] }): void;
   /** One model call finished (or failed). */
   modelCall?(call: PrivateAnswerModelCall): void;
 }

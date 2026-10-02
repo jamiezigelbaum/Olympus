@@ -272,6 +272,24 @@ percent when known; counts only, no job).
    answer creates it at `source_answer_result`, not at `source_answer`). It
    holds the question in memory only, for at most **10 minutes** from
    creation.
+   - **Precompute (2026-10-02).** The job's private analysis starts as the
+     job is created, from the search-time Private evidence, while ChatGPT
+     is still writing its own reply (often 30-50 s), so the panel's answer
+     is usually ready before the panel renders. Owner report: the user
+     waited for ChatGPT and then about 30 s more for the panel, and earlier
+     logs showed panels queued 44-58 s behind each other. The plaintext
+     answer stays in the engine's memory only; it is sealed to a key only at
+     claim, after the claim-time check (step 4). ChatGPT often calls
+     `olympus_search` several times in one turn: a newer job from the same
+     connection supersedes that connection's older precomputes (a queued
+     one never runs, a running one is aborted; a superseded job whose panel
+     is claimed anyway is computed then), an identical question (case and
+     spacing aside) within 3 minutes shares one analysis, and an unclaimed
+     precompute that has not started within 2 minutes of its search is
+     abandoned. Claimed work runs before precomputes, the newest precompute
+     first. An unclaimed precompute's answer is freed when its job expires.
+     While an analysis runs it counts as answer activity, so the tier
+     sniffer yields the shared model to it.
 3. **Tool result.** The answer tool's result `_meta["olympus/privateAnswer"]`
    is `{v:1, count, state, jobId?, percent?}` and nothing else (the response
    builder copies exactly these fields). `_meta` is widget-only: ChatGPT does
@@ -286,21 +304,50 @@ percent when known; counts only, no job).
    through `tools/call`. The first public key to arrive claims the job;
    another key gets **409 `claimed`**, the panel says "This private answer was
    already opened elsewhere", and the Mac writes a content-free local audit
-   line. Claiming starts the private model (one analysis at a time), so a
-   match the user never opens costs no model time.
+   line. Claiming seals the precomputed answer once it is ready and still
+   valid (below); without one (no precompute, superseded, abandoned or
+   discarded), claiming starts the private model for this job, ahead of any
+   precompute (one analysis at a time).
    - **Evidence at claim time.** The Private search runs again when the job
      is claimed, so every item is judged at its current tier; anything not
      Private-eligible now (re-tiered to Secret, or out of the Private tier)
-     is dropped, and the search-time hits are not trusted. No eligible item
-     left means `failed`.
-   - **Hard deadline.** One analysis (refresh plus model) has a deadline
-     enforced outside the model call (default 5 minutes): the engine marks
-     the job `failed` and frees the slot first, then runs the model's
-     `reset()` in the background with its own timeout to kill or reset its
-     runtime. The next analysis waits for that reset (bounded by its
-     timeout), so two inferences never overlap and the reset cannot kill the
-     next job. Inference never starts after the deadline, even when the
+     is dropped, and the search-time hits are not trusted. A precomputed
+     answer is sealed only when every item it read (the model reports which
+     of the hits it read; matched by source item identity) is still among
+     the Private-eligible items; otherwise it is discarded and the answer is
+     computed again from the current evidence. No eligible item left means
+     `failed`.
+   - **Hard deadline.** Every claim settles `ready` or `failed` within a
+     deadline counted from the claim (100 s, inside the panel's two-minute
+     wait), and each analysis has the same bound from its start, both
+     enforced outside the model call: the engine marks the analysis failed
+     and frees the slot first, then runs the model's `reset()` in the
+     background with its own timeout to kill or reset its runtime. The next
+     analysis waits for that reset (bounded by its timeout), so two
+     inferences never overlap and the reset cannot kill the next job.
+     Inference never starts for a claim after its deadline, even when the
      evidence refresh returns late.
+   - **What the model reads.** The panel's model reads at most 4 readable
+     items: the hits ranked by relevance to the question (the cosine
+     similarity of the question to each item's name, weighted 0.7, and to
+     its name plus the first 400 characters of its passages, computed by
+     the Private corpora's embedding model and only when it runs on this
+     computer; retrieval order otherwise), cut 0.06 below the best item.
+     They are rendered compactly for the small model: per item its number
+     and name, one line of date, source and folder, then its passages as
+     quoted `source_data`, under the same Analyst instruction worded for
+     that list (answer from this evidence only, cite, say what is missing).
+     Measured 2026-10-02 on a real Private store: a ChatGPT-rewritten query
+     ranked two dated reports from other months first by retrieval, and the
+     small model answered from them; by name similarity the right files led
+     with a clear margin, and the prompt shrank from about 3,700 to about
+     1,600 tokens.
+   - **Timing log.** Each settled claim logs one content-free line:
+     `[private-answer] outcome=… precomputed=yes|no wait_at_claim_ms=…
+     search_to_ready_ms=… queued_ms=… refresh_ms=… matched=… items=…
+     evidence_bytes=… model_ms=… main_…`. `wait_at_claim_ms` is what the
+     panel waited after its claim; `search_to_ready_ms` is from the search to
+     the answer being ready.
    - **Claim budget.** An unknown, expired or wrong-install id answers 410
      without spending the install-wide claim budget, so made-up ids cannot
      lock out a real panel. The claim-time search on a pinned Private corpus

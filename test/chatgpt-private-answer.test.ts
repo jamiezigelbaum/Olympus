@@ -145,13 +145,13 @@ describe('one-time jobs', () => {
     const begun = jobs.begin({ question: 'When does the lease end?', count: 3, evidence: EVIDENCE });
     expect(begun).toMatchObject({ count: 3, panelState: 'ready' });
     expect(begun.jobId).toMatch(new RegExp(`^oly2p\\.${INSTALL}\\.`));
-    // Nothing runs until the panel claims it.
-    expect(model.calls).toHaveLength(0);
+    // The analysis starts at search time, before any claim.
+    await settled(jobs);
+    expect(model.calls).toEqual([{ question: 'When does the lease end?', evidence: EVIDENCE }]);
     const panel = await generatePanelKeyPair();
     const first = await jobs.claim(begun.jobId!, panel.publicKey);
     expect(first).toMatchObject({ status: 202, body: { status: 'pending' }, retryAfterSeconds: 2 });
     await settled(jobs);
-    expect(model.calls).toEqual([{ question: 'When does the lease end?', evidence: EVIDENCE }]);
     const ready = await jobs.claim(begun.jobId!, panel.publicKey);
     expect(ready.status).toBe(200);
     expect(ready.body.status).toBe('ready');
@@ -189,7 +189,8 @@ describe('one-time jobs', () => {
       },
       reset: () => { resets += 1; },
     });
-    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 50, audit: (event) => events.push(event) });
+    // Claim-time analyses only: this is the path a claim takes without a usable precompute.
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 50, audit: (event) => events.push(event), precompute: false });
     const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE }).jobId!;
     const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
@@ -228,19 +229,27 @@ describe('one-time jobs', () => {
       refresh: async () => { refreshed += 1; return claimTime; },
     });
     expect(refreshed).toBe(0);
-    await jobs.claim(jobId!, (await generatePanelKeyPair()).publicKey);
+    await settled(jobs);
+    // The search-time precompute read both items.
+    expect(model.calls[0]!.evidence).toEqual(searchTime);
+    const panel0 = await generatePanelKeyPair();
+    await jobs.claim(jobId!, panel0.publicKey);
     await settled(jobs);
     expect(refreshed).toBe(1);
-    expect(model.calls[0]!.evidence).toEqual([{ item: 'lease', trust_domain: 'secure_local' }]);
+    // It read an item that is Secret now: discarded, and answered again from the current evidence.
+    expect(model.calls).toHaveLength(2);
+    expect(model.calls[1]!.evidence).toEqual([{ item: 'lease', trust_domain: 'secure_local' }]);
+    expect((await jobs.claim(jobId!, panel0.publicKey)).body.status).toBe('ready');
+    model.calls.length = 0;
 
     // Everything gone from the Private tier by claim time: no answer at all.
-    const empty = makeJobs(model);
+    const empty = makeJobs(model, { now: 1_000_000 }, { precompute: false });
     const second = empty.begin({ question: 'q', count: 1, evidence: searchTime, refresh: async () => [{ item: 'password', trust_tier: 'secret' }] });
     const panel = await generatePanelKeyPair();
     await empty.claim(second.jobId!, panel.publicKey);
     await settled(empty);
     expect(await empty.claim(second.jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
-    expect(model.calls).toHaveLength(1);
+    expect(model.calls).toHaveLength(0);
   });
 
   test('the first key wins; a second key gets 409 claimed', async () => {
@@ -361,7 +370,7 @@ describe('one-time jobs', () => {
         return new Promise<void>((resolve) => { finishReset = () => { events.push('reset:done'); resolve(); }; });
       },
     });
-    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 20, resetTimeoutMs: 60_000, audit: () => {} });
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 20, resetTimeoutMs: 60_000, audit: () => {}, precompute: false });
     const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE }).jobId!;
     const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
@@ -387,7 +396,7 @@ describe('one-time jobs', () => {
         : Promise.resolve({ answer: 'next answer', citations: [] })),
       reset: () => { resets += 1; return new Promise<void>(() => {}); },
     });
-    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 100, resetTimeoutMs: 60, audit: () => {} });
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 100, resetTimeoutMs: 60, audit: () => {}, precompute: false });
     const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE }).jobId!;
     const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
@@ -408,7 +417,7 @@ describe('one-time jobs', () => {
     const model = readyModel({
       answerPrivately: async () => { inferences += 1; return { answer: 'too late', citations: [] }; },
     });
-    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 20, audit: () => {} });
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 20, audit: () => {}, precompute: false });
     const { jobId } = jobs.begin({
       question: 'q',
       count: 1,

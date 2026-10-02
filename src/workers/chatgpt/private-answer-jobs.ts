@@ -7,37 +7,53 @@
  * the count, in the tool result's widget-only `_meta`. The private answer
  * panel collects the answer itself, directly from the relay:
  *
- * 1. It POSTs an ephemeral ECDH public key. The first key to arrive claims
- *    the job. Another key gets 409 `claimed`: the panel says the answer was
- *    already opened elsewhere, and this Mac writes a content-free audit line.
- * 2. Claiming starts the private model. The evidence is searched again at
- *    that moment (current tiers, not the search-time cache), and anything not
- *    Private-eligible now (Secret included) is dropped. Until the model is
- *    done, the claiming key gets 202 `pending` with Retry-After.
- * 3. When it is done, the claiming key gets 200 `ready` with the answer
- *    sealed to that key (private-answer-crypto.ts), padded to a size bucket
- *    so the ciphertext length does not reveal the answer length. The same key gets the
- *    same sealed bytes again until the job expires, so a replay of the
+ * 1. Search time: the job's private analysis starts at once (a precompute),
+ *    from the search-time Private evidence, while ChatGPT is still writing its
+ *    own reply. The plaintext answer stays in this engine's memory only.
+ *    ChatGPT often searches several times in one turn: a newer job from the
+ *    same caller supersedes the older jobs' precomputes (they are cancelled),
+ *    an identical question within PRIVATE_ANSWER_DEDUPE_MS shares one
+ *    analysis, and a precompute that has not started within
+ *    PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS of its search, unclaimed, is
+ *    abandoned. Claimed work always runs before precomputes, the newest
+ *    precompute first.
+ * 2. The panel POSTs an ephemeral ECDH public key. The first key to arrive
+ *    claims the job. Another key gets 409 `claimed`: the panel says the
+ *    answer was already opened elsewhere, and this Mac writes a content-free
+ *    audit line.
+ * 3. Claim time: the evidence is searched again (current tiers, not the
+ *    search-time cache), and anything not Private-eligible now (Secret
+ *    included) is dropped. The precomputed answer is used only when every
+ *    item it read is still Private-eligible; otherwise it is discarded and the
+ *    answer is computed again from the current evidence (or the job fails).
+ *    Until the answer is sealed, the claiming key gets 202 `pending` with
+ *    Retry-After.
+ * 4. Then the claiming key gets 200 `ready` with the answer sealed to that
+ *    key (private-answer-crypto.ts), padded to a size bucket so the
+ *    ciphertext length does not reveal the answer length. The same key gets
+ *    the same sealed bytes again until the job expires, so a replay of the
  *    panel's request (by anyone who saw it) is harmless and cannot consume
  *    the answer: only the holder of the panel's private key can open it.
  *
- * A hard deadline, counted from the claim (queue wait included) and inside
- * the panel's own wait, settles every claimed job as ready or failed, and
+ * A hard deadline, counted from the claim, settles every claimed job as
+ * ready or failed. Each analysis has its own deadline from its start, which
  * frees the analysis slot even when a model ignores its abort signal: the
- * job fails and the slot is freed first, then the model's `reset` (when it
- * has one) runs in the background, with its own timeout, to kill or reset
- * its runtime. Inference never starts after the deadline, even when the
- * evidence refresh finishes late. From claim to settle the job counts as
- * answer activity, so background model work (the tier sniffer) yields to it,
- * and each settled job logs one content-free line of stage timings.
+ * analysis fails and the slot is freed first, then the model's `reset` (when
+ * it has one) runs in the background, with its own timeout, to kill or reset
+ * its runtime. Inference never starts for a claim after its deadline, even
+ * when the evidence refresh finishes late. While an analysis runs, and from a
+ * claim until it settles, the job counts as answer activity, so background
+ * model work (the tier sniffer) yields to it, and each settled claim logs
+ * one content-free line of stage timings.
  *
  * Pending polls by the claiming key are rate limited per job (429), never
  * destructive. Unknown, expired (ten minutes from creation) and wrong-install
  * jobs answer 410 `gone`: the endpoint is no oracle for which ids existed.
  * Analyses run one at a time, and after a deadline the next one waits for
  * the model's reset (bounded). Claims of live jobs are rate limited; a claim
- * of an unknown id spends nothing. Nothing here is
- * persisted: an engine restart forgets every job.
+ * of an unknown id spends nothing. Nothing here is persisted: an engine
+ * restart forgets every job and every answer; an expired job's answer is
+ * dropped with it.
  */
 import { randomBytes } from 'node:crypto';
 import {
@@ -82,33 +98,48 @@ export interface PrivateAnswerJobsOptions {
   /** Claims across all jobs: burst and refill per second. */
   claimRate?: { capacity: number; refillPerSecond: number };
   /**
-   * Hard deadline for one analysis, from the claim (queue wait, evidence
-   * refresh and model), enforced outside the model.
+   * Hard deadline for one claim (evidence refresh, any wait for the
+   * analysis, and sealing), enforced outside the model; also the bound on
+   * one analysis's run, from its start.
    */
   analysisTimeoutMs?: number;
+  /** Start each job's analysis when the job is created (default true). */
+  precompute?: boolean;
+  /** An identical question within this long shares one analysis. */
+  dedupeMs?: number;
+  /** An unclaimed job's precompute that has not started this long after its search is abandoned. */
+  precomputeWindowMs?: number;
   /** Local audit log (default: one line on stderr). */
   audit?: (event: PrivateAnswerAuditEvent) => void;
   /**
-   * Answer activity: `begin` when a job is claimed, `end` once it is ready
-   * or failed (exactly once each). The worker pauses the tier sniffer and
-   * other background model work in between, so the answer never waits on it.
+   * Answer activity: `begin` when an analysis starts or a job is claimed,
+   * `end` once it finishes or the claim settles (exactly once each). The
+   * worker pauses the tier sniffer and other background model work in
+   * between, so the answer never waits on it.
    */
   activity?: { begin(): void; end(): void };
-  /** The per-job stage timing line (default: stdout). Counts and milliseconds only. */
+  /** The per-claim stage timing line (default: stdout). Counts and milliseconds only. */
   log?: (line: string) => void;
 }
 
-/** One analysis's stage costs, logged once it settles. No id, question, evidence or answer. */
+/** One claim's stage costs, logged once it settles. No id, question, evidence or answer. */
 interface AnalysisTiming {
   outcome: 'sealed' | 'failed';
   reason: 'deadline' | 'aborted' | 'no_evidence' | 'error';
+  /** The answer came from the search-time analysis (`yes`), or was computed for the claim (`no`). */
+  precomputed?: boolean;
+  /** From the claim until the answer was there to seal (refresh, and any wait for the analysis). */
+  waitAtClaimMs?: number;
+  /** From the search until the answer was ready. */
+  searchToReadyMs?: number;
+  /** The analysis's wait for the model slot. */
   queuedMs: number;
   refreshMs?: number;
   matched?: number;
-  items?: number;
-  unreadable?: number;
-  evidenceBytes?: number;
-  modelMs?: number;
+  items?: number | undefined;
+  unreadable?: number | undefined;
+  evidenceBytes?: number | undefined;
+  modelMs?: number | undefined;
   calls: PrivateAnswerModelCall[];
   totalMs?: number;
 }
@@ -123,10 +154,13 @@ const defaultLog = (line: string) => {
   console.log(line);
 };
 
-/** `[private-answer] outcome=… queued_ms=… refresh_ms=… …`: stage costs only. */
+/** `[private-answer] outcome=… precomputed=… wait_at_claim_ms=… …`: stage costs only. */
 export function formatAnalysisTiming(timing: AnalysisTiming): string {
   const fields: string[] = [`outcome=${timing.outcome}`];
   if (timing.outcome === 'failed') fields.push(`reason=${timing.reason}`);
+  if (timing.precomputed !== undefined) fields.push(`precomputed=${timing.precomputed ? 'yes' : 'no'}`);
+  if (timing.waitAtClaimMs !== undefined) fields.push(`wait_at_claim_ms=${timing.waitAtClaimMs}`);
+  if (timing.searchToReadyMs !== undefined) fields.push(`search_to_ready_ms=${timing.searchToReadyMs}`);
   fields.push(`queued_ms=${timing.queuedMs}`);
   if (timing.refreshMs !== undefined) fields.push(`refresh_ms=${timing.refreshMs}`);
   if (timing.matched !== undefined) fields.push(`matched=${timing.matched}`);
@@ -150,17 +184,45 @@ export function formatAnalysisTiming(timing: AnalysisTiming): string {
 /** Re-reads the job's evidence at claim time, at the items' current tiers. */
 export type PrivateEvidenceRefresh = (signal: AbortSignal) => Promise<readonly PrivateEvidenceItem[]>;
 
+/**
+ * One run of the private model over one question's eligible evidence: a
+ * search-time precompute, or a claim's own computation. Shared by every job
+ * that asked the identical question within the dedupe window. Its plaintext
+ * answer lives only here, in memory, until no job holds it.
+ */
+interface Analysis {
+  readonly key: string;
+  readonly createdAt: number;
+  /** Set when a claim waits on it: claimed work runs first, oldest claim first. */
+  claimedAt: number | undefined;
+  question: string | undefined;
+  evidence: readonly PrivateEvidenceItem[] | undefined;
+  state: 'queued' | 'running' | 'done' | 'failed';
+  result: { plaintext: PrivateAnswerPlaintextV1; usedKeys: readonly string[] | undefined } | undefined;
+  failReason: AnalysisTiming['reason'] | undefined;
+  startedAt: number | undefined;
+  readyAt: number | undefined;
+  stats: Pick<AnalysisTiming, 'items' | 'unreadable' | 'evidenceBytes' | 'modelMs'> & { calls: PrivateAnswerModelCall[] };
+  readonly abort: AbortController;
+  readonly jobs: Set<Job>;
+  readonly settled: Promise<void>;
+  settle: () => void;
+}
+
 interface Job {
   readonly id: string;
+  readonly createdAt: number;
   readonly expiresAt: number;
+  readonly caller: string | undefined;
   question: string | undefined;
   evidence: readonly PrivateEvidenceItem[] | undefined;
   refresh: PrivateEvidenceRefresh | undefined;
+  analysis: Analysis | undefined;
   claimKey?: string;
   pollTokens: number;
   pollRefilledAt: number;
   outcome?: { kind: 'sealed'; sealed: SealedPrivateAnswer } | { kind: 'failed' } | undefined;
-  abort?: AbortController;
+  claimAbort?: AbortController;
 }
 
 export interface ClaimResponse {
@@ -182,6 +244,10 @@ const PENDING_RETRY_SECONDS = 2;
  * engine is still running.
  */
 export const PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 100_000;
+/** An identical question asked again within this long reuses the answer. */
+export const PRIVATE_ANSWER_DEDUPE_MS = 3 * 60_000;
+/** An unclaimed job's precompute not started within this long of its search is abandoned. */
+export const PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS = 2 * 60_000;
 const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
 
 const defaultAudit = (event: PrivateAnswerAuditEvent) => {
@@ -205,10 +271,41 @@ export function isPrivateEligible(item: PrivateEvidenceItem): boolean {
   return true;
 }
 
+/**
+ * A stable identity for one evidence item (its source item: provider,
+ * account, item id; for a hit without one, the whole hit), or undefined when
+ * it has none. The claim-time check matches the items an answer read against
+ * the current evidence by it.
+ */
+export function privateEvidenceKey(item: PrivateEvidenceItem): string | undefined {
+  const provenance = asRecord(item.provenance);
+  const source = asRecord(item.sourceItem) ?? asRecord(provenance?.sourceItem);
+  const id = text(source?.localItemId) ?? text(source?.providerItemId);
+  if (source && id) {
+    return JSON.stringify(['item', text(source.provider) ?? '', text(source.family) ?? '', text(source.accountScope) ?? '', id]);
+  }
+  // No source identity: only the identical hit (same fields, same tiers) matches.
+  try {
+    return JSON.stringify(['hit', item]);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The dedupe key: the question, case and spacing aside. */
+function questionKey(question: string): string {
+  return question.normalize('NFKC').toLowerCase().split(/\s+/).filter(Boolean).join(' ');
+}
+
 export class PrivateAnswerJobs {
   // Assigned in the constructor, not as field initializers: an initializer
   // would make the bundler keep this module in bundles that never use it.
   private readonly jobs: Map<string, Job>;
+  /** Analyses an identical question may share, by question key, within the dedupe window. */
+  private readonly shared: Map<string, Analysis>;
+  /** Analyses waiting for the model slot. */
+  private readonly waiting: Analysis[];
+  private running: Analysis | undefined;
   private readonly now: () => number;
   private readonly ttlMs: number;
   private readonly maxJobs: number;
@@ -216,10 +313,11 @@ export class PrivateAnswerJobs {
   private readonly resetTimeoutMs: number;
   private readonly claimRate: { capacity: number; refillPerSecond: number };
   private readonly analysisTimeoutMs: number;
+  private readonly dedupeMs: number;
+  private readonly precomputeWindowMs: number;
   private readonly audit: (event: PrivateAnswerAuditEvent) => void;
   private tokens: number;
   private refilledAt: number;
-  private queue: Promise<void>;
   /** A deadline's background reset, bounded by resetTimeoutMs; the next analysis waits for it. */
   private resetting: Promise<void> | undefined;
   private readonly options: PrivateAnswerJobsOptions;
@@ -227,7 +325,9 @@ export class PrivateAnswerJobs {
   constructor(options: PrivateAnswerJobsOptions) {
     this.options = options;
     this.jobs = new Map();
-    this.queue = Promise.resolve();
+    this.shared = new Map();
+    this.waiting = [];
+    this.running = undefined;
     this.resetting = undefined;
     this.now = options.now ?? Date.now;
     this.ttlMs = options.ttlMs ?? PRIVATE_ANSWER_JOB_TTL_MS;
@@ -236,6 +336,8 @@ export class PrivateAnswerJobs {
     this.resetTimeoutMs = options.resetTimeoutMs ?? 30_000;
     this.claimRate = options.claimRate ?? { capacity: 60, refillPerSecond: 10 };
     this.analysisTimeoutMs = options.analysisTimeoutMs ?? PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS;
+    this.dedupeMs = options.dedupeMs ?? PRIVATE_ANSWER_DEDUPE_MS;
+    this.precomputeWindowMs = options.precomputeWindowMs ?? PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS;
     this.audit = options.audit ?? defaultAudit;
     this.tokens = this.claimRate.capacity;
     this.refilledAt = this.now();
@@ -245,19 +347,27 @@ export class PrivateAnswerJobs {
     return this.jobs.size;
   }
 
+  /** Analyses queued or running (precomputes and claims). */
+  get pendingAnalyses(): number {
+    return this.waiting.length + (this.running ? 1 : 0);
+  }
+
   /**
    * A private match: the panel summary, with a job when a private model is
    * ready and this engine has a relay install id. Counts and state only
    * otherwise. `count` is capped at PRIVATE_MATCH_COUNT_CAP. Call it as the
-   * tool result is built, so the id is valid only from then on. `refresh`
-   * re-reads the evidence at claim time; without it the search-time hits are
-   * used, still filtered by isPrivateEligible.
+   * tool result is built, so the id is valid only from then on. The job's
+   * analysis starts now, from `evidence` (Private-eligible items only).
+   * `refresh` re-reads the evidence at claim time; without it the search-time
+   * hits are used, still filtered by isPrivateEligible. `caller` (the
+   * connection) lets a newer job supersede that caller's older precomputes.
    */
   begin(input: {
     question: string;
     count: number;
     evidence: readonly PrivateEvidenceItem[];
     refresh?: PrivateEvidenceRefresh;
+    caller?: string;
   }): PrivateMatchSummary & { jobId?: string } {
     const count = Math.max(0, Math.min(PRIVATE_MATCH_COUNT_CAP, Math.floor(input.count)));
     const status = this.options.model().status();
@@ -280,15 +390,21 @@ export class PrivateAnswerJobs {
       this.drop(oldest);
     }
     const id = `oly2p.${installId}.${randomBytes(32).toString('base64url')}`;
-    this.jobs.set(id, {
+    const at = this.now();
+    const job: Job = {
       id,
-      expiresAt: this.now() + this.ttlMs,
+      createdAt: at,
+      expiresAt: at + this.ttlMs,
+      caller: input.caller,
       question: input.question.slice(0, MAX_QUESTION_CHARS),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
       refresh: input.refresh,
+      analysis: undefined,
       pollTokens: this.pollRate.capacity,
-      pollRefilledAt: this.now(),
-    });
+      pollRefilledAt: at,
+    };
+    this.jobs.set(id, job);
+    if (this.options.precompute !== false) this.precompute(job);
     return { count, panelState: 'ready', jobId: id };
   }
 
@@ -310,7 +426,7 @@ export class PrivateAnswerJobs {
     }
     if (job.claimKey === undefined) {
       job.claimKey = panel.raw;
-      this.startAnalysis(job, panel.key);
+      this.startClaim(job, panel.key);
     }
     const outcome = job.outcome;
     if (!outcome) {
@@ -321,15 +437,19 @@ export class PrivateAnswerJobs {
     return { status: 200, body: { status: 'ready', v: 1, ...outcome.sealed } };
   }
 
-  /** Drops expired jobs (and aborts their analyses). */
+  /** Drops expired jobs (cancelling analyses no live job needs) and forgets shared answers past the dedupe window. */
   sweep(at = this.now()): void {
     for (const [id, job] of this.jobs) if (job.expiresAt <= at) this.drop(id);
+    for (const [key, analysis] of this.shared) {
+      if (analysis.createdAt + this.dedupeMs <= at || analysis.state === 'failed') this.shared.delete(key);
+    }
   }
 
   private drop(id: string): void {
     const job = this.jobs.get(id);
     if (!job) return;
-    job.abort?.abort();
+    job.claimAbort?.abort();
+    this.detach(job);
     job.question = undefined;
     job.evidence = undefined;
     job.refresh = undefined;
@@ -337,12 +457,233 @@ export class PrivateAnswerJobs {
     this.jobs.delete(id);
   }
 
-  private startAnalysis(job: Job, panelKey: CryptoKey): void {
+  /* -------------------------------------------------------------- */
+  /* Analyses: precompute, dedupe, supersede, the one model slot     */
+  /* -------------------------------------------------------------- */
+
+  /** Starts (or joins) the job's search-time analysis, and supersedes the caller's older precomputes. */
+  private precompute(job: Job): void {
+    const evidence = (job.evidence ?? []).filter(isPrivateEligible);
+    if (evidence.length === 0 || job.question === undefined) return;
+    const analysis = this.analysisFor(job.question, evidence, undefined);
+    this.attach(job, analysis);
+    if (job.caller !== undefined) {
+      for (const other of this.jobs.values()) {
+        if (other !== job && other.caller === job.caller && other.claimKey === undefined && other.analysis !== analysis) {
+          this.detach(other);
+        }
+      }
+    }
+    this.pump();
+  }
+
+  /**
+   * The analysis for this question: a live shared one within the dedupe
+   * window when `fresh` is not given, else a new one (queued, and shared
+   * from now on). `claimedAt` marks a claim's own computation.
+   */
+  private analysisFor(question: string, evidence: readonly PrivateEvidenceItem[], claimedAt: number | undefined, fresh = false): Analysis {
+    const key = questionKey(question);
+    const at = this.now();
+    const existing = this.shared.get(key);
+    if (!fresh && existing && existing.state !== 'failed' && existing.createdAt + this.dedupeMs > at) return existing;
+    let settle: () => void = () => undefined;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const analysis: Analysis = {
+      key,
+      createdAt: at,
+      claimedAt,
+      question,
+      evidence: evidence.slice(0, MAX_EVIDENCE_ITEMS),
+      state: 'queued',
+      result: undefined,
+      failReason: undefined,
+      startedAt: undefined,
+      readyAt: undefined,
+      stats: { calls: [] },
+      abort: new AbortController(),
+      jobs: new Set(),
+      settled,
+      settle,
+    };
+    this.shared.set(key, analysis);
+    this.waiting.push(analysis);
+    return analysis;
+  }
+
+  private attach(job: Job, analysis: Analysis): void {
+    if (job.analysis === analysis) return;
+    this.detach(job);
+    job.analysis = analysis;
+    analysis.jobs.add(job);
+  }
+
+  /** The job lets go of its analysis; an analysis no job needs any more is cancelled (or, when done, left to expire). */
+  private detach(job: Job): void {
+    const analysis = job.analysis;
+    if (!analysis) return;
+    job.analysis = undefined;
+    analysis.jobs.delete(job);
+    if (analysis.jobs.size > 0) return;
+    if (analysis.state === 'queued' || analysis.state === 'running') this.cancel(analysis);
+    else if (this.shared.get(analysis.key) !== analysis) this.release(analysis);
+  }
+
+  private cancel(analysis: Analysis): void {
+    if (this.shared.get(analysis.key) === analysis) this.shared.delete(analysis.key);
+    const index = this.waiting.indexOf(analysis);
+    if (index >= 0) {
+      this.waiting.splice(index, 1);
+      this.finish(analysis, 'failed', 'aborted');
+      return;
+    }
+    // Running: the run settles it as aborted and frees the slot.
+    analysis.abort.abort();
+  }
+
+  /** Forgets a settled analysis's answer and evidence. */
+  private release(analysis: Analysis): void {
+    analysis.result = undefined;
+    analysis.question = undefined;
+    analysis.evidence = undefined;
+  }
+
+  private finish(analysis: Analysis, state: 'done' | 'failed', reason?: AnalysisTiming['reason']): void {
+    if (analysis.state === 'done' || analysis.state === 'failed') return;
+    analysis.state = state;
+    analysis.failReason = state === 'failed' ? reason ?? 'error' : undefined;
+    analysis.readyAt = this.now();
+    analysis.question = undefined;
+    analysis.evidence = undefined;
+    if (state === 'failed') {
+      analysis.result = undefined;
+      if (this.shared.get(analysis.key) === analysis) this.shared.delete(analysis.key);
+    }
+    if (analysis.jobs.size === 0 && this.shared.get(analysis.key) !== analysis) this.release(analysis);
+    analysis.settle();
+  }
+
+  /** The next analysis for the slot: the oldest claim, else the newest precompute still worth running. */
+  private next(): Analysis | undefined {
+    const at = this.now();
+    for (let index = this.waiting.length - 1; index >= 0; index -= 1) {
+      const analysis = this.waiting[index]!;
+      const claimed = analysis.claimedAt !== undefined || [...analysis.jobs].some((job) => job.claimKey !== undefined);
+      if (!claimed && (analysis.jobs.size === 0 || analysis.createdAt + this.precomputeWindowMs <= at)) {
+        // Unclaimed and stale (or orphaned): abandoned, never started.
+        this.waiting.splice(index, 1);
+        if (this.shared.get(analysis.key) === analysis) this.shared.delete(analysis.key);
+        for (const job of [...analysis.jobs]) {
+          job.analysis = undefined;
+          analysis.jobs.delete(job);
+        }
+        this.finish(analysis, 'failed', 'aborted');
+      }
+    }
+    let pick: Analysis | undefined;
+    for (const analysis of this.waiting) {
+      if (analysis.claimedAt !== undefined && (pick?.claimedAt === undefined || analysis.claimedAt < pick.claimedAt)) pick = analysis;
+    }
+    pick ??= this.waiting[this.waiting.length - 1];
+    if (pick) this.waiting.splice(this.waiting.indexOf(pick), 1);
+    return pick;
+  }
+
+  private pump(): void {
+    if (this.running || this.resetting) return;
+    const analysis = this.next();
+    if (!analysis) return;
+    this.running = analysis;
+    void this.run(analysis);
+  }
+
+  private async run(analysis: Analysis): Promise<void> {
+    const { abort } = analysis;
+    analysis.state = 'running';
+    analysis.startedAt = this.now();
+    this.beginActivity();
+    let freed = false;
+    // Frees the slot exactly once, and starts the next analysis.
+    const free = () => {
+      if (freed) return;
+      freed = true;
+      clearTimeout(deadlineTimer);
+      this.endActivity();
+      if (this.running === analysis) this.running = undefined;
+      this.pump();
+    };
+    // Bounded from its start: the slot is freed when it fires, even if the
+    // model ignores its abort signal, and the model is reset in the background.
+    let timedOut = false;
+    const deadlineTimer = setTimeout(() => {
+      if (freed) return;
+      timedOut = true;
+      this.audit('analysis_deadline');
+      this.finish(analysis, 'failed', 'deadline');
+      abort.abort();
+      this.resetInBackground();
+      free();
+    }, this.analysisTimeoutMs);
+    (deadlineTimer as { unref?: () => void }).unref?.();
+    const question = analysis.question ?? '';
+    const evidence = analysis.evidence ?? [];
+    const work = (async () => {
+      if (abort.signal.aborted) throw new AnalysisStop('aborted');
+      if (evidence.length === 0) throw new AnalysisStop('no_evidence');
+      const modelStarted = this.now();
+      let used: readonly number[] | undefined;
+      try {
+        const result = await this.options.model().answerPrivately(question, evidence, abort.signal, {
+          evidence: (stats) => {
+            analysis.stats.items = stats.items;
+            analysis.stats.unreadable = stats.unreadable;
+            analysis.stats.evidenceBytes = stats.bytes;
+            used = stats.used;
+          },
+          modelCall: (call) => {
+            analysis.stats.calls.push(call);
+          },
+        });
+        return { result, used };
+      } finally {
+        analysis.stats.modelMs = this.now() - modelStarted;
+      }
+    })();
+    work.catch(() => undefined);
+    const stopped = new Promise<void>((resolve) => {
+      if (abort.signal.aborted) resolve();
+      abort.signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+    try {
+      const done = await Promise.race([work, stopped]);
+      if (timedOut) return;
+      if (abort.signal.aborted || done === undefined) {
+        this.finish(analysis, 'failed', 'aborted');
+        return;
+      }
+      analysis.result = { plaintext: plaintextOf(done.result), usedKeys: usedKeys(evidence, done.used) };
+      this.finish(analysis, 'done');
+    } catch (error) {
+      if (!timedOut) this.finish(analysis, 'failed', error instanceof AnalysisStop ? error.reason : 'error');
+    } finally {
+      free();
+    }
+  }
+
+  /* -------------------------------------------------------------- */
+  /* Claims                                                          */
+  /* -------------------------------------------------------------- */
+
+  private startClaim(job: Job, panelKey: CryptoKey): void {
     const abort = new AbortController();
-    job.abort = abort;
+    job.claimAbort = abort;
     const claimedAt = this.now();
+    // A queued precompute moves ahead of other precomputes now, while the
+    // evidence is re-read.
+    if (job.analysis && job.analysis.state === 'queued') job.analysis.claimedAt ??= claimedAt;
     const timing: AnalysisTiming = { outcome: 'failed', reason: 'error', queuedMs: 0, calls: [] };
-    let running = false;
     let settled = false;
     // Answers come first: the sniffer and other background model work yield
     // from the claim until this job settles, however it settles.
@@ -352,97 +693,101 @@ export class PrivateAnswerJobs {
       settled = true;
       clearTimeout(deadlineTimer);
       if (this.jobs.get(job.id) === job) job.outcome = outcome;
+      // The sealed bytes (or the failure) are all the job keeps.
+      this.detach(job);
       timing.outcome = outcome?.kind ?? 'failed';
       if (reason) timing.reason = reason;
       timing.totalMs = this.now() - claimedAt;
       this.endActivity();
       this.logTiming(timing);
     };
-    // The deadline runs from the claim, queue wait included, so every
-    // claimed job is ready or failed within analysisTimeoutMs whatever the
-    // queue, the evidence refresh or the model do.
+    // The deadline runs from the claim, so every claimed job is ready or
+    // failed within analysisTimeoutMs whatever the queue, the evidence
+    // refresh or the model do.
     const deadlineTimer = setTimeout(() => {
       if (settled) return;
       this.audit('analysis_deadline');
-      // Fail the job and free the slot first; a model that was running is
-      // reset in the background with its own timeout, so a hung reset
-      // blocks nothing.
-      const wasRunning = running;
+      // An analysis only this job needs is cancelled with it; when it was
+      // running, the model is reset in the background (it may ignore its
+      // abort signal), and the next analysis waits for that reset.
+      const analysis = job.analysis;
+      const hung = analysis?.state === 'running' && analysis.jobs.size === 1;
       settle({ kind: 'failed' }, 'deadline');
       abort.abort();
-      if (wasRunning) this.resetInBackground();
+      if (hung) this.resetInBackground();
     }, this.analysisTimeoutMs);
     (deadlineTimer as { unref?: () => void }).unref?.();
-    // A job dropped (expired) while it waits in the queue settles at once.
-    abort.signal.addEventListener('abort', () => {
-      if (!running) settle({ kind: 'failed' }, 'aborted');
-    }, { once: true });
-    const run = async () => {
-      // A model reset after an earlier deadline finishes (or times out)
-      // first, so two inferences never overlap and the reset cannot kill
-      // this job's run.
-      if (this.resetting) await this.resetting;
-      timing.queuedMs = this.now() - claimedAt;
-      if (settled || abort.signal.aborted || this.jobs.get(job.id) !== job) {
-        settle({ kind: 'failed' }, 'aborted');
-        return;
+    // A job dropped (expired) while it waits settles at once.
+    abort.signal.addEventListener('abort', () => settle({ kind: 'failed' }, 'aborted'), { once: true });
+    const stopped = new Promise<void>((resolve) => {
+      if (abort.signal.aborted) resolve();
+      abort.signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+    const record = (analysis: Analysis) => {
+      timing.items = analysis.stats.items;
+      timing.unreadable = analysis.stats.unreadable;
+      timing.evidenceBytes = analysis.stats.evidenceBytes;
+      timing.modelMs = analysis.stats.modelMs;
+      timing.calls = [...analysis.stats.calls];
+      if (analysis.startedAt !== undefined) {
+        timing.queuedMs = Math.max(0, analysis.startedAt - Math.max(analysis.createdAt, analysis.claimedAt ?? analysis.createdAt));
       }
-      const question = job.question ?? '';
+      if (analysis.readyAt !== undefined) timing.searchToReadyMs = analysis.readyAt - job.createdAt;
+    };
+    const run = async () => {
       const cached = job.evidence ?? [];
       const refresh = job.refresh;
-      job.question = undefined;
+      const question = job.question ?? '';
       job.evidence = undefined;
       job.refresh = undefined;
-      running = true;
-      const work = (async () => {
-        const refreshStarted = this.now();
-        const found = refresh ? await refresh(abort.signal) : cached;
-        if (refresh) timing.refreshMs = this.now() - refreshStarted;
-        const evidence = found.filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
-        timing.matched = evidence.length;
-        // A refresh that finished after the deadline (or after the job was
-        // dropped) must not start inference.
-        if (abort.signal.aborted) throw new AnalysisStop('aborted');
-        if (evidence.length === 0) throw new AnalysisStop('no_evidence');
-        const model = this.options.model();
-        const modelStarted = this.now();
-        try {
-          return await model.answerPrivately(question, evidence, abort.signal, {
-            evidence: (stats) => {
-              timing.items = stats.items;
-              timing.unreadable = stats.unreadable;
-              timing.evidenceBytes = stats.bytes;
-            },
-            modelCall: (call) => {
-              timing.calls.push(call);
-            },
-          });
-        } finally {
-          timing.modelMs = this.now() - modelStarted;
+      const refreshStarted = this.now();
+      const found = refresh ? await refresh(abort.signal) : cached;
+      if (refresh) timing.refreshMs = this.now() - refreshStarted;
+      // A refresh that finished after the deadline (or after the job was
+      // dropped) must not start inference.
+      if (settled || abort.signal.aborted) return;
+      const evidence = found.filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
+      timing.matched = evidence.length;
+      if (evidence.length === 0) {
+        settle({ kind: 'failed' }, 'no_evidence');
+        return;
+      }
+      const current = new Set(evidence.map(privateEvidenceKey).filter((key): key is string => key !== undefined));
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let analysis = job.analysis;
+        // A precompute (or a shared answer) read the search-time evidence and
+        // is checked against the current evidence below; a computation made
+        // for this claim reads the current evidence itself.
+        const precomputed = analysis !== undefined;
+        if (!analysis) {
+          analysis = this.analysisFor(question, evidence, claimedAt, true);
+          this.attach(job, analysis);
+        } else if (analysis.state === 'queued' || analysis.state === 'running') {
+          analysis.claimedAt ??= claimedAt;
         }
-      })();
-      work.catch(() => undefined);
-      // Bounded by the deadline: the queue moves on when it fires, even if
-      // the model ignores its abort signal.
-      const stopped = new Promise<void>((resolve) => {
-        if (abort.signal.aborted) resolve();
-        abort.signal.addEventListener('abort', () => resolve(), { once: true });
-      });
-      try {
-        const result = await Promise.race([work, stopped]);
-        if (settled || abort.signal.aborted || result === undefined) {
-          settle({ kind: 'failed' }, 'aborted');
+        this.pump();
+        await Promise.race([analysis.settled, stopped]);
+        if (settled) return;
+        record(analysis);
+        const result = analysis.state === 'done' ? analysis.result : undefined;
+        if (result && (!precomputed || stillEligible(result.usedKeys, current))) {
+          timing.precomputed = precomputed;
+          timing.waitAtClaimMs = this.now() - claimedAt;
+          const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(result.plaintext)));
+          settle({ kind: 'sealed', sealed });
           return;
         }
-        const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(plaintextOf(result))));
-        settle({ kind: 'sealed', sealed });
-      } catch (error) {
-        settle({ kind: 'failed' }, error instanceof AnalysisStop ? error.reason : 'error');
-      } finally {
-        running = false;
+        // Failed, or read an item that is no longer Private-eligible: this
+        // answer is discarded for this job, and computed again once.
+        this.detach(job);
+        if (!precomputed) {
+          settle({ kind: 'failed' }, analysis.failReason ?? 'error');
+          return;
+        }
       }
+      settle({ kind: 'failed' }, 'error');
     };
-    this.queue = this.queue.then(run, run).catch(() => {
+    run().catch(() => {
       settle({ kind: 'failed' }, 'error');
     });
   }
@@ -486,6 +831,7 @@ export class PrivateAnswerJobs {
     const settled: Promise<void> = Promise.race([reset.then(() => undefined, () => undefined), timeout]).finally(() => {
       clearTimeout(timer);
       if (this.resetting === settled) this.resetting = undefined;
+      this.pump();
     });
     this.resetting = settled;
   }
@@ -507,6 +853,34 @@ export class PrivateAnswerJobs {
     this.tokens -= 1;
     return true;
   }
+}
+
+/** The identities of the items the answer read (all of them when the model did not say), or undefined if one has none. */
+function usedKeys(evidence: readonly PrivateEvidenceItem[], used: readonly number[] | undefined): readonly string[] | undefined {
+  const read = used === undefined
+    ? evidence
+    : used.map((index) => evidence[index]).filter((item): item is PrivateEvidenceItem => item !== undefined);
+  if (used !== undefined && read.length !== used.length) return undefined;
+  const keys: string[] = [];
+  for (const item of read) {
+    const key = privateEvidenceKey(item);
+    if (key === undefined) return undefined;
+    keys.push(key);
+  }
+  return keys;
+}
+
+/** Every item the answer read is among the current Private-eligible evidence. An answer with unknown sources never is. */
+function stillEligible(used: readonly string[] | undefined, current: ReadonlySet<string>): boolean {
+  return used !== undefined && used.every((key) => current.has(key));
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function text(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 function gone(): ClaimResponse {

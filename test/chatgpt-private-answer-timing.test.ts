@@ -50,7 +50,12 @@ function model(answer: PrivateAnswerModel['answerPrivately'], extra: Partial<Pri
   return { status: () => ({ state: 'ready' }), answerPrivately: answer, ...extra };
 }
 
-function harness(answer: PrivateAnswerModel['answerPrivately'], options: { timeoutMs?: number; extra?: Partial<PrivateAnswerModel> } = {}) {
+// Section 1 holds the claim-time path (a claim with no usable precompute);
+// precompute: true runs the search-time analysis too (section 5).
+function harness(
+  answer: PrivateAnswerModel['answerPrivately'],
+  options: { timeoutMs?: number; extra?: Partial<PrivateAnswerModel>; precompute?: boolean; now?: () => number } = {},
+) {
   const lines: string[] = [];
   const events: string[] = [];
   const activity = { begins: 0, ends: 0, begin() { this.begins += 1; }, end() { this.ends += 1; } };
@@ -62,6 +67,8 @@ function harness(answer: PrivateAnswerModel['answerPrivately'], options: { timeo
     audit: (event) => events.push(event),
     activity,
     log: (line) => lines.push(line),
+    precompute: options.precompute ?? false,
+    ...(options.now ? { now: options.now } : {}),
   });
   return { jobs, lines, events, activity };
 }
@@ -77,10 +84,11 @@ describe('1. every claimed job settles within its deadline', () => {
     const jobId = jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     expect((await jobs.claim(jobId, panel.publicKey)).status).toBe(202);
-    expect(activity.begins).toBe(1);
+    // Busy from the claim: the claim itself and the analysis it runs.
+    expect(activity.begins - activity.ends).toBe(2);
     await Bun.sleep(100);
     expect(await jobs.claim(jobId, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
-    expect(activity).toMatchObject({ begins: 1, ends: 1 });
+    expect(activity).toMatchObject({ begins: 2, ends: 2 });
     expect(resets).toBe(1);
     expect(events).toEqual(['analysis_deadline']);
     expect(lines).toHaveLength(1);
@@ -97,7 +105,8 @@ describe('1. every claimed job settles within its deadline', () => {
     await Bun.sleep(100);
     expect((await jobs.claim(first, panel.publicKey)).body.status).toBe('failed');
     expect((await jobs.claim(second, panel.publicKey)).body.status).toBe('failed');
-    expect(activity).toMatchObject({ begins: 2, ends: 2 });
+    // Two claims, and both analyses ran (the second once the first was cut off): every begin ended.
+    expect(activity).toMatchObject({ begins: 4, ends: 4 });
   });
 
   test('an evidence refresh that hangs and ignores abort: failed at the deadline, inference never starts', async () => {
@@ -124,6 +133,7 @@ describe('1. every claimed job settles within its deadline', () => {
       audit: () => {},
       activity,
       log: () => {},
+      precompute: false,
     });
     const first = jobs.begin({ question: 'one', count: 1, evidence: EVIDENCE }).jobId!;
     clock.now = 500;
@@ -134,7 +144,8 @@ describe('1. every claimed job settles within its deadline', () => {
     clock.now = 2_000;
     jobs.sweep();
     await Bun.sleep(10);
-    expect(activity).toMatchObject({ begins: 2, ends: 2 });
+    // Two claims and the one analysis that started: every begin ended.
+    expect(activity).toMatchObject({ begins: 3, ends: 3 });
   });
 
   test('a ready answer logs its stage timings once, with no content', async () => {
@@ -148,10 +159,10 @@ describe('1. every claimed job settles within its deadline', () => {
     await jobs.claim(jobId, panel.publicKey);
     await Bun.sleep(30);
     expect((await jobs.claim(jobId, panel.publicKey)).body.status).toBe('ready');
-    expect(activity).toMatchObject({ begins: 1, ends: 1 });
+    expect(activity).toMatchObject({ begins: 2, ends: 2 });
     expect(lines).toHaveLength(1);
     const line = lines[0]!;
-    expect(line).toMatch(/^\[private-answer\] outcome=sealed queued_ms=\d+ matched=1 items=1 unreadable=0 evidence_bytes=21 model_ms=\d+ main_ms=12 main_prompt_bytes=3000 main_prompt_tokens=900 main_prefill_ms=4 main_output_tokens=40 main_generate_ms=8 total_ms=\d+$/);
+    expect(line).toMatch(/^\[private-answer\] outcome=sealed precomputed=no wait_at_claim_ms=\d+ search_to_ready_ms=\d+ queued_ms=\d+ matched=1 items=1 unreadable=0 evidence_bytes=21 model_ms=\d+ main_ms=12 main_prompt_bytes=3000 main_prompt_tokens=900 main_prefill_ms=4 main_output_tokens=40 main_generate_ms=8 total_ms=\d+$/);
     expect(line).not.toMatch(CONTENT);
     expect(line).not.toContain(jobId);
   });
@@ -274,7 +285,7 @@ describe('4. the panel reads a bounded slice of work', () => {
       },
     });
     const hits = Array.from({ length: 12 }, (_, n) => ({ title: `item ${n}`, chunks: ['x'.repeat(5_000)], trust_domain: 'secure_local' }));
-    const stats: Array<{ items: number; unreadable: number; bytes: number }> = [];
+    const stats: Array<{ items: number; unreadable: number; bytes: number; used?: readonly number[] }> = [];
     await panelModel.answerPrivately('q', [{ title: 'no text', trust_domain: 'secure_local' }, ...hits], undefined, { evidence: (s) => stats.push(s) });
     expect(seen.count).toBe(PANEL_ANSWER_LIMITS.maxItems);
     expect(seen.longest).toBeLessThanOrEqual(PANEL_ANSWER_LIMITS.maxPassageChars);
@@ -282,7 +293,14 @@ describe('4. the panel reads a bounded slice of work', () => {
       maxPromptBytes: PANEL_ANSWER_LIMITS.maxPromptBytes,
       maxAnswerChars: PANEL_ANSWER_LIMITS.maxAnswerChars,
       audit: false,
+      evidenceFormat: 'compact',
     });
-    expect(stats).toEqual([{ items: PANEL_ANSWER_LIMITS.maxItems, unreadable: 1, bytes: PANEL_ANSWER_LIMITS.maxItems * PANEL_ANSWER_LIMITS.maxPassageChars }]);
+    // Without relevance scores: the first readable items in retrieval order (hits 1..maxItems; hit 0 has no text).
+    expect(stats).toEqual([{
+      items: PANEL_ANSWER_LIMITS.maxItems,
+      unreadable: 1,
+      bytes: PANEL_ANSWER_LIMITS.maxItems * PANEL_ANSWER_LIMITS.maxPassageChars,
+      used: Array.from({ length: PANEL_ANSWER_LIMITS.maxItems }, (_, n) => n + 1),
+    }]);
   });
 });

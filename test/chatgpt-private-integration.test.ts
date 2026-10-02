@@ -369,10 +369,11 @@ describe('the panel model over the built-in model', () => {
         date: '2020-02-05T13:56:40Z',
       }],
       unreadable: 1,
+      sources: [0],
     });
     // A title-only hit (the metadata search's shape) is unreadable too.
     expect(privateEvidence([{ sourceItem: { providerItemId: 'x' }, provenance: { citation: { title: 'Only a title.pdf' } } }]))
-      .toEqual({ items: [], unreadable: 1 });
+      .toEqual({ items: [], unreadable: 1, sources: [] });
   });
 
   test('the panel answer drops the Analyst\'s evidence numbers and keeps everything else', () => {
@@ -454,16 +455,29 @@ describe('claim-time evidence over a real local index', () => {
         return { answer: 'should not run', citations: [] };
       },
     };
-    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL });
+    // A claim with no precompute: the claim-time search no longer returns it, so the model reads nothing.
+    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, precompute: false, log: () => {} });
     const { jobId } = jobs.begin({ question: 'orchard invoice?', count: atSearch.length, evidence: atSearch, refresh: privateSearch });
     const panel = await generatePanelKeyPair();
     await jobs.claim(jobId!, panel.publicKey);
     await Bun.sleep(80);
-    // The claim-time search no longer returns it, so the model reads nothing.
     expect(await privateSearch()).toEqual([]);
     expect(seen).toEqual([]);
     expect(await jobs.claim(jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
     expect(atSearch.every(isPrivateEligible)).toBe(true);
+
+    // With the search-time precompute: it read the item while it was Private
+    // (in engine memory, on this computer), but the claim-time check finds it
+    // no longer Private-eligible, so that answer is discarded, nothing is
+    // left to answer from, and the job fails: nothing is ever sealed.
+    const precomputing = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {} });
+    const second = precomputing.begin({ question: 'orchard invoice?', count: atSearch.length, evidence: atSearch, refresh: privateSearch });
+    await Bun.sleep(20);
+    expect(seen).toEqual(atSearch);
+    await precomputing.claim(second.jobId!, panel.publicKey);
+    await Bun.sleep(80);
+    expect(await precomputing.claim(second.jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
+    expect(seen).toEqual(atSearch);
   });
 });
 

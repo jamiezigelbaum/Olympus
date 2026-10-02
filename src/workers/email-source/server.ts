@@ -4248,17 +4248,23 @@ export async function main(): Promise<void> {
   // built-in private model. Without it on this machine every private match
   // reports `no_model` with counts only.
   const { PrivateAnswerJobs, createPrivateAnswerHandler, withPrivateAnswerRoute } = await import('../chatgpt/private-answer-jobs.ts');
-  const { createBuiltInPrivateAnswerModel } = await import('../chatgpt/private-answer-model.ts');
+  const { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } = await import('../chatgpt/private-answer-model.ts');
   const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: workerBuiltInModel?.model,
     available: () => workerBuiltInModel?.available() ?? false,
     answer: answerPrivately,
+    // The panel reads its few most relevant items, ranked by the Private
+    // corpora's own embedding model when it runs on this computer.
+    relevance: embeddingPanelRelevance(() => (
+      secureLocalPolicyEmbeddingProvider?.backend === 'local' ? secureLocalPolicyEmbeddingProvider : undefined
+    )),
   });
   const privateAnswers = new PrivateAnswerJobs({
     model: () => privateAnswerModel,
     installId: () => remotePublicUrls()?.installId,
-    // From claim to ready/failed the sniffer stays off the shared model.
+    // While an analysis runs (from the search) and from a claim to
+    // ready/failed, the sniffer stays off the shared model.
     activity: answerActivity,
   });
   const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30_000);

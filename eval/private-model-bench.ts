@@ -14,6 +14,15 @@
 //
 // --model names a manifest model, or `custom:<label>` for a GGUF that is not in
 // the manifest (candidates under evaluation).
+//
+// --panel runs the private answer panel's path instead (private-answer-model.ts:
+// relevance-ranked, floored and capped items, the compact rendering, no audit)
+// over a synthetic set of dated lab reports whose evidence arrives in a
+// deliberately unhelpful retrieval order (reports from other months first, as
+// a lexical search ranked a real store's in the 2026-10-02 owner report). A question
+// passes when every cited item is an expected one. Add --embedding-dir
+// <built-in-embedding dir> to rank with the built-in embedding model (the
+// engine's default), or leave it out to measure retrieval order alone.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -26,6 +35,8 @@ import {
   type BuiltInReasoningModelSpec,
 } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import { createLlamaServerHandle, type LlamaServerHandle } from '../src/workers/source-index/built-in-reasoning/server.ts';
+import { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } from '../src/workers/chatgpt/private-answer-model.ts';
+import { BuiltInSourceEmbeddingProvider } from '../src/workers/source-index/built-in-embedding/provider.ts';
 import { gradeAnswer } from './grade.ts';
 import type { EvalQuestion } from './types.ts';
 
@@ -122,6 +133,78 @@ function rssKb(pid: number | undefined): number {
   return Number.parseInt(out, 10) || 0;
 }
 
+// The panel set: fictional lab reports (no real person or value), named the
+// way people file them, with a passage each.
+const PANEL_ITEMS: Array<{ id: string; title: string; saved: string; text: string }> = [
+  { id: 'organic', title: '2026-02-10 organic acids report RIVERA.pdf', saved: '2026-03-02T16:06:00Z', text: 'PATIENT: SAM RIVERA COLLECTED: 08-Feb-2026 TESTED: 20-Feb-2026 TEST NAME: Organic Acids Results Interpretation At-A-Glance B-Vitamin Needs Thiamin B1 2 Pyridoxine B6 3 Results reported for the test.' },
+  { id: 'toxin', title: '2026-04-03 TOXIN PANEL_SAM RIVERA.pdf', saved: '2026-04-21T08:17:10Z', text: 'PATIENT: SAM RIVERA TEST NAME: Environmental Toxin Profile (urine) COLLECTED: 30-Mar-2026 Results: Toxin A < 0.5 <DL; Toxin B 2.1 ug/g creatinine (high); Toxin C <DL. Test results.' },
+  { id: 'blood-1', title: '2026-04-14 blood work 1.pdf', saved: '2026-04-22T11:03:22Z', text: 'Laboratorio Central Data de colheita 14/04/2026 Data de emissao 22/04/2026 SAM RIVERA Hemograma: Hemoglobina 14.8 g/dL (13.0-17.0); Leucocitos 6.1 x10^9/L; Ferritina 82 ng/mL (30-400); Glicose 91 mg/dL.' },
+  { id: 'blood-2', title: '2026-04-14 blood work 2.pdf', saved: '2026-04-23T18:35:05Z', text: 'Laboratorio Central Pag. 4/7 Data de colheita 14/04/2026 SAM RIVERA Testosterona total 640 ng/dL (241-827); Vitamina D (25-OH) 41 ng/mL (30-100); TSH 1.9 mUI/L.' },
+  { id: 'metabolic', title: '2026-03-19 metabolic panel and tests.pdf', saved: '2026-03-26T10:00:00Z', text: 'Collected 19/03/2026 SAM RIVERA Metabolic panel: Creatinine 0.98 mg/dL; ALT 24 U/L; LDL 118 mg/dL.' },
+  { id: 'sleep', title: '2025-11-05 sleep study (english).pdf', saved: '2025-11-20T09:00:00Z', text: 'Polysomnography 5 November 2025, SAM RIVERA. Apnea-hypopnea index (AHI) 3.1 events/h; lowest SpO2 91%; sleep efficiency 86%. Impression: no significant sleep apnea.' },
+  { id: 'omega', title: '2025-11-12 Omega 3 index test.pdf', saved: '2025-12-08T14:59:34Z', text: 'Omega-3 Index report, sample collected 12 November 2025, SAM RIVERA. Omega-3 Index 6.2% (desirable 8-12%). Omega-6:Omega-3 ratio 7.4:1. Trans Fat Index 0.6%.' },
+  { id: 'urgent', title: '2026-08-30 blood and urine urgent care.pdf', saved: '2026-08-31T12:00:00Z', text: 'Urgent care visit 30/08/2026 SAM RIVERA. Reason: fever and flank pain. CRP 12 mg/L (<5); leucocytes 11.2 x10^9/L; urinalysis: nitrites negative, leucocyte esterase trace. Plan: fluids, review in 48 h.' },
+];
+
+const PANEL_QUESTIONS: Array<{ id: string; question: string; order: string[]; expected: string[] }> = [
+  { id: 'q01', question: 'April 2026 blood test results', order: ['toxin', 'organic', 'blood-2', 'metabolic', 'omega', 'blood-1'], expected: ['blood-1', 'blood-2'] },
+  { id: 'q02', question: 'April 2026 lab results', order: ['toxin', 'organic', 'blood-2', 'urgent', 'blood-1', 'metabolic'], expected: ['blood-1', 'blood-2', 'toxin'] },
+  { id: 'q03', question: 'What did my April 2026 blood work show?', order: ['blood-2', 'urgent', 'blood-1', 'organic', 'toxin', 'sleep'], expected: ['blood-1', 'blood-2'] },
+  { id: 'q04', question: 'What did my sleep study in November 2025 find?', order: ['omega', 'organic', 'sleep', 'urgent', 'blood-1', 'toxin'], expected: ['sleep'] },
+  { id: 'q05', question: 'What was my omega-3 index?', order: ['organic', 'metabolic', 'omega', 'blood-2', 'toxin', 'sleep'], expected: ['omega'] },
+  { id: 'q06', question: 'What happened at my August 2026 urgent care visit?', order: ['blood-1', 'blood-2', 'urgent', 'organic', 'toxin', 'omega'], expected: ['urgent'] },
+  { id: 'q07', question: 'What did my toxin test show?', order: ['organic', 'toxin', 'blood-1', 'urgent', 'omega', 'sleep'], expected: ['toxin'] },
+  { id: 'q08', question: 'My March 2026 metabolic panel results', order: ['organic', 'toxin', 'metabolic', 'blood-1', 'blood-2', 'omega'], expected: ['metabolic'] },
+];
+
+/** The panel path over the synthetic lab set: pass when something is cited and every citation is expected. */
+async function runPanel(model: ReturnType<typeof createBuiltInAnalystModel>, modelId: string): Promise<void> {
+  const embeddingDir = arg('embedding-dir');
+  let relevance: ReturnType<typeof embeddingPanelRelevance> | undefined;
+  if (embeddingDir) {
+    const { BUILT_IN_EMBEDDING_MODEL } = await import('../src/workers/source-index/built-in-embedding/manifest.ts');
+    const { builtInEmbeddingPaths } = await import('../src/workers/source-index/built-in-embedding/assets.ts');
+    const paths = builtInEmbeddingPaths({ OLYMPUS_BUILT_IN_EMBEDDING_DIR: embeddingDir });
+    const provider = new BuiltInSourceEmbeddingProvider({
+      // Status writes stay out of the real install's directory.
+      env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: join(process.env.TMPDIR ?? '/tmp', 'olympus-bench-embedding') },
+      install: async () => ({
+        modelPath: join(paths.modelDir, BUILT_IN_EMBEDDING_MODEL.model.name),
+        vocabularyPath: join(paths.modelDir, BUILT_IN_EMBEDDING_MODEL.vocabulary.name),
+        runtimeDir: paths.runtimeDir,
+      }),
+    });
+    relevance = embeddingPanelRelevance(() => provider);
+  }
+  const { answerPrivately } = await import('../src/core/analyst-built-in.ts');
+  const panel = createBuiltInPrivateAnswerModel({ model, available: () => true, answer: answerPrivately, ...(relevance ? { relevance } : {}) });
+  const byId = new Map(PANEL_ITEMS.map((item) => [item.id, item]));
+  let passed = 0;
+  const outcomes: Array<Record<string, unknown>> = [];
+  for (const question of PANEL_QUESTIONS) {
+    const evidence = question.order.map((id) => {
+      const item = byId.get(id)!;
+      return {
+        sourceItem: { provider: 'bench', family: 'file', accountScope: 'personal', localItemId: id, providerItemId: id },
+        provenance: { citation: { title: item.title, authoredAt: item.saved, uri: `/Health/Labs/${item.title}`, sourceLabel: 'files' } },
+        chunks: [item.text],
+        trust_domain: 'secure_local',
+      };
+    });
+    const startedAt = Date.now();
+    let read: readonly number[] = [];
+    const result = await panel.answerPrivately(question.question, evidence, undefined, { evidence: (stats) => { read = stats.used ?? []; } });
+    const titles = new Map(PANEL_ITEMS.map((item) => [item.title, item.id]));
+    const cited = result.citations.map((citation) => titles.get(citation.title ?? '') ?? citation.title ?? '');
+    const ok = cited.length > 0 && cited.every((id) => question.expected.includes(id));
+    if (ok) passed += 1;
+    outcomes.push({ id: question.id, passed: ok, durationMs: Date.now() - startedAt, read: read.map((index) => question.order[index]), cited });
+    console.error(`${modelId} panel ${question.id} ${ok ? 'PASS' : 'FAIL'} ${((Date.now() - startedAt) / 1000).toFixed(1)}s read=${read.map((index) => question.order[index]).join(',')} cited=${cited.join(',')}`);
+  }
+  await model.stop();
+  process.stdout.write(`${JSON.stringify({ modelId, mode: 'panel', ranking: relevance ? 'embedding' : 'retrieval order', questions: PANEL_QUESTIONS.length, passed, outcomes }, null, 2)}\n`);
+}
+
 async function main(): Promise<void> {
   const modelArg = arg('model') ?? '';
   const gguf = arg('gguf');
@@ -165,6 +248,10 @@ async function main(): Promise<void> {
     fetchImpl: timedFetch,
     waitForInstall: true,
   });
+  if (process.argv.includes('--panel')) {
+    await runPanel(model, spec.modelId);
+    return;
+  }
   const analyst = createAnalyst(model, { auditSuspiciousDrafts: true });
   const evidence = loadEvidence();
 

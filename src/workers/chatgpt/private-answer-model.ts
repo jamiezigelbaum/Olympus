@@ -10,6 +10,10 @@
  *   passages, read locally) becomes the built-in model's evidence items
  *   (title, passages, locator, source, date); an item with no readable text
  *   is left out and reported as unreadable, never answered from its title.
+ *   The model reads only the few most relevant items: ranked by how close
+ *   each item's name and text are to the question (local embeddings, when
+ *   this computer has them), cut at a relevance floor below the best, in a
+ *   compact rendering that puts each item's name and date first.
  *   The answer (without evidence numbers), the cited titles and the
  *   unanswered gaps become the panel's plaintext. Nothing here
  *   leaves this computer except through the sealed panel payload.
@@ -21,6 +25,7 @@ import type {
   PrivateAnswer,
   PrivateEvidenceItem as BuiltInEvidenceItem,
 } from '../../core/analyst-built-in.ts';
+import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import type { PrivateAnswerCitation, PrivateAnswerModel, PrivateEvidenceItem } from './private-answer-contract.ts';
 
 export interface BuiltInPrivateAnswerModelOptions {
@@ -32,7 +37,20 @@ export interface BuiltInPrivateAnswerModelOptions {
   answer: (question: string, evidence: readonly BuiltInEvidenceItem[], options: AnswerPrivatelyOptions) => Promise<PrivateAnswer>;
   /** The panel's work bound (PANEL_ANSWER_LIMITS by default). */
   limits?: Partial<PanelAnswerLimits>;
+  /**
+   * Scores each readable item's relevance to the question (higher is closer),
+   * one number per item, or undefined when it cannot. Local only: Private
+   * names and text never leave this computer for it. Without it, items keep
+   * their retrieval order.
+   */
+  relevance?: PanelRelevance;
 }
+
+export type PanelRelevance = (
+  question: string,
+  items: ReadonlyArray<{ title?: string; text: string }>,
+  signal?: AbortSignal,
+) => Promise<readonly number[] | undefined>;
 
 /**
  * How much work one panel answer may cost. The panel waits for it live, on
@@ -44,6 +62,11 @@ export interface BuiltInPrivateAnswerModelOptions {
 export interface PanelAnswerLimits {
   /** Readable items read, most relevant first. */
   maxItems: number;
+  /**
+   * With relevance scores: items scoring more than this below the best item
+   * are left out (the relevance floor). The best item is always read.
+   */
+  relevanceMargin: number;
   /** Characters of passage text per item. */
   maxPassageChars: number;
   /** Ceiling on the prompt's UTF-8 bytes (answerPrivately fits the evidence to it). */
@@ -54,9 +77,10 @@ export interface PanelAnswerLimits {
 }
 
 export const PANEL_ANSWER_LIMITS: Readonly<PanelAnswerLimits> = {
-  maxItems: 6,
+  maxItems: 4,
+  relevanceMargin: 0.06,
   maxPassageChars: 2_400,
-  maxPromptBytes: 12_000,
+  maxPromptBytes: 11_000,
   maxAnswerChars: 1_000,
   audit: false,
 };
@@ -83,9 +107,15 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       if (!model) throw new Error('no private answer model');
       const read = privateEvidence(evidence, limits.maxPassageChars);
       const unreadable = read.unreadable;
-      const items = read.items.slice(0, Math.max(1, limits.maxItems));
+      const picked = await panelItems(question, read, limits, options.relevance, signal);
+      const items = picked.map((index) => read.items[index]!);
       try {
-        observe?.evidence?.({ items: items.length, unreadable, bytes: items.reduce((sum, item) => sum + utf8Bytes(item.text), 0) });
+        observe?.evidence?.({
+          items: items.length,
+          unreadable,
+          bytes: items.reduce((sum, item) => sum + utf8Bytes(item.text), 0),
+          used: picked.map((index) => read.sources[index]!),
+        });
       } catch {
         // A reporting hook never fails the answer.
       }
@@ -99,6 +129,7 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
         maxPromptBytes: limits.maxPromptBytes,
         maxAnswerChars: limits.maxAnswerChars,
         audit: limits.audit,
+        evidenceFormat: 'compact',
         ...(observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {}),
         ...(signal ? { signal } : {}),
       });
@@ -136,8 +167,10 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
 export function privateEvidence(
   hits: readonly PrivateEvidenceItem[],
   maxPassageChars = MAX_PASSAGE_CHARS,
-): { items: BuiltInEvidenceItem[]; unreadable: number } {
+): { items: BuiltInEvidenceItem[]; unreadable: number; sources: number[] } {
   const items: BuiltInEvidenceItem[] = [];
+  /** Each readable item's index in `hits`. */
+  const sources: number[] = [];
   let unreadable = 0;
   hits.forEach((hit, index) => {
     const provenance = record(hit.provenance);
@@ -159,6 +192,7 @@ export function privateEvidence(
     const locator = string(hit.locator) ?? string(citation?.uri) ?? string(content?.url);
     const source = string(citation?.sourceLabel) ?? string(sourceItem?.provider);
     const date = string(citation?.authoredAt) ?? string(content?.authoredAt) ?? string(citation?.updatedAt);
+    sources.push(index);
     items.push({
       id: items.some((item) => item.id === id) ? `${id}#${index + 1}` : id,
       text,
@@ -168,7 +202,97 @@ export function privateEvidence(
       ...(date ? { date } : {}),
     });
   });
-  return { items, unreadable };
+  return { items, unreadable, sources };
+}
+
+/**
+ * Which readable items the panel's model reads, as indexes into `read.items`,
+ * most relevant first: by relevance score when there is one (ties keep
+ * retrieval order), cut at `relevanceMargin` below the best and at
+ * `maxItems`; otherwise the first `maxItems` in retrieval order. Generic: no
+ * question, source or document kind is consulted, only the scores.
+ */
+export async function panelItems(
+  question: string,
+  read: { items: readonly BuiltInEvidenceItem[] },
+  limits: Pick<PanelAnswerLimits, 'maxItems' | 'relevanceMargin'>,
+  relevance?: PanelRelevance,
+  signal?: AbortSignal,
+): Promise<number[]> {
+  const max = Math.max(1, limits.maxItems);
+  const order = read.items.map((_, index) => index);
+  if (order.length === 0) return [];
+  let scores: readonly number[] | undefined;
+  if (relevance && order.length > 1) {
+    try {
+      scores = await relevance(question, read.items.map((item) => ({ ...(item.title ? { title: item.title } : {}), text: item.text })), signal);
+    } catch {
+      scores = undefined;
+    }
+  }
+  if (!scores || scores.length !== order.length || scores.some((score) => !Number.isFinite(score))) {
+    return order.slice(0, max);
+  }
+  const ranked = [...order].sort((a, b) => (scores![b]! - scores![a]!) || (a - b));
+  const floor = scores[ranked[0]!]! - Math.max(0, limits.relevanceMargin);
+  return ranked.filter((index) => scores![index]! >= floor).slice(0, max);
+}
+
+/** How much an item's name counts against its name plus passages in its relevance. */
+const TITLE_WEIGHT = 0.7;
+/**
+ * Passage characters embedded per item for its relevance. The embedding model
+ * is shared with search (one queue), so this stays small: on the owner's lab
+ * files 400 characters ranked like the whole passage at a quarter of the cost.
+ */
+const RELEVANCE_TEXT_CHARS = 400;
+
+/**
+ * PanelRelevance from a local embedding model: the question's cosine
+ * similarity to each item's name (weighted most: a file's or message's name
+ * says what it is about) and to its name plus the start of its passages. An item without a
+ * name is scored by its text alone. One batch per kind, query embedded once.
+ */
+export function embeddingPanelRelevance(
+  provider: () => Pick<SourceEmbeddingProvider, 'embed' | 'backend' | 'dimension'> | undefined,
+): PanelRelevance {
+  return async (question, items, signal) => {
+    const model = provider();
+    // Local only: a cloud embedding service never sees Private names or text.
+    if (!model || model.backend !== 'local' || items.length === 0) return undefined;
+    const [query] = await model.embed([{ text: question }], { taskType: 'RETRIEVAL_QUERY' });
+    if (signal?.aborted) return undefined;
+    const named = items.map((item, index) => ({ index, title: item.title?.trim() })).filter((item) => item.title);
+    const [titles, texts] = await Promise.all([
+      named.length > 0
+        ? model.embed(named.map((item) => ({ text: item.title! })), { taskType: 'RETRIEVAL_DOCUMENT' })
+        : Promise.resolve([] as number[][]),
+      model.embed(items.map((item) => {
+        const head = item.text.slice(0, RELEVANCE_TEXT_CHARS);
+        return { text: item.title ? `${item.title}\n${head}` : head };
+      }), { taskType: 'RETRIEVAL_DOCUMENT' }),
+    ]);
+    if (!query || texts.length !== items.length || titles.length !== named.length) return undefined;
+    const titleScore = new Map(named.map((item, position) => [item.index, cosine(query, titles[position]!)]));
+    return items.map((_, index) => {
+      const text = cosine(query, texts[index]!);
+      const title = titleScore.get(index);
+      return title === undefined ? text : TITLE_WEIGHT * title + (1 - TITLE_WEIGHT) * text;
+    });
+  };
+}
+
+function cosine(a: readonly number[], b: readonly number[]): number {
+  if (a.length === 0 || a.length !== b.length) return Number.NaN;
+  let dot = 0;
+  let left = 0;
+  let right = 0;
+  for (let index = 0; index < a.length; index += 1) {
+    dot += a[index]! * b[index]!;
+    left += a[index]! * a[index]!;
+    right += b[index]! * b[index]!;
+  }
+  return left > 0 && right > 0 ? dot / Math.sqrt(left * right) : Number.NaN;
 }
 
 /** privateEvidence's readable items alone. */

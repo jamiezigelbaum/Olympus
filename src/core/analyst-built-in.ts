@@ -17,6 +17,7 @@ import {
   analystPromptBytes,
   createAnalyst,
   runWithAnalystAbortSignal,
+  type AnalystEvidenceFormat,
   type AnalystModel,
   type AnalystModelCompletion,
   type AnalystModelRequest,
@@ -427,6 +428,12 @@ export interface AnswerPrivatelyOptions {
    * second full prompt; an interactive caller with a tight deadline turns it off.
    */
   audit?: boolean;
+  /**
+   * How the evidence is rendered for the model (createAnalyst's
+   * evidenceFormat). `compact` suits the built-in small model reading a few
+   * items; the default is the full rendering.
+   */
+  evidenceFormat?: AnalystEvidenceFormat;
   /** Called after each model call with its stage and timing (counts only, never content). */
   onModelCall?: (call: PrivateModelCallTiming) => void;
   signal?: AbortSignal;
@@ -466,10 +473,12 @@ export async function answerPrivately(
   const pack = fitPrivatePack(
     privateEvidencePack(question, evidence),
     options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES,
+    options.evidenceFormat ?? 'full',
   );
   const analyst = createAnalyst(options.onModelCall ? timedModel(model, options.onModelCall) : model, {
     auditSuspiciousDrafts: options.audit ?? true,
     boundedResponseSchema: true,
+    ...(options.evidenceFormat ? { evidenceFormat: options.evidenceFormat } : {}),
   });
   const run = () => analyst.analyze(pack, {
     localOnly: true,
@@ -551,18 +560,19 @@ export function echoesEvidenceScaffolding(text: string): boolean {
  * trailing candidates left out. Measured on the real prompt, so labels and
  * escaping count.
  */
-function fitPrivatePack(pack: EvidencePack, maxPromptBytes: number): EvidencePack {
+function fitPrivatePack(pack: EvidencePack, maxPromptBytes: number, format: AnalystEvidenceFormat): EvidencePack {
   const options = { localOnly: true };
-  if (analystPromptBytes(pack, options) <= maxPromptBytes) return pack;
+  const promptBytes = (candidatePack: EvidencePack) => analystPromptBytes(candidatePack, options, format);
+  if (promptBytes(pack) <= maxPromptBytes) return pack;
   for (let keep = pack.candidates.length; keep >= 1; keep -= 1) {
     const base = pack.candidates.slice(0, keep);
-    const overhead = analystPromptBytes({ ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: [] })) }, options);
+    const overhead = promptBytes({ ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: [] })) });
     if (overhead >= maxPromptBytes) continue;
     let share = Math.floor((maxPromptBytes - overhead) / keep);
     for (let attempt = 0; attempt < 6; attempt += 1) {
       if (share < MIN_PRIVATE_PASSAGE_BYTES && keep > 1) break;
       const fitted = { ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, share) })) };
-      const bytes = analystPromptBytes(fitted, options);
+      const bytes = promptBytes(fitted);
       if (bytes <= maxPromptBytes) return fitted;
       // Escaping made passages cost more than their raw bytes; shrink by the observed ratio.
       share = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
