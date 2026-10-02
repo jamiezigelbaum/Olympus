@@ -3,7 +3,8 @@
 // - olympus_search with a Private match creates a one-time panel job; the
 //   panel collects it with ECDH and decrypts an answer the built-in model
 //   wrote from the Private hits (a stub completion, the real answerPrivately
-//   and Analyst). Nothing model-visible says a private match exists.
+//   and Analyst). Model-visible: one fixed note that a private match exists
+//   (owner decision 2026-10-02), never a count, title or content.
 // - The sealed answer is padded to a size bucket.
 // - The panel page refuses a job id outside the routable shape.
 // - The panel model reports ready / downloading / no model from the built-in
@@ -24,7 +25,7 @@ import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { openRemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
-import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
+import { copyDashboardViewModel, PRIVATE_MATCH_NOTE, PRIVATE_MATCH_PANEL_NOTE, searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { PRIVATE_ANSWER_META_KEY, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI } from '../src/workers/chatgpt/private-answer-resource.ts';
 import {
@@ -45,6 +46,7 @@ import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter,
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { searchPrivateEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { buildEvidencePackDetailed } from '../src/core/evidence-pack.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
@@ -194,12 +196,16 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
     const meta = (result._meta as Record<string, unknown>)[PRIVATE_ANSWER_META_KEY] as Record<string, unknown>;
     expect(Object.keys(meta).sort()).toEqual(['count', 'jobId', 'state', 'v']);
     expect(meta).toMatchObject({ v: 1, count: 1, state: 'ready' });
-    // Model-visible: the Personal evidence only; no count, state, job or note.
+    // Model-visible: the Personal evidence plus exactly the one fixed Private
+    // note (owner decision 2026-10-02); no count, state, job, title or content.
     const visible = JSON.stringify({ content: result.content, structuredContent: result.structuredContent });
     expect(visible).toContain('Flat inventory');
+    expect(visible.split(JSON.stringify(PRIVATE_MATCH_PANEL_NOTE).slice(1, -1)).length - 1).toBe(2);
+    expect((result.structuredContent as { notes?: string[] }).notes).toContain(PRIVATE_MATCH_PANEL_NOTE);
     expect(visible).not.toContain(String(meta.jobId));
     expect(visible).not.toMatch(/privateMatch|panelState|"count"/);
     expect(visible).not.toContain(DASHBOARD_CHATGPT_VOCABULARY.privateMatches);
+    expect(visible).not.toContain('Lease renewal');
     expect(JSON.stringify(result)).not.toMatch(SENTINEL_PATTERN);
 
     // The panel collects it (as through the relay) with an ECDH key of its own.
@@ -458,6 +464,51 @@ describe('claim-time evidence over a real local index', () => {
     expect(seen).toEqual([]);
     expect(await jobs.claim(jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
     expect(atSearch.every(isPrivateEligible)).toBe(true);
+  });
+});
+
+describe('a Personal name over Private contents', () => {
+  test('counted apart from Names only and unreadable; ChatGPT gets the one Private note and no folder advice', async () => {
+    const specs: FixtureSpec[] = [{ id: 'crown', name: 'dentist-crown-report.txt', text: 'SENTINEL_CROWN_7f3a: the molar crown was fitted and set.' }];
+    const { dir, cleanup } = tempDir();
+    const fixture = openTierFixture(dir, { embed: false });
+    cleanups.push(() => {
+      fixture.close();
+      cleanup();
+    });
+    await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    // Name Personal, contents Private: a split move.
+    await moveTieredItem({ set: fixture.set, identity: identityOf('crown'), target: { metadataTier: 'private', contentTier: 'secure' } });
+    const personal = fixture.set.openStores().find((store) => store.trustDomain === 'internal')!;
+    const provenance = {
+      sourceItem: { family: 'file' as const, provider: 'fixture', accountScope: 'personal', providerItemId: 'crown', localItemId: 'personal:crown' },
+    };
+    // The Personal copy serves the name only, and says why: its contents are Private.
+    const block = await createConnectorStoreContentProvider({ store: personal })
+      .fetchLocalContent({ provenance, trustDomain: 'internal', query: 'dentist crown report' });
+    expect(block).toMatchObject({ chunks: [], contentPrivate: true });
+    expect(block?.namesOnly).toBeUndefined();
+    const registry = buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: personal.corpusId, family: 'file', trustDomain: 'internal' })]);
+    const detail = await buildEvidencePackDetailed({
+      question: 'dentist crown report',
+      selectedItems: [{ corpusId: personal.corpusId, sourceItem: provenance.sourceItem }],
+      maxResults: 5,
+      searchContext: { allowedTrustDomains: ['internal'] },
+      registry,
+      adapters: {},
+      contentProviders: { [personal.corpusId]: createConnectorStoreContentProvider({ store: personal }) },
+    });
+    expect(detail).toMatchObject({ contentPrivateCandidateIndexes: [0], namesOnlyCandidateIndexes: [], unreadCandidates: 0 });
+
+    // olympus_search over such a match: the one Private note, no folder advice.
+    const result = searchToolResult({
+      evidence: [{ trust_domain: 'internal', family: 'file', provider: 'google_drive', title: 'Flat inventory', excerpt: 'Two chairs.' }],
+      coverage: { searched_corpora: 1, unreadable_items: 0, names_only_items: 0, content_private_items: 1 },
+    });
+    const visible = JSON.stringify({ content: result.content, structuredContent: result.structuredContent });
+    expect((result.structuredContent as { notes: string[] }).notes).toEqual([PRIVATE_MATCH_NOTE]);
+    expect(visible).not.toMatch(/Names only|Switch|folder picker|could not read/);
+    expect(visible).not.toMatch(SENTINEL_PATTERN);
   });
 });
 

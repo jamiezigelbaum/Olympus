@@ -315,10 +315,45 @@ export interface ChatGptCitation {
 export interface AnswerResultOptions {
   /**
    * The private answer panel's summary and job, when Private items matched.
-   * It reaches the panel only, in `_meta`; nothing model-visible changes, so
-   * the model cannot learn whether Private items match.
+   * The summary (count, state, job id) reaches the panel only, in `_meta`.
+   * The model learns one bit, by the owner's choice (2026-10-02): that some
+   * matching items are Private and answered in the panel (privateMatchNote).
+   * Never a count, a title or any content.
    */
   privateMatch?: PrivateMatchSummary & { jobId?: string };
+}
+
+/**
+ * The one sentence the model gets about a Private match. Fixed text: no
+ * count, no title, no content. It tells the model the answer is the user's,
+ * in the panel, so it neither reports "only a title" nor sends the user to
+ * change folder settings for items that are Private on purpose.
+ */
+export const PRIVATE_MATCH_PANEL_NOTE = 'Some items matching this question are marked Private in Olympus. '
+  + 'Olympus is answering from them on the user\'s Mac and showing that answer only to the user, '
+  + 'in the private answer panel above. You can\'t see it; point the user to the panel '
+  + 'and don\'t suggest changing folder settings for those items.';
+/** The same bit while the panel cannot answer yet (no private model, or it is still downloading). */
+export const PRIVATE_MATCH_PANEL_SETUP_NOTE = 'Some items matching this question are marked Private in Olympus. '
+  + 'Their contents stay on the user\'s Mac and are never shown to you; the private answer panel above '
+  + 'tells the user how to get an answer from them there. Don\'t suggest changing folder settings for those items.';
+/** The same bit when no panel accompanies this result (the Private search did not finish in time). */
+export const PRIVATE_MATCH_NOTE = 'Some items matching this question are marked Private in Olympus. '
+  + 'Their contents stay on the user\'s Mac and are never shown to you. '
+  + 'Don\'t suggest changing folder settings for those items.';
+
+/**
+ * The model-visible Private note for a result, or none: from the panel
+ * summary when a panel accompanies the result, else from the released
+ * coverage's count of matches whose contents are tiered Private.
+ */
+export function privateMatchNote(
+  match: (PrivateMatchSummary & { jobId?: string }) | undefined,
+  contentPrivateMatches = 0,
+): string | undefined {
+  const panel = copyPrivateMatch(match);
+  if (panel) return panel.state === 'ready' ? PRIVATE_MATCH_PANEL_NOTE : PRIVATE_MATCH_PANEL_SETUP_NOTE;
+  return contentPrivateMatches > 0 ? PRIVATE_MATCH_NOTE : undefined;
 }
 
 /**
@@ -362,7 +397,8 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   if (usedPrivate) privateMatched = true;
   const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record.answer.replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER);
   const shownCitations = usedPrivate ? [] : citations;
-  const notes = privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
+  const privateNote = privateMatchNote(options.privateMatch);
+  const notes = privateNote ? [privateNote] : privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
   const textParts = [answer];
   if (shownCitations.length > 0) {
     textParts.push('', 'Sources:', ...shownCitations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));
@@ -380,7 +416,7 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
 /**
  * Adds the private answer panel's `_meta` (count, state, one-time job id) to
  * a result, and nothing else: `content` and `structuredContent` are left
- * exactly as they were, with or without a match.
+ * exactly as they were (the builders add privateMatchNote themselves).
  */
 export function withPrivateAnswerMeta(
   result: ChatGptToolResult,
@@ -448,6 +484,9 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
     unclassifiedItems: whole(coverageRecord.unclassified_items),
   };
   const notes: string[] = [];
+  // Matches whose contents are tiered Private are counted apart (never as
+  // names only or unreadable), so no note sends the user to change folder
+  // settings for them; the model learns only the one Private bit below.
   if (coverage.namesOnlyItems > 0) notes.push(namesOnlyCoverageNote(coverage.namesOnlyItems));
   if (coverage.unreadableItems > 0) notes.push(`Olympus could not read ${plural(coverage.unreadableItems, 'matching item')}.`);
   if (coverage.partiallyReadItems > 0) notes.push(`Olympus could read only part of ${plural(coverage.partiallyReadItems, 'document')}.`);
@@ -456,7 +495,9 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   }
   if (whole(record.withheld) > 0) notes.push(HELD_BACK_NOTE);
   if (flagged) notes.push(FLAGGED_NOTE);
-  if (privateMatched) notes.push(DASHBOARD_CHATGPT_VOCABULARY.privateMatches);
+  const privateNote = privateMatchNote(options.privateMatch, whole(coverageRecord.content_private_items));
+  if (privateNote) notes.push(privateNote);
+  else if (privateMatched) notes.push(DASHBOARD_CHATGPT_VOCABULARY.privateMatches);
   const structured: SearchResult = { status: evidence.length > 0 ? 'found' : 'none', evidence, coverage, notes };
   const lines: string[] = [];
   if (evidence.length === 0) {

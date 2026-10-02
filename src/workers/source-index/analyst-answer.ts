@@ -2431,6 +2431,10 @@ export interface ReleasedEvidenceCoverage {
   // searchable and their contents are deliberately not read. Never folded
   // into unreadable_items.
   names_only_items: number;
+  // Matched items whose name is Personal or Public but whose contents are
+  // tiered Private: answered only by the Private lane. Never folded into
+  // unreadable_items or names_only_items.
+  content_private_items: number;
   partially_read_items: number;
   unclassified_items: number;
   // Breadth per family beyond the bounded selection (counts only).
@@ -2541,6 +2545,7 @@ export async function searchReleasedEvidence(input: {
         + (detail.policyDeniedCandidates ?? 0)
         + (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.unreadDocuments, 0),
       names_only_items: detail.namesOnlyCandidateIndexes?.length ?? 0,
+      content_private_items: detail.contentPrivateCandidateIndexes?.length ?? 0,
       partially_read_items: (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.partialDocuments, 0),
       unclassified_items: (detail.classificationCoverage ?? []).reduce((sum, note) => sum + note.pendingClassificationItems, 0),
       matches: (coverage.matchCounts ?? []).map((count) => ({

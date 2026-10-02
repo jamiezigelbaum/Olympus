@@ -22,7 +22,7 @@ import { PRIVATE_ANSWER_RESOURCE_URI } from '../src/workers/chatgpt/private-answ
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
-import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
+import { copyDashboardViewModel, PRIVATE_MATCH_PANEL_SETUP_NOTE } from '../src/workers/chatgpt/response-builder.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import type { DashboardSourceCard, SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
@@ -787,7 +787,8 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         citations: [
           { source: 'Google Drive', title: 'Budget plan 2026', url: 'https://docs.google.com/document/d/abc', date: '2026-03-01' },
         ],
-        notes: ['Some matching items are private and stay on your Mac.'],
+        // The one fixed Private note (owner decision 2026-10-02): no count, no title.
+        notes: [PRIVATE_MATCH_PANEL_SETUP_NOTE],
       });
       // The probe's boolean match counts as one item, for the panel only.
       expect((result._meta as Record<string, unknown>)['olympus/privateAnswer']).toEqual({ v: 1, count: 1, state: 'no_model' });
@@ -805,7 +806,8 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         status: 'answered',
         answer: 'Olympus can answer this only from private items, which stay on your Mac.',
         citations: [],
-        notes: ['Some matching items are private and stay on your Mac.'],
+        // The one fixed Private note (owner decision 2026-10-02): no count, no title.
+        notes: [PRIVATE_MATCH_PANEL_SETUP_NOTE],
       });
       // The probe's boolean match counts as one item, for the panel only.
       expect((result._meta as Record<string, unknown>)['olympus/privateAnswer']).toEqual({ v: 1, count: 1, state: 'no_model' });

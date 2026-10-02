@@ -32,7 +32,13 @@ import {
 } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs, createPrivateAnswerHandler } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
-import { copyPrivateMatch } from '../src/workers/chatgpt/response-builder.ts';
+import {
+  copyPrivateMatch,
+  PRIVATE_MATCH_NOTE,
+  PRIVATE_MATCH_PANEL_NOTE,
+  PRIVATE_MATCH_PANEL_SETUP_NOTE,
+  privateMatchNote,
+} from '../src/workers/chatgpt/response-builder.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { DASHBOARD_CHATGPT_VOCABULARY } from '../src/workers/dashboard/vocabulary.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
@@ -64,12 +70,27 @@ function makeJobs(model: PrivateAnswerModel, clock = { now: 1_000_000 }, extra: 
   return new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, now: () => clock.now, log: () => {}, ...extra });
 }
 
-/** Nothing model-visible (text, structuredContent) tells the model a private match exists. */
-function expectNoPrivateMatchVisible(result: Record<string, unknown>, meta: Record<string, unknown>): void {
+/**
+ * Model-visible (text, structuredContent): exactly the one fixed Private note
+ * (owner decision 2026-10-02: the model learns that a private match exists,
+ * one bit), once in the text and once in the notes. Never the job id, the
+ * count, the state, a title or any content.
+ */
+function expectOnlyPrivateNoteVisible(
+  result: Record<string, unknown>,
+  meta: Record<string, unknown>,
+  note: string = PRIVATE_MATCH_PANEL_NOTE,
+): void {
+  const text = (result.content as Array<{ text?: string }>).map((part) => part.text ?? '').join('\n');
+  expect(text.split(note).length - 1).toBe(1);
+  expect(((result.structuredContent as { notes?: string[] }).notes ?? []).filter((entry) => entry === note)).toHaveLength(1);
   const visible = JSON.stringify({ content: result.content, structuredContent: result.structuredContent });
   expect(visible).not.toContain(String(meta.jobId));
-  expect(visible).not.toMatch(/privateMatch|panelState|private item|Private item|olympus\/privateAnswer/);
-  expect(visible).not.toContain(DASHBOARD_CHATGPT_VOCABULARY.privateMatches);
+  expect(visible).not.toMatch(/privateMatch|panelState|"count"|olympus\/privateAnswer/);
+  // With the note taken out, nothing else says Private items exist.
+  const rest = visible.split(note).join('');
+  expect(rest).not.toMatch(/private item|Private item|marked Private|private answer panel/);
+  expect(rest).not.toContain(DASHBOARD_CHATGPT_VOCABULARY.privateMatches);
   expect(result.structuredContent as Record<string, unknown>).not.toHaveProperty('privateMatch');
 }
 
@@ -462,6 +483,23 @@ describe('the response builder', () => {
     expect(copyPrivateMatch({ count: 0, panelState: 'ready', jobId })).toBeUndefined();
   });
 
+  test('the model-visible Private note is one fixed bit: no count, no title, no content', () => {
+    const jobId = mintCredential('private', INSTALL);
+    expect(privateMatchNote({ count: 7, panelState: 'ready', jobId })).toBe(PRIVATE_MATCH_PANEL_NOTE);
+    expect(privateMatchNote({ count: 7, panelState: 'no_model' })).toBe(PRIVATE_MATCH_PANEL_SETUP_NOTE);
+    expect(privateMatchNote({ count: 7, panelState: 'model_downloading', percent: 40 })).toBe(PRIVATE_MATCH_PANEL_SETUP_NOTE);
+    // No panel came back in time, but released coverage saw content tiered Private.
+    expect(privateMatchNote(undefined, 3)).toBe(PRIVATE_MATCH_NOTE);
+    expect(privateMatchNote(undefined, 0)).toBeUndefined();
+    expect(privateMatchNote({ count: 0, panelState: 'ready', jobId })).toBeUndefined();
+    for (const note of [PRIVATE_MATCH_PANEL_NOTE, PRIVATE_MATCH_PANEL_SETUP_NOTE, PRIVATE_MATCH_NOTE]) {
+      // The same text whatever the count: nothing to probe holdings with.
+      expect(note).not.toMatch(/\d/);
+      expect(note).not.toContain(SECRET_ANSWER);
+      expect(note.toLowerCase()).toContain("don't suggest changing folder settings");
+    }
+  });
+
   test('the resource declares the relay as its one connect domain', () => {
     expect(privateAnswerResourceMeta()).toMatchObject({ ui: { csp: { connectDomains: ['https://mcp.olympusplugin.ai'], resourceDomains: [] } } });
     const answerTools = CHATGPT_TOOLS.filter((tool) => tool.name === 'source_answer' || tool.name === 'source_answer_result');
@@ -530,9 +568,9 @@ describe('sentinel: over the real MCP surface', () => {
     const meta = (result._meta as Record<string, unknown>)[PRIVATE_ANSWER_META_KEY] as Record<string, unknown>;
     expect(Object.keys(meta).sort()).toEqual(['count', 'jobId', 'state', 'v']);
     expect(meta).toMatchObject({ v: 1, count: 2, state: 'ready' });
-    // The model-visible channels never carry the job id, the count, the
-    // state or any note that Private items exist.
-    expectNoPrivateMatchVisible(result, meta);
+    // The model-visible channels carry the one fixed Private note and never
+    // the job id, the count, the state, a title or any content.
+    expectOnlyPrivateNoteVisible(result, meta);
     expect(JSON.stringify(resource)).toContain('Show private answer');
 
     // The panel collects it directly (as through the relay).

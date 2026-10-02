@@ -252,6 +252,7 @@ import {
   VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION,
   GeminiSourceEmbeddingProvider,
   isApprovedSecureSourceEmbeddingProvider,
+  memoizeQueryEmbeddings,
   OpenAICompatibleSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
@@ -3162,6 +3163,21 @@ export async function main(): Promise<void> {
           // The scope each corpus is searched under in THIS request, so the
           // Secret locations released beside the answer are confined to it.
           const searchScopes = new Map<string, { accountScope?: string; filters?: ConnectorStoreSearchFilters }>();
+          // Each store's embedding provider for THIS request, memoized so the
+          // vector lane and passage ranking embed the query once between them.
+          const requestEmbeddings = new Map<string, SourceEmbeddingProvider | undefined>();
+          const requestEmbedding = (store: LocalConnectorStore): SourceEmbeddingProvider | undefined => {
+            if (!requestEmbeddings.has(store.corpusId)) {
+              const provider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
+              requestEmbeddings.set(
+                store.corpusId,
+                provider && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(provider))
+                  ? memoizeQueryEmbeddings(provider)
+                  : undefined,
+              );
+            }
+            return requestEmbeddings.get(store.corpusId);
+          };
           const connectorStoreAdapter = (
             store: LocalConnectorStore,
           ): SourceIndexCorpusSearchAdapter | undefined => {
@@ -3174,8 +3190,7 @@ export async function main(): Promise<void> {
               ...(principal ? { principal } : {}),
             });
             if (scope.kind === 'skip') return undefined;
-            const connectorStoreEmbedding = connectorStoreEmbeddingProviders.get(store.corpusId)
-              ?? sourceIndexEmbeddingProvider;
+            const connectorStoreEmbedding = requestEmbedding(store);
             const connectorStoreAccount = scope.accountScope
               ?? mandatoryScope.accountScope
               ?? (request.account?.trim() || connectorStoreAccountScopes.get(store.corpusId));
@@ -3195,10 +3210,7 @@ export async function main(): Promise<void> {
               ...(scope.filters || mandatoryScope.filters
                 ? { filters: { ...scope.filters, ...mandatoryScope.filters } }
                 : {}),
-              ...(connectorStoreEmbedding
-                && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbedding))
-                ? { embeddingProvider: connectorStoreEmbedding }
-                : {}),
+              ...(connectorStoreEmbedding ? { embeddingProvider: connectorStoreEmbedding } : {}),
             });
           };
           return {
@@ -3241,9 +3253,14 @@ export async function main(): Promise<void> {
                     // Built whenever names are searchable, even with no
                     // content scope at all: an item in a Names-only folder
                     // then reports as kept unread by choice, not unreadable.
+                    // Passage ranking by embedding rides only a hybrid
+                    // request, where the vector lane already embedded the
+                    // query (memoized), so it costs no second forward pass.
+                    const passageEmbedding = request.retrieval_mode === 'hybrid' ? requestEmbedding(store) : undefined;
                     return mandatoryScope.allowed
                       ? [[store.corpusId, createConnectorStoreContentProvider({
                           store,
+                          ...(passageEmbedding ? { embeddingProvider: passageEmbedding } : {}),
                           ...(mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {}),
                           ...(mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {}),
                           ...(mandatoryScope.filters ? { metadataFilters: mandatoryScope.filters } : {}),

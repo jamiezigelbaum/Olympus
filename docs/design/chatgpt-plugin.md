@@ -233,10 +233,23 @@ private answer into the normal chat. Secret items are never answered from.
 ChatGPT calls `olympus_search` (the primary answer tool) or `source_answer`;
 both carry the same hook and link the `ui://olympus/private-answer` panel on
 every result. ChatGPT's model gets Public and Personal evidence as before and
-**nothing** about a private match: no count, no state, no note (review
-2026-10-01: a model-visible count is an oracle for testing queries against
-Private holdings). The count and state travel only in the widget-only
-`_meta`; with no match the panel renders nothing (zero height). With one,
+**one bit** about a private match: a fixed note that some matching items are
+Private and that Olympus answers from them only to the user, in the panel
+(owner decision, Jamie, 2026-10-02, superseding the 2026-10-01 "nothing"
+rule). Without it, the model saw only Personal titles and coverage gaps for
+those items, told the user Olympus "returned only its title", and sent them
+to switch folders to Full, while the answer sat in the panel. The note has
+no count, no title and no content (review 2026-10-01 still holds: a
+model-visible count is an oracle for testing queries against Private
+holdings; one bit per question is the accepted cost). Its text is fixed per
+panel state (`response-builder.ts` `privateMatchNote`): answering in the
+panel (`ready`), the panel explains setup (`no_model`, `model_downloading`),
+or no panel came back in time but released coverage shows matches whose
+contents are tiered Private. Matches whose name is Personal and whose
+contents are Private are counted apart from Names-only and unreadable items,
+so no coverage note tells the user to change folder settings for them. The
+count and state travel only in the widget-only `_meta`; with no match the
+panel renders nothing (zero height). With one,
 the panel says "N private items match", carries the badge **"Not sent to
 ChatGPT"**, and offers **Show private answer**. On click, the panel fetches
 the answer itself, from the relay, and shows it as text.
@@ -263,7 +276,8 @@ percent when known; counts only, no job).
    is `{v:1, count, state, jobId?, percent?}` and nothing else (the response
    builder copies exactly these fields). `_meta` is widget-only: ChatGPT does
    not put it in the model's context. The job id never appears in the text
-   content or `structuredContent`. There is no key and no fetch token in
+   content or `structuredContent`; the only match signal there is the fixed
+   Private note above. There is no key and no fetch token in
    `_meta`, or anywhere in any tool output.
 4. **Claim.** On click the panel generates an ephemeral **ECDH P-256** key
    pair with WebCrypto (private key non-extractable) and POSTs only its

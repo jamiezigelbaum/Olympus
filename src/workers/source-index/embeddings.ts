@@ -1131,3 +1131,35 @@ function fnv1a(value: string): number {
 function hashString(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
+
+/**
+ * The same provider, with each single-text query embedding made once. One
+ * request embeds its query in the vector lane and again to rank an item's
+ * passages; sharing one memoized provider between them costs one forward
+ * pass, not two. Document embeddings pass straight through. Scope it to one
+ * request: the memo is never evicted.
+ */
+export function memoizeQueryEmbeddings(provider: SourceEmbeddingProvider): SourceEmbeddingProvider {
+  const queries = new Map<string, Promise<number[][]>>();
+  const memoized: SourceEmbeddingProvider = {
+    provider: provider.provider,
+    modelId: provider.modelId,
+    dimension: provider.dimension,
+    configHash: provider.configHash,
+    epochId: provider.epochId,
+    backend: provider.backend,
+    embed(inputs, options) {
+      if (options.taskType !== 'RETRIEVAL_QUERY' || inputs.length !== 1) return provider.embed(inputs, options);
+      const key = inputs[0]!.text;
+      const cached = queries.get(key);
+      if (cached) return cached;
+      const pending = provider.embed(inputs, options);
+      queries.set(key, pending);
+      // A failed embed is not remembered: the next caller may try again.
+      pending.catch(() => queries.delete(key));
+      return pending;
+    },
+    ...(provider.assertBindingCurrent ? { assertBindingCurrent: () => provider.assertBindingCurrent!() } : {}),
+  };
+  return memoized;
+}

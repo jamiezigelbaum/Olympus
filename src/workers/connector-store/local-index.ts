@@ -83,6 +83,7 @@ import {
 } from '../../core/source-index/fts.ts';
 import {
   boundedSourceIndexChunks,
+  compactPassageWhitespace,
   sourceIndexChunkQueryTerms,
   sourceIndexChunkTermScore,
 } from '../../core/source-index/chunk-selection.ts';
@@ -2509,6 +2510,41 @@ export class LocalConnectorStore {
   }
 
   /** Whether this store's copy of an item may be served for any layer. */
+  /**
+   * True when this store serves an item's name only because the item's
+   * CONTENT is tiered Private: the tier ledger holds its current content copy
+   * in a secure_local store. Says nothing about what that content is.
+   */
+  contentHeldPrivate(localItemId: string): boolean {
+    if (this.trustDomain === 'secure_local') return false;
+    const row = this.db.query(`
+      SELECT provider, account_scope, provider_item_id, provider_conversation_id
+      FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
+    `).get(localItemId) as {
+      provider: string;
+      account_scope: string;
+      provider_item_id: string;
+      provider_conversation_id: string | null;
+    } | null;
+    if (!row) return false;
+    const identity = {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    };
+    try {
+      const ledger = this.visibilityLedger();
+      if (!ledger || !ledger.corpusHasCopies(this.corpusId)) return false;
+      const copies = ledger.copiesForMany([identity]).get(tierLedgerIdentityKey(identity)) ?? [];
+      return copies.some((copy) => copy.state === 'current'
+        && copy.trustDomain === 'secure_local'
+        && (copy.layers === 'content' || copy.layers === 'both'));
+    } catch {
+      return false;
+    }
+  }
+
   private copyServable(identity: { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }): boolean {
     return this.tierVisibleRows([identity], (entry) => entry, () => 'metadata').length > 0
       || this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
@@ -8544,11 +8580,12 @@ export class LocalConnectorStore {
   ): ConnectorStoreLocalContent | undefined {
     const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
-        provider_conversation_id,
+        provider_conversation_id, title,
         ${this.reactionsColumnPresent ? 'reactions_json' : 'NULL AS reactions_json'}
       FROM items WHERE local_item_id = ? AND tombstoned = 0
     `).get(localItemId) as {
       item_pk: number;
+      title: string | null;
       trust_tier: string;
       locator_uri: string | null;
       mime_type: string;
@@ -8574,15 +8611,40 @@ export class LocalConnectorStore {
     }
     const servesContent = options.withoutContent !== true
       && this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+    const queryVector = passageFocus?.queryVector;
+    const vectorModelId = passageFocus?.queryVectorModelId;
+    const scoreByVector = queryVector !== undefined && queryVector.length > 0 && vectorModelId !== undefined;
     const chunkRows = servesContent
-      ? this.db.query(
-        'SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
-      ).all(row.item_pk) as Array<{ bounded_text: string }>
+      ? (scoreByVector
+        ? this.db.query(`
+          SELECT c.bounded_text, e.embedding
+          FROM chunks c
+          LEFT JOIN chunk_embeddings e
+            ON e.chunk_pk = c.chunk_pk AND e.model_id = ? AND e.content_hash = c.embedding_input_hash
+          WHERE c.item_pk = ? ORDER BY c.chunk_index
+        `).all(vectorModelId, row.item_pk)
+        : this.db.query(
+          'SELECT bounded_text, NULL AS embedding FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
+        ).all(row.item_pk)) as Array<{ bounded_text: string; embedding: unknown }>
       : [];
+    // Cosine of each chunk's current vector to the query; undefined where the
+    // chunk has none (or one of another width), so it ranks after the rest.
+    const relevance = scoreByVector
+      ? chunkRows.map((chunk) => {
+          if (chunk.embedding === null || chunk.embedding === undefined) return undefined;
+          const vector = decodeEmbedding(chunk.embedding);
+          return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
+        })
+      : undefined;
     const { chunks, truncated } = selectEvidencePassages(
-      chunkRows.map((chunk) => chunk.bounded_text),
+      // Layout padding (OCR and PDF text keep column alignment as runs of
+      // spaces) is not evidence; dropping it lets the same budget carry
+      // several times the text (2026-10-02 live Private store: 36% padding
+      // overall, 69% in one scanned report).
+      chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)),
       maxChars,
       passageFocus,
+      { title: row.title, ...(relevance ? { relevance } : {}) },
     );
     // Item-level context seam: the reaction line is prepended as its own
     // leading block rather than written into a chunk. Chunks stay a faithful
@@ -9687,10 +9749,22 @@ export interface ConnectorStoreContentProviderOptions {
   // "could not be read". Omitted, nothing is reported as Names only.
   metadataFilters?: ConnectorStoreSearchFilters;
   contentAllowed?: boolean;
+  /**
+   * The store's own embedding provider (the one its vector lane searches
+   * with), used only to rank a long item's passages by similarity to the
+   * query. Share one memoizeQueryEmbeddings() wrapper with the adapter so the
+   * query is embedded once. A Private store only accepts an approved provider.
+   */
+  embeddingProvider?: SourceEmbeddingProvider;
 }
 
 // The coverage sentence for an item in a Names-only folder. Source-agnostic:
 // it names the owner's choice, never the folder.
+// The coverage sentence for an item whose name is in this tier and whose
+// contents are tiered Private: read only by the Private lane, never here.
+export const CONNECTOR_STORE_CONTENT_PRIVATE_GAP =
+  "this item's contents are marked Private; only its name is in this tier.";
+
 export const CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP =
   "the owner set this item's folder to Names only; its name is searchable and its contents are not read.";
 
@@ -9701,6 +9775,25 @@ export function createConnectorStoreContentProvider(
   options: ConnectorStoreContentProviderOptions,
 ): LocalContentProvider {
   const { store } = options;
+  const embeddingProvider = options.embeddingProvider
+    && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider))
+    ? options.embeddingProvider
+    : undefined;
+  // The query's vector for passage ranking, or nothing. Never fails the read:
+  // without it, passages fall back to lexical and document order.
+  let storeHasVectors: boolean | undefined;
+  const queryVector = async (query: string | undefined): Promise<readonly number[] | undefined> => {
+    const text = query?.trim();
+    if (!embeddingProvider || !text) return undefined;
+    try {
+      storeHasVectors ??= store.hasEmbeddings(embeddingProvider.modelId);
+      if (!storeHasVectors) return undefined;
+      const [vector] = await embeddingProvider.embed([{ text }], { taskType: 'RETRIEVAL_QUERY' });
+      return vector && vector.length === embeddingProvider.dimension ? vector : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   return {
     async fetchLocalContent(request: LocalContentRequest): Promise<LocalContentBlock | undefined> {
       if (request.trustDomain !== store.trustDomain) {
@@ -9720,6 +9813,17 @@ export function createConnectorStoreContentProvider(
         }
         const names = store.localContent(localItemId, request.maxChars, undefined, { withoutContent: true });
         if (!names) return undefined;
+        // Content tiered Private is not the owner's Names-only choice: the
+        // answer to it is the Private lane's, and coverage says so.
+        if (store.contentHeldPrivate(localItemId)) {
+          return {
+            sensitivity: buildSourceSensitivity({ trustTier: names.trustTier, trustDomain: store.trustDomain }),
+            chunks: [],
+            contentPrivate: true,
+            coverageGaps: [CONNECTOR_STORE_CONTENT_PRIVATE_GAP],
+            ...(names.locatorUri ? { locatorUri: names.locatorUri } : {}),
+          };
+        }
         return {
           sensitivity: buildSourceSensitivity({ trustTier: names.trustTier, trustDomain: store.trustDomain }),
           chunks: [],
@@ -9729,11 +9833,24 @@ export function createConnectorStoreContentProvider(
         };
       }
       const anchorChunkIndex = request.provenance.chunk?.chunkIndex;
+      const anchorLane = request.provenance.chunk?.span?.lane;
+      const vector = await queryVector(request.query);
       const content = store.localContent(localItemId, request.maxChars, {
         ...(request.query?.trim() ? { query: request.query } : {}),
         ...(anchorChunkIndex !== undefined ? { anchorChunkIndex } : {}),
+        ...(anchorLane === 'keyword' || anchorLane === 'semantic' ? { anchorLane } : {}),
+        ...(vector && embeddingProvider ? { queryVector: vector, queryVectorModelId: embeddingProvider.modelId } : {}),
       });
       if (!content) return undefined;
+      if (content.chunks.length === 0 && store.contentHeldPrivate(localItemId)) {
+        return {
+          sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
+          chunks: [],
+          contentPrivate: true,
+          coverageGaps: [CONNECTOR_STORE_CONTENT_PRIVATE_GAP],
+          ...(content.locatorUri ? { locatorUri: content.locatorUri } : {}),
+        };
+      }
       // An item with no chunks has two very different explanations and the
       // Analyst acts differently on each: "extraction is pending" invites a
       // retry and reads as a stalled lane, while "the owner indexes this
@@ -10644,6 +10761,20 @@ export interface ConnectorStorePassageFocus {
   query?: string;
   /** The chunk a retrieval lane matched (keyword or vector), kept first. */
   anchorChunkIndex?: number;
+  /**
+   * Which lane matched the anchor chunk. A keyword anchor is kept only when
+   * its own text carries a discriminating query term: a match through the
+   * item's name lands on an arbitrary chunk (bm25 favours the shortest), so it
+   * says nothing about which passage answers.
+   */
+  anchorLane?: 'keyword' | 'semantic';
+  /**
+   * The query's embedding, with the model it was made by. Present, each chunk
+   * holding a current vector of that model is scored by cosine, which picks
+   * the item's most query-like passages when no query term singles one out.
+   */
+  queryVector?: readonly number[];
+  queryVectorModelId?: string;
 }
 
 // At most this many passages from one item, so a long document contributes
@@ -10653,37 +10784,86 @@ const MAX_PASSAGES_PER_CANDIDATE = 3;
 // An item that fits its budget is returned whole, exactly as before. A longer
 // one yields its best passages instead of its first ones: the chunk a
 // retrieval lane matched, then the chunks densest in query terms, kept in
-// document order and clipped around their term windows. With neither signal
-// (no query terms, no anchor) the prefix is the only defensible choice.
+// document order and clipped around their term windows.
+//
+// Only terms that discriminate WITHIN the item count. A term the item's own
+// name carries explains why the item matched, not which passage answers: a
+// dated file name puts its date in every page header of a scanned report, and
+// windows around those dates were page headers, not the report's values
+// (2026-10-02 live: three header slivers per report). With no
+// discriminating term, the passages are the chunks most similar to the query
+// by embedding (when the store holds vectors), else the item from the top,
+// as whole contiguous text rather than slivers.
 function selectEvidencePassages(
   chunks: readonly string[],
   maxChars: number | undefined,
   focus: ConnectorStorePassageFocus | undefined,
+  context: { title?: string | null; relevance?: readonly (number | undefined)[] } = {},
 ): { chunks: readonly string[]; truncated: boolean } {
   if (maxChars === undefined || maxChars <= 0) return budgetChunks(chunks, maxChars);
   const totalChars = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   if (totalChars <= maxChars || !focus) return budgetChunks(chunks, maxChars);
-  const termGroups = focus.query ? sourceIndexChunkQueryTerms(focus.query) : [];
-  const anchor = focus.anchorChunkIndex !== undefined
+  const termGroups = withoutNameTerms(focus.query ? sourceIndexChunkQueryTerms(focus.query) : [], context.title);
+  const lexical = chunks.map((text) => (termGroups.length > 0 ? sourceIndexChunkTermScore(text, termGroups) : 0));
+  const relevance = (index: number): number => context.relevance?.[index] ?? Number.NEGATIVE_INFINITY;
+  const anchorIndex = focus.anchorChunkIndex !== undefined
     && focus.anchorChunkIndex >= 0
     && focus.anchorChunkIndex < chunks.length
     ? focus.anchorChunkIndex
     : undefined;
-  const scored = chunks
-    .map((text, index) => ({ index, score: termGroups.length > 0 ? sourceIndexChunkTermScore(text, termGroups) : 0 }))
-    .filter((entry) => entry.score > 0 && entry.index !== anchor)
-    .sort((left, right) => right.score - left.score || left.index - right.index);
-  const picked = [
-    ...(anchor !== undefined ? [anchor] : []),
-    ...scored.map((entry) => entry.index),
-  ].slice(0, MAX_PASSAGES_PER_CANDIDATE);
-  if (picked.length === 0) return budgetChunks(chunks, maxChars);
-  const bounded = boundedSourceIndexChunks(
-    picked.sort((left, right) => left - right).map((index) => chunks[index]!),
-    maxChars,
-    termGroups,
-  );
-  return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+  const anchor = anchorIndex !== undefined && (focus.anchorLane !== 'keyword' || lexical[anchorIndex]! > 0)
+    ? anchorIndex
+    : undefined;
+  if (lexical.some((score) => score > 0)) {
+    const scored = lexical
+      .map((score, index) => ({ index, score }))
+      .filter((entry) => entry.score > 0 && entry.index !== anchor)
+      .sort((left, right) => right.score - left.score
+        || relevance(right.index) - relevance(left.index)
+        || left.index - right.index);
+    const picked = [
+      ...(anchor !== undefined ? [anchor] : []),
+      ...scored.map((entry) => entry.index),
+    ].slice(0, MAX_PASSAGES_PER_CANDIDATE);
+    const bounded = boundedSourceIndexChunks(
+      picked.sort((left, right) => left - right).map((index) => chunks[index]!),
+      maxChars,
+      termGroups,
+    );
+    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+  }
+  // Most relevant first (the anchor, then by embedding), filled whole until
+  // the budget runs out, then read in document order.
+  const ranked = chunks
+    .map((_, index) => index)
+    .sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0)
+      || relevance(right) - relevance(left)
+      || left - right);
+  const kept = new Map<number, string>();
+  let remaining = maxChars;
+  for (const index of ranked) {
+    if (remaining <= 0) break;
+    const text = chunks[index]!;
+    const included = text.length > remaining ? text.slice(0, remaining) : text;
+    kept.set(index, included);
+    remaining -= included.length;
+  }
+  const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
+  return {
+    chunks: ordered.map(([, text]) => text),
+    truncated: ordered.length < chunks.length || ordered.some(([index, text]) => text.length < chunks[index]!.length),
+  };
+}
+
+// Query term groups minus those the item's name carries (see above).
+function withoutNameTerms(
+  termGroups: ReadonlyArray<readonly string[]>,
+  title: string | null | undefined,
+): ReadonlyArray<readonly string[]> {
+  if (!title) return termGroups;
+  const nameTokens = new Set(title.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []);
+  if (nameTokens.size === 0) return termGroups;
+  return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
 }
 
 function budgetChunks(
