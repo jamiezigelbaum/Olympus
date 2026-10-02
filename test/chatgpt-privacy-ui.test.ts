@@ -516,6 +516,45 @@ describe('saving', () => {
     expect(host.text()).toContain(W.saved);
   });
 
+  test('a label renamed elsewhere is the same rule: removing it survives the conflict replay', async () => {
+    const before = [{ kind: 'label', source_id: 'gmail.email', key: 'Label_9', value: 'Old name' }];
+    const after = [
+      { kind: 'label', source_id: 'gmail.email', key: 'Label_9', value: 'New name' },
+      { kind: 'sender', source_id: 'gmail.email', value: 'doctor@clinic.example' },
+    ];
+    const sent: any[] = [];
+    const { host } = await openPrivacy({
+      rules: before,
+      setResult: (args) => {
+        sent.push(args);
+        if (sent.length === 1) return privacyResult('', after, 0, { revision: 'rev2', status: 'conflict' });
+        return privacyResult(args.description ?? '', args.rules ?? [], 0, { status: 'saved' });
+      },
+    });
+    host.button('Remove Old name').click();
+    host.button(W.save).click();
+    host.button(W.confirm).click();
+    await host.settle();
+    host.button(W.applyAgain).click();
+    // Still a removal against the new settings, named by its new name, and still asked first.
+    expect(host.doc.querySelector('.confirm-box')!.textContent).toContain('This removes protection from New name.');
+    host.button(W.confirm).click();
+    await host.settle();
+    expect(sent.at(-1).rules).toEqual([{ kind: 'sender', source_id: 'gmail.email', value: 'doctor@clinic.example' }]);
+    expect(sent.at(-1).revision).toBe('rev2');
+    expect(host.text()).toContain(W.saved);
+  });
+
+  test('a sender already private in another case is not added twice', async () => {
+    const { host } = await openPrivacy({ rules: [{ kind: 'sender', source_id: 'gmail.email', value: 'doctor@clinic.example' }] });
+    host.button(W.addSender).click();
+    const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
+    input.value = 'Doctor@Clinic.example';
+    input.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    host.button(W.senderAdd).click();
+    expect(host.text()).toContain(W.senderDuplicate);
+  });
+
   test('Discard my changes replaces the draft with the saved settings', async () => {
     const { host } = await openPrivacy({
       description: 'old words',

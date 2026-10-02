@@ -220,8 +220,16 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit): ChatGptPrivacy {
     });
   }
 
+  /**
+   * A rule's identity as the engine matches it (privacy-profile.ts
+   * privacyRuleId): a folder or label by its key, a sender by its address,
+   * trimmed and lower-cased. A label's name can change; it is the same rule.
+   */
   function identity(rule: Any): string {
-    return rule.kind + '\n' + rule.source_id + '\n' + (typeof rule.key === 'string' ? rule.key : '') + '\n' + (typeof rule.value === 'string' ? rule.value : '');
+    const matched = rule.kind === 'sender'
+      ? (typeof rule.value === 'string' ? rule.value.trim().toLowerCase() : '')
+      : (typeof rule.key === 'string' ? rule.key.trim() : '');
+    return rule.kind + '\n' + rule.source_id + '\n' + matched;
   }
 
   function kept(): Any[] {
