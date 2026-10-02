@@ -700,8 +700,6 @@ function mountDashboardController(options) {
       refreshNow(false);
     }, pollIntervalMs) : undefined;
   }
-  const PRIVACY_EMAIL = /^[^\s@<>"(),;:]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
-  const PRIVACY_DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
   function privacyCopy(form) {
     try {
       return JSON.parse(form.dataset.copy || "{}");
@@ -715,58 +713,88 @@ function mountDashboardController(options) {
       out = out.split(`{${key}}`).join(values[key]);
     return out;
   }
+  function privacyJson(value, fallback) {
+    try {
+      const parsed = JSON.parse(value || "");
+      return parsed ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
   function privacyFolderSources(form) {
-    try {
-      const list = JSON.parse(form.dataset.folderSources || "[]");
-      return Array.isArray(list) ? list.filter((entry) => entry && typeof entry.id === "string") : [];
-    } catch {
-      return [];
-    }
+    const list = privacyJson(form.dataset.folderSources, []);
+    return Array.isArray(list) ? list.filter((entry) => entry && typeof entry.id === "string") : [];
   }
-  function privacyRuleOf(row) {
-    try {
-      const rule = JSON.parse(row.getAttribute("data-privacy-rule") || "");
-      return rule && typeof rule.kind === "string" && typeof rule.source_id === "string" ? rule : undefined;
-    } catch {
-      return;
-    }
+  function privacySourceNames(form) {
+    const names = privacyJson(form.dataset.sourceNames, {});
+    return names && typeof names === "object" ? names : {};
   }
-  function privacyIdentity(rule) {
-    const matched = rule.kind === "sender" ? (rule.value || "").trim().toLowerCase() : rule.key || "";
-    return `${rule.kind}\x00${rule.source_id}\x00${matched}`;
+  function privacyLogicFor(form) {
+    return options.privacyLogic ? options.privacyLogic({ mailSourceId: "gmail.email", folderSources: privacySourceNames(form) }) : undefined;
   }
-  function privacyKept(form) {
-    return Array.from(form.querySelectorAll("[data-privacy-rule]")).filter((row) => !row.hasAttribute("data-removed")).map(privacyRuleOf).filter((rule) => rule !== undefined);
+  function privacyDisplay(form, logic, rule) {
+    const names = privacySourceNames(form);
+    return logic.displayOf(rule, privacyFill(privacyCopy(form).folderUnnamed || "", { source: names[rule.source_id] || rule.source_id }));
   }
-  function privacyWords(form, rule) {
+  function privacyKindText(form, rule) {
     const copy = privacyCopy(form);
     if (rule.kind === "sender")
-      return { name: rule.value || "", kind: copy.kindSender || "" };
+      return copy.kindSender || "";
     if (rule.kind === "label")
-      return { name: rule.value || "", kind: copy.kindLabel || "" };
-    const source = privacyFolderSources(form).find((entry) => entry.id === rule.source_id);
-    return { name: rule.display || rule.key || "", kind: privacyFill(copy.kindFolder || "", { source: source ? source.label : rule.source_id }) };
+      return copy.kindLabel || "";
+    const names = privacySourceNames(form);
+    return privacyFill(copy.kindFolder || "", { source: names[rule.source_id] || rule.source_id });
+  }
+  function privacyViewRules(form) {
+    return Array.from(form.querySelectorAll("[data-privacy-rule]")).flatMap((row) => {
+      const rule = privacyJson(row.getAttribute("data-privacy-rule") || undefined, null);
+      if (!rule || typeof rule.kind !== "string" || typeof rule.source_id !== "string")
+        return [];
+      const saved = row.hasAttribute("data-privacy-saved");
+      const view2 = {
+        kind: rule.kind,
+        source_id: rule.source_id,
+        display: row.querySelector(".sline.strong")?.textContent || "",
+        removed: row.hasAttribute("data-removed"),
+        saved,
+        ...typeof rule.key === "string" ? { key: rule.key } : {},
+        ...typeof rule.value === "string" ? { value: rule.value } : {},
+        ...saved ? { raw: rule } : {}
+      };
+      return [view2];
+    });
+  }
+  function privacyKept(form) {
+    return privacyViewRules(form).filter((rule) => !rule.removed);
+  }
+  function privacyRulesOut(form, logic) {
+    const hidden = privacyJson(form.dataset.hidden, []);
+    return privacyKept(form).map((rule) => logic.ruleOut(rule)).concat(Array.isArray(hidden) ? hidden : []);
   }
   function setPrivacyDirty(form) {
     form.dataset.dirty = "true";
+    form.querySelectorAll("[data-privacy-confirm]").forEach((node) => node.remove());
     const empty = form.querySelector("[data-privacy-empty]");
     if (empty)
       empty.hidden = privacyKept(form).length > 0;
   }
-  function privacyRow(form, rule) {
-    const words = privacyWords(form, rule);
+  function privacyRow(form, logic, rule) {
+    const view2 = rule;
+    const display = typeof view2.display === "string" && view2.display ? view2.display : privacyDisplay(form, logic, rule);
     const copy = privacyCopy(form);
     const row = document.createElement("div");
     row.className = "srow nodot prule";
-    row.setAttribute("data-privacy-rule", JSON.stringify(rule));
+    row.setAttribute("data-privacy-rule", JSON.stringify(view2.saved && view2.raw ? view2.raw : logic.ruleOut({ ...rule, display })));
+    if (view2.saved)
+      row.setAttribute("data-privacy-saved", "");
     const main = document.createElement("div");
     main.className = "smain";
     const name = document.createElement("p");
     name.className = "sline strong";
-    name.textContent = words.name;
+    name.textContent = display;
     const kind = document.createElement("p");
     kind.className = "sline";
-    kind.textContent = words.kind;
+    kind.textContent = privacyKindText(form, rule);
     main.append(name, kind);
     const actions = document.createElement("div");
     actions.className = "sact";
@@ -774,18 +802,22 @@ function mountDashboardController(options) {
     remove.type = "button";
     remove.className = "btn";
     remove.setAttribute("data-privacy-remove", "");
-    remove.setAttribute("aria-label", privacyFill(copy.removeFor || "", { name: words.name }));
+    remove.setAttribute("aria-label", privacyFill(copy.removeFor || "", { name: display }));
     remove.textContent = copy.remove || "Remove";
     actions.append(remove);
     row.append(main, actions);
+    if (view2.removed)
+      markPrivacyRemoved(form, row, true);
     return row;
   }
   function addPrivacyRule(form, rule) {
-    const identity = privacyIdentity(rule);
-    const rows = Array.from(form.querySelectorAll("[data-privacy-rule]"));
-    const existing = rows.find((row) => {
-      const current = privacyRuleOf(row);
-      return current !== undefined && privacyIdentity(current) === identity;
+    const logic = privacyLogicFor(form);
+    if (!logic)
+      return false;
+    const identity = logic.identity(rule);
+    const existing = Array.from(form.querySelectorAll("[data-privacy-rule]")).find((row) => {
+      const current = privacyJson(row.getAttribute("data-privacy-rule") || undefined, null);
+      return current !== null && logic.identity(current) === identity;
     });
     if (existing) {
       if (!existing.hasAttribute("data-removed"))
@@ -793,22 +825,26 @@ function mountDashboardController(options) {
       togglePrivacyRemoved(form, existing);
       return true;
     }
-    form.querySelector("[data-privacy-rules]")?.append(privacyRow(form, rule));
+    form.querySelector("[data-privacy-rules]")?.append(privacyRow(form, logic, rule));
     setPrivacyDirty(form);
     return true;
   }
-  function togglePrivacyRemoved(form, row) {
+  function markPrivacyRemoved(form, row, removed) {
     const copy = privacyCopy(form);
-    const rule = privacyRuleOf(row);
-    const name = rule ? privacyWords(form, rule).name : "";
+    const name = row.querySelector(".sline.strong")?.textContent || "";
     const button = row.querySelector("[data-privacy-remove]");
-    const removed = !row.hasAttribute("data-removed");
     row.toggleAttribute("data-removed", removed);
     row.classList.toggle("removed", removed);
     if (button) {
       button.textContent = removed ? copy.undo || "Undo" : copy.remove || "Remove";
-      button.setAttribute("aria-label", removed ? `${copy.undo || "Undo"}: ${name}` : privacyFill(copy.removeFor || "", { name }));
+      button.setAttribute("aria-label", removed ? privacyFill(copy.undoFor || "", { name }) : privacyFill(copy.removeFor || "", { name }));
     }
+  }
+  function togglePrivacyRemoved(form, row) {
+    const copy = privacyCopy(form);
+    const name = row.querySelector(".sline.strong")?.textContent || "";
+    const removed = !row.hasAttribute("data-removed");
+    markPrivacyRemoved(form, row, removed);
     setPrivacyDirty(form);
     say(form, removed ? privacyFill(copy.removed || "", { name }) : "");
   }
@@ -880,7 +916,8 @@ function mountDashboardController(options) {
       inside.textContent = copy.folderOpen || "Open";
       actions.append(inside);
     }
-    const already = privacyKept(form).some((current) => privacyIdentity(current) === privacyIdentity(rule));
+    const logic = privacyLogicFor(form);
+    const already = !!logic && privacyKept(form).some((current) => logic.identity(current) === logic.identity(rule));
     const make = document.createElement("button");
     make.type = "button";
     make.className = "btn";
@@ -1016,8 +1053,8 @@ function mountDashboardController(options) {
     const field = panel?.querySelector("[data-privacy-sender]");
     if (!panel || !field)
       return;
-    const value = field.value.trim().toLowerCase();
-    if (!PRIVACY_EMAIL.test(value) && !PRIVACY_DOMAIN.test(value)) {
+    const value = privacyLogicFor(form)?.senderValue(field.value) || "";
+    if (!value) {
       panelSay(panel, copy.senderInvalid || "");
       field.focus();
       return;
@@ -1030,29 +1067,18 @@ function mountDashboardController(options) {
     panelSay(panel, "");
     field.focus();
   }
-  function privacyBaseline(form) {
-    try {
-      const saved = JSON.parse(form.dataset.saved || "{}");
-      return {
-        description: typeof saved.description === "string" ? saved.description : "",
-        rules: Array.isArray(saved.rules) ? saved.rules.filter((rule) => rule && typeof rule.kind === "string") : []
-      };
-    } catch {
-      return { description: "", rules: [] };
-    }
+  function privacySavedDescription(form) {
+    return form.dataset.savedDescription || "";
   }
-  function privacyLowering(form) {
-    const baseline = privacyBaseline(form);
-    const kept = new Set(privacyKept(form).map(privacyIdentity));
-    const removed = baseline.rules.filter((rule) => !kept.has(privacyIdentity(rule))).map((rule) => rule.name || privacyWords(form, rule).name);
+  function privacyLowering(form, logic) {
     const field = form.querySelector('textarea[name="description"]');
-    const description = field !== null && field.value.trim() !== baseline.description.trim();
-    return { removed, description };
+    const change = logic.lowering(privacyViewRules(form), field ? field.value : privacySavedDescription(form), privacySavedDescription(form));
+    return { removed: change.removed.map((rule) => rule.display), description: change.described };
   }
   function clearPrivacyPrompts(form) {
     form.querySelectorAll("[data-privacy-confirm],[data-privacy-conflict]").forEach((node) => node.remove());
   }
-  function privacyPrompt(form, kind, lines, buttons) {
+  function privacyPrompt(form, kind, lines, items, buttons) {
     clearPrivacyPrompts(form);
     const box = document.createElement("div");
     box.className = "pprompt";
@@ -1062,6 +1088,15 @@ function mountDashboardController(options) {
       const text = document.createElement("p");
       text.textContent = line;
       box.append(text);
+    }
+    if (items.length > 0) {
+      const list = document.createElement("ul");
+      for (const item of items) {
+        const entry = document.createElement("li");
+        entry.textContent = item;
+        list.append(entry);
+      }
+      box.append(list);
     }
     const row = document.createElement("div");
     row.className = "pbuttons";
@@ -1085,20 +1120,67 @@ function mountDashboardController(options) {
       lines.push(privacyFill(copy.confirmRemoves || "", { list: lowering.removed.join(", ") }));
     if (lowering.description)
       lines.push(copy.confirmDescription || "");
-    privacyPrompt(form, "confirm", lines, [
+    privacyPrompt(form, "confirm", lines, [], [
       ["data-privacy-confirm-yes", copy.confirm || "Confirm"],
-      ["data-privacy-confirm-no", copy.keepEditing || "Keep editing"]
+      ["data-privacy-confirm-no", copy.cancel || "Cancel"]
     ]);
+  }
+  function showPrivacyConflict(form, logic, current) {
+    const copy = privacyCopy(form);
+    const description = typeof current.description === "string" ? current.description.trim() : "";
+    const rules = Array.isArray(current.rules) ? current.rules.filter((rule) => logic.validRule(rule)) : [];
+    const items = [description ? privacyFill(copy.conflictDescription || "", { text: description }) : copy.conflictNoDescription || ""];
+    if (rules.length === 0)
+      items.push(copy.rulesEmpty || "");
+    for (const rule of rules)
+      items.push(`${privacyDisplay(form, logic, rule)} · ${privacyKindText(form, rule)}`);
+    privacyPrompt(form, "conflict", [copy.conflict || "", copy.conflictNow || ""], items, [
+      ["data-privacy-apply-again", copy.applyAgain || "Apply my changes again"],
+      ["data-privacy-discard-mine", copy.discardMine || "Discard my changes"]
+    ]);
+  }
+  function privacyApplyAgain(form) {
+    const logic = privacyLogicFor(form);
+    const current = privacyJson(form.dataset.server, null);
+    if (!logic || !current)
+      return;
+    const field = form.querySelector('textarea[name="description"]');
+    const draft = {
+      rules: privacyViewRules(form),
+      description: field ? field.value : privacySavedDescription(form),
+      savedDescription: privacySavedDescription(form)
+    };
+    const saved = Array.isArray(current.rules) ? current.rules : [];
+    const fresh = saved.filter((rule) => logic.validRule(rule)).map((rule) => logic.viewRule(rule, privacyDisplay(form, logic, rule)));
+    const replayed = logic.replay(draft, fresh);
+    const description = typeof current.description === "string" ? current.description : "";
+    form.dataset.revision = typeof current.revision === "string" ? current.revision : "";
+    form.dataset.savedDescription = description;
+    form.dataset.hidden = JSON.stringify(saved.filter((rule) => !logic.validRule(rule)));
+    delete form.dataset.server;
+    const list = form.querySelector("[data-privacy-rules]");
+    if (list)
+      list.replaceChildren(...replayed.rules.map((rule) => privacyRow(form, logic, rule)));
+    if (field) {
+      field.defaultValue = description;
+      field.value = replayed.description !== null ? replayed.description : description;
+    }
+    setPrivacyDirty(form);
+    clearPrivacyPrompts(form);
+    savePrivacy(form);
   }
   async function savePrivacy(form, confirmed = false) {
     const copy = privacyCopy(form);
+    const logic = privacyLogicFor(form);
+    if (!logic)
+      return;
     if (!canWrite && !csrfToken) {
       say(form, "Your OpenClaw connection has read-only access.");
       return;
     }
-    if (pendingForms.has(form))
+    if (pendingForms.has(form) || form.dataset.server)
       return;
-    const lowering = privacyLowering(form);
+    const lowering = privacyLowering(form, logic);
     const lowers = lowering.removed.length > 0 || lowering.description;
     if (lowers && !confirmed) {
       showPrivacyConfirm(form, lowering);
@@ -1107,7 +1189,6 @@ function mountDashboardController(options) {
     clearPrivacyPrompts(form);
     const field = form.querySelector('textarea[name="description"]');
     const description = field ? field.value.trim() : undefined;
-    const rules = privacyKept(form);
     const revision = form.dataset.revision || "";
     setFormPending(form, true, copy.saving || "Saving…");
     let result;
@@ -1115,7 +1196,7 @@ function mountDashboardController(options) {
       result = await options.transport.control({
         action: "save_privacy",
         ...description !== undefined ? { description } : {},
-        rules,
+        rules: privacyRulesOut(form, logic),
         ...revision ? { revision } : {},
         ...lowers ? { confirm: true } : {}
       });
@@ -1139,22 +1220,14 @@ function mountDashboardController(options) {
     const error = result.body.error && typeof result.body.error === "object" ? result.body.error : {};
     if (result.status === 409 && error.code === "conflict") {
       const current = result.body.settings && typeof result.body.settings === "object" ? result.body.settings : {};
-      const saved = Array.isArray(current.rules) ? current.rules : [];
-      form.dataset.revision = typeof current.revision === "string" ? current.revision : "";
-      form.dataset.saved = JSON.stringify({
-        description: typeof current.description === "string" ? current.description : "",
-        rules: saved.map((rule) => ({ ...rule, name: privacyWords(form, rule).name }))
-      });
+      form.dataset.server = JSON.stringify(current);
       form.dataset.dirty = "true";
       say(form, "");
-      privacyPrompt(form, "conflict", [copy.conflict || ""], [
-        ["data-privacy-apply-again", copy.applyAgain || "Apply my changes again"],
-        ["data-privacy-discard-mine", copy.discardMine || "Discard my changes"]
-      ]);
+      showPrivacyConflict(form, logic, current);
       return;
     }
     if (result.status === 409 && error.code === "privacy_owner_only") {
-      showPrivacyConfirm(form, privacyLowering(form));
+      showPrivacyConfirm(form, privacyLowering(form, logic));
       return;
     }
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
@@ -1207,11 +1280,12 @@ function mountDashboardController(options) {
       return true;
     }
     if (target.closest("[data-privacy-apply-again]")) {
-      savePrivacy(form);
+      privacyApplyAgain(form);
       return true;
     }
     if (target.closest("[data-privacy-discard-mine]")) {
       delete form.dataset.dirty;
+      delete form.dataset.server;
       clearPrivacyPrompts(form);
       const field = form.querySelector('textarea[name="description"]');
       if (field)
@@ -3671,6 +3745,95 @@ var OLYMPUS_CONTROL_UI_CSS = forShadowRoot([
   border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--t2); }
 `;
 
+// src/workers/dashboard/shared-privacy-logic.ts
+function privacyLogic(config) {
+  const KINDS = ["folder", "label", "sender"];
+  const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+  const text = (value) => typeof value === "string" && value.trim() !== "";
+  function validRule(rule) {
+    if (!rule || typeof rule !== "object" || KINDS.indexOf(rule.kind) < 0)
+      return false;
+    if (rule.kind === "sender")
+      return rule.source_id === config.mailSourceId && text(rule.value);
+    if (rule.kind === "label")
+      return rule.source_id === config.mailSourceId && text(rule.key) && text(rule.value);
+    return Object.prototype.hasOwnProperty.call(config.folderSources, rule.source_id) && text(rule.key) && (rule.display === undefined || typeof rule.display === "string");
+  }
+  function displayOf(rule, unnamed) {
+    if (rule.kind === "sender" || rule.kind === "label")
+      return String(rule.value);
+    return text(rule.display) ? String(rule.display) : unnamed;
+  }
+  function viewRule(rule, display) {
+    const raw = {};
+    for (const field of Object.keys(rule))
+      raw[field] = rule[field];
+    const copy = { kind: rule.kind, source_id: rule.source_id, display, removed: false, saved: true, raw };
+    if (typeof rule.key === "string")
+      copy.key = rule.key;
+    if (typeof rule.value === "string")
+      copy.value = rule.value;
+    return copy;
+  }
+  function identity(rule) {
+    const matched = rule.kind === "sender" ? typeof rule.value === "string" ? rule.value.trim().toLowerCase() : "" : typeof rule.key === "string" ? rule.key.trim() : "";
+    return rule.kind + `
+` + rule.source_id + `
+` + matched;
+  }
+  function ruleOut(rule) {
+    if (rule.raw)
+      return rule.raw;
+    const out = { kind: rule.kind, source_id: rule.source_id };
+    if (typeof rule.key === "string")
+      out.key = rule.key;
+    if (typeof rule.value === "string")
+      out.value = rule.value;
+    if (rule.kind === "folder" && text(rule.display))
+      out.display = rule.display;
+    return out;
+  }
+  function addTo(rules, rule) {
+    const id = identity(rule);
+    const existing = rules.filter((other) => identity(other) === id)[0];
+    if (existing)
+      existing.removed = false;
+    else
+      rules.push(rule);
+    return rules;
+  }
+  function lowering(rules, description, savedDescription) {
+    return {
+      removed: rules.filter((rule) => rule.saved && rule.removed),
+      described: description.trim() !== savedDescription
+    };
+  }
+  function lowers(rules, description, savedDescription) {
+    const change = lowering(rules, description, savedDescription);
+    return change.removed.length > 0 || change.described;
+  }
+  function replay(draft, fresh) {
+    const removed = {};
+    for (const rule of draft.rules)
+      if (rule.saved && rule.removed)
+        removed[identity(rule)] = true;
+    const additions = draft.rules.filter((rule) => !rule.saved && !rule.removed);
+    const described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
+    for (const rule of fresh)
+      if (removed[identity(rule)])
+        rule.removed = true;
+    for (const rule of additions)
+      addTo(fresh, rule);
+    return { rules: fresh, description: described };
+  }
+  function senderValue(input) {
+    const value = String(input || "").trim().toLowerCase();
+    return EMAIL.test(value) || DOMAIN.test(value) ? value : "";
+  }
+  return { validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue };
+}
+
 // src/control-ui.ts
 function routeFromProps(props) {
   const view = props.view;
@@ -3816,6 +3979,7 @@ function createDashboardPage() {
             returnUrl: context.host.navigation.pageHref(targetFor(route)),
             canWrite: result.can_write,
             authority: "gateway",
+            privacyLogic,
             replaceHtml(nextRoot, html) {
               setInertBody(nextRoot, html);
               rewriteInternalLinks(nextRoot, context.host);

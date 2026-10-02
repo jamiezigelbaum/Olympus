@@ -7343,6 +7343,10 @@ var init_public_surface = __esm(() => {
     "engine status",
     "engine restart",
     "engine logs",
+    "engine stop",
+    "engine start",
+    "engine rollback",
+    "engine verify",
     "connect google",
     "connect gmail",
     "connect google-drive",
@@ -46320,7 +46324,7 @@ function installEngine(options = {}) {
   }
   if (action === "bootstrapped" || action === "reloaded") {
     exec("launchctl", ["enable", target]);
-    mustSucceed(exec("launchctl", ["bootstrap", guiDomain(options.uid), paths.plistPath]), "load the engine agent");
+    bootstrapAgent(exec, target, guiDomain(options.uid), paths.plistPath, action === "reloaded");
   }
   return {
     ...base,
@@ -46629,7 +46633,7 @@ function startEngine(options = {}) {
   mustSucceed(exec("launchctl", ["enable", target]), "enable the engine agent");
   if (launchctlLoaded(exec, target))
     return { ok: true, action: "already_running" };
-  mustSucceed(exec("launchctl", ["bootstrap", guiDomain(options.uid), paths.plistPath]), "load the engine agent");
+  bootstrapAgent(exec, target, guiDomain(options.uid), paths.plistPath, false);
   return { ok: true, action: "started" };
 }
 async function rollbackEngine(options = {}) {
@@ -46841,6 +46845,22 @@ function guiDomain(uid) {
 }
 function serviceTarget(uid) {
   return `${guiDomain(uid)}/${ENGINE_LABEL}`;
+}
+function bootstrapAgent(exec, target, domain, plistPath, afterBootout, sleep2 = sleepSync3) {
+  if (afterBootout)
+    for (let waited = 0;waited < 1e4 && launchctlLoaded(exec, target); waited += 250)
+      sleep2(250);
+  let result = exec("launchctl", ["bootstrap", domain, plistPath]);
+  for (let attempt = 1;result.status !== 0 && attempt < 8 && /\b5: Input\/output error\b/.test(`${result.stderr ?? ""}`); attempt += 1) {
+    sleep2(500);
+    if (launchctlLoaded(exec, target))
+      return;
+    result = exec("launchctl", ["bootstrap", domain, plistPath]);
+  }
+  mustSucceed(result, "load the engine agent");
+}
+function sleepSync3(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 function launchctlLoaded(exec, target) {
   const result = exec("launchctl", ["print", target]);
@@ -47921,12 +47941,13 @@ var init_vocabulary = __esm(() => {
     changeModelsOnMac: "Change models in Olympus on your Mac."
   };
   DASHBOARD_CHATGPT_CONNECTION_COPY = {
-    not_installed: {
-      title: "Olympus isn't on your Mac yet",
-      disabledReason: "Install Olympus first"
+    not_connected: {
+      title: "Olympus isn't connected to ChatGPT yet",
+      disabledReason: "Connect Olympus first",
+      install: "Not installed yet?"
     },
     installing: {
-      title: "Installing Olympus on your Mac…",
+      title: "Olympus is setting up on your Mac…",
       disabledReason: "Available once Olympus is set up"
     },
     mac_offline: {
@@ -47935,11 +47956,11 @@ var init_vocabulary = __esm(() => {
       disabledReason: "Your Mac is offline"
     },
     relay_unavailable: {
-      title: "Olympus can't reach your Mac right now; retrying",
+      title: "Olympus can't reach your Mac right now.",
       disabledReason: "Can't reach your Mac"
     },
     actions: {
-      install: { label: "Install on your Mac", help: "In ChatGPT on your Mac, ask: Install Olympus on my Mac." },
+      connect: { label: "Connect Olympus", help: "" },
       open_olympus: { label: "Open Olympus on your Mac", help: "Open Olympus on your Mac, then check again here." },
       wake_mac: {
         label: "How to keep it available",
@@ -48028,7 +48049,9 @@ var init_vocabulary = __esm(() => {
       model_downloading: "Waiting for the search model to finish downloading"
     },
     linkExpires: "link expires in {n} min",
-    linkExpired: "link expired"
+    linkExpired: "link expired",
+    howOnMac: "How to fix this on your Mac",
+    howConnectOnMac: "How to connect these on your Mac"
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
@@ -48068,6 +48091,8 @@ var init_vocabulary = __esm(() => {
     insideFolder: "A folder inside {name}",
     noFolders: "No folders here.",
     loadMore: "Load more folders",
+    loadMoreCount: { one: "Load 1 more folder", many: "Load {n} more folders" },
+    truncated: "This folder has more folders than Olympus can list here, so this list is incomplete.",
     states: { ingest: "Fully indexed", metadata_only: "Names only", exclude: "Skipped" },
     statesLower: { ingest: "fully indexed", metadata_only: "names only", exclude: "skipped" },
     notIncluded: "Not included",
@@ -48154,8 +48179,10 @@ var init_vocabulary = __esm(() => {
     tryAgain: "Try again",
     descriptionLabel: "In your own words",
     descriptionPlaceholder: "For example: my health and therapy, money and taxes, anything about my kids, my divorce",
+    descriptionShared: 'ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.',
     rulesTitle: "Always private (optional)",
     rulesEmpty: "No folders, labels or senders yet.",
+    namesShared: "Folder and label names and senders you add here are shown to ChatGPT.",
     kindFolder: "Folder in {source}",
     kindLabel: "Gmail label",
     kindSender: "Sender",
@@ -48178,6 +48205,16 @@ var init_vocabulary = __esm(() => {
     cancel: "Cancel",
     saveFailed: "Olympus could not save. Your changes are still here. Try again.",
     saved: "Privacy saved.",
+    confirmRemove: "This removes protection from {list}.",
+    confirmDescription: "This changes your description, which decides what Olympus keeps private.",
+    confirm: "Confirm",
+    conflict: "Your changes weren't saved because the privacy settings changed elsewhere.",
+    conflictNow: "What is saved now:",
+    conflictDescription: "Your description: {text}",
+    conflictNoDescription: "No description",
+    applyAgain: "Apply my changes again",
+    discardMine: "Discard my changes",
+    folderUnnamed: "A folder in {source}",
     discardPrompt: "Discard your changes?",
     discard: "Discard changes",
     keep: "Keep editing",
@@ -48229,12 +48266,12 @@ var init_vocabulary = __esm(() => {
     hide: "Hide",
     hideLabel: "Hide private answer",
     tryAgain: "Try again",
-    noModel: "Private answers need the private model on your Mac.",
-    downloading: "The private model is downloading ({percent}%)…",
-    downloadingUnknown: "The private model is downloading…",
+    noModel: "Private answers need the private model on your Mac. Open the Olympus dashboard to finish setup, then ask again.",
+    downloading: "The private model is downloading ({percent}%). Ask again when it's ready.",
+    downloadingUnknown: "The private model is downloading. Ask again when it's ready.",
     downloadingLabel: "Private model download",
     preparing: "Preparing the answer on your Mac…",
-    preparingFull: "Reading the full report on your Mac…",
+    preparingFull: "Reading your report in more detail on your Mac…",
     slow: "Your Mac is taking longer than usual to prepare the answer.",
     failed: "Olympus couldn't answer this on your Mac.",
     claimed: "This answer was already opened in another window.",
@@ -48424,13 +48461,17 @@ var init_vocabulary = __esm(() => {
     locked: "Unlock dashboard controls in Setup to see and change what is private.",
     readOnly: "Your OpenClaw connection is read-only, so privacy can be read here but not changed.",
     unavailable: "Privacy settings are not available from this worker.",
-    confirmRemoves: "This removes protection from {list}.",
-    confirmDescription: "This changes your own words, which Olympus reads to keep items private.",
-    confirm: "Confirm",
-    keepEditing: "Keep editing",
-    conflict: "These privacy settings were changed somewhere else. Your changes are still here.",
-    applyAgain: "Apply my changes again",
-    discardMine: "Discard my changes"
+    confirmRemoves: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmRemove,
+    confirmDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmDescription,
+    confirm: DASHBOARD_CHATGPT_PRIVACY_COPY.confirm,
+    conflict: DASHBOARD_CHATGPT_PRIVACY_COPY.conflict,
+    conflictNow: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNow,
+    conflictDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictDescription,
+    conflictNoDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNoDescription,
+    applyAgain: DASHBOARD_CHATGPT_PRIVACY_COPY.applyAgain,
+    discardMine: DASHBOARD_CHATGPT_PRIVACY_COPY.discardMine,
+    folderUnnamed: DASHBOARD_CHATGPT_PRIVACY_COPY.folderUnnamed,
+    undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor
   };
 });
 
@@ -84966,8 +85007,6 @@ function mountDashboardController(options) {
       refreshNow(false);
     }, pollIntervalMs) : undefined;
   }
-  const PRIVACY_EMAIL = /^[^\s@<>"(),;:]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
-  const PRIVACY_DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
   function privacyCopy(form) {
     try {
       return JSON.parse(form.dataset.copy || "{}");
@@ -84981,58 +85020,88 @@ function mountDashboardController(options) {
       out = out.split(`{${key}}`).join(values[key]);
     return out;
   }
+  function privacyJson(value, fallback) {
+    try {
+      const parsed = JSON.parse(value || "");
+      return parsed ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
   function privacyFolderSources(form) {
-    try {
-      const list = JSON.parse(form.dataset.folderSources || "[]");
-      return Array.isArray(list) ? list.filter((entry) => entry && typeof entry.id === "string") : [];
-    } catch {
-      return [];
-    }
+    const list = privacyJson(form.dataset.folderSources, []);
+    return Array.isArray(list) ? list.filter((entry) => entry && typeof entry.id === "string") : [];
   }
-  function privacyRuleOf(row) {
-    try {
-      const rule = JSON.parse(row.getAttribute("data-privacy-rule") || "");
-      return rule && typeof rule.kind === "string" && typeof rule.source_id === "string" ? rule : undefined;
-    } catch {
-      return;
-    }
+  function privacySourceNames(form) {
+    const names = privacyJson(form.dataset.sourceNames, {});
+    return names && typeof names === "object" ? names : {};
   }
-  function privacyIdentity(rule) {
-    const matched = rule.kind === "sender" ? (rule.value || "").trim().toLowerCase() : rule.key || "";
-    return `${rule.kind}\x00${rule.source_id}\x00${matched}`;
+  function privacyLogicFor(form) {
+    return options.privacyLogic ? options.privacyLogic({ mailSourceId: "gmail.email", folderSources: privacySourceNames(form) }) : undefined;
   }
-  function privacyKept(form) {
-    return Array.from(form.querySelectorAll("[data-privacy-rule]")).filter((row) => !row.hasAttribute("data-removed")).map(privacyRuleOf).filter((rule) => rule !== undefined);
+  function privacyDisplay(form, logic, rule) {
+    const names = privacySourceNames(form);
+    return logic.displayOf(rule, privacyFill(privacyCopy(form).folderUnnamed || "", { source: names[rule.source_id] || rule.source_id }));
   }
-  function privacyWords(form, rule) {
+  function privacyKindText(form, rule) {
     const copy = privacyCopy(form);
     if (rule.kind === "sender")
-      return { name: rule.value || "", kind: copy.kindSender || "" };
+      return copy.kindSender || "";
     if (rule.kind === "label")
-      return { name: rule.value || "", kind: copy.kindLabel || "" };
-    const source = privacyFolderSources(form).find((entry) => entry.id === rule.source_id);
-    return { name: rule.display || rule.key || "", kind: privacyFill(copy.kindFolder || "", { source: source ? source.label : rule.source_id }) };
+      return copy.kindLabel || "";
+    const names = privacySourceNames(form);
+    return privacyFill(copy.kindFolder || "", { source: names[rule.source_id] || rule.source_id });
+  }
+  function privacyViewRules(form) {
+    return Array.from(form.querySelectorAll("[data-privacy-rule]")).flatMap((row) => {
+      const rule = privacyJson(row.getAttribute("data-privacy-rule") || undefined, null);
+      if (!rule || typeof rule.kind !== "string" || typeof rule.source_id !== "string")
+        return [];
+      const saved = row.hasAttribute("data-privacy-saved");
+      const view2 = {
+        kind: rule.kind,
+        source_id: rule.source_id,
+        display: row.querySelector(".sline.strong")?.textContent || "",
+        removed: row.hasAttribute("data-removed"),
+        saved,
+        ...typeof rule.key === "string" ? { key: rule.key } : {},
+        ...typeof rule.value === "string" ? { value: rule.value } : {},
+        ...saved ? { raw: rule } : {}
+      };
+      return [view2];
+    });
+  }
+  function privacyKept(form) {
+    return privacyViewRules(form).filter((rule) => !rule.removed);
+  }
+  function privacyRulesOut(form, logic) {
+    const hidden = privacyJson(form.dataset.hidden, []);
+    return privacyKept(form).map((rule) => logic.ruleOut(rule)).concat(Array.isArray(hidden) ? hidden : []);
   }
   function setPrivacyDirty(form) {
     form.dataset.dirty = "true";
+    form.querySelectorAll("[data-privacy-confirm]").forEach((node) => node.remove());
     const empty = form.querySelector("[data-privacy-empty]");
     if (empty)
       empty.hidden = privacyKept(form).length > 0;
   }
-  function privacyRow(form, rule) {
-    const words = privacyWords(form, rule);
+  function privacyRow(form, logic, rule) {
+    const view2 = rule;
+    const display = typeof view2.display === "string" && view2.display ? view2.display : privacyDisplay(form, logic, rule);
     const copy = privacyCopy(form);
     const row = document.createElement("div");
     row.className = "srow nodot prule";
-    row.setAttribute("data-privacy-rule", JSON.stringify(rule));
+    row.setAttribute("data-privacy-rule", JSON.stringify(view2.saved && view2.raw ? view2.raw : logic.ruleOut({ ...rule, display })));
+    if (view2.saved)
+      row.setAttribute("data-privacy-saved", "");
     const main = document.createElement("div");
     main.className = "smain";
     const name = document.createElement("p");
     name.className = "sline strong";
-    name.textContent = words.name;
+    name.textContent = display;
     const kind = document.createElement("p");
     kind.className = "sline";
-    kind.textContent = words.kind;
+    kind.textContent = privacyKindText(form, rule);
     main.append(name, kind);
     const actions = document.createElement("div");
     actions.className = "sact";
@@ -85040,18 +85109,22 @@ function mountDashboardController(options) {
     remove.type = "button";
     remove.className = "btn";
     remove.setAttribute("data-privacy-remove", "");
-    remove.setAttribute("aria-label", privacyFill(copy.removeFor || "", { name: words.name }));
+    remove.setAttribute("aria-label", privacyFill(copy.removeFor || "", { name: display }));
     remove.textContent = copy.remove || "Remove";
     actions.append(remove);
     row.append(main, actions);
+    if (view2.removed)
+      markPrivacyRemoved(form, row, true);
     return row;
   }
   function addPrivacyRule(form, rule) {
-    const identity = privacyIdentity(rule);
-    const rows = Array.from(form.querySelectorAll("[data-privacy-rule]"));
-    const existing = rows.find((row) => {
-      const current = privacyRuleOf(row);
-      return current !== undefined && privacyIdentity(current) === identity;
+    const logic = privacyLogicFor(form);
+    if (!logic)
+      return false;
+    const identity = logic.identity(rule);
+    const existing = Array.from(form.querySelectorAll("[data-privacy-rule]")).find((row) => {
+      const current = privacyJson(row.getAttribute("data-privacy-rule") || undefined, null);
+      return current !== null && logic.identity(current) === identity;
     });
     if (existing) {
       if (!existing.hasAttribute("data-removed"))
@@ -85059,22 +85132,26 @@ function mountDashboardController(options) {
       togglePrivacyRemoved(form, existing);
       return true;
     }
-    form.querySelector("[data-privacy-rules]")?.append(privacyRow(form, rule));
+    form.querySelector("[data-privacy-rules]")?.append(privacyRow(form, logic, rule));
     setPrivacyDirty(form);
     return true;
   }
-  function togglePrivacyRemoved(form, row) {
+  function markPrivacyRemoved(form, row, removed) {
     const copy = privacyCopy(form);
-    const rule = privacyRuleOf(row);
-    const name = rule ? privacyWords(form, rule).name : "";
+    const name = row.querySelector(".sline.strong")?.textContent || "";
     const button = row.querySelector("[data-privacy-remove]");
-    const removed = !row.hasAttribute("data-removed");
     row.toggleAttribute("data-removed", removed);
     row.classList.toggle("removed", removed);
     if (button) {
       button.textContent = removed ? copy.undo || "Undo" : copy.remove || "Remove";
-      button.setAttribute("aria-label", removed ? `${copy.undo || "Undo"}: ${name}` : privacyFill(copy.removeFor || "", { name }));
+      button.setAttribute("aria-label", removed ? privacyFill(copy.undoFor || "", { name }) : privacyFill(copy.removeFor || "", { name }));
     }
+  }
+  function togglePrivacyRemoved(form, row) {
+    const copy = privacyCopy(form);
+    const name = row.querySelector(".sline.strong")?.textContent || "";
+    const removed = !row.hasAttribute("data-removed");
+    markPrivacyRemoved(form, row, removed);
     setPrivacyDirty(form);
     say(form, removed ? privacyFill(copy.removed || "", { name }) : "");
   }
@@ -85146,7 +85223,8 @@ function mountDashboardController(options) {
       inside.textContent = copy.folderOpen || "Open";
       actions.append(inside);
     }
-    const already = privacyKept(form).some((current) => privacyIdentity(current) === privacyIdentity(rule));
+    const logic = privacyLogicFor(form);
+    const already = !!logic && privacyKept(form).some((current) => logic.identity(current) === logic.identity(rule));
     const make = document.createElement("button");
     make.type = "button";
     make.className = "btn";
@@ -85282,8 +85360,8 @@ function mountDashboardController(options) {
     const field = panel?.querySelector("[data-privacy-sender]");
     if (!panel || !field)
       return;
-    const value = field.value.trim().toLowerCase();
-    if (!PRIVACY_EMAIL.test(value) && !PRIVACY_DOMAIN.test(value)) {
+    const value = privacyLogicFor(form)?.senderValue(field.value) || "";
+    if (!value) {
       panelSay(panel, copy.senderInvalid || "");
       field.focus();
       return;
@@ -85296,29 +85374,18 @@ function mountDashboardController(options) {
     panelSay(panel, "");
     field.focus();
   }
-  function privacyBaseline(form) {
-    try {
-      const saved = JSON.parse(form.dataset.saved || "{}");
-      return {
-        description: typeof saved.description === "string" ? saved.description : "",
-        rules: Array.isArray(saved.rules) ? saved.rules.filter((rule) => rule && typeof rule.kind === "string") : []
-      };
-    } catch {
-      return { description: "", rules: [] };
-    }
+  function privacySavedDescription(form) {
+    return form.dataset.savedDescription || "";
   }
-  function privacyLowering(form) {
-    const baseline = privacyBaseline(form);
-    const kept = new Set(privacyKept(form).map(privacyIdentity));
-    const removed = baseline.rules.filter((rule) => !kept.has(privacyIdentity(rule))).map((rule) => rule.name || privacyWords(form, rule).name);
+  function privacyLowering(form, logic) {
     const field = form.querySelector('textarea[name="description"]');
-    const description = field !== null && field.value.trim() !== baseline.description.trim();
-    return { removed, description };
+    const change = logic.lowering(privacyViewRules(form), field ? field.value : privacySavedDescription(form), privacySavedDescription(form));
+    return { removed: change.removed.map((rule) => rule.display), description: change.described };
   }
   function clearPrivacyPrompts(form) {
     form.querySelectorAll("[data-privacy-confirm],[data-privacy-conflict]").forEach((node) => node.remove());
   }
-  function privacyPrompt(form, kind, lines, buttons) {
+  function privacyPrompt(form, kind, lines, items, buttons) {
     clearPrivacyPrompts(form);
     const box = document.createElement("div");
     box.className = "pprompt";
@@ -85328,6 +85395,15 @@ function mountDashboardController(options) {
       const text = document.createElement("p");
       text.textContent = line;
       box.append(text);
+    }
+    if (items.length > 0) {
+      const list = document.createElement("ul");
+      for (const item of items) {
+        const entry = document.createElement("li");
+        entry.textContent = item;
+        list.append(entry);
+      }
+      box.append(list);
     }
     const row = document.createElement("div");
     row.className = "pbuttons";
@@ -85351,20 +85427,67 @@ function mountDashboardController(options) {
       lines.push(privacyFill(copy.confirmRemoves || "", { list: lowering.removed.join(", ") }));
     if (lowering.description)
       lines.push(copy.confirmDescription || "");
-    privacyPrompt(form, "confirm", lines, [
+    privacyPrompt(form, "confirm", lines, [], [
       ["data-privacy-confirm-yes", copy.confirm || "Confirm"],
-      ["data-privacy-confirm-no", copy.keepEditing || "Keep editing"]
+      ["data-privacy-confirm-no", copy.cancel || "Cancel"]
     ]);
+  }
+  function showPrivacyConflict(form, logic, current) {
+    const copy = privacyCopy(form);
+    const description = typeof current.description === "string" ? current.description.trim() : "";
+    const rules = Array.isArray(current.rules) ? current.rules.filter((rule) => logic.validRule(rule)) : [];
+    const items = [description ? privacyFill(copy.conflictDescription || "", { text: description }) : copy.conflictNoDescription || ""];
+    if (rules.length === 0)
+      items.push(copy.rulesEmpty || "");
+    for (const rule of rules)
+      items.push(`${privacyDisplay(form, logic, rule)} · ${privacyKindText(form, rule)}`);
+    privacyPrompt(form, "conflict", [copy.conflict || "", copy.conflictNow || ""], items, [
+      ["data-privacy-apply-again", copy.applyAgain || "Apply my changes again"],
+      ["data-privacy-discard-mine", copy.discardMine || "Discard my changes"]
+    ]);
+  }
+  function privacyApplyAgain(form) {
+    const logic = privacyLogicFor(form);
+    const current = privacyJson(form.dataset.server, null);
+    if (!logic || !current)
+      return;
+    const field = form.querySelector('textarea[name="description"]');
+    const draft = {
+      rules: privacyViewRules(form),
+      description: field ? field.value : privacySavedDescription(form),
+      savedDescription: privacySavedDescription(form)
+    };
+    const saved = Array.isArray(current.rules) ? current.rules : [];
+    const fresh2 = saved.filter((rule) => logic.validRule(rule)).map((rule) => logic.viewRule(rule, privacyDisplay(form, logic, rule)));
+    const replayed = logic.replay(draft, fresh2);
+    const description = typeof current.description === "string" ? current.description : "";
+    form.dataset.revision = typeof current.revision === "string" ? current.revision : "";
+    form.dataset.savedDescription = description;
+    form.dataset.hidden = JSON.stringify(saved.filter((rule) => !logic.validRule(rule)));
+    delete form.dataset.server;
+    const list = form.querySelector("[data-privacy-rules]");
+    if (list)
+      list.replaceChildren(...replayed.rules.map((rule) => privacyRow(form, logic, rule)));
+    if (field) {
+      field.defaultValue = description;
+      field.value = replayed.description !== null ? replayed.description : description;
+    }
+    setPrivacyDirty(form);
+    clearPrivacyPrompts(form);
+    savePrivacy(form);
   }
   async function savePrivacy(form, confirmed = false) {
     const copy = privacyCopy(form);
+    const logic = privacyLogicFor(form);
+    if (!logic)
+      return;
     if (!canWrite && !csrfToken) {
       say(form, "Your OpenClaw connection has read-only access.");
       return;
     }
-    if (pendingForms.has(form))
+    if (pendingForms.has(form) || form.dataset.server)
       return;
-    const lowering = privacyLowering(form);
+    const lowering = privacyLowering(form, logic);
     const lowers = lowering.removed.length > 0 || lowering.description;
     if (lowers && !confirmed) {
       showPrivacyConfirm(form, lowering);
@@ -85373,7 +85496,6 @@ function mountDashboardController(options) {
     clearPrivacyPrompts(form);
     const field = form.querySelector('textarea[name="description"]');
     const description = field ? field.value.trim() : undefined;
-    const rules = privacyKept(form);
     const revision = form.dataset.revision || "";
     setFormPending(form, true, copy.saving || "Saving…");
     let result;
@@ -85381,7 +85503,7 @@ function mountDashboardController(options) {
       result = await options.transport.control({
         action: "save_privacy",
         ...description !== undefined ? { description } : {},
-        rules,
+        rules: privacyRulesOut(form, logic),
         ...revision ? { revision } : {},
         ...lowers ? { confirm: true } : {}
       });
@@ -85405,22 +85527,14 @@ function mountDashboardController(options) {
     const error2 = result.body.error && typeof result.body.error === "object" ? result.body.error : {};
     if (result.status === 409 && error2.code === "conflict") {
       const current = result.body.settings && typeof result.body.settings === "object" ? result.body.settings : {};
-      const saved = Array.isArray(current.rules) ? current.rules : [];
-      form.dataset.revision = typeof current.revision === "string" ? current.revision : "";
-      form.dataset.saved = JSON.stringify({
-        description: typeof current.description === "string" ? current.description : "",
-        rules: saved.map((rule) => ({ ...rule, name: privacyWords(form, rule).name }))
-      });
+      form.dataset.server = JSON.stringify(current);
       form.dataset.dirty = "true";
       say(form, "");
-      privacyPrompt(form, "conflict", [copy.conflict || ""], [
-        ["data-privacy-apply-again", copy.applyAgain || "Apply my changes again"],
-        ["data-privacy-discard-mine", copy.discardMine || "Discard my changes"]
-      ]);
+      showPrivacyConflict(form, logic, current);
       return;
     }
     if (result.status === 409 && error2.code === "privacy_owner_only") {
-      showPrivacyConfirm(form, privacyLowering(form));
+      showPrivacyConfirm(form, privacyLowering(form, logic));
       return;
     }
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
@@ -85473,11 +85587,12 @@ function mountDashboardController(options) {
       return true;
     }
     if (target.closest("[data-privacy-apply-again]")) {
-      savePrivacy(form);
+      privacyApplyAgain(form);
       return true;
     }
     if (target.closest("[data-privacy-discard-mine]")) {
       delete form.dataset.dirty;
+      delete form.dataset.server;
       clearPrivacyPrompts(form);
       const field = form.querySelector('textarea[name="description"]');
       if (field)
@@ -87460,6 +87575,102 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 `;
 });
 
+// src/workers/dashboard/shared-privacy-logic.ts
+function privacyLogic(config2) {
+  const KINDS = ["folder", "label", "sender"];
+  const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+  const text = (value) => typeof value === "string" && value.trim() !== "";
+  function validRule(rule) {
+    if (!rule || typeof rule !== "object" || KINDS.indexOf(rule.kind) < 0)
+      return false;
+    if (rule.kind === "sender")
+      return rule.source_id === config2.mailSourceId && text(rule.value);
+    if (rule.kind === "label")
+      return rule.source_id === config2.mailSourceId && text(rule.key) && text(rule.value);
+    return Object.prototype.hasOwnProperty.call(config2.folderSources, rule.source_id) && text(rule.key) && (rule.display === undefined || typeof rule.display === "string");
+  }
+  function displayOf(rule, unnamed) {
+    if (rule.kind === "sender" || rule.kind === "label")
+      return String(rule.value);
+    return text(rule.display) ? String(rule.display) : unnamed;
+  }
+  function viewRule(rule, display) {
+    const raw = {};
+    for (const field of Object.keys(rule))
+      raw[field] = rule[field];
+    const copy = { kind: rule.kind, source_id: rule.source_id, display, removed: false, saved: true, raw };
+    if (typeof rule.key === "string")
+      copy.key = rule.key;
+    if (typeof rule.value === "string")
+      copy.value = rule.value;
+    return copy;
+  }
+  function identity(rule) {
+    const matched = rule.kind === "sender" ? typeof rule.value === "string" ? rule.value.trim().toLowerCase() : "" : typeof rule.key === "string" ? rule.key.trim() : "";
+    return rule.kind + `
+` + rule.source_id + `
+` + matched;
+  }
+  function ruleOut(rule) {
+    if (rule.raw)
+      return rule.raw;
+    const out = { kind: rule.kind, source_id: rule.source_id };
+    if (typeof rule.key === "string")
+      out.key = rule.key;
+    if (typeof rule.value === "string")
+      out.value = rule.value;
+    if (rule.kind === "folder" && text(rule.display))
+      out.display = rule.display;
+    return out;
+  }
+  function addTo(rules, rule) {
+    const id = identity(rule);
+    const existing = rules.filter((other) => identity(other) === id)[0];
+    if (existing)
+      existing.removed = false;
+    else
+      rules.push(rule);
+    return rules;
+  }
+  function lowering(rules, description, savedDescription) {
+    return {
+      removed: rules.filter((rule) => rule.saved && rule.removed),
+      described: description.trim() !== savedDescription
+    };
+  }
+  function lowers(rules, description, savedDescription) {
+    const change = lowering(rules, description, savedDescription);
+    return change.removed.length > 0 || change.described;
+  }
+  function replay(draft, fresh2) {
+    const removed = {};
+    for (const rule of draft.rules)
+      if (rule.saved && rule.removed)
+        removed[identity(rule)] = true;
+    const additions = draft.rules.filter((rule) => !rule.saved && !rule.removed);
+    const described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
+    for (const rule of fresh2)
+      if (removed[identity(rule)])
+        rule.removed = true;
+    for (const rule of additions)
+      addTo(fresh2, rule);
+    return { rules: fresh2, description: described };
+  }
+  function senderValue(input) {
+    const value = String(input || "").trim().toLowerCase();
+    return EMAIL.test(value) || DOMAIN.test(value) ? value : "";
+  }
+  return { validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue };
+}
+var PRIVACY_FOLDER_SOURCE_NAMES;
+var init_shared_privacy_logic = __esm(() => {
+  PRIVACY_FOLDER_SOURCE_NAMES = {
+    "dropbox.files": "Dropbox",
+    "google_drive.docs": "Google Drive"
+  };
+});
+
 // src/workers/dashboard/components.ts
 import { createHash as createHash48 } from "node:crypto";
 function escapeHtml2(value) {
@@ -87948,6 +88159,8 @@ function standaloneDashboardControllerScript(input) {
         signature: config.signature,
         pollIntervalMs: config.intervalMs,
         csrfToken: csrfToken,
+        // The privacy rules shared with ChatGPT's panel, inlined beside the controller.
+        privacyLogic: ${privacyLogic.toString().replaceAll("</script", "<\\/script")},
       });
       window.addEventListener('pagehide', function () { controller.dispose(); abort.abort(); }, { once: true });
     })();
@@ -87958,6 +88171,7 @@ var init_components = __esm(() => {
   init_source_dashboard();
   init_phases();
   init_theme();
+  init_shared_privacy_logic();
   init_vocabulary();
   SAFE_COLOR = /^(?:#[0-9A-Fa-f]{3,8}|var\(--[a-z0-9-]+\))$/;
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
@@ -92045,54 +92259,6 @@ var init_sensitivity = __esm(() => {
   };
 });
 
-// src/workers/dashboard/shared-privacy-rules.ts
-function privacyRuleProblem(rule) {
-  if (rule.kind === "sender") {
-    if (rule.key !== undefined)
-      return "A sender rule takes value, not key.";
-    const value = (rule.value ?? "").trim();
-    return value.length > 0 && value.length <= 240 && SENDER.test(value) ? undefined : "A sender rule needs an address (name@example.com) or a whole domain (@example.com).";
-  }
-  if (rule.kind !== "folder" && rule.kind !== "label")
-    return "A rule kind must be folder, label or sender.";
-  const key = rule.key ?? "";
-  if (!key.trim() || key.length > 1024)
-    return "A folder or label rule needs its key.";
-  if (rule.kind === "folder") {
-    if (rule.source_id !== "dropbox.files" && rule.source_id !== "google_drive.docs")
-      return "A folder rule names Dropbox or Google Drive.";
-    if (rule.source_id === "dropbox.files" && !key.startsWith("/"))
-      return "A Dropbox folder key is a path.";
-    if (rule.value !== undefined)
-      return "A folder rule takes key, not value.";
-    return;
-  }
-  if (rule.source_id !== "gmail.email")
-    return "A label rule names Gmail.";
-  const name = (rule.value ?? "").trim();
-  return name && name.length <= 200 ? undefined : "A label rule needs its name.";
-}
-function privacyRuleWords(rule, words) {
-  if (rule.kind === "sender")
-    return { name: rule.value ?? "", kind: words.kindSender };
-  if (rule.kind === "label")
-    return { name: rule.value ?? rule.key ?? "", kind: words.kindLabel };
-  const key = rule.key ?? "";
-  const fromKey = key.startsWith("/") ? key.split("/").filter(Boolean).pop() : undefined;
-  return {
-    name: rule.display || fromKey || words.unnamedFolder,
-    kind: words.kindFolder.split("{source}").join(PRIVACY_FOLDER_SOURCE_NAMES[rule.source_id] ?? rule.source_id)
-  };
-}
-var PRIVACY_FOLDER_SOURCE_NAMES, SENDER;
-var init_shared_privacy_rules = __esm(() => {
-  PRIVACY_FOLDER_SOURCE_NAMES = {
-    "dropbox.files": "Dropbox",
-    "google_drive.docs": "Google Drive"
-  };
-  SENDER = /^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
-});
-
 // src/workers/dashboard/pages/privacy.ts
 function renderDashboardPrivacyPage(view, options) {
   const now = options?.now ?? new Date;
@@ -92129,13 +92295,14 @@ function renderPrivacyBody(view, options) {
   const folderSources = Object.keys(FOLDER_SOURCES).filter((id) => connected(view, id));
   const gmail = connected(view, MAIL_SOURCE_ID);
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
-  const rules = settings.rules.map((rule) => privacyRuleRow(rule, canEdit)).join("");
+  const shown = settings.rules.filter((rule) => LOGIC.validRule(rule));
+  const rules = shown.map((rule) => privacyRuleRow(rule, canEdit)).join("");
   const pending = Math.max(0, Math.floor(settings.pendingCount));
   const pendingLine = pending > 0 ? fill(pending === 1 ? DASHBOARD_LOCAL_PRIVACY_COPY.pending.one : DASHBOARD_LOCAL_PRIVACY_COPY.pending.many, { n: pending.toLocaleString("en-US") }) : DASHBOARD_LOCAL_PRIVACY_COPY.nothingPending;
   const note = canEdit ? "" : `<p class="pnote">${escapeHtml2(options?.controlMode === "native" ? DASHBOARD_LOCAL_PRIVACY_COPY.readOnly : DASHBOARD_LOCAL_PRIVACY_COPY.locked)}</p>`;
   const folderButton = folderSources.length > 0 ? `<button type="button" class="btn" data-privacy-add="folder"${disabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addFolder)}</button>` : `<span class="blocked"><button type="button" class="btn" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addFolder)}</button><span class="hint">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.needFolderSource)}</span></span>`;
   const labelButton = gmail ? `<button type="button" class="btn" data-privacy-add="label"${disabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addLabel)}</button>` : `<span class="blocked"><button type="button" class="btn" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addLabel)}</button><span class="hint">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.needGmail)}</span></span>`;
-  return `<div class="privacy" data-privacy-editor>${head}${note}` + `<form class="pform" data-privacy-form` + ` data-folder-sources="${escapeHtml2(JSON.stringify(folderSources.map((id) => ({ id, label: FOLDER_SOURCES[id] }))))}"` + ` data-mail-draft="${escapeHtml2(JSON.stringify(mailScopeDraftView(undefined)))}"` + ` data-copy="${escapeHtml2(JSON.stringify(CLIENT_COPY))}"` + ` data-revision="${escapeHtml2(settings.revision ?? "")}"` + ` data-saved="${escapeHtml2(JSON.stringify(savedBaseline(settings)))}">` + `<label class="plabel" for="privacy-description">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.descriptionLabel)}</label>` + `<textarea class="ptext" id="privacy-description" name="description" maxlength="2000" rows="5"` + ` placeholder="${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.descriptionPlaceholder)}"${canEdit ? "" : " readonly"}>${escapeHtml2(settings.description)}</textarea>` + `<div class="sect">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.rulesTitle)}</div>` + `<div class="srows" data-privacy-rules>${rules}</div>` + `<p class="foot pempty" data-privacy-empty${settings.rules.length > 0 ? " hidden" : ""}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.rulesEmpty)}</p>` + `<div class="padd">${folderButton}${labelButton}` + `<button type="button" class="btn" data-privacy-add="sender"${disabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addSender)}</button></div>` + senderPanel() + `<div class="ppanel" data-privacy-panel="label" hidden><p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.labelIntro)}</p>` + `<div class="srows" data-privacy-list></div><p class="actmsg" data-privacy-panel-message role="status"></p>` + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.close)}</button></div>` + `<div class="ppanel" data-privacy-panel="folder" hidden><p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.folderIntro)}</p>` + `<div class="psources" data-privacy-folder-sources></div><p class="ppath" data-privacy-folder-path></p>` + `<div class="srows" data-privacy-list></div><p class="actmsg" data-privacy-panel-message role="status"></p>` + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.close)}</button></div>` + `<div class="pfooter"><p>${escapeHtml2(pendingLine)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.save)}</button>` + `<a class="btn" href="${escapeHtml2(setupHref(options?.basePath))}" data-privacy-cancel>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.cancel)}</a></div>` + `<span class="actmsg" data-action-message role="status"></span></div>` + `</form></div>`;
+  return `<div class="privacy" data-privacy-editor>${head}${note}` + `<form class="pform" data-privacy-form` + ` data-folder-sources="${escapeHtml2(JSON.stringify(folderSources.map((id) => ({ id, label: FOLDER_SOURCES[id] }))))}"` + ` data-mail-draft="${escapeHtml2(JSON.stringify(mailScopeDraftView(undefined)))}"` + ` data-copy="${escapeHtml2(JSON.stringify(CLIENT_COPY))}"` + ` data-revision="${escapeHtml2(settings.revision ?? "")}"` + ` data-saved-description="${escapeHtml2(settings.description)}"` + ` data-source-names="${escapeHtml2(JSON.stringify(FOLDER_SOURCES))}"` + ` data-hidden="${escapeHtml2(JSON.stringify(settings.rules.filter((rule) => !LOGIC.validRule(rule))))}">` + `<label class="plabel" for="privacy-description">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.descriptionLabel)}</label>` + `<textarea class="ptext" id="privacy-description" name="description" maxlength="2000" rows="5"` + ` placeholder="${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.descriptionPlaceholder)}"${canEdit ? "" : " readonly"}>${escapeHtml2(settings.description)}</textarea>` + `<div class="sect">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.rulesTitle)}</div>` + `<div class="srows" data-privacy-rules>${rules}</div>` + `<p class="foot pempty" data-privacy-empty${shown.length > 0 ? " hidden" : ""}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.rulesEmpty)}</p>` + `<div class="padd">${folderButton}${labelButton}` + `<button type="button" class="btn" data-privacy-add="sender"${disabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addSender)}</button></div>` + senderPanel() + `<div class="ppanel" data-privacy-panel="label" hidden><p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.labelIntro)}</p>` + `<div class="srows" data-privacy-list></div><p class="actmsg" data-privacy-panel-message role="status"></p>` + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.close)}</button></div>` + `<div class="ppanel" data-privacy-panel="folder" hidden><p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.folderIntro)}</p>` + `<div class="psources" data-privacy-folder-sources></div><p class="ppath" data-privacy-folder-path></p>` + `<div class="srows" data-privacy-list></div><p class="actmsg" data-privacy-panel-message role="status"></p>` + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.close)}</button></div>` + `<div class="pfooter"><p>${escapeHtml2(pendingLine)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.save)}</button>` + `<a class="btn" href="${escapeHtml2(setupHref(options?.basePath))}" data-privacy-cancel>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.cancel)}</a></div>` + `<span class="actmsg" data-action-message role="status"></span></div>` + `</form></div>`;
 }
 function senderPanel() {
   return `<div class="ppanel" data-privacy-panel="sender" hidden><p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.senderIntro)}</p>` + `<label class="plabel" for="privacy-sender">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.senderLabel)}</label>` + `<div class="prow"><input class="keyfield ptextline" id="privacy-sender" type="text" autocomplete="off"` + ` placeholder="${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.senderPlaceholder)}" data-privacy-sender>` + `<button type="button" class="btn" data-privacy-sender-add>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.senderAdd)}</button>` + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.close)}</button></div>` + `<p class="actmsg" data-privacy-panel-message role="status"></p></div>`;
@@ -92144,29 +92311,26 @@ function connected(view, sourceId) {
   const source = view.sources.find((card) => card.source_id === sourceId);
   return source !== undefined && dashboardIsConnectedSource(source) && source.connection.state !== "awaiting_consent" && source.connection.state !== "reauth_required";
 }
-function privacyRuleWords2(rule) {
-  return privacyRuleWords(rule, DASHBOARD_LOCAL_PRIVACY_COPY);
-}
-function savedBaseline(settings) {
-  return {
-    description: settings.description,
-    rules: settings.rules.map((rule) => ({ ...rule, name: privacyRuleWords2(rule).name }))
-  };
+function privacyRuleWords(rule) {
+  const source = FOLDER_SOURCES[rule.source_id] ?? rule.source_id;
+  const kind = rule.kind === "sender" ? DASHBOARD_LOCAL_PRIVACY_COPY.kindSender : rule.kind === "label" ? DASHBOARD_LOCAL_PRIVACY_COPY.kindLabel : fill(DASHBOARD_LOCAL_PRIVACY_COPY.kindFolder, { source });
+  return { name: LOGIC.displayOf(rule, fill(DASHBOARD_LOCAL_PRIVACY_COPY.folderUnnamed, { source })), kind };
 }
 function privacyRuleRow(rule, canEdit) {
-  const words = privacyRuleWords2(rule);
+  const words = privacyRuleWords(rule);
   const data = JSON.stringify(rule);
-  return `<div class="srow nodot prule" data-privacy-rule="${escapeHtml2(data)}">` + `<div class="smain"><p class="sline strong">${escapeHtml2(words.name)}</p><p class="sline">${escapeHtml2(words.kind)}</p></div>` + `<div class="sact"><button type="button" class="btn" data-privacy-remove` + ` aria-label="${escapeHtml2(fill(DASHBOARD_LOCAL_PRIVACY_COPY.removeFor, { name: words.name }))}"${canEdit ? "" : ' disabled aria-disabled="true"'}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.remove)}</button></div>` + `</div>`;
+  return `<div class="srow nodot prule" data-privacy-rule="${escapeHtml2(data)}" data-privacy-saved>` + `<div class="smain"><p class="sline strong">${escapeHtml2(words.name)}</p><p class="sline">${escapeHtml2(words.kind)}</p></div>` + `<div class="sact"><button type="button" class="btn" data-privacy-remove` + ` aria-label="${escapeHtml2(fill(DASHBOARD_LOCAL_PRIVACY_COPY.removeFor, { name: words.name }))}"${canEdit ? "" : ' disabled aria-disabled="true"'}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.remove)}</button></div>` + `</div>`;
 }
-var FOLDER_SOURCES, MAIL_SOURCE_ID = "gmail.email", CLIENT_COPY;
+var FOLDER_SOURCES, MAIL_SOURCE_ID = "gmail.email", LOGIC, CLIENT_COPY;
 var init_privacy = __esm(() => {
   init_mail_source_scope();
   init_components();
   init_nav();
   init_vocabulary();
   init_source_rows();
-  init_shared_privacy_rules();
+  init_shared_privacy_logic();
   FOLDER_SOURCES = PRIVACY_FOLDER_SOURCE_NAMES;
+  LOGIC = privacyLogic({ mailSourceId: MAIL_SOURCE_ID, folderSources: { ...PRIVACY_FOLDER_SOURCE_NAMES } });
   CLIENT_COPY = {
     remove: DASHBOARD_LOCAL_PRIVACY_COPY.remove,
     removeFor: DASHBOARD_LOCAL_PRIVACY_COPY.removeFor,
@@ -92194,10 +92358,15 @@ var init_privacy = __esm(() => {
     confirmRemoves: DASHBOARD_LOCAL_PRIVACY_COPY.confirmRemoves,
     confirmDescription: DASHBOARD_LOCAL_PRIVACY_COPY.confirmDescription,
     confirm: DASHBOARD_LOCAL_PRIVACY_COPY.confirm,
-    keepEditing: DASHBOARD_LOCAL_PRIVACY_COPY.keepEditing,
     conflict: DASHBOARD_LOCAL_PRIVACY_COPY.conflict,
+    conflictNow: DASHBOARD_LOCAL_PRIVACY_COPY.conflictNow,
+    conflictDescription: DASHBOARD_LOCAL_PRIVACY_COPY.conflictDescription,
+    conflictNoDescription: DASHBOARD_LOCAL_PRIVACY_COPY.conflictNoDescription,
     applyAgain: DASHBOARD_LOCAL_PRIVACY_COPY.applyAgain,
-    discardMine: DASHBOARD_LOCAL_PRIVACY_COPY.discardMine
+    discardMine: DASHBOARD_LOCAL_PRIVACY_COPY.discardMine,
+    folderUnnamed: DASHBOARD_LOCAL_PRIVACY_COPY.folderUnnamed,
+    undoFor: DASHBOARD_LOCAL_PRIVACY_COPY.undoFor,
+    rulesEmpty: DASHBOARD_LOCAL_PRIVACY_COPY.rulesEmpty
   };
 });
 
@@ -105119,7 +105288,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   const root = doc2.getElementById("app");
   const P = config2.page;
   const C = config2.connection;
-  const GLOBAL_STATES = ["not_installed", "installing", "mac_offline", "relay_unavailable"];
+  const GLOBAL_STATES = ["not_connected", "installing", "mac_offline", "relay_unavailable"];
   const state = {
     data: null,
     relayDown: false,
@@ -105174,9 +105343,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         entry.resolve(message.result);
       return;
     }
-    if (message.method === "ui/notifications/tool-result")
+    if (message.method === "ui/notifications/tool-result") {
+      supersede();
       acceptResult(message.params, true);
-    else if (message.method === "ui/notifications/host-context-changed")
+    } else if (message.method === "ui/notifications/host-context-changed")
       applyHostContext(message.params);
   });
   function applyHostContext(context) {
@@ -105223,6 +105393,17 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function isDashboard(value) {
     return !!value && typeof value === "object" && value.v === 1 && !!value.connection && typeof value.connection.state === "string";
   }
+  let generation = 0;
+  function supersede() {
+    return ++generation;
+  }
+  function editorOpen() {
+    return !!picker && picker.active() || !!privacy && privacy.active();
+  }
+  function redraw() {
+    if (!editorOpen())
+      render();
+  }
   function acceptResult(result, fromHost) {
     if (resultTimer) {
       clearTimeout(resultTimer);
@@ -105230,19 +105411,22 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     if (!result || result.isError) {
       state.relayDown = true;
-      render();
+      redraw();
       return false;
     }
     const content = result.structuredContent;
     if (isDashboard(content)) {
       state.data = content;
       state.relayDown = false;
-      render();
+      refreshFailures = 0;
+      redraw();
+      if (!refreshing)
+        scheduleRefresh();
       return true;
     }
     if (fromHost) {
       state.relayDown = true;
-      render();
+      redraw();
     }
     return false;
   }
@@ -105257,13 +105441,19 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return text ? String(text.text) : "";
   }
   function callTool(name, args, key) {
+    const mine = supersede();
     state.busy = key;
     state.confirming = "";
     state.notice = "";
     state.actionError = null;
     render();
     request("tools/call", { name, arguments: args || {} }, config2.resultTimeoutMs).then((result) => {
-      state.busy = "";
+      if (state.busy === key)
+        state.busy = "";
+      if (mine !== generation) {
+        redraw();
+        return;
+      }
       const failed = inlineError(result);
       if (failed) {
         state.actionError = { key, text: failed };
@@ -105275,9 +105465,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       if (!state.relayDown && name !== config2.toolName)
         refresh();
     }, () => {
-      state.busy = "";
-      state.relayDown = true;
-      render();
+      if (state.busy === key)
+        state.busy = "";
+      if (mine === generation)
+        state.relayDown = true;
+      redraw();
     });
   }
   function refresh() {
@@ -105419,7 +105611,30 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function connectionState() {
     if (state.relayDown)
       return "relay_unavailable";
-    return state.data ? String(state.data.connection.state) : "";
+    const current = state.data ? String(state.data.connection.state) : "";
+    return current === "not_installed" ? "not_connected" : current;
+  }
+  function helpHref(href) {
+    if (typeof href !== "string" || !href)
+      return "";
+    let parsed;
+    try {
+      parsed = new URL(href);
+    } catch {
+      return "";
+    }
+    const host = parsed.hostname;
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password)
+      return "";
+    return host === "olympusplugin.ai" || host === "www.olympusplugin.ai" ? parsed.href : "";
+  }
+  function howLink(fix, key) {
+    const href = helpHref(fix && fix.href);
+    if (!href || compact())
+      return null;
+    const link = button(P.howOnMac, key + ":how", () => openLink(href), "plain");
+    link.className = "btn link";
+    return link;
   }
   function globalReason() {
     const current = connectionState();
@@ -105437,6 +105652,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
       add(wrap, button(fix.label, key, null, style), el("span", "reason", blocked || String(fix.disabledReason)));
+      if (!blocked)
+        add(wrap, howLink(fix, key));
       return wrap;
     }
     if (state.busy === key) {
@@ -105450,14 +105667,16 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       action = () => openPrivacy(key);
     } else if (picker && picker.handles(fix)) {
       action = () => {
+        supersede();
         state.notice = "";
         state.confirming = "";
         picker.start(fix, source ? source.id : "", source ? source.label : "", key);
       };
     } else if (typeof fix.tool === "string" && fix.tool)
       action = () => callTool(fix.tool, fix.args || {}, key);
-    else if (typeof fix.href === "string" && fix.href)
-      action = () => openLink(fix.href);
+    else if (helpHref(fix.href)) {
+      return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
+    }
     if (fix.destructive && action) {
       if (!allowConfirm)
         return wrap;
@@ -105471,11 +105690,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         return wrap;
       }
       return add(wrap, button(fix.label, key, () => {
+        supersede();
         state.confirming = key;
         render(key + ":no");
       }, "plain"), errorNote(failure));
     }
-    return add(wrap, button(fix.label, key, action, style), errorNote(failure));
+    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key) : null, errorNote(failure));
   }
   function errorNote(text) {
     if (!text)
@@ -105506,6 +105726,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const actions = el("div", "actions");
     if (current === "relay_unavailable") {
       add(actions, state.busy === "refresh" ? button(P.working, "refresh", null, "main") : button(C.actions.retry.label, "refresh", refresh, "main"));
+    } else if (current === "not_connected") {
+      add(actions, state.busy === "connection-action" ? button(P.working, "connection-action", null, "main") : button(C.actions.connect.label, "connection-action", () => callTool(config2.toolName, {}, "connection-action"), "main"));
+      const install = compact() ? "" : helpHref(conn.installHref);
+      if (install)
+        add(actions, button(C.not_connected.install, "connection-install", () => openLink(install), "plain"));
     } else if (current !== "installing" && conn.action && C.actions[conn.action.id]) {
       const words = C.actions[conn.action.id];
       const href = conn.action.href;
@@ -105546,14 +105771,21 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(body, add(el("div", "actions"), fixControl(item.fix, key, "main", allowConfirm, itemSource(item))));
     return add(banner, body);
   }
-  function staleLine() {
+  function staleWords() {
     const data = state.data;
     if (!data || state.relayDown)
-      return null;
+      return "";
     const at = Date.parse(data.generatedAt);
     if (!isFinite(at) || Date.now() - at < config2.staleAfterMs)
+      return "";
+    return fill2(P.updated, { when: ago(data.generatedAt) });
+  }
+  function staleLine() {
+    const words = staleWords();
+    drawnStale = words;
+    if (!words)
       return null;
-    const line = add(el("p", "stale"), el("span", "muted", fill2(P.updated, { when: ago(data.generatedAt) })));
+    const line = add(el("p", "stale"), el("span", "muted", words));
     return add(line, state.busy === "refresh" ? button(P.working, "refresh", null, "plain") : button(P.checkAgain, "refresh", refresh, "plain"));
   }
   function needsYouSection(items) {
@@ -105738,6 +105970,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     if (onMac.length) {
       add(section, el("h3", "", P.sourcesOnMac), el("p", "muted mac-help", P.sourcesOnMacHelp));
+      const how = onMac.map((source) => helpHref(source.primary && source.primary.href)).filter((href) => !!href)[0];
+      if (how && !globalReason()) {
+        const link = button(P.howConnectOnMac, "mac-only:how", () => openLink(how), "plain");
+        link.className = "btn link";
+        add(section, link);
+      }
       const rows = el("ul", "rows mac-only");
       for (const source of onMac)
         add(rows, add(el("li", "row source mac"), el("span", "source-name", String(source.label || source.id || ""))));
@@ -105749,6 +105987,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!privacy)
       return;
     state.notice = "";
+    supersede();
     state.confirming = "";
     privacy.start(returnKey);
   }
@@ -105976,6 +106215,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function render(focusKey) {
     const active = doc2.activeElement;
     const keepFocus = focusKey || (active && active.getAttribute ? active.getAttribute("data-key") : "") || "";
+    const field = active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT") && keepFocus === active.getAttribute("data-key") ? active : null;
+    const selection = field && typeof field.selectionStart === "number" ? [field.selectionStart, field.selectionEnd === null ? field.selectionStart : field.selectionEnd] : null;
     const theme = state.theme;
     if (theme)
       doc2.documentElement.setAttribute("data-theme", theme);
@@ -105996,6 +106237,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         const node = nodes[i];
         if (node.getAttribute("data-key") === keepFocus) {
           node.focus();
+          if (selection && (node.tagName === "TEXTAREA" || node.tagName === "INPUT")) {
+            try {
+              node.setSelectionRange(selection[0], selection[1]);
+            } catch {}
+          }
           break;
         }
       }
@@ -106028,23 +106274,32 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     setDashboard: (value) => {
       if (!isDashboard(value))
         return;
+      supersede();
       state.data = value;
       state.relayDown = false;
+      refreshFailures = 0;
     },
     close: (notice, again, focusKey) => closeScreen(notice, again, focusKey)
   }) : null;
   function closeScreen(notice, again, focusKey) {
     state.notice = notice;
     if (again) {
+      const mine = supersede();
       state.busy = "refresh";
       render(focusKey);
       request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
-        state.busy = "";
+        if (state.busy === "refresh")
+          state.busy = "";
+        if (mine !== generation)
+          return redraw();
         acceptResult(result, false);
-        render(focusKey);
+        if (!editorOpen())
+          render(focusKey);
       }, () => {
-        state.busy = "";
-        render(focusKey);
+        if (state.busy === "refresh")
+          state.busy = "";
+        if (!editorOpen())
+          render(focusKey);
       });
       return;
     }
@@ -106068,8 +106323,101 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     },
     close: (notice, again, focusKey) => closeScreen(notice, again, focusKey)
   }) : null;
+  const R = config2.refresh;
+  let refreshTimer = null;
+  let refreshing = false;
+  let refreshFailures = 0;
+  let nextRefreshAt = 0;
+  let drawnStale = "";
+  function pageHidden() {
+    return doc2.visibilityState === "hidden" || doc2.hidden === true;
+  }
+  function moving() {
+    const data = state.data;
+    if (!data || state.relayDown || String(data.connection.state) !== "ready")
+      return true;
+    const sources = Array.isArray(data.sources) ? data.sources : [];
+    if (sources.some((source) => {
+      if (!source || typeof source !== "object")
+        return false;
+      if (source.connecting || source.status === "Working")
+        return true;
+      const progress = sourceProgress(source);
+      return !!progress && !progress.stalled;
+    }))
+      return true;
+    if (data.progress && !data.progress.stalled && !progressFinished(data.progress))
+      return true;
+    return !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== "failed");
+  }
+  function refreshDelay() {
+    const base = moving() ? R.activeMs : R.idleMs;
+    return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
+  }
+  function scheduleRefresh() {
+    if (refreshTimer)
+      clearTimeout(refreshTimer);
+    refreshTimer = null;
+    const wait = refreshDelay();
+    nextRefreshAt = Date.now() + wait;
+    if (!pageHidden())
+      refreshTimer = setTimeout(backgroundRefresh, wait);
+  }
+  function backgroundRefresh() {
+    refreshTimer = null;
+    if (pageHidden() || refreshing)
+      return;
+    if (editorOpen() || state.busy || state.confirming) {
+      scheduleRefresh();
+      return;
+    }
+    refreshing = true;
+    const mine = generation;
+    request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
+      refreshing = false;
+      if (mine !== generation)
+        return scheduleRefresh();
+      const ok = !!result && !result.isError && isDashboard(result.structuredContent);
+      if (!ok)
+        refreshFailures++;
+      acceptResult(result, true);
+      scheduleRefresh();
+    }, () => {
+      refreshing = false;
+      if (mine !== generation)
+        return scheduleRefresh();
+      refreshFailures++;
+      state.relayDown = true;
+      redraw();
+      scheduleRefresh();
+    });
+  }
+  doc2.addEventListener("visibilitychange", () => {
+    if (pageHidden()) {
+      if (refreshTimer)
+        clearTimeout(refreshTimer);
+      refreshTimer = null;
+      return;
+    }
+    if (refreshing || refreshTimer)
+      return;
+    const left = nextRefreshAt - Date.now();
+    if (left <= 0)
+      backgroundRefresh();
+    else
+      refreshTimer = setTimeout(backgroundRefresh, left);
+    tickStale();
+  });
+  function tickStale() {
+    if (pageHidden() || compact() || editorOpen())
+      return;
+    if (staleWords() !== drawnStale)
+      render();
+  }
+  setInterval(tickStale, R.staleTickMs);
   readOpenAiGlobals();
   render();
+  scheduleRefresh();
   request("ui/initialize", {
     protocolVersion: "2026-01-26",
     appInfo: { name: "olympus-dashboard", version: "1" },
@@ -106233,6 +106581,13 @@ function chatgptPickerProgram(kit) {
     }
     leave(fill2(Q.connected, { source: p.label }), false);
   }
+  function reopen() {
+    if (!p || p.mode !== "connect")
+      return;
+    stopTimer();
+    session++;
+    startConnect(p.connectArgs, p.id, p.label, p.returnKey);
+  }
   function connectView(page) {
     add(page, el("h1", "", fill2(Q.connectTitle, { source: p.label })));
     const box = el("div", "picker-status");
@@ -106244,7 +106599,7 @@ function chatgptPickerProgram(kit) {
       const line = el("p", "strong", Q.connectWaiting);
       line.setAttribute("role", "status");
       add(box, line, el("p", "muted", fill2(Q.connectWaitingHelp, { source: p.label })));
-      add(box, add(el("div", "actions"), kit.button(Q.connectReopen, "picker:connect:reopen", () => kit.openLink(p.href), "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+      add(box, add(el("div", "actions"), kit.button(Q.connectReopen, "picker:connect:reopen", reopen, "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     } else if (p.phase === "timeout") {
       const line = el("p", "", fill2(Q.connectTimeout, { source: p.label }));
       line.setAttribute("role", "alert");
@@ -106253,14 +106608,11 @@ function chatgptPickerProgram(kit) {
         p.startedAt = Date.now();
         kit.render("picker:connect:cancel");
         schedulePoll();
-      }, "main"), kit.button(Q.connectReopen, "picker:connect:reopen", () => kit.openLink(p.href), "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+      }, "main"), kit.button(Q.connectReopen, "picker:connect:reopen", reopen, "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     } else {
       const line = el("p", "", p.errorText || fill2(Q.connectFailed, { source: p.label }));
       line.setAttribute("role", "alert");
-      add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", () => {
-        session++;
-        startConnect(p.connectArgs, p.id, p.label, p.returnKey);
-      }, "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+      add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", reopen, "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     }
     add(page, box);
   }
@@ -106297,6 +106649,8 @@ function chatgptPickerProgram(kit) {
       branches: new Map,
       cursors: new Map,
       catalog: new Map,
+      remaining: new Map,
+      truncated: new Set,
       ancestors: new Map,
       own: new Map,
       whole: false,
@@ -106405,6 +106759,13 @@ function chatgptPickerProgram(kit) {
     }
     const nodes = previous.concat(fresh2).sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
     const next = typeof page.next_cursor === "string" && page.next_cursor ? page.next_cursor : "";
+    const more = typeof page.remaining === "number" && isFinite(page.remaining) && page.remaining > 0 ? Math.round(page.remaining) : 0;
+    if (next && more)
+      p.remaining.set(parentKey, more);
+    else
+      p.remaining.delete(parentKey);
+    if (page.truncated === true)
+      p.truncated.add(parentKey);
     if (parentKey) {
       p.branches.set(parentKey, nodes);
       if (next)
@@ -106488,11 +106849,12 @@ function chatgptPickerProgram(kit) {
     return out;
   }
   function mixed(key) {
-    const mine = effective(key);
+    const access = (state) => state === "exclude" ? "" : state;
+    const mine = access(effective(key));
     for (const other of descendants(key)) {
       const theirs = effective(other);
-      if (theirs !== mine)
-        return theirs;
+      if (access(theirs) !== mine)
+        return theirs || "exclude";
     }
     return "";
   }
@@ -106554,6 +106916,9 @@ function chatgptPickerProgram(kit) {
       else
         p.own.delete(key);
       p.edited = true;
+      const tapped = focus.slice(focus.lastIndexOf(":") + 1);
+      if (!value && tapped && !allowed(key, tapped))
+        focus = "picker:seg:" + key + ":" + effective(key);
     }
     if (p.notice && p.notice !== Q.conflict)
       p.notice = "";
@@ -106759,7 +107124,7 @@ function chatgptPickerProgram(kit) {
   }
   function segControl(name, focusBase, model) {
     const group2 = el("div", "seg");
-    group2.setAttribute("role", "radiogroup");
+    group2.setAttribute("role", "group");
     group2.setAttribute("aria-label", fill2(Q.choiceGroup, { name }));
     const buttons = [];
     for (const state of STATES) {
@@ -106908,7 +107273,9 @@ function chatgptPickerProgram(kit) {
   }
   function loadMore(parentKey) {
     const busy = p.loading === (parentKey || "root");
-    return kit.button(busy ? Q.loadingFolders : Q.loadMore, "picker:more:" + parentKey, busy || p.loading ? null : () => list(parentKey, true), "plain");
+    const more = p.remaining.get(parentKey) || 0;
+    const label = more ? fill2(more === 1 ? Q.loadMoreCount.one : Q.loadMoreCount.many, { n: kit.count(more) }) : Q.loadMore;
+    return kit.button(busy ? Q.loadingFolders : label, "picker:more:" + parentKey, busy || p.loading ? null : () => list(parentKey, true), "plain");
   }
   function levelList(parentKey, nodes, hasMore) {
     const listNode = el("ul", "flist");
@@ -106918,6 +107285,8 @@ function chatgptPickerProgram(kit) {
       add(listNode, el("li", "muted fempty", Q.noFolders));
     if (hasMore)
       add(listNode, add(el("li", "fmore"), loadMore(parentKey)));
+    if (p.truncated.has(parentKey))
+      add(listNode, el("li", "muted fmore", Q.truncated));
     return listNode;
   }
   function loadingLine() {
@@ -107397,15 +107766,13 @@ var init_picker = __esm(() => {
 });
 
 // src/workers/dashboard/chatgpt/privacy.ts
-function chatgptPrivacyProgram(kit) {
+function chatgptPrivacyProgram(kit, makeLogic) {
   const T = kit.config.tools;
   const W = kit.config.copy;
   const el = kit.el;
   const add = kit.add;
   const fill2 = kit.fill;
-  const KINDS = ["folder", "label", "sender"];
-  const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  const DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+  const L = makeLogic({ mailSourceId: kit.config.mailSourceId, folderSources: kit.config.folderSources });
   let s = null;
   let session = 0;
   function handles(fix) {
@@ -107424,6 +107791,13 @@ function chatgptPrivacyProgram(kit) {
       description: "",
       rules: [],
       pendingCount: 0,
+      revision: "",
+      savedDescription: "",
+      confirmation: "",
+      confirmedAt: 0,
+      confirmStep: false,
+      hidden: [],
+      server: null,
       edited: false,
       saving: false,
       saveError: "",
@@ -107452,20 +107826,28 @@ function chatgptPrivacyProgram(kit) {
     return data;
   }
   function validRule(rule) {
-    return !!rule && KINDS.indexOf(rule.kind) >= 0 && typeof rule.source_id === "string" && !!rule.source_id && typeof rule.display === "string" && (typeof rule.key === "string" || typeof rule.value === "string");
+    return L.validRule(rule);
+  }
+  function displayOf(rule) {
+    return L.displayOf(rule, fill2(W.folderUnnamed, { source: sourceLabel3(rule.source_id) }));
+  }
+  function viewRule(rule) {
+    return L.viewRule(rule, displayOf(rule));
   }
   function take(data) {
     s.description = typeof data.description === "string" ? data.description : "";
-    s.rules = data.rules.filter(validRule).map((rule) => {
-      const copy = { kind: rule.kind, source_id: rule.source_id, display: rule.display, removed: false };
-      if (typeof rule.key === "string")
-        copy.key = rule.key;
-      if (typeof rule.value === "string")
-        copy.value = rule.value;
-      return copy;
-    });
+    s.savedDescription = s.description;
+    s.revision = typeof data.revision === "string" ? data.revision : "";
+    s.edited = false;
+    s.confirmStep = false;
+    s.rules = data.rules.filter(validRule).map(viewRule);
+    s.hidden = data.rules.filter((rule) => !validRule(rule));
+    s.server = null;
     s.pendingCount = typeof data.pendingCount === "number" && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
-    s.confirmation = typeof data.confirmation === "string" ? data.confirmation : "";
+    if (typeof data.confirmation === "string" && data.confirmation) {
+      s.confirmation = data.confirmation;
+      s.confirmedAt = Date.now();
+    }
   }
   function load() {
     s.loading = true;
@@ -107494,53 +107876,79 @@ function chatgptPrivacyProgram(kit) {
     });
   }
   function identity(rule) {
-    return rule.kind + `
-` + rule.source_id + `
-` + (typeof rule.key === "string" ? rule.key : "") + `
-` + (typeof rule.value === "string" ? rule.value : "");
+    return L.identity(rule);
   }
   function kept() {
     return s.rules.filter((rule) => !rule.removed);
   }
   function ruleOut(rule) {
-    const out = { kind: rule.kind, source_id: rule.source_id };
-    if (typeof rule.key === "string")
-      out.key = rule.key;
-    if (typeof rule.value === "string")
-      out.value = rule.value;
-    return out;
+    return L.ruleOut(rule);
+  }
+  function rulesOut() {
+    return kept().map(ruleOut).concat(s.hidden);
+  }
+  function changed() {
+    s.edited = true;
+    s.confirmStep = false;
   }
   function addRule(rule) {
-    const id = identity(rule);
-    const existing = s.rules.filter((other) => identity(other) === id)[0];
-    if (existing)
-      existing.removed = false;
-    else
-      s.rules.push(rule);
-    s.edited = true;
+    L.addTo(s.rules, rule);
+    changed();
     s.saveError = "";
   }
+  function lowering() {
+    return L.lowering(s.rules, s.description, s.savedDescription);
+  }
+  function lowers() {
+    return L.lowers(s.rules, s.description, s.savedDescription);
+  }
   function save() {
-    if (!s || !s.loaded || s.saving)
+    if (!s || !s.loaded || s.saving || s.server)
       return;
-    const rules = kept();
-    const args = { description: s.description.trim(), rules: rules.map(ruleOut) };
-    if (s.confirmation)
+    if (lowers()) {
+      s.confirmStep = true;
+      s.saveError = "";
+      kit.render("privacy:confirm:yes");
+      return;
+    }
+    send(false, false);
+  }
+  const CONFIRMATION_FRESH_MS = 25 * 60000;
+  function send(confirmed, retried) {
+    if (confirmed && (!s.confirmation || Date.now() - s.confirmedAt > CONFIRMATION_FRESH_MS)) {
+      renewConfirmation(() => send(true, true));
+      return;
+    }
+    const args = { description: s.description.trim(), rules: rulesOut() };
+    if (s.revision)
+      args.revision = s.revision;
+    if (confirmed)
       args.confirmation = s.confirmation;
     s.saving = true;
     s.saveError = "";
+    s.confirmStep = false;
     kit.render("privacy:save");
     const mine = session;
     kit.call(T.set, args).then((result) => {
       if (mine !== session || !s)
         return;
       s.saving = false;
+      const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
+      if (confirmed && result && result.isError && content && content.error === "privacy_owner_only" && !retried) {
+        s.confirmation = "";
+        renewConfirmation(() => send(true, true));
+        return;
+      }
       const data = settings(result);
-      if (!data) {
+      if (data && content && content.status === "conflict")
+        return conflict(data);
+      if (!data || result.isError) {
         s.saveError = W.saveFailed;
         kit.render("privacy:save");
         return;
       }
+      if (confirmed)
+        s.confirmation = "";
       kit.remember(data.rules.filter(validRule).length);
       leave(W.saved, true);
     }, () => {
@@ -107550,6 +107958,95 @@ function chatgptPrivacyProgram(kit) {
       s.saveError = W.saveFailed;
       kit.render("privacy:save");
     });
+  }
+  function conflict(data) {
+    s.server = data;
+    s.confirmStep = false;
+    s.saveError = "";
+    kit.render("privacy:conflict:apply");
+  }
+  function applyAgain() {
+    const server = s.server;
+    if (!server)
+      return;
+    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
+    take(server);
+    const replayed = L.replay(draft, s.rules);
+    s.rules = replayed.rules;
+    s.confirmStep = false;
+    s.saveError = "";
+    if (replayed.description !== null)
+      s.description = replayed.description;
+    s.edited = true;
+    save();
+    if (!s.saving && !s.confirmStep)
+      kit.render("privacy:save");
+  }
+  function discardMine() {
+    const server = s.server;
+    if (!server)
+      return;
+    take(server);
+    kit.render("privacy:description");
+  }
+  function conflictBox() {
+    const box = el("div", "confirm-box");
+    box.setAttribute("role", "alert");
+    add(box, el("p", "strong", W.conflict), el("p", "", W.conflictNow));
+    const list = el("ul", "plain");
+    const description = typeof s.server.description === "string" ? s.server.description.trim() : "";
+    add(list, el("li", "", description ? fill2(W.conflictDescription, { text: description }) : W.conflictNoDescription));
+    const rules = s.server.rules.filter(validRule);
+    if (!rules.length)
+      add(list, el("li", "", W.rulesEmpty));
+    for (const rule of rules)
+      add(list, el("li", "", displayOf(rule) + " · " + kindText(rule)));
+    add(box, list, add(el("div", "actions"), kit.button(W.applyAgain, "privacy:conflict:apply", applyAgain, "main"), kit.button(W.discardMine, "privacy:conflict:discard", discardMine, "plain")));
+    return box;
+  }
+  function renewConfirmation(then) {
+    s.saving = true;
+    s.saveError = "";
+    s.confirmStep = false;
+    kit.render("privacy:save");
+    const mine = session;
+    kit.call(T.get, {}).then((result) => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      const data = settings(result);
+      if (!data || typeof data.confirmation !== "string" || !data.confirmation) {
+        s.saveError = W.saveFailed;
+        kit.render("privacy:save");
+        return;
+      }
+      if (s.revision && typeof data.revision === "string" && data.revision !== s.revision)
+        return conflict(data);
+      s.confirmation = data.confirmation;
+      s.confirmedAt = Date.now();
+      then();
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      s.saveError = W.saveFailed;
+      kit.render("privacy:save");
+    });
+  }
+  function confirmBox() {
+    const change = lowering();
+    const box = el("div", "confirm-box");
+    box.setAttribute("role", "alert");
+    if (change.removed.length) {
+      add(box, el("p", "strong", fill2(W.confirmRemove, { list: change.removed.map((rule) => rule.display).join(", ") })));
+    }
+    if (change.described)
+      add(box, el("p", change.removed.length ? "" : "strong", W.confirmDescription));
+    add(box, add(el("div", "actions"), kit.button(W.confirm, "privacy:confirm:yes", () => send(lowers(), false), "danger"), kit.button(W.cancel, "privacy:confirm:no", () => {
+      s.confirmStep = false;
+      kit.render("privacy:save");
+    }, "plain")));
+    return box;
   }
   function sources() {
     const data = kit.data();
@@ -107641,8 +108138,8 @@ function chatgptPrivacyProgram(kit) {
     kit.render("privacy:sender");
   }
   function submitSender() {
-    const value = String(s.sender || "").trim().toLowerCase();
-    if (!EMAIL.test(value) && !DOMAIN.test(value)) {
+    const value = L.senderValue(s.sender);
+    if (!value) {
       s.senderError = W.senderInvalid;
       kit.render("privacy:sender");
       return;
@@ -107668,7 +108165,7 @@ function chatgptPrivacyProgram(kit) {
       add(li, el("p", "fname leaf muted", fill2(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, "privacy:rule:" + index, s.saving ? null : () => {
         rule.removed = false;
-        s.edited = true;
+        changed();
         kit.render("privacy:rule:" + index);
       }, "plain");
       undo.setAttribute("aria-label", fill2(W.undoFor, { name: rule.display }));
@@ -107677,7 +108174,7 @@ function chatgptPrivacyProgram(kit) {
     add(li, add(el("p", "fname leaf two-line"), el("span", "two-top", rule.display), el("span", "two-bottom", kindText(rule))));
     const remove = kit.button(W.remove, "privacy:rule:" + index, s.saving ? null : () => {
       rule.removed = true;
-      s.edited = true;
+      changed();
       s.saveError = "";
       kit.render("privacy:rule:" + index);
     }, "plain");
@@ -107687,6 +108184,8 @@ function chatgptPrivacyProgram(kit) {
   function mainView(page) {
     add(page, el("h1", "", W.title));
     add(page, el("p", "muted intro", W.intro));
+    if (s.server)
+      add(page, conflictBox());
     if (s.error) {
       const error2 = el("div", "banner");
       error2.setAttribute("role", "alert");
@@ -107709,11 +108208,18 @@ function chatgptPrivacyProgram(kit) {
     area.value = s.description;
     area.disabled = s.saving;
     area.setAttribute("data-key", "privacy:description");
+    area.setAttribute("aria-describedby", "privacy-description-shared");
     area.addEventListener("input", () => {
       s.description = area.value;
-      s.edited = true;
+      const open6 = s.confirmStep;
+      changed();
+      if (open6)
+        kit.render("privacy:description");
     });
     add(page, add(field, area));
+    const shared = el("p", "reason field-note", W.descriptionShared);
+    shared.id = "privacy-description-shared";
+    add(page, shared);
     const rules = add(el("section", "fsection"), el("h2", "", W.rulesTitle));
     if (s.rules.length) {
       const listNode = el("ul", "flist");
@@ -107728,10 +108234,15 @@ function chatgptPrivacyProgram(kit) {
       add(rules, el("p", "reason", W.needFolderSource));
     if (!gmail)
       add(rules, el("p", "reason", W.needGmail));
+    add(rules, el("p", "reason", W.namesShared));
     add(page, rules);
     const footer = el("section", "picker-footer");
     if (s.pendingCount > 0) {
       add(footer, el("p", "", fill2(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
+    }
+    if (s.confirmStep && !s.saving && lowers()) {
+      add(page, add(footer, confirmBox()));
+      return;
     }
     const row = el("div", "actions");
     if (s.saving) {
@@ -107739,7 +108250,7 @@ function chatgptPrivacyProgram(kit) {
       busy.setAttribute("aria-busy", "true");
       add(row, busy);
     } else
-      add(row, kit.button(W.save, "privacy:save", save, "main"));
+      add(row, kit.button(W.save, "privacy:save", s.server ? null : save, "main"));
     add(row, kit.button(W.cancel, "privacy:cancel", s.saving ? null : backOut, "plain"));
     const wrap = add(el("div", "save"), row);
     if (s.saveError) {
@@ -107944,6 +108455,7 @@ function chatgptDashboardPageHtml(options = {}) {
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
     staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
+    refresh: { ...CHATGPT_DASHBOARD_REFRESH, ...options.refresh },
     picker: {
       tools: CHATGPT_PICKER_TOOLS,
       mailArgs: CHATGPT_PICKER_MAIL_ARGS,
@@ -107976,23 +108488,33 @@ function chatgptDashboardPageHtml(options = {}) {
     "</head>",
     "<body>",
     '<div id="app"></div>',
-    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config2)}, ${chatgptPickerProgram.toString()}, ${chatgptPrivacyProgram.toString()});</script>`,
+    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config2)}, ${chatgptPickerProgram.toString()}, ${privacyProgramSource()});</script>`,
     "</body>",
     "</html>",
     ""
   ].join(`
 `);
 }
+function privacyProgramSource() {
+  return `function (kit) { return (${chatgptPrivacyProgram.toString()})(kit, ${privacyLogic.toString()}); }`;
+}
 function scriptJson(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
 var init_page = __esm(() => {
   init_vocabulary();
+  init_shared_privacy_logic();
   init_picker();
   init_privacy2();
   CHATGPT_INLINE_ERROR_CODES = ["sign_in_failed", "source_not_connected", "source_busy", "disconnect_incomplete"];
   CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60000;
+  CHATGPT_DASHBOARD_REFRESH = {
+    activeMs: 15000,
+    idleMs: 60000,
+    maxBackoffMs: 5 * 60000,
+    staleTickMs: 30000
+  };
   STATUS_TONE = Object.fromEntries(Object.keys(DASHBOARD_STATUS_PRESENTATION).map((status) => [status, DASHBOARD_STATUS_PRESENTATION[status].colorToken]));
   CHATGPT_DASHBOARD_LIGHT = {
     bg: "#ffffff",
@@ -108094,6 +108616,8 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.08)}
 .btn.danger{border-color:var(--danger);color:var(--danger)}
+.btn.link{border-color:transparent;background:none;color:var(--muted);padding:0.375rem 0.5rem}
+.btn.link:hover:not(:disabled){color:var(--text)}
 .btn:disabled{cursor:not-allowed;color:var(--muted);background:var(--surface);border-style:dashed}
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 summary{cursor:pointer;border-radius:0.375rem}
@@ -108124,6 +108648,7 @@ summary{cursor:pointer;border-radius:0.375rem}
 .picker-status{display:flex;flex-direction:column;gap:0.75rem;margin-top:1rem}
 .field{display:flex;flex-direction:column;gap:0.25rem;margin:0.75rem 0}
 .field-label{font-weight:600;font-size:0.875rem}
+.field+.field-note{margin:-0.5rem 0 0.75rem}
 .text{font:inherit;font-size:1rem;width:100%;min-height:2.25rem;padding:0.375rem 0.625rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
 textarea.text{resize:vertical;min-height:4.5rem}
 .picker-body{display:flex;flex-direction:column;container-type:inline-size}
@@ -108655,6 +109180,31 @@ function chatgptPrivateAnswerProgram(config2) {
   function wait(ms) {
     return new Promise((resolve10) => setTimeout(resolve10, ms));
   }
+  function bounded(work, ms, controller) {
+    return new Promise((resolve10, reject) => {
+      const timer = setTimeout(() => {
+        if (controller)
+          try {
+            controller.abort();
+          } catch {}
+        reject(new Error("timeout"));
+      }, Math.max(0, ms));
+      work.then((value) => {
+        clearTimeout(timer);
+        resolve10(value);
+      }, (error2) => {
+        clearTimeout(timer);
+        reject(error2);
+      });
+    });
+  }
+  function slow(byUser) {
+    phase = "slow";
+    errorText = T.slow;
+    canRetry = true;
+    focusAfter = byUser ? "retry" : "";
+    render();
+  }
   function fail(text, retry, byUser) {
     phase = "error";
     errorText = text;
@@ -108683,35 +109233,59 @@ function chatgptPrivateAnswerProgram(config2) {
     canRetry = false;
     focusAfter = byUser ? "status" : "";
     render();
-    const started = Date.now();
+    const deadline = Date.now() + (info.full ? config2.fullPollCapMs : config2.pollCapMs);
+    const isTimeout = (error2) => error2 instanceof Error && error2.message === "timeout";
     try {
-      const keys = await keyPair(jobId);
+      let keys;
+      try {
+        keys = await bounded(keyPair(jobId), deadline - Date.now(), null);
+      } catch (error2) {
+        if (mine !== run)
+          return;
+        if (isTimeout(error2))
+          return slow(byUser);
+        throw error2;
+      }
       for (;; ) {
         if (mine !== run)
           return;
+        const left = deadline - Date.now();
+        if (left <= 0)
+          return slow(byUser);
+        const requestEnd = Date.now() + Math.min(config2.requestTimeoutMs, left);
+        const controller = typeof window.AbortController === "function" ? new window.AbortController : null;
         let response;
+        let body = null;
         try {
-          response = await window.fetch(config2.relayOrigin + "/private/" + jobId, {
+          response = await bounded(window.fetch(config2.relayOrigin + "/private/" + jobId, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
             credentials: "omit",
             cache: "no-store",
             referrerPolicy: "no-referrer",
-            mode: "cors"
-          });
-        } catch {
-          if (mine === run)
-            fail(T.unreachable, true, byUser);
+            mode: "cors",
+            signal: controller ? controller.signal : undefined
+          }), requestEnd - Date.now(), controller);
+          if (mine !== run)
+            return;
+          try {
+            body = await bounded(response.json(), requestEnd - Date.now(), controller);
+          } catch (error2) {
+            if (isTimeout(error2))
+              throw error2;
+            body = null;
+          }
+        } catch (error2) {
+          if (mine !== run)
+            return;
+          if (isTimeout(error2)) {
+            if (Date.now() >= deadline)
+              return slow(byUser);
+            continue;
+          }
+          fail(T.unreachable, true, byUser);
           return;
-        }
-        if (mine !== run)
-          return;
-        let body = null;
-        try {
-          body = await response.json();
-        } catch {
-          body = null;
         }
         if (mine !== run)
           return;
@@ -108720,8 +109294,12 @@ function chatgptPrivateAnswerProgram(config2) {
         if (code === 200 && status === "ready") {
           let opened = null;
           try {
-            opened = readAnswer(await open6(jobId, keys.privateKey, body));
-          } catch {
+            opened = readAnswer(await bounded(open6(jobId, keys.privateKey, body), deadline - Date.now(), null));
+          } catch (error2) {
+            if (mine !== run)
+              return;
+            if (isTimeout(error2))
+              return slow(byUser);
             opened = null;
           }
           if (mine !== run)
@@ -108753,14 +109331,8 @@ function chatgptPrivateAnswerProgram(config2) {
           return fail(T.generic, false, byUser);
         const header = Number(response.headers && response.headers.get ? response.headers.get("retry-after") : NaN);
         const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
-        if (Date.now() - started + seconds * config2.secondMs > (info && info.full ? config2.fullPollCapMs : config2.pollCapMs)) {
-          phase = "slow";
-          errorText = T.slow;
-          canRetry = true;
-          focusAfter = byUser ? "retry" : "";
-          render();
-          return;
-        }
+        if (Date.now() + seconds * config2.secondMs > deadline)
+          return slow(byUser);
         await wait(seconds * config2.secondMs);
       }
     } catch {
@@ -109136,6 +109708,7 @@ function chatgptPrivateAnswerPageHtml(options) {
     secondMs: options.secondMs ?? 1000,
     pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
     fullPollCapMs: options.fullPollCapMs ?? CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS,
+    requestTimeoutMs: options.requestTimeoutMs ?? CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS,
     noteMs: options.noteMs ?? 4000,
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,
@@ -109162,7 +109735,7 @@ function chatgptPrivateAnswerPageHtml(options) {
 function scriptJson2(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 190000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
+var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 250000, CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS = 20000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
 var init_private_answer2 = __esm(() => {
   init_vocabulary();
   init_private_answer_contract();
@@ -110141,10 +110714,9 @@ var init_scope_privacy = __esm(() => {
 var exports_shared_privacy = {};
 __export(exports_shared_privacy, {
   visiblePrivacy: () => visiblePrivacy,
-  privacyRuleWords: () => privacyRuleWords,
-  privacyRuleProblem: () => privacyRuleProblem,
   privacyRuleIdentity: () => privacyRuleIdentity,
   privacyRemovedRules: () => privacyRemovedRules,
+  privacyLogic: () => privacyLogic,
   lowersPrivacy: () => lowersPrivacy,
   isSecretPrivacyRule: () => isSecretPrivacyRule,
   PRIVACY_FOLDER_SOURCE_NAMES: () => PRIVACY_FOLDER_SOURCE_NAMES
@@ -110179,7 +110751,7 @@ function visiblePrivacy(settings, secrets) {
 var init_shared_privacy = __esm(() => {
   init_scope_privacy();
   init_privacy_profile();
-  init_shared_privacy_rules();
+  init_shared_privacy_logic();
 });
 
 // src/workers/chatgpt/setup-tools.ts

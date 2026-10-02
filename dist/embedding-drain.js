@@ -21078,7 +21078,9 @@ var init_vocabulary = __esm(() => {
       model_downloading: "Waiting for the search model to finish downloading"
     },
     linkExpires: "link expires in {n} min",
-    linkExpired: "link expired"
+    linkExpired: "link expired",
+    howOnMac: "How to fix this on your Mac",
+    howConnectOnMac: "How to connect these on your Mac"
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
@@ -21118,6 +21120,8 @@ var init_vocabulary = __esm(() => {
     insideFolder: "A folder inside {name}",
     noFolders: "No folders here.",
     loadMore: "Load more folders",
+    loadMoreCount: { one: "Load 1 more folder", many: "Load {n} more folders" },
+    truncated: "This folder has more folders than Olympus can list here, so this list is incomplete.",
     states: { ingest: "Fully indexed", metadata_only: "Names only", exclude: "Skipped" },
     statesLower: { ingest: "fully indexed", metadata_only: "names only", exclude: "skipped" },
     notIncluded: "Not included",
@@ -21204,8 +21208,10 @@ var init_vocabulary = __esm(() => {
     tryAgain: "Try again",
     descriptionLabel: "In your own words",
     descriptionPlaceholder: "For example: my health and therapy, money and taxes, anything about my kids, my divorce",
+    descriptionShared: 'ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.',
     rulesTitle: "Always private (optional)",
     rulesEmpty: "No folders, labels or senders yet.",
+    namesShared: "Folder and label names and senders you add here are shown to ChatGPT.",
     kindFolder: "Folder in {source}",
     kindLabel: "Gmail label",
     kindSender: "Sender",
@@ -21228,6 +21234,16 @@ var init_vocabulary = __esm(() => {
     cancel: "Cancel",
     saveFailed: "Olympus could not save. Your changes are still here. Try again.",
     saved: "Privacy saved.",
+    confirmRemove: "This removes protection from {list}.",
+    confirmDescription: "This changes your description, which decides what Olympus keeps private.",
+    confirm: "Confirm",
+    conflict: "Your changes weren't saved because the privacy settings changed elsewhere.",
+    conflictNow: "What is saved now:",
+    conflictDescription: "Your description: {text}",
+    conflictNoDescription: "No description",
+    applyAgain: "Apply my changes again",
+    discardMine: "Discard my changes",
+    folderUnnamed: "A folder in {source}",
     discardPrompt: "Discard your changes?",
     discard: "Discard changes",
     keep: "Keep editing",
@@ -21387,13 +21403,17 @@ var init_vocabulary = __esm(() => {
     locked: "Unlock dashboard controls in Setup to see and change what is private.",
     readOnly: "Your OpenClaw connection is read-only, so privacy can be read here but not changed.",
     unavailable: "Privacy settings are not available from this worker.",
-    confirmRemoves: "This removes protection from {list}.",
-    confirmDescription: "This changes your own words, which Olympus reads to keep items private.",
-    confirm: "Confirm",
-    keepEditing: "Keep editing",
-    conflict: "These privacy settings were changed somewhere else. Your changes are still here.",
-    applyAgain: "Apply my changes again",
-    discardMine: "Discard my changes"
+    confirmRemoves: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmRemove,
+    confirmDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmDescription,
+    confirm: DASHBOARD_CHATGPT_PRIVACY_COPY.confirm,
+    conflict: DASHBOARD_CHATGPT_PRIVACY_COPY.conflict,
+    conflictNow: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNow,
+    conflictDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictDescription,
+    conflictNoDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNoDescription,
+    applyAgain: DASHBOARD_CHATGPT_PRIVACY_COPY.applyAgain,
+    discardMine: DASHBOARD_CHATGPT_PRIVACY_COPY.discardMine,
+    folderUnnamed: DASHBOARD_CHATGPT_PRIVACY_COPY.folderUnnamed,
+    undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor
   };
 });
 
@@ -21587,6 +21607,102 @@ var init_source_dashboard = __esm(() => {
   };
 });
 
+// src/workers/dashboard/shared-privacy-logic.ts
+function privacyLogic(config) {
+  const KINDS = ["folder", "label", "sender"];
+  const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+  const text = (value) => typeof value === "string" && value.trim() !== "";
+  function validRule(rule) {
+    if (!rule || typeof rule !== "object" || KINDS.indexOf(rule.kind) < 0)
+      return false;
+    if (rule.kind === "sender")
+      return rule.source_id === config.mailSourceId && text(rule.value);
+    if (rule.kind === "label")
+      return rule.source_id === config.mailSourceId && text(rule.key) && text(rule.value);
+    return Object.prototype.hasOwnProperty.call(config.folderSources, rule.source_id) && text(rule.key) && (rule.display === undefined || typeof rule.display === "string");
+  }
+  function displayOf(rule, unnamed) {
+    if (rule.kind === "sender" || rule.kind === "label")
+      return String(rule.value);
+    return text(rule.display) ? String(rule.display) : unnamed;
+  }
+  function viewRule(rule, display) {
+    const raw = {};
+    for (const field of Object.keys(rule))
+      raw[field] = rule[field];
+    const copy = { kind: rule.kind, source_id: rule.source_id, display, removed: false, saved: true, raw };
+    if (typeof rule.key === "string")
+      copy.key = rule.key;
+    if (typeof rule.value === "string")
+      copy.value = rule.value;
+    return copy;
+  }
+  function identity(rule) {
+    const matched = rule.kind === "sender" ? typeof rule.value === "string" ? rule.value.trim().toLowerCase() : "" : typeof rule.key === "string" ? rule.key.trim() : "";
+    return rule.kind + `
+` + rule.source_id + `
+` + matched;
+  }
+  function ruleOut(rule) {
+    if (rule.raw)
+      return rule.raw;
+    const out = { kind: rule.kind, source_id: rule.source_id };
+    if (typeof rule.key === "string")
+      out.key = rule.key;
+    if (typeof rule.value === "string")
+      out.value = rule.value;
+    if (rule.kind === "folder" && text(rule.display))
+      out.display = rule.display;
+    return out;
+  }
+  function addTo(rules, rule) {
+    const id = identity(rule);
+    const existing = rules.filter((other) => identity(other) === id)[0];
+    if (existing)
+      existing.removed = false;
+    else
+      rules.push(rule);
+    return rules;
+  }
+  function lowering(rules, description, savedDescription) {
+    return {
+      removed: rules.filter((rule) => rule.saved && rule.removed),
+      described: description.trim() !== savedDescription
+    };
+  }
+  function lowers(rules, description, savedDescription) {
+    const change = lowering(rules, description, savedDescription);
+    return change.removed.length > 0 || change.described;
+  }
+  function replay(draft, fresh) {
+    const removed = {};
+    for (const rule of draft.rules)
+      if (rule.saved && rule.removed)
+        removed[identity(rule)] = true;
+    const additions = draft.rules.filter((rule) => !rule.saved && !rule.removed);
+    const described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
+    for (const rule of fresh)
+      if (removed[identity(rule)])
+        rule.removed = true;
+    for (const rule of additions)
+      addTo(fresh, rule);
+    return { rules: fresh, description: described };
+  }
+  function senderValue(input) {
+    const value = String(input || "").trim().toLowerCase();
+    return EMAIL.test(value) || DOMAIN.test(value) ? value : "";
+  }
+  return { validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue };
+}
+var PRIVACY_FOLDER_SOURCE_NAMES;
+var init_shared_privacy_logic = __esm(() => {
+  PRIVACY_FOLDER_SOURCE_NAMES = {
+    "dropbox.files": "Dropbox",
+    "google_drive.docs": "Google Drive"
+  };
+});
+
 // src/workers/dashboard/shared-status.ts
 var DASHBOARD_FIXABLE_STALLS;
 var init_shared_status = __esm(() => {
@@ -21640,9 +21756,6 @@ var init_dashboard_view_model = __esm(() => {
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
 });
-
-// src/workers/dashboard/shared-privacy-rules.ts
-var init_shared_privacy_rules = () => {};
 
 // src/workers/google-connectors/gmail-live-control.ts
 var GMAIL_STORE_PULL_INTERVAL_MS, GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS, GMAIL_STORE_RECONCILE_INTERVAL_MS, GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, GMAIL_DAILY_REQUEST_GUARD_REASON = "gmail_daily_api_request_guard";
@@ -23403,6 +23516,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 `;
 
 // src/workers/dashboard/components.ts
+init_shared_privacy_logic();
 init_vocabulary();
 var DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
 var MENU_ACTION_KINDS = new Set(["disconnect", "unpair", "oauth_cancel"]);
@@ -23509,7 +23623,9 @@ var TIER_NAMES = {
 // src/workers/dashboard/pages/privacy.ts
 init_mail_source_scope();
 init_vocabulary();
-init_shared_privacy_rules();
+init_shared_privacy_logic();
+var MAIL_SOURCE_ID = "gmail.email";
+var LOGIC = privacyLogic({ mailSourceId: MAIL_SOURCE_ID, folderSources: { ...PRIVACY_FOLDER_SOURCE_NAMES } });
 var CLIENT_COPY = {
   remove: DASHBOARD_LOCAL_PRIVACY_COPY.remove,
   removeFor: DASHBOARD_LOCAL_PRIVACY_COPY.removeFor,
@@ -23537,10 +23653,15 @@ var CLIENT_COPY = {
   confirmRemoves: DASHBOARD_LOCAL_PRIVACY_COPY.confirmRemoves,
   confirmDescription: DASHBOARD_LOCAL_PRIVACY_COPY.confirmDescription,
   confirm: DASHBOARD_LOCAL_PRIVACY_COPY.confirm,
-  keepEditing: DASHBOARD_LOCAL_PRIVACY_COPY.keepEditing,
   conflict: DASHBOARD_LOCAL_PRIVACY_COPY.conflict,
+  conflictNow: DASHBOARD_LOCAL_PRIVACY_COPY.conflictNow,
+  conflictDescription: DASHBOARD_LOCAL_PRIVACY_COPY.conflictDescription,
+  conflictNoDescription: DASHBOARD_LOCAL_PRIVACY_COPY.conflictNoDescription,
   applyAgain: DASHBOARD_LOCAL_PRIVACY_COPY.applyAgain,
-  discardMine: DASHBOARD_LOCAL_PRIVACY_COPY.discardMine
+  discardMine: DASHBOARD_LOCAL_PRIVACY_COPY.discardMine,
+  folderUnnamed: DASHBOARD_LOCAL_PRIVACY_COPY.folderUnnamed,
+  undoFor: DASHBOARD_LOCAL_PRIVACY_COPY.undoFor,
+  rulesEmpty: DASHBOARD_LOCAL_PRIVACY_COPY.rulesEmpty
 };
 
 // src/workers/dashboard/index.ts
