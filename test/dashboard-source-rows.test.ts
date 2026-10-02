@@ -17,7 +17,7 @@ import {
   type DashboardRowOptions,
   type DashboardSourceRowState,
 } from '../src/workers/dashboard/source-rows.ts';
-import { dashboardStatus } from '../src/workers/dashboard/vocabulary.ts';
+import { dashboardAttentionLine, dashboardProviderRefusalSentence, dashboardStatus } from '../src/workers/dashboard/vocabulary.ts';
 import { DASHBOARD_SOURCE_ROWS_CSS } from '../src/workers/dashboard/static-styles.ts';
 
 /**
@@ -223,6 +223,34 @@ describe('a sign-in problem needs the owner whatever the progress says (Codex re
       expect(row).toContain('data-connect-kind="oauth"');
       expect(row).toContain('>Reconnect</button>');
       expect(row).not.toContain('Reading — 40%');
+    }
+  });
+
+  test('each surface words a refusal for its own fix: the local sheet\'s How to fix and app settings, ChatGPT\'s Reconnect', () => {
+    const cases = [
+      { code: 'redirect_uri_mismatch', local: 'fix it in your Google Drive app settings', chatgpt: 'Google Drive sign-in didn\'t go through. Try Reconnect.' },
+      { code: 'access_denied', local: 'sign-in was declined — connect again to retry', chatgpt: 'Google Drive sign-in was declined. Try Reconnect.' },
+      { code: 'temporarily_unavailable', local: 'see How to fix', chatgpt: 'Google Drive didn\'t finish signing in. Try Reconnect.' },
+      { code: '', local: 'see How to fix', chatgpt: 'Google Drive didn\'t finish signing in. Try Reconnect.' },
+    ];
+    for (const { code, local, chatgpt } of cases) {
+      const view = withDrive((drive) => {
+        drive.connection = { ...drive.connection, provider_refusal: { code, reason: '' } };
+      });
+      const drive = view.sources.find((source) => source.source_id === 'google_drive.docs')!;
+      // The local dashboard keeps its words.
+      expect(dashboardAttentionLine(drive)).toContain(local);
+      expect(dashboardAttentionLine(drive, { surface: 'local' })).toBe(dashboardAttentionLine(drive));
+      // ChatGPT has no How to fix sheet and no app settings of the owner's own.
+      const line = dashboardAttentionLine(drive, { surface: 'chatgpt' });
+      const sentence = dashboardProviderRefusalSentence(drive, { surface: 'chatgpt' });
+      expect(sentence).toBe(chatgpt);
+      for (const words of [line, sentence]) {
+        expect(words).toContain('Reconnect');
+        expect(words).not.toContain('How to fix');
+        expect(words).not.toContain('app settings');
+        expect(words).not.toContain('connect again');
+      }
     }
   });
 

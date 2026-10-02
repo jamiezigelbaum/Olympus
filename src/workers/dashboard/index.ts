@@ -47,33 +47,51 @@ export function isDashboardHtmlRoute(url: URL): boolean {
   return url.pathname === DASHBOARD_HTML_PATH;
 }
 
+/** Which page a dashboard URL names, in the order the renderer serves them. */
+export type DashboardHtmlRoutePage = 'source' | 'background' | 'sensitivity' | 'privacy' | 'setup' | 'home';
+
+/**
+ * The one precedence for a dashboard URL: a named source first, then
+ * Background, Sensitivity, Privacy, Setup, then Home (which a first run may
+ * still serve as Setup). The worker reads it too, so what it loads for a page
+ * is what the page renders.
+ */
+export function dashboardHtmlRoutePage(url: URL): DashboardHtmlRoutePage {
+  const params = url.searchParams;
+  if (params.get(DASHBOARD_DETAIL_QUERY_PARAM) !== null) return 'source';
+  if (params.has(DASHBOARD_BACKGROUND_QUERY_PARAM)) return 'background';
+  if (params.has(DASHBOARD_SENSITIVITY_QUERY_PARAM)) return 'sensitivity';
+  if (params.has(DASHBOARD_PRIVACY_QUERY_PARAM)) return 'privacy';
+  if (params.has(DASHBOARD_SETUP_QUERY_PARAM)) return 'setup';
+  return 'home';
+}
+
 export function renderDashboardHtmlRoute(input: DashboardHtmlRouteInput): DashboardHtmlRouteResult {
   const { url, view } = input;
   const options = withTokenBasePath(url, input.options);
-  const sourceId = url.searchParams.get(DASHBOARD_DETAIL_QUERY_PARAM);
-  if (sourceId !== null) {
-    const html = renderDashboardDetailPage(view, sourceId, options);
-    if (html !== undefined) return { html, status: 200 };
-    return { html: renderNotFound(view, options), status: 404 };
+  switch (dashboardHtmlRoutePage(url)) {
+    case 'source': {
+      const html = renderDashboardDetailPage(view, url.searchParams.get(DASHBOARD_DETAIL_QUERY_PARAM) ?? '', options);
+      if (html !== undefined) return { html, status: 200 };
+      return { html: renderNotFound(view, options), status: 404 };
+    }
+    // Asked for by name, so it serves even on a first run: the lanes are the
+    // one page that can say what is happening before any source finishes.
+    case 'background':
+      return { html: renderDashboardBackgroundPage(view, options), status: 200 };
+    // Also asked for by name, and also serves on a first run: what may read a
+    // secure item is a question the owner is entitled to before they connect
+    // anything.
+    case 'sensitivity':
+      return { html: renderDashboardSensitivityPage(view, options), status: 200 };
+    case 'privacy':
+      return { html: renderDashboardPrivacyPage(view, options), status: 200 };
+    case 'setup':
+      return { html: renderDashboardSetupPage(view, options), status: 200 };
+    case 'home':
+      if (servesSetupImplicitly(view)) return { html: renderDashboardSetupPage(view, options), status: 200 };
+      return { html: renderDashboardHomePage(view, options), status: 200 };
   }
-  // Asked for by name, so it serves even on a first run: the lanes are the one
-  // page that can say what is happening before any source finishes.
-  if (url.searchParams.has(DASHBOARD_BACKGROUND_QUERY_PARAM)) {
-    return { html: renderDashboardBackgroundPage(view, options), status: 200 };
-  }
-  // Also asked for by name, and also serves on a first run: what may read a
-  // secure item is a question the owner is entitled to before they connect
-  // anything.
-  if (url.searchParams.has(DASHBOARD_SENSITIVITY_QUERY_PARAM)) {
-    return { html: renderDashboardSensitivityPage(view, options), status: 200 };
-  }
-  if (url.searchParams.has(DASHBOARD_PRIVACY_QUERY_PARAM)) {
-    return { html: renderDashboardPrivacyPage(view, options), status: 200 };
-  }
-  if (url.searchParams.has(DASHBOARD_SETUP_QUERY_PARAM) || servesSetupImplicitly(view)) {
-    return { html: renderDashboardSetupPage(view, options), status: 200 };
-  }
-  return { html: renderDashboardHomePage(view, options), status: 200 };
 }
 
 /** The existing dashboard renderer projected as inert native-Control-UI HTML. */

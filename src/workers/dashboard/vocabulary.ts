@@ -140,6 +140,13 @@ export interface DashboardStatusGroup {
 export interface DashboardVocabularyOptions {
   now?: Date;
   degradedCredentials?: readonly WorkerCredentialDegradation[];
+  /**
+   * Which dashboard the words are for. The ChatGPT dashboard has no How to fix
+   * sheet and its owner signs in through Olympus's own apps, so a provider
+   * refusal there reads DASHBOARD_CHATGPT_REFUSAL_COPY. Defaults to the local
+   * dashboard.
+   */
+  surface?: 'local' | 'chatgpt';
 }
 
 export interface DashboardStatusResolution {
@@ -378,7 +385,7 @@ export function dashboardAttentionLine(
   // line below, because "not connected" over an attempt the provider
   // explicitly rejected explains nothing the owner can act on. The provider's
   // own words stay in the sheet's How to fix disclosure.
-  if (source.connection.provider_refusal) return dashboardProviderRefusalLine(source);
+  if (source.connection.provider_refusal) return dashboardProviderRefusalLine(source, options);
   switch (source.connection.state) {
     case 'reauth_required':
       return DASHBOARD_SIGNED_OUT;
@@ -489,8 +496,9 @@ const REDIRECT_REFUSAL_CODES: ReadonlySet<string> = new Set([
  * the address to register are technical detail; they live in the connect
  * sheet's How to fix disclosure, never on the row.
  */
-export function dashboardProviderRefusalLine(source: DashboardSourceCard): string {
+export function dashboardProviderRefusalLine(source: DashboardSourceCard, options?: DashboardVocabularyOptions): string {
   const code = source.connection.provider_refusal?.code ?? '';
+  if (options?.surface === 'chatgpt') return DASHBOARD_CHATGPT_REFUSAL_COPY.line[chatgptRefusalKind(code)];
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `rejected the sign-in address — fix it in your ${source.label} app settings`;
   }
@@ -499,13 +507,20 @@ export function dashboardProviderRefusalLine(source: DashboardSourceCard): strin
 }
 
 /** The same refusal as a full sentence, for the top of the connect sheet. */
-export function dashboardProviderRefusalSentence(source: DashboardSourceCard): string {
+export function dashboardProviderRefusalSentence(source: DashboardSourceCard, options?: DashboardVocabularyOptions): string {
   const code = source.connection.provider_refusal?.code ?? '';
+  if (options?.surface === 'chatgpt') return DASHBOARD_CHATGPT_REFUSAL_COPY.sentence[chatgptRefusalKind(code)](source.label);
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `${source.label} rejected the sign-in address. Fix it in your ${source.label} app settings, then connect again.`;
   }
   if (code === 'access_denied') return `${source.label} sign-in was declined. Connect again to retry.`;
   return `${source.label} refused the sign-in. How to fix has the details.`;
+}
+
+function chatgptRefusalKind(code: string): keyof typeof DASHBOARD_CHATGPT_REFUSAL_COPY.line {
+  if (REDIRECT_REFUSAL_CODES.has(code)) return 'address';
+  if (code === 'access_denied') return 'declined';
+  return 'unfinished';
 }
 
 /** The raw refusal, for the How to fix disclosure only. */
@@ -1111,6 +1126,27 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
   fixOnMac: 'Open Olympus on your Mac to fix this.',
   privateMatches: 'Some matching items are private and stay on your Mac.',
   changeModelsOnMac: 'Change models in Olympus on your Mac.',
+} as const;
+
+/**
+ * A provider refusal as the ChatGPT dashboard words it, by the refusal's kind.
+ * ChatGPT has no How to fix sheet, and its owner signs in through Olympus's own
+ * apps (no app settings of their own to fix), so every refusal points at the
+ * row's Reconnect. `line` is the reason half after "<Source> — "; `sentence`
+ * stands alone. The local dashboard keeps its own words
+ * (dashboardProviderRefusalLine).
+ */
+export const DASHBOARD_CHATGPT_REFUSAL_COPY = {
+  line: {
+    address: 'sign-in didn\'t go through · try Reconnect',
+    declined: 'sign-in was declined · try Reconnect',
+    unfinished: 'didn\'t finish signing in · try Reconnect',
+  },
+  sentence: {
+    address: (source: string) => `${source} sign-in didn't go through. Try Reconnect.`,
+    declined: (source: string) => `${source} sign-in was declined. Try Reconnect.`,
+    unfinished: (source: string) => `${source} didn't finish signing in. Try Reconnect.`,
+  },
 } as const;
 
 /**

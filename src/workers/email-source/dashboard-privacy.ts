@@ -6,7 +6,8 @@
  * filter are that operation's own.
  *
  * - `summary` is what every page that names privacy reads: counts only, with
- *   the privacy-check backlog (a corpus-wide count) cached briefly.
+ *   the privacy-check backlog (a corpus-wide count) cached briefly and
+ *   dropped on every successful save.
  * - `read` is the editor's full settings; the worker supplies it only to a
  *   reader holding write authority.
  * - `save` requires the revision the editor was built from (the empty
@@ -117,6 +118,9 @@ export function createDashboardPrivacyAdapter(options: DashboardPrivacyAdapterOp
         const settings = (result._meta as Record<string, PrivacySettings> | undefined)?.[PRIVACY_META_KEY];
         if (!settings) return { ok: false, code: 'unavailable', message: 'Olympus could not read your privacy settings.' };
         const status = (result.structuredContent as { status?: string } | undefined)?.status === 'conflict' ? 'conflict' : 'saved';
+        // A saved change can move items in or out of the privacy check, so the
+        // next read counts the backlog again rather than reusing the old count.
+        if (status === 'saved') cached = undefined;
         const { confirmation: _issued, ...shown } = settings;
         return { ok: true, status, settings: shown };
       } catch (error) {

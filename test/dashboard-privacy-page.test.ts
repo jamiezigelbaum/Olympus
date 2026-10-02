@@ -547,14 +547,15 @@ describe('the worker\'s privacy adapter (production code)', () => {
       secretLocations: () => ({ folderKeys: new Set(), pathPrefixes: [], labelIds: new Set(), senders: [] }),
     } as unknown as ChatGptSetupBackend;
     let pendingCalls = 0;
+    let pendingValue = 7;
     let clock = 0;
     const adapter = createDashboardPrivacyAdapter({
       backend,
       readSettings: (pending) => ({ ...stored, pendingCount: pending }),
-      pendingCount: () => { pendingCalls++; return 7; },
+      pendingCount: () => { pendingCalls++; return pendingValue; },
       now: () => clock,
     });
-    return { adapter, stored: () => stored, pendingCalls: () => pendingCalls, tick: (ms: number) => { clock += ms; } };
+    return { adapter, stored: () => stored, pendingCalls: () => pendingCalls, setPending: (n: number) => { pendingValue = n; }, tick: (ms: number) => { clock += ms; } };
   }
   const RULE = { kind: 'sender' as const, source_id: 'gmail.email' as const, value: 'billing@clinic.example' };
 
@@ -586,6 +587,19 @@ describe('the worker\'s privacy adapter (production code)', () => {
     expect(pendingCalls()).toBe(1);
     tick(60_000);
     await adapter.summary();
+    expect(pendingCalls()).toBe(2);
+  });
+  test('a successful save drops the cached backlog, so the next read counts again; a conflict keeps it', async () => {
+    const { adapter, pendingCalls, setPending } = memoryBackend({ configured: true, description: 'health', pendingCount: 0, revision: 'r1', rules: [RULE] });
+    expect(await adapter.summary()).toMatchObject({ summary: { pendingCount: 7 } });
+    setPending(3);
+    expect(await adapter.summary()).toMatchObject({ summary: { pendingCount: 7 } });
+    expect(await adapter.save({ revision: 'r0', description: 'health', rules: [RULE] })).toMatchObject({ ok: true, status: 'conflict' });
+    expect(await adapter.summary()).toMatchObject({ summary: { pendingCount: 7 } });
+    expect(await adapter.save({ revision: 'r1', description: 'health', rules: [RULE, { ...RULE, value: 'lab@clinic.example' }] })).toMatchObject({ ok: true, status: 'saved' });
+    expect(await adapter.summary()).toMatchObject({ summary: { pendingCount: 3 } });
+    const read = await adapter.read();
+    expect(read.ok && read.settings.pendingCount).toBe(3);
     expect(pendingCalls()).toBe(2);
   });
 });
@@ -647,6 +661,11 @@ describe('only the pages that name privacy read it', () => {
       await get('?background');
       await get('?source=gmail.email');
       await native('background', true);
+      // The renderer's precedence decides the page: these render Background
+      // and the source page, so they read no privacy either.
+      expect((await get('?background&privacy')).html).toContain('<title>Olympus / Background</title>');
+      expect((await get('?source=gmail.email&privacy')).html).not.toContain('<title>Olympus / Privacy</title>');
+      await get('?privacy&background');
       expect(calls).toEqual([]);
       await get('?setup');
       expect(calls).toEqual(['summary']);

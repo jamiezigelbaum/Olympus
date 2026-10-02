@@ -154,7 +154,7 @@ import {
   GOOGLE_DRIVE_DOCS_CORPUS_ID,
   INTERNAL_EMAIL_CORPUS_ID,
 } from '../google-connectors/corpora.ts';
-import { renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
+import { dashboardHtmlRoutePage, renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
 import type { DashboardModelInstalls } from '../dashboard/source-rows.ts';
 import type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
 
@@ -1376,13 +1376,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // row, Sensitivity, the editor): Background and source pages poll
           // without it. Counts for the row; the full settings only for the
           // editor, and only for a reader with write authority.
-          const dashboardPage = dashboardUi
-            ? dashboardUi.params.view
-            : url.searchParams.has('privacy') ? 'privacy'
-              : url.searchParams.has('sensitivity') ? 'sensitivity'
-                : url.searchParams.has('background') ? 'background'
-                  : url.searchParams.has('source') ? 'source'
-                    : url.searchParams.has('setup') ? 'setup' : 'home';
+          // The renderer's own precedence, so `?background&privacy` reads no
+          // privacy because it renders Background.
+          const dashboardPage = dashboardUi ? dashboardUi.params.view : dashboardHtmlRoutePage(url);
           const privacyShown = dashboardPage === 'home' || dashboardPage === 'setup' || dashboardPage === 'sensitivity' || dashboardPage === 'privacy';
           const writeAuthority = dashboardUi ? dashboardUi.canWrite : request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
           const privacySummary = sourceDashboard.privacy && privacyShown
