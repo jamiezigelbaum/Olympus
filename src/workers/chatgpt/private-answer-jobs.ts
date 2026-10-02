@@ -69,6 +69,7 @@ import {
   PRIVATE_ANSWER_JOB_TTL_MS,
   PRIVATE_MATCH_COUNT_CAP,
   type PrivateAnswerCitation,
+  type PrivateAnswerDetail,
   type PrivateAnswerModel,
   type PrivateAnswerModelCall,
   type PrivateAnswerPlaintextV1,
@@ -105,6 +106,8 @@ export interface PrivateAnswerJobsOptions {
    * one analysis's run, from its start.
    */
   analysisTimeoutMs?: number;
+  /** The same bound for a `detail: "full"` job (default PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS). */
+  fullAnalysisTimeoutMs?: number;
   /** Start each job's analysis when the job is created (default true). */
   precompute?: boolean;
   /**
@@ -210,6 +213,7 @@ export type PrivateEvidenceRefresh = (signal: AbortSignal) => Promise<readonly P
  */
 interface Analysis {
   readonly key: string;
+  readonly detail: PrivateAnswerDetail;
   readonly createdAt: number;
   /** Set when a claim waits on it: claimed work runs first, oldest claim first. */
   claimedAt: number | undefined;
@@ -232,6 +236,7 @@ interface Job {
   readonly createdAt: number;
   readonly expiresAt: number;
   readonly caller: string | undefined;
+  readonly detail: PrivateAnswerDetail;
   question: string | undefined;
   evidence: readonly PrivateEvidenceItem[] | undefined;
   refresh: PrivateEvidenceRefresh | undefined;
@@ -273,6 +278,12 @@ const PENDING_RETRY_SECONDS = 2;
  * engine is still running.
  */
 export const PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 100_000;
+/**
+ * A `detail: "full"` job reads its leading items whole and writes a longer
+ * answer, which a busy Mac can take well past the summary bound to finish.
+ * The job's `_meta` says `detail: "full"`, so the panel can wait this long.
+ */
+export const PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 180_000;
 /** An identical question asked again within this long reuses the answer. */
 export const PRIVATE_ANSWER_DEDUPE_MS = 3 * 60_000;
 /** An unclaimed job's precompute not started within this long of its search is abandoned. */
@@ -344,6 +355,7 @@ export class PrivateAnswerJobs {
   private readonly resetTimeoutMs: number;
   private readonly claimRate: { capacity: number; refillPerSecond: number };
   private readonly analysisTimeoutMs: number;
+  private readonly fullAnalysisTimeoutMs: number;
   private readonly dedupeMs: number;
   private readonly precomputeWindowMs: number;
   private readonly audit: (event: PrivateAnswerAuditEvent) => void;
@@ -371,6 +383,7 @@ export class PrivateAnswerJobs {
     this.resetTimeoutMs = options.resetTimeoutMs ?? 30_000;
     this.claimRate = options.claimRate ?? { capacity: 60, refillPerSecond: 10 };
     this.analysisTimeoutMs = options.analysisTimeoutMs ?? PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS;
+    this.fullAnalysisTimeoutMs = options.fullAnalysisTimeoutMs ?? PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS;
     this.dedupeMs = options.dedupeMs ?? PRIVATE_ANSWER_DEDUPE_MS;
     this.precomputeWindowMs = options.precomputeWindowMs ?? PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS;
     this.audit = options.audit ?? defaultAudit;
@@ -407,6 +420,8 @@ export class PrivateAnswerJobs {
     evidence: readonly PrivateEvidenceItem[];
     refresh?: PrivateEvidenceRefresh;
     caller?: string;
+    /** `full` reads the leading items in depth (slower); `summary` by default. */
+    detail?: PrivateAnswerDetail;
   }): PrivateMatchSummary & { jobId?: string } {
     const count = Math.max(0, Math.min(PRIVATE_MATCH_COUNT_CAP, Math.floor(input.count)));
     const status = this.options.model().status();
@@ -435,6 +450,7 @@ export class PrivateAnswerJobs {
       createdAt: at,
       expiresAt: at + this.ttlMs,
       caller: input.caller,
+      detail: input.detail === 'full' ? 'full' : 'summary',
       question: input.question.slice(0, MAX_QUESTION_CHARS),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
       refresh: input.refresh,
@@ -446,7 +462,7 @@ export class PrivateAnswerJobs {
     };
     this.jobs.set(id, job);
     if (this.options.precompute !== false) this.precompute(job);
-    return { count, panelState: 'ready', jobId: id };
+    return { count, panelState: 'ready', jobId: id, ...(job.detail === 'full' ? { detail: 'full' as const } : {}) };
   }
 
   /** One panel POST: claim, poll, or collect (idempotent for the claiming key until expiry). */
@@ -549,7 +565,7 @@ export class PrivateAnswerJobs {
   private precompute(job: Job): void {
     const evidence = (job.evidence ?? []).filter(isPrivateEligible);
     if (evidence.length === 0 || job.question === undefined) return;
-    const analysis = this.analysisFor(job.question, evidence, undefined);
+    const analysis = this.analysisFor(job.question, job.detail, evidence, undefined);
     this.attach(job, analysis);
     if (job.caller !== undefined) {
       for (const other of this.jobs.values()) {
@@ -566,8 +582,15 @@ export class PrivateAnswerJobs {
    * window when `fresh` is not given, else a new one (queued, and shared
    * from now on). `claimedAt` marks a claim's own computation.
    */
-  private analysisFor(question: string, evidence: readonly PrivateEvidenceItem[], claimedAt: number | undefined, fresh = false): Analysis {
-    const key = questionKey(question);
+  private analysisFor(
+    question: string,
+    detail: PrivateAnswerDetail,
+    evidence: readonly PrivateEvidenceItem[],
+    claimedAt: number | undefined,
+    fresh = false,
+  ): Analysis {
+    // The same question in another detail is another answer.
+    const key = `${detail}\u0000${questionKey(question)}`;
     const at = this.now();
     const existing = this.shared.get(key);
     if (!fresh && existing && existing.state !== 'failed' && existing.createdAt + this.dedupeMs > at) return existing;
@@ -577,6 +600,7 @@ export class PrivateAnswerJobs {
     });
     const analysis: Analysis = {
       key,
+      detail,
       createdAt: at,
       claimedAt,
       question,
@@ -709,7 +733,7 @@ export class PrivateAnswerJobs {
       abort.abort();
       this.resetInBackground();
       free();
-    }, this.analysisTimeoutMs);
+    }, this.timeoutFor(analysis.detail));
     (deadlineTimer as { unref?: () => void }).unref?.();
     const question = analysis.question ?? '';
     const evidence = analysis.evidence ?? [];
@@ -729,7 +753,7 @@ export class PrivateAnswerJobs {
           modelCall: (call) => {
             analysis.stats.calls.push(call);
           },
-        });
+        }, { detail: analysis.detail });
         return { result, used };
       } finally {
         analysis.stats.modelMs = this.now() - modelStarted;
@@ -805,7 +829,7 @@ export class PrivateAnswerJobs {
       settle({ kind: 'failed' }, 'deadline');
       abort.abort();
       if (hung) this.resetInBackground();
-    }, this.analysisTimeoutMs);
+    }, this.timeoutFor(job.detail));
     (deadlineTimer as { unref?: () => void }).unref?.();
     // A job dropped (expired) while it waits settles at once.
     abort.signal.addEventListener('abort', () => settle({ kind: 'failed' }, 'aborted'), { once: true });
@@ -850,7 +874,7 @@ export class PrivateAnswerJobs {
         // for this claim reads the current evidence itself.
         const precomputed = analysis !== undefined;
         if (!analysis) {
-          analysis = this.analysisFor(question, evidence, claimedAt, true);
+          analysis = this.analysisFor(question, job.detail, evidence, claimedAt, true);
           this.attach(job, analysis);
         } else if (analysis.state === 'queued' || analysis.state === 'running') {
           analysis.claimedAt ??= claimedAt;
@@ -882,6 +906,11 @@ export class PrivateAnswerJobs {
       settle({ kind: 'failed' }, 'error');
     });
     return done;
+  }
+
+  /** The hard deadline for an analysis (and a claim) of this detail. */
+  private timeoutFor(detail: PrivateAnswerDetail): number {
+    return detail === 'full' ? Math.max(this.analysisTimeoutMs, this.fullAnalysisTimeoutMs) : this.analysisTimeoutMs;
   }
 
   private beginActivity(): void {

@@ -512,6 +512,7 @@ describe('the response builder', () => {
     // answered in the panel the same way, from a self-contained search.
     expect(PRIVATE_MATCH_PANEL_NOTE).toContain("Don't ask the user to upload, attach or paste those files");
     expect(PRIVATE_MATCH_PANEL_NOTE).toContain('Follow-up questions about them are answered privately in the panel the same way');
+    expect(PRIVATE_MATCH_PANEL_NOTE).toContain('set the detail argument to full when the user asks for all the details');
   });
 
   test('the resource declares the relay as its one connect domain', () => {

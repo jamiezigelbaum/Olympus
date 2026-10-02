@@ -33,7 +33,7 @@ import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, SEARCH_TOOL_NAME } from '.
 import { DASHBOARD_RESOURCE, dashboardResourceHtml, dashboardResourceMeta, matchesResourceUri } from './dashboard-resource.ts';
 import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from './dashboard-view-model.ts';
 import { callSetupTool, isSetupTool, SETUP_TOOLS, type ChatGptSetupBackend } from './setup-tools.ts';
-import { PRIVATE_ANSWER_RESOURCE_URI, type PrivateEvidenceItem, type PrivateMatchSummary } from './private-answer-contract.ts';
+import { PRIVATE_ANSWER_RESOURCE_URI, type PrivateAnswerDetail, type PrivateEvidenceItem, type PrivateMatchSummary } from './private-answer-contract.ts';
 import type { PrivateAnswerJobs, PrivateEvidenceRefresh } from './private-answer-jobs.ts';
 import { PRIVATE_ANSWER_RESOURCE, privateAnswerResourceHtml, privateAnswerResourceMeta } from './private-answer-resource.ts';
 import {
@@ -132,6 +132,21 @@ export const DASHBOARD_TOOL: ChatGptToolDefinition = {
   _meta: dashboardToolMeta(),
 };
 
+/**
+ * The `detail` argument: how much Olympus's private answer (the panel under
+ * the result) reads. ChatGPT's model sets it from what the user asked for;
+ * Olympus never parses the question for it.
+ */
+const DETAIL_PROPERTY = {
+  type: 'string',
+  enum: ['summary', 'full'],
+  description: [
+    'How much of the matching items the private answer reads. Leave it out (summary) for ordinary questions: faster.',
+    'Use "full" when the user asks for all the details, the full results, every value, the whole document or',
+    'similar, including a follow-up asking for more about something already answered; it is slower.',
+  ].join(' '),
+} as const;
+
 export const SOURCE_ANSWER_TOOL: ChatGptToolDefinition = {
   name: 'source_answer',
   title: 'Ask Olympus',
@@ -150,6 +165,7 @@ export const SOURCE_ANSWER_TOOL: ChatGptToolDefinition = {
     type: 'object',
     properties: {
       question: { type: 'string', description: 'The user\'s question, in their own words, with any names, dates or places they gave.' },
+      detail: DETAIL_PROPERTY,
     },
     required: ['question'],
     additionalProperties: false,
@@ -209,6 +225,7 @@ export const SEARCH_TOOL: ChatGptToolDefinition = {
     properties: {
       question: { type: 'string', description: 'The user\'s question, in their own words, with any names, dates or places they gave.' },
       limit: { type: 'integer', minimum: 1, maximum: 48, description: 'How many items to return (default 24).' },
+      detail: DETAIL_PROPERTY,
     },
     required: ['question'],
     additionalProperties: false,
@@ -277,6 +294,7 @@ export async function callChatGptTool(
           ? args.limit
           : undefined;
         if (args.limit !== undefined && limit === undefined) throw new ChatGptSurfaceError('invalid_params');
+        const detail = detailArgument(args.detail);
         if (!options.evidenceSearch) throw new ChatGptSurfaceError('unavailable');
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const [raw, probed] = await Promise.all([
@@ -288,7 +306,7 @@ export async function callChatGptTool(
         // only once ChatGPT can see it.
         const match = normalizeProbe(probed);
         const privateMatch = match.count > 0
-          ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx) }, options)
+          ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx), detail }, options)
           : undefined;
         return searchToolResult(raw, privateMatch ? { privateMatch } : {});
       }
@@ -296,6 +314,7 @@ export async function callChatGptTool(
         if (!answerToolsListed(ctx, options)) throw new ChatGptSurfaceError('unknown_tool');
         const question = typeof args.question === 'string' ? args.question.trim() : '';
         if (!question) throw new ChatGptSurfaceError('invalid_params');
+        const detail = detailArgument(args.detail);
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const [raw, probed] = await Promise.all([
           // Public and Personal evidence only: nothing Private, not even a
@@ -310,7 +329,7 @@ export async function callChatGptTool(
         ]);
         const match = normalizeProbe(probed);
         const pending: PendingPrivateMatch | undefined = match.count > 0
-          ? { question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx) }
+          ? { question, match, refresh: privateRefresh(question, probe, later), caller: privateCaller(ctx), detail }
           : undefined;
         const jobId = pendingJobId(raw);
         if (jobId) {
@@ -374,6 +393,14 @@ interface PendingPrivateMatch {
   refresh: PrivateEvidenceRefresh;
   /** The connection that asked: its newer job supersedes its older precomputes. */
   caller?: string | undefined;
+  detail: PrivateAnswerDetail;
+}
+
+/** The tool's `detail` argument: absent is `summary`; anything but the two values is invalid. */
+function detailArgument(value: unknown): PrivateAnswerDetail {
+  if (value === undefined || value === 'summary') return 'summary';
+  if (value === 'full') return 'full';
+  throw new ChatGptSurfaceError('invalid_params');
 }
 
 /** The asking connection's id, when the caller has one. */
@@ -396,10 +423,10 @@ function privateRefresh(
  * ready, else counts and state. Called as the answered result is built.
  */
 function beginPrivateAnswer(pending: PendingPrivateMatch, options: ChatGptSurfaceOptions): PrivateMatchSummary & { jobId?: string } {
-  const { question, match, refresh, caller } = pending;
+  const { question, match, refresh, caller, detail } = pending;
   if (!options.privateAnswers) return { count: match.count, panelState: 'no_model' };
   try {
-    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence, refresh, ...(caller ? { caller } : {}) });
+    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence, refresh, detail, ...(caller ? { caller } : {}) });
   } catch {
     return { count: match.count, panelState: 'no_model' };
   }

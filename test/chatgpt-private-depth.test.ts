@@ -20,7 +20,12 @@ import {
   leadingCount,
   panelSelection,
 } from '../src/workers/chatgpt/private-answer-model.ts';
-import type { PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
+import { PRIVATE_ANSWER_META_KEY, type PrivateAnswerModel, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
+import { generatePanelKeyPair } from '../src/workers/chatgpt/private-answer-crypto.ts';
+import { PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS, PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { SEARCH_TOOL, SOURCE_ANSWER_TOOL, callChatGptTool, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
+import { copyPrivateMatch } from '../src/workers/chatgpt/response-builder.ts';
+import type { OperationContext } from '../src/core/operations.ts';
 
 function hit(id: string, title: string, text: string): PrivateEvidenceItem {
   return {
@@ -71,7 +76,7 @@ describe('reading leading items in depth', () => {
     });
   }
 
-  test('the follow-up reads both leading reports whole, with the deep prompt and answer budget, and cites only what it used', async () => {
+  test('detail "full": the follow-up reads both leading reports whole, with the deep prompt and answer budget, and cites only what it used', async () => {
     const evidence = [
       hit('bw1', 'blood work 1.pdf', 'header only'),
       hit('bw2', 'blood work 2.pdf', 'header only'),
@@ -96,7 +101,7 @@ describe('reading leading items in depth', () => {
         return { url: `https://www.dropbox.com/home/Labs?preview=${id}`, localPath: `/Users/x/Dropbox/Labs/${id}` };
       },
     });
-    const result = await panel.answerPrivately('can you give me all the details from that lab please?', evidence);
+    const result = await panel.answerPrivately('June 2026 blood work all details', evidence, undefined, undefined, { detail: 'full' });
     expect(seen!.items.map((item) => item.id)).toEqual(['bw1', 'bw2']);
     expect(seen!.options.maxPromptBytes).toBe(PANEL_ANSWER_LIMITS.deepPromptBytes);
     expect(seen!.options.maxAnswerChars).toBe(PANEL_ANSWER_LIMITS.deepAnswerChars);
@@ -109,6 +114,33 @@ describe('reading leading items in depth', () => {
       { title: 'blood work 1.pdf', source: 'fixture', url: 'https://www.dropbox.com/home/Labs?preview=bw1', localPath: '/Users/x/Dropbox/Labs/bw1' },
       { title: 'blood work 2.pdf', source: 'fixture', url: 'https://www.dropbox.com/home/Labs?preview=bw2', localPath: '/Users/x/Dropbox/Labs/bw2' },
     ]);
+  });
+
+  test('summary (the default): leading items only, re-read for their best passages within the summary budget, at the standard prompt and answer budget', async () => {
+    const evidence = [
+      hit('bw1', 'blood work 1.pdf', 'header only'),
+      hit('bw2', 'blood work 2.pdf', 'header only'),
+      hit('april', 'april report.pdf', 'near text'),
+      hit('far', 'far report.pdf', 'far text'),
+    ];
+    let seen: { items: readonly BuiltInEvidenceItem[]; options: AnswerPrivatelyOptions } | undefined;
+    const sizes: number[] = [];
+    const panel = panelWith(async (_q, items, options) => {
+      seen = { items, options };
+      return { answer: 'x', citations: [{ id: 'bw1', claim: 'c' }], unanswered: [], modelId: 'm' };
+    }, {
+      relevance: async () => [0.505, 0.497, 0.416, 0.40],
+      readItem: async (_item, request) => {
+        sizes.push(request.maxChars);
+        return ['results page '.repeat(1_000).slice(0, request.maxChars)];
+      },
+    });
+    await panel.answerPrivately('What did my June 2026 blood work show?', evidence);
+    expect(seen!.items.map((item) => item.id)).toEqual(['bw1', 'bw2']);
+    expect(seen!.options.maxPromptBytes).toBe(PANEL_ANSWER_LIMITS.maxPromptBytes);
+    expect(seen!.options.maxAnswerChars).toBe(PANEL_ANSWER_LIMITS.maxAnswerChars);
+    expect(seen!.items.reduce((sum, item) => sum + item.text.length, 0)).toBeLessThanOrEqual(PANEL_ANSWER_LIMITS.leadingEvidenceChars);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(PANEL_ANSWER_LIMITS.leadingEvidenceChars);
   });
 
   test('without a clear lead, four items at the standard budget; an uncited item is not a source', async () => {
@@ -188,5 +220,87 @@ describe('the gaps the panel shows', () => {
       evidenceFormat: 'compact',
     });
     expect(partial.unanswered).toEqual(['Lead is not in these items.']);
+  });
+});
+
+describe('detail: chosen by ChatGPT\'s model through the tool argument', () => {
+  const INSTALL = 'a'.repeat(32);
+  const EVIDENCE = [{ title: 'e', trust_domain: 'secure_local' }];
+
+  function recordingModel() {
+    const calls: Array<{ question: string; detail: string | undefined }> = [];
+    const model: PrivateAnswerModel = {
+      status: () => ({ state: 'ready' }),
+      answerPrivately: async (question, _evidence, _signal, _observe, request) => {
+        calls.push({ question, detail: request?.detail });
+        return { answer: 'a', citations: [] };
+      },
+    };
+    return { model, calls };
+  }
+
+  test('olympus_search and source_answer declare it; anything but summary/full is refused', async () => {
+    for (const tool of [SEARCH_TOOL, SOURCE_ANSWER_TOOL]) {
+      expect(tool.inputSchema.properties.detail).toMatchObject({ type: 'string', enum: ['summary', 'full'] });
+      expect(tool.inputSchema.required).toEqual(['question']);
+    }
+    expect(String((SEARCH_TOOL.inputSchema.properties.detail as { description: string }).description)).toContain('"full" when the user asks for all the details');
+    const { model } = recordingModel();
+    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 });
+    const options: ChatGptSurfaceOptions = {
+      dashboardView: async () => ({}) as never,
+      evidenceSearch: async () => ({ evidence: [], coverage: {} }),
+      privateMatchProbe: async () => ({ count: 1, evidence: EVIDENCE }),
+      privateAnswers: jobs,
+    };
+    const bad = await callChatGptTool(SEARCH_TOOL.name, { question: 'q', detail: 'everything' }, {} as OperationContext, options);
+    expect(bad.isError).toBe(true);
+  });
+
+  test('it flows into the private job, the job\'s _meta says detail "full", and the same question in each detail is a separate answer', async () => {
+    const { model, calls } = recordingModel();
+    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 });
+    const options: ChatGptSurfaceOptions = {
+      dashboardView: async () => ({}) as never,
+      evidenceSearch: async () => ({ evidence: [], coverage: {} }),
+      privateMatchProbe: async () => ({ count: 1, evidence: EVIDENCE }),
+      privateAnswers: jobs,
+    };
+    const full = await callChatGptTool(SEARCH_TOOL.name, { question: 'June 2026 blood work', detail: 'full' }, {} as OperationContext, options);
+    const summary = await callChatGptTool(SEARCH_TOOL.name, { question: 'June 2026 blood work' }, {} as OperationContext, options);
+    const fullMeta = (full._meta as Record<string, Record<string, unknown>>)[PRIVATE_ANSWER_META_KEY]!;
+    const summaryMeta = (summary._meta as Record<string, Record<string, unknown>>)[PRIVATE_ANSWER_META_KEY]!;
+    expect(fullMeta).toMatchObject({ v: 1, state: 'ready', detail: 'full' });
+    expect(summaryMeta).not.toHaveProperty('detail');
+    // The model never sees it: only the widget-only _meta carries it.
+    expect(JSON.stringify(full.structuredContent ?? {})).not.toContain('"detail"');
+    await Bun.sleep(30);
+    expect(calls.map((call) => call.detail).sort()).toEqual(['full', 'summary']);
+  });
+
+  test('copyPrivateMatch carries detail only for a ready full job', () => {
+    const jobId = `oly2p.${INSTALL}.${'A'.repeat(43)}`;
+    expect(copyPrivateMatch({ count: 2, panelState: 'ready', jobId, detail: 'full' })).toEqual({ v: 1, count: 2, state: 'ready', jobId, detail: 'full' });
+    expect(copyPrivateMatch({ count: 2, panelState: 'ready', jobId, detail: 'summary' })).toEqual({ v: 1, count: 2, state: 'ready', jobId });
+    expect(copyPrivateMatch({ count: 2, panelState: 'no_model', detail: 'full' })).toEqual({ v: 1, count: 2, state: 'no_model' });
+  });
+
+  test('a full job has the longer deadline; a summary job keeps the short one', async () => {
+    const never: PrivateAnswerModel = { status: () => ({ state: 'ready' }), answerPrivately: () => new Promise(() => {}) };
+    const lines: string[] = [];
+    const jobs = new PrivateAnswerJobs({
+      model: () => never, installId: () => INSTALL, log: (line) => lines.push(line), claimHoldMs: 0,
+      analysisTimeoutMs: 40, fullAnalysisTimeoutMs: 400, audit: () => {},
+    });
+    const summary = jobs.begin({ question: 's', count: 1, evidence: EVIDENCE }).jobId!;
+    const full = jobs.begin({ question: 'f', count: 1, evidence: EVIDENCE, detail: 'full' }).jobId!;
+    const key = (await generatePanelKeyPair()).publicKey;
+    const key2 = (await generatePanelKeyPair()).publicKey;
+    await jobs.claim(summary, key);
+    await jobs.claim(full, key2);
+    await Bun.sleep(150);
+    expect((await jobs.claim(summary, key)).body.status).toBe('failed');
+    expect((await jobs.claim(full, key2)).body.status).toBe('pending');
+    expect(PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS).toBe(180_000);
   });
 });

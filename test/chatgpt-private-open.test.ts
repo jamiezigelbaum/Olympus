@@ -55,9 +55,12 @@ function makeJobs(
 
 async function collect(jobs: PrivateAnswerJobs, jobId: string): Promise<PrivateAnswerPlaintextV1> {
   const panel = await generatePanelKeyPair();
-  await jobs.claim(jobId, panel.publicKey);
-  await Bun.sleep(30);
-  const ready = await jobs.claim(jobId, panel.publicKey);
+  let ready = await jobs.claim(jobId, panel.publicKey);
+  // Poll (as the panel does) until the sealed answer is there; a busy runner can take a moment.
+  for (let attempt = 0; attempt < 100 && (ready.body.status === 'pending' || ready.body.status === 'rate_limited'); attempt += 1) {
+    await Bun.sleep(20);
+    ready = await jobs.claim(jobId, panel.publicKey);
+  }
   expect(ready.body.status).toBe('ready');
   return JSON.parse(await openPrivateAnswer(jobId, panel.privateKey, ready.body as unknown as SealedPrivateAnswer));
 }

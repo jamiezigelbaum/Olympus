@@ -338,7 +338,8 @@ export const PRIVATE_MATCH_PANEL_NOTE = 'Some items matching this question are m
   + 'and don\'t suggest changing folder settings for those items. '
   + 'Don\'t ask the user to upload, attach or paste those files: Olympus already has them. '
   + 'Follow-up questions about them are answered privately in the panel the same way: '
-  + 'search Olympus again with the follow-up as a complete question (name the item, its date or subject).';
+  + 'search Olympus again with the follow-up as a complete question (name the item, its date or subject), '
+  + 'and set the detail argument to full when the user asks for all the details, the full results or every value.';
 /** The same bit while the panel cannot answer yet (no private model, or it is still downloading). */
 export const PRIVATE_MATCH_PANEL_SETUP_NOTE = 'Some items matching this question are marked Private in Olympus. '
   + 'Their contents stay on the user\'s Mac and are never shown to you; the private answer panel above '
@@ -546,6 +547,7 @@ export function copyPrivateMatch(match: (PrivateMatchSummary & { jobId?: string 
       out.state = 'no_model';
     } else {
       out.jobId = match.jobId;
+      if (match.detail === 'full') out.detail = 'full';
     }
   }
   if (state === 'model_downloading' && finite(match.percent)) out.percent = Math.max(0, Math.min(100, Math.round(match.percent)));

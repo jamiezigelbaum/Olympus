@@ -110,10 +110,8 @@ export interface PanelAnswerLimits {
   /**
    * At most this many items can lead (0 turns leading off). When the top
    * one or two items clearly lead the rest by relevance, the panel reads
-   * only them, in depth: their whole text (or their best passages, when
-   * longer) within `deepEvidenceChars`, a larger prompt and a longer answer.
-   * A request for every detail of an item then reads all of it, instead of
-   * four thin slices of four items.
+   * only them (an item merely within the relevance floor is left out),
+   * re-read for their best passages within `leadingEvidenceChars`.
    */
   maxLeadingItems: number;
   /**
@@ -122,7 +120,14 @@ export interface PanelAnswerLimits {
    * together and clearly apart from the rest).
    */
   leadGap: number;
-  /** Characters of item text read in depth, shared by the leading items. */
+  /** Characters of the leading items' text a summary answer reads (their best passages). */
+  leadingEvidenceChars: number;
+  /**
+   * `detail: "full"`: characters of item text read in depth (whole items
+   * when they fit), shared by the items read, with the larger prompt and
+   * answer budgets below. ChatGPT's model asks for it through the tool's
+   * `detail` argument when the user wants every detail.
+   */
   deepEvidenceChars: number;
   /** The prompt ceiling when reading in depth (about 6k tokens). */
   deepPromptBytes: number;
@@ -139,6 +144,7 @@ export const PANEL_ANSWER_LIMITS: Readonly<PanelAnswerLimits> = {
   audit: false,
   maxLeadingItems: 2,
   leadGap: 0.01,
+  leadingEvidenceChars: 5_000,
   deepEvidenceChars: 10_000,
   deepPromptBytes: 14_500,
   deepAnswerChars: 3_700,
@@ -162,19 +168,24 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       }
       return { state: 'no_model' };
     },
-    async answerPrivately(question, evidence, signal, observe) {
+    async answerPrivately(question, evidence, signal, observe, request) {
+      const full = request?.detail === 'full';
       if (!model) throw new Error('no private answer model');
       const read = privateEvidence(evidence, limits.maxPassageChars);
       const unreadable = read.unreadable;
       const selection = await panelSelection(question, read, limits, options.relevance, signal);
       const picked = selection.items;
       let items = picked.map((index) => read.items[index]!);
-      if (selection.leading && options.readItem) {
+      // Full: the items read are re-read whole (or their best passages)
+      // within the deep budget. Summary: only leading items are re-read, for
+      // their best passages within a summary-sized budget (results pages,
+      // not page headers); otherwise the search-time passages are read.
+      if (options.readItem && (full || selection.leading)) {
         items = await readInDepth(
           question,
           items,
           picked.map((index) => evidence[read.sources[index]!]!),
-          limits.deepEvidenceChars,
+          full ? limits.deepEvidenceChars : limits.leadingEvidenceChars,
           options.readItem,
           signal,
         );
@@ -196,8 +207,8 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       }
       const result = await options.answer(question, items, {
         model,
-        maxPromptBytes: selection.leading ? limits.deepPromptBytes : limits.maxPromptBytes,
-        maxAnswerChars: selection.leading ? limits.deepAnswerChars : limits.maxAnswerChars,
+        maxPromptBytes: full ? limits.deepPromptBytes : limits.maxPromptBytes,
+        maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
         audit: limits.audit,
         evidenceFormat: 'compact',
         ...(observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {}),

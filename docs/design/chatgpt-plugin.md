@@ -238,8 +238,9 @@ Private and that Olympus answers from them only to the user, in the panel
 (owner decision, Jamie, 2026-10-02, superseding the 2026-10-01 "nothing"
 rule). The note also tells the model not to ask the user to upload, attach
 or paste those files, and that a follow-up is answered privately in the
-panel the same way, from a search with the follow-up as a complete question
-(the panel sees only the search's question, not the conversation; owner
+panel the same way, from a search with the follow-up as a complete question,
+with `detail: "full"` when the user asks for every detail (the panel sees
+only the search's question, not the conversation; owner
 report 2026-10-02: ChatGPT asked the user to "attach the June report or
 paste its text"). Without it, the model saw only Personal titles and coverage gaps for
 those items, told the user Olympus "returned only its title", and sent them
@@ -296,7 +297,7 @@ percent when known; counts only, no job).
      While an analysis runs it counts as answer activity, so the tier
      sniffer yields the shared model to it.
 3. **Tool result.** The answer tool's result `_meta["olympus/privateAnswer"]`
-   is `{v:1, count, state, jobId?, percent?}` and nothing else (the response
+   is `{v:1, count, state, jobId?, percent?, detail?}` and nothing else (the response
    builder copies exactly these fields). `_meta` is widget-only: ChatGPT does
    not put it in the model's context. The job id never appears in the text
    content or `structuredContent`; the only match signal there is the fixed
@@ -348,23 +349,35 @@ percent when known; counts only, no job).
      reports from other months first by retrieval, and the small model
      answered from them; by name similarity the right files led with a clear
      margin, and the prompt shrank from about 3,700 to about 1,600 tokens.
-   - **Leading items read in depth (2026-10-02).** When the top one or two
-     items clearly lead (the drop from the k-th to the next item is at least
-     0.01 and at least the spread among the k; or only one item is
-     readable), the model reads only them, in depth: each is read again from
-     its local store, whole when the leading items fit 11,000 characters
-     together (layout whitespace compacted), otherwise the shorter ones whole
-     and the rest re-read for their best passages at an equal share of the
-     remainder; the prompt ceiling is about 5k tokens (15,500 bytes) and the
-     answer may run to about 2,500 characters. An item that is merely within
-     the 0.04 floor of leading items is left out. Owner report: the
-     follow-up "can you give me all the details from that lab please?"
-     reached the panel as four thin slices of four items and was answered
-     "the provided evidence does not contain the details"; the first answer
-     also listed an unrelated report as a source and missed values that sat
-     on later pages. The Analyst instruction allows a longer answer only
-     when the question asks for details, all results or a full list (one
-     generic sentence; no question is parsed).
+   - **Detail: summary or full (2026-10-02).** `olympus_search` and
+     `source_answer` take an optional `detail` argument, `"summary"`
+     (default) or `"full"`, which ChatGPT's model sets: its schema says to
+     use `"full"` when the user asks for all the details, the full results,
+     every value or similar, including a follow-up asking for more. Olympus
+     never parses the question for it. The job keeps it, the dedupe key
+     includes it, and a full job's `_meta` carries
+     `olympus/privateAnswer.detail: "full"` (absent for summary) so the
+     panel can wait longer.
+     - *Leading items (both modes).* When the top one or two items clearly
+       lead (the drop from the k-th to the next item is at least 0.01 and at
+       least the spread among the k; or only one item is readable), only
+       they are read; an item merely within the 0.04 floor of them is left
+       out (live: an April report listed as a source of a June answer).
+     - *Summary.* The leading items are re-read for their best passages
+       within 5,000 characters (results pages rather than page headers;
+       otherwise the search-time passages), under the 11,000-byte prompt and
+       1,000-character answer budget. Fast, like the panel before.
+     - *Full.* The items read are re-read whole, when they fit 10,000
+       characters together (layout whitespace compacted), else the shorter
+       whole and the rest at an equal share of the remainder, for their best
+       passages; the prompt ceiling is 14,500 bytes (about 4.5k tokens) and
+       the answer about 2,000 characters. Its analysis and claim deadline is
+       180 s (`PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS`) instead of 100 s.
+       Owner report: "can you give me all the details from that lab please?"
+       reached the panel as four thin slices of four items and was answered
+       "the provided evidence does not contain the details".
+     The Analyst instruction allows a longer answer only when the question
+     asks for details, all results or a full list (one generic sentence).
    - **Sources.** Only the items the answer cites are its sources. Each
      carries its title and, when it can, where it opens
      (`citations[].open`): `{kind:"mac", token}` when the file is synced to

@@ -37,12 +37,27 @@ export const PRIVATE_MATCH_COUNT_CAP = 50;
  */
 export type PrivateAnswerPanelState = 'ready' | 'no_model' | 'model_downloading';
 
+/**
+ * How much the private answer reads, chosen by ChatGPT's model through the
+ * tool's `detail` argument (never by parsing the question):
+ * - `summary` (default): the few most relevant items' best passages, a short
+ *   answer, fast.
+ * - `full`: the one or two leading items read whole, a longer answer; slower
+ *   (its analysis may take up to PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS).
+ */
+export type PrivateAnswerDetail = 'summary' | 'full';
+
 export interface PrivateAnswerMetaV1 {
   v: 1;
   count: number;
   state: PrivateAnswerPanelState;
   /** `oly2p.<installId>.<secret>`; only when state is `ready`. */
   jobId?: string;
+  /**
+   * `full` when the job reads in depth (the panel may wait longer for it, up
+   * to the full analysis deadline); absent for a summary job.
+   */
+  detail?: 'full';
   /** 0-100; only when state is `model_downloading` and known. */
   percent?: number;
 }
@@ -51,6 +66,7 @@ export interface PrivateMatchSummary {
   count: number;
   panelState: PrivateAnswerPanelState;
   percent?: number;
+  detail?: PrivateAnswerDetail;
 }
 
 /** One source of a private answer, as the panel decrypts it. */
@@ -134,6 +150,7 @@ export interface PrivateAnswerModel {
     evidence: readonly PrivateEvidenceItem[],
     signal?: AbortSignal,
     observe?: PrivateAnswerObserver,
+    options?: { detail?: PrivateAnswerDetail },
   ): Promise<{ answer: string; citations: PrivateAnswerSourceCitation[]; unanswered?: string[] }>;
   /**
    * Kill or reset the model runtime (its child process or session). Called
