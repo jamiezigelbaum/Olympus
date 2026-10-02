@@ -95,6 +95,7 @@ export function sourceVersion(root: string): string {
 
 /** Copy a tarball into site/releases and write site/install.sh pinned to it. */
 export function publishToSite(input: { root: string; artifact: string }): ReleasePins & { tarball: string; installScript: string } {
+  if (!existsSync(input.artifact)) throw new Error(`${input.artifact} does not exist.`);
   const version = sourceVersion(input.root);
   const expectedName = `olympus-${version}.tgz`;
   if (basename(input.artifact) !== expectedName) {
