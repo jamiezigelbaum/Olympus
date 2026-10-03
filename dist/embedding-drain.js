@@ -23621,10 +23621,6 @@ var CONNECTOR_PROMPT = [
 // src/workers/dashboard/pages/sensitivity.ts
 init_privacy_language();
 init_vocabulary();
-var TIER_NAMES = {
-  secure: SENSITIVITY_TIER_LABELS.secure,
-  secrets: SENSITIVITY_TIER_LABELS.secrets
-};
 
 // src/workers/dashboard/pages/privacy.ts
 init_mail_source_scope();

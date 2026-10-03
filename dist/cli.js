@@ -84017,11 +84017,7 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 @media (prefers-reduced-motion: reduce) {
   .bar.indet.working i { animation: none; width: 100%; background: var(--line2); }
 }
-`, DASHBOARD_POLICY_CSS = `.catrow { display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.catrow .name { font-weight: 600; color: var(--t2); }
-.catrow .what { color: var(--t4); font-size: var(--fs-caption); }
-.catrow .tier { color: var(--t3); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
-.scoperow { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; margin-bottom: 6px; }
+`, DASHBOARD_POLICY_CSS = `.scoperow { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; margin-bottom: 6px; }
 .scoperow .rid { font-family: var(--mono); font-size: var(--fs-caption); font-weight: 600; color: var(--t2); }
 .scoperow .what { color: var(--t3); font-size: var(--fs-caption); }
 .sect.gap { margin-top: 44px; }
@@ -84036,9 +84032,6 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 .chip { background: var(--panel); border: 1px solid var(--line2); border-radius: 999px; padding: 3px 11px; color: var(--t3); font-size: var(--fs-caption); }
 .chip b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
 .vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-@media (max-width: 700px) {
-  .catrow { grid-template-columns: 1fr; gap: 4px; }
-}
 `, DASHBOARD_NAV_CSS = `.top { position: sticky; top: 0; z-index: 12; background: var(--bg); padding-top: 2px; }
 .dnav { position: sticky; top: 39px; z-index: 11; display: flex; gap: 4px; margin: -8px 0 22px; border-bottom: 1px solid var(--line2); background: var(--bg); }
 .dnav .dnavlink { color: var(--t3); text-decoration: none; font-size: var(--fs-caption); padding: 6px 12px 8px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
@@ -88034,9 +88027,6 @@ function backgroundRow(input) {
   }
   return `<a class="bgrow" href="${escapeHtml2(href)}" aria-label="${escapeHtml2(input.label)}">` + `${lines}<span class="go" aria-hidden="true">→</span>` + `</a>`;
 }
-function categoryRow(input) {
-  return `<div class="catrow">` + `<span class="name">${escapeHtml2(input.name)}</span>` + `<span class="what">${escapeHtml2(input.interpretation)}</span>` + `<span class="tier">${escapeHtml2(input.note)}</span>` + `</div>`;
-}
 function permissionCell(allowed) {
   const mark = allowed ? "✓" : "✕";
   const word = allowed ? "Permitted" : "Not permitted";
@@ -90930,9 +90920,6 @@ var init_home = __esm(() => {
 });
 
 // src/workers/dashboard/contract.ts
-function dashboardSensitivityCategories(view) {
-  return view.sensitivity?.categories ?? [];
-}
 function dashboardSensitivityTiers(view) {
   return view.sensitivity_tiers?.tiers ?? [];
 }
@@ -92299,29 +92286,8 @@ function renderDashboardSensitivityPage(view, options) {
   });
 }
 function renderDashboardSensitivityBody(view, options) {
-  return [dashboardPrivacySection(options), renderCategories(view), renderTiers(view)].filter((section) => section.length > 0).join(`
+  return [dashboardPrivacySection(options), renderTiers(view)].filter((section) => section.length > 0).join(`
 `);
-}
-function renderCategories(view) {
-  const categories = dashboardSensitivityCategories(view);
-  if (categories.length === 0)
-    return "";
-  const rows = categories.map((category) => categoryRow({
-    name: category.label,
-    interpretation: category.interpretation,
-    note: categoryNote(category)
-  }));
-  return `<details class="howto" data-poll-key="sensitivity-map"><summary>` + `${escapeHtml2(`Also private: ${dashboardCount(categories.length)} ${categories.length === 1 ? "category" : "categories"} from your sensitivity map file`)}` + `</summary><div class="quiet">These come from the sensitivity map file on this computer and still keep matching items` + ` private. Change them in that file; what you set in Privacy above applies as well.</div>${rows.join(`
-`)}</details>`;
-}
-function categoryNote(category) {
-  const name = TIER_NAMES[category.target_tier_name] ?? category.target_tier_name;
-  const tier = category.target_trust_tier;
-  const head = [name, tier === "" ? "" : `(${tier})`].filter((part) => part !== "").join(" ");
-  if (category.match_terms <= 0)
-    return head;
-  const terms = `${dashboardCount(category.match_terms)} match ${category.match_terms === 1 ? "term" : "terms"}`;
-  return head === "" ? terms : `${head} · ${terms}`;
 }
 function displayTiers(tiers) {
   const shareable = tiers.find((tier) => tier.name === SENSITIVITY_TIER_LABELS.public);
@@ -92346,16 +92312,11 @@ function renderTiers(view) {
         </table>
         <div class="quiet after">These columns are what the policy permits, not what is connected:` + ` a model still has to be set up before it can answer.</div>`;
 }
-var TIER_NAMES;
 var init_sensitivity = __esm(() => {
   init_privacy_language();
   init_components();
   init_vocabulary();
   init_source_rows();
-  TIER_NAMES = {
-    secure: SENSITIVITY_TIER_LABELS.secure,
-    secrets: SENSITIVITY_TIER_LABELS.secrets
-  };
 });
 
 // src/workers/dashboard/pages/privacy.ts
