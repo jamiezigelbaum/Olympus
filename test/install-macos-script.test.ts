@@ -1014,8 +1014,23 @@ describe('install.sh end to end', () => {
     mkdirSync(join(served, 'bun', 'bun-v1.3.14'), { recursive: true });
     copyFileSync(bunZip, join(served, 'bun', 'bun-v1.3.14', 'bun-darwin-aarch64.zip'));
 
-    // Release tarballs built from this checkout's package files.
+    // Release tarballs built from this checkout's package files, except that
+    // OLYMPUS_INSTALL_E2E_TARBALL may name a real release tarball for V1 (for
+    // example site/releases/1.0.0-rc.1/olympus-1.0.0-rc.1.tgz from
+    // scripts/publish-release-to-site.ts), so the fresh install runs those
+    // exact bytes.
+    const realV1 = process.env.OLYMPUS_INSTALL_E2E_TARBALL?.trim();
     const release = (version: string): string => {
+      if (realV1 && version === V1) {
+        const tarball = join(served, 'releases', version, `olympus-${version}.tgz`);
+        mkdirSync(dirname(tarball), { recursive: true });
+        copyFileSync(resolve(realV1), tarball);
+        const packaged = spawnSync('tar', ['-xzOf', tarball, 'package/package.json'], { encoding: 'utf8' });
+        expect(JSON.parse(packaged.stdout)).toMatchObject({ name: 'olympus', version });
+        const script = join(root, `install-${version}.sh`);
+        writeFileSync(script, renderForTest({ version, tarball, releaseBase: `${origin}/releases`, bunBase: `${origin}/bun`, bunZip, bunExe: process.execPath }));
+        return script;
+      }
       const staging = join(root, `staging-${version}`, 'package');
       for (const file of V0_4_PUBLIC_PACKAGE_FILES) {
         mkdirSync(dirname(join(staging, file)), { recursive: true });

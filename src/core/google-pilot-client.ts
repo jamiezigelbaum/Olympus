@@ -7,9 +7,12 @@
  *
  * Two ways it reaches a runtime, in this order:
  *
- * 1. The release builder replaces `PACKAGED_GOOGLE_PILOT_CLIENT_ID` in staged
- *    bundle bytes from `OLYMPUS_GOOGLE_PILOT_CLIENT_ID`, which release builds
- *    still require.
+ * 1. The release builder replaces this module in staged bundles from
+ *    `OLYMPUS_GOOGLE_PILOT_CLIENT_ID`, which a release build must set: to a
+ *    Desktop client id, or to `none` for no Desktop client — the Olympus 1.0
+ *    choice (owner, 2026-10-03), since every host's Gmail and Drive connect
+ *    uses the publisher Web client and relay
+ *    (`scripts/release-google-pilot-choice.ts`).
  * 2. `DEFAULT_GOOGLE_PILOT_CLIENT_ID` below, which ships in source. A
  *    repository install has no release substitution, so without a real default
  *    every repo-installed direct pilot path is forced onto BYO OAuth.

@@ -86,7 +86,7 @@ waits for a calendar slot.
 | # | Item | Owner | Precondition |
 |---|---|---|---|
 | 1 | **Olympus logo.** Replace `chatgpt-plugin/assets/icon.png` (a temporary placeholder; not the OCU mark) and set `logo`, `composerIcon` and `brandColor` in `chatgpt-plugin/plugin.json`. | Owner makes the artwork; any session wires it in | The artwork |
-| 2 | **Mac installer: a script** (owner decision 2026-10-03, Decisions). `curl -fsSL https://olympusplugin.ai/install.sh \| sh`, built on branch `claude/install-script`: `scripts/install-macos.sh` is the one source; `bun scripts/publish-release-to-site.ts` builds the release tarball, puts it at `site/releases/<version>/olympus-<version>.tgz` and writes `site/install.sh` with its version, SHA-256 and size pinned (both gitignored); `site/deploy/deploy.sh` refuses to publish unless `--check` proves the served installer is the template with those pins and the tarball matches. Apple silicon and macOS 13+ only (Intel refused: the built-in models ship for Apple silicon only); pinned Bun 1.3.14; per-user, no `sudo`; same-release re-run repairs, a new release upgrades and restores the previous version on failure; `site/uninstall.sh` removes it and keeps data. The setup skill, `site/install/` and the README show the one command. Remaining: publish rc.1 to the site, then a fresh-install test on a clean Mac user (item 4). | A session built it; the owner publishes (Google publisher client ID for the release build, then `site/deploy/deploy.sh`) | Independent review of the installer (install/upgrade is critical class) |
+| 2 | **Mac installer: a script** (owner decision 2026-10-03, Decisions). `curl -fsSL https://olympusplugin.ai/install.sh \| sh`, built on branch `claude/install-script`: `scripts/install-macos.sh` is the one source; `bun scripts/publish-release-to-site.ts` builds the release tarball, puts it at `site/releases/<version>/olympus-<version>.tgz` and writes `site/install.sh` with its version, SHA-256 and size pinned (both gitignored); `site/deploy/deploy.sh` refuses to publish unless `--check` proves the served installer is the template with those pins and the tarball matches. Apple silicon and macOS 13+ only (Intel refused: the built-in models ship for Apple silicon only); pinned Bun 1.3.14; per-user, no `sudo`; same-release re-run repairs, a new release upgrades and restores the previous version on failure; `site/uninstall.sh` removes it and keeps data. The setup skill, `site/install/` and the README show the one command. Remaining: publish rc.1 to the site, then a fresh-install test on a clean Mac user (item 4). | A session built it; the owner publishes (`OLYMPUS_GOOGLE_PILOT_CLIENT_ID=none bun scripts/publish-release-to-site.ts`, then `site/deploy/deploy.sh`) | Independent review of the installer (install/upgrade is critical class) |
 | 3 | **Integration PR** `claude/chatgpt-plugin` → `main` (squash) with a critical-review receipt, since the branch touches critical paths. Rename this plan to the v1 plan in the same merge and update every link to it, AGENTS.md included. | A session opens it and gets the independent review; **the owner runs the receipt** from his login | Required exact-head CI green; independent review |
 | 4 | **`1.0.0-rc.1`**: `package.json`, `openclaw.plugin.json` and `plugin.json` are set to it (test enforced; done on `claude/install-script`). Build and publish it with item 2's tooling, then a fresh-install test on a clean Mac user: add the plugin → install the engine → approve on the Mac → connect Dropbox → choose folders → ask a Personal and a Private question. | A session; the owner drives ChatGPT | Item 3 merged; item 2 published |
 | 5 | **ChatGPT directory submission** under OCU Inc., per the [kit](../chatgpt-plugin/SUBMISSION.md): 5a-5e below. | Owner submits | 5a-5e |
@@ -127,6 +127,26 @@ and Linux installations, every source's actual limits are documented, and beta
 testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
+
+- **2026-10-03 — 1.0 release builds carry no Google Desktop client.** Owner
+  decision, conditional on proof that no host loses one-click Google sign-in;
+  the proof holds. Every Gmail and Google Drive connect path — the standalone
+  Mac dashboard, the native OpenClaw page, ChatGPT's `olympus_connect_source`
+  (and Hermes or Claude Code, which use the same dashboard) — goes through
+  `/dashboard/connect/oauth/start`, which picks the publisher Google Web
+  client, the relay and the publisher exchange whenever the install has not
+  registered its own app. The Desktop "pilot" client
+  (`OLYMPUS_GOOGLE_PILOT_CLIENT_ID`) was only a fallback for an install with
+  no publisher Web client; `olympus connect gmail|google-drive` has always
+  required `--client-id` (bring-your-own) and never read it. Pinned by the
+  "no Google Desktop client" tests in
+  `test/dashboard-oauth-publisher-relay.test.ts`. The release builder still
+  refuses by omission: a release is built with a Desktop client id, or with
+  the explicit `OLYMPUS_GOOGLE_PILOT_CLIENT_ID=none`, which packages "no
+  Desktop client" (`scripts/release-google-pilot-choice.ts`) and says so in
+  the build log. The dashboard's Google status (`google_pilot`) now follows
+  the publisher Web client too, so it keeps the unverified-app note and no
+  longer says "set up your own Google app" over one-click cards.
 
 - **2026-10-03 — The 1.0 Mac installer is a script.** Owner decision: Olympus
   1.0 ships with `curl -fsSL https://olympusplugin.ai/install.sh | sh`, not a

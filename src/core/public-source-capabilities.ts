@@ -42,7 +42,7 @@ export const V0_4_PUBLIC_SOURCE_CAPABILITIES: readonly PublicSourceCapability[] 
   {
     source_id: 'gmail.email',
     label: 'Gmail',
-    authentication: { type: 'oauth2', ownership: 'shared Google pilot client with advanced BYO fallback' },
+    authentication: { type: 'oauth2', ownership: 'Olympus publisher Google app with advanced BYO fallback' },
     contextual_scopes: ['mail query', 'exclude Spam and Trash'],
     dependencies: [{ id: 'google_oauth_client', label: 'Google OAuth client', required_for: 'authorization and refresh' }],
     provider_ceiling: 'Provider history traversal and incremental refresh remain bounded by Gmail quota and pagination.',
@@ -57,7 +57,7 @@ export const V0_4_PUBLIC_SOURCE_CAPABILITIES: readonly PublicSourceCapability[] 
   {
     source_id: 'google_drive.docs',
     label: 'Google Drive',
-    authentication: { type: 'oauth2', ownership: 'shared Google pilot client with advanced BYO fallback' },
+    authentication: { type: 'oauth2', ownership: 'Olympus publisher Google app with advanced BYO fallback' },
     contextual_scopes: ['inclusion roots', 'shared drives', 'exclude trashed items', 'fail-closed ancestry exclusions'],
     dependencies: [{ id: 'google_oauth_client', label: 'Google OAuth client', required_for: 'authorization and refresh' }],
     provider_ceiling: 'Provider history and change traversal remain bounded by Drive quota, pagination, and export limits.',

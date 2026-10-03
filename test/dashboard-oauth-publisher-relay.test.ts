@@ -10,7 +10,7 @@
 // must be the identical string or the providers refuse the exchange.
 
 import { createHmac } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -47,6 +47,8 @@ import {
   type DashboardSourceAction,
 } from '../src/workers/source-dashboard.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { packagedGooglePilotClientId } from '../src/core/google-pilot-client.ts';
+import { CONNECT_SOURCE_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
 import type { ModelSetupView } from '../src/core/model-setup.ts';
 import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
@@ -750,6 +752,24 @@ async function dashboardJson(instance: Fixture, origin = DASHBOARD_ORIGIN) {
   return await response.json();
 }
 
+/**
+ * An Olympus 1.0 release build: no Google Desktop pilot client anywhere — not
+ * in the environment, not substituted into the bundle, not in source.
+ */
+async function withoutPilotClient(run: () => Promise<void>): Promise<void> {
+  const previous = process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
+  const previousWeb = process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID;
+  delete process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
+  delete process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID;
+  try {
+    expect(packagedGooglePilotClientId()).toBeUndefined();
+    await run();
+  } finally {
+    if (previous !== undefined) process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = previous;
+    if (previousWeb !== undefined) process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID = previousWeb;
+  }
+}
+
 async function withPilotClient(run: () => Promise<void>): Promise<void> {
   const previous = process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
   process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = PILOT_CLIENT_ID;
@@ -1172,10 +1192,11 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
     registered: ReturnType<typeof gateway>,
     openClawConfig: unknown,
     browserOrigin: Record<string, unknown> = LOCAL_BROWSER,
+    source: 'dropbox' | 'gmail' | 'google-drive' = 'dropbox',
   ): Promise<{ status: number; body: Record<string, any> }> {
     const calls: unknown[][] = [];
     await registered.methods.get(OLYMPUS_DASHBOARD_CONTROL_METHOD)!({
-      params: { action: 'start_oauth', source: 'dropbox' },
+      params: { action: 'start_oauth', source },
       client: { connect: { scopes: ['operator.write'] }, browserOrigin },
       context: { getRuntimeConfig: () => openClawConfig },
       respond: (...args: unknown[]) => calls.push(args),
@@ -1269,6 +1290,25 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
     expect(instance.exchanges).toHaveLength(1);
     expect(instance.exchanges[0]?.get('code')).toBe('relay-code-native');
     expect(instance.exchanges[0]?.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+  });
+
+  test('with no Google Desktop client, the native page and Gateway still connect Gmail and Drive in one click', async () => {
+    await withoutPilotClient(async () => {
+      const body = await nativeSetupBody(fixture(), LOCAL_BROWSER);
+      for (const id of ['connect-gmail-email', 'connect-google_drive-docs']) expectPublisherSheet(sheet(body, id));
+      expect(body).not.toContain('id="setup-gmail-email"');
+      expect(body).not.toContain('id="setup-google_drive-docs"');
+      expect(body).not.toContain('data-native-oauth-unavailable');
+      for (const source of ['gmail', 'google-drive'] as const) {
+        const instance = fixture();
+        const started = await startThroughGateway(gateway(instance, FRESH_GATEWAY), FRESH_GATEWAY, LOCAL_BROWSER, source);
+        expect(started.status).toBe(200);
+        const authorization = new URL(started.body.authorization_url);
+        expect(authorization.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+        expect(authorization.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+        expect(statePayload(authorization.searchParams.get('state')!)).toMatchObject({ origin: LOOPBACK_BROWSER_ORIGIN, source });
+      }
+    });
   });
 
   test('a callback arriving on a different origin than the flow signed is refused', async () => {
@@ -1495,5 +1535,95 @@ describe('sign-in started from ChatGPT (relay hand-back)', () => {
     const started = await startConnect(instance, { handback: 'relay', client_id: 'my-own-dropbox-app' });
     expect(started.status).toBe(409);
     expect((await started.json()).error.code).toBe('oauth_handback_unavailable');
+  });
+});
+
+// Olympus 1.0 release builds ship without the Google Desktop pilot client
+// (owner decision, 2026-10-03), conditional on no host losing one-click Google
+// sign-in. Every Gmail/Drive connect path goes through
+// /dashboard/connect/oauth/start, which picks the publisher Web client and the
+// relay; these tests pin that for each host with no Desktop id present.
+describe('Gmail and Google Drive with no Google Desktop client (Olympus 1.0 release)', () => {
+  const GOOGLE_CARDS = ['gmail.email', 'google_drive.docs'] as const;
+  const DASHBOARD_ORIGINS = [...GOOGLE_LOOPBACK_ORIGINS, DASHBOARD_ORIGIN] as const;
+
+  test('the standalone dashboard offers one-click publisher Connect for Gmail and Drive on every origin, never Set up', async () => {
+    await withoutPilotClient(async () => {
+      for (const origin of DASHBOARD_ORIGINS) {
+        const view = await dashboardJson(fixture(), origin);
+        for (const sourceId of GOOGLE_CARDS) {
+          const card = view.sources.find((source: { source_id: string }) => source.source_id === sourceId);
+          expect(card.connection.state).not.toBe('needs_setup');
+          expect(card.connection.action).toMatchObject({ kind: 'oauth', label: 'Connect', publisher_client: true });
+          expect(card.connection.action.known_client_id).toBeUndefined();
+          expect(card.connection.action.instructions.fields).toEqual([]);
+        }
+        // The page-level Google status must not send a reader to bring-your-own
+        // over cards that connect in one click.
+        expect(view.google_pilot.mode).toBe('shared_pilot');
+        expect(view.google_pilot.warning).toContain('unverified app');
+      }
+    });
+  });
+
+  test('Connect completes on every dashboard origin through the Web client, the relay and the publisher exchange', async () => {
+    await withoutPilotClient(async () => {
+      for (const origin of DASHBOARD_ORIGINS) {
+        for (const source of ['gmail', 'google-drive'] as const) {
+          const callbackOrigin = origin.startsWith('http:') ? 'http://127.0.0.1:18789' : origin;
+          const instance = fixture();
+          const started = await authorizationUrl(await startConnect(instance, { source }, origin));
+          expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+          expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+          const state = started.searchParams.get('state')!;
+          expect(statePayload(state)).toMatchObject({ origin: callbackOrigin, source });
+          const callback = await instance.fetch(new Request(
+            `${callbackOrigin}/oauth/callback/${source}?code=${source}-code&state=${encodeURIComponent(state)}`,
+          ));
+          expect(callback.status).toBe(303);
+          expect(instance.exchangeUrls).toEqual([DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL]);
+          expect(instance.exchanges[0]!.has('client_secret')).toBe(false);
+          const handles = readConnectedHandleRegistry(instance.registryPath).handles;
+          expect(handles.some((handle) => handle.oauth2Refresh?.exchangeVia === 'publisher_endpoint')).toBe(true);
+        }
+      }
+    });
+  });
+
+  test('ChatGPT olympus_connect_source starts Gmail and Drive through the relay hand-back', async () => {
+    await withoutPilotClient(async () => {
+      const RELAY = 'https://mcp.olympusplugin.ai';
+      const instance = fixture({}, { handback: { origin: RELAY, installId: 'abcdefghijklmnopqrstuvwxyz234567' } });
+      const view = buildChatGptDashboardViewModel(await dashboardJson(instance) as SourceDashboardViewModel);
+      for (const sourceId of GOOGLE_CARDS) {
+        const card = view.sources.find((source) => source.id === sourceId)!;
+        expect(card.primary?.tool).toBe(CONNECT_SOURCE_TOOL_NAME);
+      }
+      const backend = createChatGptSetupBackend({
+        workerFetch: (request) => {
+          const headers = new Headers(request.headers);
+          headers.set('Authorization', 'Bearer dashboard-secret');
+          return instance.fetch(new Request(request, { headers }));
+        },
+        handoffs: createChatGptHandoffs(),
+        publicUrls: () => undefined,
+        sovereignty: { config: loadSovereigntyPreset('no-sensitive'), source: 'preset' },
+        credentialPresent: () => false,
+        requestReload: () => false,
+      });
+      for (const source of ['gmail', 'google-drive'] as const) {
+        const started = new URL((await backend.startOAuth(source)).authorizationUrl);
+        expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+        expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+        expect(statePayload(started.searchParams.get('state')!)).toMatchObject({ origin: RELAY, source });
+      }
+    });
+  });
+
+  test('only the dashboard worker reads the Desktop client; no CLI, MCP, ChatGPT or OpenClaw path depends on it', () => {
+    const importers = Array.from(new Bun.Glob('src/**/*.ts').scanSync({ cwd: join(import.meta.dir, '..') }))
+      .filter((path) => readFileSync(join(import.meta.dir, '..', path), 'utf8').match(/from '[^']*google-pilot-client(?:\.ts)?'/) !== null)
+      .sort();
+    expect(importers).toEqual(['src/workers/email-source/index.ts']);
   });
 });

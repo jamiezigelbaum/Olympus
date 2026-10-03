@@ -261,7 +261,8 @@ Package
 
 Installer
 - [ ] The build under review is published to the site:
-      `OLYMPUS_GOOGLE_PILOT_CLIENT_ID=<publisher client id> bun scripts/publish-release-to-site.ts`,
+      `OLYMPUS_GOOGLE_PILOT_CLIENT_ID=none bun scripts/publish-release-to-site.ts`
+      (1.0 ships no Google Desktop client: owner decision 2026-10-03),
       then `site/deploy/deploy.sh --dry-run` and `site/deploy/deploy.sh`.
       `curl -fsSL https://olympusplugin.ai/install.sh | grep '^OLYMPUS_VERSION='`
       shows the version in `plugin.json`.

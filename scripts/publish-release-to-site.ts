@@ -1,7 +1,8 @@
 /**
  * Puts an Olympus release on the website, ready for site/deploy/deploy.sh.
  *
- *   OLYMPUS_GOOGLE_PILOT_CLIENT_ID=<publisher client id> bun scripts/publish-release-to-site.ts
+ *   OLYMPUS_GOOGLE_PILOT_CLIENT_ID=none bun scripts/publish-release-to-site.ts   (Olympus 1.0: no Desktop client)
+ *   OLYMPUS_GOOGLE_PILOT_CLIENT_ID=<desktop client id> bun scripts/publish-release-to-site.ts
  *   bun scripts/publish-release-to-site.ts --artifact release-artifacts/olympus-<version>.tgz
  *   bun scripts/publish-release-to-site.ts --check
  *   bun scripts/publish-release-to-site.ts --pin-bun bun-darwin-aarch64.zip

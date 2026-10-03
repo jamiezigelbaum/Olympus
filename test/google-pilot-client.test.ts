@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import {
@@ -7,6 +8,12 @@ import {
   packagedGooglePilotClientId,
   resolveGooglePilotClientId,
 } from '../src/core/google-pilot-client.ts';
+import {
+  describeReleaseGooglePilotChoice,
+  GOOGLE_PILOT_CLIENT_MISSING_MESSAGE,
+  packagedGooglePilotClientModule,
+  releaseGooglePilotChoice,
+} from '../scripts/release-google-pilot-choice.ts';
 
 const ROOT = join(import.meta.dir, '..');
 const SENTINEL = '__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__';
@@ -47,11 +54,56 @@ describe('Google pilot client resolution order', () => {
     );
   });
 
-  test('the release builder still requires a real client id and substitutes both constants', () => {
+  test('the release builder resolves its Desktop client through the shared choice module', () => {
     const builder = readFileSync(join(ROOT, 'scripts/release-artifact.ts'), 'utf8');
     expect(builder).toContain("import { DEFAULT_GOOGLE_PILOT_CLIENT_ID } from '../src/core/google-pilot-client.ts';");
-    expect(builder).toContain('export const PACKAGED_GOOGLE_PILOT_CLIENT_ID = ${JSON.stringify(googlePilotClientId)}');
-    expect(builder).toContain('export const DEFAULT_GOOGLE_PILOT_CLIENT_ID = ${JSON.stringify(googlePilotClientId)}');
-    expect(builder).toContain('\\.apps\\.googleusercontent\\.com$/.test(clientId)');
+    expect(builder).toContain('releaseGooglePilotChoice(process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID, DEFAULT_GOOGLE_PILOT_CLIENT_ID)');
+    expect(builder).toContain('if (!googlePilotChoice) throw new Error(GOOGLE_PILOT_CLIENT_MISSING_MESSAGE);');
+    expect(builder).toContain('contents: packagedGooglePilotClientModule(googlePilotChoice!)');
+    const gate = readFileSync(join(ROOT, 'scripts/release-artifact-ci.ts'), 'utf8');
+    expect(gate).toContain('releaseGooglePilotChoice(');
   });
 });
+
+/**
+ * Olympus 1.0 release builds ship with no Desktop client (owner, 2026-10-03),
+ * but only by an explicit choice: OLYMPUS_GOOGLE_PILOT_CLIENT_ID=none.
+ */
+describe('release Google Desktop client choice', () => {
+  test('a Desktop client id is packaged; none is an explicit choice; anything else refuses', () => {
+    expect(releaseGooglePilotChoice(RELEASE_ID, '')).toEqual({ kind: 'client', clientId: RELEASE_ID });
+    expect(releaseGooglePilotChoice(undefined, SHIPPED_ID)).toEqual({ kind: 'client', clientId: SHIPPED_ID });
+    expect(releaseGooglePilotChoice(' none ', SHIPPED_ID)).toEqual({ kind: 'none' });
+    for (const value of [undefined, '', '   ', 'None', 'NONE', 'off', 'false', SENTINEL, 'not-a-client-id']) {
+      expect(releaseGooglePilotChoice(value, '')).toBeUndefined();
+    }
+    expect(GOOGLE_PILOT_CLIENT_MISSING_MESSAGE).toContain('or be "none"');
+  });
+
+  test('the packaged module for none resolves to no Desktop client and carries no sentinel', async () => {
+    const source = packagedGooglePilotClientModule({ kind: 'none' });
+    expect(source).not.toContain(SENTINEL);
+    const packaged = await importModuleSource(source);
+    expect(packaged.packagedGooglePilotClientId()).toBeUndefined();
+    expect(packaged.DEFAULT_GOOGLE_PILOT_CLIENT_ID).toBe('');
+    expect(packaged.PACKAGED_GOOGLE_PILOT_CLIENT_ID).toBe('');
+    expect(describeReleaseGooglePilotChoice({ kind: 'none' })).toContain('none');
+  });
+
+  test('the packaged module for a client resolves to exactly that client', async () => {
+    const packaged = await importModuleSource(packagedGooglePilotClientModule({ kind: 'client', clientId: RELEASE_ID }));
+    expect(packaged.packagedGooglePilotClientId()).toBe(RELEASE_ID);
+    expect(packaged.resolveGooglePilotClientId('', '')).toBeUndefined();
+  });
+});
+
+async function importModuleSource(source: string): Promise<Record<string, any>> {
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-pilot-module-'));
+  try {
+    const path = join(dir, 'google-pilot-client.js');
+    writeFileSync(path, source);
+    return await import(path);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}

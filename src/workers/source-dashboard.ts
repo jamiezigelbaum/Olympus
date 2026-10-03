@@ -2059,7 +2059,10 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       : {}),
     summary,
     onboarding: onboarding(summary, cardsWithProgress, folderPicker),
-    google_pilot: googlePilotStatus(options.googlePilotClientConfigured === true),
+    google_pilot: googlePilotStatus(
+      options.googlePilotClientConfigured === true
+        || (options.publisherOAuthSources ?? []).some((source) => source === 'gmail' || source === 'google-drive'),
+    ),
     answer_lanes: answerLanes,
     where_your_data_lives: trustCards,
     unassigned_corpora: unassignedCorpora,
@@ -2334,6 +2337,17 @@ function sourceCardFromDefinition(
   return card;
 }
 
+/**
+ * Whether Gmail and Drive connect through an Olympus-owned Google app, and the
+ * unverified-app note that comes with one.
+ *
+ * `configured` is true for the publisher Web client (relay + publisher
+ * exchange), which is what every dashboard origin and ChatGPT use, OR for a
+ * packaged Desktop pilot client. Olympus 1.0 release builds carry no Desktop
+ * client (owner, 2026-10-03), so keying this on the Desktop id alone told
+ * dashboard.json readers to set up their own Google app over cards that offer
+ * one-click Connect, and dropped the unverified-app note from those sheets.
+ */
 function googlePilotStatus(configured: boolean): NonNullable<SourceDashboardViewModel['google_pilot']> {
   return {
     mode: configured ? 'shared_pilot' : 'advanced_byo_required',
