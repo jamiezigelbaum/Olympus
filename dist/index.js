@@ -162,10 +162,9 @@ function assertCloudEmbeddingApproval(profile, approved) {
     throw new Error("Cloud embeddings require explicit corpus policy approval.");
   }
 }
-var SOURCE_FAMILIES, SOURCE_TRUST_TIERS, SOURCE_TRUST_DOMAINS;
+var SOURCE_FAMILIES, SOURCE_TRUST_DOMAINS;
 var init_types = __esm(() => {
   SOURCE_FAMILIES = ["email", "file", "chat", "calendar", "note", "task", "readwise", "x"];
-  SOURCE_TRUST_TIERS = ["S0", "S1", "S2", "S3", "S4", "S4+", "S5"];
   SOURCE_TRUST_DOMAINS = ["public_safe", "internal", "secure_local"];
 });
 
@@ -7088,28 +7087,6 @@ var init_ingest_filter = __esm(() => {
   OTP_BODY_HINT = /\b(code|verification|expires? in|valid for)\b/i;
 });
 
-// src/core/owner-config-read.ts
-var init_owner_config_read = () => {};
-
-// src/core/sensitivity-map.ts
-var USER_FACING_TIER_MAPPING, USER_FACING_TIER_NAMES, USER_FACING_TIER_SET, TRUST_TIER_SET, TRUST_DOMAIN_SET, RAISING_TIER_NAMES;
-var init_sensitivity_map = __esm(() => {
-  init_operation_error();
-  init_owner_config_read();
-  init_types();
-  USER_FACING_TIER_MAPPING = {
-    public: { targetTrustTier: "S0", targetTrustDomain: "public_safe" },
-    private: { targetTrustTier: "S3", targetTrustDomain: "internal" },
-    secure: { targetTrustTier: "S4", targetTrustDomain: "secure_local" },
-    secrets: { targetTrustTier: "S5", targetTrustDomain: "secure_local" }
-  };
-  USER_FACING_TIER_NAMES = Object.keys(USER_FACING_TIER_MAPPING);
-  USER_FACING_TIER_SET = new Set(USER_FACING_TIER_NAMES);
-  TRUST_TIER_SET = new Set(SOURCE_TRUST_TIERS);
-  TRUST_DOMAIN_SET = new Set(SOURCE_TRUST_DOMAINS);
-  RAISING_TIER_NAMES = new Set(["secure", "secrets"]);
-});
-
 // src/workers/google-connectors/classification.ts
 function accountFromGoogleHandle(handle, fallback = "personal") {
   const trimmed = handle?.trim();
@@ -7128,9 +7105,6 @@ function metadataStringArray(metadata, key) {
     return [];
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
-var init_classification = __esm(() => {
-  init_sensitivity_map();
-});
 
 // src/workers/google-connectors/request-budget.ts
 var GoogleRequestBudgetError;
@@ -7765,7 +7739,6 @@ var init_gmail = __esm(() => {
   init_sender_rules();
   init_credential_broker();
   init_ingest_filter();
-  init_classification();
   init_request_budget();
   GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
 });
@@ -8342,7 +8315,6 @@ var GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES 
 var init_drive = __esm(() => {
   init_source_ingestion_exclusions();
   init_credential_broker();
-  init_classification();
   init_request_budget();
   GoogleDriveContentTooLargeError = class GoogleDriveContentTooLargeError extends Error {
     constructor() {
@@ -8384,7 +8356,6 @@ var init_content_policy = () => {};
 var SECRET_FINDING_TYPES, CLEAN_GMAIL_CATEGORIES;
 var init_engine = __esm(() => {
   init_content_policy();
-  init_sensitivity_map();
   SECRET_FINDING_TYPES = new Set([
     "private_key_material",
     "aws_access_key_id",
@@ -8398,7 +8369,6 @@ var init_engine = __esm(() => {
 // src/workers/classification/tier-classifier.ts
 var UNDECIDED_TIER_SNIFFER;
 var init_tier_classifier = __esm(() => {
-  init_sensitivity_map();
   init_engine();
   init_sender_rules();
   UNDECIDED_TIER_SNIFFER = Object.freeze({
@@ -10068,7 +10038,6 @@ var GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
   init_tiered_store_set();
   init_embeddings();
-  init_classification();
   init_gmail();
   init_gmail_live_control();
   GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
@@ -10087,7 +10056,6 @@ var init_drive_live_control = __esm(() => {
 var init_drive_live_sync = __esm(() => {
   init_tiered_store_set();
   init_embeddings();
-  init_classification();
   init_drive();
   init_drive_live_control();
 });
