@@ -1687,8 +1687,10 @@ Dashboard card meanings:
 
 Normal Google setup is one click: Olympus's own publisher Google app is
 already present (it connects through Olympus's sign-in relay, from any
-dashboard address or from ChatGPT). The operator clicks **Connect**, signs in
-to Google, and approves the source-specific read scope. Google may show the documented
+dashboard address or from ChatGPT), and the packaged publisher-owned Desktop
+client ID is already present for direct and earlier-connected installs. The
+operator clicks **Connect**, signs in to Google, and approves the
+source-specific read scope. Google may show the documented
 unverified-app warning during the small pilot; the Gmail and Drive connect
 sheets carry a note about it. Explain it plainly and let the operator decide
 whether to continue. After consent, Gmail and Drive wait for the scope choice

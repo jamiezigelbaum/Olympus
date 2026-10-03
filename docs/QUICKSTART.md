@@ -483,7 +483,7 @@ source or start ingestion by itself.
 
 Connect only the source you chose, using its dashboard card and the
 [per-source guide](../INSTALL_FOR_AGENTS.md#step-6--finish-installation-dashboard-handoff).
-Olympus's own publisher Google app requests Gmail or Drive scopes only when
+Olympus's packaged publisher Google client requests Gmail or Drive scopes only when
 you choose that source; Gmail is not required for installation. X uses your own
 developer application, with plan availability and possible cost shown before
 consent. v0.4 supports one connected account per provider.

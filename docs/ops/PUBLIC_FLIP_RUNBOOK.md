@@ -393,7 +393,7 @@ bun install --frozen-lockfile
 bun run typecheck
 bun scripts/test-lane.ts fast
 bun run dist:check
-OLYMPUS_GOOGLE_PILOT_CLIENT_ID=none bun scripts/release-artifact.ts   # 1.0: no Desktop client, by explicit choice
+bun scripts/release-artifact.ts       # 1.0: packages the source-default beta.11 Desktop client
 bun scripts/public-flip-scan.ts       # must exit 0 — this is what gates step 11
 ```
 

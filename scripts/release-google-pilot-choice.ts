@@ -4,10 +4,11 @@
  * Every Gmail and Google Drive connect path a host offers — the standalone
  * dashboard, the native OpenClaw page, ChatGPT's olympus_connect_source — goes
  * through the publisher Google Web client, the relay and the publisher
- * exchange. The Desktop pilot client is only a fallback for a dashboard with
- * no publisher Web client. Olympus 1.0 release builds ship without it (owner
- * decision, 2026-10-03; docs/V0_4_RELEASE.md, Decisions), so a release may be
- * built either way, but never by omission:
+ * exchange. The Desktop pilot client is a fallback for a dashboard with no
+ * publisher Web client, and keeps publisher recognition for installs that
+ * connected through it. Olympus 1.0 ships the beta.11 Desktop client as the
+ * source default (owner decision, 2026-10-03; docs/V0_4_RELEASE.md,
+ * Decisions); a release may be built either way, but never by omission:
  *
  *   OLYMPUS_GOOGLE_PILOT_CLIENT_ID=<id>.apps.googleusercontent.com  packages that client
  *   OLYMPUS_GOOGLE_PILOT_CLIENT_ID=none                            packages no Desktop client
