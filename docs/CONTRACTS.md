@@ -317,7 +317,7 @@ section consolidates and supersedes all other policy wording.
 ### Change log
 
 - 2026-10-03 (no version change): the legacy sensitivity map is retired
-  (owner decision, Jamie). The privacy profile (`olympus_privacy_get` /
+  (owner decision). The privacy profile (`olympus_privacy_get` /
   `olympus_privacy_set`, `privacy-profile.ts`, which writes always-Private
   owner tier rules) is the only privacy path. Removed: `core/sensitivity-map.ts`,
   `OLYMPUS_SENSITIVITY_MAP_PATH`, `olympus sensitivity validate`, the
