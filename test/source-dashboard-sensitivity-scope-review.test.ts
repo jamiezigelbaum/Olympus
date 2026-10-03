@@ -48,7 +48,7 @@ describe('dashboard sensitivity section', () => {
     // profile is the only privacy path. Absent, never an empty list.
     const view = buildView({ status: statusWithCorpora([emailCorpus('internal.email', 'internal', 10, {})]) });
 
-    expect(view.sensitivity).toBeUndefined();
+    expect('sensitivity' in view).toBe(false);
     expect(JSON.stringify(view)).not.toContain('"sensitivity"');
   });
 
@@ -492,7 +492,7 @@ describe('the /dashboard.json route wires both new inputs', () => {
       const raw = await response.text();
       const body = JSON.parse(raw) as ReturnType<typeof buildSourceDashboardViewModel>;
 
-      expect(body.sensitivity).toBeUndefined();
+      expect('sensitivity' in body).toBe(false);
       expect(body.sensitivity_tiers?.tiers).toHaveLength(4);
       // Attribution comes from the picker runtime the route already opens.
       expect(body.excluded_by_configuration.by_source).toEqual([{

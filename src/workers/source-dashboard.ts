@@ -256,13 +256,6 @@ export interface SourceDashboardViewModel {
   unassigned_corpora: DashboardUnassignedCorpora;
   excluded_by_configuration: DashboardExcludedByConfiguration;
   /**
-   * RETIRED (2026-10-03): the legacy sensitivity map is gone and nothing
-   * produces this block any more; it is always absent. The field and its
-   * types remain only because src/workers/dashboard/** still reads it; remove
-   * them once the frontend change that deletes the sensitivity page lands.
-   */
-  sensitivity?: DashboardSensitivity;
-  /**
    * What each tier permits, hardcoded from the enforcement code rather than
    * measured. Always emitted; optional in the type only because hand-written
    * view fixtures predate it.
@@ -535,41 +528,6 @@ export interface DashboardExcludedSource {
   items_metadata_only_content_present: number;
   unenforceable_rule_ids?: readonly string[];
   entries: readonly DashboardExcludedRule[];
-}
-
-/**
- * RETIRED with the legacy sensitivity map (2026-10-03); never produced.
- * The owner's secure categories, as they were configured.
- *
- * `editable` is false and stays false until a write route exists: no route in
- * this worker writes the sensitivity map, so a page offering an add or remove
- * control would offer a button that cannot work.
- *
- * The categories' MATCH TERMS never cross this boundary — only how many there
- * are. Keywords, sender patterns and path patterns are the owner's real email
- * addresses and folder paths, `notes` is free text that routinely contains
- * them, and this view model is reachable with the weak `dash_` query token
- * while its own policy block declares no paths and no file names are returned.
- */
-export interface DashboardSensitivity {
-  /** Always true where this block exists at all; absent is how "not configured" is said. */
-  configured: boolean;
-  /** Always false: no route in this worker writes the sensitivity map. */
-  editable: boolean;
-  categories: DashboardSensitivityCategory[];
-}
-
-export interface DashboardSensitivityCategory {
-  id: string;
-  label: string;
-  /** The owner's own examples, joined. Always at least one — the parser requires it. */
-  interpretation: string;
-  /** Only ever `secure` or `secrets`: the map is raise-only and refuses the rest. */
-  target_tier_name: string;
-  target_trust_tier: string;
-  target_trust_domain: string;
-  /** How many keywords, sender patterns and path patterns match this category. A count, never the terms. */
-  match_terms: number;
 }
 
 /**
