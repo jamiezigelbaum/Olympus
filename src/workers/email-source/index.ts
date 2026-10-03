@@ -216,7 +216,6 @@ import {
 } from '../source-dispositions.ts';
 import type { SourceDispositionEdit, SourceDispositionState } from '../../core/source-disposition-tree.ts';
 import type { SourceExclusionCriterionKind } from '../../core/source-ingestion-exclusions.ts';
-import { loadSensitivityMap } from '../../core/sensitivity-map.ts';
 import {
   buildSourceIngestionLedgerSnapshot,
   type SourceIngestionLedgerExclusionSource,
@@ -1281,12 +1280,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // configuration" section is summarized from an empty list, so the
           // page reported zero excluded folders while the rules were enforced.
           const exclusionSources = await dashboardExclusionSources(sourceDashboard, dashboardExclusionDebt);
-          // The owner's secure categories, read the same way the exclusion
-          // rules above are: off disk, read-only, and tolerantly. A missing map
-          // is the ordinary state and an unparseable one must not take the
-          // whole page down, so both yield undefined and the page omits the
-          // section rather than rendering an empty one.
-          const sensitivityMap = loadSensitivityMap({ allowMissing: true, ignoreInvalid: true });
           const credentialHealth = readCredentialHealthReport(
             sourceDashboard.credentialHealthReportPath
               ?? process.env.OLYMPUS_CREDENTIAL_HEALTH_REPORT_PATH?.trim()
@@ -1353,7 +1346,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   ),
                 }
               : {}),
-            ...(sensitivityMap ? { sensitivityMap } : {}),
           });
           assertNoRawEmailFields(view);
           if (url.pathname === '/dashboard.json') return json(view);

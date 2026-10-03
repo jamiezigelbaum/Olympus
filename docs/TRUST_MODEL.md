@@ -37,10 +37,12 @@ changed:
 | Private | `secure` | S4 | `secure_local` |
 | Secrets | `secrets` | S5 | `secure_local`; refused before model input |
 
-In a sensitivity-map JSON file, sensitive **Private** categories still require
-`targetTierName: "secure"`, `targetTrustTier: "S4"`, and
-`targetTrustDomain: "secure_local"`. Writing `private` would mean **Personal**,
-not Private. Keep existing schema-v1 keys, corpus IDs, preset IDs, and policy
+In an owner tier rules file (`~/.olympus/tier-rules.json`), a **Private** rule
+is written `"tier": "secure"`; writing `private` would mean **Personal**, not
+Private. The owner's privacy profile (`olympus_privacy_set`, the dashboard's
+Privacy section) writes always-Private rules in that form for them, and is
+the only privacy configuration Olympus reads: the legacy sensitivity map was
+retired on 2026-10-03. Keep existing schema-v1 keys, corpus IDs, preset IDs, and policy
 values unchanged. The finer S1/S2/S3 levels below all display as Personal.
 Venice's own **Private** model category is a provider classification, distinct
 from Olympus's Private data tier.
@@ -458,12 +460,12 @@ Rules:
     names (file name and path) go to its metadata tier's store when it is
     listed, Personal by default (`internal.dropbox.files`), per the owner's
     ruling that names are Personal unless something raises them (an owner
-    rule, a map category, or names that look private); its text, read
+    rule, or names that look private); its text, read
     later by the shared extraction factory, goes to the store its content
     tier decides: Personal for reference material, Private
     (`secure_local.dropbox.files`) when the text says so. Names that look
     private keep the whole file Private until the privacy-safe sniffer
-    answers, the owner's sensitivity map judges both names and text, and an
+    answers, the owner's always-Private rules judge the names, and an
     unread file is never sent to an extractor at less than
     Private. `public_safe.dropbox.files` receives a file only on positive
     public evidence. The folder-scope approval filters reads in every one of

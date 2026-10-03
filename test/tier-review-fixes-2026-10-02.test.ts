@@ -25,7 +25,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
-import { OLYMPUS_SENSITIVITY_MAP_ENV } from '../src/core/sensitivity-map.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { isPublicTierRetired, loadSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
@@ -99,7 +98,6 @@ beforeEach(() => {
     OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(root, 'no-exclusions.json'),
     OLYMPUS_TIER_RULES_PATH: join(root, 'olympus', 'tier-rules.json'),
     OLYMPUS_PRIVACY_PROFILE_PATH: join(root, 'olympus', 'privacy.json'),
-    [OLYMPUS_SENSITIVITY_MAP_ENV]: join(root, 'olympus', 'sensitivity-map.json'),
   };
 });
 

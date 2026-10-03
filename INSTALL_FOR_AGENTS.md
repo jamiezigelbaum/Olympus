@@ -496,7 +496,7 @@ about to reuse carries a recorded caveat (for example "rotate this key
 before treating it as clean"), surface the caveat and let the operator
 decide; silently discarding it is a security failure. The gates named
 here are examples, not an exhaustive list: EVERY decision gate in Steps
-2–6 — the tier explainer, the sensitivity dialogue, the posture choice,
+2–6 — the tier explainer, the privacy conversation, the posture choice,
 per-credential consent, the worker pre-explanation — runs on the restore
 path exactly as on a fresh one. Pre-filled, though: on restore each
 gate is a confirm-or-change of the remembered answer — not a
@@ -524,8 +524,8 @@ what each posture means for THEIR data, what it requires, and its trade-off
 the posture as a multiple-choice question, a pick-list, or a choice in a
 question tool (OpenClaw's Ask User tool, a button prompt, or similar) until
 all three have happened in chat, in this order: the required four-tier
-explanation below was delivered in full, the sensitivity conversation ran and
-the operator confirmed the map, and the four-option posture walkthrough was
+explanation below was delivered in full, the privacy conversation ran and
+the operator confirmed what you read back, and the four-option posture walkthrough was
 delivered in full. A question tool is a way to collect the answer after that,
 never a substitute for it. When you do use one, each option label is the
 plain-language description from the walkthrough (for example "Venice —
@@ -533,10 +533,10 @@ Private content goes only to Venice"), never a bare preset id and never a
 compressed menu such as "Local, cloud, local only…".
 
 **Required user-facing four-tier explanation.** Deliver this entire block
-before asking any sensitivity or posture question. The point of each tier is
+before asking any privacy or posture question. The point of each tier is
 what happens *differently* to data in it — never present a tier as a bare list of
 category examples. This message both explains the model and opens the
-sensitivity conversation:
+privacy conversation:
 
 > Here's how Olympus treats your data — then you'll tell me about your
 > preferences.
@@ -569,17 +569,20 @@ sensitivity conversation:
 > The tiers are fixed, but what goes *in* them is personal — one person's
 > "eh, whatever" is another person's Private. So tell me about your data:
 > what do you want your assistant to know about, and what are you
-> protective of? Talk normally — I'll turn what you say into your personal
-> sensitivity map and read it back to you before anything gets saved.
+> protective of? Talk normally — I'll read back what I heard, and once
+> Olympus is running we'll put it in your Privacy settings together.
 
-**Operator mechanics — sensitivity mapping.** Iterate on that conversation,
-voice-friendly, until the operator confirms. This conversation is the path for
-the map: the dashboard does not edit it (its Sensitivity page only shows the
-saved categories, read-only), so do not send the operator there to write one.
-What the dashboard does own is per-source choice, made later in Step 6: which
-folders Drive and Dropbox may read, and Gmail's mail window, skipped categories
-and labels, and "always Private" and "skip" senders. Leave those to the
-dashboard pickers; do not copy them into the map or into tier rules now.
+**Operator mechanics — the privacy conversation.** Iterate on that
+conversation, voice-friendly, until the operator confirms. Its result is the
+operator's **privacy profile**, the only privacy configuration Olympus reads
+(the legacy sensitivity map file was retired on 2026-10-03; do not write
+`~/.olympus/sensitivity-map.json`, nothing reads it). The profile is saved
+later, in Step 6, from the dashboard's **Privacy** section (or ChatGPT's
+`olympus_privacy_set`): the owner's own words for "What's private for you?",
+plus folders, Gmail labels and senders that are always Private. Per-source
+choices also live there and in the source pickers: which folders Drive and
+Dropbox may read, and Gmail's mail window, skipped categories and labels, and
+"always Private" and "skip" senders. Nothing is written in this step.
 Help the operator untangle two different questions:
 
 - where data is stored today
@@ -590,8 +593,8 @@ Olympus question is not "does Google store this email?" The question is
 "may models reason over the therapy thread inside Gmail, and if so only in
 which lane?"
 
-Reflect back a proposed map before writing anything — in sentences, in
-the operator's own words, never as a `tier: item, item, item` cram-list:
+Reflect back what you heard before moving on — in sentences, in the
+operator's own words, never as a `tier: item, item, item` cram-list:
 
 > Here's what I heard. Your blog and anything you've published stays
 > Public. Day-to-day email, calendars, and work projects are Personal —
@@ -604,106 +607,12 @@ Keep revising until the operator says yes. Default categories to **Private**
 unless the operator explicitly says **Secrets**. Olympus judges every item
 twice: its names (title, path, subject, sender, labels) are Personal unless
 something raises them, and its content is judged separately and raised to
-Private or Secrets on evidence. The map feeds both judgments, so a health
-category can make a scan's text Private while its file name, matching
-nothing, stays Personal. The map is written before
-`olympus setup` runs, so its directory does not exist yet on a fresh
-machine — create it first, or the write fails with `ENOENT`. Create it
-**owner-only**: this directory holds the operator's sensitivity map, and a
-default umask would leave it world-readable.
+Private or Secrets on evidence. Secrets are found by the secret detector;
+there is no "always Secret" setting. Keep a short note of the confirmed
+answer for Step 6: the description in the operator's words, and any folders,
+labels or senders they named as always Private.
 
-```bash
-mkdir -p ~/.olympus && chmod 700 ~/.olympus
-```
-
-That `chmod` covers the DIRECTORY. The map file inside it is a second
-thing, and it matters: nothing in Olympus WRITES this file — you do — so
-it lands at your umask, which is 0644 on a clean macOS install. A 0700
-directory hides it from other users but not from anything running as the
-operator, and the file is a list of what they consider sensitive and what
-it looks like. Set the mode yourself right after writing it:
-
-```bash
-chmod 600 ~/.olympus/sensitivity-map.json
-```
-
-`olympus sensitivity validate` also enforces this: it is the one command
-that opens the map by name, so it leaves the file 0600 and reports both
-`permissions` (a 4-digit octal string) and `permissionsTightened: true`
-when it had to change anything. It refuses to chmod through a symlink or
-a non-regular file. Doing it yourself first means `permissionsTightened`
-never appears — which is the result you want, not a step you can skip.
-
-`olympus setup` creates the same directory at mode 0700, but it runs after
-this step. (If you skip ahead and `olympus sensitivity validate` cannot
-find the map, its own remedy names the directory and says setup creates
-it.) Then write `~/.olympus/sensitivity-map.json` using schemaVersion 2:
-
-```json
-{
-  "schemaVersion": 2,
-  "userFacingTiers": {
-    "public": { "targetTrustTier": "S0", "targetTrustDomain": "public_safe" },
-    "private": { "targetTrustTier": "S3", "targetTrustDomain": "internal" },
-    "secure": { "targetTrustTier": "S4", "targetTrustDomain": "secure_local" },
-    "secrets": { "targetTrustTier": "S5", "targetTrustDomain": "secure_local" }
-  },
-  "categories": [
-    {
-      "id": "therapy",
-      "label": "Therapy",
-      "targetTierName": "secure",
-      "targetTrustTier": "S4",
-      "targetTrustDomain": "secure_local",
-      "examples": ["therapy emails", "session notes"],
-      "notes": "Operator confirmed therapy material should stay secure.",
-      "match": {
-        "keywords": ["therapy", "therapist"],
-        "senderPatterns": [],
-        "pathPatterns": []
-      }
-    }
-  ]
-}
-```
-
-**Stored keys are legacy; labels are display-only.** The JSON above uses the
-legacy machine keys. Never write a key you invented to match a display label:
-the stored `private` key means **Personal** data, and sensitive **Private**
-data is still written as `secure`. Never write `private` (or `targetTierName`
-`private`) for sensitive Private data. The validator rejects mismatched target
-fields; preserve this exact mapping:
-
-| Stored key (JSON) | Trust tier / domain | Display label |
-|---|---|---|
-| `public` | `S0` / `public_safe` | Public |
-| `private` | `S3` / `internal` | Personal |
-| `secure` | `S4` / `secure_local` | Private |
-| `secrets` | `S5` / `secure_local` | Secrets |
-
-So a therapy category is written with `"targetTierName": "secure"` — never
-`"targetTierName": "private"` — even though you will describe that result to
-the operator as Private.
-
-A schemaVersion 2 map can target all four tiers. Private and Secrets
-categories raise matching items. Public and Personal categories are lowering
-guidance that any raise still beats, and content can never be lowered by
-them. Personal is already the default, so do not write a Personal category.
-Write a Public category only for material the operator names as published
-(a blog folder, say), and match it with `pathPatterns` (a folder path or
-folder key). Keywords never lower a tier: a lowering category matches only
-on a path pattern or a sender, so a keyword in a Public or Personal category
-has no effect. Lower on a sender only for authenticated or low-stakes
-senders: a From address can be spoofed, so a forged sender must never be able
-to pull real mail down a tier. An older schemaVersion 1 map still loads and
-stays raise-only.
-Validate it before continuing:
-
-```bash
-olympus sensitivity validate
-```
-
-Only after the map validates, ask the posture question. **Do not lead
+Only after the operator confirms, ask the posture question. **Do not lead
 with a recommendation.** A recommendation must come from the operator's
 own answer, so first ask:
 
@@ -711,7 +620,7 @@ own answer, so first ask:
 
 This moment — not earlier — is when local models enter the conversation.
 Do not mention machine checks, detected runtimes, or postures during the
-tier explainer or the sensitivity conversation; an unprompted "I checked
+tier explainer or the privacy conversation; an unprompted "I checked
 this machine for Ollama" lands as a non sequitur.
 
 If you detected a local runtime, it is a conversational observation to
@@ -1133,7 +1042,7 @@ ask:
 
 > One more privacy choice. Olympus sorts most of your items with rules on this
 > machine. When an item's name looks like it might be private — a word from
-> your sensitivity map, or a sensitive-sounding file or folder name — it asks
+> something you named as private, or a sensitive-sounding file or folder name — it asks
 > a private model to decide Personal or Private before indexing it for
 > search. It sends one item at a time: its title, folder path and folder
 > names, labels and sender, and, when the content itself looks sensitive, a
@@ -1613,6 +1522,15 @@ for the source the operator selects and only its approved scope. If the
 operator explicitly needs the documented headless fallback, ask which source
 that fallback should connect.
 
+**Save the privacy conversation in the Privacy section.** The Step 2
+conversation is saved here, in the dashboard's **Privacy** section, the only
+privacy configuration Olympus reads: the operator's own words for "What's
+private for you?", and any folders, Gmail labels or senders they named as
+always Private (offered once the source is connected, since those come from
+its pickers). Read the note back and let the operator press save; do not save
+it for them. Never write a `~/.olympus/sensitivity-map.json` file: it was
+retired on 2026-10-03 and nothing reads it.
+
 **Drive, Dropbox and Gmail require scope approval before ingestion.**
 Connecting an account grants access for the picker; it does not approve
 indexing the account. Until the operator saves a scope the card reads
@@ -2048,7 +1966,7 @@ the step is DONE, not broken.
    a bare menu of preset names.** The plain-language walkthrough in Step 2
    is part of the gate; the operator decides only after hearing what each
    posture means for their data. A question tool or pick-list is allowed
-   only after the four-tier explanation, the sensitivity conversation and
+   only after the four-tier explanation, the privacy conversation and
    the posture walkthrough have all been delivered in chat, and its labels
    are the plain-language descriptions, never preset ids.
 2. **Never echo, log, or store secrets in plain text.** Keys go through

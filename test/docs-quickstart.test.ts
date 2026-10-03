@@ -21,13 +21,15 @@ describe('first-run docs', () => {
     expect(docs).toContain('custom integrations are user-owned');
     expect(docs).not.toContain('end-to-end-encrypted inference');
     expect(docs).toContain('olympus setup --preset no-sensitive --yes --dry-run');
-    expect(docs).toContain('olympus sensitivity validate');
+    // The legacy sensitivity map is retired (2026-10-03): the privacy profile is the only privacy path.
+    expect(docs).not.toContain('$EDITOR ~/.olympus/sensitivity-map.json');
+    expect(docs).toContain('the only privacy configuration');
     expect(docs).toContain('olympus connect google --client-id <google-oauth-client-id>');
     expect(docs).toContain('olympus connect telegram --pair');
     expect(docs).toContain("printf '%s' \"$VENICE_API_KEY\" | olympus connect venice --api-key-stdin");
     expect(docs).toContain('Private answers are served by the approved Venice');
     expect(docs).not.toContain('E2EE secure-answer ids remain gated until');
-    expect(docs).toContain('raise-only guidance');
+    expect(docs).toContain('nothing you write can lower content');
 
     expect(docs).not.toMatch(/^olympus setup\s*(?:#.*)?$/m);
     expect(docs).not.toMatch(/^olympus connect (?:google|gmail|google-drive|dropbox|telegram|whatsapp|x|venice|readwise)\s*(?:#.*)?$/m);
@@ -37,12 +39,13 @@ describe('first-run docs', () => {
     expect(docs).not.toContain('without owning a GPU');
   });
 
-  test('agent installer walks sensitivity mapping before posture and connects sources one at a time', () => {
+  test('agent installer walks the privacy conversation before posture and connects sources one at a time', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
 
     const normalizedInstall = install.replace(/>\s*/g, '').replace(/\s+/g, ' ');
     expect(normalizedInstall).toContain('So tell me about your data: what do you want your assistant to know about, and what are you protective of?');
-    expect(install.indexOf('olympus sensitivity validate')).toBeLessThan(install.indexOf('How do you want to handle your Private data?'));
+    expect(install.indexOf('Only after the operator confirms, ask the posture question.')).toBeLessThan(install.indexOf('How do you want to handle your Private data?'));
+    expect(install).not.toContain('\nolympus sensitivity validate');
     expect(install).toContain('Gmail already lives on Google\'s servers');
     expect(normalizedInstall).toContain('Default categories to **Private** unless the operator explicitly says **Secrets**');
     expect(install).toContain('Run only the command for the source currently being connected.');
@@ -77,7 +80,8 @@ describe('first-run docs', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const scripts = [
       ["> Olympus is installed. Quick proof:", 'd3f1f9fddd7d6b9a376a7ffcfa81ad841ca87524f8298a58d8a1df62934a9aab'],
-      ["> Here's how Olympus treats your data", '2767c6bb05e4026fbd7dad2d0f6882ab00c15661279b87e27cfa161304e167d9'],
+      // Last sentence updated 2026-10-03: the sensitivity map is retired; preferences are saved in the Privacy section.
+      ["> Here's how Olympus treats your data", 'f6183f37afab29725f41b398dcf50edfebbdf16357825e33373ef55e976d4536'],
     ];
     for (const [start, digest] of scripts) {
       const from = install.indexOf(start!);
@@ -87,7 +91,7 @@ describe('first-run docs', () => {
     }
     expect(install).toContain('required user-facing transition');
     expect(install).toContain('Required user-facing four-tier explanation');
-    expect(install).toContain('before asking any sensitivity or posture question');
+    expect(install).toContain('before asking any privacy or posture question');
     expect(install.indexOf(scripts[0]![0]!)).toBeLessThan(install.indexOf(scripts[1]![0]!));
     expect(install.indexOf(scripts[1]![0]!)).toBeLessThan(install.indexOf('> Do you run local AI models'));
   });

@@ -12,7 +12,6 @@ import {
   sourceInvocationProvenance,
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import {
   createSourceExclusionMatcher,
   loadSourceIngestionExclusions,
@@ -609,13 +608,10 @@ export class GoogleDriveSourceConnector implements SourceConnector {
   }
 }
 
-export function googleDriveConnectorStoreClassification(
-  sensitivityMap: SensitivityMap | undefined,
-): ConnectorStoreClassificationOptions {
+export function googleDriveConnectorStoreClassification(): ConnectorStoreClassificationOptions {
   return {
     baselineTrustTier: 'S3',
     baselineTrustDomain: 'internal',
-    ...(sensitivityMap ? { sensitivityMap } : {}),
   };
 }
 

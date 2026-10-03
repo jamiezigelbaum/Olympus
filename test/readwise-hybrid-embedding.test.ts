@@ -14,7 +14,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { defaultConfig } from '../src/core/config.ts';
-import { parseSensitivityMap, USER_FACING_TIER_MAPPING } from '../src/core/sensitivity-map.ts';
 import { createSourceCorpusRegistry, defaultSourceCorpusRegistryConfig } from '../src/core/source-corpus-registry.ts';
 import {
   LocalConnectorStore,
@@ -127,7 +126,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
-/** One Reader document and two highlights, one of them Private by the owner's map. */
+/** One Reader document and two highlights, one of them Private (it carries an IBAN). */
 function readwiseFetch(): ReadwiseFetch {
   return async (url) => {
     const parsed = new URL(url);
@@ -148,7 +147,7 @@ function readwiseFetch(): ReadwiseFetch {
           user_book_id: 'book-42',
           title: 'Notes',
           highlights: [
-            { id: 'hl-deal', text: 'Thoughts on the acme merger timeline.', updated_at: '2026-09-24T09:30:00.000Z' },
+            { id: 'hl-deal', text: 'Thoughts on the acme merger timeline. Wire the deposit to IBAN GB82 WEST 1234 5698 7654 32.', updated_at: '2026-09-24T09:30:00.000Z' },
             { id: 'hl-city', text: 'A city is a machine for memory.', updated_at: '2026-09-24T09:31:00.000Z' },
           ],
         }],
@@ -156,22 +155,6 @@ function readwiseFetch(): ReadwiseFetch {
     }
     return jsonResponse({ error: 'unexpected URL' }, 404);
   };
-}
-
-function ownerMap() {
-  return parseSensitivityMap({
-    schemaVersion: 2,
-    userFacingTiers: USER_FACING_TIER_MAPPING,
-    categories: [{
-      id: 'deal',
-      label: 'deal',
-      targetTierName: 'secure',
-      targetTrustTier: USER_FACING_TIER_MAPPING.secure.targetTrustTier,
-      targetTrustDomain: USER_FACING_TIER_MAPPING.secure.targetTrustDomain,
-      examples: ['example'],
-      match: { keywords: ['acme merger'], senderPatterns: [], pathPatterns: [] },
-    }],
-  });
 }
 
 describe('a provider timeout during sync never fails the sync (shared connector-store path)', () => {
@@ -251,7 +234,6 @@ describe('Readwise: sync commits, the embedding task embeds with backoff, nothin
       env: { OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH: join(root, 'readwise-secure.sqlite') },
       embeddingProvider: cloud,
       secureEmbeddingProvider: venice,
-      tierClassification: { sensitivityMap: ownerMap() },
     });
     closers.push(() => lane.newStores.secure_local?.current()?.close());
     const clock = { now: new Date('2026-09-24T12:00:00.000Z') };
@@ -371,7 +353,6 @@ describe('Readwise: sync commits, the embedding task embeds with backoff, nothin
       env: { OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH: join(root, 'readwise-secure.sqlite') },
       embeddingProvider: cloud,
       secureEmbeddingProvider: venice,
-      tierClassification: { sensitivityMap: ownerMap() },
     });
     closers.push(() => lane.newStores.secure_local?.current()?.close());
     const now = () => new Date('2026-09-24T12:00:00.000Z');

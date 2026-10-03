@@ -9,12 +9,8 @@
 import { describe, expect, test } from 'bun:test';
 import type { SourceClassificationSignals } from '../src/core/contracts.ts';
 import {
-  USER_FACING_TIER_MAPPING,
-  parseSensitivityMap,
-  type SensitivityMap,
-} from '../src/core/sensitivity-map.ts';
-import {
   SNIFFER_EXCERPT_MAX_CHARS,
+  TIER_MAP_REVISION,
   classifyItemTiers,
   type OwnerTierRule,
   type TierClassificationOptions,
@@ -34,26 +30,6 @@ function classify(
   provider = 'fixture',
 ) {
   return classifyItemTiers({ signals, provider, ...(text !== undefined ? { text } : {}) }, options);
-}
-
-function mapV2(categories: Array<{ id: string; tier: 'public' | 'private' | 'secure' | 'secrets'; keywords?: string[]; pathPatterns?: string[] }>): SensitivityMap {
-  return parseSensitivityMap({
-    schemaVersion: 2,
-    userFacingTiers: USER_FACING_TIER_MAPPING,
-    categories: categories.map((category) => ({
-      id: category.id,
-      label: category.id,
-      targetTierName: category.tier,
-      targetTrustTier: USER_FACING_TIER_MAPPING[category.tier].targetTrustTier,
-      targetTrustDomain: USER_FACING_TIER_MAPPING[category.tier].targetTrustDomain,
-      examples: ['example'],
-      match: {
-        keywords: category.keywords ?? [],
-        senderPatterns: [],
-        pathPatterns: category.pathPatterns ?? [],
-      },
-    })),
-  });
 }
 
 function rule(overrides: Partial<OwnerTierRule> & Pick<OwnerTierRule, 'tier' | 'strength'>): OwnerTierRule {
@@ -91,20 +67,17 @@ describe('defaults and Public evidence', () => {
     }
   });
 
-  test('an owner rule or a map category can make an item Public', () => {
+  test('an owner rule can make an item Public', () => {
     expect(classify({ path: '/work/published/talk.pdf' }, BENIGN, {
       rules: [rule({ tier: 'public', strength: 'prior' })],
-    }).metadataTier).toBe('public');
-    expect(classify({ path: '/blog/drafts/post.md' }, BENIGN, {
-      sensitivityMap: mapV2([{ id: 'blog', tier: 'public', pathPatterns: ['/blog/'] }]),
     }).metadataTier).toBe('public');
   });
 });
 
 describe('raises beat lowers', () => {
-  test('a raising map category beats public evidence', () => {
-    const decision = classify({ title: 'Therapy notes', sharing: 'public_link' }, BENIGN, {
-      sensitivityMap: mapV2([{ id: 'therapy', tier: 'secure', keywords: ['therapy'] }]),
+  test('an owner always-Private rule beats public evidence', () => {
+    const decision = classify({ title: 'Therapy notes', path: '/therapy/notes.txt', sharing: 'public_link' }, BENIGN, {
+      rules: [rule({ id: 'therapy', match: { kind: 'pathPrefix', value: '/therapy' }, tier: 'secure', strength: 'prior' })],
     });
     expect(decision.metadataTier).toBe('secure');
     expect(decision.reasons).not.toContain('metadata:evidence:public_link');
@@ -120,19 +93,19 @@ describe('raises beat lowers', () => {
     expect(decision.reasons).toContain('metadata:floor:provider:secret_chat');
   });
 
-  test('when a raising and a lowering map category both match, the raise wins', () => {
+  test('when a raising and a lowering owner rule both match, the raise wins', () => {
     const decision = classify({ path: '/blog/medical/scan.txt' }, BENIGN, {
-      sensitivityMap: mapV2([
-        { id: 'blog', tier: 'public', pathPatterns: ['/blog/'] },
-        { id: 'medical', tier: 'secure', pathPatterns: ['/medical/'] },
-      ]),
+      rules: [
+        rule({ id: 'blog', match: { kind: 'pathPrefix', value: '/blog' }, tier: 'public', strength: 'prior' }),
+        rule({ id: 'medical', match: { kind: 'pathPrefix', value: '/blog/medical' }, tier: 'secure', strength: 'prior' }),
+      ],
     });
     expect(decision.metadataTier).toBe('secure');
   });
 
   test('among lowering signals the most sensitive target wins', () => {
     const decision = classify({ path: '/family/post.md', sharing: 'public_link' }, BENIGN, {
-      sensitivityMap: mapV2([{ id: 'family', tier: 'private', pathPatterns: ['/family/'] }]),
+      rules: [rule({ id: 'family', match: { kind: 'pathPrefix', value: '/family' }, tier: 'private', strength: 'prior' })],
     });
     expect(decision.metadataTier).toBe('private');
   });
@@ -162,13 +135,6 @@ describe('Secrets', () => {
     expect(decision.metadataTier).toBe('public');
     expect(decision.contentTier).toBe('secrets');
     expect(decision.decidedBy).toBe('secret_detector');
-  });
-
-  test('a secrets-target map category raises to Secrets', () => {
-    const decision = classify({ title: 'vault export' }, BENIGN, {
-      sensitivityMap: mapV2([{ id: 'vault', tier: 'secrets', keywords: ['vault export'] }]),
-    });
-    expect(decision.contentTier).toBe('secrets');
   });
 
   test('the sniffer is never asked about a secret-bearing item', () => {
@@ -267,23 +233,6 @@ describe('content only raises', () => {
     expect(decision.contentTier).toBe('secure');
   });
 
-  test('a lowering map category on the text is ignored', () => {
-    const decision = classify({ title: 'Account' }, 'our public roadmap blog', {
-      sensitivityMap: mapV2([{ id: 'roadmap', tier: 'public', keywords: ['public roadmap'] }]),
-    });
-    expect(decision.metadataTier).toBe('private');
-    expect(decision.contentTier).toBe('private');
-  });
-
-  test('a raising map category on the text raises the content only', () => {
-    const decision = classify({ title: 'Weekly' }, 'about my therapy session', {
-      sensitivityMap: mapV2([{ id: 'therapy', tier: 'secure', keywords: ['therapy session'] }]),
-    });
-    expect(decision.metadataTier).toBe('private');
-    expect(decision.contentTier).toBe('secure');
-    expect(decision.reasons).toContain('content:sensitivity_map:therapy');
-  });
-
   test('an unread item keeps its metadata tier and says so', () => {
     const decision = classify({ title: 'Report' }, undefined);
     expect(decision.contentTier).toBe(decision.metadataTier);
@@ -305,21 +254,11 @@ describe('sniffer seam', () => {
     expect(withRecord.contentTier).toBe('secure');
   });
 
-  test('a decided sniffer verdict raises; an owner map match means the sniffer is not asked', () => {
+  test('a decided sniffer verdict raises', () => {
     const sniffer: TierSniffer = { id: 'fake', judge: () => ({ verdict: 'decided', tier: 'secure', code: 'health:0.9' }) };
     const decided = classify({ title: 'therapy invoices' }, BENIGN, { sniffer });
     expect(decided.metadataTier).toBe('secure');
     expect(decided.state).toBe('current');
-
-    let asked = 0;
-    const spy: TierSniffer = { id: 'spy', judge: () => { asked += 1; return { verdict: 'undecided' }; } };
-    const mapped = classify({ title: 'therapy invoices', path: '/household/therapy invoices.pdf' }, BENIGN, {
-      sniffer: spy,
-      sensitivityMap: mapV2([{ id: 'household', tier: 'private', pathPatterns: ['/household/'] }]),
-    });
-    expect(mapped.metadataPending).toBe(false);
-    expect(mapped.state).toBe('current');
-    expect(asked).toBe(0);
   });
 
   test('unflagged names are never pending', () => {
@@ -343,29 +282,10 @@ describe('reasons are content-free', () => {
   });
 });
 
-describe('sensitivity map versions', () => {
-  test('a v1 map still loads and still raises', () => {
-    const v1 = parseSensitivityMap({
-      schemaVersion: 1,
-      userFacingTiers: USER_FACING_TIER_MAPPING,
-      categories: [{
-        id: 'therapy',
-        label: 'Therapy',
-        targetTierName: 'secure',
-        targetTrustTier: 'S4',
-        targetTrustDomain: 'secure_local',
-        examples: ['therapy'],
-        match: { keywords: ['therapy'], senderPatterns: [], pathPatterns: [] },
-      }],
-    });
-    expect(v1.schemaVersion).toBe(1);
-    expect(classify({ title: 'therapy' }, BENIGN, { sensitivityMap: v1 }).metadataTier).toBe('secure');
-  });
-
-  test('the map revision is recorded with every decision', () => {
-    const map = mapV2([{ id: 'therapy', tier: 'secure', keywords: ['therapy'] }]);
+describe('the retired sensitivity map', () => {
+  test('every decision records the fixed map revision', () => {
+    expect(TIER_MAP_REVISION).toBe('none');
     expect(classify({ title: 'x' }, BENIGN).mapRevision).toBe('none');
-    expect(classify({ title: 'x' }, BENIGN, { sensitivityMap: map }).mapRevision).toMatch(/^v2:[a-f0-9]{16}$/);
   });
 });
 

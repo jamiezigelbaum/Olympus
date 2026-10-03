@@ -134,7 +134,6 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           subject: identity,
         },
         {
-          ...(tierClassification?.sensitivityMap ? { sensitivityMap: tierClassification.sensitivityMap } : {}),
           ...(tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {}),
           ...(override ? { override } : {}),
           ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),

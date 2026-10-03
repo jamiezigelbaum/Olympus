@@ -48,7 +48,6 @@ import {
   readSqliteSchemaVersion,
   runSqliteMigrations,
 } from '../../core/sqlite-migrations.ts';
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { classifyItemTier, type ClassifyItemTierInput } from '../classification/engine.ts';
 import {
   TierLedger,
@@ -874,7 +873,6 @@ export type ConnectorStoreCoverageGap =
 export interface ConnectorStoreClassificationOptions {
   baselineTrustTier?: SourceTrustTier;
   baselineTrustDomain?: SourceTrustDomain;
-  sensitivityMap?: SensitivityMap;
   /**
    * Owner tier rules this lane's placement honours. Only RAISING rules
    * (Private, Secrets) move placement: an item a rule makes Private is placed
@@ -2302,7 +2300,7 @@ export class LocalConnectorStore {
     tierClassification?: ConnectorStoreTierClassification,
   ): boolean {
     try {
-      const inputs = resolveStoreTierClassification(tierClassification, this.tierLedgerPathInUse(), undefined);
+      const inputs = resolveStoreTierClassification(tierClassification, this.tierLedgerPathInUse());
       if (inputs?.unavailableReason) return false;
       const ledger = this.tierLedger();
       if (!ledger) return false;
@@ -2332,7 +2330,6 @@ export class LocalConnectorStore {
           subject: item.identity,
         },
         {
-          ...(inputs?.sensitivityMap ? { sensitivityMap: inputs.sensitivityMap } : {}),
           ...(inputs?.sniffer ? { sniffer: inputs.sniffer } : {}),
           ...(override ? { override } : {}),
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
@@ -5703,7 +5700,6 @@ export class LocalConnectorStore {
     const tierClassification = resolveStoreTierClassification(
       options?.tierClassification,
       this.tierLedgerPathInUse(),
-      classification?.sensitivityMap,
     );
     const tierRouting = options?.tierRouting;
     let itemsRoutedElsewhere = 0;
@@ -10063,7 +10059,6 @@ function assertConnectorStoreStorageProfile(profile: SourceIndexStorageProfile):
 interface NormalizedConnectorStoreClassification {
   baselineTrustTier: SourceTrustTier;
   baselineTrustDomain: SourceTrustDomain;
-  sensitivityMap?: SensitivityMap;
   ownerRules?: readonly OwnerTierRule[];
 }
 
@@ -10074,7 +10069,6 @@ function normalizeClassificationOptions(
   return {
     baselineTrustTier: options.baselineTrustTier ?? 'S3',
     baselineTrustDomain: options.baselineTrustDomain ?? 'internal',
-    ...(options.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}),
     ...(options.ownerRules?.length ? { ownerRules: [...options.ownerRules] } : {}),
   };
 }
@@ -10101,10 +10095,10 @@ function classifyConnectorStoreItem(
 ): SourceSensitivity {
   if (!classification) return placeInExistingStore(item, placement, storeTrustDomain);
 
-  // The SHARED per-item engine, not just the sensitivity map.
+  // The SHARED per-item engine.
   //
-  // This policy used to run the map alone and then fall straight to its
-  // baseline. Every connector-store lane configures an `internal` baseline, so
+  // This policy once ran the (since retired) sensitivity map alone and then
+  // fell straight to its baseline. Every connector-store lane configures an `internal` baseline, so
   // the engine's conservative detectors — credentials, financial, health,
   // identity — never ran on a store lane at all: a bank statement classified
   // as ordinary internal mail and became cloud-embedding eligible, and a
@@ -10112,13 +10106,7 @@ function classifyConnectorStoreItem(
   // the S5 rule in the sync loop. The mail and file connectors then shipped a
   // detector-backed classify() for exactly this decision; supplying a policy
   // silently replaced it with the weaker half.
-  //
-  // The engine consults the map itself, and in its own order: a credential
-  // finding outranks a map category (fail closed), which is the one behaviour
-  // this changes for a map that was already configured.
-  const classified = classifyItemTier(classificationInputFromRawItem(item), {
-    ...(classification.sensitivityMap ? { sensitivityMap: classification.sensitivityMap } : {}),
-  });
+  const classified = classifyItemTier(classificationInputFromRawItem(item));
   // The S5 floor outranks every rule: a secret is tombstoned, never placed.
   if (classified.tier === 'S5') {
     return buildSourceSensitivity({ trustTier: 'S5', trustDomain: 'secure_local' });
@@ -10130,12 +10118,6 @@ function classifyConnectorStoreItem(
     (rule.tier === 'secure' || rule.tier === 'secrets')
     && ownerRuleMatches(rule, placementSignalsFromRawItem(item), item.identity.provider))) {
     return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
-  }
-  if (classified.decidedBy === 'sensitivity_map') {
-    return buildSourceSensitivity({
-      trustTier: classified.tier,
-      trustDomain: classified.trustDomain,
-    });
   }
   // Raise-only above the lane's baseline. The engine's own floor is
   // secure_local for everything it cannot positively call clean, and adopting
@@ -10185,12 +10167,11 @@ function classificationInputFromRawItem(item: RawItem): ClassifyItemTierInput {
   // rather than being folded into the text haystack.
   const labels = metadataStringArray(item.metadata, 'labels');
   // The item's own name is part of its path, so it belongs in the haystack the
-  // sensitivity map's path patterns are tested against — JOINED, not chosen
-  // between. Picking the first available signal meant a source that publishes a
+  // detectors' path hints read — JOINED, not chosen between. Picking the first available signal meant a source that publishes a
   // locator URL but no folder path (any provider whose paths are built from
   // opaque folder ids) had its filename invisible to path matching, so a file
-  // called `password-manager-export.csv` classified as ordinary. Matching is
-  // substring containment and this classifier only ever RAISES a tier, so a
+  // called `password-manager-export.csv` classified as ordinary. This
+  // classifier only ever RAISES a tier, so a
   // longer haystack can tighten a decision and can never loosen one.
   const path = [
     metadataString(item.metadata, 'pathDisplay')

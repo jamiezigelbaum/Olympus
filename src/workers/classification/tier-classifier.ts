@@ -12,11 +12,11 @@
 //   signal never rescues an item a raising signal flagged.
 // - Secrets outrank everything except an explicit per-item owner override.
 // - Public needs positive evidence (a public link, a published item, an owner
-//   rule or a map category). Absence of sensitive signals is never enough.
+//   rule). Absence of sensitive signals is never enough.
 // - The classifier reads SIGNAL KINDS only. It never branches on which source
 //   an item came from; test/tier-classifier-source-agnostic.test.ts enforces it.
 // - Reasons are content-free codes: finding kinds, fixed vocabulary families,
-//   owner rule and map category ids. Never a title, path, sender or text.
+//   owner rule ids. Never a title, path, sender or text.
 // - Deterministic. The privacy-safe sniffer is a seam (TierSniffer). The
 //   shipped sniffer (sniffer.ts) answers synchronously from a verdict cache;
 //   a miss answers "undecided", which leaves the tier where the deterministic
@@ -27,12 +27,6 @@ import type {
   SourceClassificationSignals,
   SourceClassificationTier,
 } from '../../core/contracts.ts';
-import {
-  isRaisingSensitivityTier,
-  matchSensitivityMapTiers,
-  sensitivityMapRevision,
-  type SensitivityMap,
-} from '../../core/sensitivity-map.ts';
 import {
   detectSecretFindingKinds,
   detectSensitiveContent,
@@ -54,6 +48,15 @@ export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // and "confidence" alone no longer count). Items decided under p3 are judged
 // again, so a document either rule misfired on gets a real verdict.
 export const TIER_CLASSIFIER_VERSION = '2026-10-02.p4';
+
+/**
+ * The `mapRevision` every decision records. The legacy sensitivity map was
+ * retired on 2026-10-03 (owner ruling: the privacy profile is the only
+ * privacy path), so this is always `none`. The field stays because the tier
+ * ledger and the sniffer verdict cache key on it; a fresh install never had
+ * any other value.
+ */
+export const TIER_MAP_REVISION = 'none';
 
 export type TierKey = SourceClassificationTier;
 
@@ -134,7 +137,7 @@ export interface TierSnifferRequest {
    * the classifier does not ask the sniffer about an item it found a secret in.
    */
   material?: string;
-  /** The sensitivity map revision the question is asked under (a cache-key part). */
+  /** Always TIER_MAP_REVISION (a cache-key part kept from the retired sensitivity map). */
   mapRevision?: string;
   subject?: TierSnifferSubject;
 }
@@ -205,7 +208,6 @@ export interface TierClassificationInput {
 }
 
 export interface TierClassificationOptions {
-  sensitivityMap?: SensitivityMap;
   rules?: readonly OwnerTierRule[];
   override?: ItemTierOverride;
   sniffer?: TierSniffer;
@@ -286,7 +288,6 @@ export type TierDecidedBy =
   | 'owner_rule'
   | 'source_floor'
   | 'source_prior'
-  | 'sensitivity_map'
   | 'public_evidence'
   | 'sensitive_detector'
   | 'sniffer'
@@ -310,7 +311,7 @@ function classifyItemTiersWithPublic(
   const sniffer = options.sniffer ?? UNDECIDED_TIER_SNIFFER;
   const base = {
     engineVersion: TIER_CLASSIFIER_VERSION,
-    mapRevision: sensitivityMapRevision(options.sensitivityMap),
+    mapRevision: TIER_MAP_REVISION,
     snifferId: sniffer.id,
   };
   const text = input.text?.trim() ? input.text : undefined;
@@ -337,14 +338,13 @@ function classifyItemTiersWithPublic(
   const clearedReason = secretsCleared ? ['override:item:not_secret'] : [];
 
   const names = namesOf(signals);
-  const matchInput = mapMatchInput(signals);
+  const matchInput = namesMatchInput(signals);
 
   // ---------------------------------------------------------------- pass 1 --
   const metadata = metadataPass({
     signals,
     provider: input.provider,
     names,
-    matchInput,
     options,
     secretsCleared,
     sniffer,
@@ -434,7 +434,7 @@ export function classifyContentTier(
   const sniffer = options.sniffer ?? UNDECIDED_TIER_SNIFFER;
   const base = {
     engineVersion: TIER_CLASSIFIER_VERSION,
-    mapRevision: sensitivityMapRevision(options.sensitivityMap),
+    mapRevision: TIER_MAP_REVISION,
     snifferId: sniffer.id,
   };
   if (options.override?.kind === 'tier') {
@@ -451,7 +451,7 @@ export function classifyContentTier(
   const content = contentPass({
     signals: {},
     text,
-    matchInput: mapMatchInput({
+    matchInput: namesMatchInput({
       ...(input.title?.trim() ? { title: input.title } : {}),
       ...(input.path?.trim() ? { path: input.path } : {}),
       ...(input.sender?.trim() ? { sender: input.sender } : {}),
@@ -468,7 +468,7 @@ export function classifyContentTier(
       pending: false,
       forced: input.metadataForced,
       flags: input.metadataFlagged ? ['names:recorded'] : [],
-      ...(input.metadataOwnerDecided || namesInOwnerPersonalCategory(options.sensitivityMap, input) ? { ownerDecided: true } : {}),
+      ...(input.metadataOwnerDecided ? { ownerDecided: true } : {}),
     },
     options,
     secretsCleared: options.override?.kind === 'not_secret',
@@ -505,32 +505,16 @@ interface PassResult {
  * Whether recorded reasons show an OWNER RULE settled the names' tier (a
  * prior rule; a force rule is `metadataForced`). Such an item is not sent to
  * the sniffer only because its text was read: the owner already said where
- * it belongs. An owner's Personal-target map category counts too, read from
- * the map itself (`namesInOwnerPersonalCategory`); a Public-target one never
- * does (a broad folder category must not silence a person's own record).
+ * it belongs.
  */
 export function namesDecidedByOwner(reasons: readonly string[]): boolean {
   return reasons.some((reason) => reason.startsWith('metadata:owner_rule:'));
-}
-
-/** Whether the item's names fall in one of the owner's PERSONAL-target map categories (as in pass 1). */
-function namesInOwnerPersonalCategory(
-  map: SensitivityMap | undefined,
-  names: { title?: string; path?: string; sender?: string },
-): boolean {
-  if (!map) return false;
-  return matchSensitivityMapTiers(map, {
-    ...(names.title?.trim() ? { title: names.title } : {}),
-    ...(names.sender?.trim() ? { sender: names.sender } : {}),
-    ...(names.path?.trim() ? { path: names.path } : {}),
-  }).some((match) => match.tierName === 'private');
 }
 
 function metadataPass(args: {
   signals: SourceClassificationSignals;
   provider: string | undefined;
   names: string;
-  matchInput: MapMatchInput;
   options: TierClassificationOptions;
   secretsCleared: boolean;
   sniffer: TierSniffer;
@@ -614,24 +598,8 @@ function metadataPass(args: {
     raises.push({ tier: signals.floor.tier, decidedBy: 'source_floor', reason: floorReason! });
   }
 
-  // [5] Sensitivity map v2 on the names. Raising and lowering categories.
-  // Raising categories see the title; lowering categories see only the real
-  // path, folder keys and sender (sensitivity-map.ts, matchSensitivityMapTiers).
-  const mapMatches = matchSensitivityMapTiers(options.sensitivityMap, {
-    ...(signals.title?.trim() ? { title: signals.title } : {}),
-    ...(signals.sender?.trim() ? { sender: signals.sender } : {}),
-    ...(signals.path?.trim() ? { path: signals.path } : {}),
-    ...(signals.folderKeys && signals.folderKeys.length > 0 ? { folderKeys: signals.folderKeys } : {}),
-  });
-  for (const match of mapMatches) {
-    const verdict: Verdict = {
-      tier: match.tierName,
-      decidedBy: 'sensitivity_map',
-      reason: `metadata:sensitivity_map:${match.categoryId}`,
-    };
-    if (tierRank(match.tierName) > tierRank(resting.tier)) raises.push(verdict);
-    else lowers.push(verdict);
-  }
+  // [5] Retired: the legacy sensitivity map (2026-10-03). Owner folder,
+  // label and sender rules (step [3], the privacy profile) replace it.
 
   // [6] Deterministic public evidence.
   if (signals.sharing === 'public_link' || signals.sharing === 'published') {
@@ -641,11 +609,8 @@ function metadataPass(args: {
   let decided = resolveVerdicts(resting, raises, lowers, restingIsConfigured);
 
   // [7] Sniffer, only when names look possibly private and nothing already
-  // made them Private. Only an owner PERSONAL-target category answers the
-  // sniffer's question for it; a Public-target match (say a broad /work/
-  // folder) never silences a possibly-private name inside it.
-  const ownerSaidPersonal = mapMatches.some((match) => match.tierName === 'private');
-  const flags = ownerSaidPersonal ? [] : namesLookPossiblyPrivate(names).map((family) => `names:${family}`);
+  // made them Private.
+  const flags = namesLookPossiblyPrivate(names).map((family) => `names:${family}`);
   let pending = false;
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({
@@ -676,7 +641,7 @@ function metadataPass(args: {
     pending,
     forced: false,
     flags,
-    ...(priorRule || ownerSaidPersonal ? { ownerDecided: true } : {}),
+    ...(priorRule ? { ownerDecided: true } : {}),
     ...(priorRule ? { ownerRule: { kind: priorRule.match.kind, tier: priorRule.tier, strength: 'prior' as const } } : {}),
   };
 }
@@ -686,7 +651,7 @@ function contentPass(args: {
   text: string | undefined;
   /** The owner keeps the content unread (TierClassificationInput.namesOnly). */
   namesOnly?: boolean;
-  matchInput: MapMatchInput;
+  matchInput: NamesMatchInput;
   /** The item's names (title, folder path, sender), bounded: they travel with the excerpt. */
   names: string;
   metadata: PassResult;
@@ -760,19 +725,7 @@ function contentPass(args: {
     });
   }
 
-  // [11] Sensitivity map v2 on the text. Content only raises, so a lowering
-  // category is ignored here.
-  const mapMatches = matchSensitivityMapTiers(args.options.sensitivityMap, { text });
-  for (const match of mapMatches) {
-    // Content only raises: a lowering category never applies to the text.
-    if (!isRaisingSensitivityTier(match.tierName)) continue;
-    if (tierRank(match.tierName) <= tierRank(decided.tier)) continue;
-    decided = maxVerdict(decided, {
-      tier: match.tierName,
-      decidedBy: 'sensitivity_map',
-      reason: `content:sensitivity_map:${match.categoryId}`,
-    });
-  }
+  // [11] Retired with the legacy sensitivity map (2026-10-03).
 
   // [12] Sniffer on a short excerpt plus the item's names, while the content
   // is below Private.
@@ -784,8 +737,7 @@ function contentPass(args: {
   // item Personal. Until the model answers, the item is pending (held
   // Private). Structured detections, owner rules and overrides still decide
   // at once (above), and the model is never asked about Private content; an
-  // item whose names an owner rule or the owner's Personal-target map
-  // category settled is not asked only because its text was read.
+  // item whose names an owner rule settled is not asked only because its text was read.
   //
   // Without a privacy-safe model to ask (no private lane), only items whose
   // NAMES were flagged wait (owner ruling 2026-10-01: unflagged items are
@@ -941,18 +893,18 @@ function detectorReasons(signals: readonly string[]): string[] {
   return [...codes].sort();
 }
 
-interface MapMatchInput {
+interface NamesMatchInput {
   title?: string;
   sender?: string;
   path?: string;
 }
 
-function mapMatchInput(signals: SourceClassificationSignals): MapMatchInput {
+function namesMatchInput(signals: SourceClassificationSignals): NamesMatchInput {
   const title = signals.title?.trim();
   const sender = signals.sender?.trim();
-  // A source without a folder path still has a name, and the name is the
-  // path-shaped signal map path patterns are written against. Joined, never
-  // chosen between, so a longer haystack can only add matches.
+  // A source without a folder path still has a name, and the detectors' path
+  // hint reads both. Joined, never chosen between, so a longer haystack can
+  // only add matches.
   const path = [signals.path?.trim(), title].filter((part): part is string => Boolean(part)).join('\n');
   return {
     ...(title ? { title } : {}),

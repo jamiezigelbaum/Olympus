@@ -310,7 +310,7 @@ export function isPrivateEligible(item: PrivateEvidenceItem): boolean {
   if (domain !== undefined && domain !== 'secure_local') return false;
   for (const key of ['trust_tier', 'trustTier', 'tier', 'content_tier', 'contentTier', 'metadata_tier', 'metadataTier']) {
     const tier = item[key];
-    // Secret by name, or by trust tier: S5 is Secrets (sensitivity-map.ts USER_FACING_TIER_MAPPING).
+    // Secret by name, or by trust tier: S5 is Secrets.
     if (typeof tier === 'string' && (/secret/i.test(tier) || tier.trim().toUpperCase() === 'S5')) return false;
   }
   return true;

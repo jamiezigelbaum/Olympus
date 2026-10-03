@@ -534,7 +534,7 @@ export class TieredStoreSet {
     // and rules file re-read when edited, the sniffer), keyed by the set
     // ledger the sniffer's queue sits beside. Resolved per call, so an edited
     // map or rules file applies at the next pass.
-    return resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath, undefined);
+    return resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
   }
 
   /** @internal */

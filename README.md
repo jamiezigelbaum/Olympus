@@ -296,10 +296,10 @@ install is non-TTY, and without the flag the host exits 1 asking for capability
 consent it cannot prompt for. Omit the flag on `2026.7.1`, which does not
 define it.
 
-The agent checks prerequisites, installs the plugin, helps you describe your
-data as a sensitivity map, asks for your privacy posture and your approval of
-the private classifier, verifies the worker, restarts the gateway, and hands
-you the dashboard. You paste your model keys into its **Models** section
+The agent checks prerequisites, installs the plugin, talks through what is
+private for you (you save it later in the dashboard's Privacy section), asks
+for your privacy posture and your approval of the private classifier,
+verifies the worker, restarts the gateway, and hands you the dashboard. You paste your model keys into its **Models** section
 yourself; the agent never collects them. That completes base installation.
 Then you can choose a source in the dashboard or leave Olympus ready for
 later; no source is selected for you. Once your chosen source is ready, the

@@ -19,17 +19,13 @@
 //   scorer seam below is where a local-LLM scorer plugs in later.
 
 import { scanDropboxContentPolicyText } from '../dropbox-files/content-policy.ts';
-import {
-  matchSensitivityMap,
-  type SensitivityMap,
-} from '../../core/sensitivity-map.ts';
 
 export const ITEM_CLASSIFICATION_ENGINE_KIND = 'olympus_deterministic_item_tier_classifier';
 export const ITEM_CLASSIFICATION_ENGINE_VERSION = '2026-06-21.1';
 
 export type ItemTier = 'S2' | 'S3' | 'S4' | 'S5';
 export type ItemTrustDomain = 'internal' | 'secure_local';
-export type ItemTierDecidedBy = 'sensitive_detector' | 'sensitivity_map' | 'clean_rules' | 'default_secure';
+export type ItemTierDecidedBy = 'sensitive_detector' | 'clean_rules' | 'default_secure';
 
 export interface ClassifyItemTierInput {
   subject?: string;
@@ -72,7 +68,6 @@ export interface ClassifyItemTierOptions {
   // matched case-insensitively as substrings of the sender field. Checked as
   // a detector: overrides clean rules, never overridden by them.
   sensitiveSenderPatterns?: readonly string[];
-  sensitivityMap?: SensitivityMap;
 }
 
 export function classifyItemTier(
@@ -106,16 +101,6 @@ export function classifyItemTier(
         signals: ['sensitive_sender_override'],
       };
     }
-  }
-
-  const sensitivityMapMatch = matchSensitivityMap(options.sensitivityMap, input);
-  if (sensitivityMapMatch) {
-    return {
-      tier: sensitivityMapMatch.targetTrustTier,
-      trustDomain: sensitivityMapMatch.targetTrustDomain,
-      decidedBy: 'sensitivity_map',
-      signals: sensitivityMapMatch.categoryIds.map((categoryId) => `sensitivity_map:${categoryId}`),
-    };
   }
 
   if (sensitive.signals.length > 0) {

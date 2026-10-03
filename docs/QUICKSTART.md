@@ -32,7 +32,7 @@ agent with a terminal:
 
 Before first setup, read the full
 [four-tier privacy explanation](../INSTALL_FOR_AGENTS.md#step-2--privacy-posture-mandatory-decision-gate),
-then describe your sensitivity preferences and choose how to handle Private data.
+then describe your privacy preferences and choose how to handle Private data.
 For the credentials and models that choice requires, follow the
 [agent-led model setup guide](SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
 It covers account creation, API spending, exact password-manager references,
@@ -146,37 +146,21 @@ public install path.
 
 ## 2. Run setup
 
-First write your sensitivity map:
+Your privacy preferences are not a file you write before setup. The
+installer-agent flow asks them conversationally: "Tell me about your data —
+what do you want your assistant to know about, and what are your privacy
+concerns?" Once Olympus is running, you save the answer in the dashboard's
+**Privacy** section (or with ChatGPT's `olympus_privacy_set`): your own words
+for "What's private for you?", plus folders, Gmail labels or senders that are
+always Private. That privacy profile is the only privacy configuration
+Olympus reads. Olympus judges each item's names (Personal unless raised) and
+its content (raised to Private or Secrets on evidence); your always-Private
+rules raise matching items, and nothing you write can lower content.
 
-```bash
-mkdir -p ~/.olympus && chmod 700 ~/.olympus   # setup makes it 0700 too, but runs later
-$EDITOR ~/.olympus/sensitivity-map.json
-chmod 600 ~/.olympus/sensitivity-map.json     # the map is owner-only; your umask isn't
-olympus sensitivity validate
-```
-
-The first `chmod` covers the directory, the second covers the map itself.
-Nothing in Olympus writes `sensitivity-map.json` — you do — so it lands at
-your umask (0644 on a clean macOS install), inside a directory that hides
-it from other users but not from anything running as you.
-`olympus sensitivity validate` enforces the same thing: it leaves the file
-0600 and reports `permissions` and `permissionsTightened` when it had to
-change it. Setting it yourself first means it never has to.
-
-The installer-agent flow asks this conversationally: "Tell me about your data
-— what do you want your assistant to know about, and what are your privacy
-concerns?" The dashboard does not edit the map; its Sensitivity page shows the
-saved categories read-only. Write the map as `"schemaVersion": 2`. Olympus
-judges each item's names (Personal unless raised) and its content (raised to
-Private or Secrets on evidence), and the map feeds both. Private and Secrets
-categories raise matching items. Public and Personal categories are lowering
-guidance that any raise still beats, and they never lower content. They
-match only on a path pattern or a sender, never a keyword; Personal is the
-default, so a Personal category is rarely useful. A schemaVersion 1 map
-still loads and stays raise-only guidance. The stored keys keep their legacy
-names — `secure` is Private, and the legacy `private` key means Personal — so
-sensitive Private data is written with `"targetTierName": "secure"`, never
-`"private"`.
+The legacy sensitivity map (`~/.olympus/sensitivity-map.json` and
+`olympus sensitivity validate`) was retired on 2026-10-03. If an older
+install has that file, Olympus no longer reads it: re-add its rules in the
+Privacy section.
 
 ```bash
 olympus setup --preset private-cloud-only --cloud-lane subscription --yes

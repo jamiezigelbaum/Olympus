@@ -316,6 +316,23 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-03 (no version change): the legacy sensitivity map is retired
+  (owner decision, Jamie). The privacy profile (`olympus_privacy_get` /
+  `olympus_privacy_set`, `privacy-profile.ts`, which writes always-Private
+  owner tier rules) is the only privacy path. Removed: `core/sensitivity-map.ts`,
+  `OLYMPUS_SENSITIVITY_MAP_PATH`, `olympus sensitivity validate`, the
+  `sensitivity_map` step in the per-item engine and the four-tier classifier
+  (`decidedBy: 'sensitivity_map'`), and every lane's map loading. Decisions
+  still record `mapRevision`, now always `none` (`TIER_MAP_REVISION`); the
+  ledger and the sniffer cache key on it, and a fresh install never had any
+  other value, so the classifier version is unchanged (fresh-install
+  decisions cannot change). Rows already decided under a map keep their
+  exclusion from background re-judging. No upgrade migration: an existing
+  install's `~/.olympus/sensitivity-map.json` is no longer read, and its
+  rules should be re-added in the Privacy editor. The dashboard view's
+  `sensitivity` block is never produced; the field stays only until the
+  frontend change that removes the Sensitivity page lands. None of this is
+  reachable from the three contract types, so the fingerprint is unchanged.
 - 2026-10-02 (no version change): background re-judging and owner-rule
   sweeps (tier classification review fixes). A re-judge of a stored item
   never hides it pending the sniffer's answer: the item stays where it is

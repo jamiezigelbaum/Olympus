@@ -120,7 +120,6 @@ export const V0_4_PUBLIC_SOURCE_IDS = [
 export const V0_4_PUBLIC_CLI_COMMANDS = [
   'setup',
   'sovereignty init',
-  'sensitivity validate',
   'worker install',
   'worker status',
   'worker start',

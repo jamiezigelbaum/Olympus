@@ -14,7 +14,6 @@ import {
   createSourceCorpusRegistry,
   type SourceCorpusRegistry,
 } from '../core/source-corpus-registry.ts';
-import type { SensitivityMap } from '../core/sensitivity-map.ts';
 import { SOURCE_TRUST_DOMAINS } from '../core/source-index/types.ts';
 import type {
   SovereigntyEngine,
@@ -257,12 +256,10 @@ export interface SourceDashboardViewModel {
   unassigned_corpora: DashboardUnassignedCorpora;
   excluded_by_configuration: DashboardExcludedByConfiguration;
   /**
-   * The owner's own secure categories, read off the sensitivity map.
-   *
-   * OMITTED ENTIRELY when no map is configured or the configured one does not
-   * parse. Absent means "nothing to say", never "no categories": a page that
-   * rendered an empty category list for an unreadable file would be asserting
-   * the owner protects nothing.
+   * RETIRED (2026-10-03): the legacy sensitivity map is gone and nothing
+   * produces this block any more; it is always absent. The field and its
+   * types remain only because src/workers/dashboard/** still reads it; remove
+   * them once the frontend change that deletes the sensitivity page lands.
    */
   sensitivity?: DashboardSensitivity;
   /**
@@ -541,7 +538,8 @@ export interface DashboardExcludedSource {
 }
 
 /**
- * The owner's secure categories, as configured.
+ * RETIRED with the legacy sensitivity map (2026-10-03); never produced.
+ * The owner's secure categories, as they were configured.
  *
  * `editable` is false and stays false until a write route exists: no route in
  * this worker writes the sensitivity map, so a page offering an add or remove
@@ -1160,15 +1158,6 @@ export interface SourceDashboardBuildOptions {
   /** Explicit-scope state for folder-capable sources; keys absent for every other family. */
   fileSourceScopeStatus?: Readonly<Record<string, 'scope_pending' | 'approved'>>;
   fileSourceScopeIngestionEnabled?: Readonly<Record<string, boolean>>;
-  /**
-   * The owner's sensitivity map, already loaded and parsed by the caller.
-   *
-   * Read-only and optional: this page never opens a file of its own, so the map
-   * arrives the same way the ledger snapshot does. Absent means no map is
-   * configured or the configured one did not parse, and the `sensitivity`
-   * section is then omitted rather than emitted empty.
-   */
-  sensitivityMap?: SensitivityMap;
 }
 
 export interface DashboardPendingConnect {
@@ -2034,7 +2023,6 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
   const excludedByConfiguration = excludedByConfigurationFrom(
     options.ingestionLedger?.excluded_by_configuration,
   );
-  const sensitivity = sensitivityFrom(options.sensitivityMap);
   const folderPicker: DashboardFolderPicker = {
     available: options.ingestionDispositionsAvailable === true,
     label: 'Choose what gets ingested',
@@ -2070,9 +2058,6 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     // opens a store of its own, so the exclusion facts arrive the same way the
     // per-source ingestion health does.
     excluded_by_configuration: excludedByConfiguration,
-    // Omitted, not emptied, when no map is configured — which is the ordinary
-    // state on a fresh install.
-    ...(sensitivity ? { sensitivity } : {}),
     sensitivity_tiers: DASHBOARD_SENSITIVITY_TIERS,
     folder_picker: folderPicker,
     sources: cardsWithProgress,
@@ -4414,33 +4399,6 @@ function excludedSourceFrom(
       ? { unenforceable_rule_ids: [...source.unenforceable_rule_ids] }
       : {}),
     entries: excludedRulesFrom(source.entries),
-  };
-}
-
-/**
- * The owner's secure categories, minus everything that would leak.
- *
- * `interpretation` is the owner's own `examples` list joined — authored by them,
- * capped at 12 by the parser and never empty. The match terms are counted and
- * not carried, and `notes` is dropped outright: both hold real sender addresses
- * and folder paths.
- */
-function sensitivityFrom(map: SensitivityMap | undefined): DashboardSensitivity | undefined {
-  if (!map) return undefined;
-  return {
-    configured: true,
-    editable: false,
-    categories: map.categories.map((category) => ({
-      id: category.id,
-      label: category.label,
-      interpretation: category.examples.join(', '),
-      target_tier_name: category.targetTierName,
-      target_trust_tier: category.targetTrustTier,
-      target_trust_domain: category.targetTrustDomain,
-      match_terms: category.match.keywords.length
-        + category.match.senderPatterns.length
-        + category.match.pathPatterns.length,
-    })),
   };
 }
 

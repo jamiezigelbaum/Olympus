@@ -5,6 +5,8 @@ Date: 2026-09-23
 Risk class: **Critical**. It changes source contracts, trust routing and destructive data behavior.
 Authority: the owner's ruling of 2026-09-23: every item from every source is judged individually into Public, Personal, Private or Secrets. Private material is still searched; Argus (the private analyst) handles it, and Castor receives only OPSEC-scanned derivatives. No embedding change may throw away existing embeddings, and every embedding/re-embed decision needs advance owner approval plus a ledger entry.
 
+**Update 2026-10-03 (owner decision, Jamie): the sensitivity map is retired.** The privacy profile (`olympus_privacy_get` / `olympus_privacy_set`, `src/workers/classification/privacy-profile.ts`) is the only privacy path: the owner's own words feed the sniffer prompt, and always-Private folders, labels and senders become owner tier rules (`tier-rules.ts`, step [3]). Steps [5] and [11] below no longer exist; the classifier never reads a map, decisions record `mapRevision: none` (`TIER_MAP_REVISION`), and `sensitivity-map.ts`, `OLYMPUS_SENSITIVITY_MAP_PATH` and `olympus sensitivity validate` are deleted. A keyword category has no successor: free-text intent goes in the profile's description, which the sniffer reads. There is no upgrade migration (owner ruling: build for new users); an existing install's map file is no longer read and its rules are re-added in the Privacy editor. The classifier version did not change, because no fresh-install decision can. References to the map below are historical.
+
 Terms used below. The product tiers map to stored keys like this (TRUST_MODEL.md, "Product tier names"):
 
 | Display | Schema-v1 key | Tier | Trust domain |
@@ -133,7 +135,7 @@ The owner's rule (2026-09-23): **the default tier is Personal.** Things are rais
   [2] secret detector on title + path ............................... → Secrets
   [3] owner folder / label / sender / chat rules
   [4] source floor (provider facts, e.g. Telegram Secret Chat → Private)
-  [5] sensitivity map v2 on names/metadata (owner's own words → categories, all four tiers)
+  [5] (retired 2026-10-03: sensitivity map v2 on names; the privacy profile's rules are [3])
   [6] deterministic public evidence (public share link, published post, …) → Public
   [7] SNIFFER, only for items whose metadata looks possibly private (a map term,
       a sensitive-name pattern such as "medical", "tax", "bank", "therapy", a
@@ -150,7 +152,7 @@ The owner's rule (2026-09-23): **the default tier is Personal.** Things are rais
        structured hits (card Luhn, IBAN, routing/account number, SSN, passport, NIF) → Private;
        vocabulary-only hits (financial/health words, health origin hint) → borderline for [12],
        or → Private when no privacy-safe model can be asked
-  [11] sensitivity map v2 on text
+  [11] (retired 2026-10-03: sensitivity map v2 on text)
   [12] SNIFFER on a short text excerpt plus the item's names, while the content is below Private:
        with a privacy-safe model configured (a private lane, or the built-in model, ready or not),
        EVERY item whose text was read is asked (classifier p3); without one, only items pass 1
@@ -192,7 +194,6 @@ A classifier model change is an owner-approved, ledgered event.
 
 - `owner_rule:folder:/work/published`
 - `secret:aws_access_key_id`
-- `sensitivity_map:therapy`
 - `detector:financial:iban`
 - `evidence:public_link`
 - `sniffer:local:v1:health:0.83`

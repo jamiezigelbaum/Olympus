@@ -1239,21 +1239,16 @@ describe('tier migration P3 follow-ups', () => {
 });
 
 describe('tier migration reads the owner inputs through the P2 loaders, fail closed', () => {
-  test('an invalid map or rules file refuses to plan; valid rules reach the plan; an unapproved sniffer refuses', async () => {
+  test('an invalid rules file refuses to plan; valid rules reach the plan; an unapproved sniffer refuses', async () => {
     const context = await rehearsal();
-    const mapPath = join(context.dir, 'sensitivity-map.json');
     const rulesPath = join(context.dir, 'tier-rules.json');
     const cli = (env: Record<string, string | undefined>) => ({
-      env: { HOME: context.dir, XDG_DATA_HOME: context.dir, OLYMPUS_SENSITIVITY_MAP_PATH: mapPath, OLYMPUS_TIER_RULES_PATH: rulesPath, ...env },
+      env: { HOME: context.dir, XDG_DATA_HOME: context.dir, OLYMPUS_TIER_RULES_PATH: rulesPath, ...env },
       laneSpecs: context.specs,
       domainIdentity: context.domainIdentity,
       paths: context.paths,
       itemDelayMs: 0,
     });
-    writeFileSync(mapPath, '{ "schemaVersion": 2, ');
-    chmodSync(mapPath, 0o600);
-    await expect(runTierMigrateCommand(['plan'], cli({}))).rejects.toThrow(/sensitivity map is unusable/u);
-    rmSync(mapPath);
     writeFileSync(rulesPath, '{ not json');
     chmodSync(rulesPath, 0o600);
     await expect(runTierMigrateCommand(['plan'], cli({}))).rejects.toThrow(/Tier rules/u);

@@ -123,7 +123,6 @@ export function sweepOwnerRuleRaises(options: { set: TieredStoreSet; limit?: num
     const classified = classifyItemTiers(
       { signals, provider: record.provider, subject: identity },
       {
-        ...(inputs.sensitivityMap ? { sensitivityMap: inputs.sensitivityMap } : {}),
         rules: [...(inputs.rules ?? [])],
         ...(inputs.retirePublic ? { retirePublic: true } : {}),
       },

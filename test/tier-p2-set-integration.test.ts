@@ -62,7 +62,7 @@ describe('the sniffer settles routed items through the tiered store set', () => 
   test('a Personal verdict on a pending routed item queues a move; a Private one releases the embedding hold', async () => {
     const workspace = tempDir('olympus-tier-p2-set-');
     cleanups.push(workspace.cleanup);
-    const env = { OLYMPUS_TIER_RULES_PATH: join(workspace.dir, 'none.json'), OLYMPUS_SENSITIVITY_MAP_PATH: join(workspace.dir, 'none-map.json') };
+    const env = { OLYMPUS_TIER_RULES_PATH: join(workspace.dir, 'none.json') };
     const installed = configureInstalledTierClassification({ env, lane: { kind: LANE.kind, modelId: LANE.modelId } });
     const fixture = openTierFixture(workspace.dir, { embed: false });
     cleanups.push(() => fixture.close());
@@ -99,7 +99,7 @@ describe('the sniffer settles routed items through the tiered store set', () => 
   test('without the set planner a routed item stays pending and its question is kept', async () => {
     const workspace = tempDir('olympus-tier-p2-set-');
     cleanups.push(workspace.cleanup);
-    const env = { OLYMPUS_TIER_RULES_PATH: join(workspace.dir, 'none.json'), OLYMPUS_SENSITIVITY_MAP_PATH: join(workspace.dir, 'none-map.json') };
+    const env = { OLYMPUS_TIER_RULES_PATH: join(workspace.dir, 'none.json') };
     const installed = configureInstalledTierClassification({ env, lane: { kind: LANE.kind, modelId: LANE.modelId } });
     const fixture = openTierFixture(workspace.dir, { embed: false });
     cleanups.push(() => fixture.close());

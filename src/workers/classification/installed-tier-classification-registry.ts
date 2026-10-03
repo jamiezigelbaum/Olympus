@@ -3,12 +3,10 @@
 // store's placement layer is reachable from the plugin entry, which the host
 // may load under Node, so it must not pull SQLite in through this lookup.
 
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import type { OwnerTierRule, TierDecision, TierSniffer } from './tier-classifier.ts';
 import type { TierPlacementPlan } from './tier-ledger.ts';
 
 export interface InstalledStoreTierClassification {
-  sensitivityMap?: SensitivityMap;
   rules?: readonly OwnerTierRule[];
   sniffer?: TierSniffer;
   /** This install has no Public tier: Public verdicts are lifted to Personal. */
@@ -20,7 +18,7 @@ export interface InstalledStoreTierClassification {
 export interface InstalledTierClassificationProvider {
   /**
    * Inputs for decisions recorded in the ledger at `ledgerPath`: the owner's
-   * map and rules file as they are NOW (re-read when edited) and the sniffer.
+   * rules file as they are NOW (re-read when edited) and the sniffer.
    * Never throws.
    */
   forLedger(ledgerPath: string): InstalledStoreTierClassification;

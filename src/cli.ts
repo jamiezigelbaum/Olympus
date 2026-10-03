@@ -62,7 +62,6 @@ import {
   writeSovereigntyConfigFile,
   type SovereigntyPresetName,
 } from './core/sovereignty.ts';
-import { validateSensitivityMapFile } from './core/sensitivity-map.ts';
 import { TIER_CLI_USAGE, runTierCommand } from './workers/classification/tier-cli.ts';
 import {
   runSetupWizard,
@@ -129,7 +128,6 @@ const PUBLIC_CLI_HELP_GROUPS = new Set([
   'source',
   'source index',
   'sovereignty',
-  'sensitivity',
   'worker',
   'engine',
   'connect',
@@ -176,20 +174,6 @@ async function main(): Promise<void> {
     try {
       const result = runSovereigntyInit(args.slice(2));
       console.log(JSON.stringify(result, null, 2));
-    } catch (error) {
-      if (error instanceof OperationError) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
-        process.exit(1);
-      }
-      throw error;
-    }
-    return;
-  }
-
-  if (args[0] === 'sensitivity' && args[1] === 'validate') {
-    try {
-      console.log(JSON.stringify(validateSensitivityMapFile(parseSensitivityValidateArgs(args.slice(2))), null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
         console.error(`Error [${error.code}]: ${error.message}`);
@@ -709,7 +693,6 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
   if (group === 'source' && command === 'extract-pdfs') return 'source extract-pdfs';
   if (
     group === 'sovereignty'
-    || group === 'sensitivity'
     || group === 'worker'
     || group === 'engine'
     || group === 'connect'
@@ -1139,7 +1122,6 @@ function printHelp(): void {
   console.log('  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]');
   console.log(`  olympus setup --preset ${SOVEREIGNTY_PRESETS.join('|')} --yes [--cloud-lane subscription|api-key]`);
   console.log(`  olympus sovereignty init --preset ${SOVEREIGNTY_PRESETS.join('|')} [--path ~/.olympus/sovereignty.json]`);
-  console.log('  olympus sensitivity validate [--path ~/.olympus/sensitivity-map.json]');
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
   console.log(`  ${ENGINE_CLI_USAGE['engine install']}`);
@@ -1169,7 +1151,6 @@ function printHelp(): void {
 const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   setup: 'olympus setup --preset <preset> --yes',
   'sovereignty init': 'olympus sovereignty init --preset <preset> [--path <path>]',
-  'sensitivity validate': 'olympus sensitivity validate [--path <path>]',
   'worker install': 'olympus worker install [--platform darwin|linux] [--dry-run]',
   'worker status': 'olympus worker status [--platform darwin|linux]',
   'worker start': 'olympus worker start [--platform darwin|linux]',
@@ -1248,11 +1229,6 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Usage: olympus sovereignty <command>',
     'Commands:',
     `  olympus sovereignty init --preset ${SOVEREIGNTY_PRESETS.join('|')} [--path <path>] [--force]`,
-  ],
-  sensitivity: [
-    'Usage: olympus sensitivity <command>',
-    'Commands:',
-    '  olympus sensitivity validate [--path <path>]',
   ],
   worker: [
     'Usage: olympus worker install|start|stop|restart|status|foreground|upgrade|uninstall',
@@ -2459,24 +2435,6 @@ function parseDataOptions(args: string[]): {
     }
   }
   return { output: outputPath, input: inputPath, sourceId, all, dryRun, yesIAMSure };
-}
-
-function parseSensitivityValidateArgs(args: string[]): { path?: string } {
-  const options: { path?: string } = {};
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === '--path') {
-      options.path = requireOptionValue(args, (index += 1), arg);
-    } else if (arg?.startsWith('--path=')) {
-      options.path = arg.slice('--path='.length);
-    } else if (arg === '--help' || arg === '-h') {
-      console.log('Usage: olympus sensitivity validate [--path <path>]');
-      process.exit(0);
-    } else {
-      throw new OperationError('invalid_params', `Unknown sensitivity validate option: ${arg}`);
-    }
-  }
-  return options;
 }
 
 async function confirmDeleteAll(): Promise<void> {

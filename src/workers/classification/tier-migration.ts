@@ -41,7 +41,6 @@ import { dirname, join } from 'node:path';
 import type { SourceClassificationSignals } from '../../core/contracts.ts';
 import { trustDomainPrior } from '../../core/classification-signals.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import type { SourceItemIdentity, SourceTrustDomain } from '../../core/source-index/types.ts';
 import type {
   ConnectorStoreEmbeddingAuthoritySnapshot,
@@ -112,7 +111,6 @@ export interface TierMigrationLane {
 
 /** The owner's classification inputs. `revision` covers everything but per-item overrides (read from the ledgers). */
 export interface TierMigrationInputs {
-  sensitivityMap?: SensitivityMap;
   rules?: readonly OwnerTierRule[];
   /** Only the owner-approved privacy-safe sniffer, and only when the owner asks for it. */
   sniffer?: TierSniffer;
@@ -715,7 +713,6 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
               subject: item.identity,
             },
             {
-              ...(options.inputs.sensitivityMap ? { sensitivityMap: options.inputs.sensitivityMap } : {}),
               ...(options.inputs.rules ? { rules: options.inputs.rules } : {}),
               ...(sniffer ? { sniffer } : {}),
               ...(override ? { override } : {}),

@@ -13,6 +13,14 @@ release plan, docs/V0_4_RELEASE.md). The 0.4 beta line ended at beta.11.
   command. Re-running repairs; a new release upgrades and puts the previous
   version back if it does not start. `curl -fsSL https://olympusplugin.ai/uninstall.sh | sh`
   removes it and keeps your data.
+- **Privacy settings are the only privacy path; the sensitivity map is
+  retired.** What you mark in the dashboard's **Privacy** section (or with
+  ChatGPT's `olympus_privacy_set`), your own words and always-Private folders,
+  labels and senders, is the only privacy configuration Olympus reads.
+  `~/.olympus/sensitivity-map.json`, `OLYMPUS_SENSITIVITY_MAP_PATH` and
+  `olympus sensitivity validate` are gone. An existing install's map file is
+  no longer read and is left where it is: re-add its rules in the Privacy
+  editor.
 
 ## 0.4.0-beta.11 - 2026-10-01
 

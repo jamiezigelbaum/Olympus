@@ -153,7 +153,6 @@ function rejudgeOne(
       subject: identity,
     },
     {
-      ...(classification.sensitivityMap ? { sensitivityMap: classification.sensitivityMap } : {}),
       sniffer: classification.sniffer!,
       ...(classification.retirePublic ? { retirePublic: true } : {}),
     },
