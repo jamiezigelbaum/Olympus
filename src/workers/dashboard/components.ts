@@ -881,37 +881,13 @@ export function backgroundRow(input: DashboardBackgroundRowInput): string {
 }
 
 /**
- * Layout for the two policy surfaces: the sensitivity page's category rows and
- * tier table, and the detail page's scope rows and review chips.
+ * Layout for the two policy surfaces: the sensitivity page's tier table, and the detail page's scope rows and review chips.
  *
  * One constant rather than two because both pages want the same quiet line and
  * the same tabular treatment, and a page carrying a few unused rules costs less
  * than the same rule written twice.
  */
 
-
-export interface DashboardCategoryRowInput {
-  /** The owner's category name, e.g. Financial. */
-  name: string;
-  /** Their own examples, joined. Empty renders an empty cell, never filler. */
-  interpretation: string;
-  /** The quiet right-hand fact, e.g. "Secure (S4) · 12 match terms". */
-  note: string;
-}
-
-/**
- * One secure category, read-only.
- *
- * No remove control and no add field: neither has a write route, and a button
- * that cannot do what it says is worse than an honest list.
- */
-export function categoryRow(input: DashboardCategoryRowInput): string {
-  return `<div class="catrow">`
-    + `<span class="name">${escapeHtml(input.name)}</span>`
-    + `<span class="what">${escapeHtml(input.interpretation)}</span>`
-    + `<span class="tier">${escapeHtml(input.note)}</span>`
-    + `</div>`;
-}
 
 /**
  * A tier-table permission cell. The mark is decorative and the word beside it
