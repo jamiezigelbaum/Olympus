@@ -128,9 +128,18 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
-- **2026-10-03 — 1.0 release builds carry no Google Desktop client.** Owner
+- **2026-10-03 (superseding the entry below) — 1.0 ships the beta.11 Google
+  Desktop client as the source default.** An independent review found that
+  installs which connected Gmail or Drive through the Desktop client that
+  0.4.0-beta.11 packaged would lose publisher recognition (and one-click
+  reconnect) after an upgrade to a build without it. The owner set
+  `DEFAULT_GOOGLE_PILOT_CLIENT_ID` in `src/core/google-pilot-client.ts` to that
+  same public client id, taken from the published beta.11 package, so nothing
+  changes for any existing or new install. Release builds use the source
+  default; the explicit `none` choice below stays available.
+- **2026-10-03 — 1.0 release builds may carry no Google Desktop client.** Owner
   decision, conditional on proof that no host loses one-click Google sign-in;
-  the proof holds. Every Gmail and Google Drive connect path — the standalone
+  the proof holds for fresh installs. Every Gmail and Google Drive connect path — the standalone
   Mac dashboard, the native OpenClaw page, ChatGPT's `olympus_connect_source`
   (and Hermes or Claude Code, which use the same dashboard) — goes through
   `/dashboard/connect/oauth/start`, which picks the publisher Google Web

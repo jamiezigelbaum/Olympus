@@ -23,7 +23,7 @@
  * Web client, signed relay, and publisher exchange for every dashboard origin.
  * An empty default keeps direct pilot behavior fail-closed to BYO OAuth.
  */
-export const DEFAULT_GOOGLE_PILOT_CLIENT_ID = '';
+export const DEFAULT_GOOGLE_PILOT_CLIENT_ID = '604346037984-oukrdn4ouh8n2fctggracadt0fdd2lps.apps.googleusercontent.com';
 
 export const PACKAGED_GOOGLE_PILOT_CLIENT_ID = '__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__';
 

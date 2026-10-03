@@ -13,7 +13,7 @@ import { createHmac } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import {
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
@@ -761,10 +761,16 @@ async function withoutPilotClient(run: () => Promise<void>): Promise<void> {
   const previousWeb = process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID;
   delete process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
   delete process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID;
+  // Source now ships the beta.11 Desktop client as its default; a release
+  // built with the explicit `none` choice has no Desktop client at all. Stand
+  // that build in by making the packaged resolution return nothing.
+  const pilotModule = await import('../src/core/google-pilot-client.ts');
+  const packaged = spyOn(pilotModule, 'packagedGooglePilotClientId').mockReturnValue(undefined);
   try {
     expect(packagedGooglePilotClientId()).toBeUndefined();
     await run();
   } finally {
+    packaged.mockRestore();
     if (previous !== undefined) process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = previous;
     if (previousWeb !== undefined) process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID = previousWeb;
   }
