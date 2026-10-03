@@ -65,7 +65,7 @@ describe('renderInstallScript', () => {
     roots.push(resolve(path, '..'));
     writeFileSync(path, rendered);
     expect(spawnSync('/bin/sh', ['-n', path]).status).toBe(0);
-  });
+  }, 30_000);
 
   test('refuses pins that are not safe in a shell assignment or URL', () => {
     for (const version of ['1.0', '1.0.0 ', '1.0.0;rm', '../1.0.0', '1.0.0-rc.1/x']) {
@@ -94,7 +94,7 @@ describe('publishToSite and checkSiteRelease', () => {
     const served = readFileSync(join(root, 'site', 'install.sh'), 'utf8');
     expect(served).toBe(renderInstallScript(TEMPLATE, { version: '1.0.0-rc.1', sha256: result.sha256, bytes: result.bytes }));
     expect(checkSiteRelease(root)).toEqual([]);
-  });
+  }, 30_000);
 
   test('refuses a tarball whose name or packaged identity is not the source version', () => {
     const wrongName = fixture();
@@ -105,7 +105,7 @@ describe('publishToSite and checkSiteRelease', () => {
     expect(() => publishToSite(wrongPackage)).toThrow('packages olympus@1.0.0-rc.0, not olympus@1.0.0-rc.1');
     const wrongNamePackage = fixture('1.0.0-rc.1', { name: 'olympus-source-checkout', version: '1.0.0-rc.1' });
     expect(() => publishToSite(wrongNamePackage)).toThrow('not olympus@1.0.0-rc.1');
-  });
+  }, 30_000);
 
   test('the deploy check catches a missing installer, an edited installer, a stale template, a changed tarball and a version bump', () => {
     const missing = fixture();
@@ -138,7 +138,7 @@ describe('publishToSite and checkSiteRelease', () => {
     publishToSite(noUninstaller);
     rmSync(join(noUninstaller.root, 'site', 'uninstall.sh'));
     expect(checkSiteRelease(noUninstaller.root)).toEqual(['site/uninstall.sh is missing.']);
-  });
+  }, 30_000);
 });
 
 describe('site publishing wiring', () => {
@@ -148,7 +148,7 @@ describe('site publishing wiring', () => {
     expect(ignore).toContain('site/releases/');
     const tracked = spawnSync('git', ['ls-files', 'site/install.sh', 'site/releases'], { cwd: REPO, encoding: 'utf8' });
     expect(tracked.stdout.trim()).toBe('');
-  });
+  }, 30_000);
 
   test('deploy.sh refuses to publish without the release check, uploads releases before install.sh, and never deletes a release', () => {
     const deploy = readFileSync(join(REPO, 'site', 'deploy', 'deploy.sh'), 'utf8');

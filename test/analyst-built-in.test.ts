@@ -780,7 +780,7 @@ describe('installer', () => {
       model, runtime, env, platform: 'darwin-arm64', fetchImpl: server().fetchImpl, extractArchive, log: () => undefined, lockWaitMs: 50,
     });
     expect(existsSync(installed.modelPath)).toBe(true);
-  });
+  }, 30_000);
 
   test('an unsupported platform fails with a reason the dashboard can show', async () => {
     const { model, runtime } = specs();

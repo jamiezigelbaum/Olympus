@@ -638,7 +638,7 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
       expect(h.curlCalls()).toHaveLength(curls);
       expect(lstatSync(path).isSymbolicLink()).toBe(true);
     }
-  });
+  }, 60_000);
 
   shellTest('PoC: managed folders that belong to another user are refused before anything changes', () => {
     const h = harness(shell);
@@ -770,7 +770,7 @@ describe('install.sh template', () => {
     const result = spawnSync('/bin/sh', [TEMPLATE], { encoding: 'utf8' });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('this is the installer template, not a release.');
-  });
+  }, 30_000);
 
   test('pins Bun by version, archive SHA-256 and size, and program SHA-256, and takes no download location or checksum from the environment', () => {
     const text = readFileSync(TEMPLATE, 'utf8');

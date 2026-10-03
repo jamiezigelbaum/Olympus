@@ -332,8 +332,9 @@ download_bun() {
     die "the Bun download did not match its checksum, so it was not used." "Nothing was changed on this Mac. Run this again; if it happens again, email $SUPPORT_EMAIL."
   fi
   (cd "$WORK" && unzip -q bun.zip) || die "the Bun download could not be unpacked."
-  [ -f "$WORK/bun-darwin-aarch64/bun" ] && [ ! -L "$WORK/bun-darwin-aarch64/bun" ] \
-    || die "the Bun download has no bun program in it."
+  if [ ! -f "$WORK/bun-darwin-aarch64/bun" ] || [ -L "$WORK/bun-darwin-aarch64/bun" ]; then
+    die "the Bun download has no bun program in it."
+  fi
   [ "$(sha256_of "$WORK/bun-darwin-aarch64/bun")" = "$BUN_EXE_SHA256_DARWIN_AARCH64" ] \
     || die "the bun program in the Bun download did not match its checksum, so it was not used." "Run this again; if it happens again, email $SUPPORT_EMAIL."
 }
@@ -435,8 +436,9 @@ main() {
   fi
   # The right bytes are not enough: it must be executable (only by its owner
   # to change). chmod keeps the file, so a running engine is unaffected.
-  chmod 755 "$BUN" && [ -x "$BUN" ] \
-    || die "the Bun runtime at $BUN could not be made executable." "Details may be in $LOG. Email $SUPPORT_EMAIL."
+  if ! chmod 755 "$BUN" || [ ! -x "$BUN" ]; then
+    die "the Bun runtime at $BUN could not be made executable." "Details may be in $LOG. Email $SUPPORT_EMAIL."
+  fi
 
   # 3. The same release again: the installed files must be the verified
   #    download, and the engine must run this build.
