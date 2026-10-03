@@ -450,7 +450,7 @@ export function dashboardControlGate(input: DashboardControlGateInput): string {
       // Lock clears this browser's cookie. Same custody proof as any control
       // (cookie, same origin, CSRF); a scriptless submit posts nothing useful.
       + `<form class="rowform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">`
-      + `<button class="btn quiet" type="submit">Lock</button>`
+      + `<button class="btn" type="submit">Lock</button>`
       + `<span class="actmsg" data-action-message role="status"></span></form></div>`;
   }
   const sheetId = `${DASHBOARD_CONTROL_GATE_ID}-how`;
@@ -1087,7 +1087,7 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     ? ''
     : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">`
       + `<input type="hidden" name="source" value="${escapeHtml(input.source)}">`
-      + `<button class="btn quiet" type="submit">Cancel connection attempt</button>`
+      + `<button class="btn" type="submit">Cancel connection attempt</button>`
       + `<span class="actmsg" data-action-message role="status"></span>`
       + `</form>`;
   // The agent prompt is SECONDARY now. It used to be the only walkthrough on

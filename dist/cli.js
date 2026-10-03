@@ -87486,6 +87486,7 @@ a { color: var(--link); }
 .attncard.error { background: var(--err-bg); border-color: var(--err-line); }
 .attncard.error::before { background: var(--bad); }
 .attncard.plain { background: var(--panel); border-color: var(--line); }
+.attncard.plain[data-remote-access]::before, .attncard.plain[data-agent-connection]::before { display: none; }
 .attncard .grow { flex: 1; }
 /* The source page's ONE banner, and only it. A bare flex:1 gave the
    description a zero basis, so a banner carrying Sync now, its status text and
@@ -87938,7 +87939,7 @@ function actionButton(input) {
 }
 function dashboardControlGate(input) {
   if (input.connected) {
-    return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard plain" data-dashboard-control-gate data-state="connected">` + `<div class="grow"><span class="name">Dashboard controls unlocked</span>` + `<span class="why"> — on this browser for 30 days from opening, or until the worker token is rotated</span></div>` + `<form class="rowform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">` + `<button class="btn quiet" type="submit">Lock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></div>`;
+    return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard plain" data-dashboard-control-gate data-state="connected">` + `<div class="grow"><span class="name">Dashboard controls unlocked</span>` + `<span class="why"> — on this browser for 30 days from opening, or until the worker token is rotated</span></div>` + `<form class="rowform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">` + `<button class="btn" type="submit">Lock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></div>`;
   }
   const sheetId = `${DASHBOARD_CONTROL_GATE_ID}-how`;
   const promptId = `${sheetId}-prompt`;
@@ -88063,7 +88064,7 @@ function connectSetupSheet(input) {
   const notice = (input.notice === undefined || input.notice.trim() === "" ? "" : `<p class="why">${escapeHtml2(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail === undefined ? "" : `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>`)) + (input.providerNote === undefined || input.providerNote.trim() === "" ? "" : `<p class="providernote">${escapeHtml2(input.providerNote)}</p>`);
   const registration = callbackRegistrationSteps(id, input.registration);
   const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml2(input.redirectUri.guidance)}</p>`}`;
-  const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">` + `<button class="btn quiet" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
+  const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">` + `<button class="btn" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
   const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
   const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
@@ -91918,10 +91919,10 @@ function remoteAccessControls(access) {
   }
   const review = access.state === "not_connected" && access.needsTerms ? `<form class="rowform" data-agent-kind="remote-on"><button class="btn primary" type="submit">Review agreement</button>${status}</form>` : "";
   const confirmation = "Turn off remote access? Agents in the cloud will no longer reach Olympus until you turn it on again. Agents on this computer are unaffected.";
-  return review + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml2(confirmation)}">` + `<button class="btn quiet" type="submit">Turn off remote access</button>${status}` + `</form>`;
+  return review + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml2(confirmation)}">` + `<button class="btn" type="submit">Turn off remote access</button>${status}` + `</form>`;
 }
 function termsPanel() {
-  return `<div class="remoteterms" data-remote-terms hidden>` + `<p><b>Before remote access turns on</b></p>` + `<p>So that agents in the cloud reach this computer over an encrypted connection only this computer can open, Olympus gets a free certificate from Let's Encrypt. Getting one means agreeing to Let's Encrypt's Subscriber Agreement.</p>` + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You don't sign up for anything or share an email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>` + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>` + `<form class="rowform" data-agent-kind="remote-accept">` + `<button class="btn primary" type="submit">I accept, turn on remote access</button>` + `<button class="btn quiet" type="button" data-remote-terms-cancel>Not now</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
+  return `<div class="remoteterms" data-remote-terms hidden>` + `<p><b>Before remote access turns on</b></p>` + `<p>So that agents in the cloud reach this computer over an encrypted connection only this computer can open, Olympus gets a free certificate from Let's Encrypt. Getting one means agreeing to Let's Encrypt's Subscriber Agreement.</p>` + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You don't sign up for anything or share an email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>` + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>` + `<form class="rowform" data-agent-kind="remote-accept">` + `<button class="btn primary" type="submit">I accept, turn on remote access</button>` + `<button class="btn" type="button" data-remote-terms-cancel>Not now</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
 }
 function connectSheet(access) {
   const choices = AGENTS.map((agent) => agentChoice(agent, access)).join("");
@@ -91969,7 +91970,7 @@ function keyForm(agentId, name) {
   return `<form class="rowform" data-agent-kind="key">` + `<input class="keyfield" type="text" name="name" value="${escapeHtml2(name)}" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-key`, "Key");
 }
 function secretSlot(id, label) {
-  return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml2(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn quiet" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
+  return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml2(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
 }
 function connectionList(view, now) {
   if (view.unavailable) {
@@ -91987,7 +91988,7 @@ function connectionRow(connection, now) {
   const used = connection.lastUsedAt ? `last used ${relativeDay(connection.lastUsedAt, now)}` : "not used yet";
   const why = `added ${calendarDate(connection.createdAt)} · ${used}`;
   const confirmation = `Revoke ${connection.name}? It will no longer be able to ask Olympus. You can connect it again later.`;
-  return `<div class="attncard plain" data-agent-connection="${escapeHtml2(connection.id)}">` + `<div class="grow"><span class="name">${escapeHtml2(connection.name)}</span><span class="why"> — ${escapeHtml2(why)}</span></div>` + `<form class="rowform" data-agent-kind="revoke" data-confirmation="${escapeHtml2(confirmation)}">` + `<input type="hidden" name="connection_id" value="${escapeHtml2(connection.id)}">` + `<button class="btn quiet" type="submit">Revoke</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
+  return `<div class="attncard plain" data-agent-connection="${escapeHtml2(connection.id)}">` + `<div class="grow"><span class="name">${escapeHtml2(connection.name)}</span><span class="why"> — ${escapeHtml2(why)}</span></div>` + `<form class="rowform" data-agent-kind="revoke" data-confirmation="${escapeHtml2(confirmation)}">` + `<input type="hidden" name="connection_id" value="${escapeHtml2(connection.id)}">` + `<button class="btn" type="submit">Revoke</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
 }
 function calendarDate(iso) {
   const date4 = new Date(iso);

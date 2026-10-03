@@ -23342,6 +23342,7 @@ a { color: var(--link); }
 .attncard.error { background: var(--err-bg); border-color: var(--err-line); }
 .attncard.error::before { background: var(--bad); }
 .attncard.plain { background: var(--panel); border-color: var(--line); }
+.attncard.plain[data-remote-access]::before, .attncard.plain[data-agent-connection]::before { display: none; }
 .attncard .grow { flex: 1; }
 /* The source page's ONE banner, and only it. A bare flex:1 gave the
    description a zero basis, so a banner carrying Sync now, its status text and
