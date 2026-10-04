@@ -10,7 +10,11 @@
 // shared content pass again with the item's names, exactly as a landing does.
 //
 // - Owner overrides, force rules and owner rules on the names are never
-//   re-judged; neither are Secrets, pending or mid-move items.
+//   re-judged; neither are Secrets or mid-move items, nor items pending on
+//   their names. An item held only for its text question is re-read once
+//   per classifier and sniffer: the content pass queues its question again
+//   (one lost from the sniffer's queue would otherwise hold it forever), or
+//   a cached verdict settles it at once.
 // - The item was visible under its previous decision, so a re-judge NEVER
 //   hides it pending an answer (review fix 2026-10-02: re-judging hid items
 //   far faster than answers and moves could bring them back). A decision
@@ -183,6 +187,13 @@ function rejudgeOne(
         .map((reason) => reason.slice('content:secret:'.length)),
     });
     report.secrets += 1;
+    return;
+  }
+  if (content.contentPending && record.state === 'pending') {
+    // Already held for this question: the content pass just queued it again
+    // (`subject` above); the sniffer's answer settles the row.
+    ledger.markHeldRejudged(record, key);
+    report.asked += 1;
     return;
   }
   if (content.contentPending) {
