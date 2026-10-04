@@ -322,7 +322,15 @@ export async function callChatGptTool(
         const privateMatch = match.count > 0
           ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail }, options)
           : undefined;
-        return searchToolResult(raw, privateMatch ? { privateMatch } : {});
+        const result = searchToolResult(raw, privateMatch ? { privateMatch } : {});
+        // A new install's first question: say nothing is connected rather
+        // than "no evidence in N searched sources" (zigelbot fresh install,
+        // 2026-10-04). Best effort: an unreadable dashboard keeps the result.
+        if (!privateMatch && (result.structuredContent as { status?: string } | undefined)?.status === 'none') {
+          const sources = await dashboardViewModel(options, signal).then((view) => view.sources, () => undefined);
+          if (sources && sources.every((source) => source.status === 'Off')) return searchToolResult(raw, { noSourcesConnected: true });
+        }
+        return result;
       }
       case SOURCE_ANSWER_TOOL.name: {
         if (!answerToolsListed(ctx, options)) throw new ChatGptSurfaceError('unknown_tool');
