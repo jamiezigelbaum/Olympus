@@ -1,7 +1,7 @@
 {
   "id": "olympus",
   "name": "Olympus",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0-rc.2",
   "description": "Olympus: sovereignty-aware source answers across seven personal data providers for OpenClaw. Agents: after installing, read INSTALL_FOR_AGENTS.md and follow it before setup.",
   "configSchema": {
     "type": "object",

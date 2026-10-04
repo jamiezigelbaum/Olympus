@@ -46152,7 +46152,7 @@ function engineSovereigntySeedBlocker(input) {
     } catch {
       return `${openclawConfig} could not be read to check for an OpenClaw-hosted Olympus.`;
     }
-    if (openClawConfigHasOlympus(text))
+    if (openClawConfigHasOlympus(text, dirname26(openclawConfig)))
       return `OpenClaw is configured to run Olympus (${openclawConfig}).`;
   }
   return;
@@ -46164,10 +46164,18 @@ function openClawConfigPath(homeDir, env) {
   const stateDir = env.OPENCLAW_STATE_DIR?.trim();
   return join38(stateDir && isAbsolute6(stateDir) ? stateDir : join38(homeDir, ".openclaw"), "openclaw.json");
 }
-function openClawConfigHasOlympus(text) {
+function openClawConfigHasOlympus(text, stateDir) {
   try {
     const parsed = JSON.parse(text);
-    return Boolean(parsed?.plugins?.entries && Object.hasOwn(parsed.plugins.entries, "olympus"));
+    const plugins = parsed?.plugins;
+    const entry = plugins?.entries && Object.hasOwn(plugins.entries, "olympus") ? plugins.entries.olympus : undefined;
+    if (entry === undefined)
+      return false;
+    if (entry && typeof entry === "object" && entry.enabled === false)
+      return false;
+    const installed = Boolean(plugins?.installs && Object.hasOwn(plugins.installs, "olympus"));
+    const loaded = Array.isArray(plugins?.load?.paths) && plugins.load.paths.some((path) => typeof path === "string" && /olympus/i.test(path));
+    return installed || loaded || existsSync26(join38(stateDir, "extensions", "olympus"));
   } catch {
     return /["']?\bolympus\b["']?\s*:/.test(text);
   }

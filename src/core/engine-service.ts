@@ -790,7 +790,7 @@ export function engineSovereigntySeedBlocker(input: {
     } catch {
       return `${openclawConfig} could not be read to check for an OpenClaw-hosted Olympus.`;
     }
-    if (openClawConfigHasOlympus(text)) return `OpenClaw is configured to run Olympus (${openclawConfig}).`;
+    if (openClawConfigHasOlympus(text, dirname(openclawConfig))) return `OpenClaw is configured to run Olympus (${openclawConfig}).`;
   }
   return undefined;
 }
@@ -802,10 +802,26 @@ function openClawConfigPath(homeDir: string, env: Record<string, string | undefi
   return join(stateDir && isAbsolute(stateDir) ? stateDir : join(homeDir, '.openclaw'), 'openclaw.json');
 }
 
-function openClawConfigHasOlympus(text: string): boolean {
+/**
+ * Whether OpenClaw actually runs an Olympus plugin: an enabled `olympus` entry
+ * AND an installed plugin (an install record, a load path, or the extensions
+ * folder). An entry left behind after the plugin was removed hosts nothing;
+ * counting it left a Mac with no model policy and search "stopped working"
+ * (zigelbot fresh-install test, 2026-10-04).
+ */
+function openClawConfigHasOlympus(text: string, stateDir: string): boolean {
   try {
-    const parsed = JSON.parse(text) as { plugins?: { entries?: Record<string, unknown> } };
-    return Boolean(parsed?.plugins?.entries && Object.hasOwn(parsed.plugins.entries, 'olympus'));
+    const parsed = JSON.parse(text) as {
+      plugins?: { entries?: Record<string, unknown>; installs?: Record<string, unknown>; load?: { paths?: unknown } };
+    };
+    const plugins = parsed?.plugins;
+    const entry = plugins?.entries && Object.hasOwn(plugins.entries, 'olympus') ? plugins.entries.olympus : undefined;
+    if (entry === undefined) return false;
+    if (entry && typeof entry === 'object' && (entry as { enabled?: unknown }).enabled === false) return false;
+    const installed = Boolean(plugins?.installs && Object.hasOwn(plugins.installs, 'olympus'));
+    const loaded = Array.isArray(plugins?.load?.paths)
+      && plugins.load.paths.some((path) => typeof path === 'string' && /olympus/i.test(path));
+    return installed || loaded || existsSync(join(stateDir, 'extensions', 'olympus'));
   } catch {
     // openclaw.json may be JSON5; when it cannot be parsed, any mention of an
     // olympus key counts as an Olympus entry (skipping the seed is the safe side).
