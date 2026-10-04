@@ -39,6 +39,8 @@ import {
 } from '../src/workers/classification/installed-tier-classification.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
+import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
+import { tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON, TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { classifyItemTiers, TIER_CLASSIFIER_VERSION, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
 import { loadSovereigntyEngine } from '../src/core/sovereignty.ts';
@@ -471,6 +473,26 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
     const ledger = await readEmbeddingLedgerEntries(join(root, 'embedding-ledger.jsonl'));
     expect(ledger.some((entry) => entry.approved_by === 'system-automatic')).toBe(true);
+  });
+
+  test('an item held for a text question that left the queue is asked again, not held forever', async () => {
+    // Live 2026-10-03: a move landed an item held (text question open) with
+    // no question queued, so nothing ever asked about it again. Re-judging
+    // skipped it (pending) and the sniffer pass is driven by its queue.
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true });
+    await service.runOnce();
+    const bank = identity('id:bank');
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'pending', contentPending: true });
+    const sniffer = new TierSnifferStore({ dbPath: tierSnifferPathForLedger(install.lane.ledger.dbPath) });
+    sniffer.deleteQuestion(bank, 'content');
+    expect(sniffer.questionFor(bank, 'content')).toBeUndefined();
+    sniffer.close();
+
+    for (let pass = 0; pass < 4 && install.lane.ledger.getCurrent(bank)!.state !== 'current'; pass += 1) await service.runOnce();
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+    expect(JSON.stringify((await olympusSearch(install, 'lender')).result)).toContain('loan terms');
   });
 
   test('with a paid or remote embedding configured, the queued move waits for the owner-approved migration', async () => {

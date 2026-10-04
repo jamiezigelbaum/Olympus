@@ -762,10 +762,20 @@ export class TierLedger {
         LIMIT ?
       )
       SELECT i.*, CASE WHEN
-          i.routed = 1 AND i.content_read = 1 AND i.state = 'current'
+          i.routed = 1 AND i.content_read = 1
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
           AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move')
-          AND (i.rejudged_key IS NULL OR i.rejudged_key != ?)
+          -- A held row's stamp names the exact decision it re-read, so it
+          -- never outlives that decision (rejudgeKeyForHeld).
+          AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
+            THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
+            ELSE ? END)
+          AND (i.state = 'current'
+            -- Held for its text question alone: re-read once per classifier
+            -- and sniffer, so a question lost from the sniffer's queue (a
+            -- move that landed the item held, a verdict recorded under an
+            -- older prompt) is asked again instead of holding it forever.
+            OR (i.state = 'pending' AND i.content_pending = 1 AND i.metadata_pending = 0))
           AND NOT (i.rejudge_json IS NOT NULL
             AND json_extract(i.rejudge_json, '$.generation') = i.generation
             AND json_extract(i.rejudge_json, '$.decidedAt') = i.decided_at
@@ -779,7 +789,8 @@ export class TierLedger {
               AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
           )
           AND (
-            i.engine_version != ?
+            i.state = 'pending'
+            OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
               AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
               AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
@@ -791,6 +802,7 @@ export class TierLedger {
       after ? 1 : null,
       ...(after ?? [null, null, null, null]),
       scanLimit,
+      key,
       key,
       options.engineVersion,
       snifferMarker,
@@ -834,6 +846,28 @@ export class TierLedger {
       UPDATE tier_items SET rejudged_key = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(rejudgeKey(key.engineVersion, key.snifferId), ...idParams(identity));
+  }
+
+  /**
+   * Stamp that a re-judge re-read a row held for its text question and queued
+   * that question again. The stamp names the row's exact decision (generation
+   * and time), so the row is read once per decision, classifier and sniffer,
+   * and is a candidate again the moment any of them changes.
+   */
+  markHeldRejudged(record: TierLedgerRecord, key: { engineVersion: string; snifferId?: string }): void {
+    this.db.query(`
+      UPDATE tier_items SET rejudged_key = ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND state = 'pending' AND generation = ? AND decided_at = ?
+    `).run(
+      rejudgeKey(key.engineVersion, key.snifferId),
+      record.provider,
+      record.accountScope,
+      record.conversationKey,
+      record.providerItemId,
+      record.generation,
+      record.decidedAt,
+    );
   }
 
   /**

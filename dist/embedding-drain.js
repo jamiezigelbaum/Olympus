@@ -8960,10 +8960,20 @@ class TierLedger {
         LIMIT ?
       )
       SELECT i.*, CASE WHEN
-          i.routed = 1 AND i.content_read = 1 AND i.state = 'current'
+          i.routed = 1 AND i.content_read = 1
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
           AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move')
-          AND (i.rejudged_key IS NULL OR i.rejudged_key != ?)
+          -- A held row's stamp names the exact decision it re-read, so it
+          -- never outlives that decision (rejudgeKeyForHeld).
+          AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
+            THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
+            ELSE ? END)
+          AND (i.state = 'current'
+            -- Held for its text question alone: re-read once per classifier
+            -- and sniffer, so a question lost from the sniffer's queue (a
+            -- move that landed the item held, a verdict recorded under an
+            -- older prompt) is asked again instead of holding it forever.
+            OR (i.state = 'pending' AND i.content_pending = 1 AND i.metadata_pending = 0))
           AND NOT (i.rejudge_json IS NOT NULL
             AND json_extract(i.rejudge_json, '$.generation') = i.generation
             AND json_extract(i.rejudge_json, '$.decidedAt') = i.decided_at
@@ -8977,7 +8987,8 @@ class TierLedger {
               AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
           )
           AND (
-            i.engine_version != ?
+            i.state = 'pending'
+            OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
               AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
               AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
@@ -8985,7 +8996,7 @@ class TierLedger {
         THEN 1 ELSE 0 END AS rejudge_candidate
       FROM win i
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, options.engineVersion, snifferMarker, snifferMarker ?? "");
+    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, key, options.engineVersion, snifferMarker, snifferMarker ?? "");
     const records = [];
     let last;
     for (const row of rows) {
@@ -9018,6 +9029,13 @@ class TierLedger {
       UPDATE tier_items SET rejudged_key = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(rejudgeKey(key.engineVersion, key.snifferId), ...idParams(identity));
+  }
+  markHeldRejudged(record, key) {
+    this.db.query(`
+      UPDATE tier_items SET rejudged_key = ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND state = 'pending' AND generation = ? AND decided_at = ?
+    `).run(rejudgeKey(key.engineVersion, key.snifferId), record.provider, record.accountScope, record.conversationKey, record.providerItemId, record.generation, record.decidedAt);
   }
   openRejudgeQuestion(identity, options) {
     let opened = false;
@@ -17585,6 +17603,11 @@ function rejudgeOne(set, record, classification, report, key, autoMoves) {
       findingKinds: content.reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length))
     });
     report.secrets += 1;
+    return;
+  }
+  if (content.contentPending && record.state === "pending") {
+    ledger.markHeldRejudged(record, key);
+    report.asked += 1;
     return;
   }
   if (content.contentPending) {
