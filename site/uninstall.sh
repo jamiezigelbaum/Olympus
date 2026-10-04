@@ -102,7 +102,9 @@ remove_marked_line() {
 # stop_agent: unload the agent with launchctl, whether or not its plist is
 # still there, and go on only once launchd says it does not have it (113 or
 # 3). Stopping the agent stops the engine, which stops the helpers it
-# started.
+# started. The engine can take several seconds to shut down (launchd allows
+# 20 before it kills it), so wait up to 30: a 3-second wait refused to
+# uninstall an engine that stopped a moment later (zigelbot, 2026-10-04).
 stop_agent() {
   target="gui/$(id -u)/$LABEL"
   launchctl bootout "$target" >/dev/null 2>&1 || true
@@ -112,7 +114,8 @@ stop_agent() {
     launchctl print "$target" >/dev/null 2>&1 || printed=$?
     case "$printed" in 113|3) return 0 ;; esac
     tries=$((tries + 1))
-    [ "$tries" -lt 3 ] || break
+    [ "$tries" -lt 30 ] || break
+    [ "$tries" -ne 2 ] || say "  Stopping Olympus (this can take up to 30 seconds)..."
     sleep 1
   done
   die "Olympus could not be stopped, so nothing was removed." "launchctl still reports $target (status $printed). Restart the Mac, then run this again, or email support@olympusplugin.ai."

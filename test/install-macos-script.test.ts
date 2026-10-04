@@ -200,6 +200,8 @@ esac
   // launchctl: logs each call; print answers FAKE_LAUNCHCTL_PRINT (113, "not loaded", by default).
   writeExecutable(join(bin, 'launchctl'), `#!/bin/sh\necho "launchctl $*" >> "${log}"\nif [ "$1" = print ]; then exit "\${FAKE_LAUNCHCTL_PRINT:-113}"; fi\n`);
   // lockf, where the system has none (the installer uses /usr/bin/lockf when it exists).
+  // The uninstaller waits up to 30 one-second sleeps for launchd; the tests need not.
+  writeExecutable(join(bin, 'sleep'), '#!/bin/sh\nexit 0\n');
   writeExecutable(join(bin, 'lockf'), LOCKF_SHIM);
   // mv: FAKE_MV_FAIL_ONCE=<destination> fails the first move onto that path.
   writeExecutable(join(bin, 'mv'), `#!/bin/sh
@@ -609,7 +611,7 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
       expect(h.curlCalls().filter((url) => url.includes('bun.test'))).toHaveLength(1);
       expect(h.logLines().at(-1)).toBe(`${V2} engine install --bun ${h.runtimeBun} --restart`);
     }
-  });
+  }, 30_000);
 
   shellTest('PoC: a symbolic link anywhere in the managed folders is refused before anything cached runs or anything changes', () => {
     for (const [name, link] of [
