@@ -1,6 +1,6 @@
 # Categorization precision: Private only when it is private
 
-Status: proposal for owner approval (2026-10-04).
+Status: approved by the owner 2026-10-04 (Personal-first, the targets, and labeling); step 1 in progress (`eval/calibration/`).
 Scope: the per-item tier classifier, the private model (sniffer), the move
 machinery and the dashboard. Source-agnostic throughout.
 
