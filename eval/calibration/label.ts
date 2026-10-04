@@ -94,7 +94,7 @@ header { display:flex; gap:12px; align-items:baseline; justify-content:space-bet
 h1 { font-size:17px; margin:0; }
 .progress { color:var(--muted); font-variant-numeric: tabular-nums; }
 .bar { height:4px; background:var(--line); border-radius:2px; margin:10px 0 16px; overflow:hidden; }
-.bar > div { height:100%; background:var(--personal); width:0; transition: width .2s; }
+.bar > div { height:100%; background:var(--personal); transform-origin:left; transform:scaleX(0); transition: transform .2s; }
 details.rule { color:var(--muted); margin-bottom:14px; }
 details.rule p { margin:6px 0; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; }
@@ -135,7 +135,7 @@ const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max
 function counts() {
   const done = items.filter((it) => labels[it.id]).length;
   document.getElementById('progress').textContent = done + ' of ' + items.length + ' labeled';
-  document.getElementById('bar').style.width = (items.length ? done * 100 / items.length : 0) + '%';
+  document.getElementById('bar').style.transform = 'scaleX(' + (items.length ? done / items.length : 0) + ')';
   return done;
 }
 function render() {
