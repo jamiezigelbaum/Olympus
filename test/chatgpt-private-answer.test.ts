@@ -99,10 +99,24 @@ function expectOnlyPrivateNoteVisible(
   expect(result.structuredContent as Record<string, unknown>).not.toHaveProperty('privateMatch');
 }
 
-async function settled(jobs: PrivateAnswerJobs): Promise<void> {
-  // Analyses (refresh, model, sealing) run on a promise chain; let it drain.
-  await Bun.sleep(50);
-  void jobs;
+/**
+ * Waits until the jobs are quiet: no analysis queued or running, and every
+ * claimed job settled (ready or failed). Polls observed state rather than
+ * sleeping a fixed time, so the eligibility checks and sealing between an
+ * analysis and its hand-out can take as long as a loaded machine needs.
+ * Bounded, so a real hang still fails the test.
+ */
+async function settled(jobs: PrivateAnswerJobs, ms = 10_000): Promise<void> {
+  const live = (jobs as unknown as { jobs: Map<string, { claimKey?: string; outcome?: unknown }> }).jobs;
+  const quiet = () => jobs.pendingAnalyses === 0
+    && [...live.values()].every((job) => job.claimKey === undefined || job.outcome !== undefined);
+  const deadline = Date.now() + ms;
+  while (!quiet()) {
+    if (Date.now() > deadline) throw new Error('private answer jobs did not settle');
+    await Bun.sleep(2);
+  }
+  // One more turn, so a claim settled just now has returned to its caller.
+  await Bun.sleep(0);
 }
 
 describe('sealing', () => {
