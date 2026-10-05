@@ -11,7 +11,7 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
@@ -20,7 +20,9 @@ import {
   recoverZkapiSession,
   reserveZkapiRequest,
   sendZkapiConsult,
+  abandonZkapiFence,
   zkapiFenceScope,
+  zkapiOutstandingFences,
   zkapiUnresolvedSession,
   zkapiUsageToday,
   type ZkapiConfinement,
@@ -699,23 +701,90 @@ describe('zkAPI consult transport: fence and recovery', () => {
     expect(zkapiUnresolvedSession(statePath)).toBe(true);
   }, SLOW);
 
-  test('a fence belongs to one daemon and wallet: another cannot recover it, and is not blocked by it', async () => {
+  test('a fence belongs to the wallet directory: a replaced daemon or moved port is the same wallet', async () => {
     writePlan({ noSettlement: true });
     expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true, receipt: { fence: 'held' } });
     writePlan({ noSettlement: false });
-    const otherDaemon = join(root, 'other-bin', 'zkapi-clientd');
-    mkdirSync(dirname(otherDaemon));
-    writeFileSync(otherDaemon, readFileSync(join(binDir, 'zkapi-clientd')));
-    chmodSync(otherDaemon, 0o755);
-    const other = transport({ settings: settings({ daemonExecutable: otherDaemon }) });
-    expect(await recoverZkapiSession(other)).toMatchObject({ ok: false, error: { code: 'no_unresolved_session' } });
-    expect(await sendZkapiConsult(QUESTION, other)).toMatchObject({ ok: true, receipt: { fence: 'clear' } });
-    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({
+    // A different executable path (an upgrade) over the same config directory,
+    // spelled with a trailing slash: still this wallet's fence.
+    const upgraded = join(root, 'cellar', '0.1.6', 'zkapi-clientd');
+    mkdirSync(dirname(upgraded), { recursive: true });
+    writeFileSync(upgraded, readFileSync(join(binDir, 'zkapi-clientd')));
+    chmodSync(upgraded, 0o755);
+    const sameWallet = transport({
+      settings: settings({ daemonExecutable: upgraded }),
+      env: { HOME: root, PATH: '/usr/bin:/bin', ZKAPI_CLIENTD_CONFIG_DIR: `${configDir}/` },
+    });
+    expect(await sendZkapiConsult(QUESTION, sameWallet)).toMatchObject({
       ok: false,
       error: { code: 'unresolved_session', receipt: { fence: 'held', settlement: 'not_confirmed' } },
     });
-    expect(await recoverZkapiSession(transport())).toMatchObject({ ok: true, receipt: { fence: 'clear' } });
+    expect(await recoverZkapiSession(sameWallet)).toMatchObject({ ok: true, receipt: { fence: 'clear', settlement: 'confirmed' } });
+    expect(zkapiUnresolvedSession(statePath)).toBe(false);
   }, 60_000);
+
+  test('another wallet\'s fence blocks every consult, cannot be recovered here, and clears only by recovery there or explicit abandonment', async () => {
+    writePlan({ noSettlement: true });
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true, receipt: { fence: 'held' } });
+    const otherWallet = join(root, 'other-wallet');
+    mkdirSync(otherWallet);
+    const other = transport({ env: { HOME: root, PATH: '/usr/bin:/bin', ZKAPI_CLIENTD_CONFIG_DIR: otherWallet } });
+    expect(await sendZkapiConsult(QUESTION, other)).toMatchObject({
+      ok: false,
+      error: { code: 'unresolved_session_other_wallet', outcome: 'not_sent', receipt: { fence: 'held' } },
+    });
+    expect(await recoverZkapiSession(other)).toMatchObject({ ok: false, error: { code: 'unresolved_session_other_wallet' } });
+    const [scope] = Object.keys(zkapiOutstandingFences(statePath));
+    expect(zkapiOutstandingFences(statePath)[scope!]).toMatchObject({
+      configDir: realpathSync(configDir),
+      daemonExecutable: join(binDir, 'zkapi-clientd'),
+      daemonPort,
+    });
+    expect(abandonZkapiFence(statePath, scope!, NOW)).toBe(true);
+    expect(zkapiUnresolvedSession(statePath)).toBe(false);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).abandonedFences[scope!]).toMatchObject({ configDir: realpathSync(configDir) });
+  }, 60_000);
+
+  test('the recovery script exits 0 only when settlement is confirmed and the fence cleared', async () => {
+    const olympusDir = join(root, '.olympus');
+    mkdirSync(olympusDir, { recursive: true });
+    const ledger = join(olympusDir, 'zkapi-consult-state.json');
+    writePlan({ noSettlement: true, statePath: ledger });
+    expect(await sendZkapiConsult(QUESTION, transport({ statePath: ledger }))).toMatchObject({ ok: true, receipt: { fence: 'held' } });
+    const config = baseConfig();
+    config.modelProfiles.zk = zkapiProfile({
+      baseUrl: `http://127.0.0.1:${daemonPort}/v1`,
+      zkapi: {
+        fundingDate: new Date().toISOString().slice(0, 10),
+        acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: ZKAPI_RISK_ACKNOWLEDGEMENTS.map((item) => item.id) },
+        torSocksPort: torPort,
+        daemonExecutable: join(binDir, 'zkapi-clientd'),
+        torExecutable: join(binDir, 'tor'),
+        settleTimeoutMs: 5_000,
+        policyWarmTimeoutMs: 5_000,
+        daemonReadyTimeoutMs: 10_000,
+        torBootstrapTimeoutMs: 10_000,
+      },
+    });
+    writeFileSync(join(olympusDir, 'sovereignty.json'), JSON.stringify(config));
+    const script = join(import.meta.dir, '..', 'scripts', 'zkapi-consult-recover.ts');
+    const env = { HOME: root, PATH: '/usr/bin:/bin', ZKAPI_CLIENTD_CONFIG_DIR: configDir, OLYMPUS_ZKAPI_LOCAL_API_KEY: API_KEY };
+    expect(Bun.spawnSync([process.execPath, script], { env }).exitCode).toBe(2);
+    expect(Bun.spawnSync([process.execPath, script, '--yes'], { env }).exitCode).toBe(3);
+    expect(zkapiUnresolvedSession(ledger)).toBe(true);
+    writePlan({ noSettlement: false });
+    expect(Bun.spawnSync([process.execPath, script, '--yes'], { env }).exitCode).toBe(0);
+    expect(zkapiUnresolvedSession(ledger)).toBe(false);
+  }, 120_000);
+
+  test('an early refusal still reports a held fence', async () => {
+    writePlan({ noSettlement: true });
+    await sendZkapiConsult(QUESTION, transport());
+    const { apiKey: _key, ...noKey } = transport();
+    expect(await sendZkapiConsult(QUESTION, noKey)).toMatchObject({ ok: false, error: { code: 'daemon_api_key_missing', receipt: { fence: 'held' } } });
+    expect(await sendZkapiConsult(QUESTION, transport({ settings: settings({ acknowledgements: { version: 0, accepted: [] } }) })))
+      .toMatchObject({ ok: false, error: { code: 'acknowledgements_incomplete', receipt: { fence: 'held' } } });
+  }, SLOW);
 
   test('a receipt reflects a held fence even when the session is refused before starting', async () => {
     writePlan({ noSettlement: true });
@@ -1022,16 +1091,83 @@ describe('evidence adapters refuse a zkAPI daemon endpoint where they dispatch',
     expect(() => assertNotZkapiDaemonEndpoint(localModel, 'probe')).not.toThrow();
   });
 
-  test('a host name on a daemon port is resolved, and refused when it points at this machine', async () => {
-    await expect(assertNotZkapiDaemonEndpointResolved('http://my-alias.example:8787/v1/chat/completions', 'probe', async () => ['127.0.0.1']))
-      .rejects.toMatchObject({ name: 'ZkapiDaemonEndpointRefusal' });
-    await expect(assertNotZkapiDaemonEndpointResolved('http://my-alias.example:8787/v1/chat/completions', 'probe', async () => ['::ffff:127.0.0.1']))
-      .rejects.toMatchObject({ name: 'ZkapiDaemonEndpointRefusal' });
-    await assertNotZkapiDaemonEndpointResolved('http://my-alias.example:8787/v1/chat/completions', 'probe', async () => ['10.0.0.1']);
-    // A cloud endpoint on an ordinary port is never looked up.
+  test('any host name on a daemon port is refused, without a lookup', async () => {
+    for (const url of ['http://my-alias.example:8787/v1/chat/completions', 'https://api.example.com:8787/v1']) {
+      expect(() => assertNotZkapiDaemonEndpoint(url, 'probe')).toThrow(expect.objectContaining({ reason: 'hostname_on_daemon_port' }));
+      await expect(assertNotZkapiDaemonEndpointResolved(url, 'probe', async () => {
+        throw new Error('looked up');
+      })).rejects.toMatchObject({ reason: 'hostname_on_daemon_port' });
+    }
+    // A cloud endpoint on an ordinary port is never looked up while the policy is readable.
     await assertNotZkapiDaemonEndpointResolved('https://api.example.com/v1/chat/completions', 'probe', async () => {
       throw new Error('looked up');
     });
+  });
+
+  test('policy refresh fails closed on every read error, never caches a failure, and sees same-size same-time replacements', async () => {
+    const dir = join(root, '.olympus');
+    mkdirSync(dir, { recursive: true });
+    const policyPath = join(dir, 'sovereignty.json');
+    const localModel = `http://127.0.0.1:${freePort()}/v1/chat/completions`;
+    const write = (port: number) => {
+      const config = baseConfig();
+      config.modelProfiles.zk = zkapiProfile({ baseUrl: `http://127.0.0.1:${port}/v1` });
+      writeFileSync(policyPath, JSON.stringify(config));
+    };
+    write(41001);
+    expect(() => assertNotZkapiDaemonEndpoint(localModel, 'probe')).not.toThrow();
+    // stat fails with EACCES (directory not searchable): fail closed, not "absent".
+    chmodSync(dir, 0o000);
+    try {
+      expect(() => assertNotZkapiDaemonEndpoint(localModel, 'probe')).toThrow(expect.objectContaining({ reason: 'policy_unreadable' }));
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    // read fails with EACCES, then access is restored with nothing else changed.
+    chmodSync(policyPath, 0o000);
+    try {
+      expect(() => assertNotZkapiDaemonEndpoint(localModel, 'probe')).toThrow(expect.objectContaining({ reason: 'policy_unreadable' }));
+    } finally {
+      chmodSync(policyPath, 0o600);
+    }
+    expect(() => assertNotZkapiDaemonEndpoint(localModel, 'probe')).not.toThrow();
+    // Same size, same modification time, different daemon port.
+    const before = statSync(policyPath);
+    write(41002);
+    utimesSync(policyPath, before.atime, before.mtime);
+    expect(statSync(policyPath).size).toBe(before.size);
+    expect(() => assertNotZkapiDaemonEndpoint('http://127.0.0.1:41002/v1/chat/completions', 'probe')).toThrow(expect.objectContaining({ reason: 'daemon_port' }));
+    // A snapshot that is not a policy is unreadable too.
+    writeFileSync(policyPath, '[]');
+    expect(() => assertNotZkapiDaemonEndpoint(localModel, 'probe')).toThrow(/cannot be read/);
+    // While unreadable, a host name on any port is resolved and refused if it is local or unresolvable.
+    await expect(assertNotZkapiDaemonEndpointResolved('http://alias.example:29999/v1', 'probe', async () => ['127.0.0.1']))
+      .rejects.toMatchObject({ reason: 'policy_unreadable' });
+    await expect(assertNotZkapiDaemonEndpointResolved('http://alias.example:29999/v1', 'probe', async () => {
+      throw new Error('no answer');
+    })).rejects.toMatchObject({ reason: 'policy_unreadable' });
+    await assertNotZkapiDaemonEndpointResolved('https://api.example.com/v1', 'probe', async () => ['93.184.216.34']);
+    rmSync(policyPath);
+    expect(() => assertNotZkapiDaemonEndpoint(localModel, 'probe')).not.toThrow();
+  });
+
+  test('a refusal reaches the owner as a configuration problem, not an outage', async () => {
+    await expect(connectGeminiApiKey({
+      apiKey: 'test-key',
+      fetch: (async () => new Response('{}')) as unknown as typeof fetch,
+      geminiModelsUrl: 'http://127.0.0.1:8787/v1/models',
+      homeDir: root,
+      envPath: join(root, 'worker.env'),
+    })).rejects.toMatchObject({ name: 'ZkapiDaemonEndpointRefusal', reason: 'daemon_port', suggestion: expect.stringContaining('zkAPI daemon') });
+    mkdirSync(join(root, '.olympus'), { recursive: true });
+    writeFileSync(join(root, '.olympus', 'sovereignty.json'), '{ broken');
+    try {
+      expect(() => assertNotZkapiDaemonEndpoint('http://127.0.0.1:28090/v1', 'probe')).toThrow(
+        expect.objectContaining({ suggestion: expect.stringContaining(join(root, '.olympus', 'sovereignty.json')) }),
+      );
+    } finally {
+      rmSync(join(root, '.olympus', 'sovereignty.json'));
+    }
   });
 
   test('configurable setup probes refuse the daemon port before sending a key', async () => {
@@ -1367,18 +1503,15 @@ describe('doctor: zkapi_consult_transport', () => {
     expect(blocked.detail).toContain('local API key NOT configured');
     expect(blocked.detail).toContain('not ready: acknowledgements_incomplete, note_expired, daemon_api_key_missing, tor_not_found');
 
-    const scope = zkapiFenceScope({
-      daemonExecutable: join(binDir, 'zkapi-clientd'),
-      env: { HOME: root, ZKAPI_CLIENTD_CONFIG_DIR: configDir },
-      daemonPort,
-    });
-    reserveZkapiRequest(statePath, {}, NOW, scope);
-    reserveZkapiRequest(statePath, {}, NOW, scope);
-    reserveZkapiRequest(statePath, {}, NOW, scope);
+    const fence = { scope: zkapiFenceScope({ env: { HOME: root, ZKAPI_CLIENTD_CONFIG_DIR: configDir } }), configDir };
+    reserveZkapiRequest(statePath, {}, NOW, fence);
+    reserveZkapiRequest(statePath, {}, NOW, fence);
+    reserveZkapiRequest(statePath, {}, NOW, fence);
     // Without an owner-set limit, a high count blocks nothing; only the fence does.
     const unlimited = await zkapiCheck(doctorDeps());
     expect(unlimited.detail).toContain('requests today 3 (no limit set), worst-case authorized today $18.00 (no limit set;');
-    expect(unlimited.detail).toContain('UNRESOLVED SESSION: run a recovery-only session');
+    expect(unlimited.detail).toContain(`UNRESOLVED SESSION: fence since 2026-10-05T12:00:00.000Z for wallet directory ${configDir}, this wallet`);
+    expect(unlimited.hint).toContain('scripts/zkapi-consult-recover.ts --yes');
     expect(unlimited.detail).toContain('not ready: unresolved_session');
     expect(unlimited.detail).not.toContain('spend_cap_reached');
     expect(unlimited.detail).not.toContain('daily_cap_reached');

@@ -607,10 +607,20 @@ on, so deposit the smallest amount the service accepts.
   lease. That earlier lease is then settled under the recovery session's
   network identity, and recovery costs one request. A recovery the daemon
   refuses (for example because the model is unavailable) leaves the fence in
-  place. A fence belongs to one daemon and wallet (the daemon executable, its
-  configuration directory and its port); a session for another cannot clear
-  it. Until the consult lane offers recovery, run the developer harness from
-  the Olympus checkout: `bun scripts/zkapi-consult-recover.ts --yes`. Olympus
+  place. A fence belongs to one wallet, identified by the daemon's
+  configuration directory (canonicalized); the daemon executable and port are
+  recorded with it but do not change it, so updating the daemon keeps the same
+  fence. **Keep one wallet per configuration directory**: Olympus cannot tell
+  two wallets in the same directory apart without reading private files. Any
+  outstanding fence, for any wallet, blocks every consult and is listed by
+  doctor. Recovery runs only against the wallet that holds the fence. Until
+  the consult lane offers recovery, run the developer harness from the
+  Olympus checkout: `bun scripts/zkapi-consult-recover.ts --yes` (exit 0 only
+  when settlement is confirmed and the fence cleared). If that wallet can no
+  longer run, the same script's `--abandon <scope> --yes-abandon` marks the
+  fence abandoned; it is kept as a record, and the unsettled lease may later
+  settle under another session's network identity. Nothing clears a fence
+  automatically. Olympus
   waits up to five minutes for settlement, longer than the daemon's own
   four-minute companion timeout.
 - One session at a time across every Olympus process. A failed or timed-out
@@ -626,17 +636,23 @@ on, so deposit the smallest amount the service accepts.
   refused by the shared model transport that every analyst, embedding, vision
   and setup probe sends through, and by policy validation for every provider,
   whatever trust it declares. Known ports are 8787 and the port of every zkapi
-  profile in your sovereignty policy, which the guard reads itself. Every
-  loopback spelling counts (`localhost` names, all of 127/8, IPv4-mapped IPv6),
-  and a host name on a daemon port is resolved and refused if it points at
-  this machine. **A daemon on a port no policy names cannot be recognized by
+  profile in your sovereignty policy, which the guard reads itself, so the
+  guard depends on that file. Every loopback spelling counts (`localhost`
+  names, all of 127/8, IPv4-mapped IPv6), and **any host name on a daemon port
+  is refused**: a local model on such a port must use a numeric loopback
+  address. **A daemon on a port no policy names cannot be recognized by
   port**; the protection covers the ports Olympus knows about. If the policy
-  file exists but cannot be read, every local model endpoint is refused until
-  it can.
+  file exists but cannot be read, every local model endpoint is refused, and a
+  host name is refused if it resolves to this machine or cannot be resolved,
+  until the file can be read again; the refusal names the file to fix.
 - If Olympus crashes mid-session, a watchdog stops the session's processes,
   and the next session cleans up what is left only after proving it belonged
   to the crashed session; anything it cannot prove is reported, not signalled.
-  A session whose processes cannot be confirmed stopped ends as a failure.
+  A session whose processes cannot be confirmed stopped ends as a failure,
+  and doctor lists the leftover process groups. To clear them, find each
+  group (`ps -o pid,pgid,command -g <pgid>`) and stop its processes yourself;
+  a reboot is the conservative fallback, which the next session recognizes.
+  Never delete the zkAPI ledger to clear this.
   The watchdog cannot contain a descendant that starts its own session or
   process group, and it cannot supervise a wallet companion that was already
   running outside Olympus.

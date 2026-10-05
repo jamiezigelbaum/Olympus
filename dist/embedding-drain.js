@@ -3583,7 +3583,7 @@ function registerZkapiDaemonPorts(ports) {
   for (const port of ports)
     zkapiDaemonPorts.add(port);
 }
-function sovereigntyPolicyPath(env) {
+function sovereigntyPolicyPath(env = process.env) {
   return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim() || join3(env.HOME?.trim() || homedir3(), ".olympus", "sovereignty.json");
 }
 function refreshZkapiPortsFromPolicyFile(env = process.env) {
@@ -3591,46 +3591,57 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   let stamp;
   try {
     const stat2 = statSync2(path);
-    stamp = `${path}:${stat2.mtimeMs}:${stat2.size}`;
-  } catch {
-    policyFile.seen = `${path}:absent`;
-    policyFile.unreadable = false;
+    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      policyFile.seen = `${path}:absent`;
+      policyFile.unreadable = undefined;
+    } else {
+      policyFile.seen = undefined;
+      policyFile.unreadable = path;
+    }
     return;
   }
-  if (policyFile.seen === stamp)
+  if (policyFile.seen === stamp && policyFile.unreadable === undefined)
     return;
   try {
-    const parsed = JSON.parse(readFileSync4(path, "utf8"));
-    const root = parsed.sovereignty && typeof parsed.sovereignty === "object" ? parsed.sovereignty : parsed;
-    const profiles = root.modelProfiles && typeof root.modelProfiles === "object" ? root.modelProfiles : {};
-    for (const profile of Object.values(profiles)) {
-      const record = profile && typeof profile === "object" ? profile : {};
-      if (record.provider !== "zkapi")
-        continue;
-      const port = loopbackPort(typeof record.baseUrl === "string" ? record.baseUrl : undefined);
-      if (port !== undefined)
-        zkapiDaemonPorts.add(port);
-    }
-    policyFile.unreadable = false;
+    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync4(path, "utf8")));
+    for (const port of ports)
+      zkapiDaemonPorts.add(port);
+    policyFile.seen = stamp;
+    policyFile.unreadable = undefined;
   } catch {
-    policyFile.unreadable = true;
+    policyFile.seen = undefined;
+    policyFile.unreadable = path;
   }
-  policyFile.seen = stamp;
+}
+function zkapiPortsInPolicy(parsed) {
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  if (!record)
+    throw new Error("not a policy object");
+  const inner = record.sovereignty && typeof record.sovereignty === "object" ? record.sovereignty : record;
+  const profiles = inner.modelProfiles;
+  if (!profiles || typeof profiles !== "object" || Array.isArray(profiles))
+    throw new Error("policy has no modelProfiles");
+  const ports = [];
+  for (const profile of Object.values(profiles)) {
+    if (!profile || typeof profile !== "object")
+      throw new Error("malformed profile");
+    const entry = profile;
+    if (entry.provider !== "zkapi")
+      continue;
+    const port = loopbackPort(typeof entry.baseUrl === "string" ? entry.baseUrl : undefined);
+    if (port === undefined)
+      throw new Error("zkapi profile without a loopback baseUrl");
+    ports.push(port);
+  }
+  return ports;
+}
+function endpointPort(parsed) {
+  return parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
 }
 function assertNotZkapiDaemonEndpoint(url, label) {
   refreshZkapiPortsFromPolicyFile();
-  const port = loopbackPort(url);
-  if (port === undefined)
-    return;
-  if (policyFile.unreadable) {
-    throw new ZkapiDaemonEndpointRefusal(`${label} is a local endpoint, and the sovereignty policy cannot be read to rule out a zkAPI daemon on port ${port}.`);
-  }
-  if (!zkapiDaemonPorts.has(port))
-    return;
-  throw new ZkapiDaemonEndpointRefusal(`${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
-}
-async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defaultLookupAll) {
-  assertNotZkapiDaemonEndpoint(url, label);
   let parsed;
   try {
     parsed = new URL(url);
@@ -3639,25 +3650,63 @@ async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defa
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
     return;
-  const port = parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+  const port = endpointPort(parsed);
+  const local = loopbackPort(url) !== undefined;
+  if (local && policyFile.unreadable) {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} is a local endpoint, and the sovereignty policy at ${policyFile.unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, policyFile.unreadable);
+  }
   if (!zkapiDaemonPorts.has(port))
+    return;
+  if (local) {
+    throw new ZkapiDaemonEndpointRefusal("daemon_port", `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
+  }
+  if (!isIP(parsed.hostname.replace(/^\[|\]$/g, ""))) {
+    throw new ZkapiDaemonEndpointRefusal("hostname_on_daemon_port", `${label} names a host on port ${port}, a zkAPI daemon port; a host name could point at this machine.`);
+  }
+}
+async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defaultLookupAll) {
+  assertNotZkapiDaemonEndpoint(url, label);
+  const unreadable = policyFile.unreadable;
+  if (!unreadable)
+    return;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
     return;
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   if (isIP(host))
     return;
+  const port = endpointPort(parsed);
+  const refuse = () => {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} may be a local endpoint, and the sovereignty policy at ${unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, unreadable);
+  };
   let addresses;
   try {
-    addresses = await lookupAll(host);
+    addresses = await Promise.race([
+      lookupAll(host),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("lookup timed out")), 2000).unref?.())
+    ]);
   } catch {
-    return;
+    return refuse();
   }
-  const local = addresses.some((address) => loopbackPort(`http://${address.includes(":") ? `[${address}]` : address}:${port}`) !== undefined);
-  if (local) {
-    throw new ZkapiDaemonEndpointRefusal(`${label} resolves to this machine on port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
-  }
+  if (addresses.some((address) => loopbackPort(`http://${address.includes(":") ? `[${address}]` : address}:${port}`) !== undefined))
+    refuse();
 }
 async function defaultLookupAll(hostname) {
   return (await lookup(hostname, { all: true })).map((entry) => entry.address);
+}
+function refusalSuggestion(reason, policyPath) {
+  if (reason === "policy_unreadable") {
+    return `Fix or remove the sovereignty policy file at ${policyPath ?? "its configured path"}; until it can be read, Olympus refuses every local model endpoint.`;
+  }
+  if (reason === "hostname_on_daemon_port") {
+    return "Use a numeric address: a cloud endpoint on its own port, or 127.0.0.1 for a local model, which must then not share a zkAPI daemon port.";
+  }
+  return "This address is the zkAPI daemon, which only carries consults. Point this model at a local model server on another port.";
 }
 function isZkapiDaemonEndpointRefusal(error) {
   return error instanceof ZkapiDaemonEndpointRefusal;
@@ -3778,11 +3827,13 @@ var init_zkapi_consult_settings = __esm(() => {
     "torExecutable"
   ]);
   zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
-  policyFile = { unreadable: false };
+  policyFile = { seen: undefined, unreadable: undefined };
   ZkapiDaemonEndpointRefusal = class ZkapiDaemonEndpointRefusal extends OperationError {
-    constructor(message) {
-      super("config_error", message, "Point this model lane at a local model server on another port.");
+    reason;
+    constructor(reason, message, policyPath) {
+      super("config_error", message, refusalSuggestion(reason, policyPath));
       this.name = "ZkapiDaemonEndpointRefusal";
+      this.reason = reason;
     }
   };
 });
@@ -19205,6 +19256,7 @@ var init_worker_service = __esm(() => {
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
   init_model_transport();
+  init_zkapi_consult_settings();
   init_secret_store();
   init_worker_service();
   init_http_timeout();
@@ -24462,6 +24514,7 @@ init_analyst();
 init_analyst();
 init_operation_error();
 init_model_transport();
+init_zkapi_consult_settings();
 
 // src/workers/source-index/built-in-reasoning/manifest.ts
 var GIB = 1024 ** 3;

@@ -49,7 +49,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, dirname, join, resolve as resolvePath } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import {
   FileLeaseBusyError,
@@ -115,6 +115,7 @@ export type ZkapiConsultErrorCode =
   | 'daemon_not_found'
   | 'tor_not_found'
   | 'unresolved_session'
+  | 'unresolved_session_other_wallet'
   | 'no_unresolved_session'
   | 'stranded_processes'
   | 'daemon_already_running'
@@ -294,6 +295,10 @@ export interface ZkapiConsultReadiness {
   requestsToday: { count: number; cap?: number };
   spendToday: { reservedUsd: number; capUsd?: number };
   unresolvedSession: boolean;
+  /** Every outstanding fence, with its recorded facts; any one blocks consults. */
+  fences: Array<ZkapiFence & { thisWallet: boolean }>;
+  /** A process record an earlier session left; it blocks until cleared. */
+  stranded?: { supervisorPid: number; supervisorRunning: boolean; groups: Array<{ role: 'tor' | 'daemon'; pgid: number }> };
   lastSession?: ZkapiLastSession;
   routeLabel: string;
   blockers: ZkapiConsultErrorCode[];
@@ -313,6 +318,7 @@ const MESSAGES: Record<ZkapiConsultErrorCode, string> = {
   daemon_not_found: 'The zkapi-clientd executable was not found.',
   tor_not_found: 'The tor executable was not found; install Tor or set tor to "off".',
   unresolved_session: 'An earlier zkAPI session may have left a lease unsettled; run a recovery-only session before another consult.',
+  unresolved_session_other_wallet: 'An unresolved zkAPI session belongs to another wallet directory; recover it there, or abandon it explicitly, before another consult.',
   no_unresolved_session: 'There is no unresolved zkAPI session to recover.',
   stranded_processes: 'Processes from an earlier zkAPI session could not be confirmed stopped.',
   daemon_already_running: 'Something already serves on the zkAPI port; stop your own zkapi-clientd serve, because Olympus runs and verifies its own for each consult.',
@@ -596,11 +602,14 @@ interface ZkapiState {
   reservedMicroUsd: number;
   lastSession?: ZkapiLastSession;
   /**
-   * Per daemon/wallet scope (`zkapiFenceScope`): set before dispatch, cleared
-   * only on correlated key and settlement evidence from a session in the same
-   * scope.
+   * Per wallet scope (`zkapiFenceScope`, the canonical config directory): set
+   * before dispatch, cleared only on correlated key and settlement evidence
+   * from a session in the same scope, or marked abandoned by the owner. Any
+   * outstanding fence blocks every consult.
    */
-  fences?: Record<string, { at: string }>;
+  fences?: Record<string, ZkapiFence>;
+  /** Fences the owner abandoned; kept as a record, never blocking. */
+  abandonedFences?: Record<string, ZkapiFence & { abandonedAt: string }>;
   /** Written before any process starts; cleared only once every group is confirmed gone. */
   running?: {
     sessionId: string;
@@ -645,36 +654,74 @@ export function zkapiLastSession(path: string): ZkapiLastSession | undefined {
   return readState(path)?.lastSession;
 }
 
+/** An outstanding fence and the non-secret facts recorded with it. */
+export interface ZkapiFence {
+  at: string;
+  configDir: string;
+  daemonExecutable?: string;
+  daemonPort?: number;
+}
+
+/** Every outstanding fence, keyed by scope. */
+export function zkapiOutstandingFences(path: string): Record<string, ZkapiFence> {
+  return readState(path)?.fences ?? {};
+}
+
 export function zkapiUnresolvedSession(path: string, scope?: string): boolean {
-  const fences = readState(path)?.fences ?? {};
+  const fences = zkapiOutstandingFences(path);
   return scope === undefined ? Object.keys(fences).length > 0 : Boolean(fences[scope]);
 }
 
 /**
- * The daemon/wallet a lease belongs to, as a stable, non-secret digest: the
- * daemon executable's real path, the config directory the daemon will use
- * (from the same environment variables and platform default it reads), and
- * the API port. Nothing is read from the daemon's config.json.
+ * The wallet a lease belongs to. zkapi-clientd keeps one wallet per config
+ * directory, so the scope is that directory, canonicalized (real path when it
+ * exists, otherwise a normalized absolute path), taken from the same
+ * environment variables and platform default the daemon reads. The executable
+ * and port are recorded with a fence as facts, not identity: replacing the
+ * daemon or moving its port is the same wallet. Nothing is read from the
+ * daemon's config.json.
  */
-export function zkapiFenceScope(input: {
-  daemonExecutable: string;
-  env: Record<string, string | undefined>;
-  daemonPort: number;
-}): string {
-  let executable = input.daemonExecutable;
-  try {
-    executable = realpathSync(executable);
-  } catch {
-    // keep the configured path
-  }
-  const env = input.env;
+export function zkapiWalletDirectory(env: Record<string, string | undefined>): string {
   const home = env.HOME?.trim() || homedir();
-  const configDir = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim()
+  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim()
     || env.OA_CHAT_CONFIG_DIR?.trim()
     || (process.platform === 'darwin'
       ? join(home, 'Library', 'Application Support', 'zkapi-clientd')
       : join(env.XDG_CONFIG_HOME?.trim() || join(home, '.config'), 'zkapi-clientd'));
-  return createHash('sha256').update(`${executable}\0${configDir}\0${input.daemonPort}`).digest('hex').slice(0, 32);
+  const absolute = resolvePath(configured);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+export function zkapiFenceScope(input: { env: Record<string, string | undefined> }): string {
+  return createHash('sha256').update(zkapiWalletDirectory(input.env)).digest('hex').slice(0, 32);
+}
+
+/**
+ * The owner's explicit way out for a fence whose wallet can no longer run a
+ * recovery session (the directory was moved or the wallet replaced). The fence
+ * is kept as an abandoned record and stops blocking. An abandoned fence means
+ * a lease left unsettled may later settle under another session's network
+ * identity. Never called automatically.
+ */
+export function abandonZkapiFence(path: string, scope: string, now: Date): boolean {
+  let found = false;
+  updateState(path, now, (state) => {
+    const fence = state.fences?.[scope];
+    if (!fence) return undefined;
+    found = true;
+    const { [scope]: _abandoned, ...others } = state.fences ?? {};
+    const { fences: _all, ...rest } = state;
+    return {
+      ...rest,
+      ...(Object.keys(others).length > 0 ? { fences: others } : {}),
+      abandonedFences: { ...state.abandonedFences, [scope]: { ...fence, abandonedAt: now.toISOString() } },
+    };
+  });
+  return found;
 }
 
 function updateState(path: string, now: Date, mutate: (state: ZkapiState) => ZkapiState | undefined): ZkapiState {
@@ -691,6 +738,7 @@ function updateState(path: string, now: Date, mutate: (state: ZkapiState) => Zka
         reservedMicroUsd: 0,
         ...(current?.lastSession ? { lastSession: current.lastSession } : {}),
         ...(current?.fences ? { fences: current.fences } : {}),
+        ...(current?.abandonedFences ? { abandonedFences: current.abandonedFences } : {}),
         ...(current?.running ? { running: current.running } : {}),
       };
     const next = mutate(base);
@@ -718,7 +766,7 @@ export function reserveZkapiRequest(
   path: string,
   limits: { requestCap?: number; spendCapMicroUsd?: number },
   now: Date,
-  scope = 'default',
+  fence: { scope: string } & Omit<ZkapiFence, 'at'> = { scope: 'default', configDir: 'unknown' },
 ): { reserved: true } | { reserved: false; reason: 'daily_cap_reached' | 'spend_cap_reached' } {
   let refusal: 'daily_cap_reached' | 'spend_cap_reached' | undefined;
   updateState(path, now, (state) => {
@@ -734,7 +782,10 @@ export function reserveZkapiRequest(
       ...state,
       count: state.count + 1,
       reservedMicroUsd: state.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD,
-      fences: { ...state.fences, [scope]: { at: now.toISOString() } },
+      fences: (() => {
+        const { scope, ...facts } = fence;
+        return { ...state.fences, [scope]: { ...facts, at: now.toISOString() } };
+      })(),
     };
   });
   return refusal ? { reserved: false, reason: refusal } : { reserved: true };
@@ -1391,16 +1442,28 @@ export async function zkapiConsultReadiness(
   let usage = { count: 0, reservedMicroUsd: 0 };
   let lastSession: ZkapiLastSession | undefined;
   let unresolvedSession = false;
+  const currentScope = zkapiFenceScope({ env });
+  let fences: ZkapiConsultReadiness['fences'] = [];
+  let stranded: ZkapiConsultReadiness['stranded'];
   try {
+    const state = readState(statePath);
     usage = zkapiUsageToday(statePath, now);
     lastSession = zkapiLastSession(statePath);
-    unresolvedSession = daemonExecutable
-      ? zkapiUnresolvedSession(statePath, zkapiFenceScope({ daemonExecutable, env, daemonPort: Number(new URL(options.baseUrl).port || 80) }))
-      : zkapiUnresolvedSession(statePath);
+    fences = Object.entries(state?.fences ?? {}).map(([scope, fence]) => ({ ...fence, thisWallet: scope === currentScope }));
+    unresolvedSession = fences.length > 0;
+    if (state?.running) {
+      stranded = {
+        supervisorPid: state.running.supervisor.pid,
+        supervisorRunning: supervisorAlive(state.running.supervisor),
+        groups: state.running.groups.map((group) => ({ role: group.role, pgid: group.pgid })),
+      };
+    }
   } catch {
     blockers.push('state_unavailable');
   }
-  if (unresolvedSession) blockers.push('unresolved_session');
+  if (fences.some((fence) => fence.thisWallet)) blockers.push('unresolved_session');
+  if (fences.some((fence) => !fence.thisWallet)) blockers.push('unresolved_session_other_wallet');
+  if (stranded && !stranded.supervisorRunning) blockers.push('stranded_processes');
   const limit = ownerLimits(settings);
   if (limit.requestCap !== undefined && usage.count >= limit.requestCap) blockers.push('daily_cap_reached');
   if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limit.spendCapMicroUsd) {
@@ -1422,6 +1485,8 @@ export async function zkapiConsultReadiness(
       ...(settings.dailySpendCapUsd !== undefined ? { capUsd: settings.dailySpendCapUsd } : {}),
     },
     unresolvedSession,
+    fences,
+    ...(stranded ? { stranded } : {}),
     ...(lastSession ? { lastSession } : {}),
     routeLabel: lastSession
       ? zkapiRouteLabel(lastSession)
@@ -1529,7 +1594,19 @@ async function runSession(
     failure(code, sent.dispatched ? (extra.httpStatus ? 'sent_failed' : 'unknown') : 'not_sent', identity(), { ...extra, receipt: { ...receipt } })
   );
 
-  // --- Preconditions: nothing starts until all hold.
+  // --- Preconditions: nothing starts until all hold. The ledger's fences are
+  // read first, so every refusal's receipt reflects them.
+  const scope = zkapiFenceScope({ env });
+  let fences: Record<string, ZkapiFence>;
+  try {
+    fences = zkapiOutstandingFences(statePath);
+  } catch {
+    return fail('state_unavailable');
+  }
+  const fenced = Boolean(fences[scope]);
+  const fencedElsewhere = Object.keys(fences).some((key) => key !== scope);
+  if (fenced || fencedElsewhere) receipt.fence = 'held';
+  if (fenced) receipt.settlement = 'not_confirmed';
   const blocked = settingsBlockers(zkapiMoneyStatus(settings, now()))[0];
   if (blocked) return fail(blocked);
   if (!options.apiKey) return fail('daemon_api_key_missing');
@@ -1537,18 +1614,14 @@ async function runSession(
   if (!daemonExecutable) return fail('daemon_not_found');
   const torExecutable = perConsultTor ? resolveExecutable('tor', settings.torExecutable, env) : undefined;
   if (perConsultTor && !torExecutable) return fail('tor_not_found');
-  const scope = zkapiFenceScope({ daemonExecutable, env, daemonPort });
   try {
-    const fenced = zkapiUnresolvedSession(statePath, scope);
-    // The receipt reflects the ledger from the start, refusals included.
-    if (fenced) {
-      receipt.fence = 'held';
-      receipt.settlement = 'not_confirmed';
-    }
     const stranded = await recoverStrandedGroups(statePath, now());
     if (stranded === 'busy') return fail('busy');
     if (stranded === 'stranded') return fail('stranded_processes');
-    if (fenced && !recovery) return fail('unresolved_session');
+    // Any outstanding fence blocks a consult; a fence that is not this
+    // wallet's can only be recovered from its own wallet, or abandoned.
+    if (!recovery && fenced) return fail('unresolved_session');
+    if (fencedElsewhere && !fenced) return fail('unresolved_session_other_wallet');
     if (!fenced && recovery) return fail('no_unresolved_session');
     const usage = zkapiUsageToday(statePath, now());
     const limit = ownerLimits(settings);
@@ -1731,7 +1804,12 @@ async function runSession(
 
     let reservation: ReturnType<typeof reserveZkapiRequest>;
     try {
-      reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now(), scope);
+      reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now(), {
+        scope,
+        configDir: zkapiWalletDirectory(env),
+        daemonExecutable,
+        daemonPort,
+      });
     } catch {
       return (result = fail('state_unavailable'));
     }

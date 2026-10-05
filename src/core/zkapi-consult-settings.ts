@@ -258,16 +258,18 @@ export function assertZkapiDaemonBaseUrl(id: string, baseUrl: string | undefined
 // Every loopback port a zkAPI daemon is known on, in this process: the
 // default, each validated zkapi profile's port, and each zkapi profile in the
 // owner's sovereignty policy file, which the guard reads itself on first use
-// (and again when the file changes), so no caller has to have validated a
+// and again whenever the file changes, so no caller has to have validated a
 // policy first. Ports are only ever added: forgetting a daemon would reopen a
 // path for evidence. A daemon on a port no policy names cannot be detected by
 // port; telling it apart would need the daemon identity probe, which is not
 // appropriate on every model request.
 const zkapiDaemonPorts = new Set<number>([ZKAPI_DAEMON_DEFAULT_PORT]);
-// Fail closed: while a policy file exists that cannot be read, its zkapi
-// ports are unknown, so every loopback model endpoint is refused. A policy
-// that cannot be read also stops the engine, so this costs no working setup.
-const policyFile: { seen?: string; unreadable: boolean } = { unreadable: false };
+// Fail closed: while a policy file exists that cannot be stat'ed, read, parsed
+// or validated, its zkapi ports are unknown, so every local model endpoint is
+// refused. A policy that cannot be read also stops the engine, so this costs no
+// working setup. Only a successful read is cached; a failure is retried on the
+// next use, so a repaired file takes effect at once.
+const policyFile: { seen: string | undefined; unreadable: string | undefined } = { seen: undefined, unreadable: undefined };
 
 export function registerZkapiDaemonPorts(ports: Iterable<number>): void {
   for (const port of ports) zkapiDaemonPorts.add(port);
@@ -278,73 +280,85 @@ export function zkapiDaemonPortSet(): ReadonlySet<number> {
   return zkapiDaemonPorts;
 }
 
-function sovereigntyPolicyPath(env: Record<string, string | undefined>): string {
+export function sovereigntyPolicyPath(env: Record<string, string | undefined> = process.env): string {
   return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim()
     || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()
     || join(env.HOME?.trim() || homedir(), '.olympus', 'sovereignty.json');
 }
 
-/** Reads the owner's policy file for zkapi profiles; cheap when it has not changed. */
+/** The policy file that currently cannot be read, if any. */
+export function unreadableSovereigntyPolicy(): string | undefined {
+  refreshZkapiPortsFromPolicyFile();
+  return policyFile.unreadable;
+}
+
+/**
+ * Reads the owner's policy file for zkapi profiles. Cheap when the file has
+ * not changed: the cache key is its device, inode, size, and modification and
+ * status-change times (a rewrite always moves the status-change time).
+ */
 export function refreshZkapiPortsFromPolicyFile(env: Record<string, string | undefined> = process.env): void {
   const path = sovereigntyPolicyPath(env);
   let stamp: string;
   try {
     const stat = statSync(path);
-    stamp = `${path}:${stat.mtimeMs}:${stat.size}`;
-  } catch {
-    policyFile.seen = `${path}:absent`;
-    policyFile.unreadable = false;
+    stamp = `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') {
+      policyFile.seen = `${path}:absent`;
+      policyFile.unreadable = undefined;
+    } else {
+      policyFile.seen = undefined;
+      policyFile.unreadable = path;
+    }
     return;
   }
-  if (policyFile.seen === stamp) return;
+  if (policyFile.seen === stamp && policyFile.unreadable === undefined) return;
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
-    const root = (parsed.sovereignty && typeof parsed.sovereignty === 'object' ? parsed.sovereignty : parsed) as Record<string, unknown>;
-    const profiles = root.modelProfiles && typeof root.modelProfiles === 'object' ? root.modelProfiles as Record<string, unknown> : {};
-    for (const profile of Object.values(profiles)) {
-      const record = profile && typeof profile === 'object' ? profile as Record<string, unknown> : {};
-      if (record.provider !== 'zkapi') continue;
-      const port = loopbackPort(typeof record.baseUrl === 'string' ? record.baseUrl : undefined);
-      if (port !== undefined) zkapiDaemonPorts.add(port);
-    }
-    policyFile.unreadable = false;
+    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync(path, 'utf8')) as unknown);
+    for (const port of ports) zkapiDaemonPorts.add(port);
+    policyFile.seen = stamp;
+    policyFile.unreadable = undefined;
   } catch {
-    policyFile.unreadable = true;
+    policyFile.seen = undefined;
+    policyFile.unreadable = path;
   }
-  policyFile.seen = stamp;
+}
+
+/** The zkapi ports a parsed policy names; throws when the snapshot is not a policy. */
+function zkapiPortsInPolicy(parsed: unknown): number[] {
+  const record = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  if (!record) throw new Error('not a policy object');
+  const inner = record.sovereignty && typeof record.sovereignty === 'object' ? record.sovereignty as Record<string, unknown> : record;
+  const profiles = inner.modelProfiles;
+  if (!profiles || typeof profiles !== 'object' || Array.isArray(profiles)) throw new Error('policy has no modelProfiles');
+  const ports: number[] = [];
+  for (const profile of Object.values(profiles as Record<string, unknown>)) {
+    if (!profile || typeof profile !== 'object') throw new Error('malformed profile');
+    const entry = profile as Record<string, unknown>;
+    if (entry.provider !== 'zkapi') continue;
+    const port = loopbackPort(typeof entry.baseUrl === 'string' ? entry.baseUrl : undefined);
+    if (port === undefined) throw new Error('zkapi profile without a loopback baseUrl');
+    ports.push(port);
+  }
+  return ports;
+}
+
+function endpointPort(parsed: URL): number {
+  return parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
 }
 
 /**
- * Refuse an evidence adapter's endpoint when it is a zkAPI daemon: that
- * loopback address forwards to OpenRouter and the upstream model. Synchronous
- * and spelling-based, for policy validation and constructors.
+ * Refuse an evidence adapter's endpoint when it is, or may be, a zkAPI daemon:
+ * that loopback address forwards to OpenRouter and the upstream model.
+ * Synchronous, for policy validation, constructors and dispatch:
+ *   - a local address on a known daemon port;
+ *   - any host name on a known daemon port (a name can be re-pointed at this
+ *     machine; local models there must use a numeric loopback address);
+ *   - while the policy file cannot be read, every local address.
  */
 export function assertNotZkapiDaemonEndpoint(url: string, label: string): void {
   refreshZkapiPortsFromPolicyFile();
-  const port = loopbackPort(url);
-  if (port === undefined) return;
-  if (policyFile.unreadable) {
-    throw new ZkapiDaemonEndpointRefusal(
-      `${label} is a local endpoint, and the sovereignty policy cannot be read to rule out a zkAPI daemon on port ${port}.`,
-    );
-  }
-  if (!zkapiDaemonPorts.has(port)) return;
-  throw new ZkapiDaemonEndpointRefusal(
-    `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`,
-  );
-}
-
-/**
- * The dispatch-time form: also resolves a host name (not an IP literal) when
- * the port is a daemon port, so a DNS or hosts-file alias for this machine is
- * refused too. Cloud endpoints on other ports trigger no lookup.
- */
-export async function assertNotZkapiDaemonEndpointResolved(
-  url: string,
-  label: string,
-  lookupAll: (hostname: string) => Promise<string[]> = defaultLookupAll,
-): Promise<void> {
-  assertNotZkapiDaemonEndpoint(url, label);
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -352,34 +366,84 @@ export async function assertNotZkapiDaemonEndpointResolved(
     return;
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
-  const port = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+  const port = endpointPort(parsed);
+  const local = loopbackPort(url) !== undefined;
+  if (local && policyFile.unreadable) {
+    throw new ZkapiDaemonEndpointRefusal('policy_unreadable', `${label} is a local endpoint, and the sovereignty policy at ${policyFile.unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, policyFile.unreadable);
+  }
   if (!zkapiDaemonPorts.has(port)) return;
+  if (local) {
+    throw new ZkapiDaemonEndpointRefusal('daemon_port', `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
+  }
+  if (!isIP(parsed.hostname.replace(/^\[|\]$/g, ''))) {
+    throw new ZkapiDaemonEndpointRefusal('hostname_on_daemon_port', `${label} names a host on port ${port}, a zkAPI daemon port; a host name could point at this machine.`);
+  }
+}
+
+/**
+ * The dispatch-time form. Adds one case the synchronous check cannot settle:
+ * while the policy file cannot be read, a host name on any port might point at
+ * this machine, so it is resolved (bounded) and refused if it does, or if it
+ * cannot be resolved in time.
+ */
+export async function assertNotZkapiDaemonEndpointResolved(
+  url: string,
+  label: string,
+  lookupAll: (hostname: string) => Promise<string[]> = defaultLookupAll,
+): Promise<void> {
+  assertNotZkapiDaemonEndpoint(url, label);
+  const unreadable = policyFile.unreadable;
+  if (!unreadable) return;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
   const host = parsed.hostname.replace(/^\[|\]$/g, '');
   if (isIP(host)) return;
+  const port = endpointPort(parsed);
+  const refuse = (): never => {
+    throw new ZkapiDaemonEndpointRefusal('policy_unreadable', `${label} may be a local endpoint, and the sovereignty policy at ${unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, unreadable);
+  };
   let addresses: string[];
   try {
-    addresses = await lookupAll(host);
+    addresses = await Promise.race([
+      lookupAll(host),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('lookup timed out')), 2_000).unref?.()),
+    ]);
   } catch {
-    return; // unresolvable: the request itself cannot reach anything
+    return refuse();
   }
-  const local = addresses.some((address) => loopbackPort(`http://${address.includes(':') ? `[${address}]` : address}:${port}`) !== undefined);
-  if (local) {
-    throw new ZkapiDaemonEndpointRefusal(
-      `${label} resolves to this machine on port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`,
-    );
-  }
+  if (addresses.some((address) => loopbackPort(`http://${address.includes(':') ? `[${address}]` : address}:${port}`) !== undefined)) refuse();
 }
 
 async function defaultLookupAll(hostname: string): Promise<string[]> {
   return (await lookup(hostname, { all: true })).map((entry) => entry.address);
 }
 
-/** A refusal, not an outage: transports rethrow it as-is and never retry. */
+export type ZkapiDaemonEndpointRefusalReason = 'daemon_port' | 'hostname_on_daemon_port' | 'policy_unreadable';
+
+/** A configuration refusal, not an outage: callers rethrow it as-is and never retry. */
 export class ZkapiDaemonEndpointRefusal extends OperationError {
-  constructor(message: string) {
-    super('config_error', message, 'Point this model lane at a local model server on another port.');
+  readonly reason: ZkapiDaemonEndpointRefusalReason;
+
+  constructor(reason: ZkapiDaemonEndpointRefusalReason, message: string, policyPath?: string) {
+    super('config_error', message, refusalSuggestion(reason, policyPath));
     this.name = 'ZkapiDaemonEndpointRefusal';
+    this.reason = reason;
   }
+}
+
+function refusalSuggestion(reason: ZkapiDaemonEndpointRefusalReason, policyPath: string | undefined): string {
+  if (reason === 'policy_unreadable') {
+    return `Fix or remove the sovereignty policy file at ${policyPath ?? 'its configured path'}; until it can be read, Olympus refuses every local model endpoint.`;
+  }
+  if (reason === 'hostname_on_daemon_port') {
+    return 'Use a numeric address: a cloud endpoint on its own port, or 127.0.0.1 for a local model, which must then not share a zkAPI daemon port.';
+  }
+  return 'This address is the zkAPI daemon, which only carries consults. Point this model at a local model server on another port.';
 }
 
 export function isZkapiDaemonEndpointRefusal(error: unknown): error is ZkapiDaemonEndpointRefusal {

@@ -588,9 +588,15 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
     ...(ok
       ? {}
       : {
-        hint: lines.some((line) => line.includes('UNRESOLVED SESSION'))
-          ? 'A recovery-only zkAPI session is needed before another consult. Until the consult lane offers it, run the developer harness from the Olympus checkout: bun scripts/zkapi-consult-recover.ts --yes (one content-free request, counted at $6). Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json.'
-          : 'Fix what the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon.',
+        hint: [
+          lines.some((line) => line.includes('UNRESOLVED SESSION'))
+            ? 'A recovery-only zkAPI session is needed before another consult, run against the wallet directory that holds the fence. Until the consult lane offers it, run the developer harness from the Olympus checkout: bun scripts/zkapi-consult-recover.ts --yes (one content-free request, counted at $6). A fence whose wallet can no longer run can only be abandoned explicitly with that script\'s --abandon option; an unsettled lease may then settle under another session\'s identity.'
+            : undefined,
+          lines.some((line) => line.includes('STRANDED PROCESSES'))
+            ? 'An earlier session left processes Olympus could not prove its own. Find the listed process groups (ps -o pid,pgid,command -g <pgid>), stop them yourself, or reboot; the next session then sees them gone. Never delete the zkAPI ledger to clear this.'
+            : undefined,
+          'Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon.',
+        ].filter((part): part is string => part !== undefined).join(' '),
       }),
   };
 }
@@ -619,14 +625,19 @@ function describeZkapiReadiness(readiness: ZkapiConsultReadiness): string {
   const requestLimit = readiness.requestsToday.cap !== undefined ? `limit ${readiness.requestsToday.cap}` : 'no limit set';
   const spendLimit = readiness.spendToday.capUsd !== undefined ? `limit $${readiness.spendToday.capUsd.toFixed(2)}` : 'no limit set';
   const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts up to $6.00)`;
-  const fence = readiness.unresolvedSession
-    ? 'UNRESOLVED SESSION: run a recovery-only session before another consult'
+  const fence = readiness.fences.length > 0
+    ? `UNRESOLVED SESSION: ${readiness.fences.map((entry) => `fence since ${entry.at} for wallet directory ${entry.configDir}${entry.daemonExecutable ? ` (daemon ${entry.daemonExecutable}${entry.daemonPort ? `, port ${entry.daemonPort}` : ''})` : ''}${entry.thisWallet ? ', this wallet' : ', another wallet'}`).join('; ')}; run a recovery-only session before another consult`
     : 'no unresolved session';
+  const stranded = readiness.stranded
+    ? readiness.stranded.supervisorRunning
+      ? `; a session is in progress (supervisor pid ${readiness.stranded.supervisorPid})`
+      : `; STRANDED PROCESSES from an earlier session: ${readiness.stranded.groups.map((group) => `${group.role} process group ${group.pgid}`).join(', ') || 'no group recorded'}`
+    : '';
   const last = readiness.lastSession
     ? `last ${readiness.lastSession.recovery ? 'recovery session' : 'consult'} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}`
     : 'no consult run yet';
   const blockers = readiness.blockers.length > 0 ? `; not ready: ${readiness.blockers.join(', ')}` : '; ready';
-  return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
+  return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}${stranded}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
 }
 
 function secretRefPresent(

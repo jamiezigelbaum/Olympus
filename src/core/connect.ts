@@ -1,4 +1,5 @@
 import { modelEndpointFetch } from './model-transport.ts';
+import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
 import { Buffer } from 'node:buffer';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -913,6 +914,8 @@ async function validateGeminiApiKey(options: {
       redirect: 'error',
     }, options.timeoutMs);
   } catch (error) {
+    // A zkAPI-daemon refusal is a configuration problem, not an outage.
+    if (isZkapiDaemonEndpointRefusal(error)) throw error;
     if (isAbortError(error)) {
       throw new Error('Gemini API key validation timed out. No credentials were stored; try again when the Gemini API is reachable.');
     }
@@ -942,6 +945,8 @@ async function validatePublicApiKeySource(options: {
         headers: { Authorization: `Token ${options.apiKey}`, Accept: 'application/json' },
       }, options.timeoutMs);
     } catch (error) {
+      // A zkAPI-daemon refusal is a configuration problem, not an outage.
+      if (isZkapiDaemonEndpointRefusal(error)) throw error;
       if (isAbortError(error)) {
         throw new Error('Readwise token validation timed out. No credentials were stored; try again when Readwise is reachable.');
       }
@@ -965,6 +970,8 @@ async function validatePublicApiKeySource(options: {
       redirect: 'error',
     }, options.timeoutMs);
   } catch (error) {
+    // A zkAPI-daemon refusal is a configuration problem, not an outage.
+    if (isZkapiDaemonEndpointRefusal(error)) throw error;
     if (isAbortError(error)) {
       throw new Error('Venice API key validation timed out. No credentials were stored; try again when Venice is reachable.');
     }
@@ -1090,6 +1097,8 @@ async function validateApiKeySource(options: {
         },
       }, options.timeoutMs);
     } catch (error) {
+      // A zkAPI-daemon refusal is a configuration problem, not an outage.
+      if (isZkapiDaemonEndpointRefusal(error)) throw error;
       if (isAbortError(error)) {
         throw new Error('Readwise token validation timed out. No credentials were stored; try again when Readwise is reachable.');
       }
@@ -1120,6 +1129,8 @@ async function validateApiKeySource(options: {
         },
       }, options.timeoutMs);
     } catch (error) {
+      // A zkAPI-daemon refusal is a configuration problem, not an outage.
+      if (isZkapiDaemonEndpointRefusal(error)) throw error;
       if (isAbortError(error)) {
         throw new Error('Notion integration token validation timed out. No credentials were stored; try again when Notion is reachable.');
       }
@@ -1146,6 +1157,8 @@ async function validateApiKeySource(options: {
       redirect: 'error',
     }, options.timeoutMs);
   } catch (error) {
+    // A zkAPI-daemon refusal is a configuration problem, not an outage.
+    if (isZkapiDaemonEndpointRefusal(error)) throw error;
     if (isAbortError(error)) {
       throw new Error('Venice API key validation timed out. No credentials were stored; try again when Venice is reachable.');
     }

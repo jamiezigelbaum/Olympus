@@ -3208,7 +3208,7 @@ function registerZkapiDaemonPorts(ports) {
   for (const port of ports)
     zkapiDaemonPorts.add(port);
 }
-function sovereigntyPolicyPath(env) {
+function sovereigntyPolicyPath(env = process.env) {
   return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim() || join3(env.HOME?.trim() || homedir2(), ".olympus", "sovereignty.json");
 }
 function refreshZkapiPortsFromPolicyFile(env = process.env) {
@@ -3216,46 +3216,57 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   let stamp;
   try {
     const stat2 = statSync2(path);
-    stamp = `${path}:${stat2.mtimeMs}:${stat2.size}`;
-  } catch {
-    policyFile.seen = `${path}:absent`;
-    policyFile.unreadable = false;
+    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      policyFile.seen = `${path}:absent`;
+      policyFile.unreadable = undefined;
+    } else {
+      policyFile.seen = undefined;
+      policyFile.unreadable = path;
+    }
     return;
   }
-  if (policyFile.seen === stamp)
+  if (policyFile.seen === stamp && policyFile.unreadable === undefined)
     return;
   try {
-    const parsed = JSON.parse(readFileSync4(path, "utf8"));
-    const root = parsed.sovereignty && typeof parsed.sovereignty === "object" ? parsed.sovereignty : parsed;
-    const profiles = root.modelProfiles && typeof root.modelProfiles === "object" ? root.modelProfiles : {};
-    for (const profile of Object.values(profiles)) {
-      const record = profile && typeof profile === "object" ? profile : {};
-      if (record.provider !== "zkapi")
-        continue;
-      const port = loopbackPort(typeof record.baseUrl === "string" ? record.baseUrl : undefined);
-      if (port !== undefined)
-        zkapiDaemonPorts.add(port);
-    }
-    policyFile.unreadable = false;
+    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync4(path, "utf8")));
+    for (const port of ports)
+      zkapiDaemonPorts.add(port);
+    policyFile.seen = stamp;
+    policyFile.unreadable = undefined;
   } catch {
-    policyFile.unreadable = true;
+    policyFile.seen = undefined;
+    policyFile.unreadable = path;
   }
-  policyFile.seen = stamp;
+}
+function zkapiPortsInPolicy(parsed) {
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  if (!record)
+    throw new Error("not a policy object");
+  const inner = record.sovereignty && typeof record.sovereignty === "object" ? record.sovereignty : record;
+  const profiles = inner.modelProfiles;
+  if (!profiles || typeof profiles !== "object" || Array.isArray(profiles))
+    throw new Error("policy has no modelProfiles");
+  const ports = [];
+  for (const profile of Object.values(profiles)) {
+    if (!profile || typeof profile !== "object")
+      throw new Error("malformed profile");
+    const entry = profile;
+    if (entry.provider !== "zkapi")
+      continue;
+    const port = loopbackPort(typeof entry.baseUrl === "string" ? entry.baseUrl : undefined);
+    if (port === undefined)
+      throw new Error("zkapi profile without a loopback baseUrl");
+    ports.push(port);
+  }
+  return ports;
+}
+function endpointPort(parsed) {
+  return parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
 }
 function assertNotZkapiDaemonEndpoint(url, label) {
   refreshZkapiPortsFromPolicyFile();
-  const port = loopbackPort(url);
-  if (port === undefined)
-    return;
-  if (policyFile.unreadable) {
-    throw new ZkapiDaemonEndpointRefusal(`${label} is a local endpoint, and the sovereignty policy cannot be read to rule out a zkAPI daemon on port ${port}.`);
-  }
-  if (!zkapiDaemonPorts.has(port))
-    return;
-  throw new ZkapiDaemonEndpointRefusal(`${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
-}
-async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defaultLookupAll) {
-  assertNotZkapiDaemonEndpoint(url, label);
   let parsed;
   try {
     parsed = new URL(url);
@@ -3264,25 +3275,63 @@ async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defa
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
     return;
-  const port = parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+  const port = endpointPort(parsed);
+  const local = loopbackPort(url) !== undefined;
+  if (local && policyFile.unreadable) {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} is a local endpoint, and the sovereignty policy at ${policyFile.unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, policyFile.unreadable);
+  }
   if (!zkapiDaemonPorts.has(port))
+    return;
+  if (local) {
+    throw new ZkapiDaemonEndpointRefusal("daemon_port", `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
+  }
+  if (!isIP(parsed.hostname.replace(/^\[|\]$/g, ""))) {
+    throw new ZkapiDaemonEndpointRefusal("hostname_on_daemon_port", `${label} names a host on port ${port}, a zkAPI daemon port; a host name could point at this machine.`);
+  }
+}
+async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defaultLookupAll) {
+  assertNotZkapiDaemonEndpoint(url, label);
+  const unreadable = policyFile.unreadable;
+  if (!unreadable)
+    return;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
     return;
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   if (isIP(host))
     return;
+  const port = endpointPort(parsed);
+  const refuse = () => {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} may be a local endpoint, and the sovereignty policy at ${unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, unreadable);
+  };
   let addresses;
   try {
-    addresses = await lookupAll(host);
+    addresses = await Promise.race([
+      lookupAll(host),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("lookup timed out")), 2000).unref?.())
+    ]);
   } catch {
-    return;
+    return refuse();
   }
-  const local = addresses.some((address) => loopbackPort(`http://${address.includes(":") ? `[${address}]` : address}:${port}`) !== undefined);
-  if (local) {
-    throw new ZkapiDaemonEndpointRefusal(`${label} resolves to this machine on port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
-  }
+  if (addresses.some((address) => loopbackPort(`http://${address.includes(":") ? `[${address}]` : address}:${port}`) !== undefined))
+    refuse();
 }
 async function defaultLookupAll(hostname) {
   return (await lookup(hostname, { all: true })).map((entry) => entry.address);
+}
+function refusalSuggestion(reason, policyPath) {
+  if (reason === "policy_unreadable") {
+    return `Fix or remove the sovereignty policy file at ${policyPath ?? "its configured path"}; until it can be read, Olympus refuses every local model endpoint.`;
+  }
+  if (reason === "hostname_on_daemon_port") {
+    return "Use a numeric address: a cloud endpoint on its own port, or 127.0.0.1 for a local model, which must then not share a zkAPI daemon port.";
+  }
+  return "This address is the zkAPI daemon, which only carries consults. Point this model at a local model server on another port.";
 }
 function isZkapiDaemonEndpointRefusal(error) {
   return error instanceof ZkapiDaemonEndpointRefusal;
@@ -3438,11 +3487,13 @@ var init_zkapi_consult_settings = __esm(() => {
     "torExecutable"
   ]);
   zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
-  policyFile = { unreadable: false };
+  policyFile = { seen: undefined, unreadable: undefined };
   ZkapiDaemonEndpointRefusal = class ZkapiDaemonEndpointRefusal extends OperationError {
-    constructor(message) {
-      super("config_error", message, "Point this model lane at a local model server on another port.");
+    reason;
+    constructor(reason, message, policyPath) {
+      super("config_error", message, refusalSuggestion(reason, policyPath));
       this.name = "ZkapiDaemonEndpointRefusal";
+      this.reason = reason;
     }
   };
 });
@@ -15620,6 +15671,7 @@ init_connected_handles();
 
 // src/core/connect.ts
 init_model_transport();
+init_zkapi_consult_settings();
 import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { dirname as dirname13, join as join16 } from "node:path";
@@ -15733,7 +15785,7 @@ import { createHash as createHash6, randomUUID as randomUUID7 } from "node:crypt
 import { accessSync as accessSync3, chmodSync as chmodSync2, constants as constants2, existsSync as existsSync10, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync2, readFileSync as readFileSync14, readlinkSync, realpathSync, rmSync as rmSync3, statSync as statSync10, writeFileSync as writeFileSync5 } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir as homedir12, tmpdir as tmpdir2 } from "node:os";
-import { delimiter as delimiter4, dirname as dirname15, join as join19 } from "node:path";
+import { delimiter as delimiter4, dirname as dirname15, join as join19, resolve as resolvePath2 } from "node:path";
 var DAY_MS = 24 * 60 * 60 * 1000;
 var PROBE_MAX_BYTES = 64 * 1024;
 var MAX_QUESTION_BYTES = 8 * 1024;
@@ -15928,19 +15980,18 @@ function zkapiUsageToday(path, now) {
 function zkapiLastSession(path) {
   return readState(path)?.lastSession;
 }
-function zkapiUnresolvedSession(path, scope) {
-  const fences = readState(path)?.fences ?? {};
-  return scope === undefined ? Object.keys(fences).length > 0 : Boolean(fences[scope]);
+function zkapiWalletDirectory(env) {
+  const home = env.HOME?.trim() || homedir12();
+  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join19(home, "Library", "Application Support", "zkapi-clientd") : join19(env.XDG_CONFIG_HOME?.trim() || join19(home, ".config"), "zkapi-clientd"));
+  const absolute2 = resolvePath2(configured);
+  try {
+    return realpathSync(absolute2);
+  } catch {
+    return absolute2;
+  }
 }
 function zkapiFenceScope(input) {
-  let executable = input.daemonExecutable;
-  try {
-    executable = realpathSync(executable);
-  } catch {}
-  const env = input.env;
-  const home = env.HOME?.trim() || homedir12();
-  const configDir = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join19(home, "Library", "Application Support", "zkapi-clientd") : join19(env.XDG_CONFIG_HOME?.trim() || join19(home, ".config"), "zkapi-clientd"));
-  return createHash6("sha256").update(`${executable}\x00${configDir}\x00${input.daemonPort}`).digest("hex").slice(0, 32);
+  return createHash6("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
 }
 function ownerLimits(settings) {
   return {
@@ -16011,6 +16062,26 @@ process.stdin.on('data', (chunk) => { received += chunk; if (!child && !cleaning
 process.stdin.on('end', () => { if (!child) process.exit(71); });
 setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
+function currentBootId() {
+  return processInstanceIdentity(process.pid)?.bootId;
+}
+function supervisorAlive(supervisor) {
+  if (supervisor.pid === process.pid)
+    return false;
+  const boot = currentBootId();
+  if (supervisor.instance?.bootId && boot && supervisor.instance.bootId !== boot)
+    return false;
+  try {
+    process.kill(supervisor.pid, 0);
+  } catch (error) {
+    if (error.code !== "EPERM")
+      return false;
+  }
+  const current = processInstanceIdentity(supervisor.pid);
+  if (!supervisor.instance || !current)
+    return true;
+  return supervisor.instance.mechanism !== current.mechanism || supervisor.instance.startTime === current.startTime;
+}
 function childEnvironment(env) {
   const out = {};
   for (const key of CHILD_ENV_KEYS) {
@@ -16085,15 +16156,31 @@ async function zkapiConsultReadiness(options) {
   let usage = { count: 0, reservedMicroUsd: 0 };
   let lastSession;
   let unresolvedSession = false;
+  const currentScope = zkapiFenceScope({ env });
+  let fences = [];
+  let stranded;
   try {
+    const state = readState(statePath);
     usage = zkapiUsageToday(statePath, now);
     lastSession = zkapiLastSession(statePath);
-    unresolvedSession = daemonExecutable ? zkapiUnresolvedSession(statePath, zkapiFenceScope({ daemonExecutable, env, daemonPort: Number(new URL(options.baseUrl).port || 80) })) : zkapiUnresolvedSession(statePath);
+    fences = Object.entries(state?.fences ?? {}).map(([scope, fence]) => ({ ...fence, thisWallet: scope === currentScope }));
+    unresolvedSession = fences.length > 0;
+    if (state?.running) {
+      stranded = {
+        supervisorPid: state.running.supervisor.pid,
+        supervisorRunning: supervisorAlive(state.running.supervisor),
+        groups: state.running.groups.map((group) => ({ role: group.role, pgid: group.pgid }))
+      };
+    }
   } catch {
     blockers.push("state_unavailable");
   }
-  if (unresolvedSession)
+  if (fences.some((fence) => fence.thisWallet))
     blockers.push("unresolved_session");
+  if (fences.some((fence) => !fence.thisWallet))
+    blockers.push("unresolved_session_other_wallet");
+  if (stranded && !stranded.supervisorRunning)
+    blockers.push("stranded_processes");
   const limit = ownerLimits(settings);
   if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
     blockers.push("daily_cap_reached");
@@ -16116,6 +16203,8 @@ async function zkapiConsultReadiness(options) {
       ...settings.dailySpendCapUsd !== undefined ? { capUsd: settings.dailySpendCapUsd } : {}
     },
     unresolvedSession,
+    fences,
+    ...stranded ? { stranded } : {},
     ...lastSession ? { lastSession } : {},
     routeLabel: lastSession ? zkapiRouteLabel(lastSession) : settings.tor === "off" ? "payment privacy only (network address visible); not yet verified by a consult" : `not yet verified by a consult; on this platform: ${confinement.limit}`,
     blockers
@@ -16454,7 +16543,11 @@ async function zkapiConsultTransportCheck(deps) {
     ok,
     detail: `zkAPI consult transport (experimental, consults only; no consult is sent until the consult lane lands): ${lines.join(" | ")}`,
     ...ok ? {} : {
-      hint: lines.some((line) => line.includes("UNRESOLVED SESSION")) ? "A recovery-only zkAPI session is needed before another consult. Until the consult lane offers it, run the developer harness from the Olympus checkout: bun scripts/zkapi-consult-recover.ts --yes (one content-free request, counted at $6). Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json." : "Fix what the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon."
+      hint: [
+        lines.some((line) => line.includes("UNRESOLVED SESSION")) ? "A recovery-only zkAPI session is needed before another consult, run against the wallet directory that holds the fence. Until the consult lane offers it, run the developer harness from the Olympus checkout: bun scripts/zkapi-consult-recover.ts --yes (one content-free request, counted at $6). A fence whose wallet can no longer run can only be abandoned explicitly with that script's --abandon option; an unsettled lease may then settle under another session's identity." : undefined,
+        lines.some((line) => line.includes("STRANDED PROCESSES")) ? "An earlier session left processes Olympus could not prove its own. Find the listed process groups (ps -o pid,pgid,command -g <pgid>), stop them yourself, or reboot; the next session then sees them gone. Never delete the zkAPI ledger to clear this." : undefined,
+        "Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon."
+      ].filter((part) => part !== undefined).join(" ")
     }
   };
 }
@@ -16472,10 +16565,11 @@ function describeZkapiReadiness(readiness) {
   const requestLimit = readiness.requestsToday.cap !== undefined ? `limit ${readiness.requestsToday.cap}` : "no limit set";
   const spendLimit = readiness.spendToday.capUsd !== undefined ? `limit $${readiness.spendToday.capUsd.toFixed(2)}` : "no limit set";
   const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts up to $6.00)`;
-  const fence = readiness.unresolvedSession ? "UNRESOLVED SESSION: run a recovery-only session before another consult" : "no unresolved session";
+  const fence = readiness.fences.length > 0 ? `UNRESOLVED SESSION: ${readiness.fences.map((entry) => `fence since ${entry.at} for wallet directory ${entry.configDir}${entry.daemonExecutable ? ` (daemon ${entry.daemonExecutable}${entry.daemonPort ? `, port ${entry.daemonPort}` : ""})` : ""}${entry.thisWallet ? ", this wallet" : ", another wallet"}`).join("; ")}; run a recovery-only session before another consult` : "no unresolved session";
+  const stranded = readiness.stranded ? readiness.stranded.supervisorRunning ? `; a session is in progress (supervisor pid ${readiness.stranded.supervisorPid})` : `; STRANDED PROCESSES from an earlier session: ${readiness.stranded.groups.map((group) => `${group.role} process group ${group.pgid}`).join(", ") || "no group recorded"}` : "";
   const last = readiness.lastSession ? `last ${readiness.lastSession.recovery ? "recovery session" : "consult"} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}` : "no consult run yet";
   const blockers = readiness.blockers.length > 0 ? `; not ready: ${readiness.blockers.join(", ")}` : "; ready";
-  return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
+  return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}${stranded}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
 }
 function secretRefPresent(secretRef, env, deps) {
   const ref = normalizeSecretRef(secretRef ?? "");
