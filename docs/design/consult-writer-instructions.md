@@ -17,7 +17,7 @@
 > No licence is stated for this root-level file.
 
 Status: approved writer instructions for the frontier consult lane
-([`frontier-consult-lane.md`](frontier-consult-lane.md), sections Z.2 and A.4).
+(`docs/design/frontier-consult-lane.md` on the design proposal branch, sections Z.2 and A.4).
 They live here, not under `skills/`, until the consult orchestration that
 loads them lands: a `skills/` directory is part of the public skill list the
 calling agent sees, and these instructions are for the local writer model,
@@ -26,7 +26,7 @@ loaded home.
 
 The mechanical subset of these rules is enforced by the outbound gate
 (`src/core/consult-gate.ts`). What the gate guarantees is narrow and exact
-([`frontier-consult-lane.md`](frontier-consult-lane.md), section A.4). It
+(`docs/design/frontier-consult-lane.md`, section A.4). It
 refuses the specified copied-word patterns (runs of four content words shared
 with what you saw, and reordered copies), recognized names and identifiers from
 what you saw, figures from it that meet the documented thresholds (see
