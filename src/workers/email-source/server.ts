@@ -1114,6 +1114,20 @@ function createWorkerBuiltInAnalystModel(env: Record<string, string | undefined>
 }
 
 /**
+ * Worker shutdown stops the built-in model's server process (SIGTERM, then
+ * SIGKILL; bounded at about 10 s), so a clean shutdown never leaves it running
+ * or holding the worker open. A failure is swallowed: shutdown goes on.
+ */
+export function stopBuiltInModelOnShutdown(model: Pick<BuiltInAnalystModel, 'stop'> | undefined): void {
+  if (!model) return;
+  try {
+    void model.stop().catch(() => undefined);
+  } catch {
+    // Shutdown continues whatever the model does.
+  }
+}
+
+/**
  * The worker's one built-in private model, with `available()`: downloaded,
  * verified and prepared in this process, so a caller (the sniffer, the
  * private answer panel) never asks it while a first-time download runs. A
@@ -4618,6 +4632,7 @@ export async function main(): Promise<void> {
     tierSniffer?.stop();
     installedTierClassification.close();
     void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);
+    stopBuiltInModelOnShutdown(workerBuiltInModel?.model);
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     worker.close();
     sourceScheduler?.stop();

@@ -99332,59 +99332,131 @@ function llamaServerArguments(launch, port, tokenFile) {
 function createLlamaServerHandle(launch, options = {}) {
   const spawnImpl = options.spawnImpl ?? spawn4;
   const fetchImpl = options.fetchImpl ?? fetch;
-  let child;
+  const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS2;
+  const killWaitMs = options.killWaitMs ?? DEFAULT_KILL_WAIT_MS;
+  let current;
+  const retiring = new Set;
   let endpoint2;
   let starting;
+  let generation = 0;
   let idleTimer;
-  let tokenDir;
   let exitHookInstalled = false;
-  const cleanupTokenDir = () => {
-    if (tokenDir)
-      rmSync12(tokenDir, { recursive: true, force: true });
-    tokenDir = undefined;
-  };
-  const killChild = () => {
-    const current = child;
-    child = undefined;
-    endpoint2 = undefined;
-    if (current && current.exitCode === null && current.signalCode === null) {
-      current.kill("SIGTERM");
-    }
-    cleanupTokenDir();
-  };
-  const armIdle = () => {
+  const clearIdle = () => {
     if (idleTimer)
       clearTimeout(idleTimer);
     idleTimer = undefined;
-    if (launch.idleShutdownSeconds <= 0 || !child)
+  };
+  const retireCurrent = () => {
+    const server = current;
+    current = undefined;
+    endpoint2 = undefined;
+    if (!server)
       return;
-    idleTimer = setTimeout(killChild, launch.idleShutdownSeconds * 1000);
+    if (!server.exited) {
+      retiring.add(server);
+      terminate(server).catch(() => {
+        return;
+      });
+    }
+    server.cleanupTokenDir();
+  };
+  const terminate = (server) => {
+    if (server.exited)
+      return Promise.resolve();
+    server.terminating ??= (async () => {
+      if (!server.killed) {
+        server.signal("SIGTERM");
+        if (await server.waitExit(stopGraceMs))
+          return;
+      }
+      server.killed = true;
+      server.signal("SIGKILL");
+      if (await server.waitExit(killWaitMs))
+        return;
+      throw new LlamaServerStopError(`The built-in model server (pid ${server.pid ?? "unknown"}) has not exited ${Math.round((stopGraceMs + killWaitMs) / 1000)}s after it was told to stop.`);
+    })().catch((error2) => {
+      server.terminating = undefined;
+      throw error2;
+    });
+    return server.terminating;
+  };
+  const awaitRetired = async () => {
+    const results = await Promise.allSettled([...retiring].map((server) => terminate(server)));
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed)
+      throw failed.reason;
+  };
+  const stopAll = async () => {
+    clearIdle();
+    generation += 1;
+    const superseded = starting;
+    starting = undefined;
+    superseded?.controller.abort(new LlamaServerStartError(STOPPED_WHILE_STARTING));
+    retireCurrent();
+    await awaitRetired();
+  };
+  const armIdle = () => {
+    clearIdle();
+    if (launch.idleShutdownSeconds <= 0 || !current)
+      return;
+    idleTimer = setTimeout(() => {
+      idleTimer = undefined;
+      stopAll().catch(() => {
+        return;
+      });
+    }, launch.idleShutdownSeconds * 1000);
     idleTimer.unref?.();
   };
-  const start = async (signal) => {
+  const start = async (startGeneration, signal) => {
+    const superseded = () => {
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new LlamaServerStartError("The request was cancelled.");
+      }
+      if (generation !== startGeneration)
+        throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
+    };
+    superseded();
+    const retired = awaitRetired();
+    retired.catch(() => {
+      return;
+    });
+    try {
+      await abortable(retired, signal);
+    } catch (error2) {
+      superseded();
+      throw new LlamaServerStillExitingError(`A previous built-in model server has not exited yet, so a new one was not started. ${error2 instanceof Error ? error2.message : ""}`.trim());
+    }
+    superseded();
     const port = await freeLoopbackPort();
+    superseded();
     const token = randomBytes15(24).toString("base64url");
     const alias = `olympus-${randomBytes15(12).toString("hex")}`;
-    tokenDir = mkdtempSync2(join67(tmpdir7(), "olympus-built-in-model-"));
+    const tokenDir = mkdtempSync2(join67(tmpdir7(), "olympus-built-in-model-"));
     const tokenFile = join67(tokenDir, "token");
-    writeFileSync14(tokenFile, `${token}
+    let spawnedProcess;
+    try {
+      writeFileSync14(tokenFile, `${token}
 `, { mode: 384 });
-    const spawned = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
-      stdio: ["ignore", "ignore", "pipe"],
-      env: llamaServerEnvironment(options.env ?? process.env, alias),
-      detached: false
-    });
-    child = spawned;
-    let stderrTail = "";
-    spawned.stderr?.on("data", (chunk) => {
-      stderrTail = `${stderrTail}${chunk.toString()}`.slice(-2000);
-    });
-    spawned.on("exit", () => {
-      if (child === spawned) {
-        child = undefined;
+      spawnedProcess = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
+        stdio: ["ignore", "ignore", "pipe"],
+        env: llamaServerEnvironment(options.env ?? process.env, alias),
+        detached: false
+      });
+    } catch (error2) {
+      removeTokenDir(tokenDir);
+      throw error2;
+    }
+    const spawned = trackServerProcess(spawnedProcess, tokenDir, (server) => {
+      retiring.delete(server);
+      if (current === server) {
+        current = undefined;
         endpoint2 = undefined;
-        cleanupTokenDir();
       }
+    });
+    current = spawned;
+    let stderrTail = "";
+    spawnedProcess.stderr?.on("data", (chunk) => {
+      stderrTail = `${stderrTail}${chunk.toString()}`.slice(-2000);
     });
     if (spawned.pid !== undefined) {
       try {
@@ -99393,58 +99465,210 @@ function createLlamaServerHandle(launch, options = {}) {
     }
     if (!exitHookInstalled) {
       exitHookInstalled = true;
-      process.once("exit", killChild);
+      process.once("exit", () => {
+        for (const server of [current, ...retiring]) {
+          server?.signal("SIGKILL");
+          server?.cleanupTokenDir();
+        }
+      });
     }
     const baseUrl = `http://127.0.0.1:${port}`;
     const deadline = Date.now() + launch.startupTimeoutMs;
+    const fail = (error2) => {
+      if (current === spawned)
+        retireCurrent();
+      throw error2;
+    };
     for (;; ) {
       if (signal?.aborted) {
-        killChild();
-        throw signal.reason instanceof Error ? signal.reason : new LlamaServerStartError("The request was cancelled.");
+        fail(signal.reason instanceof Error ? signal.reason : new LlamaServerStartError("The request was cancelled."));
       }
-      if (child !== spawned) {
+      if (current !== spawned || spawned.exited) {
+        if (current === spawned)
+          current = undefined;
+        if (generation !== startGeneration)
+          throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
         throw new LlamaServerStartError(`The built-in model server exited while starting.${stderrTail ? ` ${lastLine(stderrTail)}` : ""}`);
       }
       if (await healthy(fetchImpl, baseUrl)) {
+        if (current !== spawned)
+          continue;
         if (await servesAlias(fetchImpl, baseUrl, token, alias))
           break;
-        killChild();
-        throw new LlamaServerStartError("The built-in model server's port was taken by another process; it will start again on a new port.");
+        fail(new LlamaServerStartError("The built-in model server's port was taken by another process; it will start again on a new port."));
       }
       if (Date.now() > deadline) {
-        killChild();
-        throw new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`);
+        fail(new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`));
       }
       await new Promise((resolve10) => setTimeout(resolve10, HEALTH_POLL_MS));
+    }
+    if (current !== spawned || spawned.exited) {
+      throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
+    }
+    if (signal?.aborted) {
+      fail(signal.reason instanceof Error ? signal.reason : new LlamaServerStartError("The request was cancelled."));
     }
     endpoint2 = { baseUrl, token };
     return endpoint2;
   };
   return {
     async ensureRunning(signal) {
-      if (idleTimer)
-        clearTimeout(idleTimer);
-      idleTimer = undefined;
-      if (endpoint2 && child)
+      if (signal?.aborted)
+        throw callerCancelled(signal.reason);
+      clearIdle();
+      if (endpoint2 && current && !current.exited)
         return endpoint2;
-      starting ??= start(signal).finally(() => {
-        starting = undefined;
-      });
-      return starting;
+      const callerGeneration = generation;
+      while (starting?.controller.signal.aborted) {
+        const cancelled = starting;
+        try {
+          await abortable(cancelled.promise.then(() => {
+            return;
+          }, () => {
+            return;
+          }), signal);
+        } catch {
+          throw callerCancelled(signal?.reason);
+        }
+        if (generation !== callerGeneration)
+          throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
+        if (starting === cancelled)
+          starting = undefined;
+        if (endpoint2 && current && !current.exited)
+          return endpoint2;
+      }
+      if (!starting) {
+        const controller = new AbortController;
+        const shared2 = {
+          controller,
+          waiters: 0,
+          promise: start(generation, controller.signal).finally(() => {
+            if (starting === shared2)
+              starting = undefined;
+          })
+        };
+        shared2.promise.catch(() => {
+          return;
+        });
+        starting = shared2;
+      }
+      const shared = starting;
+      if (!signal) {
+        shared.waiters = Number.POSITIVE_INFINITY;
+        return shared.promise;
+      }
+      shared.waiters += 1;
+      try {
+        return await abortable(shared.promise, signal);
+      } catch (error2) {
+        if (signal.aborted) {
+          shared.waiters -= 1;
+          if (shared.waiters <= 0)
+            shared.controller.abort(signal.reason);
+          throw callerCancelled(signal.reason);
+        }
+        throw error2;
+      }
     },
     touch() {
       armIdle();
     },
-    async stop() {
-      if (idleTimer)
-        clearTimeout(idleTimer);
-      idleTimer = undefined;
-      killChild();
+    stop() {
+      return stopAll();
     },
     get pid() {
-      return child?.pid;
+      return current?.pid;
     }
   };
+}
+function callerCancelled(reason) {
+  if (reason instanceof Error && reason.name === "AbortError")
+    return reason;
+  const error2 = new Error(reason instanceof Error ? reason.message : "The request was cancelled.", { cause: reason });
+  error2.name = "AbortError";
+  return error2;
+}
+function removeTokenDir(tokenDir) {
+  try {
+    rmSync12(tokenDir, { recursive: true, force: true });
+    return true;
+  } catch {
+    console.warn("Olympus built-in model: could not remove a model server token directory.");
+    return false;
+  }
+}
+function trackServerProcess(child, tokenDir, onExit) {
+  let exited = child.exitCode !== null || child.signalCode !== null;
+  let tokenDirPresent = true;
+  const exitWaiters = new Set;
+  const server = {
+    pid: child.pid,
+    get exited() {
+      return exited;
+    },
+    killed: false,
+    terminating: undefined,
+    waitExit(timeoutMs) {
+      if (exited)
+        return Promise.resolve(true);
+      return new Promise((resolve10) => {
+        const settle = (value) => {
+          clearTimeout(timer);
+          exitWaiters.delete(onExited);
+          resolve10(value);
+        };
+        const onExited = () => settle(true);
+        const timer = setTimeout(() => settle(false), timeoutMs);
+        exitWaiters.add(onExited);
+      });
+    },
+    signal(signal) {
+      if (exited)
+        return;
+      try {
+        child.kill(signal);
+      } catch {}
+    },
+    cleanupTokenDir() {
+      if (!tokenDirPresent)
+        return;
+      tokenDirPresent = !removeTokenDir(tokenDir);
+    }
+  };
+  const finish = () => {
+    if (exited)
+      return;
+    exited = true;
+    for (const waiter of [...exitWaiters])
+      waiter();
+    onExit(server);
+    server.cleanupTokenDir();
+  };
+  child.once("exit", finish);
+  child.once("error", () => {
+    if (child.pid === undefined)
+      finish();
+  });
+  if (exited)
+    server.cleanupTokenDir();
+  return server;
+}
+function abortable(promise2, signal) {
+  if (!signal)
+    return promise2;
+  if (signal.aborted)
+    return Promise.reject(signal.reason);
+  return new Promise((resolve10, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise2.then((value) => {
+      signal.removeEventListener("abort", onAbort);
+      resolve10(value);
+    }, (error2) => {
+      signal.removeEventListener("abort", onAbort);
+      reject(error2);
+    });
+  });
 }
 async function healthy(fetchImpl, baseUrl) {
   try {
@@ -99492,13 +99716,25 @@ function lastLine(text) {
 `);
   return (lines[lines.length - 1] ?? "").slice(0, 300);
 }
-var LlamaServerStartError, HEALTH_POLL_MS = 250, LLAMA_SERVER_ENV_ALLOWLIST;
+var LlamaServerStartError, LlamaServerStillExitingError, LlamaServerStopError, HEALTH_POLL_MS = 250, STOPPED_WHILE_STARTING = "The built-in model server was stopped while starting.", DEFAULT_STOP_GRACE_MS2 = 5000, DEFAULT_KILL_WAIT_MS = 5000, LLAMA_SERVER_ENV_ALLOWLIST;
 var init_server4 = __esm(() => {
   init_model_transport();
   LlamaServerStartError = class LlamaServerStartError extends Error {
     constructor(message) {
       super(message);
       this.name = "LlamaServerStartError";
+    }
+  };
+  LlamaServerStillExitingError = class LlamaServerStillExitingError extends LlamaServerStartError {
+    constructor(message) {
+      super(message);
+      this.name = "LlamaServerStillExitingError";
+    }
+  };
+  LlamaServerStopError = class LlamaServerStopError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "LlamaServerStopError";
     }
   };
   LLAMA_SERVER_ENV_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"];
@@ -99588,7 +99824,12 @@ function createBuiltInAnalystModel(options = {}) {
     spec,
     async prepare() {
       try {
+        const cached2 = installed !== undefined;
         await ensureInstalled();
+        const status = readBuiltInReasoningStatus(spec, env);
+        if (cached2 && status.state === "failed" && status.failure?.reason === "runtime_load_failed") {
+          reportBuiltInReasoningState({ model: spec, env }, "ready");
+        }
       } catch {}
     },
     status() {
@@ -99623,6 +99864,10 @@ function createBuiltInAnalystModel(options = {}) {
       } catch (error2) {
         if (request.signal?.aborted)
           throw error2;
+        if (error2 instanceof LlamaServerStillExitingError) {
+          reportBuiltInReasoningState({ model: spec, env }, "ready");
+          throw unavailable(error2);
+        }
         reportBuiltInReasoningState({ model: spec, env }, "failed", {
           reason: "runtime_load_failed",
           message: error2 instanceof Error ? error2.message : String(error2)
@@ -114950,6 +115195,7 @@ var exports_server2 = {};
 __export(exports_server2, {
   validateSecureVeniceAnalystProfileAtConstruction: () => validateSecureVeniceAnalystProfileAtConstruction,
   trustedAnalystAssistTimeoutMs: () => trustedAnalystAssistTimeoutMs,
+  stopBuiltInModelOnShutdown: () => stopBuiltInModelOnShutdown,
   startApprovedSourceRun: () => startApprovedSourceRun,
   sovereigntyAnalystRoutePlan: () => sovereigntyAnalystRoutePlan,
   sourceIndexTelegramAccountFromEnv: () => sourceIndexTelegramAccountFromEnv,
@@ -115478,6 +115724,15 @@ function createWorkerBuiltInAnalystModel(env) {
   if (!resolveBuiltInReasoningModel(env))
     return;
   return createBuiltInAnalystModel({ env });
+}
+function stopBuiltInModelOnShutdown(model) {
+  if (!model)
+    return;
+  try {
+    model.stop().catch(() => {
+      return;
+    });
+  } catch {}
 }
 function createWorkerSharedBuiltInModel(env) {
   const base = createWorkerBuiltInAnalystModel(env);
@@ -117784,6 +118039,7 @@ async function main() {
     Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => {
       return;
     });
+    stopBuiltInModelOnShutdown(workerBuiltInModel?.model);
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     worker.close();
     sourceScheduler?.stop();
