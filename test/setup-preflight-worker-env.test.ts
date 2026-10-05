@@ -20,6 +20,9 @@ import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import { writeManagedWorkerEnvSecret } from '../src/core/worker-service.ts';
 
 const EMPTY_STORE = { getSync: () => undefined, get: async () => undefined };
+// Never the developer's own connected-handle registry: a real connected source
+// with no scheduler entry turned source_scheduler_status red on a dev machine.
+const NO_HANDLES = () => ({ version: 1 as const, handles: [] });
 
 describe('preflight over the managed worker environment', () => {
   test('a key stored in worker.env is present; an empty worker.env still asks for it', async () => {
@@ -120,6 +123,7 @@ describe('preflight over the managed worker environment', () => {
         env: { GEMINI_API_KEY: 'shell-key' },
         secretStore: EMPTY_STORE,
         workerEnvPath: envPath,
+        readHandleRegistry: NO_HANDLES,
       });
       expect(result.checks.find((check) => check.name === 'sovereignty_prerequisites')?.ok).toBe(false);
     });
@@ -185,6 +189,7 @@ describe('preflight over the managed worker environment', () => {
           env: {},
           secretStore: EMPTY_STORE,
           workerEnvPath: envPath,
+          readHandleRegistry: NO_HANDLES,
           handleRegistry: registry,
           fetchImpl,
         });
@@ -243,6 +248,7 @@ describe('preflight over the managed worker environment', () => {
           env: {},
           secretStore: EMPTY_STORE,
           workerEnvPath: envPath,
+          readHandleRegistry: NO_HANDLES,
           fetchImpl,
         });
         return result.checks.find((check) => check.name === 'source_scheduler_status')!;
@@ -278,6 +284,7 @@ describe('preflight over the managed worker environment', () => {
         env: {},
         secretStore: EMPTY_STORE,
         workerEnvPath: envPath,
+        readHandleRegistry: NO_HANDLES,
       });
       const beforeCheck = before.checks.find((check) => check.name === 'sovereignty_prerequisites')!;
       expect(beforeCheck.ok).toBe(false);
@@ -295,6 +302,7 @@ describe('preflight over the managed worker environment', () => {
         env: {},
         secretStore: EMPTY_STORE,
         workerEnvPath: envPath,
+        readHandleRegistry: NO_HANDLES,
       });
       expect(after.checks.find((check) => check.name === 'sovereignty_prerequisites')?.ok).toBe(true);
     });

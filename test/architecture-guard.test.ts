@@ -412,6 +412,39 @@ function moduleSpecifiers(activePath: string, deletedPath: string): string[] {
   return [specifier, specifier.slice(0, -3)];
 }
 
+/**
+ * Every string a file could satisfy `content.includes(`${q}${x}${q}`)` with,
+ * for an `x` holding no quote character (' " `): the text between each quote
+ * character and the next quote character of any kind, when both are the same
+ * character. Built once per file so the literal half of the Slice 2 guard is a
+ * set lookup per deleted path instead of three full-content scans; candidates
+ * that do contain a quote character fall back to the original scan, so the
+ * answer is identical either way.
+ */
+function quoteDelimitedSegments(content: string): Set<string> {
+  const segments = new Set<string>();
+  let open = -1;
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index];
+    if (char !== "'" && char !== '"' && char !== '`') continue;
+    if (open >= 0 && content[open] === char) segments.add(content.slice(open + 1, index));
+    open = index;
+  }
+  return segments;
+}
+
+const QUOTE_CHARACTER = /['"`]/;
+
+function quotedOccurrence(content: string, segments: Set<string>, candidate: string): boolean {
+  if (QUOTE_CHARACTER.test(candidate)) {
+    return content.includes(`'${candidate}'`) || content.includes(`"${candidate}"`) || content.includes(`\`${candidate}\``);
+  }
+  return segments.has(candidate);
+}
+
+/** Per-test budget for the tests that read the whole tree; bun's 5 s default is too tight on a loaded machine. */
+const TREE_WALK_TIMEOUT_MS = 60_000;
+
 function functionNameByLine(content: string): string[] {
   const names: string[] = [];
   let current = '<top-level>';
@@ -551,36 +584,49 @@ describe('architecture guard: capability, not per-source/per-question code', () 
     // path; the redacted half runs the same check inverted — pull every quoted
     // literal out of the file, resolve relative specifiers, and hash.
     const offenders: string[] = [];
+    const literalVerdicts = new Map<string, boolean>();
+    const relativeVerdictsByDirectory = new Map<string, Map<string, boolean>>();
+    const relativeLiteralVerdicts = (directory: string): Map<string, boolean> => {
+      let verdicts = relativeVerdictsByDirectory.get(directory);
+      if (!verdicts) relativeVerdictsByDirectory.set(directory, verdicts = new Map());
+      return verdicts;
+    };
     for (const activePath of [...activePaths].sort()) {
       if (SLICE_2_RECEIPT_ONLY_LEDGERS.has(activePath)) continue;
       const content = read(activePath);
+      const segments = quoteDelimitedSegments(content);
       for (const deletedPath of deletedPaths) {
         const candidates = [
           deletedPath,
           ...moduleSpecifiers(activePath, deletedPath),
         ];
-        if (candidates.some((candidate) => (
-          content.includes(`'${candidate}'`)
-          || content.includes(`"${candidate}"`)
-          || content.includes(`\`${candidate}\``)
-        ))) {
+        if (candidates.some((candidate) => quotedOccurrence(content, segments, candidate))) {
           offenders.push(`${activePath} -> ${deletedPath}`);
         }
       }
       for (const literal of quotedLiterals(content)) {
-        const byPath = redactedPathOffenders(referenceCandidates(activePath, literal), redactedDigests).length > 0;
-        // Also the bare filename, which catches join()/interpolated paths whose
-        // only literal fragment is the name. See literalBasename() for the
-        // residual this still does not cover.
-        const basename = literalBasename(literal);
-        const byBasename = basename !== undefined && redactedBasenames.has(pathDigest(basename));
-        if (byPath || byBasename) {
+        // The verdict depends on the importing directory only for a relative
+        // specifier, so it is computed once per (directory, literal).
+        const relativeSpecifier = literal.startsWith('./') || literal.startsWith('../');
+        const verdicts = relativeSpecifier ? relativeLiteralVerdicts(dirname(activePath)) : literalVerdicts;
+        let hit = verdicts.get(literal);
+        if (hit === undefined) {
+          const byPath = redactedPathOffenders(referenceCandidates(activePath, literal), redactedDigests).length > 0;
+          // Also the bare filename, which catches join()/interpolated paths whose
+          // only literal fragment is the name. See literalBasename() for the
+          // residual this still does not cover.
+          const basename = literalBasename(literal);
+          const byBasename = basename !== undefined && redactedBasenames.has(pathDigest(basename));
+          hit = byPath || byBasename;
+          verdicts.set(literal, hit);
+        }
+        if (hit) {
           offenders.push(`${activePath} -> <redacted retired path>`);
         }
       }
     }
     expect(offenders).toEqual([]);
-  });
+  }, TREE_WALK_TIMEOUT_MS);
 
   test('the retired-path sweep covers every tracked repository path', () => {
     // The expectation is the TRACKED tree — exactly what the flip publishes —
@@ -603,7 +649,7 @@ describe('architecture guard: capability, not per-source/per-question code', () 
     // skip rule cannot quietly carve a hole in it.
     const swept = new Set(repoContentFiles());
     expect(tracked.filter((rel) => !swept.has(rel))).toEqual([]);
-  });
+  }, TREE_WALK_TIMEOUT_MS);
 
   test('the redacted half of the Slice 2 guard fires on a retired name it never spells', () => {
     // The nineteen redacted names cannot be written here either, so the

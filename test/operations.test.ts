@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -6,10 +6,86 @@ import { defaultConfig } from '../src/core/config.ts';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
+import { buildEnvBridgeSovereigntyConfig } from '../src/core/sovereignty.ts';
 import { operations, operationDescription, operationToolSchema } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+
+/**
+ * The doctor operation reads the environment it runs in (`process.env`): the
+ * sovereignty policy, config, and worker environment under `$HOME`. Run it
+ * against an empty temporary HOME, with the path overrides cleared, so the
+ * developer's own `~/.olympus` never decides the result; everything is
+ * restored afterwards.
+ */
+const HOME_SCOPED_ENV = [
+  'HOME',
+  'OLYMPUS_CONFIG',
+  'OLYMPUS_SOVEREIGNTY_CONFIG',
+  'OLYMPUS_SOVEREIGNTY_CONFIG_PATH',
+  'OLYMPUS_ENGINE_HOST',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+  'XDG_STATE_HOME',
+] as const;
+
+async function withIsolatedHome<T>(run: (home: string) => Promise<T>): Promise<T> {
+  const home = mkdtempSync(join(tmpdir(), 'olympus-operations-home-'));
+  const saved = HOME_SCOPED_ENV.map((name) => [name, process.env[name]] as const);
+  for (const name of HOME_SCOPED_ENV) delete process.env[name];
+  process.env.HOME = home;
+  try {
+    return await run(home);
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/** A HOME whose `~/.olympus/sovereignty.json` names a provider this build rejects. */
+function decoyOlympusHome(): string {
+  const home = mkdtempSync(join(tmpdir(), 'olympus-operations-decoy-home-'));
+  mkdirSync(join(home, '.olympus'), { recursive: true });
+  const policy = buildEnvBridgeSovereigntyConfig({ OLYMPUS_SOURCE_INDEX_VENICE_API_KEY: 'decoy-key' });
+  for (const profile of Object.values(policy.modelProfiles)) (profile as { provider: string }).provider = 'decoy-unknown-provider';
+  writeFileSync(join(home, '.olympus', 'sovereignty.json'), JSON.stringify(policy));
+  return home;
+}
+
+async function runDoctorOperation(): Promise<{ result: { ok: boolean; checks: Array<{ name: string; ok: boolean }> }; profiles: unknown[] }> {
+  const doctor = operations.find((operation) => operation.name === 'olympus_doctor');
+  const profiles: unknown[] = [];
+  const config = defaultConfig();
+  config.sourceIndex.enabled = false;
+  // Both worker-facing lanes deliberately off, so this asserts the walk's
+  // shape without reaching a worker over the network. The email lane is on by
+  // default now: an install whose worker is not running is a red doctor, and
+  // that behaviour is covered in doctor.test.ts.
+  config.email.enabled = false;
+  const ctx: OperationContext = {
+    config,
+    delphi: {
+      listModelsForProfile: async (profile: unknown) => {
+        profiles.push(profile);
+        return [{ id: 'model-1' }];
+      },
+      complete: async (options: { profile: 'default_chat' }) => ({
+        text: 'OLYMPUS_DOCTOR_OK',
+        profile: options.profile,
+        model: 'model-1',
+      }),
+    } as unknown as OperationContext['delphi'],
+    email: {} as OperationContext['email'],
+    // Never this machine's launchd or OpenClaw: a running standalone engine.
+    doctorHostProbe: () => ({ engine: { installed: true, state: 'running' }, legacyWorkerUnit: false }),
+  };
+  const result = await doctor!.handler(ctx, {}) as { ok: boolean; checks: Array<{ name: string; ok: boolean }> };
+  return { result, profiles };
+}
 
 describe('operations', () => {
   test('defines the current operation surface', () => {
@@ -90,33 +166,7 @@ describe('operations', () => {
 
   test('doctor runs the read-only health walk from ctx config and delphi', async () => {
     const doctor = operations.find((operation) => operation.name === 'olympus_doctor');
-    const profiles: unknown[] = [];
-    const config = defaultConfig();
-    config.sourceIndex.enabled = false;
-    // Both worker-facing lanes deliberately off, so this asserts the walk's
-    // shape without reaching a worker over the network. The email lane is on by
-    // default now: an install whose worker is not running is a red doctor, and
-    // that behaviour is covered in doctor.test.ts.
-    config.email.enabled = false;
-    const ctx: OperationContext = {
-      config,
-      delphi: {
-        listModelsForProfile: async (profile: unknown) => {
-          profiles.push(profile);
-          return [{ id: 'model-1' }];
-        },
-        complete: async (options: { profile: 'default_chat' }) => ({
-          text: 'OLYMPUS_DOCTOR_OK',
-          profile: options.profile,
-          model: 'model-1',
-        }),
-      } as unknown as OperationContext['delphi'],
-      email: {} as OperationContext['email'],
-      // Never this machine's launchd or OpenClaw: a running standalone engine.
-      doctorHostProbe: () => ({ engine: { installed: true, state: 'running' }, legacyWorkerUnit: false }),
-    };
-
-    const result = await doctor!.handler(ctx, {}) as { ok: boolean; checks: Array<{ name: string; ok: boolean }> };
+    const { result, profiles } = await withIsolatedHome(() => runDoctorOperation());
 
     expect(result.ok).toBe(true);
     // No sovereignty posture in defaultConfig() → the Argus probe is skipped
@@ -144,6 +194,26 @@ describe('operations', () => {
       type: 'object',
       required: [],
     });
+  });
+
+  test('the doctor operation test stays hermetic when the running user has an unusable ~/.olympus', async () => {
+    const decoy = decoyOlympusHome();
+    const savedHome = process.env.HOME;
+    process.env.HOME = decoy;
+    try {
+      // The decoy is real: the doctor run straight against that HOME is red.
+      expect((await runDoctorOperation()).result.ok).toBe(false);
+      // Isolated, it is the green walk the test above asserts.
+      const { result, profiles } = await withIsolatedHome(() => runDoctorOperation());
+      expect(result.ok).toBe(true);
+      expect(profiles).toEqual([]);
+      // ...and the running user's HOME is back afterwards.
+      expect(process.env.HOME).toBe(decoy);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      rmSync(decoy, { recursive: true, force: true });
+    }
   });
 
   test('source_answer delegates Castor-safe source parameters to private source lane', async () => {

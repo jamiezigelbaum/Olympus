@@ -23,6 +23,7 @@ import { chmodSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { join } from 'node:path';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { buildSourceSensitivity, type SourceTrustDomain } from '../src/core/source-index/types.ts';
+import { buildEnvBridgeSovereigntyConfig } from '../src/core/sovereignty.ts';
 import { closeSqliteStore } from '../src/core/sqlite-store.ts';
 import { TierLedger, type TierLedgerIdentity } from '../src/workers/classification/tier-ledger.ts';
 import type { TierDecision } from '../src/workers/classification/tier-classifier.ts';
@@ -1242,8 +1243,15 @@ describe('tier migration reads the owner inputs through the P2 loaders, fail clo
   test('an invalid rules file refuses to plan; valid rules reach the plan; an unapproved sniffer refuses', async () => {
     const context = await rehearsal();
     const rulesPath = join(context.dir, 'tier-rules.json');
+    const baseEnv = { HOME: context.dir, XDG_DATA_HOME: context.dir, OLYMPUS_TIER_RULES_PATH: rulesPath };
+    // The sovereignty loader's default path is the process owner's
+    // ~/.olympus/sovereignty.json (os.homedir(), not env.HOME), so the sniffer
+    // lane would come from the developer's own policy. Pin it to the policy the
+    // env bridge builds from this same environment: same lane, no real HOME.
+    const sovereigntyPath = join(context.dir, 'sovereignty.json');
+    writeFileSync(sovereigntyPath, JSON.stringify(buildEnvBridgeSovereigntyConfig(baseEnv)), { mode: 0o600 });
     const cli = (env: Record<string, string | undefined>) => ({
-      env: { HOME: context.dir, XDG_DATA_HOME: context.dir, OLYMPUS_TIER_RULES_PATH: rulesPath, ...env },
+      env: { ...baseEnv, OLYMPUS_SOVEREIGNTY_CONFIG: sovereigntyPath, ...env },
       laneSpecs: context.specs,
       domainIdentity: context.domainIdentity,
       paths: context.paths,

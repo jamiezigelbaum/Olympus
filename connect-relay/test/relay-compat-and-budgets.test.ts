@@ -13,6 +13,7 @@
  */
 import { afterAll, afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import type { ServerWebSocket } from 'bun';
+import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -34,6 +35,7 @@ import {
   solveRegistrationPow,
   spkiOf,
   verifyInstallMessage,
+  verifyRegistrationPow,
 } from '../shared/protocol.ts';
 import { mintCredential } from '../shared/tokens.ts';
 import type { RelayLimits } from '../server/limits.ts';
@@ -466,6 +468,32 @@ describe('one challenge per handshake; its proof of work stops with the handshak
       .rejects.toBeInstanceOf(PowCancelledError);
   });
 
+  /**
+   * A fixed install key and a challenge nonce whose first 22-bit proof of work
+   * for it (at PUBLIC_HOST) is counter 14,473,083: tens of seconds of hashing.
+   * The solver walks counters from 0, so no handshake in these tests can
+   * finish the solve before it is cancelled. With a random nonce and key a
+   * solve finishes within the 100-300 ms windows below a few percent of the
+   * time, and the client then (correctly) sends its answer -- the old flake.
+   */
+  const FAR_POW_SEED = '6f6c796d7075732d72656c61792d746573742d696e7374616c6c2d6b65792d31';
+  const FAR_POW_NONCE = 'far-6-2';
+  const FAR_POW_FIRST_SOLUTION = 14_473_083;
+  function farPowIdentity(): InstallIdentity {
+    const privateKey = createPrivateKey({ key: Buffer.from(`302e020100300506032b657004220420${FAR_POW_SEED}`, 'hex'), format: 'der', type: 'pkcs8' });
+    const publicKey = createPublicKey(privateKey);
+    const spki = spkiOf(publicKey);
+    return { installId: installIdForPublicKey(spki), privateKey, publicKey, publicKeySpki: base64url(spki) };
+  }
+
+  test('the fixed far proof of work still matches the protocol digest', () => {
+    // Fails (deterministically) if the digest or the install id derivation
+    // changes, so the nonce above never silently stops being far.
+    const identity = farPowIdentity();
+    expect(identity.installId).toBe('ih7bcv6s3t72w5r5fdtl7umbwbpwcdra');
+    expect(verifyRegistrationPow(22, FAR_POW_NONCE, identity.installId, PUBLIC_HOST, String(FAR_POW_FIRST_SOLUTION))).toBe(true);
+  });
+
   /** A hostile relay: sends `challenges` max-difficulty challenges and never answers. */
   async function hostileRelay(challenges: number) {
     const closes: number[] = [];
@@ -476,7 +504,7 @@ describe('one challenge per handshake; its proof of work stops with the handshak
       fetch: (request, srv) => (srv.upgrade(request, { data: undefined }) ? undefined : new Response('no', { status: 400 })),
       websocket: {
         open(ws) {
-          for (let i = 0; i < challenges; i += 1) ws.send(JSON.stringify({ type: 'challenge', v: PROTOCOL_VERSION, nonce: newNonce(), pow: 22, auth: AUTH_BOUND }));
+          for (let i = 0; i < challenges; i += 1) ws.send(JSON.stringify({ type: 'challenge', v: PROTOCOL_VERSION, nonce: FAR_POW_NONCE, pow: 22, auth: AUTH_BOUND }));
         },
         message(_ws, data) {
           answers.push(data);
@@ -512,7 +540,7 @@ describe('one challenge per handshake; its proof of work stops with the handshak
 
   test('a handshake timeout and a stop each cancel the solver', async () => {
     const hostile = await hostileRelay(1);
-    const identity = loadOrCreateIdentity(tempDir());
+    const identity = farPowIdentity();
     const statuses: RelayClientStatus[] = [];
     const client = new RelayClient({
       relayHost: PUBLIC_HOST,
@@ -543,7 +571,13 @@ describe('one challenge per handshake; its proof of work stops with the handshak
     });
     (stopping as unknown as { register: boolean }).register = true;
     stopping.start();
-    await Bun.sleep(100);
+    // Stop only once the challenge has reached the client: its own listener
+    // (registered first) has started the solve by the time this one runs.
+    let challenged = false;
+    (stopping as unknown as { socket: WebSocket }).socket.addEventListener('message', (event) => {
+      if (typeof event.data === 'string' && event.data.includes('"challenge"')) challenged = true;
+    });
+    await until(() => challenged);
     await stopping.stop();
     expect(await cpuOver(500)).toBeLessThan(250);
     expect(second.answers).toEqual([]);
