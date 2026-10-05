@@ -8,11 +8,13 @@ import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import {
   CONSULT_VOCABULARY_PACKS,
   consultVocabularyFileStatus,
+  consultVocabularyRoot,
   consultVocabularyStatus,
   consultWriterContextFromPack,
   evaluateConsultQuestion,
@@ -22,7 +24,7 @@ import {
 } from '../src/core/consult-gate.ts';
 import { V0_4_PUBLIC_PACKAGE_FILES } from '../src/core/public-surface.ts';
 import { writePack } from '../scripts/build-consult-vocabulary.ts';
-import { readManifest, writeManifest } from '../scripts/install-consult-language-pack.ts';
+import { readBounded, readManifest, writeManifest } from '../scripts/install-consult-language-pack.ts';
 
 const PACK: EvidencePack = {
   question: 'q',
@@ -176,5 +178,59 @@ describe('packaged layout', () => {
   test('the doctor status hashes files only and matches the loader', () => {
     expect(consultVocabularyFileStatus(ALL).map((entry) => entry.state)).toEqual(Object.keys(CONSULT_VOCABULARY_PACKS).map(() => 'verified'));
     expect(consultVocabularyFileStatus({}).map((entry) => entry.id)).toEqual(['cldr-units', 'en-esdb', 'rx-ingredients']);
+  });
+});
+
+describe('pack root by supported layout only', () => {
+  function tree(paths: string[]): string {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-consult-root-'));
+    dirs.push(dir);
+    for (const path of paths) mkdirSync(join(dir, path), { recursive: true });
+    return dir;
+  }
+  const at = (dir: string, ...parts: string[]) => consultVocabularyRoot(pathToFileURL(join(dir, ...parts)).href);
+  const VOCAB = 'assets/consult/vocabulary';
+
+  test('this module in a checkout resolves to the repository root', () => {
+    expect(consultVocabularyRoot()).toBe(join(import.meta.dir, '..'));
+  });
+
+  test('src/core resolves to the repository root, and a decoy in src/assets does not shadow it', () => {
+    const dir = tree([`repo/${VOCAB}`, `repo/src/${VOCAB}`, 'repo/src/core']);
+    expect(at(dir, 'repo', 'src', 'core', 'consult-gate.ts')).toBe(join(dir, 'repo'));
+    const onlyDecoy = tree([`repo/src/${VOCAB}`, 'repo/src/core']);
+    expect(at(onlyDecoy, 'repo', 'src', 'core', 'consult-gate.ts')).toBeUndefined();
+  });
+
+  test('dist resolves to the package root, never to a parent of the package', () => {
+    const dir = tree([`${VOCAB}`, `package/${VOCAB}`, 'package/dist']);
+    expect(at(dir, 'package', 'dist', 'index.js')).toBe(join(dir, 'package'));
+    const decoyAbove = tree([`${VOCAB}`, `package/dist/${VOCAB}`, 'package/dist']);
+    expect(at(decoyAbove, 'package', 'dist', 'index.js')).toBeUndefined();
+  });
+
+  test('an unsupported layout has no root even when a pack directory is nearby', () => {
+    const dir = tree([`package/${VOCAB}`, 'package/lib', `${VOCAB}`, 'core', `x/${VOCAB}`, 'x/core']);
+    expect(at(dir, 'package', 'lib', 'index.js')).toBeUndefined();
+    expect(at(dir, 'x', 'core', 'consult-gate.ts')).toBeUndefined();
+  });
+});
+
+describe('language-pack download', () => {
+  test('a body past the byte limit is cancelled mid-stream, not buffered whole', async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) { pulls += 1; controller.enqueue(new Uint8Array(1024)); },
+      cancel() { cancelled = true; },
+    });
+    await expect(readBounded(new Response(endless), 10 * 1024, 'test tarball')).rejects.toThrow('test tarball is larger than 10240 bytes');
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThan(20);
+  });
+
+  test('a body within the limit is returned whole', async () => {
+    const body = Buffer.from('a'.repeat(5000));
+    expect((await readBounded(new Response(body), 5000, 'test tarball')).equals(body)).toBe(true);
   });
 });

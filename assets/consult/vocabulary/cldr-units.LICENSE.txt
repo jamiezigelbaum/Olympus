@@ -1,6 +1,6 @@
 Pack: cldr-units.txt.gz
 Source: Unicode CLDR 48.2 via npm cldr-units-full 48.2.0: unit display names and unit patterns, in en es fr de it pt nl.
-Generator: scripts/build-consult-vocabulary.ts at commit 21a43ef0a01916dc67affad1875e0a61671751bc of this repository
+Generator: scripts/build-consult-vocabulary.ts, git blob cddb1bdc11055b7214800172b58d9d1682ebe661 in the public Olympus source repository (content-addressed: git hash-object of the script reproduces it; git log --find-object=cddb1bdc11055b7214800172b58d9d1682ebe661 names the commit)
 Licence: Unicode-3.0.
 
 UNICODE LICENSE V3

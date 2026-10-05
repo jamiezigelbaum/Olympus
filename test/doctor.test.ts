@@ -203,6 +203,23 @@ describe('runDoctor', () => {
     expect(result.checks.find((check) => check.name === 'email_worker')).toMatchObject({ ok: false });
     expect(JSON.stringify(result)).toContain('has not been resolved');
   });
+  test('consult vocabulary: a missing pack is informational, an altered pack fails doctor', async () => {
+    const check = async (states: Array<'verified' | 'missing' | 'hash_mismatch'>) => checkByName((await runDoctor(doctorDeps({
+      config: defaultConfig(),
+      delphi: healthyDelphi(),
+      consultVocabularyStatus: () => states.map((state, index) => ({ id: `pack-${index}`, origin: 'shipped' as const, state })),
+    }))).checks, 'consult_vocabulary');
+    expect(await check(['verified', 'verified'])).toMatchObject({ ok: true });
+    expect((await check(['verified', 'verified'])).hint).toBeUndefined();
+    const missing = await check(['verified', 'missing']);
+    expect(missing).toMatchObject({ ok: true });
+    expect(missing.detail).toContain('pack-1 missing');
+    expect(missing.hint).toContain('missing');
+    const altered = await check(['missing', 'hash_mismatch']);
+    expect(altered).toMatchObject({ ok: false });
+    expect(altered.detail).toContain('pack-1 hash_mismatch');
+    expect(altered.hint).toContain('not intact');
+  });
   test('reports all green when lanes, worker, and source index are healthy', async () => {
     const { fetchImpl } = fakeWorkerFetch({
       '/v1/health': { status: 'ok', configured: true },

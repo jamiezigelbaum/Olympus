@@ -27,9 +27,11 @@ loaded home.
 The mechanical subset of these rules is enforced by the outbound gate
 (`src/core/consult-gate.ts`). What the gate guarantees is narrow and exact
 ([`frontier-consult-lane.md`](frontier-consult-lane.md), section A.4). It
-refuses runs of four content words shared with what you saw, reordered copies,
-names, figures and identifiers that appear in what you saw, and repeats of a
-recent consult. **It cannot guarantee that a question carries no Private
+refuses the specified copied-word patterns (runs of four content words shared
+with what you saw, and reordered copies), recognized names and identifiers from
+what you saw, figures from it that meet the documented thresholds (see
+"Generalize quantities" below), and repeats of a recent consult. A name or
+figure it does not recognize under those rules passes. **It cannot guarantee that a question carries no Private
 information.** Synonym paraphrase, rare combinations of ordinary words, a name
 that is a dictionary word written in lower-case prose, figures re-expressed by
 arithmetic, and covert channels in word choice all pass it. Passing it does not

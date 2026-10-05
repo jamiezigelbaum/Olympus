@@ -70,9 +70,13 @@ choice is recorded in each pack's header and licence file.
 
 **Source form.** For each MPL pack, the source form is three things:
 
-- the upstream npm tarball named in its licence file, with its URL and SHA-256;
-- `scripts/build-consult-vocabulary.ts`, at the commit named in the licence
-  file;
+- the upstream npm tarball named in its licence file, at its
+  `registry.npmjs.org` URL, with its SHA-256;
+- `scripts/build-consult-vocabulary.ts` in the public Olympus source
+  repository, identified in the licence file by its git blob id. The id is
+  content-addressed, so it stays valid across history rewrites:
+  `git hash-object scripts/build-consult-vocabulary.ts` reproduces it, and
+  `git log --find-object=<blob id>` names the commit that holds it;
 - the command line shown there.
 
 Each MPL licence file also carries a dated description of the modifications
@@ -85,9 +89,17 @@ This product uses publicly available data courtesy of the U.S. National Library 
 ### Optional packs Olympus does not ship (German, Italian)
 
 The only German and Italian word lists found are GPL-licensed, so Olympus does
-not ship them. A user who wants them runs:
+not ship them.
+
+**Source-checkout procedure.** The installer script is not in the installed
+package; it runs from a checkout of the Olympus source repository (the GitHub
+repository the package is released from), with [Bun](https://bun.sh)
+installed:
 
 ```sh
+git clone <the Olympus source repository URL> olympus
+cd olympus
+bun install
 bun scripts/install-consult-language-pack.ts de   # or: it
 ```
 

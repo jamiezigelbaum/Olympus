@@ -527,3 +527,47 @@ describe('consult gate', () => {
     expect(elapsed).toBeLessThan(10_000);
   });
 });
+
+describe('snapshot shape is validated before any comparison, and the gate never throws', () => {
+  const entry = (kind: string, text = 'Mason reported a breach.') => ({ kind, text, path: 'writerVisible[]', group: -2 });
+  const context = (value: unknown) => value as ConsultWriterContext;
+  const QUESTION = 'Can Mason appeal?';
+
+  test('a known kind compares; an unknown kind is malformed, not skipped', () => {
+    expect(evaluateConsultQuestion(QUESTION, context({ overflow: false, entries: [entry('text')] })).reasons).toContain('snapshot_name');
+    expect(evaluateConsultQuestion(QUESTION, context({ overflow: false, entries: [entry('bogus')] })))
+      .toEqual({ decision: 'refuse', reasons: ['writer_context_malformed'] });
+  });
+
+  test('a missing or non-object context is a refusal', () => {
+    for (const value of [null, undefined, 'text', 7, [], {}, { entries: 'x', overflow: false }]) {
+      expect(evaluateConsultQuestion(QUESTION, context(value))).toEqual({ decision: 'refuse', reasons: ['writer_context_malformed'] });
+    }
+  });
+
+  test('wrong types anywhere in the snapshot are malformed', () => {
+    for (const value of [
+      { entries: [entry('text')] },
+      { overflow: 'no', entries: [entry('text')] },
+      { overflow: false, malformed: 'no', entries: [entry('text')] },
+      { overflow: false, entries: [null] },
+      { overflow: false, entries: [[]] },
+      { overflow: false, entries: [{ ...entry('text'), text: 42 }] },
+      { overflow: false, entries: [{ ...entry('text'), path: null }] },
+      { overflow: false, entries: [{ ...entry('text'), group: 1.5 }] },
+      { overflow: false, entries: [{ ...entry('text'), group: '1' }] },
+      { overflow: false, entries: [{ ...entry('text'), kind: undefined }] },
+    ]) {
+      expect({ value, verdict: evaluateConsultQuestion(QUESTION, context(value)) })
+        .toEqual({ value, verdict: { decision: 'refuse', reasons: ['writer_context_malformed'] } });
+    }
+  });
+
+  test('bad request, history and limit shapes refuse instead of throwing', () => {
+    expect(evaluateConsultRequest('What is a deposit?' as unknown as string[], CONTEXT).decision).toBe('refuse');
+    expect(evaluateConsultQuestion(CLEAN, CONTEXT, {}, { recentApprovedQuestions: 'x' as unknown as string[] }).reasons).toEqual(['recent_consults_too_large']);
+    expect(evaluateConsultQuestion(CLEAN, CONTEXT, null as unknown as {}, null as unknown as {}).decision).toBe('pass');
+    const hostile = { overflow: false, get entries(): never { throw new Error('boom'); } };
+    expect(evaluateConsultQuestion(CLEAN, context(hostile))).toEqual({ decision: 'refuse', reasons: ['gate_internal_error'] });
+  });
+});

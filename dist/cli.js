@@ -53576,7 +53576,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 import { createHash as createHash36 } from "node:crypto";
 import { existsSync as existsSync32, readFileSync as readFileSync27, statSync as statSync13 } from "node:fs";
 import { homedir as homedir36 } from "node:os";
-import { dirname as dirname32, join as join44 } from "node:path";
+import { basename as basename6, dirname as dirname32, join as join44 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 function consultVocabularySelection(options = {}) {
   const languages = [...new Set(options.languages && options.languages.length > 0 ? options.languages : DEFAULT_CONSULT_LANGUAGES)];
@@ -53612,7 +53612,8 @@ function verifiedPackFile(path, sha2563) {
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
   const here = dirname32(fileURLToPath5(moduleUrl));
-  return [join44(here, ".."), join44(here, "..", "..")].find((candidate) => existsSync32(join44(candidate, ...VOCABULARY_DIR)));
+  const root = basename6(here) === "core" && basename6(dirname32(here)) === "src" ? dirname32(dirname32(here)) : basename6(here) === "dist" ? dirname32(here) : undefined;
+  return root !== undefined && existsSync32(join44(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
@@ -53670,7 +53671,7 @@ function buildMonthNames() {
   names.set("sept", 9);
   return names;
 }
-var CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, vocabularyCache, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, PROSE_PATHS, SEP, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS;
+var CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, vocabularyCache, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, PROSE_PATHS, SEP, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS;
 var init_consult_gate = __esm(() => {
   init_opsec();
   init_types();
@@ -53829,6 +53830,15 @@ var init_consult_gate = __esm(() => {
     "contentMatchedItems",
     "atLeast",
     "inEvidence"
+  ]);
+  WRITER_CONTEXT_KINDS = new Set([
+    "user_question",
+    "text",
+    "identifier",
+    "person_identifier",
+    "account_scope",
+    "vocabulary",
+    "metadata"
   ]);
   CONSULT_VOCABULARY_PACKS = {
     "en-esdb": "9d04850bf1b3c1a70ddf4c706c9d69fd99c205de11c822bb5a5f7a8360a5b4cc",
@@ -55104,13 +55114,15 @@ async function zkapiConsultTransportCheck(deps) {
 }
 async function consultVocabularyCheck(deps) {
   const name = "consult_vocabulary";
-  const status = consultVocabularyFileStatus({}, deps.env ?? process.env);
-  const verified = status.every((entry) => entry.state === "verified");
+  const status = deps.consultVocabularyStatus ? deps.consultVocabularyStatus() : consultVocabularyFileStatus({}, deps.env ?? process.env);
+  const missing = status.some((entry) => entry.state === "missing");
+  const integrityFailure = status.some((entry) => entry.state !== "verified" && entry.state !== "missing");
+  const hint = integrityFailure ? "A vocabulary pack does not match its pinned hash or cannot be read: the installed package is not intact. Reinstall Olympus to restore assets/consult/vocabulary/." : missing ? "A selected vocabulary pack is missing, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/." : undefined;
   return {
     name,
-    ok: true,
+    ok: !integrityFailure,
     detail: `Consult vocabulary (no consult is sent until the consult lane lands): languages ${DEFAULT_CONSULT_LANGUAGES.join(", ")} (default); ${status.map((entry) => `${entry.id} ${entry.state}`).join(", ")}.`,
-    ...verified ? {} : { hint: "A selected vocabulary pack is missing or does not match its pinned hash, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/." }
+    ...hint ? { hint } : {}
   };
 }
 function describeZkapiReadiness(readiness) {
@@ -61791,7 +61803,7 @@ var init_native_embedding_drain_service = __esm(() => {
 // src/core/native-worker-service.ts
 import { randomUUID as randomUUID18 } from "node:crypto";
 import { statSync as statSync17 } from "node:fs";
-import { basename as basename7, delimiter as delimiter5, isAbsolute as isAbsolute10, join as join57 } from "node:path";
+import { basename as basename8, delimiter as delimiter5, isAbsolute as isAbsolute10, join as join57 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
 function createNativeWorkerService(options) {
   let readyChild;
@@ -61991,7 +62003,7 @@ function assertExecutableFile(path, label) {
   throw new Error(`Olympus ${label} is unavailable.`);
 }
 function isBunExecutableName2(path) {
-  const name = basename7(path).toLowerCase();
+  const name = basename8(path).toLowerCase();
   return name === "bun" || name === "bun.exe";
 }
 async function authenticatedReadinessProbe(fetchWorker, url, authToken, instanceId, timeoutMs) {
@@ -122259,7 +122271,7 @@ import {
   writeFileSync as writeFileSync9
 } from "node:fs";
 import { tmpdir as tmpdir4 } from "node:os";
-import { basename as basename6, isAbsolute as isAbsolute7, join as join47 } from "node:path";
+import { basename as basename7, isAbsolute as isAbsolute7, join as join47 } from "node:path";
 var MAX_UPGRADE_ARTIFACT_BYTES = 256 * 1024 * 1024;
 var MAX_UPGRADE_ARCHIVE_ENTRIES = 20000;
 var MAX_UPGRADE_EXPANDED_BYTES = 64 * 1024 * 1024;
@@ -122462,7 +122474,7 @@ function validateExtractedPackage(root, bunBin, executePreflight) {
 }
 function assertManagedVersionRoot(root, artifactSha256) {
   const stats = lstatSync13(root);
-  if (!stats.isDirectory() || stats.isSymbolicLink() || basename6(root) !== artifactSha256) {
+  if (!stats.isDirectory() || stats.isSymbolicLink() || basename7(root) !== artifactSha256) {
     throw new OperationError("config_error", "Managed upgrade version path is unsafe.");
   }
   assertRegularTree(root);
@@ -122546,7 +122558,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let published = false;
   try {
     if (existsSync34(workingDirectory)) {
-      replacedPath = join47(versionsDir, `.olympus-replaced-${basename6(workingDirectory)}-${randomUUID15()}`);
+      replacedPath = join47(versionsDir, `.olympus-replaced-${basename7(workingDirectory)}-${randomUUID15()}`);
       renameSync8(workingDirectory, replacedPath);
       syncDirectory2(versionsDir);
     }

@@ -16217,7 +16217,7 @@ async function zkapiConsultReadiness(options) {
 import { createHash as createHash7 } from "node:crypto";
 import { existsSync as existsSync11, readFileSync as readFileSync15, statSync as statSync11 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
-import { dirname as dirname16, join as join20 } from "node:path";
+import { basename as basename4, dirname as dirname16, join as join20 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 init_opsec();
 init_types();
@@ -16381,6 +16381,15 @@ var SCHEMA_FIELD_NAMES = new Set([
   "atLeast",
   "inEvidence"
 ]);
+var WRITER_CONTEXT_KINDS = new Set([
+  "user_question",
+  "text",
+  "identifier",
+  "person_identifier",
+  "account_scope",
+  "vocabulary",
+  "metadata"
+]);
 var CONSULT_VOCABULARY_PACKS = {
   "en-esdb": "9d04850bf1b3c1a70ddf4c706c9d69fd99c205de11c822bb5a5f7a8360a5b4cc",
   "nl-opentaal": "f3868461cc6dc9b758d7d4d11fd443e9f0310f10c5c4c7626cc9c2d523fade80",
@@ -16454,7 +16463,8 @@ function verifiedPackFile(path, sha256) {
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
   const here = dirname16(fileURLToPath5(moduleUrl));
-  return [join20(here, ".."), join20(here, "..", "..")].find((candidate) => existsSync11(join20(candidate, ...VOCABULARY_DIR)));
+  const root = basename4(here) === "core" && basename4(dirname16(here)) === "src" ? dirname16(dirname16(here)) : basename4(here) === "dist" ? dirname16(here) : undefined;
+  return root !== undefined && existsSync11(join20(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
@@ -17757,13 +17767,15 @@ async function zkapiConsultTransportCheck(deps) {
 }
 async function consultVocabularyCheck(deps) {
   const name = "consult_vocabulary";
-  const status = consultVocabularyFileStatus({}, deps.env ?? process.env);
-  const verified = status.every((entry) => entry.state === "verified");
+  const status = deps.consultVocabularyStatus ? deps.consultVocabularyStatus() : consultVocabularyFileStatus({}, deps.env ?? process.env);
+  const missing = status.some((entry) => entry.state === "missing");
+  const integrityFailure = status.some((entry) => entry.state !== "verified" && entry.state !== "missing");
+  const hint = integrityFailure ? "A vocabulary pack does not match its pinned hash or cannot be read: the installed package is not intact. Reinstall Olympus to restore assets/consult/vocabulary/." : missing ? "A selected vocabulary pack is missing, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/." : undefined;
   return {
     name,
-    ok: true,
+    ok: !integrityFailure,
     detail: `Consult vocabulary (no consult is sent until the consult lane lands): languages ${DEFAULT_CONSULT_LANGUAGES.join(", ")} (default); ${status.map((entry) => `${entry.id} ${entry.state}`).join(", ")}.`,
-    ...verified ? {} : { hint: "A selected vocabulary pack is missing or does not match its pinned hash, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/." }
+    ...hint ? { hint } : {}
   };
 }
 function describeZkapiReadiness(readiness) {

@@ -87,6 +87,29 @@ function untar(tgz: Buffer): Map<string, Buffer> {
   return files;
 }
 
+/**
+ * Read a response body with a running byte limit: the download is cancelled
+ * as soon as it passes `limit`, so an oversized or endless body is never
+ * buffered whole.
+ */
+export async function readBounded(response: Response, limit: number, label: string): Promise<Buffer> {
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(`${label} is larger than ${limit} bytes`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks, total);
+}
+
 export async function installLanguagePack(language: string, dir = consultUserVocabularyDir()): Promise<{ id: string; words: number; sha256: string }> {
   const spec = OPTIONAL_LANGUAGE_PACKS[language];
   if (!spec) throw new Error(`unknown optional language: ${language} (choose de or it)`);
@@ -95,8 +118,7 @@ export async function installLanguagePack(language: string, dir = consultUserVoc
   if (!response.ok) throw new Error(`${spec.npm} ${spec.version}: download failed (${response.status})`);
   const declared = Number(response.headers.get('content-length') ?? '0');
   if (declared > MAX_TARBALL_BYTES) throw new Error(`${spec.npm} tarball is larger than ${MAX_TARBALL_BYTES} bytes`);
-  const tgz = Buffer.from(await response.arrayBuffer());
-  if (tgz.length > MAX_TARBALL_BYTES) throw new Error(`${spec.npm} tarball is larger than ${MAX_TARBALL_BYTES} bytes`);
+  const tgz = await readBounded(response, MAX_TARBALL_BYTES, `${spec.npm} tarball`);
   const [algorithm, expected] = spec.integrity.split('-') as [string, string];
   if (createHash(algorithm).update(tgz).digest('base64') !== expected) throw new Error(`${spec.npm} tarball does not match the pinned integrity hash`);
   // Work inside the target directory so the final rename never crosses devices.

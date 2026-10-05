@@ -5,7 +5,7 @@ the Mozilla Public License. No MPL-covered material is in any code file of the r
 Source form (durable):
   Upstream:  npm dictionary-es 4.0.0, https://registry.npmjs.org/dictionary-es/-/dictionary-es-4.0.0.tgz
              SHA-256 of the tarball: b46986527b23ff1a578d601db7f1e6dc80cc36b728fdcb6044b5212e12e202d5
-  Generator: scripts/build-consult-vocabulary.ts at commit 21a43ef0a01916dc67affad1875e0a61671751bc of this repository
+  Generator: scripts/build-consult-vocabulary.ts, git blob cddb1bdc11055b7214800172b58d9d1682ebe661 in the public Olympus source repository (content-addressed: git hash-object of the script reproduces it; git log --find-object=cddb1bdc11055b7214800172b58d9d1682ebe661 names the commit)
   Command:   bun scripts/build-consult-vocabulary.ts es-hunspell <out-dir> --exclude <proper-nouns file> <unpacked package>
 
 Description of modifications (dated, 2026-10-05; Olympus):

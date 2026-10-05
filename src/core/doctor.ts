@@ -62,7 +62,11 @@ import {
   zkapiConsultReadiness,
   type ZkapiConsultReadiness,
 } from './consult-transport-zkapi.ts';
-import { DEFAULT_CONSULT_LANGUAGES, consultVocabularyFileStatus } from './consult-gate.ts';
+import {
+  DEFAULT_CONSULT_LANGUAGES,
+  consultVocabularyFileStatus,
+  type ConsultVocabularyFileStatus,
+} from './consult-gate.ts';
 
 export interface DoctorCheck {
   name: string;
@@ -94,6 +98,8 @@ export interface DoctorDeps {
   workerEnvPath?: string;
   /** The persistent zkAPI consult ledger; defaults beside sovereignty.json. */
   zkapiStatePath?: string;
+  /** The consult vocabulary pack states; defaults to hashing the installed packs. */
+  consultVocabularyStatus?: () => readonly ConsultVocabularyFileStatus[];
   /**
    * What hosts the engine on this machine. Optional so a test never inspects
    * the developer's own launchd; the `olympus doctor` operation passes
@@ -607,20 +613,27 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
  * The consult outbound gate's vocabulary packs, content-free: for the consult
  * languages (the default until consult settings exist), whether each selected
  * pack is present and matches its pinned hash. Doctor hashes the compressed
- * files only; it loads no word list. Informational: nothing calls the gate yet,
- * so a missing pack is reported but does not fail doctor.
+ * files only; it loads no word list. A missing pack is informational while
+ * nothing calls the gate; a pack that is present but altered, oversized or
+ * unreadable is an integrity failure and fails doctor.
  */
 async function consultVocabularyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const name = 'consult_vocabulary';
-  const status = consultVocabularyFileStatus({}, deps.env ?? process.env);
-  const verified = status.every((entry) => entry.state === 'verified');
+  const status = deps.consultVocabularyStatus
+    ? deps.consultVocabularyStatus()
+    : consultVocabularyFileStatus({}, deps.env ?? process.env);
+  const missing = status.some((entry) => entry.state === 'missing');
+  const integrityFailure = status.some((entry) => entry.state !== 'verified' && entry.state !== 'missing');
+  const hint = integrityFailure
+    ? 'A vocabulary pack does not match its pinned hash or cannot be read: the installed package is not intact. Reinstall Olympus to restore assets/consult/vocabulary/.'
+    : missing
+      ? 'A selected vocabulary pack is missing, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/.'
+      : undefined;
   return {
     name,
-    ok: true,
+    ok: !integrityFailure,
     detail: `Consult vocabulary (no consult is sent until the consult lane lands): languages ${DEFAULT_CONSULT_LANGUAGES.join(', ')} (default); ${status.map((entry) => `${entry.id} ${entry.state}`).join(', ')}.`,
-    ...(verified
-      ? {}
-      : { hint: 'A selected vocabulary pack is missing or does not match its pinned hash, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/.' }),
+    ...(hint ? { hint } : {}),
   };
 }
 

@@ -18,10 +18,12 @@
  *
  * It returns `pass` or `refuse` plus content-free reason codes.
  *
- * WHAT IT GUARANTEES, EXACTLY (design section A.4): it refuses runs of four
- * content tokens shared with the snapshot, reordered copies, names, figures and
- * identifiers that appear in the snapshot, and repeats of a recent consult. It
- * CANNOT guarantee that a question carries no Private information: synonym
+ * WHAT IT GUARANTEES, EXACTLY (design section A.4): it refuses the specified
+ * copied-word patterns (runs of four content tokens shared with the snapshot,
+ * and reordered copies), recognized names and identifiers from the snapshot,
+ * figures from the snapshot that meet the documented thresholds, and repeats
+ * of a recent consult. A name or figure it does not recognize under those
+ * rules passes. It CANNOT guarantee that a question carries no Private information: synonym
  * paraphrase, rare combinations of ordinary words, a dictionary-word name in
  * lower-case prose, figures re-expressed by arithmetic and covert channels in
  * word choice pass it (see the known limits below). Passing it is NOT
@@ -93,7 +95,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import type { EvidencePack } from './contracts.ts';
@@ -251,6 +253,7 @@ export type ConsultGateReason =
   | 'unknown_word'
   | 'vocabulary_unavailable'
   | 'writer_context_malformed'
+  | 'gate_internal_error'
   | 'secret_detected'
   | 'identifier_shape'
   | 'technical_fingerprint'
@@ -578,16 +581,39 @@ export function evaluateConsultRequest(
   history: ConsultGateHistory = {},
   options: ConsultGateOptions = {},
 ): ConsultGateVerdict {
-  const effective = clampLimits(limits);
-  const recent = history.recentApprovedQuestions ?? [];
+  // Fail closed: an exception anywhere in evaluation is a refusal, never a throw.
+  try {
+    return evaluateCheckedRequest(subQuestions, context, limits, history, options);
+  } catch {
+    return refuse(['gate_internal_error']);
+  }
+}
 
-  // 1. Size of every input, before any other work.
-  if (context.overflow || !writerContextWithinLimits(context, effective)) return refuse(['writer_context_too_large']);
+function evaluateCheckedRequest(
+  subQuestions: readonly string[],
+  context: ConsultWriterContext,
+  limits: Partial<ConsultGateLimits>,
+  history: ConsultGateHistory,
+  options: ConsultGateOptions,
+): ConsultGateVerdict {
+  const effective = clampLimits(limits ?? {});
+  const recent: unknown = history?.recentApprovedQuestions ?? [];
+
+  // 1. Shape and size of every input, before any comparison. The entry count
+  // is bounded before the entries are walked.
+  if (!context || typeof context !== 'object' || Array.isArray(context) || !Array.isArray(context.entries)) {
+    return refuse(['writer_context_malformed']);
+  }
+  if (context.overflow === true || context.entries.length > effective.maxWriterContextEntries) return refuse(['writer_context_too_large']);
+  if (!writerContextShapeValid(context)) return refuse(['writer_context_malformed']);
+  if (!writerContextWithinLimits(context, effective)) return refuse(['writer_context_too_large']);
   if (context.malformed) return refuse(['writer_context_malformed']);
-  const vocabulary = consultVocabulary(options);
+  const vocabulary = consultVocabulary(options ?? {});
   if (!vocabulary) return refuse(['vocabulary_unavailable']);
+  if (!Array.isArray(subQuestions)) return refuse(['not_plain_text']);
   if (
-    recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS
+    !Array.isArray(recent)
+    || recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS
     || recent.some((text) => typeof text !== 'string' || utf8Bytes(text) > CONSULT_GATE_MAX_QUESTION_BYTES)
   ) {
     return refuse(['recent_consults_too_large']);
@@ -647,6 +673,23 @@ function clampLimits(limits: Partial<ConsultGateLimits>): ConsultGateLimits {
 }
 
 // Recomputed, never trusted from the builder: a hand-built context is checked the same way.
+const WRITER_CONTEXT_KINDS: ReadonlySet<string> = new Set<ConsultWriterContextKind>([
+  'user_question', 'text', 'identifier', 'person_identifier', 'account_scope', 'vocabulary', 'metadata',
+]);
+
+// The complete snapshot shape: flags are booleans, and every entry has a known kind, string text and path, and an integer group.
+function writerContextShapeValid(context: ConsultWriterContext): boolean {
+  if (typeof context.overflow !== 'boolean') return false;
+  if (context.malformed !== undefined && typeof context.malformed !== 'boolean') return false;
+  for (const entry of context.entries as readonly unknown[]) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    const { kind, text, path, group } = entry as Record<string, unknown>;
+    if (typeof kind !== 'string' || !WRITER_CONTEXT_KINDS.has(kind)) return false;
+    if (typeof text !== 'string' || typeof path !== 'string' || !Number.isSafeInteger(group)) return false;
+  }
+  return true;
+}
+
 function writerContextWithinLimits(context: ConsultWriterContext, limits: ConsultGateLimits): boolean {
   if (context.entries.length > limits.maxWriterContextEntries) return false;
   let bytes = 0;
@@ -1116,14 +1159,20 @@ function readPack(path: string, sha256: string): SortedPack | ConsultVocabularyP
 }
 
 /**
- * The directory holding assets/consult/vocabulary: the package root. This
- * module runs from src/core/ in a checkout and from a bundle in dist/ in a
- * packaged install, so the nearer parent is tried first and a directory above
- * the package is never preferred to the package's own.
+ * The directory holding assets/consult/vocabulary, by supported layout only:
+ * this module in src/core/ of a checkout resolves to the repository root, and
+ * a bundle directly in dist/ of a package resolves to the package root. Any
+ * other layout, or a supported one without the directory, has no root (every
+ * shipped pack is then missing). Never a parent of the package, and never
+ * src/assets/. The pinned hashes already stop substitution; this keeps the
+ * lookup from wandering.
  */
 export function consultVocabularyRoot(moduleUrl: string = import.meta.url): string | undefined {
   const here = dirname(fileURLToPath(moduleUrl));
-  return [join(here, '..'), join(here, '..', '..')].find((candidate) => existsSync(join(candidate, ...VOCABULARY_DIR)));
+  const root = basename(here) === 'core' && basename(dirname(here)) === 'src'
+    ? dirname(dirname(here))
+    : basename(here) === 'dist' ? dirname(here) : undefined;
+  return root !== undefined && existsSync(join(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 
 export interface ConsultVocabularyFileStatus {
@@ -1136,8 +1185,8 @@ export interface ConsultVocabularyFileStatus {
  * For status surfaces (doctor): whether each pack a configuration selects is
  * present and matches its pinned hash (shipped) or its local manifest hash
  * (user-installed). It hashes the compressed files only: nothing is
- * decompressed, cached or admitted, so it costs no memory and changes no
- * verdict. Content-free: pack ids and states only.
+ * decompressed, cached or admitted, so it retains no decompressed vocabulary
+ * and changes no verdict. Content-free: pack ids and states only.
  */
 export function consultVocabularyFileStatus(
   options: ConsultGateOptions = {},
