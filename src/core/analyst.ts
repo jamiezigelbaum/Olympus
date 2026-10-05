@@ -31,7 +31,7 @@ import {
   sourceIndexChunkQueryTerms,
 } from './source-index/chunk-selection.ts';
 import { assertEvidencePackModelEligible } from './source-model-policy.ts';
-import { isSecureTrustTier } from './source-index/types.ts';
+import { isSecureSensitivity } from './source-index/types.ts';
 
 // --- Model seam -----------------------------------------------------------
 // Minimal completion interface. A production adapter maps this onto
@@ -379,14 +379,7 @@ export function analystPromptBytes(
 }
 
 function evidencePackRequiresLocalOnly(pack: EvidencePack): boolean {
-  return pack.candidates.some((candidate) => (
-    candidate.trustDomain === 'secure_local'
-    || isSecureTrustTier(candidate.trustTier)
-    || (candidate.facts ?? []).some((fact) => (
-      fact.sensitivity.trustDomain === 'secure_local'
-      || isSecureTrustTier(fact.sensitivity.trustTier)
-    ))
-  ));
+  return pack.candidates.some((candidate) => isSecureSensitivity(candidate));
 }
 
 function hasGroundedPartialAnswer(

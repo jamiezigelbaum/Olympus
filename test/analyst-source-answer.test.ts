@@ -38,6 +38,7 @@ import {
   defineConnectorCorpus,
 } from '../src/workers/connector-store/index.ts';
 import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
+import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const INTERNAL = 'internal.notes.docs';
@@ -48,14 +49,11 @@ const WHATSAPP = 'secure_local.whatsapp.messages';
 const OTHER = 'internal.other.docs';
 const INTERNAL_SECRET = 'INTERNAL-RAW-CHUNK-TEXT cholesterol LDL 100 mg/dL';
 const SECURE_SECRET = 'SECURE-RAW-CHUNK-TEXT total testosterone 612 ng/dL';
-// Local-leg prompt budgets for the fitting tests (measured with
-// analystPromptBytes against the fixtures below). The whole Personal+Private
+// Local-leg prompt budget for the fitting tests (measured with
+// analystPromptBytes against the fixtures below): the whole two-candidate
 // pack is ~3,290 bytes, so 3,200 forces a fit that keeps one candidate, the
-// Personal one (first in round-robin order). With three long Personal
-// passages and one Private item, 4,800 leaves a 600-byte passage share only
-// for two candidates: one Personal and the Private one.
+// Personal note (first in round-robin order).
 const ONE_CANDIDATE_PROMPT_BYTES = 3_200;
-const TWO_CANDIDATE_PROMPT_BYTES = 4_800;
 
 function adapterReturning(ids: string[]): SourceIndexCorpusSearchAdapter {
   return (request) => ({
@@ -1635,9 +1633,13 @@ describe('analyst-backed source_answer handler', () => {
     expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
   });
 
-  // The gate judges the pack the answering leg actually read. A local or cloud
-  // leg is fitted to its prompt budget and may lose every Private candidate; an
-  // answer from that fitted pack has no secure_local context to withhold.
+  // The secure_local context rule is fail-closed and judged on the evidence
+  // BUILD (EvidencePackBuildDetail.encounteredSecureLocal), not on what a leg
+  // was shown. A build that met Private material holds the answer in strict
+  // posture even when prompt fitting dropped that material or the prompt
+  // format never rendered it: over-withholding there is accepted, leaking is
+  // not. These tests run the real createAnalyst with a scripted model that
+  // repeats whatever Private-derived text its own prompt shows.
   const citeInternal = (pack: EvidencePack): AnalystResult => {
     const internalCandidate = pack.candidates.find((candidate) => candidate.trustDomain === 'internal')!;
     return {
@@ -1647,129 +1649,27 @@ describe('analyst-backed source_answer handler', () => {
     };
   };
 
-  test('strict mode releases a cited Personal answer when fitting dropped every Private candidate', async () => {
-    const { analyst, calls } = scriptedAnalyst(citeInternal);
-    const handler = createAnalystSourceIndexAnswerHandler({
-      analyst,
-      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
-      secureDerivativeDefault: 'approval',
-      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
-    });
-
-    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.pack.candidates.map((candidate) => candidate.trustDomain)).toEqual(['internal']);
-    expect(result.opsec.release_decision.decision).toBe('allow');
-    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_requires_approval');
-    expect(result.answer).toContain('The cholesterol note is on file.');
-    expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
-  });
-
-  test('strict mode releases a cited Personal answer from the fitted local leg after a Venice failure', async () => {
-    const { analyst, calls } = scriptedAnalyst(citeInternal);
-    let veniceCalls = 0;
-    const handler = createAnalystSourceIndexAnswerHandler({
-      analyst,
-      veniceAnalyst: () => ({
-        async analyze() {
-          veniceCalls += 1;
-          throw new Error('venice down');
-        },
-      }),
-      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
-      secureDerivativeDefault: 'approval',
-      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
-    });
-
-    const result = await handler.answer({
-      question: 'Latest labs?',
-      include_secure_local: true,
-      analyst_provider: 'venice',
-    });
-
-    expect(veniceCalls).toBe(1);
-    expect(result.audit.answer_synthesis.analyst_backend).toBe('local');
-    expect(result.audit.answer_synthesis.analyst_fallback?.from).toBe('venice');
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.pack.candidates.map((candidate) => candidate.trustDomain)).toEqual(['internal']);
-    expect(result.opsec.release_decision.decision).toBe('allow');
-    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_requires_approval');
-  });
-
-  test('strict mode still gates when fitting kept a Private candidate', async () => {
-    const { analyst, calls } = scriptedAnalyst(citeInternal);
-    const handler = createAnalystSourceIndexAnswerHandler({
-      analyst,
-      lanes: () => {
-        const fixture = lanesFixture({ internal: ['note-1', 'note-2', 'note-3'], secure: ['lab-1'] });
-        return {
-          ...fixture,
-          contentProviders: {
-            ...fixture.contentProviders,
-            [INTERNAL]: {
-              async fetchLocalContent() {
-                return {
-                  sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }),
-                  chunks: [`${INTERNAL_SECRET} ${'cholesterol follow-up note '.repeat(80)}`],
-                };
-              },
-            },
-          } as LocalContentProviderMap,
-        };
-      },
-      secureDerivativeDefault: 'approval',
-      localAnalystPromptByteBudget: TWO_CANDIDATE_PROMPT_BYTES,
-    });
-
-    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.pack.candidates.map((candidate) => candidate.trustDomain)).toEqual(['internal', 'secure_local']);
-    expect(result.opsec.release_decision.decision).toBe('needs_approval');
-    expect(result.opsec.release_decision.required_approval).toBe('s4_release');
-    expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_requires_approval');
-    expect(result.evidence).toEqual([]);
-  });
-
-  test('default mode records no uncited secure context when fitting dropped every Private candidate', async () => {
-    const { analyst, calls } = scriptedAnalyst(citeInternal);
-    const handler = createAnalystSourceIndexAnswerHandler({
-      analyst,
-      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
-      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
-    });
-
-    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.pack.candidates.map((candidate) => candidate.trustDomain)).toEqual(['internal']);
-    expect(result.opsec.release_decision.decision).toBe('allow');
-    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_derivative_allowed');
-  });
-
-  // Fitting drops Private candidates but keeps the pack's coverage, and both
-  // the main and the audit prompt render it: a Private item's extraction gap
-  // (its title) or its corpus's match count still reaches the model. The gate
-  // must count that as a secure_local context. Real createAnalyst, scripted
-  // model, so the prompts are the ones a model would receive.
   const PRIVATE_TITLE_ID = 'Project-Nightingale-acquisition';
+  const UPGRADED_ID = 'upgraded-private';
+
+  function withMatchCount(
+    adapter: SourceIndexCorpusSearchAdapter,
+    matchedItems: number,
+  ): SourceIndexCorpusSearchAdapter {
+    return async (request) => ({
+      ...(await adapter(request)),
+      matchCount: { matchedItems, contentMatchedItems: matchedItems, saturated: false },
+    });
+  }
 
   function privateCoverageLanes(input: { truncatedPrivate?: boolean; privateMatches?: number }) {
     const fixture = lanesFixture({ internal: ['note-1'], secure: [PRIVATE_TITLE_ID] });
-    const secureAdapter = adapterReturning([PRIVATE_TITLE_ID]);
-    const privateMatches = input.privateMatches;
     return {
       ...fixture,
       adapters: {
         ...fixture.adapters,
-        ...(privateMatches !== undefined
-          ? {
-              [SECURE]: async (request: Parameters<SourceIndexCorpusSearchAdapter>[0]) => ({
-                ...(await secureAdapter(request)),
-                matchCount: { matchedItems: privateMatches, contentMatchedItems: privateMatches, saturated: false },
-              }),
-            }
+        ...(input.privateMatches !== undefined
+          ? { [SECURE]: withMatchCount(adapterReturning([PRIVATE_TITLE_ID]), input.privateMatches) }
           : {}),
       } as SourceIndexRouterAdapterMap,
       contentProviders: {
@@ -1787,18 +1687,51 @@ describe('analyst-backed source_answer handler', () => {
     };
   }
 
-  // Cites candidate 1 (the Personal note); repeats whatever Private-derived
-  // coverage its own prompt shows, as a model shown it could.
-  function coverageEchoAnalyst(options: CreateAnalystOptions, echoOn: 'main' | 'audit' = 'main') {
+  // A Personal corpus (OTHER) whose provider upgrades its item to a secure
+  // sensitivity: S4/secure_local (B1, with a positive match count) or
+  // S4/internal truncated (B2, a title-bearing gap).
+  function upgradedCorpusLanes(input: { upgrade: 'secure_local' | 'secure_tier' }) {
+    const fixture = lanesFixture({ internal: ['note-1'], other: [UPGRADED_ID] });
+    return {
+      ...fixture,
+      adapters: {
+        ...fixture.adapters,
+        ...(input.upgrade === 'secure_local'
+          ? { [OTHER]: withMatchCount(adapterReturning([UPGRADED_ID]), 7) }
+          : {}),
+      } as SourceIndexRouterAdapterMap,
+      contentProviders: {
+        ...fixture.contentProviders,
+        [OTHER]: {
+          async fetchLocalContent() {
+            return input.upgrade === 'secure_local'
+              ? {
+                  sensitivity: buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
+                  chunks: [SECURE_SECRET],
+                }
+              : {
+                  sensitivity: buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'internal' }),
+                  chunks: [SECURE_SECRET],
+                  truncated: true,
+                };
+          },
+        },
+      } as LocalContentProviderMap,
+    };
+  }
+
+  // Cites candidate 1 (the Personal note) and repeats any Private-derived text
+  // its own prompt shows, on the main call or only on the audit call.
+  function echoingAnalyst(options: CreateAnalystOptions, echoOn: 'main' | 'audit' = 'main') {
     const requests: AnalystModelRequest[] = [];
     const analyst = createAnalyst({
       async complete(request) {
         requests.push(request);
-        const isAudit = requests.length > 1;
-        const echo = (echoOn === 'audit') === isAudit;
-        const leaked = [
-          echo && request.prompt.includes(`${PRIVATE_TITLE_ID}.pdf`) ? ` See also ${PRIVATE_TITLE_ID}.pdf.` : '',
-          echo && /secure_local\.dropbox\.files \(file\) 7 items/.test(request.prompt) ? ' You have 7 Private matches.' : '',
+        const echo = (echoOn === 'audit') === (requests.length > 1);
+        const leaked = !echo ? '' : [
+          request.prompt.includes(`${PRIVATE_TITLE_ID}.pdf`) ? ` See also ${PRIVATE_TITLE_ID}.pdf.` : '',
+          request.prompt.includes(`${UPGRADED_ID}.pdf`) ? ` See also ${UPGRADED_ID}.pdf.` : '',
+          /\(file\) 7 items/.test(request.prompt) ? ' You have 7 more matches.' : '',
         ].join('');
         return {
           modelId: 'scripted',
@@ -1814,47 +1747,84 @@ describe('analyst-backed source_answer handler', () => {
     return { analyst, requests };
   }
 
-  test('strict mode gates when a fitted pack keeps a Private item\'s extraction gap in the prompt', async () => {
-    const { analyst, requests } = coverageEchoAnalyst({});
-    const handler = createAnalystSourceIndexAnswerHandler({
+  const leakedText = (result: SourceIndexAnswerResult) => JSON.stringify({ answer: result.answer, evidence: result.evidence });
+
+  function expectStrictHold(result: SourceIndexAnswerResult) {
+    expect(result.opsec.release_decision.decision).toBe('needs_approval');
+    expect(result.opsec.release_decision.required_approval).toBe('s4_release');
+    expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_requires_approval');
+    expect(result.evidence).toEqual([]);
+  }
+
+  function expectStrictRelease(result: SourceIndexAnswerResult) {
+    expect(result.opsec.release_decision.decision).toBe('allow');
+    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_requires_approval');
+    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_derivative_allowed');
+    expect(result.answer).toContain('The cholesterol note is on file.');
+  }
+
+  test('strict mode holds even when fitting dropped every Private candidate', async () => {
+    const { analyst, calls } = scriptedAnalyst(citeInternal);
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+      secureDerivativeDefault: 'approval',
+      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.pack.candidates.map((candidate) => candidate.trustDomain)).toEqual(['internal']);
+    expectStrictHold(result);
+  });
+
+  test('default mode records the uncited secure context even when fitting dropped every Private candidate', async () => {
+    const { analyst, calls } = scriptedAnalyst(citeInternal);
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.pack.candidates.map((candidate) => candidate.trustDomain)).toEqual(['internal']);
+    expect(result.opsec.release_decision.decision).toBe('allow');
+    expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_derivative_allowed');
+  });
+
+  test('strict mode holds when a fitted pack keeps a Private item\'s extraction gap in the prompt', async () => {
+    const { analyst, requests } = echoingAnalyst({});
+    const result = await createAnalystSourceIndexAnswerHandler({
       analyst,
       lanes: () => privateCoverageLanes({ truncatedPrivate: true }),
       secureDerivativeDefault: 'approval',
       localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
-    });
-
-    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
 
     expect(requests).toHaveLength(1);
     expect(requests[0]!.prompt).not.toContain('trust: secure_local/');
     expect(requests[0]!.prompt).toContain(`${PRIVATE_TITLE_ID}.pdf`);
-    expect(result.opsec.release_decision.decision).toBe('needs_approval');
-    expect(result.opsec.release_decision.required_approval).toBe('s4_release');
-    expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_requires_approval');
-    expect(JSON.stringify({ answer: result.answer, evidence: result.evidence })).not.toContain('Nightingale');
+    expectStrictHold(result);
+    expect(leakedText(result)).not.toContain('Nightingale');
   });
 
-  test('strict mode gates when only the audit prompt carries a Private item\'s extraction gap', async () => {
-    const { analyst, requests } = coverageEchoAnalyst({ evidenceFormat: 'compact', auditSuspiciousDrafts: true }, 'audit');
-    const handler = createAnalystSourceIndexAnswerHandler({
+  test('strict mode holds when only the audit prompt carries a Private item\'s extraction gap', async () => {
+    const { analyst, requests } = echoingAnalyst({ evidenceFormat: 'compact', auditSuspiciousDrafts: true }, 'audit');
+    const result = await createAnalystSourceIndexAnswerHandler({
       analyst,
       lanes: () => privateCoverageLanes({ truncatedPrivate: true }),
       secureDerivativeDefault: 'approval',
       localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
-    });
-
-    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
 
     expect(requests).toHaveLength(2);
     expect(requests[0]!.prompt).not.toContain('Nightingale');
     expect(requests[1]!.prompt).toContain(`${PRIVATE_TITLE_ID}.pdf`);
-    expect(result.opsec.release_decision.decision).toBe('needs_approval');
-    expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_requires_approval');
-    expect(JSON.stringify({ answer: result.answer, evidence: result.evidence })).not.toContain('Nightingale');
+    expectStrictHold(result);
+    expect(leakedText(result)).not.toContain('Nightingale');
   });
 
-  test('a fitted pack that keeps a Private match count is a secure_local context in both postures', async () => {
-    const strict = coverageEchoAnalyst({});
+  test('a fitted pack that keeps a Private match count is a secure context in both postures', async () => {
+    const strict = echoingAnalyst({});
     const strictResult = await createAnalystSourceIndexAnswerHandler({
       analyst: strict.analyst,
       lanes: () => privateCoverageLanes({ privateMatches: 7 }),
@@ -1864,11 +1834,10 @@ describe('analyst-backed source_answer handler', () => {
 
     expect(strict.requests[0]!.prompt).not.toContain('trust: secure_local/');
     expect(strict.requests[0]!.prompt).toMatch(/secure_local\.dropbox\.files \(file\) 7 items/);
-    expect(strictResult.opsec.release_decision.decision).toBe('needs_approval');
-    expect(strictResult.opsec.release_decision.reasons).toContain('secure_local_context_uncited_requires_approval');
-    expect(JSON.stringify(strictResult)).not.toContain('7 Private matches');
+    expectStrictHold(strictResult);
+    expect(leakedText(strictResult)).not.toContain('7 more matches');
 
-    const lenient = coverageEchoAnalyst({});
+    const lenient = echoingAnalyst({});
     const defaultResult = await createAnalystSourceIndexAnswerHandler({
       analyst: lenient.analyst,
       lanes: () => privateCoverageLanes({ privateMatches: 7 }),
@@ -1879,22 +1848,104 @@ describe('analyst-backed source_answer handler', () => {
     expect(defaultResult.opsec.release_decision.reasons).toContain('secure_local_context_uncited_derivative_allowed');
   });
 
-  test('strict mode releases when fitting dropped the Private candidate and no Private coverage remains', async () => {
-    const { analyst, requests } = coverageEchoAnalyst({});
-    const handler = createAnalystSourceIndexAnswerHandler({
+  test('strict mode holds when the compact prompt (no audit) rendered no Private material at all', async () => {
+    const { analyst, requests } = echoingAnalyst({ evidenceFormat: 'compact' });
+    const result = await createAnalystSourceIndexAnswerHandler({
       analyst,
-      lanes: () => privateCoverageLanes({}),
+      lanes: () => privateCoverageLanes({ truncatedPrivate: true }),
       secureDerivativeDefault: 'approval',
       localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
-    });
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
 
-    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
-
+    expect(requests).toHaveLength(1);
     expect(requests[0]!.prompt).not.toContain('Nightingale');
+    expect(requests[0]!.prompt).not.toContain('SECURE-RAW-CHUNK-TEXT');
+    // Deliberate over-withholding: the build met Private material.
+    expectStrictHold(result);
+  });
+
+  test('strict mode holds when a Personal corpus\'s item upgraded to secure_local leaves only its match count in the prompt', async () => {
+    const { analyst, requests } = echoingAnalyst({});
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => upgradedCorpusLanes({ upgrade: 'secure_local' }),
+      secureDerivativeDefault: 'approval',
+      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(requests).toHaveLength(1);
     expect(requests[0]!.prompt).not.toContain('trust: secure_local/');
-    expect(result.opsec.release_decision.decision).toBe('allow');
-    expect(result.answer).toContain('The cholesterol note is on file.');
-    expect(JSON.stringify({ answer: result.answer, evidence: result.evidence })).not.toContain('Nightingale');
+    expect(requests[0]!.prompt).toMatch(/internal\.other\.docs \(file\) 7 items/);
+    expectStrictHold(result);
+    expect(leakedText(result)).not.toContain('7 more matches');
+  });
+
+  test('strict mode holds when an S4 item in a Personal corpus leaves only its title-bearing gap in the prompt', async () => {
+    const { analyst, requests } = echoingAnalyst({});
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => upgradedCorpusLanes({ upgrade: 'secure_tier' }),
+      secureDerivativeDefault: 'approval',
+      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.prompt).not.toContain('SECURE-RAW-CHUNK-TEXT');
+    expect(requests[0]!.prompt).toContain(`${UPGRADED_ID}.pdf`);
+    expectStrictHold(result);
+    expect(leakedText(result)).not.toContain(UPGRADED_ID);
+  });
+
+  // The ChatGPT source_answer request shape (mcp-surface.ts): both Private
+  // inclusion flags false. The Private corpus is skipped, so the build never
+  // meets it and strict mode releases. (A provider upgrade of a Personal item
+  // on this path would set the flag, correctly.)
+  test('a Personal-only build that skipped the Private corpus releases in strict mode', async () => {
+    const { analyst } = scriptedAnalyst(citeInternal);
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+      secureDerivativeDefault: 'approval',
+    }).answer({ question: 'Latest labs?', include_secure_local: false, include_secure_local_content: false });
+
+    expect(result.audit.searched_corpora).not.toContain(SECURE);
+    expect(result.audit.answer_synthesis.private_context_used).toBe(false);
+    expectStrictRelease(result);
+  });
+
+  test('a Private corpus searched with no matches does not make a secure context', async () => {
+    const { analyst } = scriptedAnalyst(citeInternal);
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => {
+        const fixture = lanesFixture({ internal: ['note-1'] });
+        return {
+          ...fixture,
+          adapters: { ...fixture.adapters, [SECURE]: withMatchCount(adapterReturning([]), 0) } as SourceIndexRouterAdapterMap,
+        };
+      },
+      secureDerivativeDefault: 'approval',
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(result.audit.searched_corpora).toContain(SECURE);
+    expectStrictRelease(result);
+  });
+
+  test('a Private corpus with a positive match count but no hit is a secure context', async () => {
+    const { analyst } = scriptedAnalyst(citeInternal);
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => {
+        const fixture = lanesFixture({ internal: ['note-1'] });
+        return {
+          ...fixture,
+          adapters: { ...fixture.adapters, [SECURE]: withMatchCount(adapterReturning([]), 3) } as SourceIndexRouterAdapterMap,
+        };
+      },
+      secureDerivativeDefault: 'approval',
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expectStrictHold(result);
   });
 
   test('strict mode still releases the content-free unsupported answer from a secure_local context', async () => {

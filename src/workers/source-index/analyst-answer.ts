@@ -71,7 +71,7 @@ import {
 } from '../../core/sovereignty.ts';
 import {
   buildSourceSensitivity,
-  isSecureTrustTier,
+  isSecureSensitivity,
   type RetrievalDegradation,
   type SourceIndexProvenance,
   type SourceItemIdentity,
@@ -445,13 +445,6 @@ export function createAnalystSourceIndexAnswerHandler(
       }
       let pack = detail.pack;
       const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
-      // What each leg actually read: a local or cloud leg reads the pack fitted
-      // to its budget, which can drop every secure_local candidate while
-      // keeping Private-derived coverage. Keyed by the result the leg
-      // returned, so the release gate judges the context of the leg whose
-      // answer it releases. OR-ed, so a result object two legs returned counts
-      // as secure if either read secure_local-derived text.
-      const analyzedSecureLocal = new WeakMap<AnalystResult, boolean>();
       // Leg fitting is keyed by the candidates of the pack actually analyzed,
       // so a rebuilt pack (the private-outage fallback below) is fitted and its
       // matchCounts restated against its own candidates, never the first build's.
@@ -460,19 +453,9 @@ export function createAnalystSourceIndexAnswerHandler(
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? '',
         ] as const));
-        const recordAnalyzed = (result: AnalystResult, analyzedPack: EvidencePack) => {
-          if (typeof result !== 'object' || result === null) return;
-          analyzedSecureLocal.set(
-            result,
-            analyzedSecureLocal.get(result) === true || packCarriesSecureLocalContext(analyzedPack, analysisDetail),
-          );
-        };
         return {
-          localLeg: (analyst: Analyst): Analyst =>
-            promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus, recordAnalyzed),
-          cloudLeg: (analyst: Analyst): Analyst =>
-            promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, recordAnalyzed),
-          wholeLeg: (analyst: Analyst): Analyst => recordingAnalyst(analyst, recordAnalyzed),
+          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus),
+          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
         };
       };
       assertEvidencePackModelEligible(pack);
@@ -504,14 +487,14 @@ export function createAnalystSourceIndexAnswerHandler(
       // was included by default or explicitly: slow-but-working private answers
       // are the product posture, so no default-path cap cuts them short.
       const analyze = (analysisDetail: EvidencePackBuildDetail, analysisLocalOnly: boolean) => {
-        const { localLeg, cloudLeg, wholeLeg } = legFitting(analysisDetail);
+        const { localLeg, cloudLeg } = legFitting(analysisDetail);
         return routeAnalysis({
           pack: analysisDetail.pack,
           localOnly: analysisLocalOnly,
           requestedProvider: requestedAnalystProvider,
           local: localLeg(options.analyst),
           ...(options.cloudAnalyst ? { cloud: cloudLeg(options.cloudAnalyst) } : {}),
-          ...(veniceAnalyst ? { venice: wholeLeg(veniceAnalyst) } : {}),
+          ...(veniceAnalyst ? { venice: veniceAnalyst } : {}),
           // Trusted/encrypted-cloud bound only. request.timeout_ms is the OpenClaw
           // tool watchdog budget (the skill passes ~600s) — a DIFFERENT quantity;
           // it must never inflate this bound, or a ~20s Venice attempt silently
@@ -520,7 +503,7 @@ export function createAnalystSourceIndexAnswerHandler(
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
           ...(options.sovereigntyAnalystRoute
-            ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg, wholeLeg) }
+            ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg) }
             : {}),
           secureAnalystPoolState,
           ...(options.secureAnalystPool?.sloMs !== undefined
@@ -576,15 +559,10 @@ export function createAnalystSourceIndexAnswerHandler(
       const analystMs = Date.now() - analystStartedAt;
 
       const releaseGateStartedAt = Date.now();
-      // A result no leg recorded (a worker-synthesized gap, or no leg ran)
-      // falls back to the whole pack: unknown context is judged secure if the
-      // pack carried secure_local-derived text, never released on a guess.
-      const analyzedSecureLocalContext = analyzedSecureLocal.get(analystResult);
       const { decision, facts, opsec, answer } = releaseAnalystAnswer({
         detail,
         result: analystResult,
         releaseSecureContent,
-        ...(analyzedSecureLocalContext !== undefined ? { analyzedSecureLocalContext } : {}),
         ...(synthesizedGap ? { synthesizedGap } : {}),
       });
       const releaseGateMs = Date.now() - releaseGateStartedAt;
@@ -839,7 +817,6 @@ function withLegPromptBudgets(
   route: NonNullable<AnalystSourceIndexAnswerHandlerOptions['sovereigntyAnalystRoute']>,
   localLeg: (analyst: Analyst) => Analyst,
   cloudLeg: (analyst: Analyst) => Analyst,
-  wholeLeg: (analyst: Analyst) => Analyst,
 ): NonNullable<AnalystSourceIndexAnswerHandlerOptions['sovereigntyAnalystRoute']> {
   return (input) => {
     const resolved = route(input);
@@ -848,38 +825,22 @@ function withLegPromptBudgets(
         ? { ...step, analyst: localLeg(step.analyst) }
         : step.backend === 'cloud'
           ? { ...step, analyst: cloudLeg(step.analyst) }
-          : { ...step, analyst: wholeLeg(step.analyst) }
+          : step
     ));
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
 
-type AnalyzedPackRecorder = (result: AnalystResult, analyzedPack: EvidencePack) => void;
-
 function promptBudgetedAnalyst(
   analyst: Analyst,
   promptBytes: number,
   candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
-  onAnalyzed: AnalyzedPackRecorder,
 ): Analyst {
   return {
-    analyze: (pack, analyzeOptions) => {
-      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions);
-      return analyst.analyze(fitted, analyzeOptions).then((result) => {
-        onAnalyzed(result, fitted);
-        return result;
-      });
-    },
-  };
-}
-
-// A leg that reads the pack whole (Venice) records that pack as its context.
-function recordingAnalyst(analyst: Analyst, onAnalyzed: AnalyzedPackRecorder): Analyst {
-  return {
-    analyze: (pack, analyzeOptions) => analyst.analyze(pack, analyzeOptions).then((result) => {
-      onAnalyzed(result, pack);
-      return result;
-    }),
+    analyze: (pack, analyzeOptions) => analyst.analyze(
+      fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions),
+      analyzeOptions,
+    ),
   };
 }
 
@@ -1886,12 +1847,6 @@ export interface AnalystReleaseInput {
   // detector reads `/** … */` on one line as a regex literal, and every other
   // file it enrolls comments the same way.
   synthesizedGap?: string;
-  // Whether anything in the pack the answering leg actually read derives from
-  // secure_local evidence (candidates, cached facts, or attributed coverage; a
-  // fitted leg may have dropped every Private candidate yet kept a Private
-  // gap or match count). Absent: judged from detail.pack, the conservative
-  // answer, since fitting only drops candidates and keeps coverage.
-  analyzedSecureLocalContext?: boolean;
 }
 
 export interface AnalystReleaseOutcome {
@@ -1999,7 +1954,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
           ? originalScanDecision
           : finalScanDecision(),
         facts,
-        input.analyzedSecureLocalContext ?? packCarriesSecureLocalContext(input.detail.pack, input.detail),
+        input.detail,
         input.releaseSecureContent,
       );
   return {
@@ -2041,22 +1996,30 @@ function scannedUnsupportedNoContentDecision(input: {
   );
 }
 
-// Gate facts come from citations, but the model read its whole pack: an answer
-// can state a secure_local detail while citing only a non-secure candidate.
-// `secureContext` says whether the pack the answering leg actually read
-// carried secure_local-derived text (packCarriesSecureLocalContext): the leg's
-// fitted pack when it recorded one, else the analyzed detail's pack (the
-// rebuilt detail when the private route fell back without secure_local). Strict posture sends a releasable answer from a
-// secure_local context to the same s4_release approval a secure-cited answer
-// gets; the default posture releases it and records the uncited secure context
+// Gate facts come from citations, but a model reads more than it cites: an
+// answer can state a secure detail (a passage, a Private title in a coverage
+// gap, a Private match count) while citing only a non-secure candidate. The
+// rule is fail-closed and judged on the BUILD, not on what a leg was shown:
+// `detail` is the build whose pack was analyzed (the handler passes the
+// rebuilt detail, with its own flag, when the private route fell back without
+// secure_local), and its context is secure when that build encountered secure
+// material anywhere, or its pack holds a secure candidate or fact. Strict
+// posture sends a releasable answer from a secure context to the same
+// s4_release approval a secure-cited answer gets. Deliberately, that holds an
+// answer even when the secure material never reached the prompt: prompt
+// fitting dropped it, or the prompt format (compact, no audit) did not render
+// coverage. Over-withholding in strict posture is accepted; under-withholding
+// is not. The default posture releases and records the uncited secure context
 // in the content-free decision reasons.
 function withSecureLocalContextGate(
   decision: ReleaseDecision,
   facts: readonly StructuredEvidenceFact[],
-  secureContext: boolean,
+  detail: EvidencePackBuildDetail,
   releaseSecureContent: boolean,
 ): ReleaseDecision {
   if (decision.decision !== 'allow' && decision.decision !== 'redact') return decision;
+  const secureContext = detail.encounteredSecureLocal
+    || detail.pack.candidates.some((candidate) => isSecureSensitivity(candidate));
   if (!secureContext) return decision;
   if (!releaseSecureContent) {
     return {
@@ -2068,7 +2031,7 @@ function withSecureLocalContextGate(
       requiredApproval: 's4_release',
     };
   }
-  if (facts.some((fact) => fact.sensitivity.trustDomain === 'secure_local')) return decision;
+  if (facts.some((fact) => isSecureSensitivity(fact.sensitivity))) return decision;
   return releaseDecisionWithReason(decision, 'secure_local_context_uncited_derivative_allowed');
 }
 
@@ -2249,45 +2212,6 @@ function isUnsupportedNoContentAnswer(result: AnalystResult): boolean {
 
 function packHasSecureLocal(pack: EvidencePack): boolean {
   return pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local');
-}
-
-/**
- * Whether anything a model reading `pack` sees derives from secure_local
- * evidence. `pack` is the pack handed to the leg (fitted or whole); the main
- * and the audit prompt are both rendered from it, so this covers either.
- * Counted: a secure_local or secure-tier candidate, or a cached fact with
- * secure sensitivity; an extraction gap or a match count that `detail`
- * attributes to secure_local evidence (evidence-pack.ts records both at build
- * time from the routed hit or count); and any gap or count `detail` cannot
- * attribute (missing sidecar, or not among its pack's entries). Searched and
- * skipped corpora are not counted: they are corpus ids and closed reason
- * codes from configuration, never item text.
- */
-function packCarriesSecureLocalContext(pack: EvidencePack, detail: EvidencePackBuildDetail): boolean {
-  const secureCandidate = pack.candidates.some((candidate) => (
-    candidate.trustDomain === 'secure_local'
-    || isSecureTrustTier(candidate.trustTier)
-    || (candidate.facts ?? []).some((fact) => (
-      fact.sensitivity.trustDomain === 'secure_local' || isSecureTrustTier(fact.sensitivity.trustTier)
-    ))
-  ));
-  if (secureCandidate) return true;
-  const builtGaps = detail.pack.coverage.extractionGaps;
-  const gapIndexes = detail.secureLocalExtractionGapIndexes;
-  const secureGaps = new Set((gapIndexes ?? []).map((index) => builtGaps[index]));
-  const knownGaps = new Set(builtGaps);
-  if (pack.coverage.extractionGaps.some((gap) => (
-    gapIndexes === undefined || secureGaps.has(gap) || !knownGaps.has(gap)
-  ))) {
-    return true;
-  }
-  const counts = pack.coverage.matchCounts ?? [];
-  if (counts.length === 0) return false;
-  const countCorpora = detail.secureLocalMatchCountCorpusIds;
-  if (countCorpora === undefined) return true;
-  const secureCounts = new Set(countCorpora);
-  const knownCounts = new Set((detail.pack.coverage.matchCounts ?? []).map((count) => count.corpusId));
-  return counts.some((count) => secureCounts.has(count.corpusId) || !knownCounts.has(count.corpusId));
 }
 
 // Each analyst citation becomes a structured evidence fact for the release

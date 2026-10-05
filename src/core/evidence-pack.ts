@@ -42,6 +42,7 @@ import {
 } from './source-index/router.ts';
 import {
   buildSourceSensitivity,
+  isSecureSensitivity,
   type RetrievalDegradation,
   type RetrievalLaneAudit,
   type SourceIndexProvenance,
@@ -246,15 +247,15 @@ export interface EvidencePackBuildDetail {
   // neither reaches the Analyst.
   secretLocations?: readonly SecretLocationNote[];
   classificationCoverage?: readonly ClassificationCoverageNote[];
-  // Which coverage entries came from secure_local evidence, attributed at
-  // build time from the routed hit or count that produced them: indexes into
-  // pack.coverage.extractionGaps (a gap carries the item's title or locator),
-  // and the corpus ids of pack.coverage.matchCounts entries counted over a
-  // secure_local corpus. A fitted pack keeps coverage after dropping
-  // candidates, so the release gate reads these to tell whether a model saw
-  // Private-derived text. Indexes and corpus ids only.
-  secureLocalExtractionGapIndexes?: readonly number[];
-  secureLocalMatchCountCorpusIds?: readonly string[];
+  // True when this build met secure material anywhere (isSecureSensitivity):
+  // a routed hit, a hydrated candidate (provider upgrades included) or its
+  // cached facts, a policy-denied item (classification unknown, so counted),
+  // or a Private corpus's positive match count. Its candidates, gaps and
+  // counts reach the model through every leg's pack whatever fitting keeps,
+  // so the release gate reads this rather than tracking what a leg was shown.
+  // A Private corpus that was skipped or matched nothing contributed no text
+  // and does not set it.
+  encounteredSecureLocal: boolean;
 }
 
 export async function buildEvidencePack(input: BuildEvidencePackInput): Promise<EvidencePack> {
@@ -286,8 +287,12 @@ export async function buildEvidencePackDetailed(
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes: number[] = [];
   const contentPrivateCandidateIndexes: number[] = [];
-  const secureLocalExtractionGapIndexes: number[] = [];
   let unreadCandidates = 0;
+  // Every routed hit, before the visibility gate removes any.
+  let encounteredSecureLocal = routed.hits.some((hit) => isSecureSensitivity(hit))
+    || (routed.matchCounts ?? []).some((count) => (
+      isSecureSensitivity(count) && (count.matchedItems > 0 || count.saturated)
+    ));
 
   const hydrationStartedAt = Date.now();
   const maxBytesPerCandidate = evidenceBytesPerCandidate(
@@ -323,9 +328,9 @@ export async function buildEvidencePackDetailed(
 
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
+      encounteredSecureLocal = true;
       policyDeniedCandidates += 1;
       const gap = `${hit.corpusId} ${SOURCE_MODEL_POLICY_GAP_SUFFIX}`;
-      if (hit.trustDomain === 'secure_local') secureLocalExtractionGapIndexes.push(extractionGaps.length);
       extractionGaps.push(gap);
       policyDeniedCoverageGaps.push(gap);
       continue;
@@ -360,6 +365,7 @@ export async function buildEvidencePackDetailed(
     // it instead returns S5 content, that is an invariant failure: hard-stop
     // the entire build rather than misreporting it as an extraction miss.
     assertEvidenceCandidateModelEligible(candidate);
+    if (isSecureSensitivity(candidate)) encounteredSecureLocal = true;
     if (content?.namesOnly === true) namesOnlyCandidateIndexes.push(candidates.length);
     else if (content?.contentPrivate === true) contentPrivateCandidateIndexes.push(candidates.length);
     else if (!provider || !content || content.chunks.length === 0) unreadCandidates += 1;
@@ -367,12 +373,7 @@ export async function buildEvidencePackDetailed(
     candidateCorpusIds.push(hit.corpusId);
 
     const gap = extractionGapFor(hit, provider !== undefined, content);
-    if (gap) {
-      if (hit.trustDomain === 'secure_local' || candidate.trustDomain === 'secure_local') {
-        secureLocalExtractionGapIndexes.push(extractionGaps.length);
-      }
-      extractionGaps.push(gap);
-    }
+    if (gap) extractionGaps.push(gap);
   }
 
   const matchCounts = coverageMatchCounts(
@@ -419,10 +420,7 @@ export async function buildEvidencePackDetailed(
     namesOnlyCandidateIndexes,
     contentPrivateCandidateIndexes,
     unreadCandidates,
-    secureLocalExtractionGapIndexes,
-    secureLocalMatchCountCorpusIds: (routed.matchCounts ?? [])
-      .filter((count) => count.trustDomain === 'secure_local')
-      .map((count) => count.corpusId),
+    encounteredSecureLocal,
     ...(secretLocations.length > 0 ? { secretLocations } : {}),
     ...(classificationCoverage.length > 0 ? { classificationCoverage } : {}),
   };

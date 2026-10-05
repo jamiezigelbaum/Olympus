@@ -223,6 +223,24 @@ export function isSecureTrustTier(trustTier: SourceTrustTier): boolean {
   return trustTier === 'S4' || trustTier === 'S4+' || trustTier === 'S5';
 }
 
+export interface SecureSensitivityInput {
+  trustDomain: SourceTrustDomain;
+  trustTier?: SourceTrustTier;
+  facts?: readonly { sensitivity: SecureSensitivityInput }[];
+}
+
+/**
+ * The one definition of secure evidence: a secure_local trust domain, a
+ * secure tier (S4 and above), or any cached fact that is secure by this same
+ * rule. Takes a sensitivity, an evidence candidate, or a routed hit (which
+ * carries a domain only).
+ */
+export function isSecureSensitivity(input: SecureSensitivityInput): boolean {
+  return input.trustDomain === 'secure_local'
+    || (input.trustTier !== undefined && isSecureTrustTier(input.trustTier))
+    || (input.facts ?? []).some((fact) => isSecureSensitivity(fact.sensitivity));
+}
+
 export function buildSourceIndexStorageProfile(input: SourceIndexStorageProfileInput): SourceIndexStorageProfile {
   if (input.trustDomain === 'secure_local') {
     if (input.embeddingBackend === 'cloud' && input.embeddingProvider !== 'venice') {

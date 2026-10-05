@@ -7031,6 +7031,9 @@ function buildSourceSensitivity(input) {
 function isSecureTrustTier(trustTier) {
   return trustTier === "S4" || trustTier === "S4+" || trustTier === "S5";
 }
+function isSecureSensitivity(input) {
+  return input.trustDomain === "secure_local" || input.trustTier !== undefined && isSecureTrustTier(input.trustTier) || (input.facts ?? []).some((fact) => isSecureSensitivity(fact.sensitivity));
+}
 function buildSourceIndexStorageProfile(input) {
   if (input.trustDomain === "secure_local") {
     if (input.embeddingBackend === "cloud" && input.embeddingProvider !== "venice") {
@@ -25911,7 +25914,7 @@ ${buildCompactAnalystPrompt(pack)}`).length;
 ${buildAnalystPrompt(pack, localOnly)}`).length;
 }
 function evidencePackRequiresLocalOnly(pack) {
-  return pack.candidates.some((candidate) => candidate.trustDomain === "secure_local" || isSecureTrustTier(candidate.trustTier) || (candidate.facts ?? []).some((fact) => fact.sensitivity.trustDomain === "secure_local" || isSecureTrustTier(fact.sensitivity.trustTier)));
+  return pack.candidates.some((candidate) => isSecureSensitivity(candidate));
 }
 function hasGroundedPartialAnswer(draft, pack) {
   if (!draft?.answer.trim())
@@ -27624,8 +27627,8 @@ async function buildEvidencePackDetailed(input) {
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes = [];
   const contentPrivateCandidateIndexes = [];
-  const secureLocalExtractionGapIndexes = [];
   let unreadCandidates = 0;
+  let encounteredSecureLocal = routed.hits.some((hit) => isSecureSensitivity(hit)) || (routed.matchCounts ?? []).some((count) => isSecureSensitivity(count) && (count.matchedItems > 0 || count.saturated));
   const hydrationStartedAt = Date.now();
   const maxBytesPerCandidate = evidenceBytesPerCandidate(routedHits.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
   const maxCharsPerCandidate = maxBytesPerCandidate;
@@ -27651,10 +27654,9 @@ async function buildEvidencePackDetailed(input) {
   recordSourceAnswerHydration(Date.now() - hydrationStartedAt);
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
+      encounteredSecureLocal = true;
       policyDeniedCandidates += 1;
       const gap2 = `${hit.corpusId} ${SOURCE_MODEL_POLICY_GAP_SUFFIX}`;
-      if (hit.trustDomain === "secure_local")
-        secureLocalExtractionGapIndexes.push(extractionGaps.length);
       extractionGaps.push(gap2);
       policyDeniedCoverageGaps.push(gap2);
       continue;
@@ -27676,6 +27678,8 @@ async function buildEvidencePackDetailed(input) {
       ...hit.score !== undefined ? { score: hit.score } : {}
     };
     assertEvidenceCandidateModelEligible(candidate);
+    if (isSecureSensitivity(candidate))
+      encounteredSecureLocal = true;
     if (content?.namesOnly === true)
       namesOnlyCandidateIndexes.push(candidates.length);
     else if (content?.contentPrivate === true)
@@ -27685,12 +27689,8 @@ async function buildEvidencePackDetailed(input) {
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
     const gap = extractionGapFor(hit, provider !== undefined, content);
-    if (gap) {
-      if (hit.trustDomain === "secure_local" || candidate.trustDomain === "secure_local") {
-        secureLocalExtractionGapIndexes.push(extractionGaps.length);
-      }
+    if (gap)
       extractionGaps.push(gap);
-    }
   }
   const matchCounts = coverageMatchCounts(routed.matchCounts, candidateCorpusIds, candidates.some((candidate) => candidate.trustDomain === "secure_local"));
   const coverage = {
@@ -27715,8 +27715,7 @@ async function buildEvidencePackDetailed(input) {
     namesOnlyCandidateIndexes,
     contentPrivateCandidateIndexes,
     unreadCandidates,
-    secureLocalExtractionGapIndexes,
-    secureLocalMatchCountCorpusIds: (routed.matchCounts ?? []).filter((count) => count.trustDomain === "secure_local").map((count) => count.corpusId),
+    encounteredSecureLocal,
     ...secretLocations.length > 0 ? { secretLocations } : {},
     ...classificationCoverage.length > 0 ? { classificationCoverage } : {}
   };
@@ -29077,21 +29076,14 @@ function createAnalystSourceIndexAnswerHandler(options) {
       }
       let pack = detail.pack;
       const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
-      const analyzedSecureLocal = new WeakMap;
       const legFitting = (analysisDetail) => {
         const candidateCorpus = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? ""
         ]));
-        const recordAnalyzed = (result, analyzedPack) => {
-          if (typeof result !== "object" || result === null)
-            return;
-          analyzedSecureLocal.set(result, analyzedSecureLocal.get(result) === true || packCarriesSecureLocalContext(analyzedPack, analysisDetail));
-        };
         return {
-          localLeg: (analyst) => promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus, recordAnalyzed),
-          cloudLeg: (analyst) => promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, recordAnalyzed),
-          wholeLeg: (analyst) => recordingAnalyst(analyst, recordAnalyzed)
+          localLeg: (analyst) => promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus),
+          cloudLeg: (analyst) => promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus)
         };
       };
       assertEvidencePackModelEligible(pack);
@@ -29106,18 +29098,18 @@ function createAnalystSourceIndexAnswerHandler(options) {
       const localAnalystTimeoutMs = options.localAnalystTimeoutMs ?? DEFAULT_LOCAL_ANALYST_TIMEOUT_MS;
       const lastLegTimeoutMs = options.secureAnalystPool?.lastLegTimeoutMs ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS;
       const analyze = (analysisDetail, analysisLocalOnly) => {
-        const { localLeg, cloudLeg, wholeLeg } = legFitting(analysisDetail);
+        const { localLeg, cloudLeg } = legFitting(analysisDetail);
         return routeAnalysis({
           pack: analysisDetail.pack,
           localOnly: analysisLocalOnly,
           requestedProvider: requestedAnalystProvider,
           local: localLeg(options.analyst),
           ...options.cloudAnalyst ? { cloud: cloudLeg(options.cloudAnalyst) } : {},
-          ...veniceAnalyst ? { venice: wholeLeg(veniceAnalyst) } : {},
+          ...veniceAnalyst ? { venice: veniceAnalyst } : {},
           trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
-          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg, wholeLeg) } : {},
+          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg) } : {},
           secureAnalystPoolState,
           ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
           ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
@@ -29163,12 +29155,10 @@ function createAnalystSourceIndexAnswerHandler(options) {
       } = routedAnalysis;
       const analystMs = Date.now() - analystStartedAt;
       const releaseGateStartedAt = Date.now();
-      const analyzedSecureLocalContext = analyzedSecureLocal.get(analystResult);
       const { decision, facts, opsec, answer } = releaseAnalystAnswer({
         detail,
         result: analystResult,
         releaseSecureContent,
-        ...analyzedSecureLocalContext !== undefined ? { analyzedSecureLocalContext } : {},
         ...synthesizedGap ? { synthesizedGap } : {}
       });
       const releaseGateMs = Date.now() - releaseGateStartedAt;
@@ -29319,30 +29309,16 @@ function secureLocalExclusionCoverageNotes(detail) {
   }
   return notes;
 }
-function withLegPromptBudgets(route, localLeg, cloudLeg, wholeLeg) {
+function withLegPromptBudgets(route, localLeg, cloudLeg) {
   return (input) => {
     const resolved = route(input);
-    const fit = (steps) => steps.map((step) => step.backend === "local" ? { ...step, analyst: localLeg(step.analyst) } : step.backend === "cloud" ? { ...step, analyst: cloudLeg(step.analyst) } : { ...step, analyst: wholeLeg(step.analyst) });
+    const fit = (steps) => steps.map((step) => step.backend === "local" ? { ...step, analyst: localLeg(step.analyst) } : step.backend === "cloud" ? { ...step, analyst: cloudLeg(step.analyst) } : step);
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
-function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, onAnalyzed) {
+function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus) {
   return {
-    analyze: (pack, analyzeOptions) => {
-      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions);
-      return analyst.analyze(fitted, analyzeOptions).then((result) => {
-        onAnalyzed(result, fitted);
-        return result;
-      });
-    }
-  };
-}
-function recordingAnalyst(analyst, onAnalyzed) {
-  return {
-    analyze: (pack, analyzeOptions) => analyst.analyze(pack, analyzeOptions).then((result) => {
-      onAnalyzed(result, pack);
-      return result;
-    })
+    analyze: (pack, analyzeOptions) => analyst.analyze(fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions), analyzeOptions)
   };
 }
 function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions) {
@@ -30037,7 +30013,7 @@ function releaseAnalystAnswer(input) {
     decision: "needs_approval",
     reasons: ["uncited_non_public_answer"],
     requiredApproval: packHasSecureLocal(input.detail.pack) ? "s4_release" : "user_review"
-  } : withSecureLocalContextGate(originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision(), facts, input.analyzedSecureLocalContext ?? packCarriesSecureLocalContext(input.detail.pack, input.detail), input.releaseSecureContent);
+  } : withSecureLocalContextGate(originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision(), facts, input.detail, input.releaseSecureContent);
   return {
     decision,
     facts,
@@ -30065,9 +30041,10 @@ function scannedUnsupportedNoContentDecision(input) {
   });
   return releaseDecisionWithReason(safeScanned.decision === "allow" ? { ...safeScanned, allowedText: input.safeUnsupportedDraft } : safeScanned, input.reason);
 }
-function withSecureLocalContextGate(decision, facts, secureContext, releaseSecureContent) {
+function withSecureLocalContextGate(decision, facts, detail, releaseSecureContent) {
   if (decision.decision !== "allow" && decision.decision !== "redact")
     return decision;
+  const secureContext = detail.encounteredSecureLocal || detail.pack.candidates.some((candidate) => isSecureSensitivity(candidate));
   if (!secureContext)
     return decision;
   if (!releaseSecureContent) {
@@ -30080,7 +30057,7 @@ function withSecureLocalContextGate(decision, facts, secureContext, releaseSecur
       requiredApproval: "s4_release"
     };
   }
-  if (facts.some((fact) => fact.sensitivity.trustDomain === "secure_local"))
+  if (facts.some((fact) => isSecureSensitivity(fact.sensitivity)))
     return decision;
   return releaseDecisionWithReason(decision, "secure_local_context_uncited_derivative_allowed");
 }
@@ -30207,27 +30184,6 @@ function isUnsupportedNoContentAnswer2(result) {
 }
 function packHasSecureLocal(pack) {
   return pack.candidates.some((candidate) => candidate.trustDomain === "secure_local");
-}
-function packCarriesSecureLocalContext(pack, detail) {
-  const secureCandidate = pack.candidates.some((candidate) => candidate.trustDomain === "secure_local" || isSecureTrustTier(candidate.trustTier) || (candidate.facts ?? []).some((fact) => fact.sensitivity.trustDomain === "secure_local" || isSecureTrustTier(fact.sensitivity.trustTier)));
-  if (secureCandidate)
-    return true;
-  const builtGaps = detail.pack.coverage.extractionGaps;
-  const gapIndexes = detail.secureLocalExtractionGapIndexes;
-  const secureGaps = new Set((gapIndexes ?? []).map((index) => builtGaps[index]));
-  const knownGaps = new Set(builtGaps);
-  if (pack.coverage.extractionGaps.some((gap) => gapIndexes === undefined || secureGaps.has(gap) || !knownGaps.has(gap))) {
-    return true;
-  }
-  const counts = pack.coverage.matchCounts ?? [];
-  if (counts.length === 0)
-    return false;
-  const countCorpora = detail.secureLocalMatchCountCorpusIds;
-  if (countCorpora === undefined)
-    return true;
-  const secureCounts = new Set(countCorpora);
-  const knownCounts = new Set((detail.pack.coverage.matchCounts ?? []).map((count) => count.corpusId));
-  return counts.some((count) => secureCounts.has(count.corpusId) || !knownCounts.has(count.corpusId));
 }
 function factsFromCitations(citations, detail, releaseSecureContent) {
   return citations.flatMap((citation, index) => {
