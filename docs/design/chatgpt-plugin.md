@@ -537,6 +537,63 @@ percent when known; counts only, no job).
      the Private-eligible items; otherwise it is discarded and the answer is
      computed again from the current evidence. No eligible item left means
      `failed`.
+   - **Live eligibility at every model input (2026-10-05).** Searches only
+     propose evidence; whether an item may be read is decided by one live
+     guard (`checkPrivateEvidenceItems` in
+     `src/workers/source-index/analyst-answer.ts`), asked per item from live
+     state with no search and no cache: the item's corpus is still a
+     registered Private corpus, and its store would serve its content now
+     under the owner's current read scope (`contentServable` in
+     `connector-store/local-index.ts`: the scope filters, then one item row
+     and one tier-ledger read, no chunk text loaded): the item exists and is
+     not tombstoned, its stored tier is a known tier below S5, no
+     metadata-only owner rule covers its path (evaluated at read time, so
+     the rule applies before any strip has run), it still has stored text,
+     and the store's copy is current WITH the content layer, so a move to
+     Secrets, or a copy that serves only the names, refuses it. Anything it cannot vouch for (an error, a missing
+     corpus or provider, an item without its store identity) is not eligible.
+     It is asked immediately before every model submission, with only promise
+     continuations (no I/O, no timer) between its answer and the submission:
+     when an analysis is dispatched (a refused item's cached text then leaves
+     the job), before the panel's document embeddings (after the question's
+     embedding), before the depth re-read and before the answer (which also
+     re-counts matched items with no readable text), and inside every
+     answer-model call (main call, any retry or audit; one refusal stops the
+     answer). It is asked again before an answer is sealed, after sealing,
+     and on **every** later hand-out of the sealed answer and every source
+     open: an answer that read an item no longer eligible is withdrawn for
+     good (its sealed bytes, item identities and open tokens are dropped, the
+     job answers `failed`; a precompute discarded before sealing is computed
+     again once from the claim's evidence). Kept answers and sealed jobs hold
+     the items' identities only, not their text. A depth re-read that the
+     store refuses, or denies by policy, drops the item; one that fails
+     otherwise or comes back empty keeps the item's earlier passages only if
+     the guard confirms it after the read. A dropped item is not counted as
+     read, as unreadable, or as a source.
+   - **What the guard does not do (residual).** It cannot recall text
+     already handed to the on-device model when a tier change lands after
+     that hand-off (or in the continuations between the guard's answer and
+     the hand-off), including while the request waits in the embedding or
+     model server's own queue. A running analysis is not cancelled on
+     revocation; its answer is discarded at sealing. An answer the panel has
+     already decrypted and shown cannot be recalled. Owner rules are not
+     evaluated here: an always-Secret or always-Private owner rule takes
+     effect when the background rules sweep re-classifies the item (once
+     per sniffer tick, every 60 s, up to 1,000 items per pass, so a large
+     backlog takes several minutes; an item never routed through the tier
+     ledger waits for its next listing); search has the same window.
+     Metadata-only owner rules, by contrast, apply at read time here: an
+     item they cover is refused at once, even before its text is stripped.
+     The guarantee is that no hand-off starts with an item the guard has
+     just refused, and no answer derived from a now-ineligible item is
+     released after the guard refuses it. Cost: one batched per-item lookup
+     (a row and a ledger read) at dispatch, embeddings, depth read, answer,
+     each model call, before and after sealing, and each later hand-out or
+     open. Reviewer findings (2026-10-05): a precompute dispatched after its
+     item became Secret sent the cached text to the model; a single re-check
+     at dispatch also missed a claim's retry, revocation during hydration or
+     the question embedding, a stale claim-time set at sealing, policy-denied
+     depth reads, partial re-checks, and later hand-outs of a sealed answer.
    - **Hard deadline.** Every claim settles `ready` or `failed` within a
      deadline counted from the claim (100 s, inside the panel's two-minute
      wait), and each analysis has the same bound from its start, both
@@ -613,8 +670,9 @@ percent when known; counts only, no job).
      at the old 40-character bound) beside an answer that gave it.
    - **Timing log.** Each settled claim logs one content-free line:
      `[private-answer] outcome=… precomputed=yes|no wait_at_claim_ms=…
-     search_to_ready_ms=… queued_ms=… refresh_ms=… matched=… items=…
-     evidence_bytes=… model_ms=… main_…`. `wait_at_claim_ms` is what the
+     search_to_ready_ms=… queued_ms=… refresh_ms=… recheck_ms=… dropped=…
+     matched=… items=… evidence_bytes=… model_ms=… main_…` (`recheck_ms`
+     is the dispatch-time eligibility check, `dropped` the items it dropped). `wait_at_claim_ms` is what the
      panel waited after its claim; `search_to_ready_ms` is from the search to
      the answer being ready.
    - **Claim budget.** An unknown, expired or wrong-install id answers 410

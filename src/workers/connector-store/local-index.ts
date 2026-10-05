@@ -8642,6 +8642,48 @@ export class LocalConnectorStore {
     ).map((row) => searchRowFromItemRow(row));
   }
 
+  /**
+   * Whether this store serves an item's CONTENT right now, without reading
+   * it: the item exists and is not tombstoned; its stored tier is a known
+   * tier below S5; no metadata-only owner rule covers its path (evaluated
+   * now, so the rule applies before any strip has run); it still has stored
+   * text (at least one chunk row); and the tier ledger keeps this store's
+   * copy current WITH the content layer (a copy that serves only names, or a
+   * superseded or staged one, does not). Item, chunk-existence and ledger
+   * reads only: no chunk text is loaded. Fails closed (false) when the ledger
+   * cannot be read or the stored tier is unknown.
+   */
+  contentServedNow(localItemId: string): boolean {
+    const row = this.db.query(`
+      SELECT item_pk, trust_tier, locator_uri, provider, account_scope, provider_item_id, provider_conversation_id
+      FROM items WHERE local_item_id = ? AND tombstoned = 0
+    `).get(localItemId) as {
+      item_pk: number;
+      trust_tier: string;
+      locator_uri: string | null;
+      provider: string;
+      account_scope: string;
+      provider_item_id: string;
+      provider_conversation_id: string | null;
+    } | null;
+    if (!row) return false;
+    try {
+      if (trustTierFromRow(row.trust_tier) === 'S5') return false;
+    } catch {
+      return false;
+    }
+    if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined) !== undefined) return false;
+    const hasText = this.db.query('SELECT EXISTS (SELECT 1 FROM chunks WHERE item_pk = ?) AS present').get(row.item_pk) as { present: number } | null;
+    if (!hasText?.present) return false;
+    const identity = {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    };
+    return this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+  }
+
   // Local content lane for the evidence-pack provider: bounded chunks, the
   // stored trust tier, and the locator uri. Tombstoned/unknown items yield
   // undefined so the pack records an honest extraction gap.
@@ -9886,9 +9928,20 @@ export const CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP =
 // LocalContentProvider over the store: bounded chunks, the item's stored
 // sensitivity, and the stored locator uri. Local by construction — every read
 // goes to the store's sqlite file; nothing here touches the network.
+/**
+ * A connector store's content provider, plus `contentServable`: whether it
+ * would serve an item's content now under this provider's scope, answered
+ * from the item row, the scope filters and the tier ledger only (no chunk is
+ * loaded, no passage selected). The private answer panel's eligibility guard
+ * asks it before every model input.
+ */
+export interface ConnectorStoreContentProvider extends LocalContentProvider {
+  contentServable(request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain }): boolean;
+}
+
 export function createConnectorStoreContentProvider(
   options: ConnectorStoreContentProviderOptions,
-): LocalContentProvider {
+): ConnectorStoreContentProvider {
   const { store } = options;
   const embeddingProvider = options.embeddingProvider
     && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider))
@@ -9910,6 +9963,13 @@ export function createConnectorStoreContentProvider(
     }
   };
   return {
+    contentServable(request) {
+      if (request.trustDomain !== store.trustDomain) return false;
+      const localItemId = request.provenance.sourceItem.localItemId.trim();
+      if (!localItemId || options.contentAllowed === false) return false;
+      if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) return false;
+      return store.contentServedNow(localItemId);
+    },
     async fetchLocalContent(request: LocalContentRequest): Promise<LocalContentBlock | undefined> {
       if (request.trustDomain !== store.trustDomain) {
         throw new Error(

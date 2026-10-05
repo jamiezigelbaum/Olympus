@@ -21,6 +21,14 @@
  *    claims the job. Another key gets 409 `claimed`: the panel says the
  *    answer was already opened elsewhere, and this Mac writes a content-free
  *    audit line.
+ * Eligibility (every model input): the live eligibility guard (`eligible`,
+ *    the item's tier, the owner's rules and scope, and that it still exists,
+ *    read when called) is asked immediately before every model submission:
+ *    when an analysis is dispatched (dropping a no-longer-eligible item's
+ *    cached text from the job then), and inside the private model before
+ *    its document embeddings, its depth re-read and every answer-model call.
+ *    An item it does not vouch for is never submitted. Nothing eligible left:
+ *    no model call, and the analysis ends with no evidence.
  * 3. Claim time: the evidence is searched again (current tiers, not the
  *    search-time cache), and anything not Private-eligible now (Secret
  *    included) is dropped. The precomputed answer is used only when every
@@ -29,6 +37,12 @@
  *    The claiming POST holds briefly (PRIVATE_ANSWER_CLAIM_HOLD_MS) for the
  *    answer; until it is sealed, the claiming key gets 202 `pending` with
  *    Retry-After.
+ *    Before an answer is sealed, and again after sealing and before it is
+ *    released, every item it read must still pass the guard; otherwise it
+ *    is discarded (a precompute is computed again once, a claim's own answer
+ *    fails), so no answer derived from a now-ineligible item is ever shown.
+ *    What the guard cannot do: recall text already handed to the on-device
+ *    model when a tier change lands after that submission was issued.
  * 4. Then the claiming key gets 200 `ready` with the answer sealed to that
  *    key (private-answer-crypto.ts), padded to a size bucket so the
  *    ciphertext length does not reveal the answer length. The same key gets
@@ -73,8 +87,11 @@ import {
   type PrivateAnswerModel,
   type PrivateAnswerModelCall,
   type PrivateAnswerPlaintextV1,
+  type PrivateEvidenceGuard,
   type PrivateEvidenceItem,
   type PrivateMatchSummary,
+  NoPrivateEvidenceError,
+  checkPrivateEvidence,
 } from './private-answer-contract.ts';
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer, type SealedPrivateAnswer } from './private-answer-crypto.ts';
 
@@ -84,6 +101,13 @@ export type PrivateAnswerAuditEvent = 'claimed_by_other_key' | 'analysis_deadlin
 export interface PrivateAnswerJobsOptions {
   /** The private model (the private-model lane's `built_in` analyst), read per use. */
   model: () => PrivateAnswerModel;
+  /**
+   * Whether each evidence item may be read by a model right now, from live
+   * state: asked when an analysis is dispatched and before (and after) an
+   * answer is sealed. The model applies the same guard before each of its
+   * own submissions. Anything it does not vouch for is never read.
+   */
+  eligible: PrivateEvidenceGuard;
   /** This engine's relay install id; no job is created without one. */
   installId: () => string | undefined;
   now?: () => number;
@@ -156,6 +180,10 @@ interface AnalysisTiming {
   /** The analysis's wait for the model slot. */
   queuedMs: number;
   refreshMs?: number;
+  /** The dispatch-time eligibility check of the analysis's cached evidence. */
+  recheckMs?: number | undefined;
+  /** Cached evidence items the dispatch-time eligibility check dropped. */
+  dropped?: number | undefined;
   matched?: number;
   items?: number | undefined;
   unreadable?: number | undefined;
@@ -184,6 +212,8 @@ export function formatAnalysisTiming(timing: AnalysisTiming): string {
   if (timing.searchToReadyMs !== undefined) fields.push(`search_to_ready_ms=${timing.searchToReadyMs}`);
   fields.push(`queued_ms=${timing.queuedMs}`);
   if (timing.refreshMs !== undefined) fields.push(`refresh_ms=${timing.refreshMs}`);
+  if (timing.recheckMs !== undefined) fields.push(`recheck_ms=${timing.recheckMs}`);
+  if (timing.dropped) fields.push(`dropped=${timing.dropped}`);
   if (timing.matched !== undefined) fields.push(`matched=${timing.matched}`);
   if (timing.items !== undefined) fields.push(`items=${timing.items}`);
   if (timing.unreadable !== undefined) fields.push(`unreadable=${timing.unreadable}`);
@@ -220,11 +250,17 @@ interface Analysis {
   question: string | undefined;
   evidence: readonly PrivateEvidenceItem[] | undefined;
   state: 'queued' | 'running' | 'done' | 'failed';
-  result: { plaintext: PrivateAnswerPlaintextV1; localPaths: readonly (string | undefined)[]; usedKeys: readonly string[] | undefined } | undefined;
+  result: {
+    plaintext: PrivateAnswerPlaintextV1;
+    localPaths: readonly (string | undefined)[];
+    usedKeys: readonly string[] | undefined;
+    /** The evidence items the answer read, checked against the live guard before it is sealed. */
+    usedItems: readonly PrivateEvidenceItem[];
+  } | undefined;
   failReason: AnalysisTiming['reason'] | undefined;
   startedAt: number | undefined;
   readyAt: number | undefined;
-  stats: Pick<AnalysisTiming, 'items' | 'unreadable' | 'evidenceBytes' | 'modelMs'> & { calls: PrivateAnswerModelCall[] };
+  stats: Pick<AnalysisTiming, 'items' | 'unreadable' | 'evidenceBytes' | 'modelMs' | 'recheckMs' | 'dropped'> & { calls: PrivateAnswerModelCall[] };
   readonly abort: AbortController;
   readonly jobs: Set<Job>;
   readonly settled: Promise<void>;
@@ -245,6 +281,12 @@ interface Job {
   pollTokens: number;
   pollRefilledAt: number;
   outcome?: { kind: 'sealed'; sealed: SealedPrivateAnswer } | { kind: 'failed' } | undefined;
+  /**
+   * The evidence items the sealed answer read, identities only (no text):
+   * every later hand-out of the sealed bytes, and every source open, asks
+   * the live guard about them first.
+   */
+  sealedItems?: readonly PrivateEvidenceItem[] | undefined;
   claimAbort?: AbortController;
   /**
    * This job's source-open capabilities: token → local file, minted when
@@ -413,15 +455,15 @@ export class PrivateAnswerJobs {
    * otherwise. `count` is capped at PRIVATE_MATCH_COUNT_CAP. Call it as the
    * tool result is built, so the id is valid only from then on. The job's
    * analysis starts now, from `evidence` (Private-eligible items only).
-   * `refresh` re-reads the evidence at claim time; without it the search-time
-   * hits are used, still filtered by isPrivateEligible. `caller` (the
+   * `refresh` is the same Private search again, at claim time: it proposes
+   * the current evidence (the live guard decides what may be read). `caller` (the
    * connection) lets a newer job supersede that caller's older precomputes.
    */
   begin(input: {
     question: string;
     count: number;
     evidence: readonly PrivateEvidenceItem[];
-    refresh?: PrivateEvidenceRefresh;
+    refresh: PrivateEvidenceRefresh;
     caller?: string;
     /** `full` reads the leading items in depth (slower); `summary` by default. */
     detail?: PrivateAnswerDetail;
@@ -506,6 +548,10 @@ export class PrivateAnswerJobs {
       return { status: 202, body: { status: 'pending' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
     }
     if (outcome.kind === 'failed') return { status: 200, body: { status: 'failed' } };
+    // Every hand-out of the sealed bytes, not only the first: an item the
+    // answer read that is no longer eligible withdraws it for good.
+    if (!(await this.stillReleasable(job))) return this.jobs.get(jobId) === job ? { status: 200, body: { status: 'failed' } } : gone();
+    if (this.jobs.get(jobId) !== job || job.outcome !== outcome) return job.outcome?.kind === 'failed' ? { status: 200, body: { status: 'failed' } } : gone();
     return { status: 200, body: { status: 'ready', v: 1, ...outcome.sealed } };
   }
 
@@ -524,6 +570,8 @@ export class PrivateAnswerJobs {
     const path = job.opens?.get(token);
     if (!path || !this.options.openFile) return gone();
     if (!this.takeOpen(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: 5 };
+    // The answer's sources open only while every item it read is still eligible.
+    if (!(await this.stillReleasable(job)) || this.jobs.get(jobId) !== job) return gone();
     // The final path as it is now: a regular file, never a symlink swapped in since the token was minted.
     let isFile = false;
     try {
@@ -538,6 +586,23 @@ export class PrivateAnswerJobs {
       return { status: 200, body: { status: 'failed' } };
     }
     return { status: 204, body: { status: 'opened' } };
+  }
+
+  /**
+   * Whether a sealed answer may still be handed out: every item it read
+   * passes the live guard now. If not, the answer is withdrawn for good: the
+   * sealed bytes, the items and the source-open tokens are dropped and the
+   * job is failed.
+   */
+  private async stillReleasable(job: Job): Promise<boolean> {
+    if (job.outcome?.kind !== 'sealed') return false;
+    const ok = await checkPrivateEvidence(this.options.eligible, job.sealedItems ?? []);
+    // (An answer that read no item, such as "nothing was readable", holds no item text.)
+    if (job.sealedItems !== undefined && ok.every(Boolean) && job.outcome?.kind === 'sealed') return true;
+    job.outcome = { kind: 'failed' };
+    job.sealedItems = undefined;
+    job.opens = undefined;
+    return false;
   }
 
   /** Drops expired jobs (cancelling analyses no live job needs) and forgets shared answers past the dedupe window. */
@@ -558,6 +623,7 @@ export class PrivateAnswerJobs {
     job.refresh = undefined;
     job.outcome = undefined;
     job.opens = undefined;
+    job.sealedItems = undefined;
     this.jobs.delete(id);
   }
 
@@ -655,6 +721,22 @@ export class PrivateAnswerJobs {
     analysis.abort.abort();
   }
 
+  /**
+   * Drops items the guard no longer vouches for from the cached evidence of
+   * every job attached to this analysis, so their text is not kept until the
+   * job is claimed or expires.
+   */
+  private forget(analysis: Analysis, items: readonly PrivateEvidenceItem[]): void {
+    const gone = new Set(items.map(privateEvidenceKey).filter((key): key is string => key !== undefined));
+    for (const job of analysis.jobs) {
+      if (!job.evidence) continue;
+      job.evidence = job.evidence.filter((item) => {
+        const key = privateEvidenceKey(item);
+        return key === undefined ? !items.includes(item) : !gone.has(key);
+      });
+    }
+  }
+
   /** Forgets a settled analysis's answer and evidence. */
   private release(analysis: Analysis): void {
     analysis.result = undefined;
@@ -740,8 +822,20 @@ export class PrivateAnswerJobs {
     }, this.timeoutFor(analysis.detail));
     (deadlineTimer as { unref?: () => void }).unref?.();
     const question = analysis.question ?? '';
-    const evidence = analysis.evidence ?? [];
+    const cached = analysis.evidence ?? [];
+    let evidence: readonly PrivateEvidenceItem[] = [];
     const work = (async () => {
+      if (abort.signal.aborted) throw new AnalysisStop('aborted');
+      if (cached.length === 0) throw new AnalysisStop('no_evidence');
+      // Dispatch: only items the live guard vouches for now go on to the
+      // model (which checks again before each of its own submissions). A
+      // dropped item's cached text leaves the analysis and its jobs now.
+      const checkStarted = this.now();
+      const ok = await checkPrivateEvidence(this.options.eligible, cached);
+      evidence = cached.filter((_, index) => ok[index]);
+      analysis.stats.recheckMs = this.now() - checkStarted;
+      analysis.stats.dropped = cached.length - evidence.length;
+      if (evidence.length < cached.length) this.forget(analysis, cached.filter((_, index) => !ok[index]));
       if (abort.signal.aborted) throw new AnalysisStop('aborted');
       if (evidence.length === 0) throw new AnalysisStop('no_evidence');
       const modelStarted = this.now();
@@ -759,6 +853,9 @@ export class PrivateAnswerJobs {
           },
         }, { detail: analysis.detail });
         return { result, used };
+      } catch (error) {
+        if (error instanceof NoPrivateEvidenceError) throw new AnalysisStop('no_evidence');
+        throw error;
       } finally {
         analysis.stats.modelMs = this.now() - modelStarted;
       }
@@ -775,7 +872,11 @@ export class PrivateAnswerJobs {
         this.finish(analysis, 'failed', 'aborted');
         return;
       }
-      analysis.result = { ...preparedAnswer(done.result), usedKeys: usedKeys(evidence, done.used) };
+      analysis.result = {
+        ...preparedAnswer(done.result),
+        usedKeys: usedKeys(evidence, done.used),
+        usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity),
+      };
       this.finish(analysis, 'done');
     } catch (error) {
       if (!timedOut) this.finish(analysis, 'failed', error instanceof AnalysisStop ? error.reason : 'error');
@@ -842,6 +943,8 @@ export class PrivateAnswerJobs {
       abort.signal.addEventListener('abort', () => resolve(), { once: true });
     });
     const record = (analysis: Analysis) => {
+      timing.recheckMs = analysis.stats.recheckMs;
+      timing.dropped = analysis.stats.dropped;
       timing.items = analysis.stats.items;
       timing.unreadable = analysis.stats.unreadable;
       timing.evidenceBytes = analysis.stats.evidenceBytes;
@@ -855,13 +958,13 @@ export class PrivateAnswerJobs {
       if (analysis.readyAt !== undefined) timing.searchToReadyMs = Math.max(0, analysis.readyAt - job.createdAt);
     };
     const run = async () => {
-      const cached = job.evidence ?? [];
       const refresh = job.refresh;
       const question = job.question ?? '';
       job.evidence = undefined;
       job.refresh = undefined;
       const refreshStarted = this.now();
-      const found = refresh ? await refresh(abort.signal) : cached;
+      // No search to judge the items by now: nothing is read (fail closed).
+      const found = refresh ? await refresh(abort.signal) : [];
       if (refresh) timing.refreshMs = this.now() - refreshStarted;
       // A refresh that finished after the deadline (or after the job was
       // dropped) must not start inference.
@@ -890,19 +993,35 @@ export class PrivateAnswerJobs {
         if (settled) return;
         record(analysis);
         const result = analysis.state === 'done' ? analysis.result : undefined;
-        if (result && (!precomputed || stillEligible(result.usedKeys, current))) {
-          timing.precomputed = precomputed;
-          timing.waitAtClaimMs = this.now() - claimedAt;
+        // Every item the answer read must still pass the live guard, checked
+        // now (not against the claim-time search, which may be minutes old),
+        // and again once it is sealed, just before it is released.
+        const stillReadable = async () => result !== undefined
+          && (await checkPrivateEvidence(this.options.eligible, result.usedItems)).every(Boolean);
+        if (result && (!precomputed || stillEligible(result.usedKeys, current)) && await stillReadable()) {
+          if (settled) return;
           const plaintext = this.withOpenTokens(job, result.plaintext, result.localPaths);
           const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(plaintext)));
-          settle({ kind: 'sealed', sealed });
-          return;
+          if (settled) return;
+          if (await stillReadable()) {
+            if (settled) return;
+            timing.precomputed = precomputed;
+            timing.waitAtClaimMs = this.now() - claimedAt;
+            job.sealedItems = result.usedItems;
+            settle({ kind: 'sealed', sealed });
+            return;
+          }
+          job.opens = undefined;
         }
+        if (settled) return;
         // Failed, or read an item that is no longer Private-eligible: this
-        // answer is discarded for this job, and computed again once.
+        // answer is discarded for this job (never sealed or released), and a
+        // precompute is computed again once from the current evidence.
+        // No later search shares an answer that was discarded.
+        if (result && this.shared.get(analysis.key) === analysis) this.shared.delete(analysis.key);
         this.detach(job);
         if (!precomputed) {
-          settle({ kind: 'failed' }, analysis.failReason ?? 'error');
+          settle({ kind: 'failed' }, result ? 'no_evidence' : analysis.failReason ?? 'error');
           return;
         }
       }
@@ -1027,6 +1146,46 @@ function usedKeys(evidence: readonly PrivateEvidenceItem[], used: readonly numbe
     keys.push(key);
   }
   return keys;
+}
+
+/** The only fields an identity keeps: what the guard and the claim-time match need (no text field can enter). */
+const IDENTITY_FIELDS = [
+  'corpusId', 'trustDomain', 'trust_domain', 'trustTier', 'trust_tier',
+  'tier', 'content_tier', 'contentTier', 'metadata_tier', 'metadataTier',
+] as const;
+
+/**
+ * An evidence item as the guard needs it, without its text: an allowlist of
+ * its corpus, trust domain and tier fields and its store identity (the
+ * source item, top-level or under provenance, and the citation title), so an
+ * answer kept for the dedupe window or a sealed job holds no passages,
+ * tables or any text field added later.
+ */
+export function privateEvidenceIdentity(item: PrivateEvidenceItem): PrivateEvidenceItem {
+  const kept: Record<string, unknown> = {};
+  for (const key of IDENTITY_FIELDS) {
+    const value = item[key];
+    if (typeof value === 'string') kept[key] = value;
+  }
+  const sourceItem = asRecord(item.sourceItem);
+  if (sourceItem) kept.sourceItem = sourceItem;
+  const provenance = asRecord(item.provenance);
+  const citation = asRecord(provenance?.citation);
+  if (provenance) {
+    kept.provenance = {
+      ...(asRecord(provenance.sourceItem) ? { sourceItem: provenance.sourceItem } : {}),
+      ...(typeof citation?.title === 'string' ? { citation: { title: citation.title } } : {}),
+    };
+  }
+  return kept;
+}
+
+/** The evidence items the answer read (all of them when the model did not say). */
+function usedItems(evidence: readonly PrivateEvidenceItem[], used: readonly number[] | undefined): readonly PrivateEvidenceItem[] {
+  if (used === undefined) return evidence;
+  const read = used.map((index) => evidence[index]);
+  // An index the evidence does not have: the answer's sources are unknown, so all of it is checked.
+  return read.every((item) => item !== undefined) ? read as PrivateEvidenceItem[] : evidence;
 }
 
 /** Every item the answer read is among the current Private-eligible evidence. An answer with unknown sources never is. */

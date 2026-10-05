@@ -17094,6 +17094,16 @@ function createConnectorStoreContentProvider(options) {
     }
   };
   return {
+    contentServable(request) {
+      if (request.trustDomain !== store.trustDomain)
+        return false;
+      const localItemId = request.provenance.sourceItem.localItemId.trim();
+      if (!localItemId || options.contentAllowed === false)
+        return false;
+      if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
+        return false;
+      return store.contentServedNow(localItemId);
+    },
     async fetchLocalContent(request) {
       if (request.trustDomain !== store.trustDomain) {
         throw new Error(`Connector store content provider for ${store.corpusId} (${store.trustDomain}) ` + `refused a ${request.trustDomain} content request.`);
@@ -22880,6 +22890,32 @@ var init_local_index = __esm(() => {
         providerItemId: row.provider_item_id,
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       }), () => "content").map((row) => searchRowFromItemRow(row));
+    }
+    contentServedNow(localItemId) {
+      const row = this.db.query(`
+      SELECT item_pk, trust_tier, locator_uri, provider, account_scope, provider_item_id, provider_conversation_id
+      FROM items WHERE local_item_id = ? AND tombstoned = 0
+    `).get(localItemId);
+      if (!row)
+        return false;
+      try {
+        if (trustTierFromRow(row.trust_tier) === "S5")
+          return false;
+      } catch {
+        return false;
+      }
+      if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined) !== undefined)
+        return false;
+      const hasText = this.db.query("SELECT EXISTS (SELECT 1 FROM chunks WHERE item_pk = ?) AS present").get(row.item_pk);
+      if (!hasText?.present)
+        return false;
+      const identity = {
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      };
+      return this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
     }
     localContent(localItemId, maxChars, passageFocus, options = {}) {
       const row = this.db.query(`
@@ -30415,6 +30451,47 @@ async function searchPrivateEvidence(input) {
   assertEvidencePackModelEligible(detail.pack);
   const candidates = detail.pack.candidates.map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? "" })).filter((candidate) => candidate.trustDomain === "secure_local" && candidate.corpusId !== "");
   return { matched: candidates.length, candidates };
+}
+async function checkPrivateEvidenceItems(input) {
+  if (input.items.length === 0)
+    return [];
+  let lanes;
+  try {
+    lanes = input.lanes({
+      question: "eligibility",
+      retrieval_mode: "keyword",
+      include_internal: false,
+      include_secure_local: true,
+      include_secure_local_content: true
+    });
+  } catch {
+    return input.items.map(() => false);
+  }
+  return Promise.all(input.items.map(async (item) => {
+    try {
+      const corpusId = typeof item.corpusId === "string" ? item.corpusId : undefined;
+      const provenance = item.provenance;
+      if (!corpusId || !provenance?.sourceItem?.localItemId || item.trustDomain !== "secure_local")
+        return false;
+      if (lanes.registry.get(corpusId)?.trustDomain !== "secure_local")
+        return false;
+      const provider = lanes.contentProviders[corpusId];
+      if (!provider)
+        return false;
+      if (typeof provider.contentServable === "function") {
+        return provider.contentServable({ provenance, trustDomain: "secure_local" }) === true;
+      }
+      const content = await provider.fetchLocalContent({ provenance, trustDomain: "secure_local", maxChars: 1 });
+      if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0)
+        return false;
+      if (content.sensitivity.trustDomain !== "secure_local")
+        return false;
+      assertModelTrustTierAllowed(content.sensitivity.trustTier);
+      return true;
+    } catch {
+      return false;
+    }
+  }));
 }
 async function readPrivateEvidenceItem(input) {
   const corpusId = typeof input.item.corpusId === "string" ? input.item.corpusId : undefined;
@@ -108652,9 +108729,30 @@ var init_model_choice = __esm(() => {
 });
 
 // src/workers/chatgpt/private-answer-contract.ts
-var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_MATCH_COUNT_CAP = 50;
+async function checkPrivateEvidence(guard, items) {
+  if (items.length === 0)
+    return [];
+  if (!guard)
+    return items.map(() => false);
+  let answer;
+  try {
+    answer = await guard(items);
+  } catch {
+    return items.map(() => false);
+  }
+  if (!Array.isArray(answer) || answer.length !== items.length)
+    return items.map(() => false);
+  return answer.map((value) => value === true);
+}
+var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_MATCH_COUNT_CAP = 50, NoPrivateEvidenceError;
 var init_private_answer_contract = __esm(() => {
   PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
+  NoPrivateEvidenceError = class NoPrivateEvidenceError extends Error {
+    constructor() {
+      super("no private evidence may be read");
+      this.name = "NoPrivateEvidenceError";
+    }
+  };
 });
 
 // src/workers/dashboard/chatgpt/private-answer.ts
@@ -112677,6 +112775,7 @@ var exports_private_answer_jobs = {};
 __export(exports_private_answer_jobs, {
   withPrivateAnswerRoute: () => withPrivateAnswerRoute,
   privateEvidenceKey: () => privateEvidenceKey,
+  privateEvidenceIdentity: () => privateEvidenceIdentity,
   plaintextOf: () => plaintextOf,
   isPrivateEligible: () => isPrivateEligible,
   isPrivateAnswerRequest: () => isPrivateAnswerRequest,
@@ -112704,6 +112803,10 @@ function formatAnalysisTiming(timing) {
   fields.push(`queued_ms=${timing.queuedMs}`);
   if (timing.refreshMs !== undefined)
     fields.push(`refresh_ms=${timing.refreshMs}`);
+  if (timing.recheckMs !== undefined)
+    fields.push(`recheck_ms=${timing.recheckMs}`);
+  if (timing.dropped)
+    fields.push(`dropped=${timing.dropped}`);
   if (timing.matched !== undefined)
     fields.push(`matched=${timing.matched}`);
   if (timing.items !== undefined)
@@ -112898,6 +113001,10 @@ class PrivateAnswerJobs {
     }
     if (outcome.kind === "failed")
       return { status: 200, body: { status: "failed" } };
+    if (!await this.stillReleasable(job))
+      return this.jobs.get(jobId) === job ? { status: 200, body: { status: "failed" } } : gone();
+    if (this.jobs.get(jobId) !== job || job.outcome !== outcome)
+      return job.outcome?.kind === "failed" ? { status: 200, body: { status: "failed" } } : gone();
     return { status: 200, body: { status: "ready", v: 1, ...outcome.sealed } };
   }
   async open(jobId, token) {
@@ -112912,6 +113019,8 @@ class PrivateAnswerJobs {
       return gone();
     if (!this.takeOpen(job))
       return { status: 429, body: { status: "rate_limited" }, retryAfterSeconds: 5 };
+    if (!await this.stillReleasable(job) || this.jobs.get(jobId) !== job)
+      return gone();
     let isFile = false;
     try {
       isFile = lstatSync19(path).isFile();
@@ -112926,6 +113035,17 @@ class PrivateAnswerJobs {
       return { status: 200, body: { status: "failed" } };
     }
     return { status: 204, body: { status: "opened" } };
+  }
+  async stillReleasable(job) {
+    if (job.outcome?.kind !== "sealed")
+      return false;
+    const ok = await checkPrivateEvidence(this.options.eligible, job.sealedItems ?? []);
+    if (job.sealedItems !== undefined && ok.every(Boolean) && job.outcome?.kind === "sealed")
+      return true;
+    job.outcome = { kind: "failed" };
+    job.sealedItems = undefined;
+    job.opens = undefined;
+    return false;
   }
   sweep(at = this.now()) {
     for (const [id, job] of this.jobs)
@@ -112947,6 +113067,7 @@ class PrivateAnswerJobs {
     job.refresh = undefined;
     job.outcome = undefined;
     job.opens = undefined;
+    job.sealedItems = undefined;
     this.jobs.delete(id);
   }
   precompute(job) {
@@ -113028,6 +113149,17 @@ class PrivateAnswerJobs {
       return;
     }
     analysis.abort.abort();
+  }
+  forget(analysis, items) {
+    const gone = new Set(items.map(privateEvidenceKey).filter((key) => key !== undefined));
+    for (const job of analysis.jobs) {
+      if (!job.evidence)
+        continue;
+      job.evidence = job.evidence.filter((item) => {
+        const key = privateEvidenceKey(item);
+        return key === undefined ? !items.includes(item) : !gone.has(key);
+      });
+    }
   }
   release(analysis) {
     analysis.result = undefined;
@@ -113115,8 +113247,20 @@ class PrivateAnswerJobs {
     }, this.timeoutFor(analysis.detail));
     deadlineTimer.unref?.();
     const question = analysis.question ?? "";
-    const evidence = analysis.evidence ?? [];
+    const cached2 = analysis.evidence ?? [];
+    let evidence = [];
     const work = (async () => {
+      if (abort.signal.aborted)
+        throw new AnalysisStop("aborted");
+      if (cached2.length === 0)
+        throw new AnalysisStop("no_evidence");
+      const checkStarted = this.now();
+      const ok = await checkPrivateEvidence(this.options.eligible, cached2);
+      evidence = cached2.filter((_, index) => ok[index]);
+      analysis.stats.recheckMs = this.now() - checkStarted;
+      analysis.stats.dropped = cached2.length - evidence.length;
+      if (evidence.length < cached2.length)
+        this.forget(analysis, cached2.filter((_, index) => !ok[index]));
       if (abort.signal.aborted)
         throw new AnalysisStop("aborted");
       if (evidence.length === 0)
@@ -113136,6 +113280,10 @@ class PrivateAnswerJobs {
           }
         }, { detail: analysis.detail });
         return { result, used };
+      } catch (error2) {
+        if (error2 instanceof NoPrivateEvidenceError)
+          throw new AnalysisStop("no_evidence");
+        throw error2;
       } finally {
         analysis.stats.modelMs = this.now() - modelStarted;
       }
@@ -113156,7 +113304,11 @@ class PrivateAnswerJobs {
         this.finish(analysis, "failed", "aborted");
         return;
       }
-      analysis.result = { ...preparedAnswer(done.result), usedKeys: usedKeys(evidence, done.used) };
+      analysis.result = {
+        ...preparedAnswer(done.result),
+        usedKeys: usedKeys(evidence, done.used),
+        usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity)
+      };
       this.finish(analysis, "done");
     } catch (error2) {
       if (!timedOut)
@@ -113215,6 +113367,8 @@ class PrivateAnswerJobs {
       abort.signal.addEventListener("abort", () => resolve10(), { once: true });
     });
     const record3 = (analysis) => {
+      timing.recheckMs = analysis.stats.recheckMs;
+      timing.dropped = analysis.stats.dropped;
       timing.items = analysis.stats.items;
       timing.unreadable = analysis.stats.unreadable;
       timing.evidenceBytes = analysis.stats.evidenceBytes;
@@ -113227,13 +113381,12 @@ class PrivateAnswerJobs {
         timing.searchToReadyMs = Math.max(0, analysis.readyAt - job.createdAt);
     };
     const run = async () => {
-      const cached2 = job.evidence ?? [];
       const refresh = job.refresh;
       const question = job.question ?? "";
       job.evidence = undefined;
       job.refresh = undefined;
       const refreshStarted = this.now();
-      const found = refresh ? await refresh(abort.signal) : cached2;
+      const found = refresh ? await refresh(abort.signal) : [];
       if (refresh)
         timing.refreshMs = this.now() - refreshStarted;
       if (settled || abort.signal.aborted)
@@ -113260,17 +113413,32 @@ class PrivateAnswerJobs {
           return;
         record3(analysis);
         const result = analysis.state === "done" ? analysis.result : undefined;
-        if (result && (!precomputed || stillEligible(result.usedKeys, current))) {
-          timing.precomputed = precomputed;
-          timing.waitAtClaimMs = this.now() - claimedAt;
+        const stillReadable = async () => result !== undefined && (await checkPrivateEvidence(this.options.eligible, result.usedItems)).every(Boolean);
+        if (result && (!precomputed || stillEligible(result.usedKeys, current)) && await stillReadable()) {
+          if (settled)
+            return;
           const plaintext = this.withOpenTokens(job, result.plaintext, result.localPaths);
           const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(JSON.stringify(plaintext)));
-          settle({ kind: "sealed", sealed });
-          return;
+          if (settled)
+            return;
+          if (await stillReadable()) {
+            if (settled)
+              return;
+            timing.precomputed = precomputed;
+            timing.waitAtClaimMs = this.now() - claimedAt;
+            job.sealedItems = result.usedItems;
+            settle({ kind: "sealed", sealed });
+            return;
+          }
+          job.opens = undefined;
         }
+        if (settled)
+          return;
+        if (result && this.shared.get(analysis.key) === analysis)
+          this.shared.delete(analysis.key);
         this.detach(job);
         if (!precomputed) {
-          settle({ kind: "failed" }, analysis.failReason ?? "error");
+          settle({ kind: "failed" }, result ? "no_evidence" : analysis.failReason ?? "error");
           return;
         }
       }
@@ -113381,6 +113549,32 @@ function usedKeys(evidence, used) {
     keys.push(key);
   }
   return keys;
+}
+function privateEvidenceIdentity(item) {
+  const kept = {};
+  for (const key of IDENTITY_FIELDS) {
+    const value = item[key];
+    if (typeof value === "string")
+      kept[key] = value;
+  }
+  const sourceItem = asRecord18(item.sourceItem);
+  if (sourceItem)
+    kept.sourceItem = sourceItem;
+  const provenance = asRecord18(item.provenance);
+  const citation = asRecord18(provenance?.citation);
+  if (provenance) {
+    kept.provenance = {
+      ...asRecord18(provenance.sourceItem) ? { sourceItem: provenance.sourceItem } : {},
+      ...typeof citation?.title === "string" ? { citation: { title: citation.title } } : {}
+    };
+  }
+  return kept;
+}
+function usedItems(evidence, used) {
+  if (used === undefined)
+    return evidence;
+  const read = used.map((index) => evidence[index]);
+  return read.every((item) => item !== undefined) ? read : evidence;
 }
 function stillEligible(used, current) {
   return used !== undefined && used.every((key) => current.has(key));
@@ -113533,7 +113727,7 @@ var AnalysisStop, defaultLog = (line) => {
   console.log(line);
 }, MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_UNANSWERED = 10, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_URL_CHARS = 2048, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, UNSAFE_CHARS2, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
-};
+}, IDENTITY_FIELDS;
 var init_private_answer_jobs = __esm(() => {
   init_private_answer();
   init_private_answer_contract();
@@ -113550,6 +113744,18 @@ var init_private_answer_jobs = __esm(() => {
   PRIVATE_ANSWER_DEDUPE_MS = 3 * 60000;
   PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS = 2 * 60000;
   UNSAFE_CHARS2 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
+  IDENTITY_FIELDS = [
+    "corpusId",
+    "trustDomain",
+    "trust_domain",
+    "trustTier",
+    "trust_tier",
+    "tier",
+    "content_tier",
+    "contentTier",
+    "metadata_tier",
+    "metadataTier"
+  ];
 });
 
 // src/workers/chatgpt/private-answer-model.ts
@@ -113590,13 +113796,63 @@ function createBuiltInPrivateAnswerModel(options) {
       if (!model)
         throw new Error("no private answer model");
       const read = privateEvidence(evidence, limits.maxPassageChars);
-      const unreadable = read.unreadable;
-      const selection = await panelSelection(question, read, limits, options.relevance, signal);
-      const picked = selection.items;
-      let items = picked.map((index) => read.items[index]);
-      if (options.readItem && (full || selection.leading)) {
-        items = await readInDepth(question, items, picked.map((index) => evidence[read.sources[index]]), full ? limits.deepEvidenceChars : limits.leadingEvidenceChars, options.readItem, signal);
+      let unreadable = read.unreadable;
+      const readableHits = new Set(read.sources);
+      const unreadableHits = evidence.filter((_, index) => !readableHits.has(index));
+      const hitOf = (index) => evidence[read.sources[index]];
+      const admit = async (indexes) => {
+        const ok = await checkPrivateEvidence(options.eligible, indexes.map(hitOf));
+        return indexes.filter((_, position) => ok[position]);
+      };
+      let live = read.items.map((_, index) => index);
+      let scores;
+      if (options.relevance && live.length > 1) {
+        const offered = live;
+        let admitted;
+        let raw;
+        try {
+          raw = await options.relevance(question, async () => {
+            admitted = await admit(offered);
+            const kept = new Set(admitted);
+            return offered.map((index) => {
+              if (!kept.has(index))
+                return;
+              const item = read.items[index];
+              return { ...item.title ? { title: item.title } : {}, text: item.text };
+            });
+          }, signal);
+        } catch {
+          raw = undefined;
+        }
+        if (admitted)
+          live = admitted;
+        if (raw && raw.length === offered.length) {
+          const byIndex = new Map(offered.map((index, position) => [index, raw[position]]));
+          const kept = live.map((index) => byIndex.get(index));
+          scores = kept.every((score) => Number.isFinite(score)) ? kept : undefined;
+        }
       }
+      const liveRead = { items: live.map((index) => read.items[index]) };
+      const selection = await panelSelection(question, liveRead, limits, scores ? async () => scores : undefined, signal);
+      let picked = selection.items.map((position) => live[position]);
+      const deepItems = new Map;
+      if (options.readItem && (full || selection.leading) && picked.length > 0) {
+        picked = await admit(picked);
+        const deep = await readInDepth(question, picked.map((index) => read.items[index]), picked.map(hitOf), full ? limits.deepEvidenceChars : limits.leadingEvidenceChars, options.readItem, signal);
+        const kept = deep.flatMap((item, position) => item ? [{ item, index: picked[position] }] : []);
+        picked = kept.map((entry) => entry.index);
+        for (const entry of kept)
+          deepItems.set(entry.index, entry.item);
+      }
+      const hadReadable = read.items.length > 0;
+      {
+        const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...unreadableHits]);
+        picked = picked.filter((_, position) => ok[position]);
+        unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
+      }
+      if (hadReadable && picked.length === 0)
+        throw new NoPrivateEvidenceError;
+      const items = picked.map((index) => deepItems.get(index) ?? read.items[index]);
       try {
         observe?.evidence?.({
           items: items.length,
@@ -113610,16 +113866,42 @@ function createBuiltInPrivateAnswerModel(options) {
           throw new Error("no private evidence");
         return { answer: unreadableAnswer(unreadable), citations: [], unanswered: [] };
       }
-      const result = await options.answer(question, items, {
-        model,
-        maxPromptBytes: full ? limits.deepPromptBytes : limits.maxPromptBytes,
-        maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
-        audit: limits.audit,
-        evidenceFormat: "compact",
-        ...observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {},
-        ...signal ? { signal } : {}
-      });
-      const byId = new Map(items.map((item, position) => [item.id, { item, hit: evidence[read.sources[picked[position]]] }]));
+      const prompted = picked.map(hitOf);
+      let revoked = false;
+      const guarded = {
+        name: model.name,
+        spec: model.spec,
+        prepare: () => model.prepare(),
+        status: () => model.status(),
+        stop: () => model.stop(),
+        async complete(modelRequest) {
+          const ok = await checkPrivateEvidence(options.eligible, prompted);
+          if (!ok.every(Boolean)) {
+            revoked = true;
+            throw new NoPrivateEvidenceError;
+          }
+          return model.complete(modelRequest);
+        }
+      };
+      let result;
+      try {
+        result = await options.answer(question, items, {
+          model: guarded,
+          maxPromptBytes: full ? limits.deepPromptBytes : limits.maxPromptBytes,
+          maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
+          audit: limits.audit,
+          evidenceFormat: "compact",
+          ...observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {},
+          ...signal ? { signal } : {}
+        });
+      } catch (error2) {
+        if (revoked)
+          throw new NoPrivateEvidenceError;
+        throw error2;
+      }
+      if (revoked)
+        throw new NoPrivateEvidenceError;
+      const byId = new Map(items.map((item, position) => [item.id, { item, hit: hitOf(picked[position]) }]));
       const citations = [];
       const seen = new Set;
       for (const citation of result.citations) {
@@ -113627,7 +113909,9 @@ function createBuiltInPrivateAnswerModel(options) {
           continue;
         seen.add(citation.id);
         const entry = byId.get(citation.id);
-        const item = entry?.item;
+        if (!entry)
+          continue;
+        const item = entry.item;
         const title = citation.title ?? item?.title;
         let links;
         try {
@@ -113702,7 +113986,7 @@ async function panelSelection(question, read, limits, relevance, signal) {
   let scores;
   if (relevance && order.length > 1) {
     try {
-      scores = await relevance(question, read.items.map((item) => ({ ...item.title ? { title: item.title } : {}, text: item.text })), signal);
+      scores = await relevance(question, async () => read.items.map((item) => ({ ...item.title ? { title: item.title } : {}, text: item.text })), signal);
     } catch {
       scores = undefined;
     }
@@ -113731,20 +114015,23 @@ function leadingCount(sorted, maxLeading, gap) {
 }
 async function readInDepth(question, items, hits, budget, readItem, signal) {
   const read = async (index, maxChars) => {
+    let chunks2;
     try {
-      const chunks2 = await readItem(hits[index], { question, maxChars }, signal);
-      const text3 = (chunks2 ?? []).map((chunk) => chunk.trim()).filter(Boolean).join(`
+      chunks2 = await readItem(hits[index], { question, maxChars }, signal);
+    } catch (error2) {
+      return error2 instanceof SourceModelPolicyDeniedError ? { kind: "refused" } : { kind: "failed" };
+    }
+    if (chunks2 === undefined)
+      return { kind: "refused" };
+    const text3 = chunks2.map((chunk) => chunk.trim()).filter(Boolean).join(`
 …
 `);
-      return text3 ? text3.slice(0, maxChars) : undefined;
-    } catch {
-      return;
-    }
+    return text3 ? { kind: "text", text: text3.slice(0, maxChars) } : { kind: "failed" };
   };
   const whole2 = await Promise.all(items.map((_, index) => read(index, budget)));
-  const sizes = whole2.map((text3, index) => text3?.length ?? items[index].text.length);
+  const sizes = whole2.map((entry, index) => entry.kind === "text" ? entry.text.length : items[index].text.length);
   const share = new Array(items.length).fill(0);
-  const byLength = sizes.map((size, index) => ({ size, index })).sort((a, b) => a.size - b.size);
+  const byLength = sizes.map((size, index) => ({ size, index })).filter(({ index }) => whole2[index].kind !== "refused").sort((a, b) => a.size - b.size);
   let remaining = budget;
   byLength.forEach(({ size, index }, position) => {
     const fair = Math.floor(remaining / (byLength.length - position));
@@ -113752,35 +114039,50 @@ async function readInDepth(question, items, hits, budget, readItem, signal) {
     remaining -= share[index];
   });
   return Promise.all(items.map(async (item, index) => {
-    const full = whole2[index];
-    if (!full)
+    const first = whole2[index];
+    if (first.kind === "refused")
+      return;
+    if (first.kind === "failed")
       return item;
-    const text3 = full.length <= share[index] ? full : await read(index, share[index]) ?? full.slice(0, share[index]);
+    let text3 = first.text;
+    if (text3.length > share[index]) {
+      const again = await read(index, share[index]);
+      if (again.kind === "refused")
+        return;
+      text3 = again.kind === "text" ? again.text : text3.slice(0, share[index]);
+    }
     return text3.length > item.text.length ? { ...item, text: text3 } : item;
   }));
 }
 function embeddingPanelRelevance(provider) {
   return async (question, items, signal) => {
     const model = provider();
-    if (!model || model.backend !== "local" || items.length === 0)
+    if (!model || model.backend !== "local")
       return;
     const [query] = await model.embed([{ text: question }], { taskType: "RETRIEVAL_QUERY" });
-    if (signal?.aborted)
+    if (signal?.aborted || !query)
       return;
-    const named = items.map((item, index) => ({ index, title: item.title?.trim() })).filter((item) => item.title);
+    const offered = await items();
+    const present = offered.flatMap((item, index) => item ? [{ index, item }] : []);
+    if (present.length === 0)
+      return;
+    const named = present.filter((entry) => entry.item.title?.trim());
     const [titles, texts] = await Promise.all([
-      named.length > 0 ? model.embed(named.map((item) => ({ text: item.title })), { taskType: "RETRIEVAL_DOCUMENT" }) : Promise.resolve([]),
-      model.embed(items.map((item) => {
+      named.length > 0 ? model.embed(named.map((entry) => ({ text: entry.item.title.trim() })), { taskType: "RETRIEVAL_DOCUMENT" }) : Promise.resolve([]),
+      model.embed(present.map(({ item }) => {
         const head = item.text.slice(0, RELEVANCE_TEXT_CHARS);
         return { text: item.title ? `${item.title}
 ${head}` : head };
       }), { taskType: "RETRIEVAL_DOCUMENT" })
     ]);
-    if (!query || texts.length !== items.length || titles.length !== named.length)
+    if (texts.length !== present.length || titles.length !== named.length)
       return;
-    const titleScore = new Map(named.map((item, position) => [item.index, cosine(query, titles[position])]));
-    return items.map((_, index) => {
-      const text3 = cosine(query, texts[index]);
+    const titleScore = new Map(named.map((entry, position) => [entry.index, cosine(query, titles[position])]));
+    const textScore = new Map(present.map((entry, position) => [entry.index, cosine(query, texts[position])]));
+    return offered.map((_, index) => {
+      const text3 = textScore.get(index);
+      if (text3 === undefined)
+        return Number.NaN;
       const title = titleScore.get(index);
       return title === undefined ? text3 : TITLE_WEIGHT * title + (1 - TITLE_WEIGHT) * text3;
     });
@@ -113822,6 +114124,8 @@ function string4(value) {
 }
 var PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MAX_PASSAGE_CHARS = 6000;
 var init_private_answer_model = __esm(() => {
+  init_source_model_policy();
+  init_private_answer_contract();
   PANEL_ANSWER_LIMITS = {
     maxItems: 4,
     relevanceMargin: 0.04,
@@ -117252,8 +117556,10 @@ async function main() {
   const sourceOpenTargets = {
     dropbox: createDropboxOpenTargets2()
   };
+  const privateEvidenceEligible = async (items) => sourceAnswerLanes ? checkPrivateEvidenceItems({ lanes: sourceAnswerLanes, items }) : items.map(() => false);
   const privateAnswerModel = createBuiltInPrivateAnswerModel2({
     model: workerBuiltInModel?.model,
+    eligible: privateEvidenceEligible,
     available: () => workerBuiltInModel?.available() ?? false,
     answer: answerPrivately,
     relevance: embeddingPanelRelevance2(() => secureLocalPolicyEmbeddingProvider?.backend === "local" ? secureLocalPolicyEmbeddingProvider : undefined),
@@ -117269,6 +117575,7 @@ async function main() {
   });
   const privateAnswers = new PrivateAnswerJobs2({
     model: () => privateAnswerModel,
+    eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
     activity: answerActivity,
     ...process.platform === "darwin" ? {

@@ -35,6 +35,9 @@ import { TierSnifferService } from '../src/workers/classification/sniffer-servic
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 
+/** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
+const ALL_ELIGIBLE = async (items: readonly unknown[]) => items.map(() => true);
+
 const INSTALL = 'c'.repeat(32);
 const QUESTION = 'SENTINEL_QUESTION_91c2 what did my blood work show';
 const EVIDENCE = [{ title: 'SENTINEL_EVIDENCE_91c2', trust_domain: 'secure_local', chunks: ['SENTINEL_PASSAGE_91c2'] }];
@@ -59,7 +62,7 @@ function harness(
   const lines: string[] = [];
   const events: string[] = [];
   const activity = { begins: 0, ends: 0, begin() { this.begins += 1; }, end() { this.ends += 1; } };
-  const jobs = new PrivateAnswerJobs({
+  const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE,
     model: () => model(answer, options.extra),
     installId: () => INSTALL,
     analysisTimeoutMs: options.timeoutMs ?? 60,
@@ -82,7 +85,7 @@ describe('1. every claimed job settles within its deadline', () => {
   test('a model that hangs and ignores abort: failed at the deadline, the activity ends once, the model is reset', async () => {
     let resets = 0;
     const { jobs, lines, activity, events } = harness(() => new Promise(() => {}), { extra: { reset: () => { resets += 1; } } });
-    const jobId = jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE }).jobId!;
+    const jobId = jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     expect((await jobs.claim(jobId, panel.publicKey)).status).toBe(202);
     // Busy from the claim: the claim itself and the analysis it runs.
@@ -98,8 +101,8 @@ describe('1. every claimed job settles within its deadline', () => {
 
   test('a job queued behind a hung one fails by its own deadline, counted from its claim', async () => {
     const { jobs, activity } = harness(() => new Promise(() => {}), { timeoutMs: 60 });
-    const first = jobs.begin({ question: 'one', count: 1, evidence: EVIDENCE }).jobId!;
-    const second = jobs.begin({ question: 'two', count: 1, evidence: EVIDENCE }).jobId!;
+    const first = jobs.begin({ question: 'one', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
+    const second = jobs.begin({ question: 'two', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(first, panel.publicKey);
     await jobs.claim(second, panel.publicKey);
@@ -125,7 +128,7 @@ describe('1. every claimed job settles within its deadline', () => {
   test('a job dropped while it waits in the queue settles at once and ends its activity', async () => {
     const clock = { now: 0 };
     const activity = { begins: 0, ends: 0, begin() { this.begins += 1; }, end() { this.ends += 1; } };
-    const jobs = new PrivateAnswerJobs({
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE,
       model: () => model(() => new Promise(() => {})),
       installId: () => INSTALL,
       now: () => clock.now,
@@ -137,9 +140,9 @@ describe('1. every claimed job settles within its deadline', () => {
       precompute: false,
       claimHoldMs: 0,
     });
-    const first = jobs.begin({ question: 'one', count: 1, evidence: EVIDENCE }).jobId!;
+    const first = jobs.begin({ question: 'one', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     clock.now = 500;
-    const second = jobs.begin({ question: 'two', count: 1, evidence: EVIDENCE }).jobId!;
+    const second = jobs.begin({ question: 'two', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(first, panel.publicKey);
     await jobs.claim(second, panel.publicKey);
@@ -156,7 +159,7 @@ describe('1. every claimed job settles within its deadline', () => {
       observe?.modelCall?.({ stage: 'main', ms: 12, promptBytes: 3_000, ok: true, promptTokens: 900, promptMs: 4, outputTokens: 40, outputMs: 8 });
       return { answer: 'SENTINEL_ANSWER_91c2', citations: [{ title: 'SENTINEL_EVIDENCE_91c2' }] };
     });
-    const jobId = jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE }).jobId!;
+    const jobId = jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(jobId, panel.publicKey);
     await Bun.sleep(30);
@@ -164,7 +167,7 @@ describe('1. every claimed job settles within its deadline', () => {
     expect(activity).toMatchObject({ begins: 2, ends: 2 });
     expect(lines).toHaveLength(1);
     const line = lines[0]!;
-    expect(line).toMatch(/^\[private-answer\] outcome=sealed precomputed=no wait_at_claim_ms=\d+ search_to_ready_ms=\d+ queued_ms=\d+ matched=1 items=1 unreadable=0 evidence_bytes=21 model_ms=\d+ main_ms=12 main_prompt_bytes=3000 main_prompt_tokens=900 main_prefill_ms=4 main_output_tokens=40 main_generate_ms=8 total_ms=\d+$/);
+    expect(line).toMatch(/^\[private-answer\] outcome=sealed precomputed=no wait_at_claim_ms=\d+ search_to_ready_ms=\d+ queued_ms=\d+ refresh_ms=\d+ recheck_ms=\d+ matched=1 items=1 unreadable=0 evidence_bytes=21 model_ms=\d+ main_ms=12 main_prompt_bytes=3000 main_prompt_tokens=900 main_prefill_ms=4 main_output_tokens=40 main_generate_ms=8 total_ms=\d+$/);
     expect(line).not.toMatch(CONTENT);
     expect(line).not.toContain(jobId);
   });
@@ -174,11 +177,11 @@ describe('1b. a shared analysis logs no negative wait', () => {
   test('a later search of the same question shares the ready answer: search_to_ready_ms is 0, never negative', async () => {
     const clock = { now: 1_000 };
     const { jobs, lines } = harness(async () => ({ answer: 'x', citations: [] }), { precompute: true, now: () => clock.now });
-    jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE });
+    jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     await Bun.sleep(20);
     // The first search's analysis is ready; the same question is asked again later.
     clock.now = 61_000;
-    const later = jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE }).jobId!;
+    const later = jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(later, panel.publicKey);
     await Bun.sleep(20);
@@ -254,7 +257,7 @@ describe('2. the sniffer yields to a private answer', () => {
     cleanups.push(() => service?.stop());
 
     let finishAnswer!: () => void;
-    const jobs = new PrivateAnswerJobs({
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE,
       model: () => model(() => {
         log.push('answer:start');
         return new Promise((resolve) => { finishAnswer = () => { log.push('answer:done'); resolve({ answer: 'ok', citations: [] }); }; });
@@ -267,7 +270,7 @@ describe('2. the sniffer yields to a private answer', () => {
 
     const pass = service.runOnce();
     await sniffing;
-    const jobId = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE }).jobId!;
+    const jobId = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(jobId, panel.publicKey);
     expect(await pass).toMatchObject({ state: 'ran', report: { stoppedBy: 'preempted', failedCalls: 0 } });
@@ -297,7 +300,7 @@ describe('2. the sniffer yields to a private answer', () => {
 describe('4. the panel reads a bounded slice of work', () => {
   test('the most relevant readable items, clipped passages, a tight prompt, a short answer and no audit', async () => {
     const seen: { count?: number; longest?: number; options?: AnswerPrivatelyOptions } = {};
-    const panelModel = createBuiltInPrivateAnswerModel({
+    const panelModel = createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE,
       model: { stop: async () => {} } as never,
       available: () => true,
       answer: async (_question, items, options) => {

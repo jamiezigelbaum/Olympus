@@ -20,12 +20,15 @@ import {
   leadingCount,
   panelSelection,
 } from '../src/workers/chatgpt/private-answer-model.ts';
-import { PRIVATE_ANSWER_META_KEY, type PrivateAnswerModel, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
+import { NoPrivateEvidenceError, PRIVATE_ANSWER_META_KEY, type PrivateAnswerModel, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { generatePanelKeyPair } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS, PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { SEARCH_TOOL, SOURCE_ANSWER_TOOL, callChatGptTool, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
 import { copyPrivateMatch } from '../src/workers/chatgpt/response-builder.ts';
 import type { OperationContext } from '../src/core/operations.ts';
+
+/** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
+const ALL_ELIGIBLE = async (items: readonly unknown[]) => items.map(() => true);
 
 function hit(id: string, title: string, text: string): PrivateEvidenceItem {
   return {
@@ -68,7 +71,7 @@ describe('reading leading items in depth', () => {
   const longText = (label: string, pages: number) => Array.from({ length: pages }, (_, page) => `${label} page ${page + 1}: value ${page + 1}.`).join(' ').padEnd(12_000, ' x');
 
   function panelWith(answer: (q: string, items: readonly BuiltInEvidenceItem[], options: AnswerPrivatelyOptions) => Promise<{ answer: string; citations: Array<{ id: string; title?: string; claim: string }>; unanswered: string[]; modelId: string }>, extra: Partial<Parameters<typeof createBuiltInPrivateAnswerModel>[0]> = {}) {
-    return createBuiltInPrivateAnswerModel({
+    return createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE,
       model: { name: 'built_in' } as unknown as BuiltInAnalystModel,
       available: () => true,
       answer,
@@ -159,7 +162,7 @@ describe('reading leading items in depth', () => {
     expect(result.citations).toEqual([{ title: 'b.pdf', source: 'fixture' }]);
   });
 
-  test('a failing in-depth read keeps the search-time passages', async () => {
+  test('a failing in-depth read (transient) keeps only the passages the dispatch-time re-check returned', async () => {
     const evidence = [hit('a', 'a.pdf', 'search passage a')];
     let text = '';
     const panel = panelWith(async (_q, items) => {
@@ -168,6 +171,50 @@ describe('reading leading items in depth', () => {
     }, { readItem: async () => { throw new Error('store busy'); } });
     await panel.answerPrivately('q', evidence);
     expect(text).toBe('search passage a');
+  });
+
+  test('an in-depth read the store refuses (re-tiered, out of scope, gone) drops the item: no fallback to its passages', async () => {
+    const evidence = [hit('a', 'a.pdf', 'SENTINEL_REFUSED_PASSAGE_4d1b'), hit('b', 'b.pdf', 'passage b')];
+    let seen: readonly BuiltInEvidenceItem[] = [];
+    const stats: Array<{ items: number; unreadable: number; bytes: number; used?: readonly number[] }> = [];
+    const panel = panelWith(async (_q, items) => {
+      seen = items;
+      return { answer: 'x', citations: [{ id: 'a', claim: 'c' }, { id: 'b', claim: 'c' }], unanswered: [], modelId: 'm' };
+    }, {
+      // Both lead; the store now refuses `a`.
+      relevance: async () => [0.9, 0.89],
+      readItem: async (item) => ((item.provenance as { sourceItem: { localItemId: string } }).sourceItem.localItemId === 'a' ? undefined : ['deep b']),
+    });
+    const result = await panel.answerPrivately('q', evidence, undefined, { evidence: (entry) => stats.push(entry) });
+    expect(seen.map((item) => item.id)).toEqual(['b']);
+    expect(JSON.stringify(seen)).not.toContain('SENTINEL_REFUSED_PASSAGE_4d1b');
+    // Truthful counts: one item used (b, input index 1), nothing reported unreadable.
+    expect(stats).toEqual([{ items: 1, unreadable: 0, bytes: 'passage b'.length, used: [1] }]);
+    // A dropped item is never a source, even if the model named it.
+    expect(result.citations).toEqual([{ title: 'b.pdf', source: 'fixture' }]);
+  });
+
+  test('every picked item refused on re-read: no model call, and the no-evidence outcome', async () => {
+    let calls = 0;
+    const panel = panelWith(async () => {
+      calls += 1;
+      return { answer: 'x', citations: [], unanswered: [], modelId: 'm' };
+    }, { readItem: async () => undefined });
+    await expect(panel.answerPrivately('q', [hit('a', 'a.pdf', 'SENTINEL_REFUSED_PASSAGE_4d1b')])).rejects.toBeInstanceOf(NoPrivateEvidenceError);
+    expect(calls).toBe(0);
+
+    // Through the jobs: the claim fails, and the log says no evidence.
+    const lines: string[] = [];
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => panel, installId: () => 'e'.repeat(32), log: (line) => lines.push(line), claimHoldMs: 0, audit: () => {} });
+    const evidence = [hit('a', 'a.pdf', 'SENTINEL_REFUSED_PASSAGE_4d1b')];
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence, refresh: async () => evidence });
+    const key = await generatePanelKeyPair();
+    await jobs.claim(jobId!, key.publicKey);
+    await Bun.sleep(50);
+    expect(await jobs.claim(jobId!, key.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
+    expect(calls).toBe(0);
+    expect(lines.join('\n')).toContain('reason=no_evidence');
+    expect(lines.join('\n')).not.toContain('SENTINEL');
   });
 });
 
@@ -246,7 +293,7 @@ describe('detail: chosen by ChatGPT\'s model through the tool argument', () => {
     }
     expect(String((SEARCH_TOOL.inputSchema.properties.detail as { description: string }).description)).toContain('"full" when the user asks for all the details');
     const { model } = recordingModel();
-    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 });
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 });
     const options: ChatGptSurfaceOptions = {
       dashboardView: async () => ({}) as never,
       evidenceSearch: async () => ({ evidence: [], coverage: {} }),
@@ -259,7 +306,7 @@ describe('detail: chosen by ChatGPT\'s model through the tool argument', () => {
 
   test('it flows into the private job, the job\'s _meta says detail "full", and the same question in each detail is a separate answer', async () => {
     const { model, calls } = recordingModel();
-    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 });
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 });
     const options: ChatGptSurfaceOptions = {
       dashboardView: async () => ({}) as never,
       evidenceSearch: async () => ({ evidence: [], coverage: {} }),
@@ -288,12 +335,12 @@ describe('detail: chosen by ChatGPT\'s model through the tool argument', () => {
   test('a full job has the longer deadline; a summary job keeps the short one', async () => {
     const never: PrivateAnswerModel = { status: () => ({ state: 'ready' }), answerPrivately: () => new Promise(() => {}) };
     const lines: string[] = [];
-    const jobs = new PrivateAnswerJobs({
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE,
       model: () => never, installId: () => INSTALL, log: (line) => lines.push(line), claimHoldMs: 0,
       analysisTimeoutMs: 40, fullAnalysisTimeoutMs: 400, audit: () => {},
     });
-    const summary = jobs.begin({ question: 's', count: 1, evidence: EVIDENCE }).jobId!;
-    const full = jobs.begin({ question: 'f', count: 1, evidence: EVIDENCE, detail: 'full' }).jobId!;
+    const summary = jobs.begin({ question: 's', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
+    const full = jobs.begin({ question: 'f', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE, detail: 'full' }).jobId!;
     const key = (await generatePanelKeyPair()).publicKey;
     const key2 = (await generatePanelKeyPair()).publicKey;
     await jobs.claim(summary, key);
@@ -332,7 +379,7 @@ describe('a private match probe that is slow or fails', () => {
       privateMatchProbe: probe,
       privateMatchProbeTimeoutMs: 30,
       privateMatchProbeLog: (line) => lines.push(line),
-      privateAnswers: new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 }),
+      privateAnswers: new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 }),
     };
   }
 

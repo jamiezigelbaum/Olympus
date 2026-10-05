@@ -52,9 +52,10 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
-import { releaseAnalystAnswer, searchPrivateEvidence, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { checkPrivateEvidenceItems, releaseAnalystAnswer, searchPrivateEvidence, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { buildEvidencePackDetailed } from '../src/core/evidence-pack.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
@@ -68,6 +69,9 @@ import {
   tempDir,
   type FixtureSpec,
 } from './helpers/tier-fixtures.ts';
+
+/** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
+const ALL_ELIGIBLE = async (items: readonly unknown[]) => items.map(() => true);
 
 const INSTALL = 'c'.repeat(32);
 const PANEL_ORIGIN = 'https://olympus.web-sandbox.oaiusercontent.com';
@@ -146,8 +150,8 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
       unanswered: [],
       sufficient: true,
     }));
-    const privateModel = createBuiltInPrivateAnswerModel({ model: stub.model, available: () => true, answer: answerPrivately });
-    const jobs = new PrivateAnswerJobs({ model: () => privateModel, installId: () => INSTALL, claimHoldMs: 0 });
+    const privateModel = createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE, model: stub.model, available: () => true, answer: answerPrivately });
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => privateModel, installId: () => INSTALL, claimHoldMs: 0 });
 
     const dir = mkdtempSync(join(tmpdir(), 'olympus-private-integration-'));
     const store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
@@ -245,7 +249,9 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
     expect(opened.citations).toEqual([{ title: 'Lease renewal', source: 'Gmail', date: '2026-04-01' }]);
     expect(opened.unanswered).toBeUndefined();
 
-    // The built-in model read the Private passage, locally, and the evidence was re-read at claim time.
+    // The built-in model read the Private passage, locally; the evidence was
+    // searched at search time and again at claim time (dispatch asks the
+    // live eligibility guard instead).
     expect(stub.requests.length).toBeGreaterThan(0);
     expect(stub.requests.every((request) => request.localOnly === true)).toBe(true);
     expect(stub.requests[0]!.prompt).toContain(PRIVATE_PASSAGE);
@@ -259,8 +265,8 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
       unanswered: [],
       sufficient: true,
     }));
-    const privateModel = createBuiltInPrivateAnswerModel({ model: stub.model, available: () => true, answer: answerPrivately });
-    const jobs = new PrivateAnswerJobs({ model: () => privateModel, installId: () => INSTALL, claimHoldMs: 0 });
+    const privateModel = createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE, model: stub.model, available: () => true, answer: answerPrivately });
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => privateModel, installId: () => INSTALL, claimHoldMs: 0 });
     const dir = mkdtempSync(join(tmpdir(), 'olympus-private-integration-'));
     const store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
     const worker = createEmailSourceWorker({});
@@ -334,7 +340,7 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
 
   test('only unreadable Private items: a plain no-answer, never one built from titles', async () => {
     const stub = stubBuiltInModel('{}');
-    const privateModel = createBuiltInPrivateAnswerModel({ model: stub.model, available: () => true, answer: answerPrivately });
+    const privateModel = createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE, model: stub.model, available: () => true, answer: answerPrivately });
     const result = await privateModel.answerPrivately('Any receipts?', [PRIVATE_CANDIDATES[1]!]);
     expect(stub.requests).toHaveLength(0);
     expect(result.citations).toEqual([]);
@@ -343,7 +349,7 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
 
   test('an ungrounded built-in answer carries its gaps to the panel', async () => {
     const stub = stubBuiltInModel(JSON.stringify({ answer: 'Nothing here says.', citations: [], unanswered: ['the deposit amount'], sufficient: false }));
-    const privateModel = createBuiltInPrivateAnswerModel({ model: stub.model, available: () => true, answer: answerPrivately });
+    const privateModel = createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE, model: stub.model, available: () => true, answer: answerPrivately });
     const result = await privateModel.answerPrivately('How much was the deposit?', PRIVATE_HITS);
     expect(result.citations).toEqual([]);
     expect(result.unanswered?.length).toBeGreaterThan(0);
@@ -353,15 +359,15 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
 describe('the panel model over the built-in model', () => {
   test('status follows the install; reset stops the model server; no model means no_model', async () => {
     const ready = stubBuiltInModel('{}');
-    expect(createBuiltInPrivateAnswerModel({ model: ready.model, available: () => true, answer: answerPrivately }).status()).toEqual({ state: 'ready' });
+    expect(createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE, model: ready.model, available: () => true, answer: answerPrivately }).status()).toEqual({ state: 'ready' });
     const downloading = stubBuiltInModel('{}', 'downloading');
-    expect(createBuiltInPrivateAnswerModel({ model: downloading.model, available: () => false, answer: answerPrivately }).status())
+    expect(createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE, model: downloading.model, available: () => false, answer: answerPrivately }).status())
       .toEqual({ state: 'model_downloading', percent: 42 });
     const notStarted = stubBuiltInModel('{}', 'not_started');
-    expect(createBuiltInPrivateAnswerModel({ model: notStarted.model, available: () => false, answer: answerPrivately }).status()).toEqual({ state: 'no_model' });
-    const none = createBuiltInPrivateAnswerModel({ model: undefined, available: () => false, answer: answerPrivately });
+    expect(createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE, model: notStarted.model, available: () => false, answer: answerPrivately }).status()).toEqual({ state: 'no_model' });
+    const none = createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE, model: undefined, available: () => false, answer: answerPrivately });
     expect(none.status()).toEqual({ state: 'no_model' });
-    const model = createBuiltInPrivateAnswerModel({ model: ready.model, available: () => true, answer: answerPrivately });
+    const model = createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE, model: ready.model, available: () => true, answer: answerPrivately });
     await model.reset?.();
     expect(ready.stops()).toBe(1);
   });
@@ -421,10 +427,8 @@ describe('sealing and the panel page', () => {
 });
 
 describe('claim-time evidence over a real local index', () => {
-  test('a Private item re-tiered to Secret is never returned by the all_tiers:false search a job refreshes with', async () => {
-    const specs: FixtureSpec[] = [
-      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
-    ];
+  /** The production search and the production live guard over one tier fixture. */
+  async function realPrivateLane(specs: FixtureSpec[]) {
     const { dir, cleanup } = tempDir();
     const fixture = openTierFixture(dir, { embed: false });
     cleanups.push(() => {
@@ -432,28 +436,46 @@ describe('claim-time evidence over a real local index', () => {
       cleanup();
     });
     await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-    const corpusIds = new Set(Object.values(CORPORA));
-    const worker = createEmailSourceWorker({
-      connectorStores: fixture.set.openStores(),
-      connectorStoreTierSiblings: (corpusId) => [...corpusIds].filter((sibling) => sibling !== corpusId),
-      sourceIndexVisibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds }]),
-    });
-    const privateSearch = async (): Promise<PrivateEvidenceItem[]> => {
-      const response = await worker.fetch(new Request('http://worker.test/v1/source/index/search', {
-        method: 'POST',
-        body: JSON.stringify({ corpus_id: CORPORA.secure_local, query: 'orchard', all_tiers: false }),
-        headers: { 'Content-Type': 'application/json' },
-      }));
-      expect(response.status).toBe(200);
-      return ((await response.json()) as { hits: PrivateEvidenceItem[] }).hits;
+    /** The owner's current read scope: an account scope the item is not in narrows it away. */
+    const scope: { accountScope?: string } = {};
+    const lanes = () => {
+      const stores = fixture.set.openStores();
+      return {
+        registry: buildSourceIndexCorpusRegistry(stores.map((store) => defineConnectorCorpus({
+          corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain,
+        }))),
+        adapters: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreCorpusAdapter({ store })])),
+        contentProviders: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreContentProvider({
+          store,
+          ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
+        })])),
+        visibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }]),
+      };
     };
+    const privateSearch = async (): Promise<PrivateEvidenceItem[]> => (
+      await searchPrivateEvidence({ lanes, question: 'orchard invoice' })
+    ).candidates as unknown as PrivateEvidenceItem[];
+    let guardCalls = 0;
+    const eligible = async (items: readonly PrivateEvidenceItem[]) => {
+      guardCalls += 1;
+      return checkPrivateEvidenceItems({ lanes, items });
+    };
+    return { fixture, privateSearch, eligible, scope, guardCalls: () => guardCalls };
+  }
 
-    // At search time the invoice's body is Private and found.
-    const atSearch = await privateSearch();
-    expect(atSearch.map((hit) => (hit.sourceItem as { providerItemId: string }).providerItemId)).toEqual(['invoice']);
+  test('a Private item re-tiered to Secret: the live guard refuses it, and no model ever reads it (claim or precompute)', async () => {
+    const lane = await realPrivateLane([
+      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+    ]);
+    // At search time the invoice's body is Private, found and eligible.
+    const atSearch = await lane.privateSearch();
+    expect(atSearch.map((hit) => (hit.provenance as { sourceItem: { providerItemId: string } }).sourceItem.providerItemId)).toEqual(['invoice']);
+    expect(await lane.eligible(atSearch)).toEqual([true]);
 
-    // The owner marks it Secret before the panel claims the job.
-    await moveTieredItem({ set: fixture.set, identity: identityOf('invoice'), target: { metadataTier: 'secrets', contentTier: 'secrets' } });
+    // The owner marks it Secret before anything is dispatched.
+    await moveTieredItem({ set: lane.fixture.set, identity: identityOf('invoice'), target: { metadataTier: 'secrets', contentTier: 'secrets' } });
+    expect(await lane.eligible(atSearch)).toEqual([false]);
+    expect(await lane.privateSearch()).toEqual([]);
 
     const seen: unknown[] = [];
     const model = {
@@ -463,29 +485,81 @@ describe('claim-time evidence over a real local index', () => {
         return { answer: 'should not run', citations: [] };
       },
     };
-    // A claim with no precompute: the claim-time search no longer returns it, so the model reads nothing.
-    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, precompute: false, log: () => {} });
-    const { jobId } = jobs.begin({ question: 'orchard invoice?', count: atSearch.length, evidence: atSearch, refresh: privateSearch });
     const panel = await generatePanelKeyPair();
+    const settledLine = (lines: string[]) => new Promise<void>((resolve) => {
+      const poll = () => (lines.length > 0 ? resolve() : setTimeout(poll, 2));
+      poll();
+    });
+    // A claim with no precompute: nothing to read, the model is never called.
+    const claimLines: string[] = [];
+    const jobs = new PrivateAnswerJobs({ eligible: lane.eligible, model: () => model, installId: () => INSTALL, precompute: false, log: (line) => claimLines.push(line) });
+    const { jobId } = jobs.begin({ question: 'orchard invoice?', count: atSearch.length, evidence: atSearch, refresh: lane.privateSearch });
     await jobs.claim(jobId!, panel.publicKey);
-    await Bun.sleep(80);
-    expect(await privateSearch()).toEqual([]);
+    await settledLine(claimLines);
     expect(seen).toEqual([]);
     expect(await jobs.claim(jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
     expect(atSearch.every(isPrivateEligible)).toBe(true);
 
-    // With the search-time precompute: it read the item while it was Private
-    // (in engine memory, on this computer), but the claim-time check finds it
-    // no longer Private-eligible, so that answer is discarded, nothing is
-    // left to answer from, and the job fails: nothing is ever sealed.
-    const precomputing = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {} });
-    const second = precomputing.begin({ question: 'orchard invoice?', count: atSearch.length, evidence: atSearch, refresh: privateSearch });
-    await Bun.sleep(20);
-    expect(seen).toEqual(atSearch);
+    // With the precompute, queued from the search-time evidence (cached while
+    // the item was Private) and dispatched after it became Secret: the live
+    // guard refuses it, so the model is never called, and the job fails.
+    const precomputeLines: string[] = [];
+    const precomputing = new PrivateAnswerJobs({ eligible: lane.eligible, model: () => model, installId: () => INSTALL, log: (line) => precomputeLines.push(line) });
+    const second = precomputing.begin({ question: 'orchard invoice?', count: atSearch.length, evidence: atSearch, refresh: lane.privateSearch });
     await precomputing.claim(second.jobId!, panel.publicKey);
-    await Bun.sleep(80);
+    await settledLine(precomputeLines);
     expect(await precomputing.claim(second.jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
-    expect(seen).toEqual(atSearch);
+    expect(seen).toEqual([]);
+  });
+
+  test('the owner narrows the read scope: the live guard refuses the item at once', async () => {
+    const lane = await realPrivateLane([
+      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+    ]);
+    const atSearch = await lane.privateSearch();
+    expect(await lane.eligible(atSearch)).toEqual([true]);
+    lane.scope.accountScope = 'someone-else';
+    expect(await lane.eligible(atSearch)).toEqual([false]);
+    delete lane.scope.accountScope;
+    expect(await lane.eligible(atSearch)).toEqual([true]);
+  });
+
+  test('a current Private copy that holds only the names: not eligible (its content is not served there)', async () => {
+    const lane = await realPrivateLane([
+      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+    ]);
+    const atSearch = await lane.privateSearch();
+    expect(await lane.eligible(atSearch)).toEqual([true]);
+    // Re-place the item so the Private store's copy is current for the
+    // metadata layer only (not reachable with today's placement map; the
+    // guard must not rely on that).
+    lane.fixture.ledger.recordRoutedPlacement(identityOf('invoice'), {
+      ...classifyItemTiers({ signals: { title: 'orchard-invoice.txt' }, text: 'orchard invoice' }),
+      metadataTier: 'secure',
+      contentTier: 'secure',
+    }, {
+      copies: [
+        { corpusId: CORPORA.secure_local, trustDomain: 'secure_local', layers: 'metadata' },
+        { corpusId: CORPORA.internal, trustDomain: 'internal', layers: 'content' },
+      ],
+      embedHold: false,
+    }, { staleCopiesGone: true });
+    const copies = lane.fixture.ledger.copies(identityOf('invoice'));
+    expect(copies.find((copy) => copy.corpusId === CORPORA.secure_local)).toMatchObject({ layers: 'metadata', state: 'current' });
+    expect(await lane.eligible(atSearch)).toEqual([false]);
+  });
+
+  test('a deleted Private item: the live guard refuses it at once', async () => {
+    const lane = await realPrivateLane([
+      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+    ]);
+    const atSearch = await lane.privateSearch();
+    expect(await lane.eligible(atSearch)).toEqual([true]);
+    const store = lane.fixture.set.openStores().find((candidate) => candidate.corpusId === atSearch[0]!.corpusId)!;
+    expect(store.tombstoneCopy(identityOf('invoice'), { connectorId: 'fixture_lane' })).toBe(true);
+    expect(await lane.eligible(atSearch)).toEqual([false]);
+    // An item without its store identity, or from no Private corpus, is never vouched for.
+    expect(await lane.eligible([{ ...atSearch[0]!, corpusId: 'nope' }, { ...atSearch[0]!, provenance: {} }])).toEqual([false, false]);
   });
 });
 

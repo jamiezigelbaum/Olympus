@@ -31,7 +31,16 @@ import type {
   PrivateEvidenceItem as BuiltInEvidenceItem,
 } from '../../core/analyst-built-in.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
-import type { PrivateAnswerModel, PrivateAnswerSourceCitation, PrivateEvidenceItem } from './private-answer-contract.ts';
+import type { AnalystModelRequest } from '../../core/analyst.ts';
+import { SourceModelPolicyDeniedError } from '../../core/source-model-policy.ts';
+import {
+  NoPrivateEvidenceError,
+  checkPrivateEvidence,
+  type PrivateEvidenceGuard,
+  type PrivateAnswerModel,
+  type PrivateAnswerSourceCitation,
+  type PrivateEvidenceItem,
+} from './private-answer-contract.ts';
 
 export interface BuiltInPrivateAnswerModelOptions {
   /** The worker's one built-in model instance (shared with the sniffer and the answer pool). */
@@ -40,6 +49,13 @@ export interface BuiltInPrivateAnswerModelOptions {
   available: () => boolean;
   /** analyst-built-in.ts answerPrivately (injected, so tests run a stub). */
   answer: (question: string, evidence: readonly BuiltInEvidenceItem[], options: AnswerPrivatelyOptions) => Promise<PrivateAnswer>;
+  /**
+   * Whether each evidence item may be read by a model right now, from live
+   * state. Called immediately before every model submission (the document
+   * embeddings, the depth re-read, each answer-model call); an item it does
+   * not vouch for is dropped. Without it nothing is read.
+   */
+  eligible: PrivateEvidenceGuard;
   /** The panel's work bound (PANEL_ANSWER_LIMITS by default). */
   limits?: Partial<PanelAnswerLimits>;
   /**
@@ -53,8 +69,12 @@ export interface BuiltInPrivateAnswerModelOptions {
    * Re-reads one evidence item's own text, up to `maxChars`, with its
    * passages chosen for `question` (the whole item when it fits), from the
    * store on this computer. The panel reads an item that clearly leads in
-   * depth through it. Without it (or when it fails), the search-time
-   * passages are read.
+   * depth through it. Without it, the passages the evidence carries are read.
+   * Undefined, or a policy denial, means the store refuses the item now (its
+   * tier, the owner's scope, or it is gone): the item is dropped, never read
+   * from the passages it carried. Any other failure, or an empty result, keeps
+   * the passages it carried only if `eligible` confirms the item after the
+   * read; otherwise it is dropped.
    */
   readItem?: PanelItemReader;
   /**
@@ -79,9 +99,16 @@ export interface PrivateSourceLinks {
   localPath?: string;
 }
 
+/**
+ * Scores items' relevance to the question. `items()` runs the eligibility
+ * guard and returns each item's name and text, or undefined for an item no
+ * longer eligible: a relevance call must invoke it immediately before it
+ * submits item text to any model (no other wait in between) and submit only
+ * the items it returns. One score per entry (any value for an undefined one).
+ */
 export type PanelRelevance = (
   question: string,
-  items: ReadonlyArray<{ title?: string; text: string }>,
+  items: () => Promise<ReadonlyArray<{ title?: string; text: string } | undefined>>,
   signal?: AbortSignal,
 ) => Promise<readonly number[] | undefined>;
 
@@ -177,24 +204,80 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       const full = request?.detail === 'full';
       if (!model) throw new Error('no private answer model');
       const read = privateEvidence(evidence, limits.maxPassageChars);
-      const unreadable = read.unreadable;
-      const selection = await panelSelection(question, read, limits, options.relevance, signal);
-      const picked = selection.items;
-      let items = picked.map((index) => read.items[index]!);
+      let unreadable = read.unreadable;
+      const readableHits = new Set(read.sources);
+      /** Matched items with no readable text: only counted, and only while still eligible. */
+      const unreadableHits = evidence.filter((_, index) => !readableHits.has(index));
+      const hitOf = (index: number) => evidence[read.sources[index]!]!;
+      // The readable items (indexes into read.items) still eligible now, by
+      // the live guard. Every model submission below is issued right after
+      // one of these returns, with no other wait in between.
+      const admit = async (indexes: readonly number[]): Promise<number[]> => {
+        const ok = await checkPrivateEvidence(options.eligible, indexes.map(hitOf));
+        return indexes.filter((_, position) => ok[position]);
+      };
+      let live = read.items.map((_, index) => index);
+      let scores: number[] | undefined;
+      if (options.relevance && live.length > 1) {
+        const offered = live;
+        let admitted: number[] | undefined;
+        let raw: readonly number[] | undefined;
+        try {
+          raw = await options.relevance(question, async () => {
+            admitted = await admit(offered);
+            const kept = new Set(admitted);
+            return offered.map((index) => {
+              if (!kept.has(index)) return undefined;
+              const item = read.items[index]!;
+              return { ...(item.title ? { title: item.title } : {}), text: item.text };
+            });
+          }, signal);
+        } catch {
+          raw = undefined;
+        }
+        if (admitted) live = admitted;
+        if (raw && raw.length === offered.length) {
+          const byIndex = new Map(offered.map((index, position) => [index, raw![position]!]));
+          const kept = live.map((index) => byIndex.get(index)!);
+          scores = kept.every((score) => Number.isFinite(score)) ? kept : undefined;
+        }
+      }
+      const liveRead = { items: live.map((index) => read.items[index]!) };
+      const selection = await panelSelection(question, liveRead, limits, scores ? async () => scores : undefined, signal);
+      let picked = selection.items.map((position) => live[position]!);
+      /** The depth re-read's text for an item, by index into read.items. */
+      const deepItems = new Map<number, BuiltInEvidenceItem>();
       // Full: the items read are re-read whole (or their best passages)
       // within the deep budget. Summary: only leading items are re-read, for
       // their best passages within a summary-sized budget (results pages,
       // not page headers); otherwise the search-time passages are read.
-      if (options.readItem && (full || selection.leading)) {
-        items = await readInDepth(
+      if (options.readItem && (full || selection.leading) && picked.length > 0) {
+        picked = await admit(picked);
+        const deep = await readInDepth(
           question,
-          items,
-          picked.map((index) => evidence[read.sources[index]!]!),
+          picked.map((index) => read.items[index]!),
+          picked.map(hitOf),
           full ? limits.deepEvidenceChars : limits.leadingEvidenceChars,
           options.readItem,
           signal,
         );
+        // An item its store now refuses (re-tiered, out of scope, deleted) is
+        // dropped: neither its deeper text nor its earlier passages are read.
+        const kept = deep.flatMap((item, position) => (item ? [{ item, index: picked[position]! }] : []));
+        picked = kept.map((entry) => entry.index);
+        for (const entry of kept) deepItems.set(entry.index, entry.item);
       }
+      // Readable items there were, but none may be read now: no evidence.
+      const hadReadable = read.items.length > 0;
+      // Immediately before the answer: only items still eligible now (and
+      // only still-eligible unreadable items are counted), in one lookup.
+      {
+        const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...unreadableHits]);
+        picked = picked.filter((_, position) => ok[position]);
+        unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
+      }
+      if (hadReadable && picked.length === 0) throw new NoPrivateEvidenceError();
+      const items = picked.map((index) => deepItems.get(index) ?? read.items[index]!);
       try {
         observe?.evidence?.({
           items: items.length,
@@ -210,16 +293,43 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
         // Never answer from titles alone: say plainly that nothing was readable.
         return { answer: unreadableAnswer(unreadable), citations: [], unanswered: [] };
       }
-      const result = await options.answer(question, items, {
-        model,
-        maxPromptBytes: full ? limits.deepPromptBytes : limits.maxPromptBytes,
-        maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
-        audit: limits.audit,
-        evidenceFormat: 'compact',
-        ...(observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {}),
-        ...(signal ? { signal } : {}),
-      });
-      const byId = new Map(items.map((item, position) => [item.id, { item, hit: evidence[read.sources[picked[position]!]!] }]));
+      // Every model call the answer makes (its main call, any retry or
+      // audit) re-checks the items in its prompt first; one no longer
+      // eligible stops the answer, and nothing it produced is used.
+      const prompted = picked.map(hitOf);
+      let revoked = false;
+      const guarded: BuiltInAnalystModel = {
+        name: model.name,
+        spec: model.spec,
+        prepare: () => model.prepare(),
+        status: () => model.status(),
+        stop: () => model.stop(),
+        async complete(modelRequest: AnalystModelRequest) {
+          const ok = await checkPrivateEvidence(options.eligible, prompted);
+          if (!ok.every(Boolean)) {
+            revoked = true;
+            throw new NoPrivateEvidenceError();
+          }
+          return model.complete(modelRequest);
+        },
+      };
+      let result: Awaited<ReturnType<typeof options.answer>>;
+      try {
+        result = await options.answer(question, items, {
+          model: guarded,
+          maxPromptBytes: full ? limits.deepPromptBytes : limits.maxPromptBytes,
+          maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
+          audit: limits.audit,
+          evidenceFormat: 'compact',
+          ...(observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {}),
+          ...(signal ? { signal } : {}),
+        });
+      } catch (error) {
+        if (revoked) throw new NoPrivateEvidenceError();
+        throw error;
+      }
+      if (revoked) throw new NoPrivateEvidenceError();
+      const byId = new Map(items.map((item, position) => [item.id, { item, hit: hitOf(picked[position]!) }]));
       const citations: PrivateAnswerSourceCitation[] = [];
       const seen = new Set<string>();
       // Only the items the answer cites are its sources.
@@ -227,7 +337,10 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
         if (seen.has(citation.id)) continue;
         seen.add(citation.id);
         const entry = byId.get(citation.id);
-        const item = entry?.item;
+        // Only an item the model was given can be a source (never one the
+        // depth re-read dropped).
+        if (!entry) continue;
+        const item = entry.item;
         const title = citation.title ?? item?.title;
         let links: PrivateSourceLinks | undefined;
         try {
@@ -339,7 +452,7 @@ export async function panelSelection(
   let scores: readonly number[] | undefined;
   if (relevance && order.length > 1) {
     try {
-      scores = await relevance(question, read.items.map((item) => ({ ...(item.title ? { title: item.title } : {}), text: item.text })), signal);
+      scores = await relevance(question, async () => read.items.map((item) => ({ ...(item.title ? { title: item.title } : {}), text: item.text })), signal);
     } catch {
       scores = undefined;
     }
@@ -378,8 +491,12 @@ export function leadingCount(sorted: readonly number[], maxLeading: number, gap:
  * The leading items' text, re-read in depth: each item's whole text when
  * all of them fit `budget` characters; otherwise the shorter ones whole and
  * the rest an equal share of what is left, each re-read for its best
- * passages at that size. An item whose re-read fails or comes back shorter
- * keeps its search-time passages.
+ * passages at that size. Undefined at an item's position when its store
+ * refuses it now (re-tiered, out of scope, gone, or a policy denial): the
+ * caller drops it and never falls back to the passages it carried. An item
+ * whose re-read only fails (or comes back empty or shorter) keeps the
+ * passages it carried here; the caller reads them only if the live guard
+ * confirms the item after this read.
  */
 async function readInDepth(
   question: string,
@@ -388,31 +505,44 @@ async function readInDepth(
   budget: number,
   readItem: PanelItemReader,
   signal?: AbortSignal,
-): Promise<BuiltInEvidenceItem[]> {
-  const read = async (index: number, maxChars: number): Promise<string | undefined> => {
+): Promise<Array<BuiltInEvidenceItem | undefined>> {
+  type Read = { kind: 'text'; text: string } | { kind: 'refused' } | { kind: 'failed' };
+  const read = async (index: number, maxChars: number): Promise<Read> => {
+    let chunks: readonly string[] | undefined;
     try {
-      const chunks = await readItem(hits[index]!, { question, maxChars }, signal);
-      const text = (chunks ?? []).map((chunk) => chunk.trim()).filter(Boolean).join('\n…\n');
-      return text ? text.slice(0, maxChars) : undefined;
-    } catch {
-      return undefined;
+      chunks = await readItem(hits[index]!, { question, maxChars }, signal);
+    } catch (error) {
+      // A policy denial is the store refusing the item, not a failed read.
+      return error instanceof SourceModelPolicyDeniedError ? { kind: 'refused' } : { kind: 'failed' };
     }
+    if (chunks === undefined) return { kind: 'refused' };
+    const text = chunks.map((chunk) => chunk.trim()).filter(Boolean).join('\n…\n');
+    return text ? { kind: 'text', text: text.slice(0, maxChars) } : { kind: 'failed' };
   };
   const whole = await Promise.all(items.map((_, index) => read(index, budget)));
-  const sizes = whole.map((text, index) => text?.length ?? items[index]!.text.length);
-  // Fair shares: the shorter items whole, the rest split what is left.
+  const sizes = whole.map((entry, index) => (entry.kind === 'text' ? entry.text.length : items[index]!.text.length));
+  // Fair shares among the items still readable: the shorter whole, the rest split what is left.
   const share = new Array<number>(items.length).fill(0);
-  const byLength = sizes.map((size, index) => ({ size, index })).sort((a, b) => a.size - b.size);
+  const byLength = sizes
+    .map((size, index) => ({ size, index }))
+    .filter(({ index }) => whole[index]!.kind !== 'refused')
+    .sort((a, b) => a.size - b.size);
   let remaining = budget;
   byLength.forEach(({ size, index }, position) => {
     const fair = Math.floor(remaining / (byLength.length - position));
     share[index] = Math.min(size, fair);
     remaining -= share[index]!;
   });
-  return Promise.all(items.map(async (item, index) => {
-    const full = whole[index];
-    if (!full) return item;
-    const text = full.length <= share[index]! ? full : (await read(index, share[index]!)) ?? full.slice(0, share[index]!);
+  return Promise.all(items.map(async (item, index): Promise<BuiltInEvidenceItem | undefined> => {
+    const first = whole[index]!;
+    if (first.kind === 'refused') return undefined;
+    if (first.kind === 'failed') return item;
+    let text = first.text;
+    if (text.length > share[index]!) {
+      const again = await read(index, share[index]!);
+      if (again.kind === 'refused') return undefined;
+      text = again.kind === 'text' ? again.text : text.slice(0, share[index]!);
+    }
     return text.length > item.text.length ? { ...item, text } : item;
   }));
 }
@@ -438,23 +568,30 @@ export function embeddingPanelRelevance(
   return async (question, items, signal) => {
     const model = provider();
     // Local only: a cloud embedding service never sees Private names or text.
-    if (!model || model.backend !== 'local' || items.length === 0) return undefined;
+    if (!model || model.backend !== 'local') return undefined;
     const [query] = await model.embed([{ text: question }], { taskType: 'RETRIEVAL_QUERY' });
-    if (signal?.aborted) return undefined;
-    const named = items.map((item, index) => ({ index, title: item.title?.trim() })).filter((item) => item.title);
+    if (signal?.aborted || !query) return undefined;
+    // The eligibility guard runs now, after the question's embedding, and
+    // the documents are submitted in the same turn it returns.
+    const offered = await items();
+    const present = offered.flatMap((item, index) => (item ? [{ index, item }] : []));
+    if (present.length === 0) return undefined;
+    const named = present.filter((entry) => entry.item.title?.trim());
     const [titles, texts] = await Promise.all([
       named.length > 0
-        ? model.embed(named.map((item) => ({ text: item.title! })), { taskType: 'RETRIEVAL_DOCUMENT' })
+        ? model.embed(named.map((entry) => ({ text: entry.item.title!.trim() })), { taskType: 'RETRIEVAL_DOCUMENT' })
         : Promise.resolve([] as number[][]),
-      model.embed(items.map((item) => {
+      model.embed(present.map(({ item }) => {
         const head = item.text.slice(0, RELEVANCE_TEXT_CHARS);
         return { text: item.title ? `${item.title}\n${head}` : head };
       }), { taskType: 'RETRIEVAL_DOCUMENT' }),
     ]);
-    if (!query || texts.length !== items.length || titles.length !== named.length) return undefined;
-    const titleScore = new Map(named.map((item, position) => [item.index, cosine(query, titles[position]!)]));
-    return items.map((_, index) => {
-      const text = cosine(query, texts[index]!);
+    if (texts.length !== present.length || titles.length !== named.length) return undefined;
+    const titleScore = new Map(named.map((entry, position) => [entry.index, cosine(query, titles[position]!)]));
+    const textScore = new Map(present.map((entry, position) => [entry.index, cosine(query, texts[position]!)]));
+    return offered.map((_, index) => {
+      const text = textScore.get(index);
+      if (text === undefined) return Number.NaN;
       const title = titleScore.get(index);
       return title === undefined ? text : TITLE_WEIGHT * title + (1 - TITLE_WEIGHT) * text;
     });

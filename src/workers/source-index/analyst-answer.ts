@@ -38,6 +38,7 @@ import {
   hasTemporalIntent,
   type ClassificationCoverageNote,
   type EvidencePackBuildDetail,
+  type LocalContentProvider,
   type LocalContentProviderMap,
   type SecretLocationNote,
   type SelectedEvidenceItem,
@@ -62,6 +63,7 @@ import type {
 import { mergeRetrievalDegradations } from '../../core/source-index/retrieval.ts';
 import {
   assertEvidencePackModelEligible,
+  assertModelTrustTierAllowed,
 } from '../../core/source-model-policy.ts';
 import {
   assertSecureAnalystPoolModelIdAllowed,
@@ -2631,6 +2633,69 @@ export async function searchPrivateEvidence(input: {
     .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
     .filter((candidate) => candidate.trustDomain === 'secure_local' && candidate.corpusId !== '');
   return { matched: candidates.length, candidates };
+}
+
+/**
+ * Whether each Private evidence item may be read by a model right now: the
+ * private answer panel's eligibility guard, asked immediately before every
+ * model submission and before an answer is sealed or released. Per item, from
+ * live state only (no search, no cache): the item's corpus is still a
+ * registered Private (secure_local) corpus, and its store's content provider
+ * would serve its CONTENT now under the owner's current read scope. For a
+ * connector store that is `contentServable` (connector-store/local-index.ts):
+ * the scope filters, then the item row, a chunk-existence read and one
+ * tier-ledger read (the item exists and is not tombstoned, its stored tier is
+ * a known tier below S5, no metadata-only owner rule covers its path, it
+ * still has stored text, and this store's copy is current WITH the content
+ * layer, so a move to Secrets, or a copy that serves only names, refuses
+ * it); no chunk text is loaded. Lanes
+ * are built per call, so scope and registry are current. A provider without
+ * that check is asked for the content itself and must return text. Owner
+ * tier rules (always Secret / always Private) are applied by the
+ * classification sweep, not here (see
+ * docs/design/chatgpt-plugin.md). Fails closed: an error, a missing corpus or
+ * provider, or an item without its store identity is not eligible. No query
+ * is passed, so no embedding is computed.
+ */
+export async function checkPrivateEvidenceItems(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  items: readonly Readonly<Record<string, unknown>>[];
+}): Promise<boolean[]> {
+  if (input.items.length === 0) return [];
+  let lanes: AnalystAnswerLanes;
+  try {
+    lanes = input.lanes({
+      question: 'eligibility',
+      retrieval_mode: 'keyword',
+      include_internal: false,
+      include_secure_local: true,
+      include_secure_local_content: true,
+    });
+  } catch {
+    return input.items.map(() => false);
+  }
+  return Promise.all(input.items.map(async (item) => {
+    try {
+      const corpusId = typeof item.corpusId === 'string' ? item.corpusId : undefined;
+      const provenance = item.provenance as SourceIndexProvenance | undefined;
+      if (!corpusId || !provenance?.sourceItem?.localItemId || item.trustDomain !== 'secure_local') return false;
+      if (lanes.registry.get(corpusId)?.trustDomain !== 'secure_local') return false;
+      const provider = lanes.contentProviders[corpusId] as
+        | (LocalContentProvider & { contentServable?: (request: { provenance: SourceIndexProvenance; trustDomain: 'secure_local' }) => boolean })
+        | undefined;
+      if (!provider) return false;
+      if (typeof provider.contentServable === 'function') {
+        return provider.contentServable({ provenance, trustDomain: 'secure_local' }) === true;
+      }
+      const content = await provider.fetchLocalContent({ provenance, trustDomain: 'secure_local', maxChars: 1 });
+      if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0) return false;
+      if (content.sensitivity.trustDomain !== 'secure_local') return false;
+      assertModelTrustTierAllowed(content.sensitivity.trustTier);
+      return true;
+    } catch {
+      return false;
+    }
+  }));
 }
 
 /**

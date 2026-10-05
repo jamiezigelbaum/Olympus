@@ -160,6 +160,47 @@ export interface PrivateAnswerModel {
   reset?(): void | Promise<void>;
 }
 
+/**
+ * Which of these items a model may read right now: one `true` per item that
+ * is still Private-eligible in live state (its tier, the owner's rules and
+ * scope, and that it still exists), read when called. Called immediately
+ * before every model submission and before an answer is sealed. Anything it
+ * cannot vouch for is not eligible.
+ */
+export type PrivateEvidenceGuard = (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>;
+
+/**
+ * `guard` over `items`, failing closed: a throw, a wrong-length answer, or
+ * anything but `true` for an item counts as not eligible.
+ */
+export async function checkPrivateEvidence(
+  guard: PrivateEvidenceGuard | undefined,
+  items: readonly PrivateEvidenceItem[],
+): Promise<boolean[]> {
+  if (items.length === 0) return [];
+  if (!guard) return items.map(() => false);
+  let answer: readonly boolean[];
+  try {
+    answer = await guard(items);
+  } catch {
+    return items.map(() => false);
+  }
+  if (!Array.isArray(answer) || answer.length !== items.length) return items.map(() => false);
+  return answer.map((value) => value === true);
+}
+
+/**
+ * Thrown by `answerPrivately` when none of the evidence it was given may be
+ * read any more (a depth re-read found every picked item refused or gone):
+ * the job ends with its no-evidence outcome, and no model was called.
+ */
+export class NoPrivateEvidenceError extends Error {
+  constructor() {
+    super('no private evidence may be read');
+    this.name = 'NoPrivateEvidenceError';
+  }
+}
+
 /** No private model on this engine yet: every private match reports `no_model`. */
 export const UNAVAILABLE_PRIVATE_ANSWER_MODEL: PrivateAnswerModel = {
   status: () => ({ state: 'no_model' }),
