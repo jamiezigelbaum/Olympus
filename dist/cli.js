@@ -99352,13 +99352,13 @@ function createLlamaServerHandle(launch, options = {}) {
     endpoint2 = undefined;
     if (!server)
       return;
+    if (!server.exited) {
+      retiring.add(server);
+      terminate(server).catch(() => {
+        return;
+      });
+    }
     server.cleanupTokenDir();
-    if (server.exited)
-      return;
-    retiring.add(server);
-    terminate(server).catch(() => {
-      return;
-    });
   };
   const terminate = (server) => {
     if (server.exited)
@@ -99389,7 +99389,9 @@ function createLlamaServerHandle(launch, options = {}) {
   const stopAll = async () => {
     clearIdle();
     generation += 1;
+    const superseded = starting;
     starting = undefined;
+    superseded?.controller.abort(new LlamaServerStartError("The built-in model server was stopped while starting."));
     retireCurrent();
     await awaitRetired();
   };
@@ -99413,11 +99415,16 @@ function createLlamaServerHandle(launch, options = {}) {
       if (generation !== startGeneration)
         throw new LlamaServerStartError("The built-in model server was stopped while starting.");
     };
+    superseded();
+    const retired = awaitRetired();
+    retired.catch(() => {
+      return;
+    });
     try {
-      await abortable(awaitRetired(), signal);
+      await abortable(retired, signal);
     } catch (error2) {
       superseded();
-      throw new LlamaServerStartError(`A previous built-in model server has not exited yet, so a new one was not started. ${error2 instanceof Error ? error2.message : ""}`.trim());
+      throw new LlamaServerStillExitingError(`A previous built-in model server has not exited yet, so a new one was not started. ${error2 instanceof Error ? error2.message : ""}`.trim());
     }
     superseded();
     const port = await freeLoopbackPort();
@@ -99426,17 +99433,17 @@ function createLlamaServerHandle(launch, options = {}) {
     const alias = `olympus-${randomBytes15(12).toString("hex")}`;
     const tokenDir = mkdtempSync2(join67(tmpdir7(), "olympus-built-in-model-"));
     const tokenFile = join67(tokenDir, "token");
-    writeFileSync14(tokenFile, `${token}
-`, { mode: 384 });
     let spawnedProcess;
     try {
+      writeFileSync14(tokenFile, `${token}
+`, { mode: 384 });
       spawnedProcess = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
         stdio: ["ignore", "ignore", "pipe"],
         env: llamaServerEnvironment(options.env ?? process.env, alias),
         detached: false
       });
     } catch (error2) {
-      rmSync12(tokenDir, { recursive: true, force: true });
+      removeTokenDir(tokenDir);
       throw error2;
     }
     const spawned = trackServerProcess(spawnedProcess, tokenDir, (server) => {
@@ -99460,8 +99467,8 @@ function createLlamaServerHandle(launch, options = {}) {
       exitHookInstalled = true;
       process.once("exit", () => {
         for (const server of [current, ...retiring]) {
-          server?.cleanupTokenDir();
           server?.signal("SIGKILL");
+          server?.cleanupTokenDir();
         }
       });
     }
@@ -99495,8 +99502,11 @@ function createLlamaServerHandle(launch, options = {}) {
       }
       await new Promise((resolve10) => setTimeout(resolve10, HEALTH_POLL_MS));
     }
-    if (current !== spawned) {
+    if (current !== spawned || spawned.exited) {
       throw new LlamaServerStartError("The built-in model server was stopped while starting.");
+    }
+    if (signal?.aborted) {
+      fail(signal.reason instanceof Error ? signal.reason : new LlamaServerStartError("The request was cancelled."));
     }
     endpoint2 = { baseUrl, token };
     return endpoint2;
@@ -99507,13 +99517,36 @@ function createLlamaServerHandle(launch, options = {}) {
       if (endpoint2 && current && !current.exited)
         return endpoint2;
       if (!starting) {
-        const pending = start(generation, signal).finally(() => {
-          if (starting === pending)
-            starting = undefined;
+        const controller = new AbortController;
+        const shared2 = {
+          controller,
+          waiters: 0,
+          promise: start(generation, controller.signal).finally(() => {
+            if (starting === shared2)
+              starting = undefined;
+          })
+        };
+        shared2.promise.catch(() => {
+          return;
         });
-        starting = pending;
+        starting = shared2;
       }
-      return starting;
+      const shared = starting;
+      if (!signal) {
+        shared.waiters = Number.POSITIVE_INFINITY;
+        return shared.promise;
+      }
+      shared.waiters += 1;
+      try {
+        return await abortable(shared.promise, signal);
+      } catch (error2) {
+        if (signal.aborted) {
+          shared.waiters -= 1;
+          if (shared.waiters <= 0)
+            shared.controller.abort(signal.reason);
+        }
+        throw error2;
+      }
     },
     touch() {
       armIdle();
@@ -99526,15 +99559,19 @@ function createLlamaServerHandle(launch, options = {}) {
     }
   };
 }
+function removeTokenDir(tokenDir) {
+  try {
+    rmSync12(tokenDir, { recursive: true, force: true });
+    return true;
+  } catch {
+    console.warn("Olympus built-in model: could not remove a model server token directory; it will be retried.");
+    return false;
+  }
+}
 function trackServerProcess(child, tokenDir, onExit) {
   let exited = child.exitCode !== null || child.signalCode !== null;
   let tokenDirPresent = true;
-  let markExited = () => {
-    return;
-  };
-  const exit = new Promise((resolve10) => {
-    markExited = resolve10;
-  });
+  const exitWaiters = new Set;
   const server = {
     pid: child.pid,
     get exited() {
@@ -99542,18 +99579,19 @@ function trackServerProcess(child, tokenDir, onExit) {
     },
     killed: false,
     terminating: undefined,
-    async waitExit(timeoutMs) {
+    waitExit(timeoutMs) {
       if (exited)
-        return true;
-      let timer;
-      const timeout = new Promise((resolve10) => {
-        timer = setTimeout(() => resolve10(false), timeoutMs);
+        return Promise.resolve(true);
+      return new Promise((resolve10) => {
+        const settle = (value) => {
+          clearTimeout(timer);
+          exitWaiters.delete(onExited);
+          resolve10(value);
+        };
+        const onExited = () => settle(true);
+        const timer = setTimeout(() => settle(false), timeoutMs);
+        exitWaiters.add(onExited);
       });
-      try {
-        return await Promise.race([exit.then(() => true), timeout]);
-      } finally {
-        clearTimeout(timer);
-      }
     },
     signal(signal) {
       if (exited)
@@ -99565,27 +99603,25 @@ function trackServerProcess(child, tokenDir, onExit) {
     cleanupTokenDir() {
       if (!tokenDirPresent)
         return;
-      tokenDirPresent = false;
-      rmSync12(tokenDir, { recursive: true, force: true });
+      tokenDirPresent = !removeTokenDir(tokenDir);
     }
   };
   const finish = () => {
     if (exited)
       return;
     exited = true;
-    server.cleanupTokenDir();
-    markExited();
+    for (const waiter of [...exitWaiters])
+      waiter();
     onExit(server);
+    server.cleanupTokenDir();
   };
   child.once("exit", finish);
   child.once("error", () => {
     if (child.pid === undefined)
       finish();
   });
-  if (exited) {
+  if (exited)
     server.cleanupTokenDir();
-    markExited();
-  }
   return server;
 }
 function abortable(promise2, signal) {
@@ -99651,13 +99687,19 @@ function lastLine(text) {
 `);
   return (lines[lines.length - 1] ?? "").slice(0, 300);
 }
-var LlamaServerStartError, LlamaServerStopError, HEALTH_POLL_MS = 250, DEFAULT_STOP_GRACE_MS2 = 5000, DEFAULT_KILL_WAIT_MS = 5000, LLAMA_SERVER_ENV_ALLOWLIST;
+var LlamaServerStartError, LlamaServerStillExitingError, LlamaServerStopError, HEALTH_POLL_MS = 250, DEFAULT_STOP_GRACE_MS2 = 5000, DEFAULT_KILL_WAIT_MS = 5000, LLAMA_SERVER_ENV_ALLOWLIST;
 var init_server4 = __esm(() => {
   init_model_transport();
   LlamaServerStartError = class LlamaServerStartError extends Error {
     constructor(message) {
       super(message);
       this.name = "LlamaServerStartError";
+    }
+  };
+  LlamaServerStillExitingError = class LlamaServerStillExitingError extends LlamaServerStartError {
+    constructor(message) {
+      super(message);
+      this.name = "LlamaServerStillExitingError";
     }
   };
   LlamaServerStopError = class LlamaServerStopError extends Error {
@@ -99753,7 +99795,12 @@ function createBuiltInAnalystModel(options = {}) {
     spec,
     async prepare() {
       try {
+        const cached2 = installed !== undefined;
         await ensureInstalled();
+        const status = readBuiltInReasoningStatus(spec, env);
+        if (cached2 && status.state === "failed" && status.failure?.reason === "runtime_load_failed") {
+          reportBuiltInReasoningState({ model: spec, env }, "ready");
+        }
       } catch {}
     },
     status() {
@@ -99788,6 +99835,10 @@ function createBuiltInAnalystModel(options = {}) {
       } catch (error2) {
         if (request.signal?.aborted)
           throw error2;
+        if (error2 instanceof LlamaServerStillExitingError) {
+          reportBuiltInReasoningState({ model: spec, env }, "ready");
+          throw unavailable(error2);
+        }
         reportBuiltInReasoningState({ model: spec, env }, "failed", {
           reason: "runtime_load_failed",
           message: error2 instanceof Error ? error2.message : String(error2)
@@ -115115,6 +115166,7 @@ var exports_server2 = {};
 __export(exports_server2, {
   validateSecureVeniceAnalystProfileAtConstruction: () => validateSecureVeniceAnalystProfileAtConstruction,
   trustedAnalystAssistTimeoutMs: () => trustedAnalystAssistTimeoutMs,
+  stopBuiltInModelOnShutdown: () => stopBuiltInModelOnShutdown,
   startApprovedSourceRun: () => startApprovedSourceRun,
   sovereigntyAnalystRoutePlan: () => sovereigntyAnalystRoutePlan,
   sourceIndexTelegramAccountFromEnv: () => sourceIndexTelegramAccountFromEnv,
@@ -115643,6 +115695,15 @@ function createWorkerBuiltInAnalystModel(env) {
   if (!resolveBuiltInReasoningModel(env))
     return;
   return createBuiltInAnalystModel({ env });
+}
+function stopBuiltInModelOnShutdown(model) {
+  if (!model)
+    return;
+  try {
+    model.stop().catch(() => {
+      return;
+    });
+  } catch {}
 }
 function createWorkerSharedBuiltInModel(env) {
   const base = createWorkerBuiltInAnalystModel(env);
@@ -117949,9 +118010,7 @@ async function main() {
     Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => {
       return;
     });
-    workerBuiltInModel?.model.stop().catch(() => {
-      return;
-    });
+    stopBuiltInModelOnShutdown(workerBuiltInModel?.model);
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     worker.close();
     sourceScheduler?.stop();

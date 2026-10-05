@@ -44,6 +44,7 @@ import {
 import {
   builtInReasoningThreads,
   createLlamaServerHandle,
+  LlamaServerStillExitingError,
   type LlamaServerHandle,
   type LlamaServerLaunch,
 } from '../workers/source-index/built-in-reasoning/server.ts';
@@ -205,7 +206,14 @@ export function createBuiltInAnalystModel(options: BuiltInAnalystModelOptions = 
     spec,
     async prepare() {
       try {
+        const cached = installed !== undefined;
         await ensureInstalled();
+        // A server that failed to start does not undo a verified install:
+        // "Try again" re-arms it, and the next request starts the server.
+        const status = readBuiltInReasoningStatus(spec, env);
+        if (cached && status.state === 'failed' && status.failure?.reason === 'runtime_load_failed') {
+          reportBuiltInReasoningState({ model: spec, env }, 'ready');
+        }
       } catch {
         // The status file carries the failure for the dashboard.
       }
@@ -244,6 +252,12 @@ export function createBuiltInAnalystModel(options: BuiltInAnalystModelOptions = 
         reportBuiltInReasoningState({ model: spec, env }, 'ready');
       } catch (error) {
         if (request.signal?.aborted) throw error;
+        // An earlier server still exiting is transient: the model stays
+        // available and the next request starts it once the old one is gone.
+        if (error instanceof LlamaServerStillExitingError) {
+          reportBuiltInReasoningState({ model: spec, env }, 'ready');
+          throw unavailable(error);
+        }
         reportBuiltInReasoningState({ model: spec, env }, 'failed', {
           reason: 'runtime_load_failed',
           message: error instanceof Error ? error.message : String(error),

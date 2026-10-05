@@ -63,6 +63,18 @@ export class LlamaServerStartError extends Error {
   }
 }
 
+/**
+ * A new server was not started because an earlier one has not exited yet.
+ * Transient: the install is fine, and a later request starts the server once
+ * the old process is gone.
+ */
+export class LlamaServerStillExitingError extends LlamaServerStartError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LlamaServerStillExitingError';
+  }
+}
+
 /** A stopped server process did not exit even after SIGKILL within the bound. */
 export class LlamaServerStopError extends Error {
   constructor(message: string) {
@@ -150,18 +162,23 @@ export function createLlamaServerHandle(
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const killWaitMs = options.killWaitMs ?? DEFAULT_KILL_WAIT_MS;
   // Every process is tracked by its ChildProcess object and exit promise,
-  // never by a bare pid, so a signal can never reach a recycled pid. The
-  // child stays in the worker's process group (detached: false): the engine
-  // supervisor stops the worker by signalling that whole group, and the
-  // stale-group reaper finds it there, so the model server cannot outlive a
-  // worker that dies without running this code. llama-server started with
-  // --model runs as one process and starts no helpers.
+  // never by a bare pid, so a signal can never reach a recycled pid.
+  //
+  // The child stays in the worker's process group (detached: false). When
+  // the engine supervisor stops the worker it signals that whole group
+  // (SIGTERM, then SIGKILL), so the model server goes with it even if this
+  // code never runs. Not guaranteed: if the worker is SIGKILLed on its own
+  // (no group signal, no exit hook), the model server is orphaned until it
+  // is killed or its host restarts; --sleep-idle-seconds still gives its
+  // model memory back. llama-server started with --model runs as one
+  // process and starts no helpers.
   /** The server being started or serving. */
   let current: ServerProcess | undefined;
   /** Servers told to stop whose exit has not been observed yet. */
   const retiring = new Set<ServerProcess>();
   let endpoint: LlamaServerEndpoint | undefined;
-  let starting: Promise<LlamaServerEndpoint> | undefined;
+  /** The one in-flight start, shared by every concurrent ensureRunning(). */
+  let starting: SharedStart | undefined;
   /** Bumped by every stop(): a start from an older generation never spawns. */
   let generation = 0;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -172,16 +189,21 @@ export function createLlamaServerHandle(
     idleTimer = undefined;
   };
 
-  /** Takes the current server out of service and starts its termination. */
+  /**
+   * Takes the current server out of service and starts its termination. It
+   * is tracked in `retiring` before anything that could fail runs, so a
+   * cleanup error can never leave a live process untracked.
+   */
   const retireCurrent = () => {
     const server = current;
     current = undefined;
     endpoint = undefined;
     if (!server) return;
+    if (!server.exited) {
+      retiring.add(server);
+      terminate(server).catch(() => undefined);
+    }
     server.cleanupTokenDir();
-    if (server.exited) return;
-    retiring.add(server);
-    terminate(server).catch(() => undefined);
   };
 
   /**
@@ -219,7 +241,9 @@ export function createLlamaServerHandle(
   const stopAll = async (): Promise<void> => {
     clearIdle();
     generation += 1;
+    const superseded = starting;
     starting = undefined;
+    superseded?.controller.abort(new LlamaServerStartError('The built-in model server was stopped while starting.'));
     retireCurrent();
     await awaitRetired();
   };
@@ -241,12 +265,17 @@ export function createLlamaServerHandle(
       }
       if (generation !== startGeneration) throw new LlamaServerStartError('The built-in model server was stopped while starting.');
     };
+    // Cancelled before it began: nothing is created, so nothing is left unobserved.
+    superseded();
     // Never two model servers at once: an earlier one must be confirmed gone.
+    // The wait is observed here whatever abortable() does with it.
+    const retired = awaitRetired();
+    retired.catch(() => undefined);
     try {
-      await abortable(awaitRetired(), signal);
+      await abortable(retired, signal);
     } catch (error) {
       superseded();
-      throw new LlamaServerStartError(
+      throw new LlamaServerStillExitingError(
         `A previous built-in model server has not exited yet, so a new one was not started. ${error instanceof Error ? error.message : ''}`.trim(),
       );
     }
@@ -257,16 +286,16 @@ export function createLlamaServerHandle(
     const alias = `olympus-${randomBytes(12).toString('hex')}`;
     const tokenDir = mkdtempSync(join(tmpdir(), 'olympus-built-in-model-'));
     const tokenFile = join(tokenDir, 'token');
-    writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
     let spawnedProcess: ChildProcess;
     try {
+      writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
       spawnedProcess = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
         stdio: ['ignore', 'ignore', 'pipe'],
         env: llamaServerEnvironment(options.env ?? process.env, alias),
         detached: false,
       });
     } catch (error) {
-      rmSync(tokenDir, { recursive: true, force: true });
+      removeTokenDir(tokenDir);
       throw error;
     }
     const spawned = trackServerProcess(spawnedProcess, tokenDir, (server) => {
@@ -294,8 +323,8 @@ export function createLlamaServerHandle(
       // nothing to flush (no slot or prompt cache is saved), so SIGKILL.
       process.once('exit', () => {
         for (const server of [current, ...retiring]) {
-          server?.cleanupTokenDir();
           server?.signal('SIGKILL');
+          server?.cleanupTokenDir();
         }
       });
     }
@@ -328,8 +357,12 @@ export function createLlamaServerHandle(
       }
       await new Promise((resolve) => setTimeout(resolve, HEALTH_POLL_MS));
     }
-    if (current !== spawned) {
+    // Cancelled or stopped while the identity check ran: never hand out an endpoint.
+    if (current !== spawned || spawned.exited) {
       throw new LlamaServerStartError('The built-in model server was stopped while starting.');
+    }
+    if (signal?.aborted) {
+      fail(signal.reason instanceof Error ? signal.reason : new LlamaServerStartError('The request was cancelled.'));
     }
     endpoint = { baseUrl, token };
     return endpoint;
@@ -340,12 +373,37 @@ export function createLlamaServerHandle(
       clearIdle();
       if (endpoint && current && !current.exited) return endpoint;
       if (!starting) {
-        const pending: Promise<LlamaServerEndpoint> = start(generation, signal).finally(() => {
-          if (starting === pending) starting = undefined;
-        });
-        starting = pending;
+        const controller = new AbortController();
+        const shared: SharedStart = {
+          controller,
+          waiters: 0,
+          promise: start(generation, controller.signal).finally(() => {
+            if (starting === shared) starting = undefined;
+          }),
+        };
+        // Every caller may abort and walk away; the shared start is always observed.
+        shared.promise.catch(() => undefined);
+        starting = shared;
       }
-      return starting;
+      const shared = starting;
+      // A caller without a signal waits for the outcome; the start is never
+      // cancelled under it.
+      if (!signal) {
+        shared.waiters = Number.POSITIVE_INFINITY;
+        return shared.promise;
+      }
+      shared.waiters += 1;
+      try {
+        return await abortable(shared.promise, signal);
+      } catch (error) {
+        // Each caller observes its own signal. The start itself is cancelled
+        // only when every caller waiting on it has gone.
+        if (signal.aborted) {
+          shared.waiters -= 1;
+          if (shared.waiters <= 0) shared.controller.abort(signal.reason);
+        }
+        throw error;
+      }
     },
     touch() {
       armIdle();
@@ -374,6 +432,30 @@ interface ServerProcess {
   cleanupTokenDir(): void;
 }
 
+/** One start shared by concurrent ensureRunning() callers. */
+interface SharedStart {
+  promise: Promise<LlamaServerEndpoint>;
+  /** Aborted by stop(), or once every caller waiting on the start has aborted. */
+  controller: AbortController;
+  /** Callers still waiting; Infinity once one waits without a signal. */
+  waiters: number;
+}
+
+/**
+ * Removes a token directory, best effort: a failure here must never stop a
+ * process from being tracked, signalled or seen to exit. Returns whether the
+ * directory is gone. The note carries no path or token.
+ */
+function removeTokenDir(tokenDir: string): boolean {
+  try {
+    rmSync(tokenDir, { recursive: true, force: true });
+    return true;
+  } catch {
+    console.warn('Olympus built-in model: could not remove a model server token directory; it will be retried.');
+    return false;
+  }
+}
+
 function trackServerProcess(
   child: ChildProcess,
   tokenDir: string,
@@ -381,10 +463,8 @@ function trackServerProcess(
 ): ServerProcess {
   let exited = child.exitCode !== null || child.signalCode !== null;
   let tokenDirPresent = true;
-  let markExited: () => void = () => undefined;
-  const exit = new Promise<void>((resolve) => {
-    markExited = resolve;
-  });
+  /** Pending waitExit() calls; each removes itself when it settles. */
+  const exitWaiters = new Set<() => void>();
   const server: ServerProcess = {
     pid: child.pid,
     get exited() {
@@ -392,17 +472,18 @@ function trackServerProcess(
     },
     killed: false,
     terminating: undefined,
-    async waitExit(timeoutMs) {
-      if (exited) return true;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<false>((resolve) => {
-        timer = setTimeout(() => resolve(false), timeoutMs);
+    waitExit(timeoutMs) {
+      if (exited) return Promise.resolve(true);
+      return new Promise<boolean>((resolve) => {
+        const settle = (value: boolean) => {
+          clearTimeout(timer);
+          exitWaiters.delete(onExited);
+          resolve(value);
+        };
+        const onExited = () => settle(true);
+        const timer = setTimeout(() => settle(false), timeoutMs);
+        exitWaiters.add(onExited);
       });
-      try {
-        return await Promise.race([exit.then(() => true as const), timeout]);
-      } finally {
-        clearTimeout(timer);
-      }
     },
     signal(signal) {
       if (exited) return;
@@ -414,26 +495,23 @@ function trackServerProcess(
     },
     cleanupTokenDir() {
       if (!tokenDirPresent) return;
-      tokenDirPresent = false;
-      rmSync(tokenDir, { recursive: true, force: true });
+      tokenDirPresent = !removeTokenDir(tokenDir);
     },
   };
   const finish = () => {
     if (exited) return;
     exited = true;
-    server.cleanupTokenDir();
-    markExited();
+    // Exit is recorded and announced before any filesystem work.
+    for (const waiter of [...exitWaiters]) waiter();
     onExit(server);
+    server.cleanupTokenDir();
   };
   child.once('exit', finish);
   // A spawn that failed outright (no pid) never runs and may never emit exit.
   child.once('error', () => {
     if (child.pid === undefined) finish();
   });
-  if (exited) {
-    server.cleanupTokenDir();
-    markExited();
-  }
+  if (exited) server.cleanupTokenDir();
   return server;
 }
 

@@ -7,12 +7,17 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { createBuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
+import { stopBuiltInModelOnShutdown } from '../src/workers/email-source/server.ts';
+import { readBuiltInReasoningStatus, reportBuiltInReasoningState } from '../src/workers/source-index/built-in-reasoning/install.ts';
+import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import {
   createLlamaServerHandle,
   LlamaServerStartError,
+  LlamaServerStillExitingError,
   LlamaServerStopError,
   type LlamaServerHandle,
   type LlamaServerLaunch,
@@ -21,8 +26,14 @@ import {
 const temporaryDirectories: string[] = [];
 const handles: LlamaServerHandle[] = [];
 const realChildren: ChildProcess[] = [];
+/** Token directories a test made unremovable; restored and removed after it. */
+const lockedDirs: string[] = [];
 
 afterEach(async () => {
+  for (const dir of lockedDirs.splice(0)) {
+    if (existsSync(dir)) chmodSync(dir, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  }
   // Kill first: a stand-in that ignores SIGTERM would otherwise hold stop() for its whole grace period.
   for (const child of realChildren.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
@@ -184,47 +195,82 @@ describe('a new server never overlaps an old one', () => {
   }, 60_000);
 });
 
-/** A model server that survives even SIGKILL until the test lets it exit. */
-class UnkillableChild extends EventEmitter {
+/**
+ * A fake model server process. It exits on the signals in `exitsOn` (none:
+ * it survives even SIGKILL until the test calls exitNow()).
+ */
+class FakeChild extends EventEmitter {
   readonly pid = undefined;
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
   readonly stderr = new EventEmitter();
   readonly signals: string[] = [];
+  constructor(private readonly exitsOn: readonly NodeJS.Signals[]) {
+    super();
+  }
   kill(signal: NodeJS.Signals): boolean {
     this.signals.push(signal);
+    if (this.exitsOn.includes(signal)) queueMicrotask(() => this.exitNow(signal));
     return true;
   }
-  exitNow(): void {
-    this.signalCode = 'SIGKILL';
-    this.emit('exit', null, 'SIGKILL');
+  exitNow(signal: NodeJS.Signals = 'SIGKILL'): void {
+    if (this.exitCode !== null || this.signalCode !== null) return;
+    this.signalCode = signal;
+    this.emit('exit', null, signal);
   }
+}
+
+interface FakeHarnessOptions {
+  exitsOn?: NodeJS.Signals[];
+  /** Whether /health answers 200 (default: always). */
+  health?: () => boolean;
+  /** Runs while the identity check (/v1/models) is in flight. */
+  onIdentity?: () => void | Promise<void>;
+  /** Runs inside spawn, with the token file path. */
+  onSpawn?: (tokenFile: string) => void;
+  stopGraceMs?: number;
+  killWaitMs?: number;
+  idleShutdownSeconds?: number;
+}
+
+function fakeHarness(options: FakeHarnessOptions = {}) {
+  const spawned: FakeChild[] = [];
+  const aliases: string[] = [];
+  const spawnImpl = ((_command: string, args: readonly string[], spawnOptions: { env?: Record<string, string> }) => {
+    aliases.push(spawnOptions.env?.LLAMA_ARG_ALIAS ?? '');
+    options.onSpawn?.(args[args.indexOf('--api-key-file') + 1]!);
+    const child = new FakeChild(options.exitsOn ?? []);
+    spawned.push(child);
+    return child as unknown as ChildProcess;
+  }) as unknown as typeof spawn;
+  const fetchImpl = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/health') {
+      return (options.health?.() ?? true) ? new Response('{}') : new Response('loading', { status: 503 });
+    }
+    await options.onIdentity?.();
+    return Response.json({ data: [{ id: aliases[aliases.length - 1] }] });
+  }) as typeof fetch;
+  const handle = createLlamaServerHandle(
+    { ...launchFor('/unused'), idleShutdownSeconds: options.idleShutdownSeconds ?? 0 },
+    { spawnImpl, fetchImpl, stopGraceMs: options.stopGraceMs ?? 20, killWaitMs: options.killWaitMs ?? 50 },
+  );
+  handles.push(handle);
+  return { handle, spawned };
 }
 
 describe('overall stop bound', () => {
   test('a process that outlives SIGKILL fails stop() with a typed error, and no new server starts until it is gone', async () => {
-    const spawned: UnkillableChild[] = [];
-    const aliases: string[] = [];
-    const spawnImpl = ((_command: string, _args: readonly string[], options: { env?: Record<string, string> }) => {
-      aliases.push(options.env?.LLAMA_ARG_ALIAS ?? '');
-      const child = new UnkillableChild();
-      spawned.push(child);
-      return child as unknown as ChildProcess;
-    }) as unknown as typeof spawn;
-    const fetchImpl = (async (input: RequestInfo | URL) => {
-      const url = new URL(String(input));
-      if (url.pathname === '/health') return new Response('{}');
-      return Response.json({ data: [{ id: aliases[aliases.length - 1] }] });
-    }) as typeof fetch;
-    const handle = createLlamaServerHandle(launchFor('/unused'), { spawnImpl, fetchImpl, stopGraceMs: 20, killWaitMs: 50 });
-    handles.push(handle);
+    const { handle, spawned } = fakeHarness();
     await handle.ensureRunning();
     const startedAt = Date.now();
     await expect(handle.stop()).rejects.toBeInstanceOf(LlamaServerStopError);
     expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(spawned[0]!.signals).toEqual(['SIGTERM', 'SIGKILL']);
     // Refused, not started beside it; the retry sends SIGKILL again.
-    await expect(handle.ensureRunning()).rejects.toThrow('has not exited yet');
+    const refused = await handle.ensureRunning().catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(LlamaServerStillExitingError);
+    expect((refused as Error).message).toContain('has not exited yet');
     expect(spawned).toHaveLength(1);
     expect(spawned[0]!.signals).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL']);
     // Once its exit is observed, the next request starts a fresh server.
@@ -233,22 +279,33 @@ describe('overall stop bound', () => {
     expect(spawned).toHaveLength(2);
   }, 30_000);
 
+  test('a token directory that cannot be removed never untracks a live server', async () => {
+    const warn = console.warn;
+    console.warn = () => undefined;
+    try {
+      const { handle, spawned } = fakeHarness({
+        onSpawn: (tokenFile) => {
+          // Make the token file unremovable: cleanup fails with EACCES.
+          lockedDirs.push(dirname(tokenFile));
+          chmodSync(dirname(tokenFile), 0o500);
+        },
+      });
+      await handle.ensureRunning();
+      await expect(handle.stop()).rejects.toBeInstanceOf(LlamaServerStopError);
+      // It was still signalled, and it is still tracked: no second server.
+      expect(spawned[0]!.signals).toEqual(['SIGTERM', 'SIGKILL']);
+      await expect(handle.ensureRunning()).rejects.toBeInstanceOf(LlamaServerStillExitingError);
+      expect(spawned).toHaveLength(1);
+      spawned[0]!.exitNow();
+      await handle.ensureRunning();
+      expect(spawned).toHaveLength(2);
+    } finally {
+      console.warn = warn;
+    }
+  }, 30_000);
+
   test('an abort while waiting for an old server to exit rejects at once with the abort reason', async () => {
-    const spawned: UnkillableChild[] = [];
-    const aliases: string[] = [];
-    const spawnImpl = ((_command: string, _args: readonly string[], options: { env?: Record<string, string> }) => {
-      aliases.push(options.env?.LLAMA_ARG_ALIAS ?? '');
-      const child = new UnkillableChild();
-      spawned.push(child);
-      return child as unknown as ChildProcess;
-    }) as unknown as typeof spawn;
-    const fetchImpl = (async (input: RequestInfo | URL) => {
-      const url = new URL(String(input));
-      if (url.pathname === '/health') return new Response('{}');
-      return Response.json({ data: [{ id: aliases[aliases.length - 1] }] });
-    }) as typeof fetch;
-    const handle = createLlamaServerHandle(launchFor('/unused'), { spawnImpl, fetchImpl, stopGraceMs: 60_000, killWaitMs: 60_000 });
-    handles.push(handle);
+    const { handle, spawned } = fakeHarness({ stopGraceMs: 60_000, killWaitMs: 60_000 });
     await handle.ensureRunning();
     const stopping = handle.stop().catch(() => undefined);
     const abort = new AbortController();
@@ -259,4 +316,215 @@ describe('overall stop bound', () => {
     spawned[0]!.exitNow();
     await stopping;
   }, 30_000);
+
+  test('a start with an already-aborted signal while an old server times out leaves no unhandled rejection', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { handle, spawned } = fakeHarness({ stopGraceMs: 20, killWaitMs: 50 });
+      await handle.ensureRunning();
+      const stopping = handle.stop().then(() => 'stopped', (error: unknown) => error);
+      const abort = new AbortController();
+      abort.abort(new Error('already cancelled'));
+      await expect(handle.ensureRunning(abort.signal)).rejects.toThrow('already cancelled');
+      expect(await stopping).toBeInstanceOf(LlamaServerStopError);
+      // Give any stray rejection its turn to surface.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+      spawned[0]!.exitNow();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  }, 30_000);
+});
+
+describe('cancellation and crashes after spawn', () => {
+  test('an abort during the health check stops the spawned server; the next start waits for its exit', async () => {
+    let healthy = false;
+    const { handle, spawned } = fakeHarness({ exitsOn: ['SIGTERM'], health: () => healthy });
+    const abort = new AbortController();
+    const first = handle.ensureRunning(abort.signal);
+    await until(() => spawned.length === 1);
+    abort.abort(new Error('caller gone'));
+    await expect(first).rejects.toThrow('caller gone');
+    await until(() => spawned[0]!.signalCode !== null);
+    expect(spawned[0]!.signals).toEqual(['SIGTERM']);
+    healthy = true;
+    await handle.ensureRunning();
+    expect(spawned).toHaveLength(2);
+  }, 30_000);
+
+  test('a server that crashes during the health check fails the start, and the next start spawns fresh', async () => {
+    const { handle, spawned } = fakeHarness({ exitsOn: ['SIGTERM'], health: () => spawned.length > 1 });
+    const first = handle.ensureRunning();
+    await until(() => spawned.length === 1);
+    spawned[0]!.exitNow('SIGSEGV');
+    await expect(first).rejects.toThrow('exited while starting');
+    expect(handle.pid).toBeUndefined();
+    await handle.ensureRunning();
+    expect(spawned).toHaveLength(2);
+  }, 30_000);
+
+  test('an abort during the identity check never hands out the endpoint', async () => {
+    const abort = new AbortController();
+    const { handle, spawned } = fakeHarness({ exitsOn: ['SIGTERM'], onIdentity: () => abort.abort(new Error('caller gone')) });
+    await expect(handle.ensureRunning(abort.signal)).rejects.toThrow('caller gone');
+    await until(() => spawned[0]!.signalCode !== null);
+    expect(spawned[0]!.signals).toEqual(['SIGTERM']);
+    expect(handle.pid).toBeUndefined();
+  }, 30_000);
+
+  test('a stale start whose identity check completes after stop() is discarded', async () => {
+    let stopped: Promise<void> | undefined;
+    let handleRef: LlamaServerHandle | undefined;
+    const { handle, spawned } = fakeHarness({
+      exitsOn: ['SIGTERM'],
+      onIdentity: () => {
+        if (!stopped) stopped = handleRef!.stop();
+      },
+    });
+    handleRef = handle;
+    const outcome = await handle.ensureRunning().catch((error: unknown) => error);
+    expect(outcome).toBeInstanceOf(LlamaServerStartError);
+    expect((outcome as Error).message).toContain('stopped while starting');
+    await stopped;
+    expect(spawned[0]!.signals).toEqual(['SIGTERM']);
+    expect(handle.pid).toBeUndefined();
+    // The next start is a fresh one, after the old exit.
+    await handle.ensureRunning();
+    expect(spawned).toHaveLength(2);
+  }, 30_000);
+});
+
+describe('per-caller cancellation of a shared start', () => {
+  test('one caller aborting does not cancel the start another caller still waits for', async () => {
+    let healthy = false;
+    const { handle, spawned } = fakeHarness({ exitsOn: ['SIGTERM'], health: () => healthy });
+    const abort = new AbortController();
+    const a = handle.ensureRunning(abort.signal);
+    const b = handle.ensureRunning();
+    await until(() => spawned.length === 1);
+    abort.abort(new Error('a gave up'));
+    await expect(a).rejects.toThrow('a gave up');
+    healthy = true;
+    const endpoint = await b;
+    expect(endpoint.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]!.signals).toEqual([]);
+  }, 30_000);
+
+  test('when every caller aborts, the shared start is cancelled and its server stopped', async () => {
+    const { handle, spawned } = fakeHarness({ exitsOn: ['SIGTERM'], health: () => false });
+    const one = new AbortController();
+    const two = new AbortController();
+    const a = handle.ensureRunning(one.signal);
+    const b = handle.ensureRunning(two.signal);
+    await until(() => spawned.length === 1);
+    one.abort(new Error('one gone'));
+    await expect(a).rejects.toThrow('one gone');
+    expect(spawned[0]!.signals).toEqual([]);
+    two.abort(new Error('two gone'));
+    await expect(b).rejects.toThrow('two gone');
+    await until(() => spawned[0]!.signalCode !== null);
+    expect(spawned[0]!.signals).toEqual(['SIGTERM']);
+  }, 30_000);
+});
+
+describe('idle shutdown versus a new request', () => {
+  test('a request arriving while the idle shutdown waits for the exit starts the next server only after it', async () => {
+    const log: string[] = [];
+    const { spawnImpl, children } = recordingSpawn(log);
+    const handle = createLlamaServerHandle(
+      { ...launchFor(standInServer('exit-on-release')), idleShutdownSeconds: 1 },
+      { spawnImpl, stopGraceMs: 60_000 },
+    );
+    handles.push(handle);
+    const first = await handle.ensureRunning();
+    handle.touch();
+    await until(() => terminated(first.baseUrl));
+    const next = handle.ensureRunning();
+    expect(children).toHaveLength(1);
+    await fetch(`${first.baseUrl}/release`);
+    await next;
+    expect(log.indexOf('exit 1')).toBeGreaterThan(-1);
+    expect(log.indexOf('exit 1')).toBeLessThan(log.indexOf('spawn 2'));
+  }, 60_000);
+});
+
+describe('callers of the handle', () => {
+  test('a refused restart (old server still exiting) leaves the model available, and the next request starts it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-built-in-retry-test-'));
+    temporaryDirectories.push(dir);
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    let refuse = true;
+    const server: LlamaServerHandle = {
+      async ensureRunning() {
+        if (refuse) throw new LlamaServerStillExitingError('A previous built-in model server has not exited yet.');
+        return { baseUrl: 'http://127.0.0.1:1', token: 't' };
+      },
+      touch() {},
+      async stop() {},
+      pid: undefined,
+    };
+    const model = createBuiltInAnalystModel({
+      env,
+      model: QWEN35_4B,
+      install: async () => ({ modelPath: '/m.gguf', serverPath: '/llama-server', gpu: true }),
+      createServer: () => server,
+      fetchImpl: (async () => Response.json({ choices: [{ message: { content: '{}' } }] })) as unknown as typeof fetch,
+      waitForInstall: true,
+    });
+    await model.prepare();
+    await expect(model.complete({ system: 's', prompt: 'p', localOnly: true })).rejects.toThrow();
+    expect(readBuiltInReasoningStatus(QWEN35_4B, env).state).toBe('ready');
+    refuse = false;
+    await expect(model.complete({ system: 's', prompt: 'p', localOnly: true })).resolves.toMatchObject({ text: '{}' });
+  });
+
+  test('"Try again" (prepare) re-arms a cached install after a runtime failure', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-built-in-retry-test-'));
+    temporaryDirectories.push(dir);
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    let installs = 0;
+    const model = createBuiltInAnalystModel({
+      env,
+      model: QWEN35_4B,
+      install: async () => {
+        installs += 1;
+        reportBuiltInReasoningState({ model: QWEN35_4B, env }, 'ready');
+        return { modelPath: '/m.gguf', serverPath: '/llama-server', gpu: true };
+      },
+      createServer: () => ({ async ensureRunning() { return { baseUrl: 'http://127.0.0.1:1', token: 't' }; }, touch() {}, async stop() {}, pid: undefined }),
+      waitForInstall: true,
+    });
+    await model.prepare();
+    reportBuiltInReasoningState({ model: QWEN35_4B, env }, 'failed', { reason: 'runtime_load_failed', message: 'did not load' });
+    await model.prepare();
+    expect(readBuiltInReasoningStatus(QWEN35_4B, env).state).toBe('ready');
+    expect(installs).toBe(1);
+    // Other failures are not papered over.
+    reportBuiltInReasoningState({ model: QWEN35_4B, env }, 'failed', { reason: 'checksum_mismatch', message: 'bad' });
+    await model.prepare();
+    expect(readBuiltInReasoningStatus(QWEN35_4B, env).state).toBe('failed');
+  });
+
+  test('worker shutdown stops the built-in model and swallows a failed stop', async () => {
+    let stops = 0;
+    stopBuiltInModelOnShutdown({ stop: async () => { stops += 1; } });
+    expect(stops).toBe(1);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      stopBuiltInModelOnShutdown({ stop: async () => { throw new LlamaServerStopError('stuck'); } });
+      stopBuiltInModelOnShutdown({ stop: () => { throw new Error('sync'); } });
+      stopBuiltInModelOnShutdown(undefined);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });
