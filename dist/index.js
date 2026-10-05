@@ -15804,6 +15804,28 @@ var CHILD_ENV_KEYS = [
   "ZKAPI_CLIENTD_CONFIG_DIR",
   "OA_CHAT_CONFIG_DIR"
 ];
+var ZKAPI_STAGE_LABELS = [
+  ["leaseAcquireMs", "lease acquire"],
+  ["confinementSelfTestMs", "confinement self-test"],
+  ["torBootstrapMs", "Tor start to bootstrapped"],
+  ["daemonReadyMs", "daemon start to ready"],
+  ["daemonVerifyMs", "daemon verification"],
+  ["policyWarmMs", "models/policy warm"],
+  ["reservationMs", "reservation"],
+  ["dispatchToFirstByteMs", "dispatch to first byte"],
+  ["firstByteToCompletionMs", "first byte to completion"],
+  ["correlationWaitMs", "request correlation wait"],
+  ["settlementWaitMs", "settlement wait"],
+  ["torStopMs", "Tor stop"],
+  ["postStopProbeMs", "post-stop probe"],
+  ["teardownMs", "teardown"],
+  ["totalMs", "total"]
+];
+function zkapiStageRows(timings) {
+  if (!timings)
+    return [];
+  return ZKAPI_STAGE_LABELS.filter(([key]) => typeof timings[key] === "number").map(([key, label]) => ({ label, ms: timings[key] }));
+}
 function zkapiRouteLabel(receipt) {
   if (receipt.keyReuse !== "verified_off" || receipt.inferenceAuth !== "verified") {
     return "not anonymous: key isolation or local authentication not confirmed";
@@ -17794,9 +17816,13 @@ function describeZkapiReadiness(readiness) {
   const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts up to $6.00)`;
   const fence = readiness.fences.length > 0 ? `UNRESOLVED SESSION: ${readiness.fences.map((entry) => `fence since ${entry.at} for wallet directory ${entry.configDir}${entry.daemonExecutable ? ` (daemon ${entry.daemonExecutable}${entry.daemonPort ? `, port ${entry.daemonPort}` : ""})` : ""}${entry.thisWallet ? ", this wallet" : ", another wallet"}`).join("; ")}; run a recovery-only session before another consult` : "no unresolved session";
   const stranded = readiness.stranded ? readiness.stranded.supervisorRunning ? `; a session is in progress (supervisor pid ${readiness.stranded.supervisorPid})` : `; STRANDED PROCESSES from an earlier session: ${readiness.stranded.groups.map((group) => `${group.role} process group ${group.pgid}`).join(", ") || "no group recorded"}` : "";
-  const last = readiness.lastSession ? `last ${readiness.lastSession.recovery ? "recovery session" : "consult"} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}` : "no consult run yet";
+  const last = readiness.lastSession ? `last ${readiness.lastSession.recovery ? "recovery session" : "consult"} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}${stageTimings(readiness.lastSession.stageMs)}` : "no consult run yet";
   const blockers = readiness.blockers.length > 0 ? `; not ready: ${readiness.blockers.join(", ")}` : "; ready";
   return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}${stranded}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
+}
+function stageTimings(timings) {
+  const rows = zkapiStageRows(timings);
+  return rows.length > 0 ? `, stage timings ${rows.map((row) => `${row.label} ${row.ms} ms`).join(", ")}` : "";
 }
 function secretRefPresent(secretRef, env, deps) {
   const ref = normalizeSecretRef(secretRef ?? "");
