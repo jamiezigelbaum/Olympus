@@ -188,6 +188,11 @@ export interface SourceIndexRoutedSearchResponse {
   // that matched nothing contributed nothing. Internal: never part of a tool
   // or model result.
   encounteredSecureLocal: boolean;
+  // The lane audits (by object identity, members of laneAudits) of every
+  // corpus whose contribution was secure by that same rule. Their counts
+  // describe secure-inclusive matches, so an answer analyzed on an ordinary
+  // route leaves them out of what it returns. Internal.
+  secureLaneAudits: readonly RetrievalLaneAudit[];
   latencyMs: number;
   rawExposed: false;
 }
@@ -294,6 +299,7 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
   const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[] }> = [];
   const matchCounts: SourceIndexRoutedMatchCount[] = [];
   let encounteredSecureLocal = false;
+  const secureLaneAudits: RetrievalLaneAudit[] = [];
   const startedAt = Date.now();
 
   const searchableCorpora: SourceIndexCorpusDefinition[] = [];
@@ -367,8 +373,10 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
       outcome: 'success',
     });
     searchedCorpora.push(corpus.corpusId);
+    const corpusLaneAuditsStart = laneAudits.length;
     laneAudits.push(...(response.laneAudits ?? []));
-    if (corpusContributedSecure(corpus, response)) encounteredSecureLocal = true;
+    const contributedSecure = corpusContributedSecure(corpus, response);
+    if (contributedSecure) encounteredSecureLocal = true;
     if (response.matchCount) {
       matchCounts.push({
         corpusId: corpus.corpusId,
@@ -392,6 +400,7 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
       const semanticLoss = semanticLaneDegradation(corpus.corpusId, retrievalState, response);
       if (semanticLoss) degradations.push(semanticLoss);
     }
+    if (contributedSecure) secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
     lanes.push({
       name: corpus.corpusId,
       items: response.hits.map((hit) => ({
@@ -447,6 +456,7 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
     corpusTimings,
     ...(matchCounts.length > 0 ? { matchCounts } : {}),
     encounteredSecureLocal,
+    secureLaneAudits,
     latencyMs: Date.now() - startedAt,
     rawExposed: false,
   };

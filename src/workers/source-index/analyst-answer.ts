@@ -73,6 +73,7 @@ import {
   buildSourceSensitivity,
   isSecureSensitivity,
   type RetrievalDegradation,
+  type RetrievalLaneAudit,
   type SourceIndexProvenance,
   type SourceItemIdentity,
   type SourceTrustDomain,
@@ -438,6 +439,7 @@ export function createAnalystSourceIndexAnswerHandler(
             skippedCorpora: mergeSkippedCorpora(preRebuild, rebuilt),
             degradations: mergeRetrievalDegradations(preRebuild.degradations, rebuilt.degradations),
             laneAudits: [...preRebuild.laneAudits, ...rebuilt.laneAudits],
+            secureLaneAudits: [...preRebuild.secureLaneAudits, ...rebuilt.secureLaneAudits],
           };
           evidencePackMs += Date.now() - rebuildStartedAt;
         }
@@ -542,6 +544,9 @@ export function createAnalystSourceIndexAnswerHandler(
             skippedCorpora: mergeSkippedCorpora(detail, rebuilt),
             degradations: mergeRetrievalDegradations(detail.degradations, rebuilt.degradations),
             laneAudits: [...detail.laneAudits, ...rebuilt.laneAudits],
+            // The original build's secure lanes stay marked, so the ordinary
+            // answer does not return their counts.
+            secureLaneAudits: [...detail.secureLaneAudits, ...rebuilt.secureLaneAudits],
           }, 'private_analyst_unavailable');
           pack = detail.pack;
           assertEvidencePackModelEligible(pack);
@@ -608,7 +613,16 @@ export function createAnalystSourceIndexAnswerHandler(
             trust_domain: skip.trustDomain,
             reason: skip.reason,
           })),
-          lane_audits: [...detail.laneAudits],
+          // A lane audit's counts from a corpus that contributed anything
+          // secure describe secure-inclusive matches: an answer analyzed on an
+          // ordinary route (or an exclusion rebuild) leaves those entries out
+          // whole; the secure pool keeps every one, and so does a
+          // policy-denied empty pack, which no analyst route ever saw (its
+          // audits are the content-free policy_filtered rewrite). The detail
+          // keeps them all.
+          lane_audits: localOnly || policyDeniedEmptyPack
+            ? [...detail.laneAudits]
+            : withoutSecureLaneAudits(detail.laneAudits, detail.secureLaneAudits),
           ...(detail.degradations.length > 0
             ? { retrieval_degradations: detail.degradations.map(answerRetrievalDegradation) }
             : {}),
@@ -2212,6 +2226,14 @@ function isUnsupportedNoContentAnswer(result: AnalystResult): boolean {
 
 function packHasSecureLocal(pack: EvidencePack): boolean {
   return pack.candidates.some((candidate) => isSecureSensitivity(candidate));
+}
+
+function withoutSecureLaneAudits(
+  laneAudits: readonly RetrievalLaneAudit[],
+  secureLaneAudits: readonly RetrievalLaneAudit[],
+): RetrievalLaneAudit[] {
+  const secure = new Set(secureLaneAudits);
+  return laneAudits.filter((audit) => !secure.has(audit));
 }
 
 // Each analyst citation becomes a structured evidence fact for the release

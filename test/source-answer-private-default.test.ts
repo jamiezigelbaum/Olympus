@@ -202,6 +202,14 @@ describe('a private analyst outage never costs an ordinary answer', () => {
               hits: [hit('note-1', 'note-1.pdf'), hit('merger', MERGER)],
               // Two matches, one of them the S4 memo: secure-inclusive.
               matchCount: { matchedItems: 2, contentMatchedItems: 2, saturated: false, secureMatchedItems: 1 },
+              laneAudits: [{
+                laneName: 'internal-merger-keyword',
+                laneType: 'keyword' as const,
+                candidateCount: 2,
+                returnedCount: 2,
+                localOnly: true,
+                rawExposed: false as const,
+              }],
               latencyMs: 1,
               rawExposed: false as const,
             }),
@@ -238,6 +246,9 @@ describe('a private analyst outage never costs an ordinary answer', () => {
     expect({ posture, decision: result.opsec.release_decision.decision }).toEqual({ posture, decision: 'allow' });
     expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_requires_approval');
     expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_derivative_allowed');
+    // Neither the original build's nor the rebuild's lane audit for the
+    // secure-contributing corpus is returned with the ordinary answer.
+    expect(result.audit.lane_audits.some((audit) => audit.laneName === 'internal-merger-keyword')).toBe(false);
     }
   });
 

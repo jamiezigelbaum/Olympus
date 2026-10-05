@@ -215,6 +215,10 @@ export interface EvidencePackBuildDetail {
   pack: EvidencePack;
   candidateCorpusIds: readonly string[];
   laneAudits: readonly RetrievalLaneAudit[];
+  // Members of laneAudits (by object identity) from a corpus that contributed
+  // anything secure (router.ts secureLaneAudits). Kept whole here for
+  // diagnostics; an answer analyzed on an ordinary route does not return them.
+  secureLaneAudits: readonly RetrievalLaneAudit[];
   skippedCorpora: readonly SourceIndexSkippedCorpus[];
   // Counts-only markers for lanes that did not contribute. Merged across every
   // routed run this build performed, because a build can fan out more than
@@ -416,12 +420,18 @@ export async function buildEvidencePackDetailed(
     .filter((note) => note.pendingClassificationItems > 0);
 
   const builtAt = (input.now ?? (() => new Date()))().toISOString();
+  const laneAudits = policyDeniedCandidates > 0
+    ? contentFreePolicyLaneAudits(routed.laneAudits)
+    : routed.laneAudits;
+  // The policy rewrite maps audits one to one, so the secure ones keep their
+  // place.
+  const secureRouted = new Set(routed.secureLaneAudits);
+  const secureLaneAudits = laneAudits.filter((_, index) => secureRouted.has(routed.laneAudits[index]!));
   return {
     pack: { question: input.question, candidates, coverage, builtAt },
     candidateCorpusIds,
-    laneAudits: policyDeniedCandidates > 0
-      ? contentFreePolicyLaneAudits(routed.laneAudits)
-      : routed.laneAudits,
+    laneAudits,
+    secureLaneAudits,
     skippedCorpora: routed.skippedCorpora,
     // Survives the policy-filter rewrite above: a degradation marker is already
     // counts-only, so there is nothing in it for that rewrite to protect, and
@@ -625,7 +635,7 @@ const MAX_SEARCH_QUERIES = 3;
 type RoutedSearchSlice = Pick<
   SourceIndexRoutedSearchResponse,
   'hits' | 'searchedCorpora' | 'skippedCorpora' | 'laneAudits' | 'degradations' | 'matchCounts'
-  | 'encounteredSecureLocal'
+  | 'encounteredSecureLocal' | 'secureLaneAudits'
 >;
 
 function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearchSlice {
@@ -670,8 +680,9 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
     });
   }
 
+  const secureLaneAudits: RetrievalLaneAudit[] = [];
   for (const corpusId of searched) {
-    laneAudits.push({
+    const audit: RetrievalLaneAudit = {
       laneName: `${corpusId}:selected_evidence`,
       laneType: 'metadata',
       candidateCount: hits.filter((hit) => hit.corpusId === corpusId).length,
@@ -679,7 +690,10 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
       backend: 'selected_evidence',
       localOnly: true,
       rawExposed: false,
-    });
+    };
+    laneAudits.push(audit);
+    const corpus = input.registry.get(corpusId);
+    if (corpus && isSecureSensitivity(corpus.defaultSensitivity)) secureLaneAudits.push(audit);
   }
 
   return {
@@ -687,6 +701,7 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
     searchedCorpora: [...searched],
     skippedCorpora,
     laneAudits,
+    secureLaneAudits,
     // Caller-selected items bypass retrieval entirely: no lane ran, so no lane
     // was lost. Reporting a degradation here would be a false alarm.
     degradations: [],
@@ -764,6 +779,7 @@ async function runRoutedSearches(input: BuildEvidencePackInput): Promise<RoutedS
     // keeping only literalRun's skips hid every such loss.
     skippedCorpora: mergeRoutedSkippedCorpora(runs),
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
+    secureLaneAudits: runs.flatMap((run) => [...run.secureLaneAudits]),
     degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
     // The literal question's counts, not a merge across planner rephrasings:
     // the breadth reported is for what the owner asked.

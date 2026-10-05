@@ -3575,6 +3575,56 @@ describe('row tiers reach the secure_local context decision', () => {
     });
   }
 
+  // Lane audits count matched items, so a lane from a corpus that contributed
+  // anything secure is not returned with an answer analyzed on an ordinary
+  // route; Personal-only and secure-pool answers keep every lane audit.
+  test('a raw answer on an ordinary route returns no lane audit counting the filtered S4 match', async () => {
+    const store = await mixedStore();
+    try {
+      const result = await createAnalystSourceIndexAnswerHandler({
+        analyst: titleEchoAnalyst('held.md').analyst,
+        lanes: () => mixedLanes(store, true),
+      }).answer({ question: 'garden tomatoes', retrieval_mode: 'keyword' });
+
+      expect(result.audit.answer_synthesis.private_context_used).toBe(false);
+      expect(result.audit.lane_audits.some((audit) => audit.laneName.startsWith(STORE))).toBe(false);
+      expect(result.audit.lane_audits.some((audit) => audit.candidateCount === 2 || audit.returnedCount === 2)).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a Personal-only answer keeps its lane audit counts', async () => {
+    const store = await tieredStore('file', [
+      { id: 'one', text: 'garden tomatoes', tier: 'S3' },
+      { id: 'two', text: 'garden tomatoes again', tier: 'S3' },
+    ]);
+    try {
+      const result = await createAnalystSourceIndexAnswerHandler({
+        analyst: titleEchoAnalyst('none').analyst,
+        lanes: () => mixedLanes(store),
+      }).answer({ question: 'garden tomatoes', retrieval_mode: 'keyword' });
+
+      const storeLanes = result.audit.lane_audits.filter((audit) => audit.laneName.startsWith(STORE));
+      expect(storeLanes.length).toBeGreaterThan(0);
+      expect(storeLanes.some((audit) => audit.candidateCount === 2)).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('an answer analyzed on the secure pool keeps the secure corpus lane audit counts', async () => {
+    const { analyst } = scriptedAnalyst(citeFirstInternal);
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(result.audit.answer_synthesis.private_context_used).toBe(true);
+    expect(result.audit.lane_audits).toContainEqual(expect.objectContaining({ laneName: 'lab-1-keyword', candidateCount: 1 }));
+    expect(result.audit.lane_audits).toContainEqual(expect.objectContaining({ laneName: 'note-1-keyword' }));
+  });
+
   test('ChatGPT source_answer shape: a mixed S3/S4 corpus cannot surface the secure-inclusive total', async () => {
     const store = await mixedStore();
     try {

@@ -27253,6 +27253,7 @@ async function routeSourceIndexSearch(options) {
   const lanes = [];
   const matchCounts = [];
   let encounteredSecureLocal = false;
+  const secureLaneAudits = [];
   const startedAt = Date.now();
   const searchableCorpora = [];
   for (const corpus of candidateCorpora) {
@@ -27313,8 +27314,10 @@ async function routeSourceIndexSearch(options) {
       outcome: "success"
     });
     searchedCorpora.push(corpus.corpusId);
+    const corpusLaneAuditsStart = laneAudits.length;
     laneAudits.push(...response.laneAudits ?? []);
-    if (corpusContributedSecure(corpus, response))
+    const contributedSecure = corpusContributedSecure(corpus, response);
+    if (contributedSecure)
       encounteredSecureLocal = true;
     if (response.matchCount) {
       matchCounts.push({
@@ -27338,6 +27341,8 @@ async function routeSourceIndexSearch(options) {
       if (semanticLoss)
         degradations.push(semanticLoss);
     }
+    if (contributedSecure)
+      secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
     lanes.push({
       name: corpus.corpusId,
       items: response.hits.map((hit) => ({
@@ -27368,6 +27373,7 @@ async function routeSourceIndexSearch(options) {
     corpusTimings,
     ...matchCounts.length > 0 ? { matchCounts } : {},
     encounteredSecureLocal,
+    secureLaneAudits,
     latencyMs: Date.now() - startedAt,
     rawExposed: false
   };
@@ -27741,10 +27747,14 @@ async function buildEvidencePackDetailed(input) {
   const secretLocations = input.secretLocations?.(input.searchQuery ?? input.question, routed.searchedCorpora) ?? [];
   const classificationCoverage = (input.classificationCoverage?.(routed.searchedCorpora) ?? []).filter((note) => note.pendingClassificationItems > 0);
   const builtAt = (input.now ?? (() => new Date))().toISOString();
+  const laneAudits = policyDeniedCandidates > 0 ? contentFreePolicyLaneAudits(routed.laneAudits) : routed.laneAudits;
+  const secureRouted = new Set(routed.secureLaneAudits);
+  const secureLaneAudits = laneAudits.filter((_, index) => secureRouted.has(routed.laneAudits[index]));
   return {
     pack: { question: input.question, candidates, coverage, builtAt },
     candidateCorpusIds,
-    laneAudits: policyDeniedCandidates > 0 ? contentFreePolicyLaneAudits(routed.laneAudits) : routed.laneAudits,
+    laneAudits,
+    secureLaneAudits,
     skippedCorpora: routed.skippedCorpora,
     degradations: routed.degradations,
     policyDeniedCandidates,
@@ -27903,8 +27913,9 @@ function selectedItemsToRoutedSlice(input) {
       rawExposed: false
     });
   }
+  const secureLaneAudits = [];
   for (const corpusId of searched) {
-    laneAudits.push({
+    const audit = {
       laneName: `${corpusId}:selected_evidence`,
       laneType: "metadata",
       candidateCount: hits.filter((hit) => hit.corpusId === corpusId).length,
@@ -27912,13 +27923,18 @@ function selectedItemsToRoutedSlice(input) {
       backend: "selected_evidence",
       localOnly: true,
       rawExposed: false
-    });
+    };
+    laneAudits.push(audit);
+    const corpus = input.registry.get(corpusId);
+    if (corpus && isSecureSensitivity(corpus.defaultSensitivity))
+      secureLaneAudits.push(audit);
   }
   return {
     hits,
     searchedCorpora: [...searched],
     skippedCorpora,
     laneAudits,
+    secureLaneAudits,
     degradations: [],
     encounteredSecureLocal
   };
@@ -27957,6 +27973,7 @@ async function runRoutedSearches(input) {
     searchedCorpora: literalRun.searchedCorpora,
     skippedCorpora: mergeRoutedSkippedCorpora(runs),
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
+    secureLaneAudits: runs.flatMap((run) => [...run.secureLaneAudits]),
     degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
     ...literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {},
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal)
@@ -29120,7 +29137,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
             ...rebuilt,
             skippedCorpora: mergeSkippedCorpora(preRebuild, rebuilt),
             degradations: mergeRetrievalDegradations(preRebuild.degradations, rebuilt.degradations),
-            laneAudits: [...preRebuild.laneAudits, ...rebuilt.laneAudits]
+            laneAudits: [...preRebuild.laneAudits, ...rebuilt.laneAudits],
+            secureLaneAudits: [...preRebuild.secureLaneAudits, ...rebuilt.secureLaneAudits]
           };
           evidencePackMs += Date.now() - rebuildStartedAt;
         }
@@ -29189,7 +29207,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
             ...rebuilt,
             skippedCorpora: mergeSkippedCorpora(detail, rebuilt),
             degradations: mergeRetrievalDegradations(detail.degradations, rebuilt.degradations),
-            laneAudits: [...detail.laneAudits, ...rebuilt.laneAudits]
+            laneAudits: [...detail.laneAudits, ...rebuilt.laneAudits],
+            secureLaneAudits: [...detail.secureLaneAudits, ...rebuilt.secureLaneAudits]
           }, "private_analyst_unavailable");
           pack = detail.pack;
           assertEvidencePackModelEligible(pack);
@@ -29248,7 +29267,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
             trust_domain: skip.trustDomain,
             reason: skip.reason
           })),
-          lane_audits: [...detail.laneAudits],
+          lane_audits: localOnly || policyDeniedEmptyPack ? [...detail.laneAudits] : withoutSecureLaneAudits(detail.laneAudits, detail.secureLaneAudits),
           ...detail.degradations.length > 0 ? { retrieval_degradations: detail.degradations.map(answerRetrievalDegradation) } : {},
           ...(detail.corpusReadabilityGaps ?? []).length > 0 ? {
             corpus_readability: (detail.corpusReadabilityGaps ?? []).map((gap) => ({
@@ -30238,6 +30257,10 @@ function isUnsupportedNoContentAnswer2(result) {
 }
 function packHasSecureLocal(pack) {
   return pack.candidates.some((candidate) => isSecureSensitivity(candidate));
+}
+function withoutSecureLaneAudits(laneAudits, secureLaneAudits) {
+  const secure = new Set(secureLaneAudits);
+  return laneAudits.filter((audit) => !secure.has(audit));
 }
 function factsFromCitations(citations, detail, releaseSecureContent) {
   return citations.flatMap((citation, index) => {
