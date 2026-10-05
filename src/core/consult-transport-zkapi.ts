@@ -301,6 +301,8 @@ export interface ZkapiConsultError {
   httpStatus?: number;
   networkIdentity: ZkapiNetworkIdentity;
   receipt?: ZkapiSessionReceipt;
+  /** Timings for a session that ended before it had a receipt (the session lease was not taken). */
+  stageMs?: ZkapiStageTimings;
 }
 
 export type ZkapiConsultResult =
@@ -433,7 +435,7 @@ function failure(
   code: ZkapiConsultErrorCode,
   outcome: ZkapiConsultOutcome,
   networkIdentity: ZkapiNetworkIdentity,
-  extra: Partial<Pick<ZkapiConsultError, 'daemonCode' | 'httpStatus' | 'receipt'>> = {},
+  extra: Partial<Pick<ZkapiConsultError, 'daemonCode' | 'httpStatus' | 'receipt' | 'stageMs'>> = {},
 ): { ok: false; error: ZkapiConsultError } {
   return { ok: false, error: { code, message: MESSAGES[code], outcome, networkIdentity, ...extra } };
 }
@@ -1624,26 +1626,39 @@ async function exclusiveSession(
   const initialIdentity: ZkapiNetworkIdentity = options.settings.tor === 'off' ? 'visible' : 'not_verified';
   if (zkapiConsultInFlight) return failure('busy', 'not_sent', initialIdentity);
   zkapiConsultInFlight = true;
-  const clock = options.clock ?? (() => performance.now());
-  const startedAt = clock();
   const statePath = options.statePath ?? defaultZkapiStatePath();
   const sent = { dispatched: false };
+  // Timing never throws and never changes control flow: a failed or
+  // non-finite clock sample just leaves that measurement out.
+  const clock = options.clock ?? (() => performance.now());
+  let startedAt: number | undefined;
+  let leaseHeld = false;
   try {
+    startedAt = sampleClock(clock);
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 });
     const result = await withFileLease(
       `${statePath}.session`,
-      () => runSession(question, recovery, options, statePath, signal, sent, clock, startedAt),
+      () => {
+        leaseHeld = true;
+        return runSession(question, recovery, options, statePath, signal, sent, clock, startedAt);
+      },
       { acquireTimeoutMs: 50 },
     );
     // A refusal before any process started never reaches teardown; its total ends here.
     const receipt = result.ok ? result.receipt : result.error.receipt;
     if (receipt && receipt.stageMs?.totalMs === undefined) {
-      receipt.stageMs = { ...receipt.stageMs, totalMs: elapsedMs(clock, startedAt) };
+      receipt.stageMs = withTiming(receipt.stageMs ?? {}, 'totalMs', elapsedMs(clock, startedAt));
+      if (Object.keys(receipt.stageMs).length === 0) delete receipt.stageMs;
     }
     return result;
   } catch (error) {
-    if (error instanceof FileLeaseBusyError) return failure('busy', 'not_sent', initialIdentity);
-    return failure('internal_error', sent.dispatched ? 'unknown' : 'not_sent', initialIdentity);
+    // No receipt exists on this path; the timings ride on the error instead.
+    const total = elapsedMs(clock, startedAt);
+    let stageMs = withTiming({}, 'totalMs', total);
+    if (!leaseHeld) stageMs = withTiming(stageMs, 'leaseAcquireMs', total);
+    const timed = Object.keys(stageMs).length > 0 ? { stageMs } : {};
+    if (error instanceof FileLeaseBusyError) return failure('busy', 'not_sent', initialIdentity, timed);
+    return failure('internal_error', sent.dispatched ? 'unknown' : 'not_sent', initialIdentity, timed);
   } finally {
     zkapiConsultInFlight = false;
   }
@@ -1657,14 +1672,15 @@ async function runSession(
   signal: AbortSignal | undefined,
   sent: { dispatched: boolean },
   clock: () => number,
-  startedAt: number,
+  startedAt: number | undefined,
 ): Promise<ZkapiConsultResult> {
-  // Stage timers: one clock read per transition, never inside a polling loop.
-  const timings: ZkapiStageTimings = { leaseAcquireMs: elapsedMs(clock, startedAt) };
-  let openStage: { key: keyof ZkapiStageTimings; at: number } | undefined;
+  // Stage timers: one clock sample per transition, never inside a polling
+  // loop. Sampling never throws; a missing sample omits that stage.
+  let timings: ZkapiStageTimings = withTiming({}, 'leaseAcquireMs', elapsedMs(clock, startedAt));
+  let openStage: { key: keyof ZkapiStageTimings; at: number | undefined } | undefined;
   const stage = (key: keyof ZkapiStageTimings | undefined): void => {
-    const at = clock();
-    if (openStage) timings[openStage.key] = Math.max(0, Math.round(at - openStage.at));
+    const at = sampleClock(clock);
+    if (openStage) timings = withTiming(timings, openStage.key, durationMs(openStage.at, at));
     openStage = key ? { key, at } : undefined;
   };
   const now = options.now ?? (() => new Date());
@@ -1688,7 +1704,9 @@ async function runSession(
     settlement: 'no_lease',
     fence: 'clear',
   };
-  const snapshot = (): ZkapiSessionReceipt => ({ ...receipt, stageMs: { ...timings } });
+  const snapshot = (): ZkapiSessionReceipt => (
+    Object.keys(timings).length > 0 ? { ...receipt, stageMs: { ...timings } } : { ...receipt }
+  );
   const identity = (): ZkapiNetworkIdentity => (perConsultTor ? networkIdentityFor(receipt) : 'visible');
   const fail = (code: ZkapiConsultErrorCode, extra: Partial<Pick<ZkapiConsultError, 'daemonCode' | 'httpStatus'>> = {}): ZkapiConsultResult => (
     failure(code, sent.dispatched ? (extra.httpStatus ? 'sent_failed' : 'unknown') : 'not_sent', identity(), { ...extra, receipt: snapshot() })
@@ -1978,13 +1996,15 @@ async function runSession(
       tor!.deliberate = true;
       stage('torStopMs');
       const torStopped = await stopOwned(tor!);
-      stage(torStopped ? 'postStopProbeMs' : undefined);
+      stage(undefined);
       // Secondary signal only. With Tor gone the model list must fail with the
       // daemon's exact upstream-unavailable shape; a 200 is a bypass.
-      const after = torStopped && !daemonGone() && await owned(false)
-        ? await probeRequest(fetchImpl, `${origin}/v1/models`, { method: 'GET', headers: authorization }, undefined, MODELS_PROBE_TIMEOUT_MS)
-        : undefined;
-      stage(undefined);
+      let after: ProbeResponse | undefined;
+      if (torStopped && !daemonGone() && await owned(false)) {
+        stage('postStopProbeMs');
+        after = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: 'GET', headers: authorization }, undefined, MODELS_PROBE_TIMEOUT_MS);
+        stage(undefined);
+      }
       receipt.postStopProbe = after?.status === 200
         ? 'still_reachable'
         : after?.status === 502 && daemonErrorEnvelope(after.body) === 'models_unavailable'
@@ -2041,12 +2061,12 @@ async function runSession(
     result = fail('teardown_incomplete');
   }
   stage(undefined);
-  timings.totalMs = elapsedMs(clock, startedAt);
+  timings = withTiming(timings, 'totalMs', elapsedMs(clock, startedAt));
   const final = result;
   // The returned receipt and the ledger's last session carry every stage,
   // teardown and total included.
   const finalReceipt = final.ok ? final.receipt : final.error.receipt;
-  if (finalReceipt) finalReceipt.stageMs = { ...timings };
+  if (finalReceipt && Object.keys(timings).length > 0) finalReceipt.stageMs = { ...timings };
   try {
     updateState(statePath, now(), (state) => {
       const { running, ...rest } = state;
@@ -2062,8 +2082,29 @@ async function runSession(
   return final;
 }
 
-function elapsedMs(clock: () => number, since: number): number {
-  return Math.max(0, Math.round(clock() - since));
+/** One clock sample, or undefined when the clock throws or returns a non-finite value. */
+function sampleClock(clock: () => number): number | undefined {
+  try {
+    const value = clock();
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function durationMs(from: number | undefined, to: number | undefined): number | undefined {
+  if (from === undefined || to === undefined) return undefined;
+  const ms = Math.round(to - from);
+  return Number.isFinite(ms) ? Math.max(0, ms) : undefined;
+}
+
+function elapsedMs(clock: () => number, since: number | undefined): number | undefined {
+  return since === undefined ? undefined : durationMs(since, sampleClock(clock));
+}
+
+/** Timings with `key` set to `ms`, or unchanged when the measurement is missing. */
+function withTiming(timings: ZkapiStageTimings, key: keyof ZkapiStageTimings, ms: number | undefined): ZkapiStageTimings {
+  return ms === undefined ? timings : { ...timings, [key]: ms };
 }
 
 function adminStatusNetwork(response: ProbeResponse): 'mainnet' | 'sepolia' | undefined {
