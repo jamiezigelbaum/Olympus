@@ -66,6 +66,21 @@ import {
 
 export type DashboardPhaseId = 'metadata_sync' | 'extraction' | 'embedding';
 
+/**
+ * True when the only chunks this source has left unembedded are Private ones
+ * its embedding service may not receive: nothing is pending and nothing needs
+ * a refresh. That remainder is not work any lane will do, so the embedding
+ * row reads done (the bar still shows the true share) and nothing is stalled
+ * or owed; the page explains the remainder in its own sentence.
+ */
+export function dashboardEmbeddingWithheldOnly(source: Pick<DashboardSourceCard, 'embedding_backlog'>): boolean {
+  const backlog = source.embedding_backlog;
+  return backlog !== undefined
+    && (backlog.private_withheld_chunks ?? 0) > 0
+    && backlog.missing_chunks <= 0
+    && !backlog.refresh_needed;
+}
+
 /** The reader-facing name of each phase. Technical, by ruling, and final. */
 export const DASHBOARD_PHASE_LABELS: Readonly<Record<DashboardPhaseId, string>> = {
   metadata_sync: 'Metadata sync',
@@ -513,7 +528,8 @@ function withState(
   if (phase.unmeasured === true) {
     return { ...phase, state: 'waiting', state_words: 'Not measured by this store' };
   }
-  if (dashboardPhaseComplete(phase)) {
+  if (dashboardPhaseComplete(phase)
+    || (phase.id === 'embedding' && dashboardEmbeddingWithheldOnly(source))) {
     const due = nextSyncDue(source, phase.id, now);
     if (phase.id === 'metadata_sync' && due !== undefined) {
       return { ...phase, state: 'done', state_words: `Complete · next check in ${due}` };

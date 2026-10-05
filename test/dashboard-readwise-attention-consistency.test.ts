@@ -11,7 +11,12 @@
 import { describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { dashboardAttentionBanner } from '../src/workers/dashboard/attention.ts';
-import { dashboardBackgroundLanes, renderDashboardBackgroundBody } from '../src/workers/dashboard/pages/background.ts';
+import {
+  dashboardBackgroundLanes,
+  dashboardIndexingProgress,
+  renderDashboardBackgroundBody,
+} from '../src/workers/dashboard/pages/background.ts';
+import { dashboardSourceProgress } from '../src/workers/dashboard/phases.ts';
 import { renderDashboardDetailBody } from '../src/workers/dashboard/pages/detail.ts';
 import { dashboardStatus, dashboardSubLine } from '../src/workers/dashboard/vocabulary.ts';
 import {
@@ -33,7 +38,7 @@ interface TaskState {
 
 function readwiseView(
   pull: TaskState,
-  options: { embeddingRequired?: boolean; privateWithheldOnly?: boolean } = {},
+  options: { embeddingRequired?: boolean; privateWithheldOnly?: boolean; privateWithheldMixed?: boolean } = {},
 ): SourceDashboardViewModel {
   const required = options.embeddingRequired === true;
   const corpus = (
@@ -78,13 +83,13 @@ function readwiseView(
       // the cloud embedder may not receive.
       ...(counts.withheld
         ? {
-            refresh_needed: false,
+            refresh_needed: counts.chunks - counts.embedded > counts.withheld,
             private_tier_withheld: { chunks: counts.withheld, reason: 'private_tier_requires_private_embedder' },
             backlog_estimate: {
               model_id: 'fixture-model',
-              missing_chunks: 0,
-              estimated_tokens: 0,
-              estimated_cost_usd: 0,
+              missing_chunks: counts.chunks - counts.embedded - counts.withheld,
+              estimated_tokens: (counts.chunks - counts.embedded - counts.withheld) * 500,
+              estimated_cost_usd: counts.chunks - counts.embedded > counts.withheld ? 0.01 : 0,
               price_source: 'default_unverified',
             },
           }
@@ -107,8 +112,10 @@ function readwiseView(
     corpora: [
       options.privateWithheldOnly
         ? corpus('internal.readwise.library', 'internal', { items: 2040, text: 900, chunks: 1527, embedded: 1500, itemsEmbedded: 880, withheld: 27 })
-        : corpus('internal.readwise.library', 'internal', { items: 2040, text: 900, chunks: 1527, embedded: 1527, itemsEmbedded: 900 }),
-      options.privateWithheldOnly
+        : options.privateWithheldMixed
+          ? corpus('internal.readwise.library', 'internal', { items: 2040, text: 900, chunks: 1527, embedded: 1490, itemsEmbedded: 875, withheld: 27 })
+          : corpus('internal.readwise.library', 'internal', { items: 2040, text: 900, chunks: 1527, embedded: 1527, itemsEmbedded: 900 }),
+      options.privateWithheldOnly || options.privateWithheldMixed
         ? corpus('secure_local.readwise.library', 'secure_local', { items: 751, text: 751, chunks: 5704, embedded: 5704, itemsEmbedded: 751 })
         : corpus('secure_local.readwise.library', 'secure_local', { items: 751, text: 751, chunks: 5704, embedded: 1664, itemsEmbedded: 107 }),
     ],
@@ -318,7 +325,7 @@ describe('the Readwise page states one embedding fact and counts in its own noun
     expect(html).toContain('4,040 chunks are waiting to be embedded (about 2.0M tokens, ~$0.03 estimated at unverified list price)');
   });
 
-  test('chunks kept out of cloud embedding because they are Private are not shown as work left', () => {
+  test('Private chunks the embedding service may not receive are not shown as work left', () => {
     const view = readwiseView({ failures: 0 }, { embeddingRequired: true, privateWithheldOnly: true });
     const card = readwiseCard(view);
 
@@ -332,13 +339,45 @@ describe('the Readwise page states one embedding fact and counts in its own noun
     });
     expect(view.background_work?.embedding_backlog?.private_withheld_chunks).toBe(27);
     const detail = renderDashboardDetailBody(card, { now: NOW });
-    expect(detail).toContain('27 chunks are kept out of cloud embedding because they are Private. Keyword search still finds them.');
+    expect(detail).toContain('27 chunks are Private and are not sent to this embedding service. Keyword search still finds them.');
     expect(detail).not.toContain('waiting to be embedded');
     const background = renderDashboardBackgroundBody(view, NOW);
-    expect(background).toContain('27 kept out of cloud embedding because they are Private');
+    expect(background).toContain('27 Private chunks not sent to this embedding service');
     expect(background).not.toContain('chunks left');
     expect(background).not.toContain('chunks not yet embedded');
     expect(background).not.toMatch(/all [0-9.,K]+ chunks embedded/);
+
+    // Nothing is actionable, so embedding is done (its bar still shows the
+    // true share), nothing stalls, no banner, and no items are owed, even with
+    // two days of no movement and no scheduled recovery.
+    const later = new Date(NOW.getTime() + 48 * 3_600_000);
+    const embedding = dashboardSourceProgress(card, { now: later }).phases.find((phase) => phase.id === 'embedding')!;
+    expect(embedding.state).toBe('done');
+    expect(embedding.measure).toMatchObject({ kind: 'ratio' });
+    expect((embedding.measure as { done: number; total: number }).done)
+      .toBeLessThan((embedding.measure as { done: number; total: number }).total);
+    const banner = dashboardAttentionBanner(card, { now: later, setupPath: SETUP });
+    expect(banner).toBeUndefined();
+    expect(renderDashboardDetailBody(card, { now: later })).not.toContain('Sync now');
+    const indexing = dashboardIndexingProgress(view, { now: later }, later);
+    expect(indexing?.state).toBe('done');
+    expect(indexing?.itemsLeft ?? 0).toBe(0);
+  });
+
+  test('pending work beside Private-withheld chunks is still work in progress', () => {
+    const view = readwiseView({ failures: 0 }, { embeddingRequired: true, privateWithheldMixed: true });
+    const card = readwiseCard(view);
+
+    expect(card.embedding_backlog).toMatchObject({ missing_chunks: 10, private_withheld_chunks: 27, refresh_needed: true });
+    const embedding = dashboardSourceProgress(card, { now: NOW }).phases.find((phase) => phase.id === 'embedding')!;
+    expect(embedding.state).not.toBe('done');
+    // Same stall rule as before for the pending part.
+    const later = new Date(NOW.getTime() + 48 * 3_600_000);
+    const stale = dashboardSourceProgress(card, { now: later }).phases.find((phase) => phase.id === 'embedding')!;
+    expect(stale.state).toBe('stalled');
+    // No item remainder: no measured count of the pending items alone exists.
+    expect(dashboardIndexingProgress(view, { now: NOW }, NOW)?.itemsLeft).toBeUndefined();
+    expect(renderDashboardBackgroundBody(view, NOW)).toMatch(/10 of [0-9.,K]+ chunks left/);
   });
 
   test('Readwise counts in items — it holds documents and highlights — never files', () => {

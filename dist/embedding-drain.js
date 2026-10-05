@@ -23864,6 +23864,9 @@ init_vocabulary();
 // src/workers/dashboard/pages/home.ts
 init_vocabulary();
 
+// src/workers/dashboard/pages/background.ts
+init_phases();
+
 // src/workers/dashboard/lane-state.ts
 var LANE_HEARTBEAT_STALE_AFTER_MS = 5 * 60 * 1000;
 var LANE_STUCK_GRACE_MS = 10 * 60 * 1000;

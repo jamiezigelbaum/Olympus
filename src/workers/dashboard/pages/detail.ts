@@ -444,7 +444,7 @@ function renderProgress(
       + ` (${embeddingCostPhrase(backlog.estimate)}). Keyword search answers from them meanwhile.`);
   }
   if (source.embedding_required !== false && (backlog?.private_withheld_chunks ?? 0) > 0) {
-    notes.push(`${dashboardCount(backlog!.private_withheld_chunks!)} chunks are kept out of cloud embedding because they are Private. Keyword search still finds them.`);
+    notes.push(`${dashboardCount(backlog!.private_withheld_chunks!)} chunks are Private and are not sent to this embedding service. Keyword search still finds them.`);
   }
   if (progress.phases.some((phase) => phase.unmeasured === true)) {
     notes.push('This store does not yet publish a per-item embedding count, so the embedding row states no share rather than deriving one from chunk totals.');

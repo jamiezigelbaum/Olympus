@@ -48992,6 +48992,10 @@ var init_vocabulary = __esm(() => {
 });
 
 // src/workers/dashboard/phases.ts
+function dashboardEmbeddingWithheldOnly(source) {
+  const backlog = source.embedding_backlog;
+  return backlog !== undefined && (backlog.private_withheld_chunks ?? 0) > 0 && backlog.missing_chunks <= 0 && !backlog.refresh_needed;
+}
 function dashboardSourceProgress(source, options = {}) {
   const now = options.now ?? new Date;
   const settledPass = dashboardHasSettledPass(source);
@@ -49138,7 +49142,7 @@ function withState(phase, index, phases, source, now, embeddingRuntime) {
   if (phase.unmeasured === true) {
     return { ...phase, state: "waiting", state_words: "Not measured by this store" };
   }
-  if (dashboardPhaseComplete(phase)) {
+  if (dashboardPhaseComplete(phase) || phase.id === "embedding" && dashboardEmbeddingWithheldOnly(source)) {
     const due2 = nextSyncDue(source, phase.id, now);
     if (phase.id === "metadata_sync" && due2 !== undefined) {
       return { ...phase, state: "done", state_words: `Complete · next check in ${due2}` };
@@ -89505,6 +89509,10 @@ function indexItemsLeft(sources) {
     return;
   let left = 0;
   for (const source of indexing) {
+    if (dashboardEmbeddingWithheldOnly(source))
+      continue;
+    if ((source.embedding_backlog?.private_withheld_chunks ?? 0) > 0)
+      return;
     const files = source.coverage.embedded_files;
     if (files === undefined)
       return;
@@ -89591,7 +89599,7 @@ function embeddingsLaneView(view, options, now) {
     const withheld = backlog.private_withheld_chunks ?? 0;
     facts.push(backlog.missing_chunks > 0 ? `${compactCount(backlog.missing_chunks)} of ${compactCount(backlog.chunks)} chunks left` : withheld > 0 ? `${compactCount(backlog.embedded_chunks)} of ${compactCount(backlog.chunks)} chunks embedded` : `all ${compactCount(backlog.chunks)} chunks embedded`);
     if (withheld > 0)
-      facts.push(`${compactCount(withheld)} kept out of cloud embedding because they are Private`);
+      facts.push(`${compactCount(withheld)} Private chunks not sent to this embedding service`);
     if (backlog.refresh_needed)
       facts.push("re-embed needed");
   }
@@ -90379,6 +90387,7 @@ function plural2(count, word) {
 }
 var RECENT_RUN_LIMIT = 8, DEFAULT_BASE_PATH2 = "/dashboard", DETAIL_QUERY_PARAM = "source", EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger", SCHEDULER_SELF_PAUSE_SENTENCES, PARKED_EMBEDDING_STATES, LANE_OWNER_NAMES, LANE_STATE_WORDS, STRIP_TONE_COLORS, DASHBOARD_READING_NAME = "Reading files", DASHBOARD_SYNCING_NAME = "Syncing";
 var init_background = __esm(() => {
+  init_phases();
   init_components();
   init_lane_state();
   init_nav();
@@ -92144,7 +92153,7 @@ function renderProgress2(source, progress, now) {
     notes.push(`${dashboardCount(backlog.missing_chunks)} chunks are waiting to be embedded` + ` (${embeddingCostPhrase(backlog.estimate)}). Keyword search answers from them meanwhile.`);
   }
   if (source.embedding_required !== false && (backlog?.private_withheld_chunks ?? 0) > 0) {
-    notes.push(`${dashboardCount(backlog.private_withheld_chunks)} chunks are kept out of cloud embedding because they are Private. Keyword search still finds them.`);
+    notes.push(`${dashboardCount(backlog.private_withheld_chunks)} chunks are Private and are not sent to this embedding service. Keyword search still finds them.`);
   }
   if (progress.phases.some((phase) => phase.unmeasured === true)) {
     notes.push("This store does not yet publish a per-item embedding count, so the embedding row states no share rather than deriving one from chunk totals.");

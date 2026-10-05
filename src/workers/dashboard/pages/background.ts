@@ -38,6 +38,7 @@ export { BACKGROUND_CSS };
  * scheduled source.
  */
 import type { DashboardSourceCard, SourceDashboardViewModel } from '../../source-dashboard.ts';
+import { dashboardEmbeddingWithheldOnly } from '../phases.ts';
 import {
   DASHBOARD_LANE_CSS,
   DASHBOARD_PROGRESS_CSS,
@@ -226,12 +227,20 @@ export function dashboardIndexingProgress(
   return { ...base, state: 'unknown' };
 }
 
-/** Items with text still waiting to be indexed, when every indexing card counts them. */
+/**
+ * Items with text still waiting to be indexed, when every indexing card counts
+ * them. Items whose chunks are Private and never sent to the embedding
+ * service are not waiting: a card with only those left contributes nothing,
+ * and a card with both kinds has no measured count of the waiting items alone
+ * (chunk counts are never subtracted from item counts), so no total is given.
+ */
 function indexItemsLeft(sources: readonly DashboardSourceCard[]): number | undefined {
   const indexing = sources.filter((source) => source.embedding_backlog !== undefined);
   if (indexing.length === 0) return undefined;
   let left = 0;
   for (const source of indexing) {
+    if (dashboardEmbeddingWithheldOnly(source)) continue;
+    if ((source.embedding_backlog?.private_withheld_chunks ?? 0) > 0) return undefined;
     const files = source.coverage.embedded_files;
     if (files === undefined) return undefined;
     left += Math.max(0, source.coverage.content_ready_items - files);
@@ -420,7 +429,7 @@ function embeddingsLaneView(
       : withheld > 0
         ? `${compactCount(backlog.embedded_chunks)} of ${compactCount(backlog.chunks)} chunks embedded`
         : `all ${compactCount(backlog.chunks)} chunks embedded`);
-    if (withheld > 0) facts.push(`${compactCount(withheld)} kept out of cloud embedding because they are Private`);
+    if (withheld > 0) facts.push(`${compactCount(withheld)} Private chunks not sent to this embedding service`);
     if (backlog.refresh_needed) facts.push('re-embed needed');
   }
   const status = deriveLaneState({
