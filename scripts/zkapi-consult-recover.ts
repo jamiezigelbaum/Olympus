@@ -16,6 +16,7 @@
 import {
   abandonZkapiFence,
   defaultZkapiStatePath,
+  formatZkapiStageTable,
   recoverZkapiSession,
   zkapiOutstandingFences,
 } from '../src/core/consult-transport-zkapi.ts';
@@ -66,6 +67,7 @@ async function main(argv: string[]): Promise<number> {
   console.log(JSON.stringify(result.ok
     ? { ok: true, receipt }
     : { ok: false, code: result.error.code, receipt }, null, 2));
+  console.log(`Stage timings:\n${formatZkapiStageTable(receipt?.stageMs)}`);
   if (!result.ok) {
     console.error('Recovery did not complete; the fence is still held.');
     return 1;

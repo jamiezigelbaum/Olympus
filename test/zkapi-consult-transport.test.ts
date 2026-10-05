@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import {
+  formatZkapiStageTable,
   recoverZkapiSession,
   reserveZkapiRequest,
   sendZkapiConsult,
@@ -360,6 +361,12 @@ function alive(pid: number): boolean {
 
 const NO_CONFINEMENT_LABEL = 'payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; no network confinement';
 
+/** A monotonic clock that advances 7 ms on every read, so stage timings are exact. */
+function steppingClock(step = 7): () => number {
+  let reads = 0;
+  return () => (reads += 1) * step;
+}
+
 // ---------------------------------------------------------------------------
 // Sessions and labels
 
@@ -474,6 +481,92 @@ describe('zkAPI consult transport: a supervised session', () => {
       expect(await sendZkapiConsult(bad, transport())).toMatchObject({ ok: false, error: { code: 'invalid_question' } });
     }
     expect(torRuns()).toEqual([]);
+  });
+});
+
+describe('zkAPI consult transport: stage timings', () => {
+  // The transport reads the clock once per stage transition and never while
+  // polling, so with a clock that advances 7 ms per read every stage that ran
+  // takes exactly 7 ms and the total counts the reads on that path.
+  test('a successful session records every stage, in the receipt and the ledger', async () => {
+    const result = await sendZkapiConsult(QUESTION, transport({ clock: steppingClock() }));
+    const expected = {
+      leaseAcquireMs: 7,
+      confinementSelfTestMs: 7,
+      torBootstrapMs: 7,
+      daemonReadyMs: 7,
+      daemonVerifyMs: 7,
+      policyWarmMs: 7,
+      reservationMs: 7,
+      dispatchToFirstByteMs: 7,
+      firstByteToCompletionMs: 7,
+      correlationWaitMs: 7,
+      settlementWaitMs: 7,
+      torStopMs: 7,
+      postStopProbeMs: 7,
+      teardownMs: 7,
+      totalMs: 133,
+    };
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.receipt.stageMs).toEqual(expected);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).lastSession.stageMs).toEqual(expected);
+  }, SLOW);
+
+  test('a failure before dispatch records only the stages it reached', async () => {
+    writePlan({ policyNeverLoads: true });
+    const result = await sendZkapiConsult(QUESTION, transport({ clock: steppingClock(), settings: settings({ policyWarmTimeoutMs: 300 }) }));
+    expect(result).toMatchObject({ ok: false, error: { code: 'policy_unavailable', outcome: 'not_sent' } });
+    const expected = {
+      leaseAcquireMs: 7,
+      confinementSelfTestMs: 7,
+      torBootstrapMs: 7,
+      daemonReadyMs: 7,
+      daemonVerifyMs: 7,
+      policyWarmMs: 7,
+      teardownMs: 7,
+      totalMs: 63,
+    };
+    expect(!result.ok && result.error.receipt?.stageMs).toEqual(expected);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).lastSession.stageMs).toEqual(expected);
+  }, SLOW);
+
+  test('a refusal before any process starts records the lease and the total', async () => {
+    const partial = settings({ acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: [] } });
+    const result = await sendZkapiConsult(QUESTION, transport({ clock: steppingClock(), settings: partial }));
+    expect(result).toMatchObject({ ok: false, error: { code: 'acknowledgements_incomplete' } });
+    expect(!result.ok && result.error.receipt?.stageMs).toEqual({ leaseAcquireMs: 7, totalMs: 14 });
+  });
+
+  test('a failure after dispatch times the wait until it failed and every later stage', async () => {
+    writePlan({ completion: 'slow' });
+    const result = await sendZkapiConsult(QUESTION, transport({ clock: steppingClock(), settings: settings({ timeoutMs: 300 }) }));
+    expect(result).toMatchObject({ ok: false, error: { code: 'timeout', outcome: 'unknown' } });
+    // No response headers arrived, so first byte to completion is absent.
+    expect(!result.ok && result.error.receipt?.stageMs).toEqual({
+      leaseAcquireMs: 7,
+      confinementSelfTestMs: 7,
+      torBootstrapMs: 7,
+      daemonReadyMs: 7,
+      daemonVerifyMs: 7,
+      policyWarmMs: 7,
+      reservationMs: 7,
+      dispatchToFirstByteMs: 7,
+      correlationWaitMs: 7,
+      settlementWaitMs: 7,
+      torStopMs: 7,
+      postStopProbeMs: 7,
+      teardownMs: 7,
+      totalMs: 119,
+    });
+  }, SLOW);
+
+  test('the stage table lists recorded stages in session order', () => {
+    expect(formatZkapiStageTable({ totalMs: 1234, leaseAcquireMs: 5, dispatchToFirstByteMs: 870 })).toBe([
+      'lease acquire              5 ms',
+      'dispatch to first byte   870 ms',
+      'total                   1234 ms',
+    ].join('\n'));
+    expect(formatZkapiStageTable(undefined)).toBe('no stage timings recorded');
   });
 });
 
@@ -773,7 +866,13 @@ describe('zkAPI consult transport: fence and recovery', () => {
     expect(Bun.spawnSync([process.execPath, script, '--yes'], { env }).exitCode).toBe(3);
     expect(zkapiUnresolvedSession(ledger)).toBe(true);
     writePlan({ noSettlement: false });
-    expect(Bun.spawnSync([process.execPath, script, '--yes'], { env }).exitCode).toBe(0);
+    const recovered = Bun.spawnSync([process.execPath, script, '--yes'], { env });
+    expect(recovered.exitCode).toBe(0);
+    const printed = recovered.stdout.toString();
+    expect(printed).toContain('Stage timings:');
+    for (const label of ['lease acquire', 'Tor start to bootstrapped', 'daemon start to ready', 'dispatch to first byte', 'settlement wait', 'teardown', 'total']) {
+      expect(printed).toMatch(new RegExp(`\\n${label} +\\d+ ms`));
+    }
     expect(zkapiUnresolvedSession(ledger)).toBe(false);
   }, 120_000);
 
@@ -1480,10 +1579,12 @@ describe('doctor: zkapi_consult_transport', () => {
     expect(before.detail).not.toContain(API_KEY);
     expect(events()).toEqual([]);
 
-    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true });
+    expect(await sendZkapiConsult(QUESTION, transport({ clock: steppingClock() }))).toMatchObject({ ok: true });
     const after = await zkapiCheck(doctorDeps());
     expect(after.detail).toContain('requests today 1 (no limit set), worst-case authorized today $6.00 (no limit set;');
     expect(after.detail).toContain('(ok): key reuse verified_off, local auth verified, Tor per_consult, confinement none (self-test not_run), settlement confirmed');
+    expect(after.detail).toContain(', stage timings lease acquire 7 ms, confinement self-test 7 ms, Tor start to bootstrapped 7 ms,');
+    expect(after.detail).toContain('teardown 7 ms, total 133 ms;');
     expect(after.detail).toContain(`route: ${NO_CONFINEMENT_LABEL}`);
   }, SLOW);
 
