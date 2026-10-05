@@ -47,6 +47,14 @@ const WHATSAPP = 'secure_local.whatsapp.messages';
 const OTHER = 'internal.other.docs';
 const INTERNAL_SECRET = 'INTERNAL-RAW-CHUNK-TEXT cholesterol LDL 100 mg/dL';
 const SECURE_SECRET = 'SECURE-RAW-CHUNK-TEXT total testosterone 612 ng/dL';
+// Local-leg prompt budgets for the fitting tests (measured with
+// analystPromptBytes against the fixtures below). The whole Personal+Private
+// pack is ~3,290 bytes, so 3,200 forces a fit that keeps one candidate, the
+// Personal one (first in round-robin order). With three long Personal
+// passages and one Private item, 4,800 leaves a 600-byte passage share only
+// for two candidates: one Personal and the Private one.
+const ONE_CANDIDATE_PROMPT_BYTES = 3_200;
+const TWO_CANDIDATE_PROMPT_BYTES = 4_800;
 
 function adapterReturning(ids: string[]): SourceIndexCorpusSearchAdapter {
   return (request) => ({
@@ -1624,6 +1632,117 @@ describe('analyst-backed source_answer handler', () => {
     expect(result.answer).not.toContain('612');
     expect(JSON.stringify(result)).not.toContain(privateDetail);
     expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
+  });
+
+  // The gate judges the pack the answering leg actually read. A local or cloud
+  // leg is fitted to its prompt budget and may lose every Private candidate; an
+  // answer from that fitted pack has no secure_local context to withhold.
+  const citeInternal = (pack: EvidencePack): AnalystResult => {
+    const internalCandidate = pack.candidates.find((candidate) => candidate.trustDomain === 'internal')!;
+    return {
+      answer: 'The cholesterol note is on file.',
+      citations: [{ provenance: internalCandidate.provenance, claim: 'Cholesterol note is on file.' }],
+      unanswered: [],
+    };
+  };
+
+  test('strict mode releases a cited Personal answer when fitting dropped every Private candidate', async () => {
+    const { analyst, calls } = scriptedAnalyst(citeInternal);
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+      secureDerivativeDefault: 'approval',
+      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
+    });
+
+    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.pack.candidates.map((candidate) => candidate.trustDomain)).toEqual(['internal']);
+    expect(result.opsec.release_decision.decision).toBe('allow');
+    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_requires_approval');
+    expect(result.answer).toContain('The cholesterol note is on file.');
+    expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
+  });
+
+  test('strict mode releases a cited Personal answer from the fitted local leg after a Venice failure', async () => {
+    const { analyst, calls } = scriptedAnalyst(citeInternal);
+    let veniceCalls = 0;
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst,
+      veniceAnalyst: () => ({
+        async analyze() {
+          veniceCalls += 1;
+          throw new Error('venice down');
+        },
+      }),
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+      secureDerivativeDefault: 'approval',
+      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
+    });
+
+    const result = await handler.answer({
+      question: 'Latest labs?',
+      include_secure_local: true,
+      analyst_provider: 'venice',
+    });
+
+    expect(veniceCalls).toBe(1);
+    expect(result.audit.answer_synthesis.analyst_backend).toBe('local');
+    expect(result.audit.answer_synthesis.analyst_fallback?.from).toBe('venice');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.pack.candidates.map((candidate) => candidate.trustDomain)).toEqual(['internal']);
+    expect(result.opsec.release_decision.decision).toBe('allow');
+    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_requires_approval');
+  });
+
+  test('strict mode still gates when fitting kept a Private candidate', async () => {
+    const { analyst, calls } = scriptedAnalyst(citeInternal);
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => {
+        const fixture = lanesFixture({ internal: ['note-1', 'note-2', 'note-3'], secure: ['lab-1'] });
+        return {
+          ...fixture,
+          contentProviders: {
+            ...fixture.contentProviders,
+            [INTERNAL]: {
+              async fetchLocalContent() {
+                return {
+                  sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }),
+                  chunks: [`${INTERNAL_SECRET} ${'cholesterol follow-up note '.repeat(80)}`],
+                };
+              },
+            },
+          } as LocalContentProviderMap,
+        };
+      },
+      secureDerivativeDefault: 'approval',
+      localAnalystPromptByteBudget: TWO_CANDIDATE_PROMPT_BYTES,
+    });
+
+    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.pack.candidates.map((candidate) => candidate.trustDomain)).toEqual(['internal', 'secure_local']);
+    expect(result.opsec.release_decision.decision).toBe('needs_approval');
+    expect(result.opsec.release_decision.required_approval).toBe('s4_release');
+    expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_requires_approval');
+    expect(result.evidence).toEqual([]);
+  });
+
+  test('default mode records no uncited secure context when fitting dropped every Private candidate', async () => {
+    const { analyst } = scriptedAnalyst(citeInternal);
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
+    });
+
+    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(result.opsec.release_decision.decision).toBe('allow');
+    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_derivative_allowed');
   });
 
   test('strict mode still releases the content-free unsupported answer from a secure_local context', async () => {

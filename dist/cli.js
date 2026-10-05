@@ -29068,14 +29068,21 @@ function createAnalystSourceIndexAnswerHandler(options) {
       }
       let pack = detail.pack;
       const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
+      const analyzedSecureLocal = new WeakMap;
+      const recordAnalyzed = (result, analyzedPack) => {
+        if (typeof result !== "object" || result === null)
+          return;
+        analyzedSecureLocal.set(result, analyzedSecureLocal.get(result) === true || packHasSecureLocal(analyzedPack));
+      };
       const legFitting = (analysisDetail) => {
         const candidateCorpus = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? ""
         ]));
         return {
-          localLeg: (analyst) => promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus),
-          cloudLeg: (analyst) => promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus)
+          localLeg: (analyst) => promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus, recordAnalyzed),
+          cloudLeg: (analyst) => promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, recordAnalyzed),
+          wholeLeg: (analyst) => recordingAnalyst(analyst, recordAnalyzed)
         };
       };
       assertEvidencePackModelEligible(pack);
@@ -29090,18 +29097,18 @@ function createAnalystSourceIndexAnswerHandler(options) {
       const localAnalystTimeoutMs = options.localAnalystTimeoutMs ?? DEFAULT_LOCAL_ANALYST_TIMEOUT_MS;
       const lastLegTimeoutMs = options.secureAnalystPool?.lastLegTimeoutMs ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS;
       const analyze = (analysisDetail, analysisLocalOnly) => {
-        const { localLeg, cloudLeg } = legFitting(analysisDetail);
+        const { localLeg, cloudLeg, wholeLeg } = legFitting(analysisDetail);
         return routeAnalysis({
           pack: analysisDetail.pack,
           localOnly: analysisLocalOnly,
           requestedProvider: requestedAnalystProvider,
           local: localLeg(options.analyst),
           ...options.cloudAnalyst ? { cloud: cloudLeg(options.cloudAnalyst) } : {},
-          ...veniceAnalyst ? { venice: veniceAnalyst } : {},
+          ...veniceAnalyst ? { venice: wholeLeg(veniceAnalyst) } : {},
           trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
-          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg) } : {},
+          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg, wholeLeg) } : {},
           secureAnalystPoolState,
           ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
           ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
@@ -29147,10 +29154,12 @@ function createAnalystSourceIndexAnswerHandler(options) {
       } = routedAnalysis;
       const analystMs = Date.now() - analystStartedAt;
       const releaseGateStartedAt = Date.now();
+      const analyzedPackHasSecureLocal = analyzedSecureLocal.get(analystResult);
       const { decision, facts, opsec, answer } = releaseAnalystAnswer({
         detail,
         result: analystResult,
         releaseSecureContent,
+        ...analyzedPackHasSecureLocal !== undefined ? { analyzedPackHasSecureLocal } : {},
         ...synthesizedGap ? { synthesizedGap } : {}
       });
       const releaseGateMs = Date.now() - releaseGateStartedAt;
@@ -29301,16 +29310,30 @@ function secureLocalExclusionCoverageNotes(detail) {
   }
   return notes;
 }
-function withLegPromptBudgets(route, localLeg, cloudLeg) {
+function withLegPromptBudgets(route, localLeg, cloudLeg, wholeLeg) {
   return (input) => {
     const resolved = route(input);
-    const fit = (steps) => steps.map((step) => step.backend === "local" ? { ...step, analyst: localLeg(step.analyst) } : step.backend === "cloud" ? { ...step, analyst: cloudLeg(step.analyst) } : step);
+    const fit = (steps) => steps.map((step) => step.backend === "local" ? { ...step, analyst: localLeg(step.analyst) } : step.backend === "cloud" ? { ...step, analyst: cloudLeg(step.analyst) } : { ...step, analyst: wholeLeg(step.analyst) });
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
-function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus) {
+function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, onAnalyzed) {
   return {
-    analyze: (pack, analyzeOptions) => analyst.analyze(fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions), analyzeOptions)
+    analyze: (pack, analyzeOptions) => {
+      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions);
+      return analyst.analyze(fitted, analyzeOptions).then((result) => {
+        onAnalyzed(result, fitted);
+        return result;
+      });
+    }
+  };
+}
+function recordingAnalyst(analyst, onAnalyzed) {
+  return {
+    analyze: (pack, analyzeOptions) => analyst.analyze(pack, analyzeOptions).then((result) => {
+      onAnalyzed(result, pack);
+      return result;
+    })
   };
 }
 function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions) {
@@ -30005,7 +30028,7 @@ function releaseAnalystAnswer(input) {
     decision: "needs_approval",
     reasons: ["uncited_non_public_answer"],
     requiredApproval: packHasSecureLocal(input.detail.pack) ? "s4_release" : "user_review"
-  } : withSecureLocalContextGate(originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision(), facts, input.detail.pack, input.releaseSecureContent);
+  } : withSecureLocalContextGate(originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision(), facts, input.analyzedPackHasSecureLocal ?? packHasSecureLocal(input.detail.pack), input.releaseSecureContent);
   return {
     decision,
     facts,
@@ -30033,10 +30056,10 @@ function scannedUnsupportedNoContentDecision(input) {
   });
   return releaseDecisionWithReason(safeScanned.decision === "allow" ? { ...safeScanned, allowedText: input.safeUnsupportedDraft } : safeScanned, input.reason);
 }
-function withSecureLocalContextGate(decision, facts, pack, releaseSecureContent) {
+function withSecureLocalContextGate(decision, facts, secureContext, releaseSecureContent) {
   if (decision.decision !== "allow" && decision.decision !== "redact")
     return decision;
-  if (!packHasSecureLocal(pack))
+  if (!secureContext)
     return decision;
   if (!releaseSecureContent) {
     return {
