@@ -471,6 +471,107 @@ estimate. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
 `OLYMPUS_TIER_SNIFFER_INTERVAL_MS`, `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS`,
 `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`.
 
+### Experimental: zkAPI consult transport
+
+zkAPI (`zkapi-clientd`, from the Ethereum Foundation and the Open Anonymity
+Project) pays for ordinary cloud models from a prepaid ETH deposit in a way the
+payment side cannot tie to the deposit. OpenRouter and the upstream model still
+read every request. Olympus therefore uses it for one thing only: carrying a
+**consult**, a single question a local model wrote, with no evidence (design:
+`docs/design/frontier-consult-lane.md`, track Z). **No consult can be sent yet.**
+This release ships the transport and its checks; the consult lane that writes,
+gates and approves questions lands separately.
+
+A `zkapi` profile is consult-only. Its trust is always `standard_cloud`, its
+`purpose` must be `consult`, and it is refused, with a `config_error`, in every
+role that carries evidence: any analyst route (including the secure pool),
+any embedding policy, vision and classification. Any profile with
+`purpose: "consult"` is refused in those roles too. A `local` or
+`local-openai-compatible` profile pointing at the daemon's port (8787 by
+default, or a configured `zkapi` profile's port) is refused, because a
+loopback address there forwards to the cloud.
+
+```json
+"zkapi-consult": {
+  "provider": "zkapi",
+  "trust": "standard_cloud",
+  "purpose": "consult",
+  "baseUrl": "http://127.0.0.1:8787/v1",
+  "model": "<a model id from the daemon's model list>",
+  "secretRef": "env:OLYMPUS_ZKAPI_LOCAL_API_KEY",
+  "zkapi": {
+    "tor": "per_consult",
+    "torSocksPort": 19050,
+    "fundingDate": "2026-10-01",
+    "depositUsd": 20,
+    "dailyRequestCap": 10,
+    "dailySpendCapUsd": 20,
+    "acknowledgements": { "version": 1, "accepted": ["deposit_fee", "withdrawal_fee", "note_expiry_30_days", "no_top_up", "operator_risk", "local_files_risk"] }
+  }
+}
+```
+
+**You install and fund the daemon yourself, in its own tool.** Olympus holds
+no credential that can move funds, calls no wallet route, never runs
+`zkapi-clientd config`, and never reads the daemon's private configuration.
+Funding, the funding address and withdrawal all happen in the daemon's own
+terminal session. Configure the daemon once:
+
+```sh
+zkapi-clientd config --key-reuse-window-seconds 0 --require-api-key --relay-url socks5://127.0.0.1:19050
+zkapi-clientd config --api-key   # store this inference-only key for Olympus
+```
+
+Install Tor yourself; Olympus does not bundle it. Do not keep your own
+`zkapi-clientd serve` running: for each consult Olympus starts a throwaway Tor
+client with a fresh data directory on the relay port, starts the daemon,
+verifies it, sends one request, waits for settlement on that same circuit,
+stops Tor, confirms the daemon then has no route, and stops the daemon.
+Between consults nothing listens on the relay port, so the daemon fails closed.
+This sequence follows the reference wrapper scripts in `ethereum/zkapi` pull
+request #16.
+
+**The money, plainly.** Turning this on requires accepting six statements:
+
+- Depositing is an expensive on-chain transaction; the fee can exceed a small deposit.
+- Withdrawing unspent money is a second expensive transaction and needs more ETH for its fee.
+- A deposit not withdrawn within 30 days becomes claimable in full by the operator.
+- There is no top-up; each deposit is a new note with its own fee and 30-day clock.
+- One operator account can pause deposits and withdrawals while the clock keeps running, and one party ran the proof setup; funds could be frozen or lost.
+- The balance is controlled by files on this computer; losing them loses the money.
+
+In practice a deposit is prepaid credit you should not expect back: expect to
+pay roughly the deposit fee plus whatever you deposit each month you keep this
+on, so deposit the smallest amount the service accepts.
+
+**Guards.**
+
+- Each consult checks, from the daemon it started: a fresh key for every
+  request (key reuse 0), local API-key authentication enforced (an
+  unauthenticated request must be rejected), the configured route, the
+  daemon's version (0.1.5 or newer), and that the listening process is the one
+  it started. Any failure refuses the consult.
+- The label **anonymous route** appears only when key isolation and
+  authentication were confirmed and the consult ran through its own Tor
+  instance. With `"tor": "off"` the mode is called **payment privacy only**:
+  your network address is visible.
+- The expiry date is an **estimate** from the funding date you confirm; the
+  real expiry is set on-chain by the deposit block. Doctor and status show the
+  estimated date, days left, and a notice at 10, 5 and 2 days. A recorded note
+  past its estimated expiry refuses consults.
+- A daily request cap and a daily worst-case spend cap: each request reserves
+  its model's full allowance (today $1 to $6, from the daemon's model list)
+  before it is sent, in a ledger that survives restarts. A request whose
+  outcome is unknown stays counted.
+- One consult in flight at a time. A failed or timed-out consult is never
+  resent, on zkAPI or any other route.
+- The balance, fee quotes and the on-chain expiry are not available from the
+  daemon without its wallet-management credential, which Olympus will not
+  hold. Olympus shows no live fee estimate.
+
+`olympus doctor` reports all of this as the `zkapi_consult_transport` check,
+content-free.
+
 ## Active Shape
 
 Olympus v0.3 activates the sovereignty engine. The default location is

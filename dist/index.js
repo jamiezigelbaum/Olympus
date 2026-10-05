@@ -3614,6 +3614,190 @@ var init_manifest = __esm(() => {
   };
 });
 
+// src/core/zkapi-consult-settings.ts
+function parseZkapiConsultSettings(value, label) {
+  const record = value === undefined ? {} : value;
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    throw new OperationError("config_error", `${label} must be an object.`);
+  }
+  const input = record;
+  for (const key of Object.keys(input)) {
+    if (!SETTINGS_KEYS.has(key)) {
+      throw new OperationError("config_error", `${label}.${key} is not a zkAPI consult setting.`);
+    }
+  }
+  const settings = {
+    tor: DEFAULTS.tor,
+    torSocksPort: DEFAULTS.torSocksPort,
+    acknowledgements: parseAcknowledgements(input.acknowledgements, `${label}.acknowledgements`),
+    dailyRequestCap: DEFAULTS.dailyRequestCap,
+    dailySpendCapUsd: DEFAULTS.dailySpendCapUsd,
+    timeoutMs: DEFAULTS.timeoutMs,
+    torBootstrapTimeoutMs: DEFAULTS.torBootstrapTimeoutMs,
+    daemonReadyTimeoutMs: DEFAULTS.daemonReadyTimeoutMs,
+    policyWarmTimeoutMs: DEFAULTS.policyWarmTimeoutMs,
+    settleTimeoutMs: DEFAULTS.settleTimeoutMs,
+    maxResponseBytes: DEFAULTS.maxResponseBytes
+  };
+  for (const [key, [min, max]] of Object.entries(INTEGER_BOUNDS)) {
+    const raw = input[key];
+    if (raw === undefined)
+      continue;
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < min || raw > max) {
+      throw new OperationError("config_error", `${label}.${key} must be an integer from ${min} to ${max}.`);
+    }
+    settings[key] = raw;
+  }
+  if (input.tor !== undefined) {
+    if (input.tor !== "per_consult" && input.tor !== "off") {
+      throw new OperationError("config_error", `${label}.tor must be "per_consult" or "off".`);
+    }
+    settings.tor = input.tor;
+  }
+  if (input.fundingDate !== undefined) {
+    if (typeof input.fundingDate !== "string" || parseIsoDate(input.fundingDate) === undefined) {
+      throw new OperationError("config_error", `${label}.fundingDate must be a calendar date in YYYY-MM-DD form.`);
+    }
+    settings.fundingDate = input.fundingDate;
+  }
+  for (const key of ["depositUsd", "dailySpendCapUsd"]) {
+    const raw = input[key];
+    if (raw === undefined)
+      continue;
+    if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0 || raw > 1e4) {
+      throw new OperationError("config_error", `${label}.${key} must be a positive number of US dollars.`);
+    }
+    settings[key] = raw;
+  }
+  for (const key of ["daemonExecutable", "torExecutable"]) {
+    const raw = input[key];
+    if (raw === undefined)
+      continue;
+    if (typeof raw !== "string" || !raw.startsWith("/")) {
+      throw new OperationError("config_error", `${label}.${key} must be an absolute path.`);
+    }
+    settings[key] = raw;
+  }
+  return settings;
+}
+function assertZkapiDaemonBaseUrl(id, baseUrl) {
+  let url;
+  try {
+    url = new URL(baseUrl ?? "");
+  } catch {
+    throw new OperationError("config_error", `Sovereignty zkapi profile "${id}" requires a loopback baseUrl such as ${ZKAPI_DAEMON_DEFAULT_BASE_URL}.`);
+  }
+  if (url.protocol !== "http:" || !isLoopbackHost(url.hostname) || url.username || url.password || url.search || url.hash || url.pathname.replace(/\/+$/, "") !== "/v1") {
+    throw new OperationError("config_error", `Sovereignty zkapi profile "${id}" baseUrl must be the daemon's loopback API, such as ${ZKAPI_DAEMON_DEFAULT_BASE_URL}.`, "zkapi-clientd serves only on a numeric loopback address; Olympus never reaches it over a network.");
+  }
+}
+function loopbackPort(baseUrl) {
+  if (!baseUrl)
+    return;
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:" || !isLoopbackHost(url.hostname))
+    return;
+  if (url.port)
+    return Number(url.port);
+  return url.protocol === "https:" ? 443 : 80;
+}
+function isLoopbackHost(hostname) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "localhost" || host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+function parseIsoDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value))
+    return;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value)
+    return;
+  return date;
+}
+function parseAcknowledgements(value, label) {
+  if (value === undefined)
+    return { version: 0, accepted: [] };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new OperationError("config_error", `${label} must be an object with version and accepted.`);
+  }
+  const record = value;
+  if (typeof record.version !== "number" || !Number.isInteger(record.version) || record.version < 0) {
+    throw new OperationError("config_error", `${label}.version must be a non-negative integer.`);
+  }
+  if (!Array.isArray(record.accepted) || !record.accepted.every((item) => typeof item === "string")) {
+    throw new OperationError("config_error", `${label}.accepted must be a string array.`);
+  }
+  return { version: record.version, accepted: [...new Set(record.accepted)] };
+}
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, ZKAPI_NOTE_TTL_DAYS = 30, ZKAPI_EXPIRY_NOTICE_DAYS, ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD = 50, DEFAULTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 1, ZKAPI_RISK_ACKNOWLEDGEMENTS, INTEGER_BOUNDS, SETTINGS_KEYS;
+var init_zkapi_consult_settings = __esm(() => {
+  init_operation_error();
+  ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
+  ZKAPI_EXPIRY_NOTICE_DAYS = [10, 5, 2];
+  DEFAULTS = {
+    tor: "per_consult",
+    torSocksPort: ZKAPI_DEFAULT_TOR_SOCKS_PORT,
+    dailyRequestCap: 10,
+    dailySpendCapUsd: 20,
+    timeoutMs: 6 * 60 * 1000,
+    torBootstrapTimeoutMs: 210 * 1000,
+    daemonReadyTimeoutMs: 120 * 1000,
+    policyWarmTimeoutMs: 180 * 1000,
+    settleTimeoutMs: 180 * 1000,
+    maxResponseBytes: 256 * 1024
+  };
+  ZKAPI_RISK_ACKNOWLEDGEMENTS = [
+    {
+      id: "deposit_fee",
+      statement: "Depositing is an expensive on-chain transaction. Its fee can be larger than a small deposit."
+    },
+    {
+      id: "withdrawal_fee",
+      statement: "Getting unspent money back is a second expensive transaction and needs more ETH sent for its fee."
+    },
+    {
+      id: "note_expiry_30_days",
+      statement: "A deposit that is not withdrawn within 30 days becomes claimable in full by the operator. Olympus only estimates that date from the funding date you confirm; the real one is set on-chain by the deposit block."
+    },
+    {
+      id: "no_top_up",
+      statement: "There is no top-up. Each deposit is a new note with its own fee and its own 30-day clock."
+    },
+    {
+      id: "operator_risk",
+      statement: "One operator account can pause deposits and withdrawals while the expiry clock keeps running, and one party ran the proof setup. Funds could be frozen or lost."
+    },
+    {
+      id: "local_files_risk",
+      statement: "The balance is controlled by files on this computer. Losing them loses the money."
+    }
+  ];
+  INTEGER_BOUNDS = {
+    torSocksPort: [1024, 65535],
+    dailyRequestCap: [1, 100],
+    timeoutMs: [30000, 30 * 60000],
+    torBootstrapTimeoutMs: [1e4, 10 * 60000],
+    daemonReadyTimeoutMs: [5000, 10 * 60000],
+    policyWarmTimeoutMs: [5000, 10 * 60000],
+    settleTimeoutMs: [5000, 30 * 60000],
+    maxResponseBytes: [1024, 4 * 1024 * 1024]
+  };
+  SETTINGS_KEYS = new Set([
+    ...Object.keys(INTEGER_BOUNDS),
+    "tor",
+    "fundingDate",
+    "depositUsd",
+    "acknowledgements",
+    "dailySpendCapUsd",
+    "daemonExecutable",
+    "torExecutable"
+  ]);
+});
+
 // src/core/sovereignty.ts
 import { chmodSync, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync9, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
@@ -3691,8 +3875,9 @@ function createSovereigntyEngine(rawConfig, metadata = { source: "inline_config"
 }
 function validateSovereigntyConfig(rawConfig) {
   const config = parseSovereigntyConfig(rawConfig, "sovereignty config");
+  const daemonPorts = zkapiDaemonPorts(config);
   for (const [id, profile] of Object.entries(config.modelProfiles)) {
-    validateProfile(id, profile);
+    validateProfile(id, profile, daemonPorts);
   }
   const publicRetired = isPublicTierRetired(config);
   for (const domain of BUILTIN_DOMAINS) {
@@ -3713,6 +3898,7 @@ function validateSovereigntyConfig(rawConfig) {
     validateAnalystPoolShape(pool, domain);
     for (const profileId of pool.members) {
       const resolved = resolveProfile(config, profileId, `route ${domain}`);
+      assertNotConsultOnly(resolved, `the ${domain} analyst route`);
       if (resolved.profile.provider === "built-in") {
         throw new OperationError("config_error", `sovereignty.routes.${domain} cannot use the built-in embedding profile "${profileId}" as an analyst.`);
       }
@@ -3927,6 +4113,11 @@ function parseProfiles(value, label) {
     if (typeof profile.purpose === "string") {
       parsedProfile.purpose = profile.purpose;
     }
+    if (provider === "zkapi") {
+      parsedProfile.zkapi = parseZkapiConsultSettings(profile.zkapi, `${label}.modelProfiles.${id}.zkapi`);
+    } else if (profile.zkapi !== undefined) {
+      throw new OperationError("config_error", `${label}.modelProfiles.${id}.zkapi is only valid on a provider "zkapi" profile.`);
+    }
     profiles[id] = parsedProfile;
   }
   return profiles;
@@ -3991,15 +4182,17 @@ function parseTrustDomainPolicy(record, label) {
   }
   return policy;
 }
-function validateProfile(id, profile) {
+function validateProfile(id, profile, daemonPorts) {
   if (!id.trim())
     throw new OperationError("config_error", "Sovereignty model profile ids must not be empty.");
-  if (!["local-openai-compatible", "openclaw-infer", "google-gemini", "venice", "anthropic", "openai-compatible", "built-in"].includes(profile.provider)) {
+  if (!SUPPORTED_PROVIDERS.includes(profile.provider)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" has unsupported provider "${profile.provider}".`);
   }
   if (!["local", "encrypted_cloud", "standard_cloud"].includes(profile.trust)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
   }
+  if (profile.provider === "zkapi")
+    validateZkapiProfile(id, profile);
   if (profile.provider === "built-in") {
     validateBuiltInProfile(id, profile);
     return;
@@ -4017,9 +4210,13 @@ function validateProfile(id, profile) {
   if (profile.baseUrl !== undefined && !/^https?:\/\//.test(profile.baseUrl)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" baseUrl must be an HTTP(S) URL.`);
   }
-  if (profile.trust === "local" || profile.provider === "local-openai-compatible") {
+  if (profile.provider !== "zkapi" && (profile.trust === "local" || profile.provider === "local-openai-compatible")) {
     assertLocalProfileBaseUrl(id, profile.baseUrl);
     assertLocalModelIdNotCloudForwarding(`Sovereignty local profile "${id}"`, profile.model ?? "");
+    const port = loopbackPort(profile.baseUrl);
+    if (port !== undefined && daemonPorts.has(port)) {
+      throw new OperationError("config_error", `Sovereignty local profile "${id}" points at port ${port}, where the zkAPI daemon serves.`, "zkapi-clientd forwards every request to cloud providers through OpenRouter, so a loopback address there is not a local model. Move the local model server to another port.");
+    }
   }
   const rawProfile = profile;
   if (rawProfile.apiKey !== undefined || rawProfile.secret !== undefined) {
@@ -4057,6 +4254,34 @@ function assertLocalProfileBaseUrl(id, baseUrl) {
     throw new OperationError("config_error", `Sovereignty local profile "${id}" baseUrl must stay on loopback.`, "Use 127.0.0.1, ::1, or localhost for local analyst profiles.");
   }
 }
+function validateZkapiProfile(id, profile) {
+  if (profile.trust !== "standard_cloud") {
+    throw new OperationError("config_error", `Sovereignty zkapi profile "${id}" must declare trust "standard_cloud".`, "zkAPI hides who paid, not what was asked: the cloud provider reads the request, whatever the loopback address.");
+  }
+  if (profile.purpose !== "consult") {
+    throw new OperationError("config_error", `Sovereignty zkapi profile "${id}" must declare purpose "consult".`, "zkAPI is a consult-only transport; it may never serve an analyst, embedding, vision or classification role.");
+  }
+  assertZkapiDaemonBaseUrl(id, profile.baseUrl);
+}
+function zkapiDaemonPorts(config) {
+  const ports = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
+  for (const profile of Object.values(config.modelProfiles)) {
+    if (profile.provider !== "zkapi")
+      continue;
+    const port = loopbackPort(profile.baseUrl);
+    if (port !== undefined)
+      ports.add(port);
+  }
+  return ports;
+}
+function isConsultOnlyProfile(profile) {
+  return profile.provider === "zkapi" || profile.purpose === "consult";
+}
+function assertNotConsultOnly(resolved, role) {
+  if (!isConsultOnlyProfile(resolved.profile))
+    return;
+  throw new OperationError("config_error", `Consult-only profile "${resolved.id}" cannot serve ${role}.`, "A consult profile (provider zkapi or purpose consult) carries one approved question and never evidence; choose an analyst or embedding profile for this role.");
+}
 function isLoopbackHostname(hostname) {
   const normalized = hostname.toLowerCase();
   return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "[::1]" || normalized === "::1";
@@ -4077,6 +4302,7 @@ function validateRetrievalPolicy(config, domain, policy) {
   }
   if (policy.embeddingProfile) {
     const resolved = resolveProfile(config, policy.embeddingProfile, `retrieval policy ${domain}`);
+    assertNotConsultOnly(resolved, `the ${domain} embedding policy`);
     if (!policy.allowedEmbeddingTrust.includes(resolved.profile.trust)) {
       throw new OperationError("config_error", `${domain} embedding profile "${policy.embeddingProfile}" is outside allowedEmbeddingTrust.`);
     }
@@ -4093,6 +4319,8 @@ function resolveProfile(config, id, context) {
   return { id, profile };
 }
 function profileAllowedForDomain(profile, domain) {
+  if (isConsultOnlyProfile(profile))
+    return false;
   if (domain === "secure_local") {
     return profile.trust === "local" && profile.provider === "local-openai-compatible" || profile.trust === "encrypted_cloud" && profile.provider === "venice";
   }
@@ -4202,7 +4430,7 @@ function stringArrayField(value, label) {
   }
   return value.map((item) => item.trim()).filter(Boolean);
 }
-var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
+var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SUPPORTED_PROVIDERS, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
 var init_sovereignty = __esm(() => {
   init_operation_error();
   init_local_model_policy();
@@ -4211,8 +4439,19 @@ var init_sovereignty = __esm(() => {
   init_source_model_policy();
   init_venice_models();
   init_manifest();
+  init_zkapi_consult_settings();
   init_source_model_policy();
   BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_MODEL.modelId;
+  SUPPORTED_PROVIDERS = [
+    "local-openai-compatible",
+    "openclaw-infer",
+    "google-gemini",
+    "venice",
+    "anthropic",
+    "openai-compatible",
+    "built-in",
+    "zkapi"
+  ];
   SecureAnalystPoolE2EEGateError = class SecureAnalystPoolE2EEGateError extends OperationError {
     profileId;
     modelId;
@@ -14745,9 +14984,9 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/doctor.ts
 init_config();
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync13, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname15, join as join18 } from "node:path";
-import { homedir as homedir11 } from "node:os";
+import { existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync14, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname16, join as join19 } from "node:path";
+import { homedir as homedir12 } from "node:os";
 
 // src/core/engine-service.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
@@ -15333,11 +15572,217 @@ init_source_dashboard();
 init_ingestion_throughput();
 init_public_source_capabilities();
 init_source_corpus_registry();
+init_secret_store();
+
+// src/core/consult-transport-zkapi.ts
+init_atomic_file();
+init_file_lease();
+init_zkapi_consult_settings();
+import { spawn, execFileSync as execFileSync2 } from "node:child_process";
+import { accessSync as accessSync3, chmodSync as chmodSync2, constants as constants2, existsSync as existsSync10, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync2, readFileSync as readFileSync13, readlinkSync, rmSync as rmSync3, statSync as statSync9 } from "node:fs";
+import { createConnection } from "node:net";
+import { homedir as homedir11, tmpdir as tmpdir2 } from "node:os";
+import { delimiter as delimiter4, dirname as dirname15, join as join18 } from "node:path";
+var DAY_MS = 24 * 60 * 60 * 1000;
+var PROBE_MAX_BYTES = 64 * 1024;
+var MAX_QUESTION_BYTES = 8 * 1024;
+var MINIMUM_DAEMON_VERSION = [0, 1, 5];
+var CHILD_ENV_KEYS = [
+  "HOME",
+  "PATH",
+  "USER",
+  "LOGNAME",
+  "LANG",
+  "TMPDIR",
+  "XDG_CONFIG_HOME",
+  "ZKAPI_CLIENTD_CONFIG_DIR",
+  "OA_CHAT_CONFIG_DIR"
+];
+function zkapiRouteLabel(receipt) {
+  if (receipt.keyReuse !== "verified_off" || receipt.inferenceAuth !== "verified") {
+    return "not anonymous: key isolation or local authentication not confirmed";
+  }
+  if (receipt.tor === "per_consult_verified")
+    return "anonymous route (payment, key and network identity hidden)";
+  if (receipt.tor === "off")
+    return "payment privacy only (network address visible)";
+  return "payment privacy only (Tor route not confirmed)";
+}
+function zkapiMoneyStatus(settings, now) {
+  const required = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((item) => item.id);
+  const currentVersion = settings.acknowledgements.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION;
+  const accepted = currentVersion ? required.filter((id) => settings.acknowledgements.accepted.includes(id)).length : 0;
+  return {
+    acknowledgements: { complete: accepted === required.length, accepted, required: required.length },
+    expiryEstimate: expiryEstimate(settings.fundingDate, now),
+    depositAboveSuggestedCeiling: (settings.depositUsd ?? 0) > ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD
+  };
+}
+function expiryEstimate(fundingDate, now) {
+  if (!fundingDate)
+    return { state: "unknown", notice: "unknown" };
+  const funded = parseIsoDate(fundingDate);
+  const today = parseIsoDate(now.toISOString().slice(0, 10));
+  if (!funded || !today || funded.getTime() > today.getTime()) {
+    return { state: "invalid", fundingDate, notice: "unknown" };
+  }
+  const expiry = new Date(funded.getTime() + ZKAPI_NOTE_TTL_DAYS * DAY_MS);
+  const daysLeft = Math.round((expiry.getTime() - today.getTime()) / DAY_MS);
+  const expiryDate = expiry.toISOString().slice(0, 10);
+  if (daysLeft <= 0)
+    return { state: "expired", fundingDate, expiryDate, daysLeft: 0, notice: "expired" };
+  const [ten, five, two] = ZKAPI_EXPIRY_NOTICE_DAYS;
+  const notice = daysLeft <= two ? "two_days" : daysLeft <= five ? "five_days" : daysLeft <= ten ? "ten_days" : "none";
+  return { state: "active", fundingDate, expiryDate, daysLeft, notice };
+}
+function settingsBlockers(money) {
+  const blockers = [];
+  if (!money.acknowledgements.complete)
+    blockers.push("acknowledgements_incomplete");
+  if (money.expiryEstimate.state === "unknown")
+    blockers.push("funding_date_missing");
+  if (money.expiryEstimate.state === "invalid")
+    blockers.push("funding_date_invalid");
+  if (money.expiryEstimate.state === "expired")
+    blockers.push("note_expired");
+  return blockers;
+}
+function defaultZkapiStatePath(home = homedir11()) {
+  return join18(home, ".olympus", "zkapi-consult-state.json");
+}
+function utcDay(now) {
+  return now.toISOString().slice(0, 10);
+}
+function readState(path) {
+  if (!existsSync10(path))
+    return;
+  const parsed = JSON.parse(readFileSync13(path, "utf8"));
+  if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
+    throw new Error("zkAPI state record is malformed");
+  }
+  return parsed;
+}
+function zkapiUsageToday(path, now) {
+  const state = readState(path);
+  return state && state.day === utcDay(now) ? { count: state.count, reservedMicroUsd: state.reservedMicroUsd } : { count: 0, reservedMicroUsd: 0 };
+}
+function zkapiLastSession(path) {
+  return readState(path)?.lastSession;
+}
+function childEnvironment(env) {
+  const out = {};
+  for (const key of CHILD_ENV_KEYS) {
+    const value = env[key];
+    if (value)
+      out[key] = value;
+  }
+  return out;
+}
+function resolveExecutable(name, explicit, env) {
+  const candidates = explicit ? [explicit] : (env.PATH ?? "").split(delimiter4).filter(Boolean).map((dir) => join18(dir, name));
+  for (const candidate of candidates) {
+    try {
+      accessSync3(candidate, constants2.X_OK);
+      if (statSync9(candidate).isFile())
+        return candidate;
+    } catch {}
+  }
+  return;
+}
+function portAnswers(port) {
+  return new Promise((resolve3) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const done = (value) => {
+      socket.destroy();
+      resolve3(value);
+    };
+    socket.setTimeout(1000, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+function versionSupported(version) {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version ?? "");
+  if (!match)
+    return false;
+  const parts = [Number(match[1]), Number(match[2]), Number(match[3])];
+  for (let index = 0;index < 3; index += 1) {
+    if (parts[index] !== MINIMUM_DAEMON_VERSION[index])
+      return parts[index] > MINIMUM_DAEMON_VERSION[index];
+  }
+  return true;
+}
+async function zkapiConsultReadiness(options) {
+  const now = (options.now ?? (() => new Date))();
+  const env = options.env ?? process.env;
+  const settings = options.settings;
+  const money = zkapiMoneyStatus(settings, now);
+  const blockers = settingsBlockers(money);
+  const apiKeyConfigured = Boolean(options.apiKey) || options.apiKeyPresent === true;
+  if (!apiKeyConfigured)
+    blockers.push("daemon_api_key_missing");
+  const daemonExecutable = resolveExecutable("zkapi-clientd", settings.daemonExecutable, env);
+  let daemonVersion;
+  if (!daemonExecutable) {
+    blockers.push("daemon_not_found");
+  } else {
+    try {
+      const out = execFileSync2(daemonExecutable, ["--version"], {
+        encoding: "utf8",
+        timeout: 5000,
+        env: childEnvironment(env),
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+      daemonVersion = /^zkapi-clientd (\S+)/.exec(out.trim())?.[1];
+    } catch {
+      daemonVersion = undefined;
+    }
+    if (!versionSupported(daemonVersion))
+      blockers.push("daemon_version_unsupported");
+  }
+  const torExecutable = settings.tor === "per_consult" ? resolveExecutable("tor", settings.torExecutable, env) : undefined;
+  if (settings.tor === "per_consult" && !torExecutable)
+    blockers.push("tor_not_found");
+  const daemonPort = await portAnswers(Number(new URL(options.baseUrl).port || 80)) ? "in_use" : "free";
+  if (daemonPort === "in_use")
+    blockers.push("daemon_already_running");
+  const torPort = settings.tor === "per_consult" ? await portAnswers(settings.torSocksPort) ? "in_use" : "free" : "not_used";
+  if (torPort === "in_use")
+    blockers.push("tor_port_busy");
+  const statePath = options.statePath ?? defaultZkapiStatePath();
+  let usage = { count: 0, reservedMicroUsd: 0 };
+  let lastSession;
+  try {
+    usage = zkapiUsageToday(statePath, now);
+    lastSession = zkapiLastSession(statePath);
+  } catch {
+    blockers.push("state_unavailable");
+  }
+  if (usage.count >= settings.dailyRequestCap)
+    blockers.push("daily_cap_reached");
+  return {
+    ...daemonExecutable ? { daemonExecutable } : {},
+    ...daemonVersion ? { daemonVersion } : {},
+    ...torExecutable ? { torExecutable } : {},
+    tor: settings.tor,
+    daemonPort,
+    torPort,
+    apiKeyConfigured,
+    money,
+    requestsToday: { count: usage.count, cap: settings.dailyRequestCap },
+    spendToday: { reservedUsd: usage.reservedMicroUsd / 1e6, capUsd: settings.dailySpendCapUsd },
+    ...lastSession ? { lastSession } : {},
+    routeLabel: lastSession ? zkapiRouteLabel(lastSession) : settings.tor === "off" ? "payment privacy only (network address visible); not yet verified by a consult" : "not yet verified: each consult verifies key isolation, local authentication and its own Tor route",
+    blockers
+  };
+}
+
+// src/core/doctor.ts
 function defaultDoctorHostProbe(env = process.env, options = {}) {
-  const home = env.HOME?.trim() || homedir11();
+  const home = env.HOME?.trim() || homedir12();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" ? inspectEngine({ homeDir: home }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync10(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync11(workerServicePaths(process.platform, home).unitPath) : false;
   return {
     ...openclawPath ? { openclawPath } : {},
     engine: { installed: engine.installed, state: engine.state },
@@ -15374,6 +15819,7 @@ async function runDoctor(input) {
     await safeCheck("credential_reauthorization_backlog", () => credentialReauthorizationBacklogCheck(deps)),
     await safeCheck("argus_model_pool", () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck("sovereignty_model_lanes", () => sovereigntyModelLaneCheck(deps)),
+    await safeCheck("zkapi_consult_transport", () => zkapiConsultTransportCheck(deps)),
     await safeCheck("email_worker", () => emailWorkerCheck(deps)),
     await safeCheck("worker_credential_lanes", () => workerCredentialLanesCheck(deps)),
     await safeCheck("dropbox_content_extraction_throughput", () => dropboxContentExtractionThroughputCheck(deps)),
@@ -15417,7 +15863,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync10(configPath))
+  if (configPath === undefined || !existsSync11(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -15429,7 +15875,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join18(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join19(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -15631,6 +16077,67 @@ async function sovereigntyModelLaneCheck(deps) {
     ok: true,
     detail: `Configured local sovereignty model lanes are reachable (${profiles.length} profile${profiles.length === 1 ? "" : "s"} checked).`
   };
+}
+async function zkapiConsultTransportCheck(deps) {
+  const name = "zkapi_consult_transport";
+  const engine = doctorSovereigntyEngine(deps);
+  const profiles = engine ? Object.entries(engine.config.modelProfiles).filter(([, profile]) => profile.provider === "zkapi") : [];
+  if (profiles.length === 0) {
+    return { name, ok: true, detail: "Not configured: the experimental zkAPI consult transport is off." };
+  }
+  const env = deps.env ?? process.env;
+  const home = env.HOME?.trim();
+  const statePath = deps.zkapiStatePath ?? (home ? defaultZkapiStatePath(home) : defaultZkapiStatePath());
+  const lines = [];
+  let ok = true;
+  for (const [profileId, profile] of profiles) {
+    const readiness = await zkapiConsultReadiness({
+      baseUrl: profile.baseUrl,
+      model: "model" in profile && profile.model ? profile.model : "",
+      settings: profile.zkapi,
+      statePath,
+      env,
+      apiKeyPresent: secretRefPresent(profile.secretRef, env, deps),
+      ...deps.now ? { now: deps.now } : {}
+    });
+    if (readiness.blockers.length > 0)
+      ok = false;
+    lines.push(`${profileId}: ${describeZkapiReadiness(readiness)}`);
+  }
+  return {
+    name,
+    ok,
+    detail: `zkAPI consult transport (experimental, consults only; no consult is sent until the consult lane lands): ${lines.join(" | ")}`,
+    ...ok ? {} : { hint: "Fix what the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon." }
+  };
+}
+function describeZkapiReadiness(readiness) {
+  const daemon = readiness.daemonExecutable ? `zkapi-clientd ${readiness.daemonVersion ?? "version unknown"}` : "zkapi-clientd not found";
+  const tor = readiness.tor === "off" ? "Tor off" : readiness.torExecutable ? "tor found (a fresh instance per consult)" : "tor not found";
+  const ports = `daemon port ${readiness.daemonPort === "free" ? "free" : "IN USE"}${readiness.torPort === "not_used" ? "" : `, Tor port ${readiness.torPort === "free" ? "free" : "IN USE"}`}`;
+  const key = readiness.apiKeyConfigured ? "local API key configured" : "local API key NOT configured";
+  const money = readiness.money;
+  const acks = `acknowledgements ${money.acknowledgements.complete ? "complete" : "incomplete"} (${money.acknowledgements.accepted}/${money.acknowledgements.required})`;
+  const expiry = money.expiryEstimate;
+  const expiryText = expiry.state === "active" ? `estimated expiry ${expiry.expiryDate} from the confirmed funding date (${expiry.daysLeft} day${expiry.daysLeft === 1 ? "" : "s"} left, notice ${expiry.notice})` : expiry.state === "expired" ? `estimated expiry PASSED on ${expiry.expiryDate}; an unwithdrawn note becomes claimable by the operator` : expiry.state === "invalid" ? "funding date invalid" : "funding date not recorded";
+  const deposit = money.depositAboveSuggestedCeiling ? "; deposit is above the suggested ceiling" : "";
+  const usage = `requests today ${readiness.requestsToday.count}/${readiness.requestsToday.cap}, worst-case spend reserved $${readiness.spendToday.reservedUsd.toFixed(2)}/$${readiness.spendToday.capUsd.toFixed(2)}`;
+  const last = readiness.lastSession ? `last consult ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, settlement ${readiness.lastSession.settlement}` : "no consult run yet";
+  const blockers = readiness.blockers.length > 0 ? `; not ready: ${readiness.blockers.join(", ")}` : "; ready";
+  return `${daemon}; ${tor}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
+}
+function secretRefPresent(secretRef, env, deps) {
+  const ref = normalizeSecretRef(secretRef ?? "");
+  if (!ref)
+    return false;
+  if (ref.kind === "env")
+    return Boolean(env[ref.key]?.trim());
+  const store = deps.secretStore ?? createDefaultSecretStore({ env });
+  try {
+    return Boolean(store.getSync?.(ref.key)?.trim());
+  } catch {
+    return false;
+  }
 }
 async function sovereigntyPrerequisiteCheck(deps) {
   const engine = doctorSovereigntyEngine(deps);
@@ -15860,7 +16367,7 @@ function tierMigrationStoppedGraceDays(env) {
   const value = Number(raw);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS;
 }
-var DAY_MS = 24 * 60 * 60 * 1000;
+var DAY_MS2 = 24 * 60 * 60 * 1000;
 function approvedTierMigrationInProgress(value, now, graceDays) {
   const migration = asRecord15(value);
   if (migration.in_progress !== true)
@@ -15880,8 +16387,8 @@ function approvedTierMigrationInProgress(value, now, graceDays) {
   if (state === "stopped") {
     const stoppedAt = typeof migration.stopped_at === "string" ? Date.parse(migration.stopped_at) : Number.NaN;
     const ageMs = Number.isFinite(stoppedAt) ? Math.max(0, now.getTime() - stoppedAt) : Number.POSITIVE_INFINITY;
-    if (ageMs > graceDays * DAY_MS) {
-      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS)} days ago` : "migration stopped at an unknown time";
+    if (ageMs > graceDays * DAY_MS2) {
+      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS2)} days ago` : "migration stopped at an unknown time";
       return {
         state,
         approvalEntryId,
@@ -16311,7 +16818,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join18(dirname15(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join19(dirname16(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -16332,9 +16839,9 @@ function ingestionHealthStateFromLedger(ledger) {
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync10(path))
+    if (!existsSync11(path))
       return;
-    const parsed = JSON.parse(readFileSync13(path, "utf8"));
+    const parsed = JSON.parse(readFileSync14(path, "utf8"));
     const record = asRecord15(parsed);
     const sources = asRecord15(record.sources);
     const normalized = {};
@@ -16355,7 +16862,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync8(dirname15(path), { recursive: true });
+  mkdirSync9(dirname16(path), { recursive: true });
   writeFileSync5(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -16569,7 +17076,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync10(join18(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync11(join19(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync3(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });

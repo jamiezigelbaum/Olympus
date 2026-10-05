@@ -47,6 +47,7 @@ import {
   renderPdfFirstPageForVision,
 } from './pdf-render.ts';
 import { missingBytesFailure } from './text.ts';
+import { loopbackPort, ZKAPI_DAEMON_DEFAULT_PORT } from '../../../core/zkapi-consult-settings.ts';
 
 export const REMOTE_VLM_EXTRACTOR_VERSION = 'venice-v1';
 export const APPROVED_REMOTE_EXTRACTION_HOST = 'api.venice.ai';
@@ -196,6 +197,10 @@ export function requireLocalHttpBaseUrl(value: string | undefined, label: string
     || hostname.startsWith('127.');
   if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !isLoopback) {
     throw new Error(`${label} must use a loopback HTTP(S) endpoint for secure-local vision extraction.`);
+  }
+  if (loopbackPort(raw) === ZKAPI_DAEMON_DEFAULT_PORT) {
+    // zkapi-clientd serves there and forwards every request to cloud providers.
+    throw new Error(`${label} points at the zkAPI daemon port ${ZKAPI_DAEMON_DEFAULT_PORT}, which forwards to cloud providers; it is not a local vision backend.`);
   }
   return raw;
 }

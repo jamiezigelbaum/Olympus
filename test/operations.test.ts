@@ -133,6 +133,7 @@ describe('operations', () => {
       'credential_reauthorization_backlog',
       'argus_model_pool',
       'sovereignty_model_lanes',
+      'zkapi_consult_transport',
       'email_worker',
       'worker_credential_lanes',
       'dropbox_content_extraction_throughput',
