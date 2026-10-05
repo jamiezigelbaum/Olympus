@@ -240,6 +240,35 @@ export function assertZkapiDaemonBaseUrl(id: string, baseUrl: string | undefined
   }
 }
 
+// Every loopback port a zkAPI daemon is configured on, in this process: the
+// default plus each validated zkapi profile's port. A module binding, not
+// shared class state. Ports are only ever added: forgetting a daemon would
+// reopen a path for evidence.
+const zkapiDaemonPorts = new Set<number>([ZKAPI_DAEMON_DEFAULT_PORT]);
+
+export function registerZkapiDaemonPorts(ports: Iterable<number>): void {
+  for (const port of ports) zkapiDaemonPorts.add(port);
+}
+
+export function zkapiDaemonPortSet(): ReadonlySet<number> {
+  return zkapiDaemonPorts;
+}
+
+/**
+ * Refuse an evidence adapter's resolved endpoint when it is a zkAPI daemon:
+ * that loopback address forwards to OpenRouter and the upstream model. Called
+ * where each adapter dispatches, on the URL it actually uses.
+ */
+export function assertNotZkapiDaemonEndpoint(url: string, label: string): void {
+  const port = loopbackPort(url);
+  if (port === undefined || !zkapiDaemonPorts.has(port)) return;
+  throw new OperationError(
+    'config_error',
+    `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`,
+    'Point this model lane at a local model server on another port.',
+  );
+}
+
 /** The loopback port a URL names, or undefined when it is not loopback HTTP(S). */
 export function loopbackPort(baseUrl: string | undefined): number | undefined {
   if (!baseUrl) return undefined;

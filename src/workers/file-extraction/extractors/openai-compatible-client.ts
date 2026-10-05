@@ -15,7 +15,7 @@ import type {
   VlmProbeRequest,
 } from '../types.ts';
 import { normalizeExtractedText } from './bounded-text.ts';
-import { requireLocalHttpBaseUrl, requireNonEmpty } from './remote-vlm.ts';
+import { assertNotZkapiVisionEndpoint, requireLocalHttpBaseUrl, requireNonEmpty } from './remote-vlm.ts';
 import { assertLocalModelIdNotCloudForwarding } from '../../../core/local-model-policy.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from '../../../core/model-transport.ts';
 import {
@@ -56,6 +56,7 @@ export class OpenAICompatibleVlmClient implements VlmClient {
   }
 
   async describe(request: VlmDescribeRequest): Promise<VlmDescribeResult> {
+    assertNotZkapiVisionEndpoint(this.baseUrl, 'File extraction local VLM base URL');
     const timeout = requestTimeout(this.timeoutMs);
     try {
       const response = await fetchModelEndpoint(this.fetchImpl, `${this.baseUrl}/chat/completions`, {

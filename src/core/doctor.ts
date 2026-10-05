@@ -596,7 +596,8 @@ function describeZkapiReadiness(readiness: ZkapiConsultReadiness): string {
     : 'zkapi-clientd not found';
   const tor = readiness.tor === 'off'
     ? 'Tor off'
-    : readiness.torExecutable ? 'tor found (a fresh instance per consult)' : 'tor not found';
+    : readiness.torExecutable ? 'tor found (a fresh client per consult)' : 'tor not found';
+  const confinement = `confinement on this platform: ${readiness.confinement.limit}`;
   const ports = `daemon port ${readiness.daemonPort === 'free' ? 'free' : 'IN USE'}${readiness.torPort === 'not_used' ? '' : `, Tor port ${readiness.torPort === 'free' ? 'free' : 'IN USE'}`}`;
   const key = readiness.apiKeyConfigured ? 'local API key configured' : 'local API key NOT configured';
   const money = readiness.money;
@@ -610,12 +611,15 @@ function describeZkapiReadiness(readiness: ZkapiConsultReadiness): string {
         ? 'funding date invalid'
         : 'funding date not recorded';
   const deposit = money.depositAboveSuggestedCeiling ? '; deposit is above the suggested ceiling' : '';
-  const usage = `requests today ${readiness.requestsToday.count}/${readiness.requestsToday.cap}, worst-case spend reserved $${readiness.spendToday.reservedUsd.toFixed(2)}/$${readiness.spendToday.capUsd.toFixed(2)}`;
+  const usage = `requests today ${readiness.requestsToday.count}/${readiness.requestsToday.cap}, worst-case spend reserved $${readiness.spendToday.reservedUsd.toFixed(2)}/$${readiness.spendToday.capUsd.toFixed(2)} ($6.00 per request)`;
+  const fence = readiness.unresolvedSession
+    ? 'UNRESOLVED SESSION: run a recovery-only session before another consult'
+    : 'no unresolved session';
   const last = readiness.lastSession
-    ? `last consult ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, settlement ${readiness.lastSession.settlement}`
+    ? `last ${readiness.lastSession.recovery ? 'recovery session' : 'consult'} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}`
     : 'no consult run yet';
   const blockers = readiness.blockers.length > 0 ? `; not ready: ${readiness.blockers.join(', ')}` : '; ready';
-  return `${daemon}; ${tor}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
+  return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
 }
 
 function secretRefPresent(

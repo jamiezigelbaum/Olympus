@@ -2,6 +2,7 @@ import type { ArgusLane, ArgusModelProfile, OlympusConfig } from './config.ts';
 import { OperationError } from './operation-error.ts';
 import { assertLocalModelIdNotCloudForwarding } from './local-model-policy.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
+import { assertNotZkapiDaemonEndpoint } from './zkapi-consult-settings.ts';
 import { resolveSecretRefValue } from './secret-store.ts';
 
 export type DelphiFetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -226,6 +227,9 @@ export class DelphiClient {
     lane: string,
     options?: DelphiRequestOptions,
   ): Promise<unknown> {
+    // Every Argus/Delphi lane and profile dispatches here, including a lane
+    // chosen at runtime that no sovereignty profile validated.
+    assertNotZkapiDaemonEndpoint(url, `Argus ${lane} endpoint`);
     return this.transport.requestJson(url, init, lane, options);
   }
 }

@@ -1,22 +1,33 @@
 // Tranche Z1 of the frontier-consult design: the experimental zkAPI consult
 // transport, proven against stand-in executables. A fake `tor` binds the SOCKS
 // port and reports bootstrap; a fake `zkapi-clientd` answers `--version` and
-// `serve` the way the real daemon's loopback API and foreground log do. No real
-// daemon, no Tor network, no funds, and no binary beyond Bun itself.
+// `serve` the way the real daemon's loopback API and foreground log do
+// (`internal/server/logging.go` request lines included). No real daemon, no Tor
+// network, no funds, and no binary beyond Bun itself (plus the base-system
+// sandbox on macOS for the one confinement test).
+//
+// Hermetic: every test runs with HOME, the sovereignty config variables and
+// the zkapi-clientd config variables pointed at a fresh temp directory.
 
-import { beforeAll, beforeEach, afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import {
+  recoverZkapiSession,
   reserveZkapiRequest,
   sendZkapiConsult,
+  zkapiUnresolvedSession,
   zkapiUsageToday,
+  type ZkapiConfinement,
   type ZkapiConsultTransportOptions,
 } from '../src/core/consult-transport-zkapi.ts';
+import { DelphiClient, type DelphiTransport } from '../src/core/delphi.ts';
 import { runDoctor, type DoctorCheck, type DoctorDeps } from '../src/core/doctor.ts';
+import { processInstanceIdentity, withFileLease } from '../src/core/file-lease.ts';
 import { OperationError } from '../src/core/operation-error.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import {
@@ -28,12 +39,14 @@ import {
 import { assertSnifferProfileAllowed, resolveSnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import { applyModelChoice } from '../src/workers/chatgpt/model-choice.ts';
 import { requireLocalHttpBaseUrl } from '../src/workers/file-extraction/extractors/remote-vlm.ts';
+import { OpenAICompatibleVlmClient } from '../src/workers/file-extraction/extractors/openai-compatible-client.ts';
+import { OpenAICompatibleSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const QUESTION = 'What is the usual notice period rule for ending a residential lease, across common durations?';
 const API_KEY = 'k'.repeat(40);
 const MODEL = 'openai/gpt-6-astra';
 const NOW = new Date('2026-10-05T12:00:00.000Z');
-const SLOW = 30_000;
+const SLOW = 40_000;
 
 // ---------------------------------------------------------------------------
 // Stand-in executables
@@ -50,12 +63,15 @@ fs.appendFileSync(dir + '/tor-runs.log', dataDir + ' ' + mode + ' ' + value('--_
 const port = Number(value('--SocksPort').split(':')[1]);
 Bun.listen({ hostname: '127.0.0.1', port, socket: { open(s) { s.end(); }, data() {} } });
 if (!plan.torNeverBootstraps) console.log('Oct 05 12:00:00.000 [notice] Bootstrapped 100% (done): Done');
+if (plan.torDiesAfterMs) setTimeout(() => process.exit(1), plan.torDiesAfterMs);
 setInterval(() => {}, 1 << 30);
 `;
 
 const FAKE_DAEMON = `#!${process.execPath}
 const fs = require('node:fs');
 const net = require('node:net');
+const dgram = require('node:dgram');
+const { spawn } = require('node:child_process');
 const dir = process.env.ZKAPI_CLIENTD_CONFIG_DIR;
 const planPath = dir + '/plan.json';
 const plan = fs.existsSync(planPath) ? JSON.parse(fs.readFileSync(planPath, 'utf8')) : { version: '0.1.6' };
@@ -69,45 +85,69 @@ const relayUp = () => new Promise((resolve) => {
   s.once('connect', () => { s.destroy(); resolve(true); });
   s.once('error', () => resolve(false));
 });
+const tryTcp = (host, port) => new Promise((resolve) => {
+  const started = Date.now();
+  const s = net.createConnection({ host, port });
+  s.setTimeout(2000, () => { s.destroy(); resolve('timeout'); });
+  s.once('connect', () => { s.destroy(); resolve('connected'); });
+  s.once('error', () => resolve(Date.now() - started < 1000 ? 'refused_fast' : 'error_slow'));
+});
+const tryUdp = () => new Promise((resolve) => { const s = dgram.createSocket('udp4'); s.send(Buffer.from([0]), 53, '192.0.2.1', (e) => { s.close(); resolve(e ? 'denied' : 'sent'); }); });
+const tryResolver = () => new Promise((resolve) => { const s = net.createConnection({ path: '/private/var/run/mDNSResponder' }); s.once('connect', () => { s.destroy(); resolve('connected'); }); s.once('error', () => resolve('denied')); });
 const json = (status, body, headers = {}) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers } });
 const err = (status, code, message = 'fixed daemon text') => json(status, { error: { message, type: code, code, param: null } }, status === 401 ? { 'WWW-Authenticate': 'Bearer' } : {});
 let key = 0;
+let request = 0;
 (async () => {
   if (!(await relayUp())) { log('ERROR configuration check failed'); process.exit(1); }
+  if (plan.egressProbe) {
+    const result = { direct: await tryTcp('192.0.2.1', 9), udp: await tryUdp(), resolver: await tryResolver(), loopbackOther: await tryTcp('127.0.0.1', plan.egressProbe) };
+    event('egress ' + JSON.stringify(result));
+  }
+  if (plan.companion) {
+    const companion = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { stdio: 'ignore' });
+    event('companion ' + companion.pid);
+  }
+  if (plan.startDelayMs) await Bun.sleep(plan.startDelayMs);
   event('serve ' + process.pid);
-  Bun.serve({ hostname: '127.0.0.1', port: plan.port, async fetch(request) {
-    const url = new URL(request.url);
+  Bun.serve({ hostname: '127.0.0.1', port: plan.port, async fetch(httpRequest) {
+    const url = new URL(httpRequest.url);
     if (url.pathname === '/healthz') return json(200, '{"status":"ok"}');
     const keyless = !plan.requireKey && (url.pathname === '/v1/models' || url.pathname === '/v1/chat/completions');
-    if (!keyless && request.headers.get('authorization') !== 'Bearer ' + plan.apiKey) return err(401, 'invalid_api_key', 'A valid local zkAPI client API key is required.');
+    if (!keyless && httpRequest.headers.get('authorization') !== 'Bearer ' + plan.apiKey) return err(401, 'invalid_api_key', 'A valid local zkAPI client API key is required.');
     if (url.pathname === '/admin/status') return json(200, { backend: 'zkapi', network: 'mainnet', request_budget_policy: 'model' });
-    if (url.pathname === '/v1/models' && request.method !== 'GET') return err(405, 'method_not_allowed');
+    if (url.pathname === '/v1/models' && httpRequest.method !== 'GET') return err(405, 'method_not_allowed');
     if (url.pathname === '/v1/models') {
       if (plan.policyNeverLoads) return err(502, 'models_unavailable');
-      if (!plan.bypassTor && !(await relayUp())) return err(502, 'models_unavailable');
-      return json(200, { object: 'list', data: [{ id: 'other/model', oa_request_limit_micro_usd: 1000000 }, ...(plan.modelMissing ? [] : [{ id: '${MODEL}', oa_request_limit_micro_usd: plan.allowance ?? 2000000 }])] });
+      const up = plan.bypassTor || (await relayUp());
+      if (!up) return plan.postStopShape === 'unauthorized' ? err(401, 'invalid_api_key') : err(502, 'models_unavailable');
+      return json(200, { object: 'list', data: [{ id: 'other/model', oa_request_limit_micro_usd: 1000000 }, ...(plan.modelMissing ? [] : [{ id: '${MODEL}', oa_request_limit_micro_usd: plan.allowance ?? 1000000 }])] });
     }
-    if (url.pathname === '/v1/chat/completions' && request.method === 'POST') {
-      const body = await request.text();
+    if (url.pathname === '/v1/chat/completions' && httpRequest.method === 'POST') {
+      request += 1;
+      const id = request;
+      log('request started method=POST route=/v1/chat/completions request=' + id);
+      const finish = (response) => { log('request completed method=POST route=/v1/chat/completions status=' + response.status + ' duration=1ms request=' + id); if (plan.crashAfterCompletion) setTimeout(() => process.exit(1), 50); return response; };
+      const body = await httpRequest.text();
       const state = plan.statePath && fs.existsSync(plan.statePath) ? JSON.parse(fs.readFileSync(plan.statePath, 'utf8')) : {};
-      event('completion ' + JSON.stringify({ body, auth: request.headers.get('authorization'), origin: request.headers.get('origin'), countAtArrival: state.count ?? 0 }));
+      event('completion ' + JSON.stringify({ body, auth: httpRequest.headers.get('authorization'), origin: httpRequest.headers.get('origin'), countAtArrival: state.count ?? 0, fenceAtArrival: Boolean(state.fence) }));
+      const completion = (content) => json(200, { object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content } }] }, { 'X-OA-Verification-Status': 'verified' });
+      if (plan.completion === 'error') return finish(err(400, 'model_budget_unavailable', 'echo: ' + body + ' ?secret=1'));
       key += 1;
       const ref = key;
-      log('request key selected request=' + ref + ' key_ref=' + ref + ' source=' + (plan.reusedKey ? 'reused' : 'fresh'));
+      if (!plan.noKeyLog) log('request key selected request=' + id + ' key_ref=' + ref + ' source=' + (plan.reusedKey ? 'reused' : 'fresh'));
       if (!plan.noSettlement) setTimeout(() => {
         log('automatic settlement result key_ref=' + ref + ' ready=true duration=30ms');
         log('zkAPI OpenRouter key session ' + ref + ' ended (settled); cost: 0.000123 ETH; balance remaining: 0.004567 ETH');
-      }, 30);
-      const completion = (content) => json(200, { object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content } }] }, { 'X-OA-Verification-Status': 'verified' });
+      }, plan.settleDelayMs ?? 30);
       switch (plan.completion) {
-        case 'redirect': return new Response(null, { status: 307, headers: { Location: '/v1/elsewhere' } });
-        case 'oversize': return completion('x'.repeat(200000));
-        case 'error': return err(400, 'model_budget_unavailable', 'echo: ' + body + ' ?secret=1');
-        case 'garbage': return new Response('<html>' + body + '</html>', { status: 502 });
-        case 'empty': return completion('   ');
-        case 'slow': await Bun.sleep(1500); return completion('late');
-        case 'held': while (!fs.existsSync(dir + '/release')) await Bun.sleep(20); return completion('held');
-        default: return completion('Generally, notice scales with term length.');
+        case 'redirect': return finish(new Response(null, { status: 307, headers: { Location: '/v1/elsewhere' } }));
+        case 'oversize': return finish(completion('x'.repeat(200000)));
+        case 'garbage': return finish(new Response('<html>' + body + '</html>', { status: 502 }));
+        case 'empty': return finish(completion('   '));
+        case 'slow': await Bun.sleep(1500); return finish(completion('late'));
+        case 'held': while (!fs.existsSync(dir + '/release')) await Bun.sleep(20); return finish(completion('held'));
+        default: return finish(completion('Generally, notice scales with term length.'));
       }
     }
     if (url.pathname === '/v1/elsewhere') event('followed redirect');
@@ -148,13 +188,35 @@ interface Plan {
   statePath: string;
   completion?: string;
   bypassTor?: boolean;
+  postStopShape?: 'unauthorized';
   reusedKey?: boolean;
+  noKeyLog?: boolean;
   noSettlement?: boolean;
+  settleDelayMs?: number;
   torNeverBootstraps?: boolean;
+  torDiesAfterMs?: number;
+  startDelayMs?: number;
   policyNeverLoads?: boolean;
   modelMissing?: boolean;
   allowance?: number;
+  companion?: boolean;
+  crashAfterCompletion?: boolean;
+  egressProbe?: number;
 }
+
+/** A confinement that filters loopback ports: no shipped platform provides one. */
+const filteredConfinement: ZkapiConfinement = {
+  level: 'loopback_filtered',
+  limit: 'test confinement',
+  wrap: (argv) => [...argv],
+  selfTest: async () => true,
+};
+const noConfinement: ZkapiConfinement = {
+  level: 'none',
+  limit: 'no network confinement is implemented on this platform',
+  wrap: (argv) => [...argv],
+  selfTest: async () => false,
+};
 
 let root: string;
 let configDir: string;
@@ -162,8 +224,6 @@ let statePath: string;
 let daemonPort: number;
 let torPort: number;
 let plan: Plan;
-// Hermetic: no code path in these tests may fall back to the developer's real
-// home, sovereignty policy or zkapi-clientd configuration.
 const HERMETIC_ENV_KEYS = ['HOME', 'OLYMPUS_SOVEREIGNTY_CONFIG', 'OLYMPUS_SOVEREIGNTY_CONFIG_PATH', 'ZKAPI_CLIENTD_CONFIG_DIR', 'XDG_CONFIG_HOME'];
 let savedEnv: Record<string, string | undefined> = {};
 
@@ -202,7 +262,7 @@ function readLines(name: string): string[] {
 const events = (): string[] => readLines('events.log');
 const torRuns = (): string[] => readLines('tor-runs.log');
 
-function completions(): Array<{ body: string; auth: string; origin: string | null; countAtArrival: number }> {
+function completions(): Array<{ body: string; auth: string; origin: string | null; countAtArrival: number; fenceAtArrival: boolean }> {
   return events().filter((line) => line.startsWith('completion ')).map((line) => JSON.parse(line.slice('completion '.length)));
 }
 
@@ -218,6 +278,7 @@ function settings(overrides: Partial<ZkapiConsultSettings> = {}): ZkapiConsultSe
     torSocksPort: torPort,
     daemonExecutable: join(binDir, 'zkapi-clientd'),
     torExecutable: join(binDir, 'tor'),
+    dailySpendCapUsd: 60,
     timeoutMs: 5_000,
     torBootstrapTimeoutMs: 5_000,
     daemonReadyTimeoutMs: 8_000,
@@ -236,6 +297,7 @@ function transport(overrides: Partial<ZkapiConsultTransportOptions> = {}): Zkapi
     settings: settings(),
     statePath,
     env: { HOME: root, PATH: '/usr/bin:/bin', ZKAPI_CLIENTD_CONFIG_DIR: configDir },
+    confinement: noConfinement,
     now: () => NOW,
     ...overrides,
   };
@@ -251,27 +313,43 @@ async function portFree(port: number): Promise<boolean> {
   }
 }
 
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const NO_CONFINEMENT_LABEL = 'payment privacy; inference through a fresh Tor client; no network confinement, so the daemon and companion route is not verified';
+
 // ---------------------------------------------------------------------------
-// Sessions
+// Sessions and labels
 
 describe('zkAPI consult transport: a supervised session', () => {
-  test('per-consult Tor, verified daemon, fixed body, settled, everything stopped', async () => {
+  test('fresh Tor, verified daemon, fixed body, correlated settlement, fence cleared, everything stopped', async () => {
     const result = await sendZkapiConsult(QUESTION, transport());
     expect(result).toMatchObject({
       ok: true,
       text: 'Generally, notice scales with term length.',
-      networkIdentity: 'hidden',
-      routeLabel: 'anonymous route (payment, key and network identity hidden)',
+      networkIdentity: 'not_verified',
+      routeLabel: NO_CONFINEMENT_LABEL,
       providerVerification: 'verified',
       receipt: {
+        recovery: false,
         keyReuse: 'verified_off',
         inferenceAuth: 'verified',
-        tor: 'per_consult_verified',
-        freshNetworkIdentity: true,
+        tor: 'per_consult',
+        freshTorClient: true,
+        confinement: 'none',
+        postStopProbe: 'route_lost',
         settlement: 'confirmed',
+        fence: 'clear',
         daemonVersion: '0.1.6',
         network: 'mainnet',
-        allowanceUsd: 2,
+        listedAllowanceUsd: 1,
+        reservedUsd: 6,
       },
     });
     const sent = completions();
@@ -279,55 +357,73 @@ describe('zkAPI consult transport: a supervised session', () => {
     expect(JSON.parse(sent[0]!.body)).toEqual({ model: MODEL, messages: [{ role: 'user', content: QUESTION }], stream: false });
     expect(sent[0]!.auth).toBe(`Bearer ${API_KEY}`);
     expect(sent[0]!.origin).toBeNull();
-    // Reserved before the daemon saw the request.
+    // Reserved, and fenced, before the daemon saw the request.
     expect(sent[0]!.countAtArrival).toBe(1);
-    // A throwaway Tor with a private fresh data directory, owned by this process, then removed.
+    expect(sent[0]!.fenceAtArrival).toBe(true);
     const [dataDir, mode, owner] = torRuns()[0]!.split(' ');
     expect(mode).toBe('700');
     expect(owner).toBe(String(process.pid));
     expect(existsSync(dataDir!)).toBe(false);
     expect(await portFree(daemonPort)).toBe(true);
     expect(await portFree(torPort)).toBe(true);
-    // The ledger holds counts and a content-free receipt only.
     const ledger = readFileSync(statePath, 'utf8');
-    expect(JSON.parse(ledger)).toMatchObject({ day: '2026-10-05', count: 1, reservedMicroUsd: 2_000_000, lastSession: { result: 'ok' } });
-    for (const forbidden of ['notice period', 'balance', 'cost', API_KEY, 'runningDaemon']) expect(ledger).not.toContain(forbidden);
+    expect(JSON.parse(ledger)).toMatchObject({ day: '2026-10-05', count: 1, reservedMicroUsd: 6_000_000, lastSession: { result: 'ok' } });
+    for (const forbidden of ['notice period', 'balance', 'cost', API_KEY]) expect(ledger).not.toContain(forbidden);
+    expect(JSON.parse(ledger).running).toBeUndefined();
+    expect(JSON.parse(ledger).fence).toBeUndefined();
   }, SLOW);
 
-  test('every consult gets a brand-new Tor instance', async () => {
+  test('the strong label needs loopback-filtered confinement that passed its self-test', async () => {
+    expect(await sendZkapiConsult(QUESTION, transport({ confinement: filteredConfinement }))).toMatchObject({
+      ok: true,
+      networkIdentity: 'hidden',
+      routeLabel: 'anonymous route (payment, key and network identity hidden)',
+      receipt: { confinement: 'loopback_filtered', confinementSelfTest: 'passed' },
+    });
+    const failingSelfTest: ZkapiConfinement = { ...filteredConfinement, selfTest: async () => false };
+    expect(await sendZkapiConsult(QUESTION, transport({ confinement: failingSelfTest }))).toMatchObject({
+      ok: true,
+      networkIdentity: 'not_verified',
+      routeLabel: NO_CONFINEMENT_LABEL,
+      receipt: { confinementSelfTest: 'failed' },
+    });
+  }, SLOW);
+
+  test('every consult gets a brand-new Tor client', async () => {
     expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true });
     expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true });
     const dirs = torRuns().map((run) => run.split(' ')[0]);
     expect(dirs).toHaveLength(2);
     expect(dirs[0]).not.toBe(dirs[1]);
-    expect(events().filter((line) => line.startsWith('serve '))).toHaveLength(2);
   }, SLOW);
 
   test('without Tor the mode is named payment privacy only', async () => {
     writePlan({ relayPort: null });
-    const result = await sendZkapiConsult(QUESTION, transport({ settings: settings({ tor: 'off' }) }));
-    expect(result).toMatchObject({
+    expect(await sendZkapiConsult(QUESTION, transport({ settings: settings({ tor: 'off' }) }))).toMatchObject({
       ok: true,
       networkIdentity: 'visible',
       routeLabel: 'payment privacy only (network address visible)',
-      receipt: { tor: 'off', freshNetworkIdentity: false },
+      receipt: { tor: 'off', freshTorClient: false },
     });
     expect(torRuns()).toEqual([]);
   }, SLOW);
 
-  test('a daemon that still reaches the network after Tor stops loses the anonymous label', async () => {
+  test('the post-stop probe is secondary: a bypass is visible, a 401 is never proof', async () => {
     writePlan({ bypassTor: true });
-    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({
+    expect(await sendZkapiConsult(QUESTION, transport({ confinement: filteredConfinement }))).toMatchObject({
       ok: true,
       networkIdentity: 'visible',
-      routeLabel: 'payment privacy only (Tor route not confirmed)',
-      receipt: { tor: 'per_consult_unconfirmed' },
+      routeLabel: 'payment privacy only: the daemon still reached the network after Tor stopped (Tor bypass observed)',
+      receipt: { postStopProbe: 'still_reachable' },
     });
+    writePlan({ bypassTor: false, postStopShape: 'unauthorized' });
+    const inconclusive = await sendZkapiConsult(QUESTION, transport());
+    expect(inconclusive).toMatchObject({ ok: true, routeLabel: NO_CONFINEMENT_LABEL, receipt: { postStopProbe: 'inconclusive' } });
   }, SLOW);
 
   test('a reused key in the daemon log withdraws the key-isolation claim', async () => {
     writePlan({ reusedKey: true });
-    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({
+    expect(await sendZkapiConsult(QUESTION, transport({ confinement: filteredConfinement }))).toMatchObject({
       ok: true,
       routeLabel: 'not anonymous: key isolation or local authentication not confirmed',
       receipt: { keyReuse: 'not_verified' },
@@ -345,6 +441,32 @@ describe('zkAPI consult transport: a supervised session', () => {
   });
 });
 
+describe('zkAPI consult transport: macOS confinement', () => {
+  test.skipIf(process.platform !== 'darwin')('the real sandbox denies the daemon direct TCP, UDP and DNS, but not other loopback ports', async () => {
+    const otherLoopback = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
+    try {
+      writePlan({ egressProbe: otherLoopback.port });
+      const { confinement: _injected, ...withDefault } = transport();
+      const result = await sendZkapiConsult(QUESTION, withDefault);
+      const egress = JSON.parse(events().find((line) => line.startsWith('egress '))!.slice('egress '.length));
+      expect(egress.direct).not.toBe('connected');
+      expect(egress.direct).not.toBe('timeout');
+      expect(egress.udp).toBe('denied');
+      expect(egress.resolver).toBe('denied');
+      // The stated limit: loopback is not port-filtered.
+      expect(egress.loopbackOther).toBe('connected');
+      expect(result).toMatchObject({
+        ok: true,
+        networkIdentity: 'not_verified',
+        receipt: { confinement: 'non_loopback_blocked', confinementSelfTest: 'passed' },
+      });
+      if (result.ok) expect(result.routeLabel).toContain('loopback was not port-filtered');
+    } finally {
+      otherLoopback.stop(true);
+    }
+  }, SLOW);
+});
+
 describe('zkAPI consult transport: verification refusals', () => {
   test('key reuse on refuses; so does a keyless daemon; nothing is sent', async () => {
     writePlan({ reuse: 60 });
@@ -356,28 +478,37 @@ describe('zkAPI consult transport: verification refusals', () => {
     expect(await portFree(torPort)).toBe(true);
   }, SLOW);
 
-  test('a daemon not routed through the Tor port refuses', async () => {
+  test('a daemon not routed through SOCKS refuses', async () => {
     writePlan({ relayPort: null });
     expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { code: 'relay_mismatch' } });
+  }, SLOW);
+
+  test('only reviewed daemon versions are accepted', async () => {
+    for (const version of ['0.1.4', '0.1.7']) {
+      writePlan({ version });
+      expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { code: 'daemon_version_unsupported' } });
+    }
+  }, SLOW);
+
+  test('a daemon or Tor port not held by the group Olympus started is refused', async () => {
+    const foreign = await sendZkapiConsult(QUESTION, transport({ inspectListener: () => ({ kind: 'found', pid: 1, pgid: 1 }) }));
+    expect(foreign).toMatchObject({ ok: false, error: { code: 'daemon_identity_failed', outcome: 'not_sent' } });
+    const { inspectLoopbackListener } = await import('../src/core/consult-transport-zkapi.ts');
+    const foreignTor = await sendZkapiConsult(QUESTION, transport({
+      inspectListener: (port) => (port === torPort ? { kind: 'found', pid: 1, pgid: 1 } : inspectLoopbackListener(port)),
+    }));
+    expect(foreignTor).toMatchObject({ ok: false, error: { code: 'daemon_identity_failed' } });
     expect(completions()).toEqual([]);
   }, SLOW);
 
-  test('an old daemon refuses', async () => {
-    writePlan({ version: '0.1.4' });
-    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { code: 'daemon_version_unsupported' } });
-  }, SLOW);
-
-  test('a listener that is not the process Olympus started is refused', async () => {
-    const result = await sendZkapiConsult(QUESTION, transport({ inspectListener: () => ({ kind: 'found', pid: 1 }) }));
-    expect(result).toMatchObject({ ok: false, error: { code: 'daemon_identity_failed', outcome: 'not_sent' } });
+  test('a Tor client that dies after bootstrap ends the session', async () => {
+    writePlan({ torDiesAfterMs: 150, startDelayMs: 600 });
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { code: 'session_process_exited', outcome: 'not_sent' } });
     expect(completions()).toEqual([]);
   }, SLOW);
 
   test('a wrong or missing local API key refuses', async () => {
-    expect(await sendZkapiConsult(QUESTION, transport({ apiKey: 'w'.repeat(40) }))).toMatchObject({
-      ok: false,
-      error: { code: 'daemon_api_key_rejected' },
-    });
+    expect(await sendZkapiConsult(QUESTION, transport({ apiKey: 'w'.repeat(40) }))).toMatchObject({ ok: false, error: { code: 'daemon_api_key_rejected' } });
     const { apiKey: _key, ...noKey } = transport();
     expect(await sendZkapiConsult(QUESTION, noKey)).toMatchObject({ ok: false, error: { code: 'daemon_api_key_missing' } });
   }, SLOW);
@@ -410,7 +541,7 @@ describe('zkAPI consult transport: verification refusals', () => {
     expect(await portFree(torPort)).toBe(true);
   }, SLOW);
 
-  test('the selected model is smoke-tested against the live list', async () => {
+  test('the selected model must be in the live list (membership, not a test request)', async () => {
     writePlan({ modelMissing: true });
     expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { code: 'model_unavailable' } });
     writePlan({ modelMissing: false, policyNeverLoads: true });
@@ -471,21 +602,72 @@ describe('zkAPI consult transport: responses', () => {
   test('a timeout is typed, outcome unknown, still counted, and still settles', async () => {
     writePlan({ completion: 'slow' });
     const result = await sendZkapiConsult(QUESTION, transport({ settings: settings({ timeoutMs: 300 }) }));
-    expect(result).toMatchObject({ ok: false, error: { code: 'timeout', outcome: 'unknown', receipt: { settlement: 'confirmed' } } });
+    expect(result).toMatchObject({ ok: false, error: { code: 'timeout', outcome: 'unknown', receipt: { settlement: 'confirmed', fence: 'clear' } } });
     expect(zkapiUsageToday(statePath, NOW).count).toBe(1);
   }, SLOW);
 
-  test('a caller abort is typed', async () => {
-    writePlan({ completion: 'slow' });
+  test('an abort while settling keeps settling and returns a typed cancellation', async () => {
+    writePlan({ settleDelayMs: 800 });
     const controller = new AbortController();
     const pending = sendZkapiConsult(QUESTION, transport(), { signal: controller.signal });
     while (completions().length === 0) await Bun.sleep(20);
+    await Bun.sleep(100);
     controller.abort();
-    expect(await pending).toMatchObject({ ok: false, error: { code: 'aborted', outcome: 'unknown' } });
+    expect(await pending).toMatchObject({
+      ok: false,
+      error: { code: 'aborted', outcome: 'unknown', receipt: { settlement: 'confirmed', fence: 'clear' } },
+    });
+  }, SLOW);
+
+  test('an exception inside the session becomes a typed error and everything still stops', async () => {
+    const result = await sendZkapiConsult(QUESTION, transport({
+      inspectListener: () => {
+        throw new Error('inspector exploded with /secret/path');
+      },
+    }));
+    expect(result).toMatchObject({ ok: false, error: { code: 'internal_error', outcome: 'not_sent' } });
+    expect(JSON.stringify(result)).not.toContain('secret');
+    expect(await portFree(daemonPort)).toBe(true);
+    expect(await portFree(torPort)).toBe(true);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).running).toBeUndefined();
   }, SLOW);
 });
 
-describe('zkAPI consult transport: single flight, no fallback, caps', () => {
+describe('zkAPI consult transport: fence and recovery', () => {
+  test('an unconfirmed settlement holds the fence and blocks the next consult until recovery', async () => {
+    writePlan({ noSettlement: true });
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({
+      ok: true,
+      routeLabel: `${NO_CONFINEMENT_LABEL}; lease settlement not confirmed`,
+      receipt: { settlement: 'not_confirmed', fence: 'held' },
+    });
+    expect(zkapiUnresolvedSession(statePath)).toBe(true);
+    writePlan({ noSettlement: false });
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { code: 'unresolved_session', outcome: 'not_sent' } });
+    expect(completions()).toHaveLength(1);
+    const recovered = await recoverZkapiSession(transport());
+    expect(recovered).toMatchObject({ ok: true, receipt: { recovery: true, settlement: 'confirmed', fence: 'clear' } });
+    expect(JSON.parse(completions()[1]!.body).messages).toEqual([{ role: 'user', content: 'Reply with the single word OK.' }]);
+    expect(zkapiUnresolvedSession(statePath)).toBe(false);
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true });
+    expect(await recoverZkapiSession(transport())).toMatchObject({ ok: false, error: { code: 'no_unresolved_session' } });
+  }, SLOW);
+
+  test('a missing key line is not proof that no lease exists', async () => {
+    writePlan({ noKeyLog: true });
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true, receipt: { settlement: 'not_confirmed', fence: 'held' } });
+    expect(zkapiUnresolvedSession(statePath)).toBe(true);
+  }, SLOW);
+
+  test('only a refusal made before any lease request clears the fence without a key', async () => {
+    writePlan({ completion: 'error' });
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { receipt: { settlement: 'no_lease', fence: 'clear' } } });
+    writePlan({ completion: 'garbage', noSettlement: true });
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { receipt: { fence: 'held' } } });
+  }, SLOW);
+});
+
+describe('zkAPI consult transport: exclusivity, processes, caps', () => {
   test('a second consult while one is in flight is refused as busy', async () => {
     writePlan({ completion: 'held' });
     const first = sendZkapiConsult(QUESTION, transport());
@@ -496,13 +678,80 @@ describe('zkAPI consult transport: single flight, no fallback, caps', () => {
     expect(completions()).toHaveLength(1);
   }, SLOW);
 
+  test('the session lease excludes another process holding it', async () => {
+    mkdirSync(root, { recursive: true });
+    await withFileLease(`${statePath}.session`, async () => {
+      expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { code: 'busy' } });
+    });
+    expect(events()).toEqual([]);
+  }, SLOW);
+
+  test('a stranded group is stopped only once its supervisor is proven dead, and a live supervisor is never preempted', async () => {
+    const supervisor = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { stdio: 'ignore' });
+    const strandedGroup = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { stdio: 'ignore', detached: true });
+    try {
+      const record = (supervisorPid: number) => ({
+        version: 1,
+        day: '2026-10-05',
+        count: 0,
+        reservedMicroUsd: 0,
+        running: {
+          sessionId: 'earlier',
+          supervisor: { pid: supervisorPid, instance: processInstanceIdentity(supervisorPid) },
+          groups: [{ role: 'daemon', pgid: strandedGroup.pid!, leader: processInstanceIdentity(strandedGroup.pid!) }],
+        },
+      });
+      writeFileSync(statePath, JSON.stringify(record(supervisor.pid!)));
+      expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { code: 'busy' } });
+      expect(alive(strandedGroup.pid!)).toBe(true);
+      supervisor.kill('SIGKILL');
+      while (alive(supervisor.pid!)) await Bun.sleep(20);
+      expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true });
+      expect(alive(strandedGroup.pid!)).toBe(false);
+    } finally {
+      supervisor.kill('SIGKILL');
+      strandedGroup.kill('SIGKILL');
+    }
+  }, SLOW);
+
+  test('a recorded leader from another boot is never signalled', async () => {
+    const live = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { stdio: 'ignore', detached: true });
+    try {
+      const identity = processInstanceIdentity(live.pid!);
+      if (!identity?.bootId) return; // this platform reports no boot identity
+      writeFileSync(statePath, JSON.stringify({
+        version: 1,
+        day: '2026-10-05',
+        count: 0,
+        reservedMicroUsd: 0,
+        running: {
+          sessionId: 'earlier',
+          supervisor: { pid: 999_999 },
+          groups: [{ role: 'daemon', pgid: live.pid!, leader: { ...identity, bootId: 'another-boot' } }],
+        },
+      }));
+      expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true });
+      expect(alive(live.pid!)).toBe(true);
+    } finally {
+      live.kill('SIGKILL');
+    }
+  }, SLOW);
+
+  test('a daemon that crashes leaves no descendant behind', async () => {
+    writePlan({ companion: true, crashAfterCompletion: true, settleDelayMs: 2_000 });
+    await sendZkapiConsult(QUESTION, transport({ settings: settings({ settleTimeoutMs: 1_000 }) }));
+    const companion = Number(events().find((line) => line.startsWith('companion '))!.split(' ')[1]);
+    expect(alive(companion)).toBe(false);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).running).toBeUndefined();
+  }, SLOW);
+
   test('a failed consult is never resent, and nothing but the daemon is contacted', async () => {
     const urls: string[] = [];
     const recordingFetch = (async (input: string | URL | Request, init?: RequestInit) => {
       urls.push(String(input));
       return fetch(input, init);
     }) as typeof fetch;
-    writePlan({ completion: 'error' });
+    writePlan({ completion: 'garbage' });
     await sendZkapiConsult(QUESTION, transport({ fetchImpl: recordingFetch }));
     expect(urls.length).toBeGreaterThan(0);
     expect(urls.every((url) => url.startsWith(`http://127.0.0.1:${daemonPort}/`))).toBe(true);
@@ -510,10 +759,10 @@ describe('zkAPI consult transport: single flight, no fallback, caps', () => {
     expect(completions()).toHaveLength(1);
   }, SLOW);
 
-  test('request and worst-case spend caps are reserved before send and survive a restart', async () => {
-    writePlan({ allowance: 6_000_000 });
+  test('every request reserves the $6 worst case, whatever the listed allowance, and the caps survive a restart', async () => {
+    writePlan({ allowance: 1_000_000 });
     const capped = settings({ dailyRequestCap: 5, dailySpendCapUsd: 13 });
-    expect(await sendZkapiConsult(QUESTION, transport({ settings: capped }))).toMatchObject({ ok: true, receipt: { allowanceUsd: 6 } });
+    expect(await sendZkapiConsult(QUESTION, transport({ settings: capped }))).toMatchObject({ ok: true, receipt: { listedAllowanceUsd: 1, reservedUsd: 6 } });
     // A fresh options object over the same ledger stands in for a restart.
     expect(await sendZkapiConsult(QUESTION, { ...transport({ settings: capped }) })).toMatchObject({ ok: true });
     expect(await sendZkapiConsult(QUESTION, transport({ settings: capped }))).toMatchObject({
@@ -527,10 +776,48 @@ describe('zkAPI consult transport: single flight, no fallback, caps', () => {
       error: { code: 'daily_cap_reached' },
     });
     // A new UTC day starts a new ledger.
-    expect(reserveZkapiRequest(statePath, { requestCap: 2, spendCapMicroUsd: 13_000_000, allowanceMicroUsd: 6_000_000 }, new Date('2026-10-06T00:00:01.000Z')))
+    expect(reserveZkapiRequest(statePath, { requestCap: 2, spendCapMicroUsd: 13_000_000 }, new Date('2026-10-06T00:00:01.000Z')))
       .toEqual({ reserved: true });
   }, SLOW);
 });
+
+// ---------------------------------------------------------------------------
+// Evidence adapters refuse the daemon at dispatch
+
+describe('evidence adapters refuse a zkAPI daemon endpoint where they dispatch', () => {
+  test('an Argus lane chosen at runtime on the daemon port never dispatches', async () => {
+    const config = defaultConfig();
+    config.argus.lanes.deep.baseUrl = 'http://127.0.0.1:8787/v1';
+    let dispatched = false;
+    const transportDouble: DelphiTransport = {
+      requestJson: async () => {
+        dispatched = true;
+        return {};
+      },
+    };
+    const client = new DelphiClient(config, transportDouble);
+    await expect(client.complete({ lane: 'deep', prompt: 'evidence' })).rejects.toMatchObject({ code: 'config_error' });
+    expect(dispatched).toBe(false);
+  });
+
+  test('a configured non-default daemon port is refused for embeddings and vision too', async () => {
+    const port = freePort();
+    const config = baseConfig();
+    config.modelProfiles.zk = zkapiProfile({ baseUrl: `http://127.0.0.1:${port}/v1` });
+    createSovereigntyEngine(config as SovereigntyConfig);
+    let fetched = false;
+    const fetchDouble = (async () => {
+      fetched = true;
+      return new Response('{}');
+    }) as unknown as typeof fetch;
+    const embeddings = new OpenAICompatibleSourceEmbeddingProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: 'm', dimension: 4, fetchImpl: fetchDouble });
+    await expect(embeddings.embed([{ text: 'evidence' }], { taskType: 'RETRIEVAL_DOCUMENT' })).rejects.toThrow(/zkAPI daemon/);
+    expect(() => requireLocalHttpBaseUrl(`http://127.0.0.1:${port}/v1`, 'vision url')).toThrow(/zkAPI daemon port/);
+    expect(() => new OpenAICompatibleVlmClient({ baseUrl: `http://127.0.0.1:${port}/v1`, model: 'm', fetchImpl: fetchDouble })).toThrow(/zkAPI daemon port/);
+    expect(fetched).toBe(false);
+  });
+});
+
 
 // ---------------------------------------------------------------------------
 // Sovereignty: a zkapi profile is consult-only
@@ -679,6 +966,8 @@ describe('sovereignty: zkapi provider', () => {
 });
 
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Doctor
 
 function doctorDeps(profile: Record<string, unknown> = {}, env: Record<string, string> = {}): DoctorDeps {
@@ -693,6 +982,7 @@ function doctorDeps(profile: Record<string, unknown> = {}, env: Record<string, s
       torSocksPort: torPort,
       daemonExecutable: join(binDir, 'zkapi-clientd'),
       torExecutable: join(binDir, 'tor'),
+      dailySpendCapUsd: 20,
       ...(profile.zkapi as object | undefined),
     },
   };
@@ -739,12 +1029,14 @@ describe('doctor: zkapi_consult_transport', () => {
     for (const part of [
       'no consult is sent until the consult lane lands',
       'zkapi-clientd 0.1.6',
-      'tor found (a fresh instance per consult)',
+      'tor found (a fresh client per consult)',
+      'confinement on this platform: ',
       'daemon port free, Tor port free',
       'local API key configured',
       'acknowledgements complete (6/6)',
       'estimated expiry 2026-10-30 from the confirmed funding date (25 days left, notice none)',
-      'requests today 0/10, worst-case spend reserved $0.00/$20.00',
+      'requests today 0/10, worst-case spend reserved $0.00/$20.00 ($6.00 per request)',
+      'no unresolved session',
       'balance, fee quotes and on-chain expiry not available from the daemon',
       'no consult run yet',
       'route: not yet verified',
@@ -755,12 +1047,12 @@ describe('doctor: zkapi_consult_transport', () => {
 
     expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true });
     const after = await zkapiCheck(doctorDeps());
-    expect(after.detail).toContain('requests today 1/10, worst-case spend reserved $2.00/$20.00');
-    expect(after.detail).toContain('(ok): key reuse verified_off, local auth verified, Tor per_consult_verified, settlement confirmed');
-    expect(after.detail).toContain('route: anonymous route');
+    expect(after.detail).toContain('requests today 1/10, worst-case spend reserved $6.00/$20.00');
+    expect(after.detail).toContain('(ok): key reuse verified_off, local auth verified, Tor per_consult, confinement none (self-test not_run), settlement confirmed');
+    expect(after.detail).toContain(`route: ${NO_CONFINEMENT_LABEL}`);
   }, SLOW);
 
-  test('names what blocks', async () => {
+  test('names what blocks, including an exhausted spend cap and an unresolved session', async () => {
     const torOff = await zkapiCheck(doctorDeps({ zkapi: { tor: 'off', fundingDate: '2026-09-07' } }));
     expect(torOff.detail).toContain('Tor off');
     expect(torOff.detail).toContain('route: payment privacy only (network address visible)');
@@ -775,6 +1067,15 @@ describe('doctor: zkapi_consult_transport', () => {
     expect(blocked.detail).toContain('estimated expiry PASSED on 2026-10-01; an unwithdrawn note becomes claimable by the operator');
     expect(blocked.detail).toContain('local API key NOT configured');
     expect(blocked.detail).toContain('not ready: acknowledgements_incomplete, note_expired, daemon_api_key_missing, tor_not_found');
+
+    reserveZkapiRequest(statePath, { requestCap: 10, spendCapMicroUsd: 20_000_000 }, NOW);
+    reserveZkapiRequest(statePath, { requestCap: 10, spendCapMicroUsd: 20_000_000 }, NOW);
+    reserveZkapiRequest(statePath, { requestCap: 10, spendCapMicroUsd: 20_000_000 }, NOW);
+    const exhausted = await zkapiCheck(doctorDeps());
+    expect(exhausted.ok).toBe(false);
+    expect(exhausted.detail).toContain('requests today 3/10, worst-case spend reserved $18.00/$20.00');
+    expect(exhausted.detail).toContain('UNRESOLVED SESSION: run a recovery-only session');
+    expect(exhausted.detail).toContain('not ready: unresolved_session, spend_cap_reached');
 
     const squatter = Bun.serve({ hostname: '127.0.0.1', port: daemonPort, fetch: () => new Response('x') });
     try {

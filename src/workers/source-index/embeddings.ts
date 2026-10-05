@@ -7,6 +7,7 @@ import { isIP } from 'node:net';
 import { OperationError } from '../../core/operation-error.ts';
 import { assertLocalModelIdNotCloudForwarding } from '../../core/local-model-policy.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from '../../core/model-transport.ts';
+import { assertNotZkapiDaemonEndpoint } from '../../core/zkapi-consult-settings.ts';
 import { resolveEmbeddingEpoch } from './embedding-identity.ts';
 
 export type SourceEmbeddingBackend = 'cloud' | 'local';
@@ -532,6 +533,7 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
+      assertNotZkapiDaemonEndpoint(this.baseUrl, 'Source embedding endpoint');
       await this.preflight?.(controller.signal);
       const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
         method: 'POST',

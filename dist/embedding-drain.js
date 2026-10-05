@@ -3576,6 +3576,16 @@ function assertZkapiDaemonBaseUrl(id, baseUrl) {
     throw new OperationError("config_error", `Sovereignty zkapi profile "${id}" baseUrl must be the daemon's loopback API, such as ${ZKAPI_DAEMON_DEFAULT_BASE_URL}.`, "zkapi-clientd serves only on a numeric loopback address; Olympus never reaches it over a network.");
   }
 }
+function registerZkapiDaemonPorts(ports) {
+  for (const port of ports)
+    zkapiDaemonPorts.add(port);
+}
+function assertNotZkapiDaemonEndpoint(url, label) {
+  const port = loopbackPort(url);
+  if (port === undefined || !zkapiDaemonPorts.has(port))
+    return;
+  throw new OperationError("config_error", `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`, "Point this model lane at a local model server on another port.");
+}
 function loopbackPort(baseUrl) {
   if (!baseUrl)
     return;
@@ -3618,7 +3628,7 @@ function parseAcknowledgements(value, label) {
   }
   return { version: record.version, accepted: [...new Set(record.accepted)] };
 }
-var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, DEFAULTS, INTEGER_BOUNDS, SETTINGS_KEYS;
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, DEFAULTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts;
 var init_zkapi_consult_settings = __esm(() => {
   init_operation_error();
   ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
@@ -3654,6 +3664,7 @@ var init_zkapi_consult_settings = __esm(() => {
     "daemonExecutable",
     "torExecutable"
   ]);
+  zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
 });
 
 // src/core/sovereignty.ts
@@ -3733,7 +3744,8 @@ function createSovereigntyEngine(rawConfig, metadata = { source: "inline_config"
 }
 function validateSovereigntyConfig(rawConfig) {
   const config = parseSovereigntyConfig(rawConfig, "sovereignty config");
-  const daemonPorts = zkapiDaemonPorts(config);
+  const daemonPorts = zkapiDaemonPorts2(config);
+  registerZkapiDaemonPorts(daemonPorts);
   for (const [id, profile] of Object.entries(config.modelProfiles)) {
     validateProfile(id, profile, daemonPorts);
   }
@@ -4121,7 +4133,7 @@ function validateZkapiProfile(id, profile) {
   }
   assertZkapiDaemonBaseUrl(id, profile.baseUrl);
 }
-function zkapiDaemonPorts(config) {
+function zkapiDaemonPorts2(config) {
   const ports = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
   for (const profile of Object.values(config.modelProfiles)) {
     if (profile.provider !== "zkapi")
@@ -7193,6 +7205,7 @@ class OpenAICompatibleSourceEmbeddingProvider {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
+      assertNotZkapiDaemonEndpoint(this.baseUrl, "Source embedding endpoint");
       await this.preflight?.(controller.signal);
       const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
         method: "POST",
@@ -7606,6 +7619,7 @@ var init_embeddings = __esm(() => {
   init_operation_error();
   init_local_model_policy();
   init_model_transport();
+  init_zkapi_consult_settings();
   init_embedding_identity();
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   MEDIA_FETCH_HEADERS = {
@@ -21814,6 +21828,7 @@ var init_delphi = __esm(() => {
   init_operation_error();
   init_local_model_policy();
   init_model_transport();
+  init_zkapi_consult_settings();
   init_secret_store();
 });
 

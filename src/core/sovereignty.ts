@@ -16,6 +16,7 @@ import {
   assertZkapiDaemonBaseUrl,
   loopbackPort,
   parseZkapiConsultSettings,
+  registerZkapiDaemonPorts,
   ZKAPI_DAEMON_DEFAULT_PORT,
   type ZkapiConsultSettings,
 } from './zkapi-consult-settings.ts';
@@ -294,6 +295,7 @@ export function createSovereigntyEngine(
 export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): SovereigntyConfig {
   const config = parseSovereigntyConfig(rawConfig, 'sovereignty config');
   const daemonPorts = zkapiDaemonPorts(config);
+  registerZkapiDaemonPorts(daemonPorts);
   for (const [id, profile] of Object.entries(config.modelProfiles)) {
     validateProfile(id, profile, daemonPorts);
   }
