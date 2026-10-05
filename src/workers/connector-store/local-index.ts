@@ -124,6 +124,7 @@ import type {
 import {
   buildSourceIndexStorageProfile,
   buildSourceSensitivity,
+  isSecureSensitivity,
   isSecureTrustTier,
   SOURCE_TRUST_TIERS,
   type RetrievalLaneAudit,
@@ -1167,6 +1168,20 @@ export interface ConnectorStoreEmbedSummary {
    * embedding task or drain to finish later. A counts-only marker.
    */
   deferredReason?: string;
+  /**
+   * Chunks in the selection that were owed a vector but that this embedder
+   * was not given because their row is Private by its own tier (or carries an
+   * unknown tier) and the embedder is not approved for Private content. They
+   * stay unembedded (lexical search is unaffected). A row Private when the
+   * run started is not in chunksSeen; one that turned Private while an
+   * earlier batch was out is in chunksSeen and chunksSkipped. A chunk that
+   * already holds a current vector is never counted. Present only when
+   * non-zero. Counts only.
+   */
+  privateTierWithheld?: {
+    chunks: number;
+    reason: typeof CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
+  };
   policy: {
     rawSourceExposed: false;
     sourceTextReturned: false;
@@ -1274,7 +1289,7 @@ export async function embedPendingChunks(
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     if (target.wholeStore === true && queued < options.maxItems) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = store.missingEmbeddingItemIds(target.provider.modelId, options.maxItems - queued)
+      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued)
         .filter((localItemId) => !queuedIds.has(localItemId));
       if (missing.length > 0) groups.push({ provider: target.provider, localItemIds: missing });
     }
@@ -3390,6 +3405,13 @@ export class LocalConnectorStore {
    * source-neutral metadata capability: it never reads chunks or source text,
    * and it states its population precisely instead of claiming provider-wide
    * completeness the local store cannot prove.
+   *
+   * The population is the rows this store may serve at its own scope. In a
+   * store that is not itself Private (the only kind source_index_status
+   * aggregates), a row that is Private by its own tier (isSecureSensitivity,
+   * an unknown tier included) never contributes a sender, a label, a count or
+   * a date. In any store, neither does a copy the tier ledger keeps out of
+   * view (superseded, staged, or held for classification).
    */
   senderAggregation(options: ConnectorStoreSenderAggregationOptions): ConnectorStoreSenderAggregation {
     if (this.family !== 'chat') {
@@ -3403,8 +3425,20 @@ export class LocalConnectorStore {
     if (!Number.isInteger(maxSenders) || maxSenders < 1 || maxSenders > 100) {
       throw new Error('Connector store sender aggregation maxSenders must be an integer from 1 to 100.');
     }
-    const providerClause = provider ? 'AND i.provider = ?' : '';
-    const scopeParams = [accountScope, conversationId, ...(provider ? [provider] : [])];
+    const scopeTiers = isSecureSensitivity({ trustDomain: this.trustDomain })
+      ? SOURCE_TRUST_TIERS
+      : SOURCE_TRUST_TIERS.filter((trustTier) => !isSecureSensitivity({ trustDomain: this.trustDomain, trustTier }));
+    const tierHidden = this.tierHiddenItemPks();
+    const providerClause = `${provider ? 'AND i.provider = ?' : ''}
+          AND i.trust_tier IN (SELECT value FROM json_each(?))
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))`;
+    const scopeParams = [
+      accountScope,
+      conversationId,
+      ...(provider ? [provider] : []),
+      JSON.stringify(scopeTiers),
+      JSON.stringify([...tierHidden.hidden, ...tierHidden.held]),
+    ];
     const summary = this.db.query(`
       SELECT
         COUNT(*) AS indexed_items,
@@ -7146,11 +7180,21 @@ export class LocalConnectorStore {
    * oldest chunk first, at most `limit`, never one marked failed. The same
    * exclusions every embedder keeps: deleted, tier-hidden, held for
    * classification, and metadata-only copies. Secrets are never stored as text.
+   * Rows Private by their own tier are left out when the embedder is not
+   * approved for Private content: they are withheld, not pending, so the sweep
+   * never picks them up again and they never hold the rest of the backlog.
    */
-  missingEmbeddingItemIds(modelId: string, limit: number): string[] {
+  missingEmbeddingItemIds(
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+    limit: number,
+  ): string[] {
     if (limit <= 0) return [];
+    const modelId = embedder.modelId;
     const failed = this.embeddingFailureState;
-    const { filter, params } = this.embeddingTierExclusionFilter();
+    const tierExclusion = this.embeddingTierExclusionFilter();
+    const privateTier = this.privateTierEmbeddingFilter(embedder);
+    const filter = `${tierExclusion.filter} ${privateTier.filter}`;
+    const params = [...tierExclusion.params, ...privateTier.params];
     const rows = this.db.query(`
       SELECT i.local_item_id AS local_item_id
       FROM chunks c
@@ -7172,10 +7216,19 @@ export class LocalConnectorStore {
   /**
    * The chunks still waiting for a vector on `modelId`, and a token estimate of
    * embedding them (characters / 4, the estimate every planner here uses).
-   * Same exclusions as missingEmbeddingItemIds.
+   * Same exclusions as missingEmbeddingItemIds; with the embedder named, rows
+   * it may not receive (Private by their own tier) are not a backlog it owes.
    */
-  embeddingBacklogEstimate(modelId: string): { missingChunks: number; estimatedTokens: number } {
-    const { filter, params } = this.embeddingTierExclusionFilter();
+  embeddingBacklogEstimate(
+    modelId: string,
+    embedder?: Pick<SourceEmbeddingProvider, 'provider' | 'backend'>,
+    scope?: ConnectorStoreStatusScope,
+  ): { missingChunks: number; estimatedTokens: number } {
+    const tierExclusion = this.embeddingTierExclusionFilter();
+    const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: '', params: [] };
+    const scoped = statusScopeContentFilter(scope);
+    const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
+    const params = [...tierExclusion.params, ...privateTier.params, ...scoped.params];
     const row = this.db.query(`
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
@@ -7218,6 +7271,89 @@ export class LocalConnectorStore {
     return excludedPks.length > 0
       ? { filter: 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))', params: [JSON.stringify(excludedPks)] }
       : { filter: '', params: [] };
+  }
+
+  /**
+   * The rows of an embedding batch this embedder may still receive, judged
+   * from the store as it is now: a row whose item is now Private by its own
+   * tier (or carries an unknown tier) is counted `privateTier`; one now
+   * deleted or kept out of view by the tier ledger is counted `notVisible`.
+   * Synchronous, so the caller can dispatch with no await in between.
+   */
+  private embeddingBatchRecheck<T extends { item_pk: number }>(
+    batch: readonly T[],
+    embeddableTiers: readonly SourceTrustTier[],
+  ): { kept: T[]; privateTier: number; notVisible: number } {
+    const itemPks = [...new Set(batch.map((row) => row.item_pk))];
+    const current = new Map((this.db.query(`
+      SELECT item_pk, trust_tier, tombstoned FROM items
+      WHERE item_pk IN (SELECT value FROM json_each(?))
+    `).all(JSON.stringify(itemPks)) as Array<{ item_pk: number; trust_tier: string; tombstoned: number }>)
+      .map((row) => [row.item_pk, row] as const));
+    const tierHidden = this.tierHiddenItemPks();
+    const hidden = new Set([...tierHidden.hidden, ...tierHidden.held, ...tierHidden.metadataLayer]);
+    const kept: T[] = [];
+    let privateTier = 0;
+    let notVisible = 0;
+    for (const row of batch) {
+      const item = current.get(row.item_pk);
+      if (!item || item.tombstoned !== 0 || hidden.has(row.item_pk)) {
+        notVisible += 1;
+      } else if (!(embeddableTiers as readonly string[]).includes(item.trust_tier)) {
+        privateTier += 1;
+      } else {
+        kept.push(row);
+      }
+    }
+    return { kept, privateTier, notVisible };
+  }
+
+  /**
+   * SQL that keeps only rows this embedder may receive: every row when it is
+   * approved for Private content, otherwise only rows whose own stored tier is
+   * not Private (connectorStoreEmbeddableRowTiers). Expects items aliased `i`.
+   */
+  private privateTierEmbeddingFilter(
+    embedder: Pick<SourceEmbeddingProvider, 'provider' | 'backend'>,
+  ): { filter: string; params: string[] } {
+    const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
+    return tiers === undefined
+      ? { filter: '', params: [] }
+      : { filter: 'AND i.trust_tier IN (SELECT value FROM json_each(?))', params: [JSON.stringify(tiers)] };
+  }
+
+  /**
+   * Chunks still without a current vector on this embedder's model that it
+   * may not receive because their row is Private by its own tier, and how many
+   * items they belong to. Zero for an embedder approved for Private content.
+   * Same live, tier-visible population as missingEmbeddingItemIds. Counts only.
+   */
+  privateTierEmbeddingWithheld(
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+    scope?: ConnectorStoreStatusScope,
+  ): {
+    items: number;
+    chunks: number;
+    reason: typeof CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
+  } {
+    const reason = CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
+    const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
+    if (tiers === undefined) return { items: 0, chunks: 0, reason };
+    const tierExclusion = this.embeddingTierExclusionFilter();
+    const scoped = statusScopeContentFilter(scope);
+    const filter = `${tierExclusion.filter} ${scoped.filter}`;
+    const params = [...tierExclusion.params, ...scoped.params];
+    const row = this.db.query(`
+      SELECT COUNT(*) AS chunks, COUNT(DISTINCT c.item_pk) AS items
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        AND i.trust_tier NOT IN (SELECT value FROM json_each(?))
+        ${filter}
+    `).get(embedder.modelId, JSON.stringify(tiers), ...params) as { chunks: number; items: number };
+    return { items: row.items, chunks: row.chunks, reason };
   }
 
   /** Why embedding on this store is currently deferred, when it is. */
@@ -7316,11 +7452,35 @@ export class LocalConnectorStore {
     )) {
       throw new Error('Connector store embedding journal provider changed.');
     }
-    const rows = this.embeddingSourceRows(
+    const selectedRows = this.embeddingSourceRows(
       options.localItemIds,
       options.accountScope,
       options.filters,
     );
+    // A row that is Private by its own stored tier (or carries a tier the
+    // store does not recognise) never reaches an embedder that is not approved
+    // for Private content, whatever the store's domain. It stays unembedded,
+    // counted under a content-free reason; it is not an error, so it is not
+    // retried, and its lexical search is unaffected.
+    const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
+    const rows = embeddableTiers === undefined
+      ? selectedRows
+      : selectedRows.filter((row) => (embeddableTiers as readonly string[]).includes(row.trust_tier));
+    // Counted only when the chunk is otherwise owed a vector: one that already
+    // holds a current vector is not withheld work (privateTierEmbeddingWithheld
+    // counts the same population).
+    let privateTierWithheldChunks = 0;
+    if (rows.length !== selectedRows.length) {
+      const kept = new Set(rows);
+      const currentVector = this.db.query(
+        'SELECT content_hash FROM chunk_embeddings WHERE chunk_pk = ? AND model_id = ?',
+      );
+      for (const row of selectedRows) {
+        if (kept.has(row)) continue;
+        const existing = currentVector.get(row.chunk_pk, provider.modelId) as { content_hash: string } | null;
+        if (existing?.content_hash !== row.content_hash) privateTierWithheldChunks += 1;
+      }
+    }
     const selectionSha256 = connectorStoreEmbeddingSelectionSha256(options.localItemIds);
     const inputSha256 = connectorStoreEmbeddingInputSha256(rows);
     if (priorCounts && (
@@ -7460,8 +7620,21 @@ export class LocalConnectorStore {
     // skipped rather than silently dropped out of the counts.
     let staleSkipped = 0;
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-      const batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+      let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       await options.assertAuthorized?.();
+      // The rows were selected before any provider round trip, and ordinary
+      // item and classification writes are not serialized by the embedding
+      // lease, so a row can turn Private (or be hidden) while an earlier batch
+      // is out. Re-read each row's current tier and visibility right before
+      // its batch is dispatched, with no await in between.
+      if (embeddableTiers !== undefined) {
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers);
+        privateTierWithheldChunks += recheck.privateTier;
+        // Seen and not embedded: skipped, and the Private ones also withheld.
+        staleSkipped += recheck.notVisible + recheck.privateTier;
+        batch = recheck.kept;
+        if (batch.length === 0) continue;
+      }
       const vectors = await provider.embed(batch.map((row) => ({
         ...(row.title ? { title: row.title } : {}),
         text: buildConnectorStoreEmbeddingText(row),
@@ -7597,7 +7770,7 @@ export class LocalConnectorStore {
       skipped = rows.length - embedded;
     }
     this.clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch);
-    return connectorStoreEmbedSummary(
+    const summary = connectorStoreEmbedSummary(
       this.corpusId,
       this.trustDomain,
       provider,
@@ -7605,6 +7778,15 @@ export class LocalConnectorStore {
       embedded,
       skipped,
     );
+    return privateTierWithheldChunks > 0
+      ? {
+          ...summary,
+          privateTierWithheld: {
+            chunks: privateTierWithheldChunks,
+            reason: CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON,
+          },
+        }
+      : summary;
   }
 
 
@@ -7867,7 +8049,7 @@ export class LocalConnectorStore {
       ) as { cursor: string | null; audit_receipt_sha256: string | null } | null;
       if (!existing) return;
       if (!parseConnectorStoreEmbeddingWriteAuthority(existing.cursor).currencyRebuildPending) return;
-      if (this.embeddingModelCurrencyIncomplete(provider.modelId)) return;
+      if (this.embeddingModelCurrencyIncomplete(provider)) return;
       this.assertEmbeddingWriteAuthority(provider, providerEpoch);
       const cursor = connectorStoreEmbeddingWriteAuthority(provider, providerEpoch);
       const cleared = this.db.query(`
@@ -7895,7 +8077,12 @@ export class LocalConnectorStore {
    * so "complete" here means exactly what "servable" means there. One indexed
    * existence query, stopped at the first outstanding chunk.
    */
-  private embeddingModelCurrencyIncomplete(modelId: string): boolean {
+  private embeddingModelCurrencyIncomplete(
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+  ): boolean {
+    // A row withheld from this embedder by its own Private tier is never
+    // going to get a vector from it, so it is not currency debt it owes.
+    const privateTier = this.privateTierEmbeddingFilter(embedder);
     const row = this.db.query(`
       SELECT 1 AS pending
       FROM chunks c
@@ -7904,8 +8091,9 @@ export class LocalConnectorStore {
         ON emb.chunk_pk = c.chunk_pk AND emb.model_id = ?
       WHERE i.tombstoned = 0
         AND (emb.chunk_pk IS NULL OR emb.content_hash <> c.embedding_input_hash)
+        ${privateTier.filter}
       LIMIT 1
-    `).get(modelId) as { pending: number } | null;
+    `).get(embedder.modelId, ...privateTier.params) as { pending: number } | null;
     return row !== null;
   }
 
@@ -8282,6 +8470,7 @@ export class LocalConnectorStore {
     mime_type: string | null;
     authored_at: string | null;
     updated_at: string | null;
+    trust_tier: string;
   }> {
     const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
     if (selectedLocalItemIds && selectedLocalItemIds.length === 0) return [];
@@ -8309,7 +8498,8 @@ export class LocalConnectorStore {
         i.search_text,
         i.mime_type,
         i.authored_at,
-        i.updated_at
+        i.updated_at,
+        i.trust_tier
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       WHERE i.tombstoned = 0
@@ -8333,6 +8523,7 @@ export class LocalConnectorStore {
       mime_type: string | null;
       authored_at: string | null;
       updated_at: string | null;
+      trust_tier: string;
     }>;
   }
 
@@ -9183,6 +9374,7 @@ export async function syncAndEmbedFromConnector(
         chunksSeen: embed.chunksSeen + batch.chunksSeen,
         chunksEmbedded: embed.chunksEmbedded + batch.chunksEmbedded,
         chunksSkipped: embed.chunksSkipped + batch.chunksSkipped,
+        ...mergedPrivateTierWithheld(embed, batch),
       }
       : batch;
   }
@@ -10701,6 +10893,33 @@ function connectorStoreEmbeddingInputSha256(
   return digest.digest('hex');
 }
 
+/**
+ * The content population a status scope counts parity over (status():
+ * contentAllowed, account, content filters), for counts that must agree with
+ * that parity. The tier-ledger exclusions are applied by the caller.
+ */
+function statusScopeContentFilter(scope: ConnectorStoreStatusScope | undefined): { filter: string; params: string[] } {
+  if (!scope) return { filter: '', params: [] };
+  const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+  const contentFilters = connectorStoreFilterSql(scope.contentFilters);
+  return {
+    filter: `${scope.contentAllowed === false ? 'AND 0' : ''}
+      ${accountScope ? 'AND i.account_scope = ?' : ''}
+      ${contentFilters.sql}`,
+    params: [...(accountScope ? [accountScope] : []), ...contentFilters.params],
+  };
+}
+
+function mergedPrivateTierWithheld(
+  a: ConnectorStoreEmbedSummary,
+  b: ConnectorStoreEmbedSummary,
+): Pick<ConnectorStoreEmbedSummary, 'privateTierWithheld'> {
+  const chunks = (a.privateTierWithheld?.chunks ?? 0) + (b.privateTierWithheld?.chunks ?? 0);
+  return chunks > 0
+    ? { privateTierWithheld: { chunks, reason: CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON } }
+    : {};
+}
+
 function connectorStoreEmbedSummary(
   corpusId: string,
   trustDomain: SourceTrustDomain,
@@ -11096,6 +11315,34 @@ function assertConnectorStoreEmbeddingBackend(
       'Connector store secure_local embeddings must use a local/private provider or the approved Venice embedding lane.',
     );
   }
+}
+
+/**
+ * The content-free reason a row stays unembedded because its own tier is
+ * Private and the embedder is not approved for Private content.
+ */
+export const CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON =
+  'private_tier_requires_private_embedder' as const;
+
+/**
+ * The row half of the trust rule. The store-level assertion above decides by
+ * the store's domain alone, so a row that is Private by its OWN tier (an S4
+ * row a lane's placement or a corpus default put in a Personal store) would
+ * otherwise reach any embedder the store accepts. This is the same approval
+ * the store level uses for a secure_local store
+ * (isApprovedSecureSourceEmbeddingProvider), applied per row with the one
+ * definition of Private (isSecureSensitivity).
+ *
+ * Returns the stored tiers such an embedder may receive, or undefined when the
+ * embedder is approved for Private content and no row is withheld. A tier the
+ * store does not recognise is never in the list (unknown counts as Private).
+ */
+function connectorStoreEmbeddableRowTiers(
+  trustDomain: SourceTrustDomain,
+  provider: Pick<SourceEmbeddingProvider, 'provider' | 'backend'>,
+): readonly SourceTrustTier[] | undefined {
+  if (isApprovedSecureSourceEmbeddingProvider(provider)) return undefined;
+  return SOURCE_TRUST_TIERS.filter((trustTier) => !isSecureSensitivity({ trustDomain, trustTier }));
 }
 
 

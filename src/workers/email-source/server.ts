@@ -444,6 +444,7 @@ export function registerConnectorStoreEmbeddingLane(options: {
       modelId: options.provider.modelId,
       embeddingEpoch: options.provider.epochId,
       backend: options.provider.backend,
+      provider: options.provider.provider,
     };
   };
 }

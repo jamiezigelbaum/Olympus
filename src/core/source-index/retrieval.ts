@@ -54,6 +54,8 @@ export interface SourceIndexHybridAvailability {
   modelId?: string;
   embeddingEpoch?: string;
   backend?: string;
+  // Provider name of the serving embedder; with backend it decides Private-content approval.
+  provider?: string;
 }
 
 export function assessSourceIndexRetrievalState(input: {

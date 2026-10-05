@@ -2,7 +2,7 @@ import { CONSENT_PAGE_STYLE } from '../remote-oauth/consent-page.ts';
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import { runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import type { SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
-import type { SourceTrustDomain } from '../../core/source-index/types.ts';
+import { isSecureSensitivity, type SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { SecretLocationNote } from '../../core/evidence-pack.ts';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { FileLeaseBusyError } from '../../core/file-lease.ts';
@@ -2896,6 +2896,26 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const visible = new Set(options.sourceIndexVisibilityGate
               ? options.sourceIndexVisibilityGate(tagged)
               : tagged);
+            // A hit is Private by the one definition (isSecureSensitivity):
+            // its store's domain or its row's own tier. A hit with no tier is
+            // judged Private (every connector-store hit carries one).
+            const hitIsPrivate = (hit: (typeof tagged)[number]): boolean => hit.trustTier === undefined
+              || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier });
+            // A search that read no secure_local store did not ask for Private
+            // results, so a Personal store's row that is Private by its own
+            // tier (an S4 row a lane placed there) is withheld from it, as
+            // olympus_search withholds it: counted, never listed. A search
+            // that did read a secure_local store already returns Private
+            // titles under local_only, and returns this one the same way.
+            const searchedSecureLocal = runs.some((run) => run.store.trustDomain === 'secure_local');
+            let privateTierWithheld = 0;
+            if (!searchedSecureLocal) {
+              for (const hit of [...visible]) {
+                if (!hitIsPrivate(hit)) continue;
+                visible.delete(hit);
+                privateTierWithheld += 1;
+              }
+            }
             // Round-robin across tiers, so a full page from one tier cannot
             // starve another, then the request's own bound.
             const perRun = runs.map((run) => tagged.filter((hit) => hit.corpusId === run.store.corpusId && visible.has(hit)));
@@ -2947,13 +2967,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 raw_source_exposed: false,
                 source_text_returned: false,
                 ...(searchRequest.locatorsRequested ? { locators_requested: true } : {}),
+                ...(privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {}),
               },
               policy: {
                 raw_source_exposed: false,
                 source_text_returned: false,
                 source_packets_exposed: false,
+                // Decided from the hits' own sensitivity before their tier is
+                // stripped, not from store domains alone.
                 local_only: searchRequest.explicitEmptyChatScope
-                  || runs.some((run) => run.store.trustDomain === 'secure_local'),
+                  || searchedSecureLocal
+                  || hits.some(hitIsPrivate),
                 // The most private tier this search read, not the named
                 // corpus's: a tiered result may carry Private hits.
                 trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),

@@ -303,6 +303,11 @@ export interface SourceIndexSearchResult {
     raw_source_exposed: false;
     source_text_returned: boolean;
     locators_requested?: boolean;
+    /**
+     * Hits withheld because their row is Private by its own tier while the
+     * search read no Private store. A count only; never what they were.
+     */
+    private_tier_withheld?: number;
   };
   policy: {
     raw_source_exposed: false;
@@ -1315,6 +1320,10 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
       raw_source_exposed: false,
       source_text_returned: sourceTextReturned,
       ...(typeof audit.locators_requested === 'boolean' ? { locators_requested: audit.locators_requested } : {}),
+      ...(typeof audit.private_tier_withheld === 'number' && Number.isSafeInteger(audit.private_tier_withheld)
+        && audit.private_tier_withheld > 0
+        ? { private_tier_withheld: audit.private_tier_withheld }
+        : {}),
     },
     policy: {
       raw_source_exposed: false,
