@@ -537,6 +537,25 @@ percent when known; counts only, no job).
      the Private-eligible items; otherwise it is discarded and the answer is
      computed again from the current evidence. No eligible item left means
      `failed`.
+   - **Evidence at dispatch (2026-10-05).** A job's evidence is cached when
+     it is queued, and an analysis can wait minutes for the one model slot.
+     So when an analysis leaves the queue, before any model input (the
+     panel's relevance embeddings, its depth re-read, inference), the job's
+     own Private search runs again (the same search: corpus registry, owner
+     scope, each store's tier-ledger copy filter and the cross-store
+     visibility gate, all read at that moment). A cached item it no longer
+     returns Private-eligible (re-tiered to Secret, deleted, out of scope) is
+     dropped, and the rest are read in their current form; none left ends
+     the analysis with no evidence and no model call. A claim's own
+     computation that takes the slot in the same turn as its claim-time
+     search is not searched twice. Without a search to re-check with, nothing
+     is read. The depth re-read narrows this further: an item its store now
+     refuses is dropped, never answered from the passages it carried; a read
+     that merely fails (an error) keeps only the passages the dispatch-time
+     search returned, never text whose eligibility was not re-established.
+     A dropped item is not counted as read, as unreadable, or as a source.
+     Reviewer finding: a precompute queued while an item was Private and
+     dispatched after it became Secret sent the cached text to the model.
    - **Hard deadline.** Every claim settles `ready` or `failed` within a
      deadline counted from the claim (100 s, inside the panel's two-minute
      wait), and each analysis has the same bound from its start, both
@@ -613,8 +632,9 @@ percent when known; counts only, no job).
      at the old 40-character bound) beside an answer that gave it.
    - **Timing log.** Each settled claim logs one content-free line:
      `[private-answer] outcome=… precomputed=yes|no wait_at_claim_ms=…
-     search_to_ready_ms=… queued_ms=… refresh_ms=… matched=… items=…
-     evidence_bytes=… model_ms=… main_…`. `wait_at_claim_ms` is what the
+     search_to_ready_ms=… queued_ms=… refresh_ms=… recheck_ms=… dropped=…
+     matched=… items=… evidence_bytes=… model_ms=… main_…` (`recheck_ms`
+     when the dispatch-time search ran, `dropped` when it dropped items). `wait_at_claim_ms` is what the
      panel waited after its claim; `search_to_ready_ms` is from the search to
      the answer being ready.
    - **Claim budget.** An unknown, expired or wrong-install id answers 410

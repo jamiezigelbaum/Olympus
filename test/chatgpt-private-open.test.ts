@@ -77,7 +77,7 @@ describe('open targets in the sealed answer', () => {
       { title: 'Not a link', url: 'javascript:alert(1)' },
       { title: 'Plain' },
     ]), opened);
-    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE });
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     await Bun.sleep(20);
     const plaintext = await collect(jobs, jobId!);
     expect(JSON.stringify(plaintext)).not.toContain(dir);
@@ -101,7 +101,7 @@ describe('open targets in the sealed answer', () => {
     writeFileSync(file, 'x');
     const opened: string[] = [];
     const { jobs } = makeJobs(sourcesModel([{ title: 'f', url: 'https://www.dropbox.com/home?preview=report.pdf', localPath: file }]), opened, { noOpener: true });
-    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE });
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     await Bun.sleep(20);
     const plaintext = await collect(jobs, jobId!);
     expect(plaintext.citations).toEqual([{ title: 'f', open: { kind: 'web', url: 'https://www.dropbox.com/home?preview=report.pdf' } }]);
@@ -113,8 +113,8 @@ describe('open targets in the sealed answer', () => {
     writeFileSync(file, 'x');
     const opened: string[] = [];
     const { jobs } = makeJobs(sourcesModel([{ title: 'f', localPath: file }]), opened);
-    const first = jobs.begin({ question: 'same question', count: 1, evidence: EVIDENCE }).jobId!;
-    const second = jobs.begin({ question: 'same question', count: 1, evidence: EVIDENCE }).jobId!;
+    const first = jobs.begin({ question: 'same question', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
+    const second = jobs.begin({ question: 'same question', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     await Bun.sleep(20);
     const a = (await collect(jobs, first)).citations[0]!.open as { kind: 'mac'; token: string };
     const b = (await collect(jobs, second)).citations[0]!.open as { kind: 'mac'; token: string };
@@ -140,7 +140,7 @@ describe('the /private/<id>/open endpoint', () => {
     const file = join(dir, 'report.pdf');
     writeFileSync(file, 'x');
     const made = makeJobs(sourcesModel([{ title: 'f', localPath: file }]), opened, extra);
-    const { jobId } = made.jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE });
+    const { jobId } = made.jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     await Bun.sleep(20);
     const token = ((await collect(made.jobs, jobId!)).citations[0]!.open as { token: string }).token;
     return { ...made, jobId: jobId!, token, file };

@@ -21,6 +21,17 @@
  *    claims the job. Another key gets 409 `claimed`: the panel says the
  *    answer was already opened elsewhere, and this Mac writes a content-free
  *    audit line.
+ * Dispatch time: when an analysis leaves the queue for the model slot, and
+ *    before any model input (the panel's relevance embeddings, its depth
+ *    re-read, or inference), its cached evidence is checked again through
+ *    the job's own Private search (`refresh`, the same search that found it:
+ *    corpus registry, owner scope, the stores' tier-ledger copy filter and
+ *    the cross-store visibility gate, all read now). An item that search no
+ *    longer returns Private-eligible (re-tiered Secret, deleted, out of
+ *    scope) is dropped; the rest are read in their current form. Nothing
+ *    left: the analysis ends with no evidence and no model call. A claim's
+ *    own computation that reaches the slot in the same turn as its claim-time
+ *    search is not searched twice.
  * 3. Claim time: the evidence is searched again (current tiers, not the
  *    search-time cache), and anything not Private-eligible now (Secret
  *    included) is dropped. The precomputed answer is used only when every
@@ -75,6 +86,7 @@ import {
   type PrivateAnswerPlaintextV1,
   type PrivateEvidenceItem,
   type PrivateMatchSummary,
+  NoPrivateEvidenceError,
 } from './private-answer-contract.ts';
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer, type SealedPrivateAnswer } from './private-answer-crypto.ts';
 
@@ -156,6 +168,10 @@ interface AnalysisTiming {
   /** The analysis's wait for the model slot. */
   queuedMs: number;
   refreshMs?: number;
+  /** The dispatch-time re-check of the analysis's cached evidence. */
+  recheckMs?: number | undefined;
+  /** Cached evidence items the dispatch-time re-check dropped. */
+  dropped?: number | undefined;
   matched?: number;
   items?: number | undefined;
   unreadable?: number | undefined;
@@ -184,6 +200,8 @@ export function formatAnalysisTiming(timing: AnalysisTiming): string {
   if (timing.searchToReadyMs !== undefined) fields.push(`search_to_ready_ms=${timing.searchToReadyMs}`);
   fields.push(`queued_ms=${timing.queuedMs}`);
   if (timing.refreshMs !== undefined) fields.push(`refresh_ms=${timing.refreshMs}`);
+  if (timing.recheckMs !== undefined) fields.push(`recheck_ms=${timing.recheckMs}`);
+  if (timing.dropped) fields.push(`dropped=${timing.dropped}`);
   if (timing.matched !== undefined) fields.push(`matched=${timing.matched}`);
   if (timing.items !== undefined) fields.push(`items=${timing.items}`);
   if (timing.unreadable !== undefined) fields.push(`unreadable=${timing.unreadable}`);
@@ -224,7 +242,15 @@ interface Analysis {
   failReason: AnalysisTiming['reason'] | undefined;
   startedAt: number | undefined;
   readyAt: number | undefined;
-  stats: Pick<AnalysisTiming, 'items' | 'unreadable' | 'evidenceBytes' | 'modelMs'> & { calls: PrivateAnswerModelCall[] };
+  stats: Pick<AnalysisTiming, 'items' | 'unreadable' | 'evidenceBytes' | 'modelMs' | 'recheckMs' | 'dropped'> & { calls: PrivateAnswerModelCall[] };
+  /** The Private search that re-checks the cached evidence at dispatch; none means nothing may be read. */
+  recheck: PrivateEvidenceRefresh | undefined;
+  /**
+   * True only while a claim that just searched hands this analysis to the
+   * slot in the same turn: its evidence is current, so dispatch does not
+   * search again. Cleared as soon as that hand-off is over.
+   */
+  prechecked: boolean;
   readonly abort: AbortController;
   readonly jobs: Set<Job>;
   readonly settled: Promise<void>;
@@ -413,15 +439,16 @@ export class PrivateAnswerJobs {
    * otherwise. `count` is capped at PRIVATE_MATCH_COUNT_CAP. Call it as the
    * tool result is built, so the id is valid only from then on. The job's
    * analysis starts now, from `evidence` (Private-eligible items only).
-   * `refresh` re-reads the evidence at claim time; without it the search-time
-   * hits are used, still filtered by isPrivateEligible. `caller` (the
+   * `refresh` is the same Private search again: it re-checks the evidence
+   * when an analysis is dispatched to the model and again at claim time, so
+   * no item is read unless that search still returns it eligible. `caller` (the
    * connection) lets a newer job supersede that caller's older precomputes.
    */
   begin(input: {
     question: string;
     count: number;
     evidence: readonly PrivateEvidenceItem[];
-    refresh?: PrivateEvidenceRefresh;
+    refresh: PrivateEvidenceRefresh;
     caller?: string;
     /** `full` reads the leading items in depth (slower); `summary` by default. */
     detail?: PrivateAnswerDetail;
@@ -569,7 +596,7 @@ export class PrivateAnswerJobs {
   private precompute(job: Job): void {
     const evidence = (job.evidence ?? []).filter(isPrivateEligible);
     if (evidence.length === 0 || job.question === undefined) return;
-    const analysis = this.analysisFor(job.question, job.detail, evidence, undefined);
+    const analysis = this.analysisFor(job.question, job.detail, evidence, job.refresh, undefined);
     this.attach(job, analysis);
     if (job.caller !== undefined) {
       for (const other of this.jobs.values()) {
@@ -590,6 +617,7 @@ export class PrivateAnswerJobs {
     question: string,
     detail: PrivateAnswerDetail,
     evidence: readonly PrivateEvidenceItem[],
+    recheck: PrivateEvidenceRefresh | undefined,
     claimedAt: number | undefined,
     fresh = false,
   ): Analysis {
@@ -615,6 +643,8 @@ export class PrivateAnswerJobs {
       startedAt: undefined,
       readyAt: undefined,
       stats: { calls: [] },
+      recheck,
+      prechecked: false,
       abort: new AbortController(),
       jobs: new Set(),
       settled,
@@ -660,6 +690,7 @@ export class PrivateAnswerJobs {
     analysis.result = undefined;
     analysis.question = undefined;
     analysis.evidence = undefined;
+    analysis.recheck = undefined;
   }
 
   private finish(analysis: Analysis, state: 'done' | 'failed', reason?: AnalysisTiming['reason']): void {
@@ -669,6 +700,7 @@ export class PrivateAnswerJobs {
     analysis.readyAt = this.now();
     analysis.question = undefined;
     analysis.evidence = undefined;
+    analysis.recheck = undefined;
     if (state === 'failed') {
       analysis.result = undefined;
       if (this.shared.get(analysis.key) === analysis) this.shared.delete(analysis.key);
@@ -740,8 +772,25 @@ export class PrivateAnswerJobs {
     }, this.timeoutFor(analysis.detail));
     (deadlineTimer as { unref?: () => void }).unref?.();
     const question = analysis.question ?? '';
-    const evidence = analysis.evidence ?? [];
+    const cached = analysis.evidence ?? [];
+    const recheck = analysis.recheck;
+    // Read now, before any await: true only when a claim that just searched
+    // handed this analysis straight to the slot.
+    const prechecked = analysis.prechecked;
+    let evidence: readonly PrivateEvidenceItem[] = [];
     const work = (async () => {
+      if (abort.signal.aborted) throw new AnalysisStop('aborted');
+      if (cached.length === 0) throw new AnalysisStop('no_evidence');
+      // Before any model input (embeddings, depth re-reads, inference): only
+      // what the Private search returns eligible now is read.
+      if (prechecked) {
+        evidence = cached;
+      } else {
+        const recheckStarted = this.now();
+        evidence = await currentEvidence(cached, recheck, abort.signal);
+        analysis.stats.recheckMs = this.now() - recheckStarted;
+        analysis.stats.dropped = cached.length - evidence.length;
+      }
       if (abort.signal.aborted) throw new AnalysisStop('aborted');
       if (evidence.length === 0) throw new AnalysisStop('no_evidence');
       const modelStarted = this.now();
@@ -759,6 +808,9 @@ export class PrivateAnswerJobs {
           },
         }, { detail: analysis.detail });
         return { result, used };
+      } catch (error) {
+        if (error instanceof NoPrivateEvidenceError) throw new AnalysisStop('no_evidence');
+        throw error;
       } finally {
         analysis.stats.modelMs = this.now() - modelStarted;
       }
@@ -842,6 +894,8 @@ export class PrivateAnswerJobs {
       abort.signal.addEventListener('abort', () => resolve(), { once: true });
     });
     const record = (analysis: Analysis) => {
+      timing.recheckMs = analysis.stats.recheckMs;
+      timing.dropped = analysis.stats.dropped;
       timing.items = analysis.stats.items;
       timing.unreadable = analysis.stats.unreadable;
       timing.evidenceBytes = analysis.stats.evidenceBytes;
@@ -861,7 +915,8 @@ export class PrivateAnswerJobs {
       job.evidence = undefined;
       job.refresh = undefined;
       const refreshStarted = this.now();
-      const found = refresh ? await refresh(abort.signal) : cached;
+      // No search to judge the items by now: nothing is read (fail closed).
+      const found = refresh ? await refresh(abort.signal) : [];
       if (refresh) timing.refreshMs = this.now() - refreshStarted;
       // A refresh that finished after the deadline (or after the job was
       // dropped) must not start inference.
@@ -880,12 +935,17 @@ export class PrivateAnswerJobs {
         // for this claim reads the current evidence itself.
         const precomputed = analysis !== undefined;
         if (!analysis) {
-          analysis = this.analysisFor(question, job.detail, evidence, claimedAt, true);
+          analysis = this.analysisFor(question, job.detail, evidence, refresh, claimedAt, true);
           this.attach(job, analysis);
-        } else if (analysis.state === 'queued' || analysis.state === 'running') {
-          analysis.claimedAt ??= claimedAt;
+          // Searched just now: when the slot takes it in this same turn, it
+          // is not searched again; if it has to wait, dispatch re-checks it.
+          analysis.prechecked = true;
+          this.pump();
+          analysis.prechecked = false;
+        } else {
+          if (analysis.state === 'queued' || analysis.state === 'running') analysis.claimedAt ??= claimedAt;
+          this.pump();
         }
-        this.pump();
         await Promise.race([analysis.settled, stopped]);
         if (settled) return;
         record(analysis);
@@ -1027,6 +1087,44 @@ function usedKeys(evidence: readonly PrivateEvidenceItem[], used: readonly numbe
     keys.push(key);
   }
   return keys;
+}
+
+/**
+ * The cached items the Private search returns eligible now, each in its
+ * current form (the search's own copy: current text and tier), in the cached
+ * order. An item the search no longer returns, returns ineligible, or that
+ * has no identity to match it by is dropped. No search, or a failed one:
+ * nothing (fail closed). A deeper re-read of a kept item can only narrow this.
+ */
+async function currentEvidence(
+  cached: readonly PrivateEvidenceItem[],
+  recheck: PrivateEvidenceRefresh | undefined,
+  signal: AbortSignal,
+): Promise<PrivateEvidenceItem[]> {
+  if (!recheck) return [];
+  let found: readonly PrivateEvidenceItem[];
+  try {
+    found = await recheck(signal);
+  } catch {
+    return [];
+  }
+  const current = new Map<string, PrivateEvidenceItem>();
+  for (const item of Array.isArray(found) ? found : []) {
+    if (!isPrivateEligible(item)) continue;
+    const key = privateEvidenceKey(item);
+    if (key !== undefined && !current.has(key)) current.set(key, item);
+  }
+  const kept: PrivateEvidenceItem[] = [];
+  const seen = new Set<string>();
+  for (const item of cached) {
+    const key = privateEvidenceKey(item);
+    if (key === undefined || seen.has(key)) continue;
+    const now = current.get(key);
+    if (!now) continue;
+    seen.add(key);
+    kept.push(now);
+  }
+  return kept;
 }
 
 /** Every item the answer read is among the current Private-eligible evidence. An answer with unknown sources never is. */

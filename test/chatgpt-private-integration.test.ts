@@ -245,11 +245,13 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
     expect(opened.citations).toEqual([{ title: 'Lease renewal', source: 'Gmail', date: '2026-04-01' }]);
     expect(opened.unanswered).toBeUndefined();
 
-    // The built-in model read the Private passage, locally, and the evidence was re-read at claim time.
+    // The built-in model read the Private passage, locally; the evidence was
+    // searched at search time, again when the precompute was dispatched to
+    // the model, and again at claim time.
     expect(stub.requests.length).toBeGreaterThan(0);
     expect(stub.requests.every((request) => request.localOnly === true)).toBe(true);
     expect(stub.requests[0]!.prompt).toContain(PRIVATE_PASSAGE);
-    expect(refreshes).toBe(2);
+    expect(refreshes).toBe(3);
   });
 
   test('Private candidates carry their passages to the built-in model; the tool result carries only the count', async () => {
@@ -474,18 +476,19 @@ describe('claim-time evidence over a real local index', () => {
     expect(await jobs.claim(jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
     expect(atSearch.every(isPrivateEligible)).toBe(true);
 
-    // With the search-time precompute: it read the item while it was Private
-    // (in engine memory, on this computer), but the claim-time check finds it
-    // no longer Private-eligible, so that answer is discarded, nothing is
-    // left to answer from, and the job fails: nothing is ever sealed.
+    // With the search-time precompute, queued from the search-time evidence
+    // (cached while the item was Private) but dispatched after the owner
+    // marked it Secret: the dispatch-time search no longer returns it, so the
+    // model is never called and reads nothing. The claim finds nothing either,
+    // and the job fails: nothing is ever read or sealed.
     const precomputing = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {} });
     const second = precomputing.begin({ question: 'orchard invoice?', count: atSearch.length, evidence: atSearch, refresh: privateSearch });
     await Bun.sleep(20);
-    expect(seen).toEqual(atSearch);
+    expect(seen).toEqual([]);
     await precomputing.claim(second.jobId!, panel.publicKey);
     await Bun.sleep(80);
     expect(await precomputing.claim(second.jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
-    expect(seen).toEqual(atSearch);
+    expect(seen).toEqual([]);
   });
 });
 

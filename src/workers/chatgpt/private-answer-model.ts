@@ -31,7 +31,12 @@ import type {
   PrivateEvidenceItem as BuiltInEvidenceItem,
 } from '../../core/analyst-built-in.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
-import type { PrivateAnswerModel, PrivateAnswerSourceCitation, PrivateEvidenceItem } from './private-answer-contract.ts';
+import {
+  NoPrivateEvidenceError,
+  type PrivateAnswerModel,
+  type PrivateAnswerSourceCitation,
+  type PrivateEvidenceItem,
+} from './private-answer-contract.ts';
 
 export interface BuiltInPrivateAnswerModelOptions {
   /** The worker's one built-in model instance (shared with the sniffer and the answer pool). */
@@ -53,8 +58,11 @@ export interface BuiltInPrivateAnswerModelOptions {
    * Re-reads one evidence item's own text, up to `maxChars`, with its
    * passages chosen for `question` (the whole item when it fits), from the
    * store on this computer. The panel reads an item that clearly leads in
-   * depth through it. Without it (or when it fails), the search-time
-   * passages are read.
+   * depth through it. Without it, the passages the evidence carries are read.
+   * Undefined means the store refuses the item now (its tier, the owner's
+   * scope, or it is gone): the item is dropped, never read from the passages
+   * it carried. A throw is a failed read: the item keeps only the passages it
+   * carried, which the dispatch-time re-check established as current.
    */
   readItem?: PanelItemReader;
   /**
@@ -179,14 +187,14 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       const read = privateEvidence(evidence, limits.maxPassageChars);
       const unreadable = read.unreadable;
       const selection = await panelSelection(question, read, limits, options.relevance, signal);
-      const picked = selection.items;
+      let picked = selection.items;
       let items = picked.map((index) => read.items[index]!);
       // Full: the items read are re-read whole (or their best passages)
       // within the deep budget. Summary: only leading items are re-read, for
       // their best passages within a summary-sized budget (results pages,
       // not page headers); otherwise the search-time passages are read.
       if (options.readItem && (full || selection.leading)) {
-        items = await readInDepth(
+        const deep = await readInDepth(
           question,
           items,
           picked.map((index) => evidence[read.sources[index]!]!),
@@ -194,6 +202,12 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           options.readItem,
           signal,
         );
+        // An item its store now refuses (re-tiered, out of scope, deleted) is
+        // dropped: neither its deeper text nor its earlier passages are read.
+        const kept = deep.flatMap((item, position) => (item ? [{ item, index: picked[position]! }] : []));
+        if (kept.length === 0) throw new NoPrivateEvidenceError();
+        items = kept.map((entry) => entry.item);
+        picked = kept.map((entry) => entry.index);
       }
       try {
         observe?.evidence?.({
@@ -227,7 +241,10 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
         if (seen.has(citation.id)) continue;
         seen.add(citation.id);
         const entry = byId.get(citation.id);
-        const item = entry?.item;
+        // Only an item the model was given can be a source (never one the
+        // depth re-read dropped).
+        if (!entry) continue;
+        const item = entry.item;
         const title = citation.title ?? item?.title;
         let links: PrivateSourceLinks | undefined;
         try {
@@ -378,8 +395,11 @@ export function leadingCount(sorted: readonly number[], maxLeading: number, gap:
  * The leading items' text, re-read in depth: each item's whole text when
  * all of them fit `budget` characters; otherwise the shorter ones whole and
  * the rest an equal share of what is left, each re-read for its best
- * passages at that size. An item whose re-read fails or comes back shorter
- * keeps its search-time passages.
+ * passages at that size. Undefined at an item's position when its store
+ * refuses it now (re-tiered, out of scope, gone): the caller drops it and
+ * never falls back to the passages it carried. An item whose re-read only
+ * fails (or comes back empty or shorter) keeps the passages it carried, which
+ * passed the dispatch-time eligibility re-check.
  */
 async function readInDepth(
   question: string,
@@ -388,31 +408,43 @@ async function readInDepth(
   budget: number,
   readItem: PanelItemReader,
   signal?: AbortSignal,
-): Promise<BuiltInEvidenceItem[]> {
-  const read = async (index: number, maxChars: number): Promise<string | undefined> => {
+): Promise<Array<BuiltInEvidenceItem | undefined>> {
+  type Read = { kind: 'text'; text: string } | { kind: 'refused' } | { kind: 'failed' };
+  const read = async (index: number, maxChars: number): Promise<Read> => {
+    let chunks: readonly string[] | undefined;
     try {
-      const chunks = await readItem(hits[index]!, { question, maxChars }, signal);
-      const text = (chunks ?? []).map((chunk) => chunk.trim()).filter(Boolean).join('\n…\n');
-      return text ? text.slice(0, maxChars) : undefined;
+      chunks = await readItem(hits[index]!, { question, maxChars }, signal);
     } catch {
-      return undefined;
+      return { kind: 'failed' };
     }
+    if (chunks === undefined) return { kind: 'refused' };
+    const text = chunks.map((chunk) => chunk.trim()).filter(Boolean).join('\n…\n');
+    return text ? { kind: 'text', text: text.slice(0, maxChars) } : { kind: 'failed' };
   };
   const whole = await Promise.all(items.map((_, index) => read(index, budget)));
-  const sizes = whole.map((text, index) => text?.length ?? items[index]!.text.length);
-  // Fair shares: the shorter items whole, the rest split what is left.
+  const sizes = whole.map((entry, index) => (entry.kind === 'text' ? entry.text.length : items[index]!.text.length));
+  // Fair shares among the items still readable: the shorter whole, the rest split what is left.
   const share = new Array<number>(items.length).fill(0);
-  const byLength = sizes.map((size, index) => ({ size, index })).sort((a, b) => a.size - b.size);
+  const byLength = sizes
+    .map((size, index) => ({ size, index }))
+    .filter(({ index }) => whole[index]!.kind !== 'refused')
+    .sort((a, b) => a.size - b.size);
   let remaining = budget;
   byLength.forEach(({ size, index }, position) => {
     const fair = Math.floor(remaining / (byLength.length - position));
     share[index] = Math.min(size, fair);
     remaining -= share[index]!;
   });
-  return Promise.all(items.map(async (item, index) => {
-    const full = whole[index];
-    if (!full) return item;
-    const text = full.length <= share[index]! ? full : (await read(index, share[index]!)) ?? full.slice(0, share[index]!);
+  return Promise.all(items.map(async (item, index): Promise<BuiltInEvidenceItem | undefined> => {
+    const first = whole[index]!;
+    if (first.kind === 'refused') return undefined;
+    if (first.kind === 'failed') return item;
+    let text = first.text;
+    if (text.length > share[index]!) {
+      const again = await read(index, share[index]!);
+      if (again.kind === 'refused') return undefined;
+      text = again.kind === 'text' ? again.text : text.slice(0, share[index]!);
+    }
     return text.length > item.text.length ? { ...item, text } : item;
   }));
 }

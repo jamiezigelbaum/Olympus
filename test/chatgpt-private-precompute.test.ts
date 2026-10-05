@@ -107,7 +107,7 @@ describe('1. the analysis starts at search time', () => {
     expect(await collect(jobs, jobId!, panel)).toEqual({ status: 'ready', answer: 'answer to q from 2 items' });
     expect(calls).toHaveLength(1);
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/^\[private-answer\] outcome=sealed precomputed=yes wait_at_claim_ms=\d+ search_to_ready_ms=\d+ queued_ms=\d+ refresh_ms=\d+ matched=2 items=2 /);
+    expect(lines[0]).toMatch(/^\[private-answer\] outcome=sealed precomputed=yes wait_at_claim_ms=\d+ search_to_ready_ms=\d+ queued_ms=\d+ refresh_ms=\d+ recheck_ms=\d+ matched=2 items=2 /);
     expect(activity.begins).toBe(activity.ends);
   });
 
@@ -150,14 +150,14 @@ describe('1. the analysis starts at search time', () => {
     const clock = { now: 0 };
     const { model, calls } = gatedModel();
     const { jobs } = makeJobs(model, { now: () => clock.now, ttlMs: 1_000, dedupeMs: 500 });
-    jobs.begin({ question: 'q', count: 1, evidence: [item('a')] });
+    jobs.begin({ question: 'q', count: 1, evidence: [item('a')], refresh: async () => [item('a')] });
     await tick();
     expect(calls).toHaveLength(1);
     clock.now = 2_000;
     jobs.sweep();
     expect(jobs.size).toBe(0);
     // Nothing left to share: the same question asks the model again.
-    jobs.begin({ question: 'q', count: 1, evidence: [item('a')] });
+    jobs.begin({ question: 'q', count: 1, evidence: [item('a')], refresh: async () => [item('a')] });
     await tick();
     expect(calls).toHaveLength(2);
   });
@@ -182,13 +182,19 @@ describe('2. claim-time revalidation of the precomputed answer', () => {
   test('an item the answer read that is no longer Private-eligible: discarded, recomputed from the current evidence', async () => {
     const { model, calls } = gatedModel({ used: (evidence) => evidence.map((_, index) => index) });
     const { jobs, lines } = makeJobs(model);
+    // Private when the precompute is dispatched; re-tiered before the claim.
+    let reclassified = false;
     const { jobId } = jobs.begin({
       question: 'q',
       count: 2,
       evidence: [item('lease'), item('password')],
-      refresh: async () => [item('lease'), item('password', { trust_tier: 'secrets' }), item('note', { trust_domain: 'internal' })],
+      refresh: async () => (reclassified
+        ? [item('lease'), item('password', { trust_tier: 'secrets' }), item('note', { trust_domain: 'internal' })]
+        : [item('lease'), item('password')]),
     });
     await tick();
+    expect(calls).toHaveLength(1);
+    reclassified = true;
     expect(await collect(jobs, jobId!, await generatePanelKeyPair())).toEqual({ status: 'ready', answer: 'answer to q from 1 items' });
     expect(calls).toHaveLength(2);
     expect(calls[1]!.evidence.map(privateEvidenceKey)).toEqual([privateEvidenceKey(item('lease'))]);
@@ -198,10 +204,24 @@ describe('2. claim-time revalidation of the precomputed answer', () => {
   test('an item the answer read that left the Private search entirely, with nothing left: the job fails', async () => {
     const { model, calls } = gatedModel();
     const { jobs } = makeJobs(model);
-    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: [item('gone')], refresh: async () => [] });
+    let gone = false;
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: [item('gone')], refresh: async () => (gone ? [] : [item('gone')]) });
     await tick();
+    expect(calls).toHaveLength(1);
+    gone = true;
     expect(await collect(jobs, jobId!, await generatePanelKeyPair())).toEqual({ status: 'failed' });
     expect(calls).toHaveLength(1);
+  });
+
+  test('an item that left the Private search before the precompute was dispatched is never read: no model call', async () => {
+    const { model, calls } = gatedModel();
+    const { jobs, lines } = makeJobs(model);
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: [item('gone')], refresh: async () => [] });
+    await tick();
+    expect(calls).toHaveLength(0);
+    expect(await collect(jobs, jobId!, await generatePanelKeyPair())).toEqual({ status: 'failed' });
+    expect(calls).toHaveLength(0);
+    expect(lines[0]).toContain('reason=no_evidence');
   });
 });
 
@@ -225,10 +245,10 @@ describe('3. several searches per turn', () => {
     const clock = { now: 0 };
     const { model, calls } = gatedModel();
     const { jobs } = makeJobs(model, { now: () => clock.now, dedupeMs: 1_000 });
-    jobs.begin({ question: 'q', count: 1, evidence: [item('a')] });
+    jobs.begin({ question: 'q', count: 1, evidence: [item('a')], refresh: async () => [item('a')] });
     await tick();
     clock.now = 1_500;
-    jobs.begin({ question: 'q', count: 1, evidence: [item('a')] });
+    jobs.begin({ question: 'q', count: 1, evidence: [item('a')], refresh: async () => [item('a')] });
     await tick();
     expect(calls).toHaveLength(2);
   });
@@ -240,8 +260,8 @@ describe('3. several searches per turn', () => {
     const one = jobs.begin({ question: 'one', count: 1, evidence, refresh: async () => evidence, caller: 'remote:x' }).jobId!;
     await tick();
     expect(calls.map((call) => call.question)).toEqual(['one']);
-    jobs.begin({ question: 'two', count: 1, evidence, caller: 'remote:x' });
-    jobs.begin({ question: 'other', count: 1, evidence, caller: 'remote:y' });
+    jobs.begin({ question: 'two', count: 1, evidence, refresh: async () => evidence, caller: 'remote:x' });
+    jobs.begin({ question: 'other', count: 1, evidence, refresh: async () => evidence, caller: 'remote:y' });
     const three = jobs.begin({ question: 'three', count: 1, evidence, refresh: async () => evidence, caller: 'remote:x' }).jobId!;
     await tick();
     // `one` was aborted mid-run, `two` never ran; the newest precompute runs next.
@@ -266,12 +286,12 @@ describe('3. several searches per turn', () => {
     const { model, calls, release } = gatedModel({ gated: true });
     const { jobs } = makeJobs(model, { now: () => clock.now, precomputeWindowMs: 1_000 });
     const evidence = [item('a')];
-    jobs.begin({ question: 'running', count: 1, evidence });
+    jobs.begin({ question: 'running', count: 1, evidence, refresh: async () => evidence });
     await tick();
     const claimed = jobs.begin({ question: 'claimed', count: 1, evidence, refresh: async () => evidence }).jobId!;
-    jobs.begin({ question: 'newer', count: 1, evidence });
+    jobs.begin({ question: 'newer', count: 1, evidence, refresh: async () => evidence });
     clock.now = 500;
-    jobs.begin({ question: 'stale', count: 1, evidence });
+    jobs.begin({ question: 'stale', count: 1, evidence, refresh: async () => evidence });
     const panel = await generatePanelKeyPair();
     await jobs.claim(claimed, panel.publicKey);
     await tick();
@@ -386,5 +406,85 @@ describe('4. the panel reads a few relevant items', () => {
     } }, { evidenceFormat: 'compact' });
     await analyst.analyze(pack, { localOnly: true });
     expect(analystPromptBytes(pack, { localOnly: true }, 'compact')).toBe(new TextEncoder().encode(sent).length);
+  });
+});
+
+describe('5. dispatch-time eligibility: a queued analysis re-checks its cached evidence before any model input', () => {
+  const SECRET_TEXT = 'SENTINEL_NOW_SECRET_9c2e';
+  const lease = () => item('lease');
+  const password = (extra: Record<string, unknown> = {}) => item('password', { chunks: [SECRET_TEXT], ...extra });
+
+  /**
+   * A job queued behind a running analysis, whose `password` item is Private
+   * when it is queued and changes (by `change`) before it is dispatched.
+   * Returns every byte any model-facing hook (embeddings, depth re-read,
+   * the answer model) received.
+   */
+  async function queuedThenChanged(change: 'secret' | 'deleted' | 'out_of_scope' | 'all_gone') {
+    const seen: string[] = [];
+    let state: 'private' | typeof change = 'private';
+    const refresh = async (): Promise<PrivateEvidenceItem[]> => {
+      if (state === 'private') return [lease(), password()];
+      if (state === 'secret') return [lease(), password({ trust_tier: 'secrets' })];
+      if (state === 'all_gone') return [];
+      // Deleted, or its folder taken out of scope: the Private search no longer returns it.
+      return [lease()];
+    };
+    const blocker = gatedModel({ gated: true });
+    let answerCalls = 0;
+    const panelModel = createBuiltInPrivateAnswerModel({
+      model: { spec: { modelId: 'test' }, complete: async () => ({ text: '{}' }), stop: async () => {} } as never,
+      available: () => true,
+      answer: async (_question, items) => {
+        answerCalls += 1;
+        for (const entry of items) seen.push(`${entry.title ?? ''}\n${entry.text}`);
+        return { answer: 'ok', citations: [], unanswered: [], modelId: 'test' };
+      },
+      relevance: async (_question, items) => {
+        for (const entry of items) seen.push(`${entry.title ?? ''}\n${entry.text}`);
+        return items.map(() => 0.5);
+      },
+      readItem: async (hit) => {
+        seen.push(JSON.stringify(hit));
+        return hit.chunks as string[];
+      },
+    });
+    let blocking = true;
+    const model: PrivateAnswerModel = {
+      status: () => ({ state: 'ready' }),
+      answerPrivately: (question, evidence, signal, observe, request) => (blocking && question === 'blocker'
+        ? blocker.model.answerPrivately(question, evidence, signal, observe, request)
+        : panelModel.answerPrivately(question, evidence, signal, observe, request)),
+    };
+    const { jobs, lines } = makeJobs(model);
+    jobs.begin({ question: 'blocker', count: 1, evidence: [item('other')], refresh: async () => [item('other')] });
+    await tick();
+    const { jobId } = jobs.begin({ question: 'q', count: 2, evidence: [lease(), password()], refresh });
+    await tick();
+    // Queued, not yet dispatched: nothing read.
+    expect(seen).toEqual([]);
+    state = change;
+    blocking = false;
+    blocker.release('blocker');
+    await tick(40);
+    const outcome = await collect(jobs, jobId!, await generatePanelKeyPair());
+    return { seen, outcome, answerCalls, lines };
+  }
+
+  for (const change of ['secret', 'deleted', 'out_of_scope'] as const) {
+    test(`an item Private when queued and ${change} by dispatch contributes zero bytes to embeddings, depth reads or the model`, async () => {
+      const { seen, outcome } = await queuedThenChanged(change);
+      expect(outcome).toMatchObject({ status: 'ready' });
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.join('\n')).not.toContain(SECRET_TEXT);
+      expect(seen.join('\n')).not.toContain('"password"');
+    });
+  }
+
+  test('nothing eligible left at dispatch: no model input at all, and the job fails with no evidence', async () => {
+    const { seen, outcome, answerCalls } = await queuedThenChanged('all_gone');
+    expect(seen).toEqual([]);
+    expect(answerCalls).toBe(0);
+    expect(outcome).toEqual({ status: 'failed' });
   });
 });

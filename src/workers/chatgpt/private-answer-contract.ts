@@ -160,6 +160,18 @@ export interface PrivateAnswerModel {
   reset?(): void | Promise<void>;
 }
 
+/**
+ * Thrown by `answerPrivately` when none of the evidence it was given may be
+ * read any more (a depth re-read found every picked item refused or gone):
+ * the job ends with its no-evidence outcome, and no model was called.
+ */
+export class NoPrivateEvidenceError extends Error {
+  constructor() {
+    super('no private evidence may be read');
+    this.name = 'NoPrivateEvidenceError';
+  }
+}
+
 /** No private model on this engine yet: every private match reports `no_model`. */
 export const UNAVAILABLE_PRIVATE_ANSWER_MODEL: PrivateAnswerModel = {
   status: () => ({ state: 'no_model' }),

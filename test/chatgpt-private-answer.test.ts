@@ -144,7 +144,7 @@ describe('one-time jobs', () => {
   test('claim, poll, collect; replays of the same key get the same sealed bytes, any other key 409', async () => {
     const model = readyModel();
     const jobs = makeJobs(model);
-    const begun = jobs.begin({ question: 'When does the lease end?', count: 3, evidence: EVIDENCE });
+    const begun = jobs.begin({ question: 'When does the lease end?', count: 3, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     expect(begun).toMatchObject({ count: 3, panelState: 'ready' });
     expect(begun.jobId).toMatch(new RegExp(`^oly2p\\.${INSTALL}\\.`));
     // The analysis starts at search time, before any claim.
@@ -173,7 +173,7 @@ describe('one-time jobs', () => {
   test('a second key is audited locally, without content', async () => {
     const events: string[] = [];
     const jobs = makeJobs(readyModel(), { now: 0 }, { audit: (event) => events.push(event) });
-    const { jobId } = jobs.begin({ question: SECRET_ANSWER, count: 1, evidence: EVIDENCE });
+    const { jobId } = jobs.begin({ question: SECRET_ANSWER, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     await jobs.claim(jobId!, (await generatePanelKeyPair()).publicKey);
     await jobs.claim(jobId!, (await generatePanelKeyPair()).publicKey);
     expect(events).toEqual(['claimed_by_other_key']);
@@ -193,8 +193,8 @@ describe('one-time jobs', () => {
     });
     // Claim-time analyses only: this is the path a claim takes without a usable precompute.
     const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 50, audit: (event) => events.push(event), precompute: false });
-    const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE }).jobId!;
-    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
+    const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
+    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     expect((await jobs.claim(stuck, panel.publicKey)).status).toBe(202);
     await Bun.sleep(120);
@@ -210,35 +210,41 @@ describe('one-time jobs', () => {
     expect(events).toEqual(['analysis_deadline']);
   });
 
-  test('evidence is re-read at claim time; an item re-tiered to Secret since the search is dropped', async () => {
+  test('evidence is re-read at dispatch and at claim time; an item re-tiered to Secret since is dropped', async () => {
     const model = readyModel();
     const jobs = makeJobs(model);
     const searchTime = [
       { item: 'lease', trust_domain: 'secure_local' },
       { item: 'password', trust_domain: 'secure_local' },
     ];
-    // Between search and claim the owner's classifier raised `password` to Secrets.
+    // After the precompute ran, the owner's classifier raised `password` to Secrets.
     const claimTime = [
       { item: 'lease', trust_domain: 'secure_local' },
       { item: 'password', trust_domain: 'secure_local', trust_tier: 'secrets' },
       { item: 'note', trust_domain: 'internal' },
     ];
+    let reclassified = false;
     let refreshed = 0;
     const { jobId } = jobs.begin({
       question: 'q',
       count: 2,
       evidence: searchTime,
-      refresh: async () => { refreshed += 1; return claimTime; },
+      refresh: async () => { refreshed += 1; return reclassified ? claimTime : searchTime; },
     });
-    expect(refreshed).toBe(0);
+    // The precompute's dispatch searched again before reading anything.
+    expect(refreshed).toBe(1);
     await settled(jobs);
-    // The search-time precompute read both items.
+    // Both items were still Private when it was dispatched: it read both.
     expect(model.calls[0]!.evidence).toEqual(searchTime);
+    reclassified = true;
     const panel0 = await generatePanelKeyPair();
     await jobs.claim(jobId!, panel0.publicKey);
     await settled(jobs);
-    expect(refreshed).toBe(1);
-    // It read an item that is Secret now: discarded, and answered again from the current evidence.
+    // The claim searched again; its own computation went straight to the
+    // model slot from that search, so it was not searched a third time.
+    expect(refreshed).toBe(2);
+    // The precompute read an item that is Secret now: discarded, and answered
+    // again from the current evidence, which holds no Secret item.
     expect(model.calls).toHaveLength(2);
     expect(model.calls[1]!.evidence).toEqual([{ item: 'lease', trust_domain: 'secure_local' }]);
     expect((await jobs.claim(jobId!, panel0.publicKey)).body.status).toBe('ready');
@@ -256,7 +262,7 @@ describe('one-time jobs', () => {
 
   test('the first key wins; a second key gets 409 claimed', async () => {
     const jobs = makeJobs(readyModel());
-    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE });
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     const owner = await generatePanelKeyPair();
     const intruder = await generatePanelKeyPair();
     expect((await jobs.claim(jobId!, owner.publicKey)).status).toBe(202);
@@ -269,8 +275,8 @@ describe('one-time jobs', () => {
   test('a job expires ten minutes after it was created, claimed or not', async () => {
     const clock = { now: 1_000_000 };
     const jobs = makeJobs(readyModel(), clock);
-    const unclaimed = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE }).jobId!;
-    const claimed = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE }).jobId!;
+    const unclaimed = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
+    const claimed = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(claimed, panel.publicKey);
     await settled(jobs);
@@ -286,7 +292,7 @@ describe('one-time jobs', () => {
     const panel = await generatePanelKeyPair();
     expect(await jobs.claim(mintCredential('private', OTHER_INSTALL), panel.publicKey)).toMatchObject({ status: 410 });
     expect(await jobs.claim(mintCredential('private', INSTALL), panel.publicKey)).toMatchObject({ status: 410 });
-    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE });
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     // The engine was re-linked as another install: its old ids no longer answer.
     installId = OTHER_INSTALL;
     expect(await jobs.claim(jobId!, panel.publicKey)).toMatchObject({ status: 410 });
@@ -294,7 +300,7 @@ describe('one-time jobs', () => {
 
   test('a failed analysis reports failed, idempotently', async () => {
     const jobs = makeJobs(readyModel({ answerPrivately: async () => { throw new Error(SECRET_ANSWER); } }));
-    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE });
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     const panel = await generatePanelKeyPair();
     await jobs.claim(jobId!, panel.publicKey);
     await settled(jobs);
@@ -304,19 +310,19 @@ describe('one-time jobs', () => {
   });
 
   test('no model, a downloading model, or no relay install: counts only, no job', () => {
-    expect(makeJobs(readyModel({ status: () => ({ state: 'no_model' }) })).begin({ question: 'q', count: 2, evidence: EVIDENCE }))
+    expect(makeJobs(readyModel({ status: () => ({ state: 'no_model' }) })).begin({ question: 'q', count: 2, evidence: EVIDENCE, refresh: async () => EVIDENCE }))
       .toEqual({ count: 2, panelState: 'no_model' });
-    expect(makeJobs(readyModel({ status: () => ({ state: 'model_downloading', percent: 41.6 }) })).begin({ question: 'q', count: 99, evidence: EVIDENCE }))
+    expect(makeJobs(readyModel({ status: () => ({ state: 'model_downloading', percent: 41.6 }) })).begin({ question: 'q', count: 99, evidence: EVIDENCE, refresh: async () => EVIDENCE }))
       .toEqual({ count: 50, panelState: 'model_downloading', percent: 42 });
     const unlinked = new PrivateAnswerJobs({ model: () => readyModel(), installId: () => undefined });
-    expect(unlinked.begin({ question: 'q', count: 1, evidence: EVIDENCE })).toEqual({ count: 1, panelState: 'no_model' });
+    expect(unlinked.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE })).toEqual({ count: 1, panelState: 'no_model' });
     expect(unlinked.size).toBe(0);
   });
 
   test('claims of live jobs are rate limited; pending polls by the claiming key are rate limited per job but never destroy it', async () => {
     const limited = makeJobs(readyModel(), { now: 0 }, { claimRate: { capacity: 2, refillPerSecond: 0 } });
     const panel = await generatePanelKeyPair();
-    const live = limited.begin({ question: 'q', count: 1, evidence: EVIDENCE }).jobId!;
+    const live = limited.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     await limited.claim(live, panel.publicKey);
     await limited.claim(live, panel.publicKey);
     expect(await limited.claim(live, panel.publicKey)).toMatchObject({ status: 429, body: { status: 'rate_limited' } });
@@ -328,7 +334,7 @@ describe('one-time jobs', () => {
     const polled = makeJobs(readyModel({
       answerPrivately: async () => { await gate; return { answer: 'survived', citations: [] }; },
     }), clock, { pollRate: { capacity: 3, refillPerSecond: 1 } });
-    const { jobId } = polled.begin({ question: 'q', count: 1, evidence: EVIDENCE });
+    const { jobId } = polled.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     for (let i = 0; i < 3; i += 1) expect((await polled.claim(jobId!, panel.publicKey)).status).toBe(202);
     for (let i = 0; i < 50; i += 1) {
       expect(await polled.claim(jobId!, panel.publicKey)).toEqual({ status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: 2 });
@@ -352,7 +358,7 @@ describe('one-time jobs', () => {
     for (let i = 0; i < 100; i += 1) {
       expect(await jobs.claim(mintCredential('private', INSTALL), panel.publicKey)).toEqual({ status: 410, body: { status: 'gone' } });
     }
-    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE });
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     expect((await jobs.claim(jobId!, panel.publicKey)).status).toBe(202);
     await settled(jobs);
     const ready = await jobs.claim(jobId!, panel.publicKey);
@@ -372,12 +378,14 @@ describe('one-time jobs', () => {
         return new Promise<void>((resolve) => { finishReset = () => { events.push('reset:done'); resolve(); }; });
       },
     });
-    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 20, resetTimeoutMs: 60_000, audit: () => {}, precompute: false });
-    const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE }).jobId!;
-    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
+    // The deadline (one bound for every claim) leaves `next` room to finish
+    // after the reset; `stuck` passes it during the first sleep.
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 60, resetTimeoutMs: 60_000, audit: () => {}, precompute: false });
+    const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
+    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(stuck, panel.publicKey);
-    await Bun.sleep(80);
+    await Bun.sleep(120);
     // The stuck job failed and its reset is running: the next one, claimed now, has not started.
     expect(await jobs.claim(stuck, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
     expect((await jobs.claim(next, panel.publicKey)).status).toBe(202);
@@ -399,8 +407,8 @@ describe('one-time jobs', () => {
       reset: () => { resets += 1; return new Promise<void>(() => {}); },
     });
     const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 100, resetTimeoutMs: 60, audit: () => {}, precompute: false });
-    const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE }).jobId!;
-    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE }).jobId!;
+    const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
+    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(stuck, panel.publicKey);
     await Bun.sleep(110);
@@ -447,7 +455,7 @@ describe('the /private/<id> endpoint', () => {
   test('serves relayed POSTs from a ChatGPT widget origin only, with a tiny body', async () => {
     const jobs = makeJobs(readyModel());
     const handler = createPrivateAnswerHandler({ jobs, isRelayed: relayed });
-    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE });
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     const panel = await generatePanelKeyPair();
     const good = { v: 1, publicKey: panel.publicKey };
 
@@ -780,7 +788,7 @@ describe('end to end through a real relay', () => {
         if (Date.now() > deadline) throw new Error('install never came online');
         await Bun.sleep(10);
       }
-      const { jobId } = jobs.begin({ question: 'When does the lease end?', count: 1, evidence: EVIDENCE });
+      const { jobId } = jobs.begin({ question: 'When does the lease end?', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
       const panel = await generatePanelKeyPair();
       const collect = () => fetch(`${relay.url}/private/${jobId}`, {
         method: 'POST',
