@@ -1,6 +1,6 @@
 {
   "name": "olympus-source-checkout",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0-rc.3",
   "private": true,
   "description": "Sovereignty-aware OpenClaw source answers across seven personal data providers.",
   "license": "MIT",

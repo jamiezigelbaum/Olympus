@@ -325,7 +325,13 @@ export interface AnswerResultOptions {
    * Never a count, a title or any content.
    */
   privateMatch?: PrivateMatchSummary & { jobId?: string };
+  /** No source is connected yet: an empty result says so instead of counting searched sources. */
+  noSourcesConnected?: boolean;
 }
+
+/** An empty search on a new install, before any source is connected. */
+export const NO_SOURCES_CONNECTED_TEXT = 'No sources are connected to Olympus yet, so there is nothing to search. '
+  + 'The user can connect one from the Olympus dashboard (for example: Connect Dropbox).';
 
 /**
  * The one note the model gets about a Private match. Fixed text: no
@@ -537,7 +543,9 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   const lines: string[] = [];
   if (evidence.length === 0) {
     if (!panelActive) {
-      lines.push(`Olympus found no Public or Personal evidence for this question in ${plural(coverage.searchedSources, 'searched source')}.`);
+      lines.push(options.noSourcesConnected
+        ? NO_SOURCES_CONNECTED_TEXT
+        : `Olympus found no Public or Personal evidence for this question in ${plural(coverage.searchedSources, 'searched source')}.`);
     }
   } else {
     lines.push(panelActive ? PANEL_SEARCH_INSTRUCTION : SEARCH_INSTRUCTION, '');

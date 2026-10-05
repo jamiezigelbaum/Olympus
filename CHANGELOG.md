@@ -1,6 +1,21 @@
 # Changelog
 
-## 1.0.0-rc.1 - unreleased
+## 1.0.0-rc.3 - unreleased
+
+- **A first question before anything is connected says so.** With no source
+  connected, an empty `olympus_search` tells ChatGPT nothing is connected yet
+  and how to connect one, instead of "no evidence in 4 searched sources".
+
+## 1.0.0-rc.2 - unreleased
+
+- **A leftover OpenClaw entry no longer leaves search unset.** The engine
+  skips writing its default model policy only when OpenClaw really runs an
+  Olympus plugin (installed, enabled), not when an old `olympus` entry is all
+  that is left; that case left a new install with no search model.
+- **The uninstaller waits for the engine to stop** (up to 30 seconds) instead
+  of refusing after 3.
+
+## 1.0.0-rc.1
 
 First release candidate of Olympus 1.0, the ChatGPT plugin release (see the
 release plan, docs/V0_4_RELEASE.md). The 0.4 beta line ended at beta.11.

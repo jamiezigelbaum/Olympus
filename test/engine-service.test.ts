@@ -890,7 +890,17 @@ describe('engine install preflight, policy seeding, and what uninstall keeps', (
   const blockers: Array<[string, (home: string, root: string) => Record<string, string>, string]> = [
     ['an OpenClaw config with an Olympus entry', (home) => {
       mkdirSync(join(home, '.openclaw'), { recursive: true });
-      writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { entries: { olympus: { config: {} } } } }));
+      writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { entries: { olympus: { config: {} } }, installs: { olympus: { source: 'npm' } } } }));
+      return {};
+    }, 'OpenClaw is configured to run Olympus'],
+    ['an OpenClaw config whose Olympus entry has the plugin in its extensions folder', (home) => {
+      mkdirSync(join(home, '.openclaw', 'extensions', 'olympus'), { recursive: true });
+      writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { entries: { olympus: { enabled: true } } } }));
+      return {};
+    }, 'OpenClaw is configured to run Olympus'],
+    ['an OpenClaw config loading Olympus from a path', (home) => {
+      mkdirSync(join(home, '.openclaw'), { recursive: true });
+      writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { entries: { olympus: {} }, load: { paths: ['/Users/me/Code/Olympus'] } } }));
       return {};
     }, 'OpenClaw is configured to run Olympus'],
     ['a JSON5 OpenClaw config named by OPENCLAW_CONFIG_PATH', (_home, root) => {
@@ -925,6 +935,18 @@ describe('engine install preflight, policy seeding, and what uninstall keeps', (
       expect(result.seeded_sovereignty).toBeUndefined();
       expect(existsSync(enginePaths(home).sovereigntyPath)).toBe(false);
       expect(result.warnings.some((warning) => warning.includes('was not created'))).toBe(true);
+    });
+  }
+
+  for (const [name, config] of [
+    ['a leftover Olympus entry with no installed plugin', { plugins: { entries: { olympus: { enabled: true } }, allow: ['olympus'] } }],
+    ['a disabled Olympus plugin', { plugins: { entries: { olympus: { enabled: false } }, installs: { olympus: { source: 'npm' } } } }],
+  ] as const) {
+    test(`${name} in OpenClaw does not block the seed`, () => {
+      const { home } = fixture();
+      mkdirSync(join(home, '.openclaw'), { recursive: true });
+      writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify(config));
+      expect(engineSovereigntySeedBlocker({ homeDir: home, workerEnvPath: enginePaths(home).workerEnvPath, env: {} })).toBeUndefined();
     });
   }
 
