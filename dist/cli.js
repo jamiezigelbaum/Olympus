@@ -27624,6 +27624,7 @@ async function buildEvidencePackDetailed(input) {
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes = [];
   const contentPrivateCandidateIndexes = [];
+  const secureLocalExtractionGapIndexes = [];
   let unreadCandidates = 0;
   const hydrationStartedAt = Date.now();
   const maxBytesPerCandidate = evidenceBytesPerCandidate(routedHits.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
@@ -27652,6 +27653,8 @@ async function buildEvidencePackDetailed(input) {
     if (policyDenied) {
       policyDeniedCandidates += 1;
       const gap2 = `${hit.corpusId} ${SOURCE_MODEL_POLICY_GAP_SUFFIX}`;
+      if (hit.trustDomain === "secure_local")
+        secureLocalExtractionGapIndexes.push(extractionGaps.length);
       extractionGaps.push(gap2);
       policyDeniedCoverageGaps.push(gap2);
       continue;
@@ -27682,8 +27685,12 @@ async function buildEvidencePackDetailed(input) {
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
     const gap = extractionGapFor(hit, provider !== undefined, content);
-    if (gap)
+    if (gap) {
+      if (hit.trustDomain === "secure_local" || candidate.trustDomain === "secure_local") {
+        secureLocalExtractionGapIndexes.push(extractionGaps.length);
+      }
       extractionGaps.push(gap);
+    }
   }
   const matchCounts = coverageMatchCounts(routed.matchCounts, candidateCorpusIds, candidates.some((candidate) => candidate.trustDomain === "secure_local"));
   const coverage = {
@@ -27708,6 +27715,8 @@ async function buildEvidencePackDetailed(input) {
     namesOnlyCandidateIndexes,
     contentPrivateCandidateIndexes,
     unreadCandidates,
+    secureLocalExtractionGapIndexes,
+    secureLocalMatchCountCorpusIds: (routed.matchCounts ?? []).filter((count) => count.trustDomain === "secure_local").map((count) => count.corpusId),
     ...secretLocations.length > 0 ? { secretLocations } : {},
     ...classificationCoverage.length > 0 ? { classificationCoverage } : {}
   };
@@ -29069,16 +29078,16 @@ function createAnalystSourceIndexAnswerHandler(options) {
       let pack = detail.pack;
       const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
       const analyzedSecureLocal = new WeakMap;
-      const recordAnalyzed = (result, analyzedPack) => {
-        if (typeof result !== "object" || result === null)
-          return;
-        analyzedSecureLocal.set(result, analyzedSecureLocal.get(result) === true || packHasSecureLocal(analyzedPack));
-      };
       const legFitting = (analysisDetail) => {
         const candidateCorpus = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? ""
         ]));
+        const recordAnalyzed = (result, analyzedPack) => {
+          if (typeof result !== "object" || result === null)
+            return;
+          analyzedSecureLocal.set(result, analyzedSecureLocal.get(result) === true || packCarriesSecureLocalContext(analyzedPack, analysisDetail));
+        };
         return {
           localLeg: (analyst) => promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus, recordAnalyzed),
           cloudLeg: (analyst) => promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, recordAnalyzed),
@@ -29154,12 +29163,12 @@ function createAnalystSourceIndexAnswerHandler(options) {
       } = routedAnalysis;
       const analystMs = Date.now() - analystStartedAt;
       const releaseGateStartedAt = Date.now();
-      const analyzedPackHasSecureLocal = analyzedSecureLocal.get(analystResult);
+      const analyzedSecureLocalContext = analyzedSecureLocal.get(analystResult);
       const { decision, facts, opsec, answer } = releaseAnalystAnswer({
         detail,
         result: analystResult,
         releaseSecureContent,
-        ...analyzedPackHasSecureLocal !== undefined ? { analyzedPackHasSecureLocal } : {},
+        ...analyzedSecureLocalContext !== undefined ? { analyzedSecureLocalContext } : {},
         ...synthesizedGap ? { synthesizedGap } : {}
       });
       const releaseGateMs = Date.now() - releaseGateStartedAt;
@@ -30028,7 +30037,7 @@ function releaseAnalystAnswer(input) {
     decision: "needs_approval",
     reasons: ["uncited_non_public_answer"],
     requiredApproval: packHasSecureLocal(input.detail.pack) ? "s4_release" : "user_review"
-  } : withSecureLocalContextGate(originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision(), facts, input.analyzedPackHasSecureLocal ?? packHasSecureLocal(input.detail.pack), input.releaseSecureContent);
+  } : withSecureLocalContextGate(originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision(), facts, input.analyzedSecureLocalContext ?? packCarriesSecureLocalContext(input.detail.pack, input.detail), input.releaseSecureContent);
   return {
     decision,
     facts,
@@ -30198,6 +30207,27 @@ function isUnsupportedNoContentAnswer2(result) {
 }
 function packHasSecureLocal(pack) {
   return pack.candidates.some((candidate) => candidate.trustDomain === "secure_local");
+}
+function packCarriesSecureLocalContext(pack, detail) {
+  const secureCandidate = pack.candidates.some((candidate) => candidate.trustDomain === "secure_local" || isSecureTrustTier(candidate.trustTier) || (candidate.facts ?? []).some((fact) => fact.sensitivity.trustDomain === "secure_local" || isSecureTrustTier(fact.sensitivity.trustTier)));
+  if (secureCandidate)
+    return true;
+  const builtGaps = detail.pack.coverage.extractionGaps;
+  const gapIndexes = detail.secureLocalExtractionGapIndexes;
+  const secureGaps = new Set((gapIndexes ?? []).map((index) => builtGaps[index]));
+  const knownGaps = new Set(builtGaps);
+  if (pack.coverage.extractionGaps.some((gap) => gapIndexes === undefined || secureGaps.has(gap) || !knownGaps.has(gap))) {
+    return true;
+  }
+  const counts = pack.coverage.matchCounts ?? [];
+  if (counts.length === 0)
+    return false;
+  const countCorpora = detail.secureLocalMatchCountCorpusIds;
+  if (countCorpora === undefined)
+    return true;
+  const secureCounts = new Set(countCorpora);
+  const knownCounts = new Set((detail.pack.coverage.matchCounts ?? []).map((count) => count.corpusId));
+  return counts.some((count) => secureCounts.has(count.corpusId) || !knownCounts.has(count.corpusId));
 }
 function factsFromCitations(citations, detail, releaseSecureContent) {
   return citations.flatMap((citation, index) => {

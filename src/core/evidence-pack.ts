@@ -246,6 +246,15 @@ export interface EvidencePackBuildDetail {
   // neither reaches the Analyst.
   secretLocations?: readonly SecretLocationNote[];
   classificationCoverage?: readonly ClassificationCoverageNote[];
+  // Which coverage entries came from secure_local evidence, attributed at
+  // build time from the routed hit or count that produced them: indexes into
+  // pack.coverage.extractionGaps (a gap carries the item's title or locator),
+  // and the corpus ids of pack.coverage.matchCounts entries counted over a
+  // secure_local corpus. A fitted pack keeps coverage after dropping
+  // candidates, so the release gate reads these to tell whether a model saw
+  // Private-derived text. Indexes and corpus ids only.
+  secureLocalExtractionGapIndexes?: readonly number[];
+  secureLocalMatchCountCorpusIds?: readonly string[];
 }
 
 export async function buildEvidencePack(input: BuildEvidencePackInput): Promise<EvidencePack> {
@@ -277,6 +286,7 @@ export async function buildEvidencePackDetailed(
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes: number[] = [];
   const contentPrivateCandidateIndexes: number[] = [];
+  const secureLocalExtractionGapIndexes: number[] = [];
   let unreadCandidates = 0;
 
   const hydrationStartedAt = Date.now();
@@ -315,6 +325,7 @@ export async function buildEvidencePackDetailed(
     if (policyDenied) {
       policyDeniedCandidates += 1;
       const gap = `${hit.corpusId} ${SOURCE_MODEL_POLICY_GAP_SUFFIX}`;
+      if (hit.trustDomain === 'secure_local') secureLocalExtractionGapIndexes.push(extractionGaps.length);
       extractionGaps.push(gap);
       policyDeniedCoverageGaps.push(gap);
       continue;
@@ -356,7 +367,12 @@ export async function buildEvidencePackDetailed(
     candidateCorpusIds.push(hit.corpusId);
 
     const gap = extractionGapFor(hit, provider !== undefined, content);
-    if (gap) extractionGaps.push(gap);
+    if (gap) {
+      if (hit.trustDomain === 'secure_local' || candidate.trustDomain === 'secure_local') {
+        secureLocalExtractionGapIndexes.push(extractionGaps.length);
+      }
+      extractionGaps.push(gap);
+    }
   }
 
   const matchCounts = coverageMatchCounts(
@@ -403,6 +419,10 @@ export async function buildEvidencePackDetailed(
     namesOnlyCandidateIndexes,
     contentPrivateCandidateIndexes,
     unreadCandidates,
+    secureLocalExtractionGapIndexes,
+    secureLocalMatchCountCorpusIds: (routed.matchCounts ?? [])
+      .filter((count) => count.trustDomain === 'secure_local')
+      .map((count) => count.corpusId),
     ...(secretLocations.length > 0 ? { secretLocations } : {}),
     ...(classificationCoverage.length > 0 ? { classificationCoverage } : {}),
   };

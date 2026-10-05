@@ -71,6 +71,7 @@ import {
 } from '../../core/sovereignty.ts';
 import {
   buildSourceSensitivity,
+  isSecureTrustTier,
   type RetrievalDegradation,
   type SourceIndexProvenance,
   type SourceItemIdentity,
@@ -445,15 +446,12 @@ export function createAnalystSourceIndexAnswerHandler(
       let pack = detail.pack;
       const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
       // What each leg actually read: a local or cloud leg reads the pack fitted
-      // to its budget, which can drop every secure_local candidate. Keyed by
-      // the result the leg returned, so the release gate judges the context of
-      // the leg whose answer it releases. OR-ed, so a result object two legs
-      // returned counts as secure if either read secure_local.
+      // to its budget, which can drop every secure_local candidate while
+      // keeping Private-derived coverage. Keyed by the result the leg
+      // returned, so the release gate judges the context of the leg whose
+      // answer it releases. OR-ed, so a result object two legs returned counts
+      // as secure if either read secure_local-derived text.
       const analyzedSecureLocal = new WeakMap<AnalystResult, boolean>();
-      const recordAnalyzed = (result: AnalystResult, analyzedPack: EvidencePack) => {
-        if (typeof result !== 'object' || result === null) return;
-        analyzedSecureLocal.set(result, analyzedSecureLocal.get(result) === true || packHasSecureLocal(analyzedPack));
-      };
       // Leg fitting is keyed by the candidates of the pack actually analyzed,
       // so a rebuilt pack (the private-outage fallback below) is fitted and its
       // matchCounts restated against its own candidates, never the first build's.
@@ -462,6 +460,13 @@ export function createAnalystSourceIndexAnswerHandler(
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? '',
         ] as const));
+        const recordAnalyzed = (result: AnalystResult, analyzedPack: EvidencePack) => {
+          if (typeof result !== 'object' || result === null) return;
+          analyzedSecureLocal.set(
+            result,
+            analyzedSecureLocal.get(result) === true || packCarriesSecureLocalContext(analyzedPack, analysisDetail),
+          );
+        };
         return {
           localLeg: (analyst: Analyst): Analyst =>
             promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus, recordAnalyzed),
@@ -573,13 +578,13 @@ export function createAnalystSourceIndexAnswerHandler(
       const releaseGateStartedAt = Date.now();
       // A result no leg recorded (a worker-synthesized gap, or no leg ran)
       // falls back to the whole pack: unknown context is judged secure if the
-      // pack held secure_local, never released on a guess.
-      const analyzedPackHasSecureLocal = analyzedSecureLocal.get(analystResult);
+      // pack carried secure_local-derived text, never released on a guess.
+      const analyzedSecureLocalContext = analyzedSecureLocal.get(analystResult);
       const { decision, facts, opsec, answer } = releaseAnalystAnswer({
         detail,
         result: analystResult,
         releaseSecureContent,
-        ...(analyzedPackHasSecureLocal !== undefined ? { analyzedPackHasSecureLocal } : {}),
+        ...(analyzedSecureLocalContext !== undefined ? { analyzedSecureLocalContext } : {}),
         ...(synthesizedGap ? { synthesizedGap } : {}),
       });
       const releaseGateMs = Date.now() - releaseGateStartedAt;
@@ -1881,10 +1886,12 @@ export interface AnalystReleaseInput {
   // detector reads `/** … */` on one line as a regex literal, and every other
   // file it enrolls comments the same way.
   synthesizedGap?: string;
-  // Whether the pack the answering leg actually read held a secure_local
-  // candidate (a fitted leg may have dropped them all). Absent: judged from
-  // detail.pack, the conservative answer, since fitting only drops candidates.
-  analyzedPackHasSecureLocal?: boolean;
+  // Whether anything in the pack the answering leg actually read derives from
+  // secure_local evidence (candidates, cached facts, or attributed coverage; a
+  // fitted leg may have dropped every Private candidate yet kept a Private
+  // gap or match count). Absent: judged from detail.pack, the conservative
+  // answer, since fitting only drops candidates and keeps coverage.
+  analyzedSecureLocalContext?: boolean;
 }
 
 export interface AnalystReleaseOutcome {
@@ -1992,7 +1999,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
           ? originalScanDecision
           : finalScanDecision(),
         facts,
-        input.analyzedPackHasSecureLocal ?? packHasSecureLocal(input.detail.pack),
+        input.analyzedSecureLocalContext ?? packCarriesSecureLocalContext(input.detail.pack, input.detail),
         input.releaseSecureContent,
       );
   return {
@@ -2036,10 +2043,10 @@ function scannedUnsupportedNoContentDecision(input: {
 
 // Gate facts come from citations, but the model read its whole pack: an answer
 // can state a secure_local detail while citing only a non-secure candidate.
-// `secureContext` says whether the pack the answering leg actually read held a
-// secure_local candidate: the leg's fitted pack when it recorded one, else the
-// analyzed detail's pack (the rebuilt detail when the private route fell back
-// without secure_local). Strict posture sends a releasable answer from a
+// `secureContext` says whether the pack the answering leg actually read
+// carried secure_local-derived text (packCarriesSecureLocalContext): the leg's
+// fitted pack when it recorded one, else the analyzed detail's pack (the
+// rebuilt detail when the private route fell back without secure_local). Strict posture sends a releasable answer from a
 // secure_local context to the same s4_release approval a secure-cited answer
 // gets; the default posture releases it and records the uncited secure context
 // in the content-free decision reasons.
@@ -2242,6 +2249,45 @@ function isUnsupportedNoContentAnswer(result: AnalystResult): boolean {
 
 function packHasSecureLocal(pack: EvidencePack): boolean {
   return pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local');
+}
+
+/**
+ * Whether anything a model reading `pack` sees derives from secure_local
+ * evidence. `pack` is the pack handed to the leg (fitted or whole); the main
+ * and the audit prompt are both rendered from it, so this covers either.
+ * Counted: a secure_local or secure-tier candidate, or a cached fact with
+ * secure sensitivity; an extraction gap or a match count that `detail`
+ * attributes to secure_local evidence (evidence-pack.ts records both at build
+ * time from the routed hit or count); and any gap or count `detail` cannot
+ * attribute (missing sidecar, or not among its pack's entries). Searched and
+ * skipped corpora are not counted: they are corpus ids and closed reason
+ * codes from configuration, never item text.
+ */
+function packCarriesSecureLocalContext(pack: EvidencePack, detail: EvidencePackBuildDetail): boolean {
+  const secureCandidate = pack.candidates.some((candidate) => (
+    candidate.trustDomain === 'secure_local'
+    || isSecureTrustTier(candidate.trustTier)
+    || (candidate.facts ?? []).some((fact) => (
+      fact.sensitivity.trustDomain === 'secure_local' || isSecureTrustTier(fact.sensitivity.trustTier)
+    ))
+  ));
+  if (secureCandidate) return true;
+  const builtGaps = detail.pack.coverage.extractionGaps;
+  const gapIndexes = detail.secureLocalExtractionGapIndexes;
+  const secureGaps = new Set((gapIndexes ?? []).map((index) => builtGaps[index]));
+  const knownGaps = new Set(builtGaps);
+  if (pack.coverage.extractionGaps.some((gap) => (
+    gapIndexes === undefined || secureGaps.has(gap) || !knownGaps.has(gap)
+  ))) {
+    return true;
+  }
+  const counts = pack.coverage.matchCounts ?? [];
+  if (counts.length === 0) return false;
+  const countCorpora = detail.secureLocalMatchCountCorpusIds;
+  if (countCorpora === undefined) return true;
+  const secureCounts = new Set(countCorpora);
+  const knownCounts = new Set((detail.pack.coverage.matchCounts ?? []).map((count) => count.corpusId));
+  return counts.some((count) => secureCounts.has(count.corpusId) || !knownCounts.has(count.corpusId));
 }
 
 // Each analyst citation becomes a structured evidence fact for the release
