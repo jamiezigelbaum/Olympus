@@ -211,6 +211,83 @@ export interface ZkapiSessionReceipt {
   network?: 'mainnet' | 'sepolia';
   listedAllowanceUsd?: number;
   reservedUsd?: number;
+  /** How long each stage took; content-free numbers only. */
+  stageMs?: ZkapiStageTimings;
+}
+
+/**
+ * Monotonic whole milliseconds spent in each stage of one session, in session
+ * order. A stage that started is recorded with the time spent in it, whether
+ * it completed or ended the session (a dispatch that timed out records the
+ * wait until it failed); a stage never started is absent, never zero.
+ */
+export interface ZkapiStageTimings {
+  /** Session start until the cross-process session lease is held. */
+  leaseAcquireMs?: number;
+  /** The platform confinement's self-test (Tor sessions only). */
+  confinementSelfTestMs?: number;
+  /** Tor start until "Bootstrapped 100". */
+  torBootstrapMs?: number;
+  /** Daemon start until it logs its listener and its health check answers. */
+  daemonReadyMs?: number;
+  /** Version, route, key-isolation, ownership and local-auth checks. */
+  daemonVerifyMs?: number;
+  /** Polling the model list until the reviewed policy is listed. */
+  policyWarmMs?: number;
+  /** The ledger reservation and fence, and the ownership check before dispatch. */
+  reservationMs?: number;
+  /** Request dispatch until the response headers arrive. */
+  dispatchToFirstByteMs?: number;
+  /** Response headers until the body is read. */
+  firstByteToCompletionMs?: number;
+  /** Waiting for the daemon log to correlate this request and its key. */
+  correlationWaitMs?: number;
+  /** Waiting for the daemon to report the key settled. */
+  settlementWaitMs?: number;
+  /** Stopping Tor before the post-stop probe. */
+  torStopMs?: number;
+  /** The post-stop route probe. */
+  postStopProbeMs?: number;
+  /** Stopping every owned process group and removing the session directory. */
+  teardownMs?: number;
+  /** Session start until teardown ends (or until a refusal before any process started). */
+  totalMs?: number;
+}
+
+/** Display order and labels for stage timings. */
+export const ZKAPI_STAGE_LABELS: ReadonlyArray<readonly [keyof ZkapiStageTimings, string]> = [
+  ['leaseAcquireMs', 'lease acquire'],
+  ['confinementSelfTestMs', 'confinement self-test'],
+  ['torBootstrapMs', 'Tor start to bootstrapped'],
+  ['daemonReadyMs', 'daemon start to ready'],
+  ['daemonVerifyMs', 'daemon verification'],
+  ['policyWarmMs', 'models/policy warm'],
+  ['reservationMs', 'reservation'],
+  ['dispatchToFirstByteMs', 'dispatch to first byte'],
+  ['firstByteToCompletionMs', 'first byte to completion'],
+  ['correlationWaitMs', 'request correlation wait'],
+  ['settlementWaitMs', 'settlement wait'],
+  ['torStopMs', 'Tor stop'],
+  ['postStopProbeMs', 'post-stop probe'],
+  ['teardownMs', 'teardown'],
+  ['totalMs', 'total'],
+];
+
+/** The recorded stages, in session order; absent stages are skipped. */
+export function zkapiStageRows(timings: ZkapiStageTimings | undefined): Array<{ label: string; ms: number }> {
+  if (!timings) return [];
+  return ZKAPI_STAGE_LABELS
+    .filter(([key]) => typeof timings[key] === 'number')
+    .map(([key, label]) => ({ label, ms: timings[key]! }));
+}
+
+/** A fixed-width text table of the recorded stages. */
+export function formatZkapiStageTable(timings: ZkapiStageTimings | undefined): string {
+  const rows = zkapiStageRows(timings);
+  if (rows.length === 0) return 'no stage timings recorded';
+  const width = Math.max(...rows.map((row) => row.label.length));
+  const msWidth = Math.max(...rows.map((row) => String(row.ms).length));
+  return rows.map((row) => `${row.label.padEnd(width)}  ${String(row.ms).padStart(msWidth)} ms`).join('\n');
 }
 
 export type ZkapiNetworkIdentity = 'hidden' | 'not_verified' | 'visible';
@@ -224,6 +301,8 @@ export interface ZkapiConsultError {
   httpStatus?: number;
   networkIdentity: ZkapiNetworkIdentity;
   receipt?: ZkapiSessionReceipt;
+  /** Timings for a session that ended before it had a receipt (the session lease was not taken). */
+  stageMs?: ZkapiStageTimings;
 }
 
 export type ZkapiConsultResult =
@@ -261,6 +340,8 @@ export interface ZkapiConsultTransportOptions {
   /** Defaults to this platform's implementation (`defaultZkapiConfinement`). */
   confinement?: ZkapiConfinement;
   now?: () => Date;
+  /** Monotonic milliseconds for stage timings; defaults to `performance.now()`. */
+  clock?: () => number;
 }
 
 export interface ZkapiMoneyStatus {
@@ -354,7 +435,7 @@ function failure(
   code: ZkapiConsultErrorCode,
   outcome: ZkapiConsultOutcome,
   networkIdentity: ZkapiNetworkIdentity,
-  extra: Partial<Pick<ZkapiConsultError, 'daemonCode' | 'httpStatus' | 'receipt'>> = {},
+  extra: Partial<Pick<ZkapiConsultError, 'daemonCode' | 'httpStatus' | 'receipt' | 'stageMs'>> = {},
 ): { ok: false; error: ZkapiConsultError } {
   return { ok: false, error: { code, message: MESSAGES[code], outcome, networkIdentity, ...extra } };
 }
@@ -1547,14 +1628,37 @@ async function exclusiveSession(
   zkapiConsultInFlight = true;
   const statePath = options.statePath ?? defaultZkapiStatePath();
   const sent = { dispatched: false };
+  // Timing never throws and never changes control flow: a failed or
+  // non-finite clock sample just leaves that measurement out.
+  const clock = options.clock ?? (() => performance.now());
+  let startedAt: number | undefined;
+  let leaseHeld = false;
   try {
+    startedAt = sampleClock(clock);
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 });
-    return await withFileLease(`${statePath}.session`, () => runSession(question, recovery, options, statePath, signal, sent), {
-      acquireTimeoutMs: 50,
-    });
+    const result = await withFileLease(
+      `${statePath}.session`,
+      () => {
+        leaseHeld = true;
+        return runSession(question, recovery, options, statePath, signal, sent, clock, startedAt);
+      },
+      { acquireTimeoutMs: 50 },
+    );
+    // A refusal before any process started never reaches teardown; its total ends here.
+    const receipt = result.ok ? result.receipt : result.error.receipt;
+    if (receipt && receipt.stageMs?.totalMs === undefined) {
+      receipt.stageMs = withTiming(receipt.stageMs ?? {}, 'totalMs', elapsedMs(clock, startedAt));
+      if (Object.keys(receipt.stageMs).length === 0) delete receipt.stageMs;
+    }
+    return result;
   } catch (error) {
-    if (error instanceof FileLeaseBusyError) return failure('busy', 'not_sent', initialIdentity);
-    return failure('internal_error', sent.dispatched ? 'unknown' : 'not_sent', initialIdentity);
+    // No receipt exists on this path; the timings ride on the error instead.
+    const total = elapsedMs(clock, startedAt);
+    let stageMs = withTiming({}, 'totalMs', total);
+    if (!leaseHeld) stageMs = withTiming(stageMs, 'leaseAcquireMs', total);
+    const timed = Object.keys(stageMs).length > 0 ? { stageMs } : {};
+    if (error instanceof FileLeaseBusyError) return failure('busy', 'not_sent', initialIdentity, timed);
+    return failure('internal_error', sent.dispatched ? 'unknown' : 'not_sent', initialIdentity, timed);
   } finally {
     zkapiConsultInFlight = false;
   }
@@ -1567,7 +1671,18 @@ async function runSession(
   statePath: string,
   signal: AbortSignal | undefined,
   sent: { dispatched: boolean },
+  clock: () => number,
+  startedAt: number | undefined,
 ): Promise<ZkapiConsultResult> {
+  // Stage timers: one clock sample per transition, never inside a polling
+  // loop. Sampling never throws; a missing sample omits that stage.
+  let timings: ZkapiStageTimings = withTiming({}, 'leaseAcquireMs', elapsedMs(clock, startedAt));
+  let openStage: { key: keyof ZkapiStageTimings; at: number | undefined } | undefined;
+  const stage = (key: keyof ZkapiStageTimings | undefined): void => {
+    const at = sampleClock(clock);
+    if (openStage) timings = withTiming(timings, openStage.key, durationMs(openStage.at, at));
+    openStage = key ? { key, at } : undefined;
+  };
   const now = options.now ?? (() => new Date());
   const settings = options.settings;
   const env = options.env ?? process.env;
@@ -1589,9 +1704,12 @@ async function runSession(
     settlement: 'no_lease',
     fence: 'clear',
   };
+  const snapshot = (): ZkapiSessionReceipt => (
+    Object.keys(timings).length > 0 ? { ...receipt, stageMs: { ...timings } } : { ...receipt }
+  );
   const identity = (): ZkapiNetworkIdentity => (perConsultTor ? networkIdentityFor(receipt) : 'visible');
   const fail = (code: ZkapiConsultErrorCode, extra: Partial<Pick<ZkapiConsultError, 'daemonCode' | 'httpStatus'>> = {}): ZkapiConsultResult => (
-    failure(code, sent.dispatched ? (extra.httpStatus ? 'sent_failed' : 'unknown') : 'not_sent', identity(), { ...extra, receipt: { ...receipt } })
+    failure(code, sent.dispatched ? (extra.httpStatus ? 'sent_failed' : 'unknown') : 'not_sent', identity(), { ...extra, receipt: snapshot() })
   );
 
   // --- Preconditions: nothing starts until all hold. The ledger's fences are
@@ -1681,6 +1799,7 @@ async function runSession(
     const anyExited = unexpectedExit;
 
     if (perConsultTor) {
+      stage('confinementSelfTestMs');
       if (await confinement.selfTest(workDir, childEnv)) {
         receipt.confinementSelfTest = 'passed';
       } else if (confinement.level !== 'none') {
@@ -1693,6 +1812,7 @@ async function runSession(
       const torDataDir = join(workDir, 'tor');
       mkdirSync(torDataDir, { mode: 0o700 });
       let bootstrapped = false;
+      stage('torBootstrapMs');
       tor = supervise('tor', watchdog, [
         torExecutable!,
         '--ClientOnly', '1',
@@ -1713,6 +1833,7 @@ async function runSession(
 
     const facts: DaemonFacts = { requests: new Map(), settled: new Map() };
     const daemonArgv = [daemonExecutable, 'serve'];
+    stage('daemonReadyMs');
     daemon = supervise(
       'daemon',
       watchdog,
@@ -1752,6 +1873,7 @@ async function runSession(
       { signal: sessionSignal, giveUp: anyExited, pollMs: 250 },
     );
     if (!ready) return (result = fail(sessionSignal.aborted ? interrupted() : 'daemon_start_failed'));
+    stage('daemonVerifyMs');
     receipt.daemonVersion = facts.version!;
     if (!versionSupported(facts.version)) return (result = fail('daemon_version_unsupported'));
     if (facts.listen !== new URL(options.baseUrl).host) return (result = fail('daemon_identity_failed'));
@@ -1789,6 +1911,7 @@ async function runSession(
     // policy has loaded. Listing is catalog membership, not a test request.
     let listing: { listed: boolean; allowance?: number } = { listed: false };
     let guardProblem: ZkapiConsultErrorCode | undefined;
+    stage('policyWarmMs');
     await waitFor(async (remainingMs) => {
       guardProblem = await guard();
       if (guardProblem) return true;
@@ -1803,6 +1926,7 @@ async function runSession(
     receipt.listedAllowanceUsd = listing.allowance / 1_000_000;
 
     let reservation: ReturnType<typeof reserveZkapiRequest>;
+    stage('reservationMs');
     try {
       reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now(), {
         scope,
@@ -1821,10 +1945,11 @@ async function runSession(
 
     const requestsBefore = new Set(facts.requests.keys());
     sent.dispatched = true;
-    const completion = await sendCompletion(question, options, origin, sessionSignal);
+    const completion = await sendCompletion(question, options, origin, sessionSignal, stage);
 
     // Correlate this request's own log lines, then wait for its key to settle.
     // Runs to completion even if the caller cancelled; stops if a process died.
+    stage('correlationWaitMs');
     const correlated = await waitFor(() => {
       const ours = [...facts.requests.entries()].filter(([id, request]) => !requestsBefore.has(id) && request.route === '/v1/chat/completions');
       return ours.length === 1 && ours[0]![1].finished !== undefined;
@@ -1835,6 +1960,7 @@ async function runSession(
     const keyRef = request?.keys.length === 1 ? request.keys[0]!.keyRef : undefined;
     let fenceClears = false;
     if (keyRef !== undefined) {
+      stage('settlementWaitMs');
       receipt.settlement = await waitFor(
         () => facts.settled.get(keyRef) === true,
         settings.settleTimeoutMs,
@@ -1852,6 +1978,7 @@ async function runSession(
       receipt.settlement = preLease ? 'no_lease' : 'not_confirmed';
       fenceClears = preLease;
     }
+    stage(undefined);
     if (fenceClears) {
       try {
         updateState(statePath, now(), (state) => {
@@ -1867,12 +1994,17 @@ async function runSession(
 
     if (perConsultTor && !unexpectedExit()) {
       tor!.deliberate = true;
+      stage('torStopMs');
       const torStopped = await stopOwned(tor!);
+      stage(undefined);
       // Secondary signal only. With Tor gone the model list must fail with the
       // daemon's exact upstream-unavailable shape; a 200 is a bypass.
-      const after = torStopped && !daemonGone() && await owned(false)
-        ? await probeRequest(fetchImpl, `${origin}/v1/models`, { method: 'GET', headers: authorization }, undefined, MODELS_PROBE_TIMEOUT_MS)
-        : undefined;
+      let after: ProbeResponse | undefined;
+      if (torStopped && !daemonGone() && await owned(false)) {
+        stage('postStopProbeMs');
+        after = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: 'GET', headers: authorization }, undefined, MODELS_PROBE_TIMEOUT_MS);
+        stage(undefined);
+      }
       receipt.postStopProbe = after?.status === 200
         ? 'still_reachable'
         : after?.status === 502 && daemonErrorEnvelope(after.body) === 'models_unavailable'
@@ -1886,7 +2018,7 @@ async function runSession(
       result = failure(completion.error.code, completion.error.outcome, identity(), {
         ...(completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {}),
         ...(completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {}),
-        receipt: { ...receipt },
+        receipt: snapshot(),
       });
       return result;
     }
@@ -1895,7 +2027,7 @@ async function runSession(
       text: completion.text,
       routeLabel: zkapiRouteLabel(receipt),
       networkIdentity: identity(),
-      receipt: { ...receipt },
+      receipt: snapshot(),
       ...(completion.providerVerification ? { providerVerification: completion.providerVerification } : {}),
       elapsedMs: completion.elapsedMs,
     };
@@ -1908,6 +2040,8 @@ async function runSession(
   // session whose processes cannot be confirmed stopped is not a success.
   // Each step on its own: one failure never skips the next.
   signal?.removeEventListener('abort', onCallerAbort);
+  // Closes a stage the session ended in, and starts timing teardown.
+  stage('teardownMs');
   let allStopped = true;
   for (const group of [...groups].reverse()) {
     group.deliberate = true;
@@ -1926,20 +2060,51 @@ async function runSession(
   } else {
     result = fail('teardown_incomplete');
   }
+  stage(undefined);
+  timings = withTiming(timings, 'totalMs', elapsedMs(clock, startedAt));
   const final = result;
+  // The returned receipt and the ledger's last session carry every stage,
+  // teardown and total included.
+  const finalReceipt = final.ok ? final.receipt : final.error.receipt;
+  if (finalReceipt && Object.keys(timings).length > 0) finalReceipt.stageMs = { ...timings };
   try {
     updateState(statePath, now(), (state) => {
       const { running, ...rest } = state;
       return {
         ...rest,
         ...(allStopped ? {} : running ? { running } : {}),
-        lastSession: { ...receipt, at: now().toISOString(), result: final.ok ? 'ok' : final.error.code },
+        lastSession: { ...snapshot(), at: now().toISOString(), result: final.ok ? 'ok' : final.error.code },
       };
     });
   } catch {
     // The ledger stays as last written; the next session refuses if it is unreadable.
   }
   return final;
+}
+
+/** One clock sample, or undefined when the clock throws or returns a non-finite value. */
+function sampleClock(clock: () => number): number | undefined {
+  try {
+    const value = clock();
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function durationMs(from: number | undefined, to: number | undefined): number | undefined {
+  if (from === undefined || to === undefined) return undefined;
+  const ms = Math.round(to - from);
+  return Number.isFinite(ms) ? Math.max(0, ms) : undefined;
+}
+
+function elapsedMs(clock: () => number, since: number | undefined): number | undefined {
+  return since === undefined ? undefined : durationMs(since, sampleClock(clock));
+}
+
+/** Timings with `key` set to `ms`, or unchanged when the measurement is missing. */
+function withTiming(timings: ZkapiStageTimings, key: keyof ZkapiStageTimings, ms: number | undefined): ZkapiStageTimings {
+  return ms === undefined ? timings : { ...timings, [key]: ms };
 }
 
 function adminStatusNetwork(response: ProbeResponse): 'mainnet' | 'sepolia' | undefined {
@@ -1962,6 +2127,7 @@ async function sendCompletion(
   options: ZkapiConsultTransportOptions,
   origin: string,
   signal: AbortSignal | undefined,
+  stage: (key: keyof ZkapiStageTimings | undefined) => void,
 ): Promise<CompletionResult> {
   const settings = options.settings;
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -1979,6 +2145,7 @@ async function sendCompletion(
   );
   try {
     let response: Response;
+    stage('dispatchToFirstByteMs');
     try {
       response = await fetchImpl(`${origin}/v1/chat/completions`, {
         method: 'POST',
@@ -2001,11 +2168,13 @@ async function sendCompletion(
       if (isRedirectError(error)) return bad('redirect_refused', 'unknown');
       return bad('transport_failed', 'unknown');
     }
+    stage('firstByteToCompletionMs');
     if (response.status >= 300 && response.status < 400) {
       await response.body?.cancel().catch(() => undefined);
       return bad('redirect_refused', 'unknown', { httpStatus: response.status });
     }
     const body = await readBounded(response, settings.maxResponseBytes).catch(() => undefined);
+    stage(undefined);
     if (!body) {
       if (timedOut) return bad('timeout', 'unknown');
       if (controller.signal.aborted) return bad('aborted', 'unknown');

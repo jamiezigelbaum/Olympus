@@ -17,6 +17,8 @@ import { dirname, join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import {
+  formatZkapiStageTable,
+  inspectLoopbackListener,
   recoverZkapiSession,
   reserveZkapiRequest,
   sendZkapiConsult,
@@ -360,6 +362,84 @@ function alive(pid: number): boolean {
 
 const NO_CONFINEMENT_LABEL = 'payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; no network confinement';
 
+/** What each mocked operation advances virtual time by; distinct so a misplaced one shows. */
+const OP = { selfTest: 1, now: 2, healthz: 3, inspect: 5, unauthenticatedProbe: 7, adminStatus: 11, models: 13, dispatch: 17, body: 19 } as const;
+
+/**
+ * Virtual time for stage timings. Mocked operations advance it by their own
+ * amount; read k of the clock returns the current time, then advances it by
+ * k x 1000. A stage opened at read k and closed at read k + 1 therefore lasts
+ * k x 1000 plus the operations that ran inside it.
+ */
+function virtualTime() {
+  let time = 0;
+  let reads = 0;
+  const values: number[] = [];
+  return {
+    values,
+    advance: (ms: number): void => {
+      time += ms;
+    },
+    clock: (): number => {
+      reads += 1;
+      const value = time;
+      values.push(value);
+      time += reads * 1000;
+      return value;
+    },
+  };
+}
+
+function timedTransport(time: ReturnType<typeof virtualTime>, overrides: Partial<ZkapiConsultTransportOptions> = {}): ZkapiConsultTransportOptions {
+  const inspect = overrides.inspectListener ?? inspectLoopbackListener;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/v1/chat/completions') {
+      let response: Response;
+      try {
+        response = await fetch(input, init);
+      } finally {
+        time.advance(OP.dispatch);
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return new Response(new ReadableStream({
+        pull(controller) {
+          time.advance(OP.body);
+          controller.enqueue(bytes);
+          controller.close();
+        },
+        // No eager pull: the body is read only when the transport reads it.
+      }, { highWaterMark: 0 }), { status: response.status, headers: response.headers });
+    }
+    const op = url.pathname === '/healthz'
+      ? OP.healthz
+      : url.pathname === '/admin/status'
+        ? OP.adminStatus
+        : url.pathname === '/v1/models'
+          ? (init?.method === 'POST' ? OP.unauthenticatedProbe : OP.models)
+          : 0;
+    try {
+      return await fetch(input, init);
+    } finally {
+      time.advance(op);
+    }
+  }) as typeof fetch;
+  return transport({
+    clock: time.clock,
+    now: () => {
+      time.advance(OP.now);
+      return NOW;
+    },
+    confinement: { ...noConfinement, selfTest: async () => { time.advance(OP.selfTest); return false; } },
+    fetchImpl,
+    ...overrides,
+    inspectListener: async (port) => {
+      time.advance(OP.inspect);
+      return inspect(port);
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Sessions and labels
 
@@ -474,6 +554,154 @@ describe('zkAPI consult transport: a supervised session', () => {
       expect(await sendZkapiConsult(bad, transport())).toMatchObject({ ok: false, error: { code: 'invalid_question' } });
     }
     expect(torRuns()).toEqual([]);
+  });
+});
+
+describe('zkAPI consult transport: stage timings', () => {
+  // Virtual time (see `virtualTime`): each stage reads as
+  // (its opening read's position x 1000) + (the mocked operations inside it),
+  // so a stage attributed to the wrong key, or a boundary moved across an
+  // operation or a read, changes the number.
+  const SUCCESS = {
+    leaseAcquireMs: 1000,
+    confinementSelfTestMs: 3000 + OP.selfTest,
+    torBootstrapMs: 4000 + OP.now,
+    daemonReadyMs: 5000 + OP.now + OP.healthz,
+    daemonVerifyMs: 6000 + 4 * OP.inspect + OP.unauthenticatedProbe + OP.adminStatus,
+    policyWarmMs: 7000 + 2 * OP.inspect + OP.models,
+    reservationMs: 8000 + OP.now + 2 * OP.inspect,
+    dispatchToFirstByteMs: 9000 + OP.dispatch,
+    firstByteToCompletionMs: 10000 + OP.body,
+  };
+
+  test('a successful session records every stage, in the receipt and the ledger', async () => {
+    const time = virtualTime();
+    const result = await sendZkapiConsult(QUESTION, timedTransport(time));
+    const expected = {
+      ...SUCCESS,
+      correlationWaitMs: 12000,
+      settlementWaitMs: 13000,
+      torStopMs: 15000,
+      postStopProbeMs: 17000 + OP.models,
+      teardownMs: 19000,
+      totalMs: time.values.at(-1)! - time.values[0]!,
+    };
+    expect(time.values).toHaveLength(21);
+    expect(result).toMatchObject({ ok: true, receipt: { settlement: 'confirmed', fence: 'clear', postStopProbe: 'route_lost' } });
+    expect(result.ok && result.receipt.stageMs).toEqual(expected);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).lastSession.stageMs).toEqual(expected);
+  }, SLOW);
+
+  test('a failure before dispatch records only the stages it reached', async () => {
+    writePlan({ modelMissing: true });
+    const time = virtualTime();
+    const result = await sendZkapiConsult(QUESTION, timedTransport(time));
+    expect(result).toMatchObject({ ok: false, error: { code: 'model_unavailable', outcome: 'not_sent' } });
+    const expected = {
+      leaseAcquireMs: SUCCESS.leaseAcquireMs,
+      confinementSelfTestMs: SUCCESS.confinementSelfTestMs,
+      torBootstrapMs: SUCCESS.torBootstrapMs,
+      daemonReadyMs: SUCCESS.daemonReadyMs,
+      daemonVerifyMs: SUCCESS.daemonVerifyMs,
+      policyWarmMs: SUCCESS.policyWarmMs,
+      teardownMs: 8000,
+      totalMs: time.values.at(-1)! - time.values[0]!,
+    };
+    expect(!result.ok && result.error.receipt?.stageMs).toEqual(expected);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).lastSession.stageMs).toEqual(expected);
+  }, SLOW);
+
+  test('a refusal before any process starts records the lease and the total', async () => {
+    const time = virtualTime();
+    const partial = settings({ acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: [] } });
+    const result = await sendZkapiConsult(QUESTION, timedTransport(time, { settings: partial }));
+    expect(result).toMatchObject({ ok: false, error: { code: 'acknowledgements_incomplete' } });
+    // The owner-settings check reads `now` once between the lease and the total.
+    expect(!result.ok && result.error.receipt?.stageMs).toEqual({ leaseAcquireMs: 1000, totalMs: 3000 + OP.now });
+  });
+
+  test('a failure after dispatch times the wait until it failed and every later stage', async () => {
+    writePlan({ completion: 'slow' });
+    const time = virtualTime();
+    const result = await sendZkapiConsult(QUESTION, timedTransport(time, { settings: settings({ timeoutMs: 300 }) }));
+    expect(result).toMatchObject({ ok: false, error: { code: 'timeout', outcome: 'unknown', receipt: { settlement: 'confirmed' } } });
+    // No response headers arrived, so first byte to completion is absent.
+    const { firstByteToCompletionMs: _absent, ...beforeDispatch } = SUCCESS;
+    const expected = {
+      ...beforeDispatch,
+      correlationWaitMs: 10000,
+      settlementWaitMs: 11000,
+      torStopMs: 13000,
+      postStopProbeMs: 15000 + OP.models,
+      teardownMs: 17000,
+      totalMs: time.values.at(-1)! - time.values[0]!,
+    };
+    expect(!result.ok && result.error.receipt?.stageMs).toEqual(expected);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).lastSession).toMatchObject({ result: 'timeout', stageMs: expected });
+  }, SLOW);
+
+  test('no post-stop probe timing when the probe never runs', async () => {
+    // Once Tor has stopped, the daemon's port is no longer attributable, so
+    // the probe is skipped.
+    const time = virtualTime();
+    const result = await sendZkapiConsult(QUESTION, timedTransport(time, {
+      inspectListener: async (port) => (port === daemonPort && await portFree(torPort) ? { kind: 'not_visible' } : inspectLoopbackListener(port)),
+    }));
+    expect(result).toMatchObject({ ok: true, receipt: { postStopProbe: 'inconclusive' } });
+    const stageMs = result.ok ? result.receipt.stageMs! : {};
+    expect(stageMs.torStopMs).toBe(15000);
+    expect(stageMs).not.toHaveProperty('postStopProbeMs');
+    expect(stageMs.teardownMs).toBe(17000);
+  }, SLOW);
+
+  test('a throwing or non-finite clock changes nothing but the timings', async () => {
+    for (const clock of [() => { throw new Error('clock exploded'); }, () => Number.NaN]) {
+      const result = await sendZkapiConsult(QUESTION, transport({ clock }));
+      expect(result).toMatchObject({ ok: true, receipt: { settlement: 'confirmed', fence: 'clear', postStopProbe: 'route_lost' } });
+      expect(result.ok && result.receipt).not.toHaveProperty('stageMs');
+      const ledger = JSON.parse(readFileSync(statePath, 'utf8'));
+      expect(ledger.lastSession).toMatchObject({ result: 'ok', fence: 'clear' });
+      expect(ledger.lastSession).not.toHaveProperty('stageMs');
+      expect(ledger.running).toBeUndefined();
+      expect(ledger.fences).toBeUndefined();
+      expect(await portFree(daemonPort)).toBe(true);
+      expect(await portFree(torPort)).toBe(true);
+    }
+    // The in-flight flag was released: the next session runs, not `busy`.
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true });
+    expect(zkapiUsageToday(statePath, NOW).count).toBe(3);
+  }, 90_000);
+
+  test('a session lease that is busy or cannot be taken still reports lease and total timings', async () => {
+    const holder = spawn(process.execPath, [
+      '-e',
+      `const { withFileLease } = await import(${JSON.stringify(join(import.meta.dir, '..', 'src', 'core', 'file-lease.ts'))});
+       await withFileLease(${JSON.stringify(`${statePath}.session`)}, async () => { console.log('held'); await new Promise(() => {}); });`,
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    try {
+      await new Promise<void>((resolve) => holder.stdout!.on('data', (chunk) => { if (String(chunk).includes('held')) resolve(); }));
+      const busy = await sendZkapiConsult(QUESTION, timedTransport(virtualTime()));
+      expect(busy).toMatchObject({ ok: false, error: { code: 'busy', outcome: 'not_sent', stageMs: { leaseAcquireMs: 1000, totalMs: 1000 } } });
+      expect(!busy.ok && busy.error.receipt).toBeUndefined();
+    } finally {
+      holder.kill('SIGKILL');
+    }
+    expect(existsSync(statePath)).toBe(false);
+    // A ledger directory that cannot be created fails as before, still timed.
+    const blocked = join(root, 'not-a-directory');
+    writeFileSync(blocked, '');
+    const failed = await sendZkapiConsult(QUESTION, timedTransport(virtualTime(), { statePath: join(blocked, 'state.json') }));
+    expect(failed).toMatchObject({ ok: false, error: { code: 'internal_error', outcome: 'not_sent', stageMs: { leaseAcquireMs: 1000, totalMs: 1000 } } });
+    expect(events()).toEqual([]);
+  }, SLOW);
+
+  test('the stage table lists recorded stages in session order', () => {
+    expect(formatZkapiStageTable({ totalMs: 1234, leaseAcquireMs: 5, dispatchToFirstByteMs: 870 })).toBe([
+      'lease acquire              5 ms',
+      'dispatch to first byte   870 ms',
+      'total                   1234 ms',
+    ].join('\n'));
+    expect(formatZkapiStageTable(undefined)).toBe('no stage timings recorded');
   });
 });
 
@@ -773,7 +1001,13 @@ describe('zkAPI consult transport: fence and recovery', () => {
     expect(Bun.spawnSync([process.execPath, script, '--yes'], { env }).exitCode).toBe(3);
     expect(zkapiUnresolvedSession(ledger)).toBe(true);
     writePlan({ noSettlement: false });
-    expect(Bun.spawnSync([process.execPath, script, '--yes'], { env }).exitCode).toBe(0);
+    const recovered = Bun.spawnSync([process.execPath, script, '--yes'], { env });
+    expect(recovered.exitCode).toBe(0);
+    const printed = recovered.stdout.toString();
+    expect(printed).toContain('Stage timings:');
+    for (const label of ['lease acquire', 'Tor start to bootstrapped', 'daemon start to ready', 'dispatch to first byte', 'settlement wait', 'teardown', 'total']) {
+      expect(printed).toMatch(new RegExp(`\\n${label} +\\d+ ms`));
+    }
     expect(zkapiUnresolvedSession(ledger)).toBe(false);
   }, 120_000);
 
@@ -1480,10 +1714,13 @@ describe('doctor: zkapi_consult_transport', () => {
     expect(before.detail).not.toContain(API_KEY);
     expect(events()).toEqual([]);
 
-    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true });
+    const time = virtualTime();
+    expect(await sendZkapiConsult(QUESTION, timedTransport(time))).toMatchObject({ ok: true });
     const after = await zkapiCheck(doctorDeps());
     expect(after.detail).toContain('requests today 1 (no limit set), worst-case authorized today $6.00 (no limit set;');
     expect(after.detail).toContain('(ok): key reuse verified_off, local auth verified, Tor per_consult, confinement none (self-test not_run), settlement confirmed');
+    expect(after.detail).toContain(', stage timings lease acquire 1000 ms, confinement self-test 3001 ms, Tor start to bootstrapped 4002 ms,');
+    expect(after.detail).toContain(`teardown 19000 ms, total ${time.values.at(-1)! - time.values[0]!} ms;`);
     expect(after.detail).toContain(`route: ${NO_CONFINEMENT_LABEL}`);
   }, SLOW);
 

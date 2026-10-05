@@ -60,6 +60,7 @@ import { createDefaultSecretStore, normalizeSecretRef } from './secret-store.ts'
 import {
   defaultZkapiStatePath,
   zkapiConsultReadiness,
+  zkapiStageRows,
   type ZkapiConsultReadiness,
 } from './consult-transport-zkapi.ts';
 
@@ -634,10 +635,15 @@ function describeZkapiReadiness(readiness: ZkapiConsultReadiness): string {
       : `; STRANDED PROCESSES from an earlier session: ${readiness.stranded.groups.map((group) => `${group.role} process group ${group.pgid}`).join(', ') || 'no group recorded'}`
     : '';
   const last = readiness.lastSession
-    ? `last ${readiness.lastSession.recovery ? 'recovery session' : 'consult'} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}`
+    ? `last ${readiness.lastSession.recovery ? 'recovery session' : 'consult'} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}${stageTimings(readiness.lastSession.stageMs)}`
     : 'no consult run yet';
   const blockers = readiness.blockers.length > 0 ? `; not ready: ${readiness.blockers.join(', ')}` : '; ready';
   return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}${stranded}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
+}
+
+function stageTimings(timings: Parameters<typeof zkapiStageRows>[0]): string {
+  const rows = zkapiStageRows(timings);
+  return rows.length > 0 ? `, stage timings ${rows.map((row) => `${row.label} ${row.ms} ms`).join(', ')}` : '';
 }
 
 function secretRefPresent(
