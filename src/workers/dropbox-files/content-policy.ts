@@ -16,7 +16,6 @@ export type DropboxContentPolicyFindingType =
   | 'slack_token'
   | 'api_secret_token'
   | 'credential_assignment'
-  | 'explicit_s5_marker'
   | 'hostile_instruction'
   | 'financial_record_signal'
   | 'medical_record_signal'
@@ -75,12 +74,6 @@ const SECRET_PATTERNS: DropboxContentPolicyPattern[] = [
     findingType: 'credential_assignment',
     pattern: /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi,
     confidence: 0.9,
-    trustTier: 'S5',
-  },
-  {
-    findingType: 'explicit_s5_marker',
-    pattern: /\b(S5|highly confidential|do not distribute)\b/gi,
-    confidence: 0.72,
     trustTier: 'S5',
   },
 ];

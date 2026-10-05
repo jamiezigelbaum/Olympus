@@ -146,6 +146,16 @@ describe('Secrets', () => {
     // the secret before any excerpt question.
     expect(asked).toBe(1);
   });
+
+  test('a "do not distribute" or "highly confidential" stamp is not a secret', () => {
+    // Calibration 2026-10-05: handouts and readings stamped this way were made
+    // Secrets (hidden everywhere, vectors deleted). A stamp is not a credential.
+    for (const text of ['Integration handout. Do not distribute.', 'HIGHLY CONFIDENTIAL reading notes', 'Tier S5 is the top tier in this design.']) {
+      const decision = classify({ title: 'notes.pdf' }, text);
+      expect(decision.contentTier).not.toBe('secrets');
+      expect(decision.reasons.some((reason) => reason.includes('secret'))).toBe(false);
+    }
+  });
 });
 
 describe('per-item owner override', () => {

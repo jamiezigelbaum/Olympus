@@ -250,6 +250,19 @@ describe('batching, cache and threshold', () => {
     expect(snifferTierKey({ tier: 'private', category: 'ordinary', confidence: 0.1 })).toBe('secure');
   });
 
+  test('a Private verdict with a non-private category is Personal; fail-safe and other stay Private', () => {
+    // Calibration 2026-10-05: the built-in model paired "private" with "work"
+    // on ordinary project notes. The category the prompt defines decides.
+    for (const category of ['work', 'reference', 'ordinary']) {
+      expect(snifferTierKey({ tier: 'private', category, confidence: 0.95 })).toBe('private');
+    }
+    for (const category of ['other', 'intimate', 'family', 'health', 'financial']) {
+      expect(snifferTierKey({ tier: 'private', category, confidence: 0.95 })).toBe('secure');
+    }
+    expect(snifferTierKey({ tier: 'private', category: 'work', confidence: 0.95, failSafe: true })).toBe('secure');
+    expect(snifferTierKey({ tier: 'personal', category: 'ordinary', confidence: 0.95, failSafe: true })).toBe('secure');
+  });
+
   test('never Public: a public verdict, a missing verdict or a repeated one is no verdict', () => {
     const expected = new Set([1, 2, 3]);
     const parsed = parseSnifferBatchResponse(JSON.stringify({ verdicts: [
