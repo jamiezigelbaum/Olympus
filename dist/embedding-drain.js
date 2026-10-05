@@ -3296,6 +3296,25 @@ var init_config = __esm(() => {
   ];
 });
 
+// src/core/local-model-policy.ts
+function isCloudForwardingModelId(modelId) {
+  const trimmed = modelId.trim().toLowerCase();
+  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+  const colon = lastSegment.lastIndexOf(":");
+  if (colon < 0)
+    return false;
+  const tag = lastSegment.slice(colon + 1);
+  return tag === "cloud" || tag.endsWith("-cloud");
+}
+function assertLocalModelIdNotCloudForwarding(label, modelId) {
+  if (!isCloudForwardingModelId(modelId))
+    return;
+  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", which runs in the provider's cloud and cannot serve as a local model.`, 'Model tags ending in ":cloud" or "-cloud" (Ollama cloud models) are forwarded off this machine by the local daemon. Choose a model that runs locally, or configure the cloud model as a cloud profile.');
+}
+var init_local_model_policy = __esm(() => {
+  init_operation_error();
+});
+
 // src/core/source-model-policy.ts
 function assertModelTrustTierAllowed(trustTier) {
   if (trustTier === "S5") {
@@ -3885,6 +3904,7 @@ function validateProfile(id, profile) {
   }
   if (profile.trust === "local" || profile.provider === "local-openai-compatible") {
     assertLocalProfileBaseUrl(id, profile.baseUrl);
+    assertLocalModelIdNotCloudForwarding(`Sovereignty local profile "${id}"`, profile.model ?? "");
   }
   const rawProfile = profile;
   if (rawProfile.apiKey !== undefined || rawProfile.secret !== undefined) {
@@ -4070,6 +4090,7 @@ function stringArrayField(value, label) {
 var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
 var init_sovereignty = __esm(() => {
   init_operation_error();
+  init_local_model_policy();
   init_config();
   init_secret_store();
   init_source_model_policy();
@@ -6421,6 +6442,52 @@ var init_connector = __esm(() => {
   init_provider_client();
 });
 
+// src/core/model-transport.ts
+function isModelEndpointRedirectError(error) {
+  return error instanceof ModelEndpointRedirectError;
+}
+async function fetchModelEndpoint(fetchImpl, url, init) {
+  let response;
+  try {
+    response = await fetchImpl(url, { ...init, redirect: "error" });
+  } catch (error) {
+    if (isFetchRedirectRefusal(error))
+      throw new ModelEndpointRedirectError;
+    throw error;
+  }
+  if (response.redirected || REDIRECT_STATUSES.has(response.status)) {
+    await response.body?.cancel().catch(() => {
+      return;
+    });
+    throw new ModelEndpointRedirectError(response.status);
+  }
+  return response;
+}
+function isFetchRedirectRefusal(error) {
+  if (error instanceof ModelEndpointRedirectError)
+    return true;
+  if (!(error instanceof Error))
+    return false;
+  if (error.code === "UnexpectedRedirect")
+    return true;
+  const cause = error.cause;
+  const causeMessage = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
+  return /unexpected redirect/i.test(causeMessage) || /unexpected ?redirect/i.test(error.message);
+}
+var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus does not follow redirects on model transports, so the request was not re-sent anywhere.", ModelEndpointRedirectError, REDIRECT_STATUSES;
+var init_model_transport = __esm(() => {
+  ModelEndpointRedirectError = class ModelEndpointRedirectError extends Error {
+    code = "model_endpoint_redirect";
+    status;
+    constructor(status) {
+      super(MODEL_ENDPOINT_REDIRECT_MESSAGE);
+      this.name = "ModelEndpointRedirectError";
+      this.status = status;
+    }
+  };
+  REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+});
+
 // src/workers/source-index/embedding-identity.ts
 function embeddingProviderFamily(providerKind) {
   return declaredEmbeddingProviderFamily(providerKind) ?? { providerKind, epochProviderToken: providerKind, dimensionToken: "declared" };
@@ -6619,7 +6686,7 @@ async function fetchEmbeddingResponse(fetchImpl, provider, url, init, budget) {
     let reason;
     let waitMs;
     try {
-      const response = await fetchImpl(url, init);
+      const response = await fetchModelEndpoint(fetchImpl, url, init);
       attempt += 1;
       if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status))
         return response;
@@ -6635,6 +6702,9 @@ async function fetchEmbeddingResponse(fetchImpl, provider, url, init, budget) {
     } catch (error) {
       if (error instanceof TransientSourceEmbeddingError)
         throw error;
+      if (isModelEndpointRedirectError(error)) {
+        throw new OperationError("source_index_error", `${provider} source embedding endpoint answered with a redirect, which is refused.`, error.message);
+      }
       if (init.signal.aborted)
         throw timedOut(attempt + 1);
       attempt += 1;
@@ -6863,6 +6933,9 @@ class OpenAICompatibleSourceEmbeddingProvider {
     if (!this.modelId) {
       throw new OperationError("config_error", "Local source embedding model must be configured.");
     }
+    if (this.backend === "local") {
+      assertLocalModelIdNotCloudForwarding("Local source embedding model", this.modelId);
+    }
     this.dimension = options.dimension ?? 0;
     this.timeoutMs = options.timeoutMs ?? 30000;
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -6907,7 +6980,6 @@ class OpenAICompatibleSourceEmbeddingProvider {
           input: inputs.map((input) => this.formatInput(input, options.taskType)),
           ...this.sendDimensions ? { dimensions: this.dimension } : {}
         }),
-        redirect: "error",
         signal: controller.signal
       }, budget);
       if (!response.ok) {
@@ -7310,6 +7382,8 @@ function hashString(value) {
 var DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
 var init_embeddings = __esm(() => {
   init_operation_error();
+  init_local_model_policy();
+  init_model_transport();
   init_embedding_identity();
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   MEDIA_FETCH_HEADERS = {
@@ -21492,6 +21566,8 @@ var init_source_ingestion_ledger = __esm(() => {
 // src/core/delphi.ts
 var init_delphi = __esm(() => {
   init_operation_error();
+  init_local_model_policy();
+  init_model_transport();
   init_secret_store();
 });
 
@@ -22483,6 +22559,7 @@ init_answer_ready_coverage();
 
 // src/core/analyst-openai.ts
 init_operation_error();
+init_model_transport();
 
 // src/core/venice-model-catalog.ts
 init_venice_models();
@@ -22803,6 +22880,11 @@ function approvedVeniceAnalystBaseUrl(rawBaseUrl) {
 // src/workers/file-extraction/extractors/venice-client.ts
 init_venice_models();
 init_sovereignty();
+init_model_transport();
+
+// src/workers/file-extraction/extractors/openai-compatible-client.ts
+init_local_model_policy();
+init_model_transport();
 
 // src/workers/email-source/index.ts
 init_consent_page();
@@ -23987,6 +24069,7 @@ init_analyst();
 // src/core/analyst-built-in.ts
 init_analyst();
 init_operation_error();
+init_model_transport();
 
 // src/workers/source-index/built-in-reasoning/manifest.ts
 var GIB = 1024 ** 3;
@@ -24078,6 +24161,9 @@ var SPACE_BACKOFF_MS = 15 * 60000;
 var DOWNLOAD_STALL_MS = 2 * 60000;
 var VERIFY_TIMEOUT_MS = 15 * 60000;
 var EXTRACT_TIMEOUT_MS = 5 * 60000;
+
+// src/workers/source-index/built-in-reasoning/server.ts
+init_model_transport();
 
 // src/core/analyst-built-in.ts
 var GAP_GENERIC_WORDS = new Set([
@@ -24241,6 +24327,7 @@ init_operation_error();
 
 // src/core/analyst-anthropic.ts
 init_operation_error();
+init_model_transport();
 
 // src/workers/email-source/server.ts
 init_analyst_openclaw_infer();
@@ -26861,6 +26948,7 @@ class InstalledTierClassification {
 
 // src/workers/classification/sniffer-lane.ts
 init_operation_error();
+init_local_model_policy();
 init_sovereignty();
 
 class SnifferLaneRefusedError extends OperationError {
@@ -26876,8 +26964,10 @@ class SnifferLaneRefusedError extends OperationError {
 function assertSnifferProfileAllowed(profileId, profile) {
   if (profile.trust === "standard_cloud")
     throw new SnifferLaneRefusedError("standard_cloud", profileId);
-  if (profile.provider === "local-openai-compatible" && profile.trust === "local")
+  if (profile.provider === "local-openai-compatible" && profile.trust === "local") {
+    assertLocalModelIdNotCloudForwarding(`Privacy sniffer profile "${profileId}"`, profile.model);
     return "local";
+  }
   if (profile.provider === "built-in" && profile.trust === "local" && profileId === "built_in" && profile.purpose === "classification")
     return "local";
   if (profile.provider === "venice" && profile.trust === "encrypted_cloud") {
