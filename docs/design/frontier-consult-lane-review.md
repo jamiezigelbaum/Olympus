@@ -158,3 +158,50 @@ Questions a reviewer should press:
 8. Whether the recommended daemon fork (§Z.6; prototype in `~/Code/Claude/zkapi-fork/`, awaiting owner decision) proves what the proposed label "confined to this session's Tor listener" says, given one sandbox profile over the whole process tree, the `localhost`-only host filter, the deprecated `sandbox-exec`, and the pre-existing bridge-token exposure on the wallet API port.
 
 Unmeasured, and stated as such in the proposal: writer and rewrite durations, gate speed on real packs, abort-to-free latency, every zkAPI stage time.
+
+## F. Third round: revision 5 reviewed, revision 6 written (2026-10-05)
+
+Reviewer: Codex (gpt-6-astra), read-only, revision 5 at `0378dfe7`, against `main` at `bb1755fb`, the gate branch at `47c5acd6`, and the fork prototype in `~/Code/Claude/zkapi-fork/`. No inference, funded request or prototype run. **Verdict: needs redesign.** The author re-checked every cited file and line before writing revision 6. All 19 findings hold. Two citations were slightly off, and neither changes a finding:
+- finding 7 cites `built-in-reasoning/server.ts:124`; the `--parallel 1` flag is at `src/workers/source-index/built-in-reasoning/server.ts:131`;
+- line numbers elsewhere are within a few lines.
+
+The owner then made simplifying decisions on 2026-10-05:
+- no rewrite pass in version one, append a labelled outside block instead;
+- no searchable consult records;
+- one route;
+- a uniform, fixed-size collection protocol;
+- measurement before feature code;
+- fence recovery as a button;
+- enable only from the Mac;
+- consult only on insufficient answers;
+- ship all ten packs.
+
+| # | Finding (short) | Verified | Disposition in revision 6 |
+|---|---|---|---|
+| 1 | Panel resizing exposes consult presence and timing to ChatGPT | Yes, `private-answer.ts:875–899` | **Accepted.** Fixed outer height from first reveal through the follow-up period, reserved strip, internal scroll; host-message transcript test across all outcomes (§A.5, C4a) |
+| 2 | `follow: true` protects only one path; withdrawal is a plaintext `failed` | Yes, jobs `:545–555`, `:553`; relay forwards body opaquely | **Accepted.** One uniform post-claim response on every install; `follow` flag removed; withdrawal moved inside the envelope (§A.5) |
+| 3 | 16 KiB is not an established bound | Yes, jobs `:307–316`, crypto pad buckets grow | **Accepted.** 32 KiB fixed envelope; per-field serialized byte budgets totalling 30,720 B; deterministic overflow; fill test (§A.5) |
+| 4 | "No document text, name, figure or identifier is sent" overstates the gate | Yes, gate `:42–64`, test review-3 `:88–89`, `mcp-surface.ts:305` | **Accepted.** Real guarantee stated; known gaps listed; the user's question is a hosted tool argument (§A.4) |
+| 5 | Eligibility not at the actual submission boundary; sweep residual | Yes, transport warm-up before dispatch; `analyst-answer.ts:2724–2727` | **Accepted.** Warm-up and writer first, then recheck settings, liveness, deadlines, latch and eligibility, then gate, then send at once; residual documented (§A.7) |
+| 6 | Citation checks cannot stop an injected reply from fabricating document claims | Yes, `analyst.ts:401–410`, `:728`; audit off | **Accepted; made moot.** No rewrite in version one; reply shown as a labelled plain-text block; no model reads it (§A.6) |
+| 7 | Preemption on the shared `--parallel 1` server does not meet "not slower at all" | Yes, jobs `:788`, `:1065` | **Accepted.** M0 measurement gate before feature code with a pass criterion; the writer never resets the model; fallbacks listed for the owner (§A.7, M0) |
+| 8 | Ownership checks do not protect the wallet API before the bridge token | Yes, `owned()` at transport `:1726–1735` covers API and Tor only | **Accepted.** Authenticated wallet-listener ownership before the first token-bearing request is an F2 prerequisite; the label stays until F2 (§Z.4) |
+| 9 | The snapshot does not cross the model/jobs boundary; precompute reuse | Yes, depth items local to the model wrapper; jobs keep identities only | **Accepted.** Immutable snapshot from the actual computation, including reuse and depth reads; exact writer-visible texts; bounded retention (§A.3) |
+| 10 | A recent poll proves neither an open panel nor presence | Yes, the claim needs no proof of key possession; auto-collect on render | **Accepted.** Called "recent panel activity"; close/send race and relay replay disclosed; replay-resistant liveness deferred with reasoning; send-once latch; cost wording names the real trigger; CLI enforces the acknowledgement (§A.5, §A.9, §A.10) |
+| 11 | Early reply and warm-up need one session lifecycle; "cannot be cut short" was false | Yes, lease `:1546`, `daemon_already_running` `:1636`, late abort `:1884`, fetch abort `:1975` | **Accepted.** One supervised session with `open`/`cancel`/`send` and `reply`/`finished`; lease through teardown; no caller abort after dispatch; claim corrected (§A.8) |
+| 12 | Paid-result retention, deadlines, eviction and restart underspecified | Yes, settings defaults; eviction at 200 jobs | **Accepted.** Separate start, delivery-room and collection deadlines; no paid work without delivery time; eviction-last and restart losses stated; latch (§A.5, §A.8). The rewrite-preemption part is moot |
+| 13 | Searchable consult records add durable injection and false-evidence risk | Yes | **Accepted.** Removed from version one; content-free receipts only (§A.12) |
+| 14 | An unchanged fingerprint does not establish unchanged semantics | Yes | **Accepted.** "Contract impact: none" replaced by explicit architecture decision AD-1 for review sign-off (§A.11) |
+| 15 | Trigger data missing; writer and latency estimates not bounded | Yes, `sufficient` dropped after gap filtering in `analyst-built-in.ts` | **Accepted.** Explicit `sufficient` and no-answer metadata; writer prompt ≤ 2,048 model tokens by the server's tokenizer; labelled estimates; live timing moved first (M1) (§A.2, §A.3) |
+| 16 | "Abandon writes the reservation off" hides a privacy consequence | Yes, transport `:703–710` | **Accepted.** Consequence stated in the design and in the confirmation; manual and separate from Recover; cancel-before-dispatch proof in C2 (§A.8) |
+| 17 | Sandbox evidence overstated; does not qualify the production bundle | Yes, `run-poc.out` (unused port refused and non-loopback timed out even without the sandbox; fake companion and Tor; `run-poc.sh:23–25` auth off, reuse 60 s) | **Accepted.** Claims narrowed to the recorded probes; real-companion, auth, reuse-0, Unix socket, UDP/DNS, address-family and listener-replacement tests and whole-bundle pinning added as F2 prerequisites (§Z.4) |
+| 18 | C4 too large; decisive proofs too late | Yes | **Accepted.** M0 and M1 first; C4 split into protocol-plus-panel (C4a) and scheduling (C4b); the composition stage is gone; the record connector removed; first usable version is C5 (§A.14) |
+| 19 | G7 omits web sources through the host; milestone wording stale | Yes, `private-answer.ts:590–600`; `V0_4_RELEASE.md` now leads with Olympus 1.0 | **Accepted.** Web-source exception and the host and relay visibility table stated; positioned as a candidate for after 1.0 (§2, §A.5, §A.7) |
+
+None rejected.
+
+Questions for the next review:
+1. Does the uniform 32 KiB envelope make every per-answer outcome invisible to the relay and the host? Check pre-claim responses, timing of guard-dependent withdrawal, and Mac source-open traffic.
+2. Is AD-1 (the outside block as panel presentation) acceptable under `CONTRACTS.md`?
+3. Is deferring replay-resistant liveness reasonable, given dispatch once per job about a minute after the claim?
+4. Does the M0 pass criterion actually capture "the first answer is not slower"?
