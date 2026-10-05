@@ -9,7 +9,7 @@
 // owner's privacy words and folder rules are read (never written) so the
 // classifier sees what the live one sees.
 //
-//   bun eval/calibration/score.ts [--dir DIR] [--split dev|test] [--model MODEL_ID] [--gguf PATH --server PATH] [--no-gpu] [--limit N]
+//   bun eval/calibration/score.ts [--dir DIR] [--split dev|test] [--model MODEL_ID] [--owner-words FILE] [--gguf PATH --server PATH] [--no-gpu] [--limit N]
 //
 // --model picks another manifest model (e.g. the 9B). Its file is read where
 // Olympus installed it, or from <calibration dir>/models/<model id>/ for a
@@ -25,7 +25,7 @@
 // items count as Private, because that is what the owner experiences.
 
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createBuiltInAnalystModel } from '../../src/core/analyst-built-in.ts';
@@ -95,7 +95,10 @@ async function main(): Promise<void> {
   const unsure = sample.items.filter((item) => labels[item.id]?.label === 'unsure').length;
   if (labeled.length === 0) throw new Error('No Personal or Private labels yet. Run: bun eval/calibration/label.ts');
 
-  const ownerContext = privacyOwnerContext();
+  // --owner-words FILE tries other privacy words without touching the owner's
+  // saved profile; by default the saved words are read as the live engine reads them.
+  const wordsFile = flag('--owner-words');
+  const ownerContext = wordsFile ? readFileSync(wordsFile, 'utf8').trim() || undefined : privacyOwnerContext();
   const profile = readPrivacyProfile();
   const rules = [...loadOwnerTierRules({ allowMissing: true }), ...(profile?.rules ?? []).map(privacyRuleToTierRule)];
   const spec = installedSpec(join(homedir(), '.local', 'share', 'openclaw', 'olympus', 'models', 'built-in-reasoning'));
@@ -193,7 +196,7 @@ async function main(): Promise<void> {
     ];
     process.stdout.write(`\n${summary.join('\n')}\n${misses.length ? `\nMisses:\n${misses.join('\n')}\n` : '\nNo misses.\n'}`);
     const resultPath = join(dir, `score-${split ?? 'all'}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-    writeFileSync(resultPath, JSON.stringify({ at: new Date().toISOString(), split: split ?? 'all', model: spec.modelId, precision, recall, held, calls, rows }, null, 1), { mode: 0o600 });
+    writeFileSync(resultPath, JSON.stringify({ at: new Date().toISOString(), split: split ?? 'all', model: spec.modelId, ownerWords: wordsFile ? 'trial' : 'saved', precision, recall, held, calls, rows }, null, 1), { mode: 0o600 });
     process.stdout.write(`\nFull result: ${resultPath}\n`);
   } finally {
     store.close();

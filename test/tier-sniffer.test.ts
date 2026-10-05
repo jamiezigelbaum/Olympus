@@ -277,6 +277,18 @@ describe('batching, cache and threshold', () => {
     expect(parseSnifferBatchResponse('```json\n{"verdicts":[{"i":1,"tier":"private","category":"legal","confidence":0.8}]}\n```', expected).get(1)).toEqual({ tier: 'private', category: 'legal', confidence: 0.8 });
   });
 
+  test('a Private answer in the model\'s own words is kept; a Personal one is not', () => {
+    const expected = new Set([1, 2, 3]);
+    const parsed = parseSnifferBatchResponse(JSON.stringify({ verdicts: [
+      { i: 1, tier: 'private', category: 'insurance', confidence: 0.95 },
+      { i: 2, tier: 'private', category: 'spiritual', confidence: 0.95 },
+      { i: 3, tier: 'personal', category: 'spiritual', confidence: 0.95 },
+    ] }), expected);
+    expect(parsed.get(1)).toEqual({ tier: 'private', category: 'financial', confidence: 0.95 });
+    expect(parsed.get(2)).toEqual({ tier: 'private', category: 'other', confidence: 0.95 });
+    expect(parsed.has(3)).toBe(false);
+  });
+
   test('an 0.89 Personal answer resolves the item to Private', async () => {
     const ledger = new TierLedger({ dbPath: ':memory:' });
     const store = new TierSnifferStore({ dbPath: ':memory:' });
