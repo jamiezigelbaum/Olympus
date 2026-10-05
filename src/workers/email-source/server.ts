@@ -4618,6 +4618,9 @@ export async function main(): Promise<void> {
     tierSniffer?.stop();
     installedTierClassification.close();
     void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);
+    // The built-in model's server process: SIGTERM, then SIGKILL, bounded
+    // (about 10 s), so it neither outlives the worker nor holds it open.
+    void workerBuiltInModel?.model.stop().catch(() => undefined);
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     worker.close();
     sourceScheduler?.stop();
