@@ -11502,7 +11502,7 @@ function isCloudForwardingModelId(modelId) {
 function assertLocalModelIdNotCloudForwarding(label, modelId) {
   if (!isCloudForwardingModelId(modelId))
     return;
-  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", which runs in the provider's cloud and cannot serve as a local model.`, 'Model tags ending in ":cloud" or "-cloud" (Ollama cloud models) are forwarded off this machine by the local daemon. Choose a model that runs locally, or configure the cloud model as a cloud profile.');
+  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
 }
 var init_local_model_policy = __esm(() => {
   init_operation_error();
@@ -11521,13 +11521,24 @@ async function fetchModelEndpoint(fetchImpl, url, init) {
       throw new ModelEndpointRedirectError;
     throw error;
   }
-  if (response.redirected || REDIRECT_STATUSES.has(response.status)) {
-    await response.body?.cancel().catch(() => {
-      return;
-    });
-    throw new ModelEndpointRedirectError(response.status);
+  if (isRedirectResponse(response)) {
+    discardBody(response);
+    throw new ModelEndpointRedirectError(response.status >= 300 && response.status <= 399 ? response.status : undefined);
   }
   return response;
+}
+function isRedirectResponse(response) {
+  return response.type === "opaqueredirect" || response.redirected === true || response.status >= 300 && response.status <= 399;
+}
+function discardBody(response) {
+  try {
+    const cancelled = response.body?.cancel();
+    if (cancelled && typeof cancelled.catch === "function") {
+      cancelled.catch(() => {
+        return;
+      });
+    }
+  } catch {}
 }
 function isFetchRedirectRefusal(error) {
   if (error instanceof ModelEndpointRedirectError)
@@ -11540,7 +11551,7 @@ function isFetchRedirectRefusal(error) {
   const causeMessage = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
   return /unexpected redirect/i.test(causeMessage) || /unexpected ?redirect/i.test(error.message);
 }
-var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus does not follow redirects on model transports, so the request was not re-sent anywhere.", ModelEndpointRedirectError, REDIRECT_STATUSES;
+var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus refuses redirects on model transports and did not use the answer.", ModelEndpointRedirectError;
 var init_model_transport = __esm(() => {
   ModelEndpointRedirectError = class ModelEndpointRedirectError extends Error {
     code = "model_endpoint_redirect";
@@ -11551,7 +11562,6 @@ var init_model_transport = __esm(() => {
       this.status = status;
     }
   };
-  REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 });
 
 // src/workers/source-index/embedding-identity.ts
@@ -11740,7 +11750,7 @@ function retryAfterMs(response, nowMs = Date.now()) {
   const at = Date.parse(value);
   return Number.isNaN(at) ? undefined : Math.max(0, at - nowMs);
 }
-async function discardBody(response) {
+async function discardBody2(response) {
   await response.body?.cancel().catch(() => {
     return;
   });
@@ -11759,7 +11769,7 @@ async function fetchEmbeddingResponse(fetchImpl, provider, url, init, budget) {
       reason = response.status;
       const backoffMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
       const requestedMs = retryAfterMs(response);
-      await discardBody(response);
+      await discardBody2(response);
       if (backoffMs !== undefined) {
         waitMs = requestedMs ?? backoffMs;
         if (Date.now() + waitMs >= budget.deadlineAtMs)
@@ -79653,6 +79663,9 @@ function createVlmPdfExtractor(options = {}) {
             sawEmptyContent = true;
             lastError = undefined;
           } catch (error2) {
+            if (isModelEndpointRedirectError(error2)) {
+              return { status: "failed_retryable", errorKind: "model_endpoint_redirect" };
+            }
             sawEmptyContent = false;
             lastError = error2;
           }
@@ -79840,6 +79853,7 @@ var init_vlm = __esm(() => {
   init_command_runner();
   init_pdf_render();
   init_text();
+  init_model_transport();
   DEFAULT_VLM_PROMPT = [
     "Describe the visible content for secure-local retrieval.",
     "Focus on document layout, headings, labels, diagrams, tables, handwriting, screenshots, and any clearly legible text.",
@@ -80511,6 +80525,8 @@ async function settleOneJob(input) {
   try {
     output = await extractor.extract(extractorInput);
   } catch (error2) {
+    if (isModelEndpointRedirectError(error2))
+      return retryable(EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT, error2);
     return error2 instanceof ExtractionCommandTimeoutError ? retryable(EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT, error2) : retryable(EXTRACTION_ERROR_KIND_EXTRACTOR_THREW, error2);
   }
   if (output.status !== "indexed") {
@@ -80855,9 +80871,10 @@ async function drainPdfExtraction(input) {
   }
   return results;
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_operation_error();
+  init_model_transport();
   init_types();
   init_file_extraction_source();
   init_command_runner();
@@ -114646,6 +114663,7 @@ __export(exports_server2, {
   createRefreshableXBookmarksConnectorStoreRuntime: () => createRefreshableXBookmarksConnectorStoreRuntime,
   createRefreshableReadwiseConnectorStoreRuntime: () => createRefreshableReadwiseConnectorStoreRuntime,
   createReadwiseConnectorStoreRuntime: () => createReadwiseConnectorStoreRuntime,
+  createFileExtractionLocalVlmClientFromEnv: () => createFileExtractionLocalVlmClientFromEnv,
   createEmailSourceConnectorFromEnv: () => createEmailSourceConnectorFromEnv,
   createCloudSourceIndexEmbeddingProviderFromEnv: () => createCloudSourceIndexEmbeddingProviderFromEnv,
   createAnalystForSovereigntyProfile: () => createAnalystForSovereigntyProfile,
@@ -115508,6 +115526,29 @@ function accountFromDropboxCredentialHandle(value) {
   const match = /^dropbox\.([a-z0-9_-]+)(?:\.|$)/i.exec(handle);
   return match?.[1];
 }
+function createFileExtractionLocalVlmClientFromEnv(env) {
+  const fileExtractionLocalVlmEnabled = parseOptionalBooleanEnv(env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED");
+  const fileExtractionLocalVlmConfigured = [
+    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_BASE_URL",
+    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL",
+    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY",
+    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS",
+    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES",
+    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES",
+    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS"
+  ].some((name) => Boolean(env[name]?.trim()));
+  if (fileExtractionLocalVlmConfigured && !fileExtractionLocalVlmEnabled) {
+    throw new Error("OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED=true is required when local VLM settings are present.");
+  }
+  return fileExtractionLocalVlmEnabled ? new OpenAICompatibleVlmClient({
+    baseUrl: requiredFileExtractionEnv(env, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_BASE_URL"),
+    model: requiredFileExtractionEnv(env, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL"),
+    ...env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY?.trim() ? { apiKey: env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY.trim() } : {},
+    ...parseOptionalTimeoutSecondsOrNone(env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS") !== undefined ? {
+      timeoutMs: parseOptionalTimeoutSecondsOrNone(env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS")
+    } : {}
+  }) : undefined;
+}
 async function main() {
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? "8010");
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
@@ -115704,27 +115745,7 @@ async function main() {
       timeoutMs: parseOptionalTimeoutSecondsOrNone(process.env.OLYMPUS_FILE_EXTRACTION_REMOTE_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_REMOTE_TIMEOUT_SECONDS")
     } : {}
   }) : undefined;
-  const fileExtractionLocalVlmEnabled = parseOptionalBooleanEnv(process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED");
-  const fileExtractionLocalVlmConfigured = [
-    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_BASE_URL",
-    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL",
-    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY",
-    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS",
-    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES",
-    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES",
-    "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS"
-  ].some((name) => Boolean(process.env[name]?.trim()));
-  if (fileExtractionLocalVlmConfigured && !fileExtractionLocalVlmEnabled) {
-    throw new Error("OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED=true is required when local VLM settings are present.");
-  }
-  const fileExtractionLocalVlmClient = fileExtractionLocalVlmEnabled ? new OpenAICompatibleVlmClient({
-    baseUrl: requiredFileExtractionEnv(process.env, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_BASE_URL"),
-    model: requiredFileExtractionEnv(process.env, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL"),
-    ...process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY?.trim() ? { apiKey: process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY.trim() } : {},
-    ...parseOptionalTimeoutSecondsOrNone(process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS") !== undefined ? {
-      timeoutMs: parseOptionalTimeoutSecondsOrNone(process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS")
-    } : {}
-  }) : undefined;
+  const fileExtractionLocalVlmClient = createFileExtractionLocalVlmClientFromEnv(process.env);
   const tierLanes = [];
   let registerTierLegStore = () => {
     throw new Error("A tier store opened before the source runtime finished wiring its stores.");

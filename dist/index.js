@@ -3137,7 +3137,7 @@ function isCloudForwardingModelId(modelId) {
 function assertLocalModelIdNotCloudForwarding(label, modelId) {
   if (!isCloudForwardingModelId(modelId))
     return;
-  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", which runs in the provider's cloud and cannot serve as a local model.`, 'Model tags ending in ":cloud" or "-cloud" (Ollama cloud models) are forwarded off this machine by the local daemon. Choose a model that runs locally, or configure the cloud model as a cloud profile.');
+  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
 }
 var init_local_model_policy = __esm(() => {
   init_operation_error();
@@ -3156,13 +3156,24 @@ async function fetchModelEndpoint(fetchImpl, url, init) {
       throw new ModelEndpointRedirectError;
     throw error;
   }
-  if (response.redirected || REDIRECT_STATUSES.has(response.status)) {
-    await response.body?.cancel().catch(() => {
-      return;
-    });
-    throw new ModelEndpointRedirectError(response.status);
+  if (isRedirectResponse(response)) {
+    discardBody(response);
+    throw new ModelEndpointRedirectError(response.status >= 300 && response.status <= 399 ? response.status : undefined);
   }
   return response;
+}
+function isRedirectResponse(response) {
+  return response.type === "opaqueredirect" || response.redirected === true || response.status >= 300 && response.status <= 399;
+}
+function discardBody(response) {
+  try {
+    const cancelled = response.body?.cancel();
+    if (cancelled && typeof cancelled.catch === "function") {
+      cancelled.catch(() => {
+        return;
+      });
+    }
+  } catch {}
 }
 function isFetchRedirectRefusal(error) {
   if (error instanceof ModelEndpointRedirectError)
@@ -3175,7 +3186,7 @@ function isFetchRedirectRefusal(error) {
   const causeMessage = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
   return /unexpected redirect/i.test(causeMessage) || /unexpected ?redirect/i.test(error.message);
 }
-var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus does not follow redirects on model transports, so the request was not re-sent anywhere.", ModelEndpointRedirectError, REDIRECT_STATUSES;
+var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus refuses redirects on model transports and did not use the answer.", ModelEndpointRedirectError;
 var init_model_transport = __esm(() => {
   ModelEndpointRedirectError = class ModelEndpointRedirectError extends Error {
     code = "model_endpoint_redirect";
@@ -3186,7 +3197,6 @@ var init_model_transport = __esm(() => {
       this.status = status;
     }
   };
-  REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 });
 
 // src/core/http-timeout.ts
