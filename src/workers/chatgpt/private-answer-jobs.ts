@@ -875,7 +875,7 @@ export class PrivateAnswerJobs {
       analysis.result = {
         ...preparedAnswer(done.result),
         usedKeys: usedKeys(evidence, done.used),
-        usedItems: usedItems(evidence, done.used).map(identityOnly),
+        usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity),
       };
       this.finish(analysis, 'done');
     } catch (error) {
@@ -1148,29 +1148,34 @@ function usedKeys(evidence: readonly PrivateEvidenceItem[], used: readonly numbe
   return keys;
 }
 
-/** Text-bearing fields of an evidence item; an identity kept for the guard drops them. */
-const TEXT_FIELDS = new Set(['chunks', 'text', 'excerpt', 'passage', 'passages', 'snippet', 'internalContent', 'content', 'facts']);
+/** The only fields an identity keeps: what the guard and the claim-time match need (no text field can enter). */
+const IDENTITY_FIELDS = [
+  'corpusId', 'trustDomain', 'trust_domain', 'trustTier', 'trust_tier',
+  'tier', 'content_tier', 'contentTier', 'metadata_tier', 'metadataTier',
+] as const;
 
 /**
- * An evidence item as the guard needs it, without its text: its corpus,
- * trust domain, tier fields and store identity (provenance keeps only its
- * source item and citation title), so an answer kept for the dedupe window
- * or a sealed job does not hold the items' passages.
+ * An evidence item as the guard needs it, without its text: an allowlist of
+ * its corpus, trust domain and tier fields and its store identity (the
+ * source item, top-level or under provenance, and the citation title), so an
+ * answer kept for the dedupe window or a sealed job holds no passages,
+ * tables or any text field added later.
  */
-function identityOnly(item: PrivateEvidenceItem): PrivateEvidenceItem {
+export function privateEvidenceIdentity(item: PrivateEvidenceItem): PrivateEvidenceItem {
   const kept: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(item)) {
-    if (TEXT_FIELDS.has(key)) continue;
-    if (key === 'provenance') {
-      const provenance = asRecord(value);
-      const citation = asRecord(provenance?.citation);
-      kept.provenance = {
-        ...(provenance?.sourceItem !== undefined ? { sourceItem: provenance.sourceItem } : {}),
-        ...(citation?.title !== undefined ? { citation: { title: citation.title } } : {}),
-      };
-      continue;
-    }
-    kept[key] = value;
+  for (const key of IDENTITY_FIELDS) {
+    const value = item[key];
+    if (typeof value === 'string') kept[key] = value;
+  }
+  const sourceItem = asRecord(item.sourceItem);
+  if (sourceItem) kept.sourceItem = sourceItem;
+  const provenance = asRecord(item.provenance);
+  const citation = asRecord(provenance?.citation);
+  if (provenance) {
+    kept.provenance = {
+      ...(asRecord(provenance.sourceItem) ? { sourceItem: provenance.sourceItem } : {}),
+      ...(typeof citation?.title === 'string' ? { citation: { title: citation.title } } : {}),
+    };
   }
   return kept;
 }

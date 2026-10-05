@@ -2643,13 +2643,16 @@ export async function searchPrivateEvidence(input: {
  * registered Private (secure_local) corpus, and its store's content provider
  * would serve its CONTENT now under the owner's current read scope. For a
  * connector store that is `contentServable` (connector-store/local-index.ts):
- * the scope filters, then one item row and one tier-ledger read (the item
- * exists and is not tombstoned, its stored tier is not S5, and this store's
- * copy is current WITH the content layer, so a move to Secrets or Personal,
- * or a copy that serves only names, refuses it); no chunk is loaded. Lanes
+ * the scope filters, then the item row, a chunk-existence read and one
+ * tier-ledger read (the item exists and is not tombstoned, its stored tier is
+ * a known tier below S5, no metadata-only owner rule covers its path, it
+ * still has stored text, and this store's copy is current WITH the content
+ * layer, so a move to Secrets, or a copy that serves only names, refuses
+ * it); no chunk text is loaded. Lanes
  * are built per call, so scope and registry are current. A provider without
  * that check is asked for the content itself and must return text. Owner
- * tier rules are applied by the classification sweep, not here (see
+ * tier rules (always Secret / always Private) are applied by the
+ * classification sweep, not here (see
  * docs/design/chatgpt-plugin.md). Fails closed: an error, a missing corpus or
  * provider, or an item without its store identity is not eligible. No query
  * is passed, so no embedding is computed.

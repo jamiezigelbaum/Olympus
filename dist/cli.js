@@ -22893,10 +22893,21 @@ var init_local_index = __esm(() => {
     }
     contentServedNow(localItemId) {
       const row = this.db.query(`
-      SELECT trust_tier, provider, account_scope, provider_item_id, provider_conversation_id
+      SELECT item_pk, trust_tier, locator_uri, provider, account_scope, provider_item_id, provider_conversation_id
       FROM items WHERE local_item_id = ? AND tombstoned = 0
     `).get(localItemId);
-      if (!row || row.trust_tier === "S5")
+      if (!row)
+        return false;
+      try {
+        if (trustTierFromRow(row.trust_tier) === "S5")
+          return false;
+      } catch {
+        return false;
+      }
+      if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined) !== undefined)
+        return false;
+      const hasText = this.db.query("SELECT EXISTS (SELECT 1 FROM chunks WHERE item_pk = ?) AS present").get(row.item_pk);
+      if (!hasText?.present)
         return false;
       const identity = {
         provider: row.provider,
@@ -112764,6 +112775,7 @@ var exports_private_answer_jobs = {};
 __export(exports_private_answer_jobs, {
   withPrivateAnswerRoute: () => withPrivateAnswerRoute,
   privateEvidenceKey: () => privateEvidenceKey,
+  privateEvidenceIdentity: () => privateEvidenceIdentity,
   plaintextOf: () => plaintextOf,
   isPrivateEligible: () => isPrivateEligible,
   isPrivateAnswerRequest: () => isPrivateAnswerRequest,
@@ -113295,7 +113307,7 @@ class PrivateAnswerJobs {
       analysis.result = {
         ...preparedAnswer(done.result),
         usedKeys: usedKeys(evidence, done.used),
-        usedItems: usedItems(evidence, done.used).map(identityOnly)
+        usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity)
       };
       this.finish(analysis, "done");
     } catch (error2) {
@@ -113538,21 +113550,23 @@ function usedKeys(evidence, used) {
   }
   return keys;
 }
-function identityOnly(item) {
+function privateEvidenceIdentity(item) {
   const kept = {};
-  for (const [key, value] of Object.entries(item)) {
-    if (TEXT_FIELDS.has(key))
-      continue;
-    if (key === "provenance") {
-      const provenance = asRecord18(value);
-      const citation = asRecord18(provenance?.citation);
-      kept.provenance = {
-        ...provenance?.sourceItem !== undefined ? { sourceItem: provenance.sourceItem } : {},
-        ...citation?.title !== undefined ? { citation: { title: citation.title } } : {}
-      };
-      continue;
-    }
-    kept[key] = value;
+  for (const key of IDENTITY_FIELDS) {
+    const value = item[key];
+    if (typeof value === "string")
+      kept[key] = value;
+  }
+  const sourceItem = asRecord18(item.sourceItem);
+  if (sourceItem)
+    kept.sourceItem = sourceItem;
+  const provenance = asRecord18(item.provenance);
+  const citation = asRecord18(provenance?.citation);
+  if (provenance) {
+    kept.provenance = {
+      ...asRecord18(provenance.sourceItem) ? { sourceItem: provenance.sourceItem } : {},
+      ...typeof citation?.title === "string" ? { citation: { title: citation.title } } : {}
+    };
   }
   return kept;
 }
@@ -113713,7 +113727,7 @@ var AnalysisStop, defaultLog = (line) => {
   console.log(line);
 }, MAX_ANSWER_CHARS, MAX_CITATIONS2 = 20, MAX_UNANSWERED = 10, MAX_CITATION_TEXT = 300, MAX_QUESTION_CHARS = 4000, MAX_URL_CHARS = 2048, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, UNSAFE_CHARS2, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
-}, TEXT_FIELDS;
+}, IDENTITY_FIELDS;
 var init_private_answer_jobs = __esm(() => {
   init_private_answer();
   init_private_answer_contract();
@@ -113730,7 +113744,18 @@ var init_private_answer_jobs = __esm(() => {
   PRIVATE_ANSWER_DEDUPE_MS = 3 * 60000;
   PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS = 2 * 60000;
   UNSAFE_CHARS2 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
-  TEXT_FIELDS = new Set(["chunks", "text", "excerpt", "passage", "passages", "snippet", "internalContent", "content", "facts"]);
+  IDENTITY_FIELDS = [
+    "corpusId",
+    "trustDomain",
+    "trust_domain",
+    "trustTier",
+    "trust_tier",
+    "tier",
+    "content_tier",
+    "contentTier",
+    "metadata_tier",
+    "metadataTier"
+  ];
 });
 
 // src/workers/chatgpt/private-answer-model.ts

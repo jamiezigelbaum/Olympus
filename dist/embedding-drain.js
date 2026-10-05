@@ -17068,10 +17068,21 @@ var init_local_index = __esm(() => {
     }
     contentServedNow(localItemId) {
       const row = this.db.query(`
-      SELECT trust_tier, provider, account_scope, provider_item_id, provider_conversation_id
+      SELECT item_pk, trust_tier, locator_uri, provider, account_scope, provider_item_id, provider_conversation_id
       FROM items WHERE local_item_id = ? AND tombstoned = 0
     `).get(localItemId);
-      if (!row || row.trust_tier === "S5")
+      if (!row)
+        return false;
+      try {
+        if (trustTierFromRow(row.trust_tier) === "S5")
+          return false;
+      } catch {
+        return false;
+      }
+      if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined) !== undefined)
+        return false;
+      const hasText = this.db.query("SELECT EXISTS (SELECT 1 FROM chunks WHERE item_pk = ?) AS present").get(row.item_pk);
+      if (!hasText?.present)
         return false;
       const identity = {
         provider: row.provider,

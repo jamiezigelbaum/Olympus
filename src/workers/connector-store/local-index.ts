@@ -8644,24 +8644,37 @@ export class LocalConnectorStore {
 
   /**
    * Whether this store serves an item's CONTENT right now, without reading
-   * it: the item exists and is not tombstoned, its stored tier is not S5,
-   * and the tier ledger keeps this store's copy current WITH the content
-   * layer (a copy that serves only names, or a superseded or staged one, does
-   * not). One item row and one ledger read: no chunk is loaded. Fails closed
-   * (false) when the ledger cannot be read.
+   * it: the item exists and is not tombstoned; its stored tier is a known
+   * tier below S5; no metadata-only owner rule covers its path (evaluated
+   * now, so the rule applies before any strip has run); it still has stored
+   * text (at least one chunk row); and the tier ledger keeps this store's
+   * copy current WITH the content layer (a copy that serves only names, or a
+   * superseded or staged one, does not). Item, chunk-existence and ledger
+   * reads only: no chunk text is loaded. Fails closed (false) when the ledger
+   * cannot be read or the stored tier is unknown.
    */
   contentServedNow(localItemId: string): boolean {
     const row = this.db.query(`
-      SELECT trust_tier, provider, account_scope, provider_item_id, provider_conversation_id
+      SELECT item_pk, trust_tier, locator_uri, provider, account_scope, provider_item_id, provider_conversation_id
       FROM items WHERE local_item_id = ? AND tombstoned = 0
     `).get(localItemId) as {
+      item_pk: number;
       trust_tier: string;
+      locator_uri: string | null;
       provider: string;
       account_scope: string;
       provider_item_id: string;
       provider_conversation_id: string | null;
     } | null;
-    if (!row || row.trust_tier === 'S5') return false;
+    if (!row) return false;
+    try {
+      if (trustTierFromRow(row.trust_tier) === 'S5') return false;
+    } catch {
+      return false;
+    }
+    if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined) !== undefined) return false;
+    const hasText = this.db.query('SELECT EXISTS (SELECT 1 FROM chunks WHERE item_pk = ?) AS present').get(row.item_pk) as { present: number } | null;
+    if (!hasText?.present) return false;
     const identity = {
       provider: row.provider,
       accountScope: row.account_scope,

@@ -19,7 +19,7 @@ import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { SourceModelPolicyDeniedError } from '../src/core/source-model-policy.ts';
 import type { PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
-import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { PrivateAnswerJobs, privateEvidenceIdentity } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } from '../src/workers/chatgpt/private-answer-model.ts';
 
 const INSTALL = 'f'.repeat(32);
@@ -425,5 +425,33 @@ describe('B-1: a sealed answer is withdrawn on every later hand-out once an item
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('kept answers and sealed jobs hold identities, not text', () => {
+  test('an item with passages, a table and an unknown text field keeps only its corpus, tiers, store identity and title', () => {
+    const candidate = {
+      ...hit('lab', `${SENTINEL} passage`),
+      trustTier: 'S4',
+      tables: [{ caption: `${SENTINEL} table`, rows: [[`${SENTINEL} cell`]] }],
+      facts: [{ text: `${SENTINEL} fact` }],
+      someFutureTextField: `${SENTINEL} later`,
+      provenance: {
+        sourceItem: { family: 'file', provider: 'fixture', accountScope: 'personal', providerItemId: 'lab', localItemId: 'lab' },
+        citation: { title: 'lab.pdf', excerpt: `${SENTINEL} excerpt` },
+        chunk: { text: `${SENTINEL} chunk` },
+      },
+    };
+    const identity = privateEvidenceIdentity(candidate);
+    expect(JSON.stringify(identity)).not.toContain(SENTINEL);
+    expect(identity).toEqual({
+      corpusId: 'private-a',
+      trustDomain: 'secure_local',
+      trustTier: 'S4',
+      provenance: {
+        sourceItem: { family: 'file', provider: 'fixture', accountScope: 'personal', providerItemId: 'lab', localItemId: 'lab' },
+        citation: { title: 'lab.pdf' },
+      },
+    });
   });
 });

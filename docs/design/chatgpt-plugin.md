@@ -545,10 +545,12 @@ percent when known; counts only, no job).
      registered Private corpus, and its store would serve its content now
      under the owner's current read scope (`contentServable` in
      `connector-store/local-index.ts`: the scope filters, then one item row
-     and one tier-ledger read, no chunk loaded): the item exists and is not
-     tombstoned, its stored tier is not S5, and the store's copy is current
-     WITH the content layer, so a move to Secrets, or a copy that serves only
-     the names, refuses it. Anything it cannot vouch for (an error, a missing
+     and one tier-ledger read, no chunk text loaded): the item exists and is
+     not tombstoned, its stored tier is a known tier below S5, no
+     metadata-only owner rule covers its path (evaluated at read time, so
+     the rule applies before any strip has run), it still has stored text,
+     and the store's copy is current WITH the content layer, so a move to
+     Secrets, or a copy that serves only the names, refuses it. Anything it cannot vouch for (an error, a missing
      corpus or provider, an item without its store identity) is not eligible.
      It is asked immediately before every model submission, with only promise
      continuations (no I/O, no timer) between its answer and the submission:
@@ -579,8 +581,9 @@ percent when known; counts only, no job).
      effect when the background rules sweep re-classifies the item (once
      per sniffer tick, every 60 s, up to 1,000 items per pass, so a large
      backlog takes several minutes; an item never routed through the tier
-     ledger waits for its next listing), and a metadata-only rule takes
-     effect once the item's text is removed. Search has the same windows.
+     ledger waits for its next listing); search has the same window.
+     Metadata-only owner rules, by contrast, apply at read time here: an
+     item they cover is refused at once, even before its text is stripped.
      The guarantee is that no hand-off starts with an item the guard has
      just refused, and no answer derived from a now-ineligible item is
      released after the guard refuses it. Cost: one batched per-item lookup
