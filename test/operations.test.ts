@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -6,10 +6,88 @@ import { defaultConfig } from '../src/core/config.ts';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
+import { buildEnvBridgeSovereigntyConfig } from '../src/core/sovereignty.ts';
 import { operations, operationDescription, operationToolSchema } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+
+type DoctorRun = { result: { ok: boolean; checks: Array<{ name: string; ok: boolean }> }; profiles: unknown[] };
+
+const DOCTOR_CHILD = join(import.meta.dir, 'fixtures', 'doctor-operation-child.ts');
+
+/**
+ * Runs the doctor operation in a child process whose HOME is `home` and whose
+ * environment is otherwise only PATH and TMPDIR. The doctor's default readers
+ * and writers (sovereignty policy, connected-handle registry, pending OAuth
+ * state, the ingestion-health baseline it writes) resolve through
+ * `os.homedir()`, which Bun caches per process, so changing `process.env.HOME`
+ * here would still read -- and write -- the developer's own home.
+ */
+function runDoctorOperationUnderHome(home: string): DoctorRun {
+  const child = Bun.spawnSync([process.execPath, DOCTOR_CHILD], {
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', TMPDIR: tmpdir(), HOME: home },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  if (child.exitCode !== 0) throw new Error(`doctor child failed (${child.exitCode}): ${child.stderr.toString()}`);
+  return JSON.parse(child.stdout.toString()) as DoctorRun;
+}
+
+/** The doctor operation against an empty temporary HOME. */
+function runIsolatedDoctorOperation(): DoctorRun {
+  const home = mkdtempSync(join(tmpdir(), 'olympus-operations-home-'));
+  try {
+    return runDoctorOperationUnderHome(home);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A HOME whose Olympus state would turn the doctor red: a sovereignty policy
+ * naming a provider this build rejects, a connected handle waiting for
+ * reauthorization, and a pending OAuth connection whose child process died.
+ */
+function decoyOlympusHome(): string {
+  const home = mkdtempSync(join(tmpdir(), 'olympus-operations-decoy-home-'));
+  mkdirSync(join(home, '.olympus', 'pending-oauth'), { recursive: true });
+  mkdirSync(join(home, '.config', 'olympus'), { recursive: true, mode: 0o700 });
+  const policy = buildEnvBridgeSovereigntyConfig({ OLYMPUS_SOURCE_INDEX_VENICE_API_KEY: 'decoy-key' });
+  for (const profile of Object.values(policy.modelProfiles)) (profile as { provider: string }).provider = 'decoy-unknown-provider';
+  writeFileSync(join(home, '.olympus', 'sovereignty.json'), JSON.stringify(policy));
+  writeFileSync(join(home, '.config', 'olympus', 'handles.json'), JSON.stringify({
+    version: 1,
+    handles: [{
+      handle: 'gmail.personal',
+      provider: 'gmail',
+      accountRole: 'personal',
+      trustDomain: 'secure_local',
+      allowedCapabilities: ['gmail.email.sync'],
+      scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+      oauth2Refresh: {
+        tokenUrl: 'https://oauth2.googleapis.com/token',
+        clientIdSecretRef: 'store:gmail.personal.oauth.client_id',
+        clientSecretSecretRef: 'store:gmail.personal.oauth.client_secret',
+        refreshTokenSecretRef: 'store:gmail.personal.oauth.refresh_token',
+      },
+      backendState: { kind: 'oauth2_refresh', status: 'reauth_required' },
+      connectedAt: '2026-07-07T12:00:00.000Z',
+    }],
+  }), { mode: 0o600 });
+  writeFileSync(join(home, '.olympus', 'pending-oauth', 'gmail.personal.json'), JSON.stringify({
+    source: 'gmail',
+    accountRole: 'personal',
+    status: 'pending',
+    authorizationUrl: 'https://example.test/oauth',
+    port: 49152,
+    pid: 999999,
+    startedAt: '2026-07-07T12:00:00.000Z',
+    expiresAt: '2026-07-07T12:10:00.000Z',
+    logPath: join(home, 'oauth.log'),
+  }));
+  return home;
+}
 
 describe('operations', () => {
   test('defines the current operation surface', () => {
@@ -90,33 +168,7 @@ describe('operations', () => {
 
   test('doctor runs the read-only health walk from ctx config and delphi', async () => {
     const doctor = operations.find((operation) => operation.name === 'olympus_doctor');
-    const profiles: unknown[] = [];
-    const config = defaultConfig();
-    config.sourceIndex.enabled = false;
-    // Both worker-facing lanes deliberately off, so this asserts the walk's
-    // shape without reaching a worker over the network. The email lane is on by
-    // default now: an install whose worker is not running is a red doctor, and
-    // that behaviour is covered in doctor.test.ts.
-    config.email.enabled = false;
-    const ctx: OperationContext = {
-      config,
-      delphi: {
-        listModelsForProfile: async (profile: unknown) => {
-          profiles.push(profile);
-          return [{ id: 'model-1' }];
-        },
-        complete: async (options: { profile: 'default_chat' }) => ({
-          text: 'OLYMPUS_DOCTOR_OK',
-          profile: options.profile,
-          model: 'model-1',
-        }),
-      } as unknown as OperationContext['delphi'],
-      email: {} as OperationContext['email'],
-      // Never this machine's launchd or OpenClaw: a running standalone engine.
-      doctorHostProbe: () => ({ engine: { installed: true, state: 'running' }, legacyWorkerUnit: false }),
-    };
-
-    const result = await doctor!.handler(ctx, {}) as { ok: boolean; checks: Array<{ name: string; ok: boolean }> };
+    const { result, profiles } = runIsolatedDoctorOperation();
 
     expect(result.ok).toBe(true);
     // No sovereignty posture in defaultConfig() → the Argus probe is skipped
@@ -144,7 +196,33 @@ describe('operations', () => {
       type: 'object',
       required: [],
     });
-  });
+  }, 30_000);
+
+  test('the doctor operation test stays hermetic when the running user has an unusable ~/.olympus', () => {
+    const decoy = decoyOlympusHome();
+    try {
+      // The decoy is real: the doctor run as that user is red on each planted state.
+      const unisolated = runDoctorOperationUnderHome(decoy);
+      expect(unisolated.result.ok).toBe(false);
+      const failing = unisolated.result.checks.filter((check) => !check.ok).map((check) => check.name);
+      expect(failing).toEqual(expect.arrayContaining([
+        'sovereignty_prerequisites',
+        'detached_oauth_connections',
+        'google_oauth_refresh_lifetime',
+      ]));
+      // The doctor test itself, run by that user, still passes.
+      const run = Bun.spawnSync(
+        [process.execPath, 'test', join(import.meta.dir, 'operations.test.ts'), '-t', 'doctor runs the read-only health walk'],
+        { cwd: join(import.meta.dir, '..'), env: { ...process.env, HOME: decoy }, stdout: 'pipe', stderr: 'pipe' },
+      );
+      const output = `${run.stdout.toString()}${run.stderr.toString()}`;
+      expect(output).toContain(' 1 pass');
+      expect(output).toContain(' 0 fail');
+      expect(run.exitCode).toBe(0);
+    } finally {
+      rmSync(decoy, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   test('source_answer delegates Castor-safe source parameters to private source lane', async () => {
     const sourceAnswer = operations.find((operation) => operation.name === 'source_answer');

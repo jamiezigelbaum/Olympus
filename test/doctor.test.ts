@@ -187,6 +187,8 @@ function doctorDeps(overrides: DoctorDeps): DoctorDeps {
     env: {},
     secretStore: memorySecretStore({}),
     ingestionHealthStatePath: join(stateRoot, 'source-ingestion-doctor-state.json'),
+    // Never the developer's own pending OAuth connections (~/.olympus/pending-oauth).
+    oauthStateDir: join(stateRoot, 'pending-oauth'),
     ...overrides,
   };
 }
@@ -1170,14 +1172,14 @@ describe('runDoctor', () => {
       },
     });
 
-    const result = await runDoctor({
+    const result = await runDoctor(doctorDeps({
       config,
       delphi: healthyDelphi(),
       env: {},
       secretStore: memorySecretStore({}),
       fetchImpl,
       sovereigntyEngine: engine,
-    });
+    }));
 
     expect(checkByName(result.checks, 'sovereignty_prerequisites')).toMatchObject({ ok: true });
   });
@@ -1209,14 +1211,14 @@ describe('runDoctor', () => {
       },
     });
 
-    const result = await runDoctor({
+    const result = await runDoctor(doctorDeps({
       config,
       delphi: healthyDelphi(),
       env: {},
       secretStore: memorySecretStore({}),
       fetchImpl,
       sovereigntyEngine: engine,
-    });
+    }));
 
     const prerequisites = checkByName(result.checks, 'sovereignty_prerequisites');
     expect(prerequisites.ok).toBe(false);

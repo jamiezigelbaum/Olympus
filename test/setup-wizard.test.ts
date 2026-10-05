@@ -249,6 +249,9 @@ describe('olympus setup wizard', () => {
         platform: 'linux',
         homeDir: dir,
         env: {},
+        // An empty store, never the developer's own (~/.config/olympus): a stored
+        // Venice key there hid the expected prerequisite.
+        secretStore: memorySecretStore({}),
         tokenGenerator: () => 'local-token',
         dependencyCheck: healthyDependencyCheck,
       });

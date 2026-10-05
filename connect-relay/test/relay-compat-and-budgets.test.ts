@@ -13,6 +13,7 @@
  */
 import { afterAll, afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import type { ServerWebSocket } from 'bun';
+import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -34,6 +35,7 @@ import {
   solveRegistrationPow,
   spkiOf,
   verifyInstallMessage,
+  verifyRegistrationPow,
 } from '../shared/protocol.ts';
 import { mintCredential } from '../shared/tokens.ts';
 import type { RelayLimits } from '../server/limits.ts';
@@ -466,6 +468,45 @@ describe('one challenge per handshake; its proof of work stops with the handshak
       .rejects.toBeInstanceOf(PowCancelledError);
   });
 
+  /**
+   * A fixed install key and a challenge nonce whose first 22-bit proof of work
+   * for it (at PUBLIC_HOST) is counter 14,473,083: tens of seconds of hashing.
+   * The solver walks counters from 0, so no handshake in these tests can
+   * finish the solve before it is cancelled. With a random nonce and key a
+   * solve finishes within the 100-300 ms windows below a few percent of the
+   * time, and the client then (correctly) sends its answer -- the old flake.
+   */
+  const FAR_POW_SEED = '6f6c796d7075732d72656c61792d746573742d696e7374616c6c2d6b65792d31';
+  const FAR_POW_NONCE = 'far-6-2';
+  const FAR_POW_FIRST_SOLUTION = 14_473_083;
+  function farPowIdentity(): InstallIdentity {
+    const privateKey = createPrivateKey({ key: Buffer.from(`302e020100300506032b657004220420${FAR_POW_SEED}`, 'hex'), format: 'der', type: 'pkcs8' });
+    const publicKey = createPublicKey(privateKey);
+    const spki = spkiOf(publicKey);
+    return { installId: installIdForPublicKey(spki), privateKey, publicKey, publicKeySpki: base64url(spki) };
+  }
+
+  /**
+   * Counters this test proves unsolved. The solver restarts from 0 on every
+   * handshake, and the windows below (a 150 ms handshake, or until the
+   * challenge arrives) cover well under half of this even on a fast machine.
+   */
+  const FAR_POW_CHECKED_PREFIX = 400_000;
+
+  test('the fixed nonce has no proof of work below the checked prefix, and its recorded first solution is valid', () => {
+    // Fails deterministically if the digest or the install id derivation
+    // changes, so the nonce never silently stops being far. The first
+    // solution (14,473,083) was found offline; only the prefix is re-proven.
+    const identity = farPowIdentity();
+    expect(identity.installId).toBe('ih7bcv6s3t72w5r5fdtl7umbwbpwcdra');
+    expect(verifyRegistrationPow(22, FAR_POW_NONCE, identity.installId, PUBLIC_HOST, String(FAR_POW_FIRST_SOLUTION))).toBe(true);
+    const early: number[] = [];
+    for (let counter = 0; counter < FAR_POW_CHECKED_PREFIX; counter += 1) {
+      if (verifyRegistrationPow(22, FAR_POW_NONCE, identity.installId, PUBLIC_HOST, String(counter))) early.push(counter);
+    }
+    expect(early).toEqual([]);
+  }, 60_000);
+
   /** A hostile relay: sends `challenges` max-difficulty challenges and never answers. */
   async function hostileRelay(challenges: number) {
     const closes: number[] = [];
@@ -476,7 +517,7 @@ describe('one challenge per handshake; its proof of work stops with the handshak
       fetch: (request, srv) => (srv.upgrade(request, { data: undefined }) ? undefined : new Response('no', { status: 400 })),
       websocket: {
         open(ws) {
-          for (let i = 0; i < challenges; i += 1) ws.send(JSON.stringify({ type: 'challenge', v: PROTOCOL_VERSION, nonce: newNonce(), pow: 22, auth: AUTH_BOUND }));
+          for (let i = 0; i < challenges; i += 1) ws.send(JSON.stringify({ type: 'challenge', v: PROTOCOL_VERSION, nonce: FAR_POW_NONCE, pow: 22, auth: AUTH_BOUND }));
         },
         message(_ws, data) {
           answers.push(data);
@@ -512,7 +553,7 @@ describe('one challenge per handshake; its proof of work stops with the handshak
 
   test('a handshake timeout and a stop each cancel the solver', async () => {
     const hostile = await hostileRelay(1);
-    const identity = loadOrCreateIdentity(tempDir());
+    const identity = farPowIdentity();
     const statuses: RelayClientStatus[] = [];
     const client = new RelayClient({
       relayHost: PUBLIC_HOST,
@@ -543,9 +584,32 @@ describe('one challenge per handshake; its proof of work stops with the handshak
     });
     (stopping as unknown as { register: boolean }).register = true;
     stopping.start();
-    await Bun.sleep(100);
+    // Stop only once the challenge has reached the client: its own listener
+    // (registered first) has started the solve by the time this one runs.
+    let challenged = false;
+    (stopping as unknown as { socket: WebSocket }).socket.addEventListener('message', (event) => {
+      if (typeof event.data === 'string' && event.data.includes('"challenge"')) challenged = true;
+    });
+    await until(() => challenged);
     await stopping.stop();
     expect(await cpuOver(500)).toBeLessThan(250);
     expect(second.answers).toEqual([]);
   });
+
+  test('an authentication result that lands after its handshake was given up on is never sent', () => {
+    // The answer is built by a stand-in whose result the child releases by
+    // hand: session 0 is dropped mid-solve, the client reconnects, and
+    // session 0's result arrives while session 1 is open and current.
+    // (mock.module is process-wide in Bun, so this runs in its own process.)
+    const child = Bun.spawnSync([process.execPath, join(import.meta.dir, 'fixtures', 'late-auth-child.ts')], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(child.stderr.toString()).toBe('');
+    expect(child.exitCode).toBe(0);
+    const { first, second } = JSON.parse(child.stdout.toString()) as { first: string[]; second: string[] };
+    expect(first).toEqual([]);
+    // Only session 1's own answer: session 0's late one is dropped, not sent over session 1.
+    expect(second.map((frame) => (JSON.parse(frame) as { marker: string }).marker)).toEqual(['session-1']);
+  }, 30_000);
 });

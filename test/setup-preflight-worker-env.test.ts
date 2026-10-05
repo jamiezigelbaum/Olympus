@@ -10,7 +10,7 @@
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { defaultConfig } from '../src/core/config.ts';
 import { runDoctor } from '../src/core/doctor.ts';
@@ -20,6 +20,17 @@ import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import { writeManagedWorkerEnvSecret } from '../src/core/worker-service.ts';
 
 const EMPTY_STORE = { getSync: () => undefined, get: async () => undefined };
+// Never the developer's own connected-handle registry: a real connected source
+// with no scheduler entry turned source_scheduler_status red on a dev machine.
+const NO_HANDLES = () => ({ version: 1 as const, handles: [] });
+// ...nor its pending OAuth state, nor the ingestion-health baseline doctor
+// WRITES: both default under os.homedir(), which a test cannot redirect.
+function doctorStatePaths(envPath: string) {
+  return {
+    oauthStateDir: join(dirname(envPath), 'pending-oauth'),
+    ingestionHealthStatePath: join(dirname(envPath), 'source-ingestion-doctor-state.json'),
+  };
+}
 
 describe('preflight over the managed worker environment', () => {
   test('a key stored in worker.env is present; an empty worker.env still asks for it', async () => {
@@ -120,6 +131,8 @@ describe('preflight over the managed worker environment', () => {
         env: { GEMINI_API_KEY: 'shell-key' },
         secretStore: EMPTY_STORE,
         workerEnvPath: envPath,
+        readHandleRegistry: NO_HANDLES,
+        ...doctorStatePaths(envPath),
       });
       expect(result.checks.find((check) => check.name === 'sovereignty_prerequisites')?.ok).toBe(false);
     });
@@ -185,6 +198,8 @@ describe('preflight over the managed worker environment', () => {
           env: {},
           secretStore: EMPTY_STORE,
           workerEnvPath: envPath,
+          readHandleRegistry: NO_HANDLES,
+          ...doctorStatePaths(envPath),
           handleRegistry: registry,
           fetchImpl,
         });
@@ -243,6 +258,8 @@ describe('preflight over the managed worker environment', () => {
           env: {},
           secretStore: EMPTY_STORE,
           workerEnvPath: envPath,
+          readHandleRegistry: NO_HANDLES,
+          ...doctorStatePaths(envPath),
           fetchImpl,
         });
         return result.checks.find((check) => check.name === 'source_scheduler_status')!;
@@ -278,6 +295,8 @@ describe('preflight over the managed worker environment', () => {
         env: {},
         secretStore: EMPTY_STORE,
         workerEnvPath: envPath,
+        readHandleRegistry: NO_HANDLES,
+        ...doctorStatePaths(envPath),
       });
       const beforeCheck = before.checks.find((check) => check.name === 'sovereignty_prerequisites')!;
       expect(beforeCheck.ok).toBe(false);
@@ -295,6 +314,8 @@ describe('preflight over the managed worker environment', () => {
         env: {},
         secretStore: EMPTY_STORE,
         workerEnvPath: envPath,
+        readHandleRegistry: NO_HANDLES,
+        ...doctorStatePaths(envPath),
       });
       expect(after.checks.find((check) => check.name === 'sovereignty_prerequisites')?.ok).toBe(true);
     });
