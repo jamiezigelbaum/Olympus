@@ -365,6 +365,27 @@ describe('one-time jobs', () => {
     expect(ready.body.status).toBe('ready');
   });
 
+  // Waits on observed state, not on wall-clock margins, so a slow runner
+  // cannot reorder the steps below (bounded so a real hang still fails).
+  async function until(condition: () => boolean, ms = 10_000): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (!condition()) {
+      if (Date.now() > deadline) throw new Error('condition not reached');
+      await Bun.sleep(5);
+    }
+  }
+
+  async function settledClaim(jobs: PrivateAnswerJobs, jobId: string, key: string) {
+    // Each pending answer spends a poll token (ten, and the fixed test clock
+    // never refills them), so a few widening waits, not a tight loop.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const response = await jobs.claim(jobId, key);
+      if (response.status !== 202) return response;
+      await Bun.sleep(50 * (attempt + 1));
+    }
+    return jobs.claim(jobId, key);
+  }
+
   test('after a deadline the next analysis waits for the model reset, so two inferences never overlap', async () => {
     const events: string[] = [];
     let finishReset!: () => void;
@@ -378,14 +399,14 @@ describe('one-time jobs', () => {
         return new Promise<void>((resolve) => { finishReset = () => { events.push('reset:done'); resolve(); }; });
       },
     });
-    // The deadline (one bound for every claim) leaves `next` room to finish
-    // after the reset; `stuck` passes it during the first sleep.
-    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 60, resetTimeoutMs: 60_000, audit: () => {}, precompute: false });
+    // `stuck` (summary) hits its short deadline; `next` (full) has a long
+    // one, so only the reset gate, never its own deadline, decides when it runs.
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 20, fullAnalysisTimeoutMs: 60_000, resetTimeoutMs: 60_000, audit: () => {}, precompute: false });
     const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
-    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
+    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE, detail: 'full' }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(stuck, panel.publicKey);
-    await Bun.sleep(120);
+    await until(() => events.includes('reset:start'));
     // The stuck job failed and its reset is running: the next one, claimed now, has not started.
     expect(await jobs.claim(stuck, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
     expect((await jobs.claim(next, panel.publicKey)).status).toBe(202);
@@ -393,30 +414,32 @@ describe('one-time jobs', () => {
     expect(events).toEqual(['start:stuck', 'reset:start']);
     expect((await jobs.claim(next, panel.publicKey)).status).toBe(202);
     finishReset();
-    await settled(jobs);
+    await until(() => events.includes('start:next'));
     expect(events).toEqual(['start:stuck', 'reset:start', 'reset:done', 'start:next']);
-    expect((await jobs.claim(next, panel.publicKey)).body.status).toBe('ready');
+    expect((await settledClaim(jobs, next, panel.publicKey)).body.status).toBe('ready');
   });
 
   test('a reset that never resolves holds the next analysis only until the reset timeout', async () => {
     let resets = 0;
+    const started: string[] = [];
     const model = readyModel({
-      answerPrivately: (question) => (question === 'stuck'
-        ? new Promise(() => {})
-        : Promise.resolve({ answer: 'next answer', citations: [] })),
+      answerPrivately: (question) => {
+        started.push(question);
+        return question === 'stuck' ? new Promise(() => {}) : Promise.resolve({ answer: 'next answer', citations: [] });
+      },
       reset: () => { resets += 1; return new Promise<void>(() => {}); },
     });
-    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 100, resetTimeoutMs: 60, audit: () => {}, precompute: false });
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 20, fullAnalysisTimeoutMs: 60_000, resetTimeoutMs: 60, audit: () => {}, precompute: false });
     const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
-    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
+    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE, detail: 'full' }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(stuck, panel.publicKey);
-    await Bun.sleep(110);
+    await until(() => resets === 1);
     // Claimed while the hung reset holds the slot: it runs once the reset times out.
     await jobs.claim(next, panel.publicKey);
-    await Bun.sleep(100);
+    await until(() => started.includes('next'));
     expect(await jobs.claim(stuck, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
-    const ready = await jobs.claim(next, panel.publicKey);
+    const ready = await settledClaim(jobs, next, panel.publicKey);
     expect(ready.body.status).toBe('ready');
     expect(JSON.parse(await openPrivateAnswer(next, panel.privateKey, ready.body as unknown as SealedPrivateAnswer)).answer).toBe('next answer');
     expect(resets).toBe(1);
