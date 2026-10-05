@@ -833,6 +833,9 @@ function buildSourceSensitivity(input) {
 function isSecureTrustTier(trustTier) {
   return trustTier === "S4" || trustTier === "S4+" || trustTier === "S5";
 }
+function isSecureSensitivity(input) {
+  return input.trustDomain === "secure_local" || input.trustTier !== undefined && isSecureTrustTier(input.trustTier) || (input.facts ?? []).some((fact) => isSecureSensitivity(fact.sensitivity));
+}
 function buildSourceIndexStorageProfile(input) {
   if (input.trustDomain === "secure_local") {
     if (input.embeddingBackend === "cloud" && input.embeddingProvider !== "venice") {
@@ -12296,6 +12299,11 @@ function assertConnectorStoreEmbeddingBackend(trustDomain, provider) {
     throw new Error("Connector store secure_local embeddings must use a local/private provider or the approved Venice embedding lane.");
   }
 }
+function connectorStoreEmbeddableRowTiers(trustDomain, provider) {
+  if (isApprovedSecureSourceEmbeddingProvider(provider))
+    return;
+  return SOURCE_TRUST_TIERS.filter((trustTier) => !isSecureSensitivity({ trustDomain, trustTier }));
+}
 async function assertEmbeddingProviderCanEmbed(provider) {
   assertConnectorStoreEmbeddingAuthorityProviderDimension(provider);
   const vectors = await provider.embed([{ text: "olympus connector store embedding rebind probe" }], { taskType: "RETRIEVAL_DOCUMENT" });
@@ -13474,7 +13482,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -14369,8 +14377,18 @@ var init_local_index = __esm(() => {
       if (!Number.isInteger(maxSenders) || maxSenders < 1 || maxSenders > 100) {
         throw new Error("Connector store sender aggregation maxSenders must be an integer from 1 to 100.");
       }
-      const providerClause = provider ? "AND i.provider = ?" : "";
-      const scopeParams = [accountScope, conversationId, ...provider ? [provider] : []];
+      const scopeTiers = isSecureSensitivity({ trustDomain: this.trustDomain }) ? SOURCE_TRUST_TIERS : SOURCE_TRUST_TIERS.filter((trustTier) => !isSecureSensitivity({ trustDomain: this.trustDomain, trustTier }));
+      const tierHidden = this.tierHiddenItemPks();
+      const providerClause = `${provider ? "AND i.provider = ?" : ""}
+          AND i.trust_tier IN (SELECT value FROM json_each(?))
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))`;
+      const scopeParams = [
+        accountScope,
+        conversationId,
+        ...provider ? [provider] : [],
+        JSON.stringify(scopeTiers),
+        JSON.stringify([...tierHidden.hidden, ...tierHidden.held])
+      ];
       const summary = this.db.query(`
       SELECT
         COUNT(*) AS indexed_items,
@@ -16632,11 +16650,15 @@ var init_local_index = __esm(() => {
     embeddingFailedItemCount() {
       return this.embeddingFailureState?.size ?? 0;
     }
-    missingEmbeddingItemIds(modelId, limit) {
+    missingEmbeddingItemIds(embedder, limit) {
       if (limit <= 0)
         return [];
+      const modelId = embedder.modelId;
       const failed = this.embeddingFailureState;
-      const { filter, params } = this.embeddingTierExclusionFilter();
+      const tierExclusion = this.embeddingTierExclusionFilter();
+      const privateTier = this.privateTierEmbeddingFilter(embedder);
+      const filter = `${tierExclusion.filter} ${privateTier.filter}`;
+      const params = [...tierExclusion.params, ...privateTier.params];
       const rows = this.db.query(`
       SELECT i.local_item_id AS local_item_id
       FROM chunks c
@@ -16651,8 +16673,11 @@ var init_local_index = __esm(() => {
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
       return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
     }
-    embeddingBacklogEstimate(modelId) {
-      const { filter, params } = this.embeddingTierExclusionFilter();
+    embeddingBacklogEstimate(modelId, embedder) {
+      const tierExclusion = this.embeddingTierExclusionFilter();
+      const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
+      const filter = `${tierExclusion.filter} ${privateTier.filter}`;
+      const params = [...tierExclusion.params, ...privateTier.params];
       const row = this.db.query(`
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
@@ -16686,6 +16711,28 @@ var init_local_index = __esm(() => {
       const tierExcluded = this.tierHiddenItemPks();
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
+    }
+    privateTierEmbeddingFilter(embedder) {
+      const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
+      return tiers === undefined ? { filter: "", params: [] } : { filter: "AND i.trust_tier IN (SELECT value FROM json_each(?))", params: [JSON.stringify(tiers)] };
+    }
+    privateTierEmbeddingWithheld(embedder) {
+      const reason = CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
+      const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
+      if (tiers === undefined)
+        return { items: 0, chunks: 0, reason };
+      const { filter, params } = this.embeddingTierExclusionFilter();
+      const row = this.db.query(`
+      SELECT COUNT(*) AS chunks, COUNT(DISTINCT c.item_pk) AS items
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        AND i.trust_tier NOT IN (SELECT value FROM json_each(?))
+        ${filter}
+    `).get(embedder.modelId, JSON.stringify(tiers), ...params);
+      return { items: row.items, chunks: row.chunks, reason };
     }
     embeddingDeferredReason() {
       return this.embeddingDeferral;
@@ -16733,7 +16780,10 @@ var init_local_index = __esm(() => {
       if (priorCounts && (priorCounts.modelId !== provider.modelId || priorCounts.embeddingProvider !== provider.provider || priorCounts.embeddingBackend !== provider.backend || priorCounts.embeddingDimension !== provider.dimension || priorCounts.embeddingEpoch !== provider.epochId)) {
         throw new Error("Connector store embedding journal provider changed.");
       }
-      const rows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters);
+      const selectedRows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters);
+      const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
+      const rows = embeddableTiers === undefined ? selectedRows : selectedRows.filter((row) => embeddableTiers.includes(row.trust_tier));
+      const privateTierWithheldChunks = selectedRows.length - rows.length;
       const selectionSha256 = connectorStoreEmbeddingSelectionSha256(options.localItemIds);
       const inputSha256 = connectorStoreEmbeddingInputSha256(rows);
       if (priorCounts && (priorCounts.chunksSeen !== rows.length || priorCounts.selectionSha256 !== selectionSha256 || priorCounts.inputSha256 !== inputSha256 || priorCounts.invalidateCurrentModelEmbeddings !== invalidateCurrentModelEmbeddings)) {
@@ -16897,7 +16947,14 @@ var init_local_index = __esm(() => {
         skipped = rows.length - embedded;
       }
       this.clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch);
-      return connectorStoreEmbedSummary(this.corpusId, this.trustDomain, provider, rows.length, embedded, skipped);
+      const summary = connectorStoreEmbedSummary(this.corpusId, this.trustDomain, provider, rows.length, embedded, skipped);
+      return privateTierWithheldChunks > 0 ? {
+        ...summary,
+        privateTierWithheld: {
+          chunks: privateTierWithheldChunks,
+          reason: CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON
+        }
+      } : summary;
     }
     bindEmbeddingWriteAuthority(provider, options) {
       assertConnectorStoreEmbeddingAuthorityProviderDimension(provider);
@@ -17040,7 +17097,7 @@ var init_local_index = __esm(() => {
           return;
         if (!parseConnectorStoreEmbeddingWriteAuthority(existing.cursor).currencyRebuildPending)
           return;
-        if (this.embeddingModelCurrencyIncomplete(provider.modelId))
+        if (this.embeddingModelCurrencyIncomplete(provider))
           return;
         this.assertEmbeddingWriteAuthority(provider, providerEpoch);
         const cursor = connectorStoreEmbeddingWriteAuthority(provider, providerEpoch);
@@ -17055,7 +17112,8 @@ var init_local_index = __esm(() => {
         }
       })();
     }
-    embeddingModelCurrencyIncomplete(modelId) {
+    embeddingModelCurrencyIncomplete(embedder) {
+      const privateTier = this.privateTierEmbeddingFilter(embedder);
       const row = this.db.query(`
       SELECT 1 AS pending
       FROM chunks c
@@ -17064,8 +17122,9 @@ var init_local_index = __esm(() => {
         ON emb.chunk_pk = c.chunk_pk AND emb.model_id = ?
       WHERE i.tombstoned = 0
         AND (emb.chunk_pk IS NULL OR emb.content_hash <> c.embedding_input_hash)
+        ${privateTier.filter}
       LIMIT 1
-    `).get(modelId);
+    `).get(embedder.modelId, ...privateTier.params);
       return row !== null;
     }
     embeddingCurrencyRebuildPending(modelId) {
@@ -17277,7 +17336,8 @@ var init_local_index = __esm(() => {
         i.search_text,
         i.mime_type,
         i.authored_at,
-        i.updated_at
+        i.updated_at,
+        i.trust_tier
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       WHERE i.tombstoned = 0
@@ -23332,6 +23392,7 @@ init_model_transport();
 // src/workers/email-source/index.ts
 init_consent_page();
 init_analyst();
+init_types();
 init_file_lease();
 init_email_policy();
 init_publisher_oauth_client();

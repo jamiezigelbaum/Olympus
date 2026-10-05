@@ -13530,7 +13530,8 @@ function parseSourceIndexSearchResult(value, context) {
       latency_ms: requiredNumber(audit.latency_ms, "audit.latency_ms"),
       raw_source_exposed: false,
       source_text_returned: sourceTextReturned,
-      ...typeof audit.locators_requested === "boolean" ? { locators_requested: audit.locators_requested } : {}
+      ...typeof audit.locators_requested === "boolean" ? { locators_requested: audit.locators_requested } : {},
+      ...typeof audit.private_tier_withheld === "number" && Number.isSafeInteger(audit.private_tier_withheld) && audit.private_tier_withheld > 0 ? { private_tier_withheld: audit.private_tier_withheld } : {}
     },
     policy: {
       raw_source_exposed: false,
