@@ -24,6 +24,7 @@ import type { SecretStore } from '../src/core/secret-store.ts';
 import { runCredentialHealthProbe } from '../src/workers/credential-health.ts';
 import { OpenAICompatibleVlmClient } from '../src/workers/file-extraction/extractors/openai-compatible-client.ts';
 import { VeniceVlmClient } from '../src/workers/file-extraction/extractors/venice-client.ts';
+import { VlmRouterError } from '../src/workers/file-extraction/extractors/vlm.ts';
 import {
   GeminiSourceEmbeddingProvider,
   OpenAICompatibleSourceEmbeddingProvider,
@@ -328,6 +329,8 @@ describe('vision extraction transports', () => {
     expect(isModelEndpointRedirectError(described)).toBe(true);
     expectContentFree(described);
     const probed = await caught(() => client.probe({ timeoutMs: 5_000 }));
+    expect(probed).toBeInstanceOf(VlmRouterError);
+    expect((probed as VlmRouterError).errorKind).toBe('model_endpoint_redirect');
     expectContentFree(probed);
     expectNotFollowed();
   });

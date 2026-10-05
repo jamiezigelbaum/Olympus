@@ -139,7 +139,9 @@ export class OpenAICompatibleVlmClient implements VlmClient {
       }
     } catch (error) {
       if (error instanceof VlmRouterError) throw error;
-      const kind = vlmRouterErrorKind(error) ?? 'vlm_backend_unavailable';
+      const kind = isModelEndpointRedirectError(error)
+        ? 'model_endpoint_redirect'
+        : vlmRouterErrorKind(error) ?? 'vlm_backend_unavailable';
       throw new VlmRouterError({
         status: 503,
         errorKind: kind,

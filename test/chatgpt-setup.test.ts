@@ -27,7 +27,7 @@ import { PRIVACY_META_KEY, SCOPE_UI_META_KEY } from '../src/workers/chatgpt/dash
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
 import { createChatGptHandoffHandler, createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
-import { applyModelChoice, embeddingIsBuiltIn, ModelChoiceRefusal } from '../src/workers/chatgpt/model-choice.ts';
+import { ANSWER_PROFILE_IDS, answerProfile, applyModelChoice, embeddingIsBuiltIn, ModelChoiceRefusal } from '../src/workers/chatgpt/model-choice.ts';
 import { isSecretFolder, isSecretLabel, isSecretSender, secretLocationsFromRules, type SecretLocations } from '../src/workers/chatgpt/scope-privacy.ts';
 import { ownerRuleMatches, type OwnerTierRule } from '../src/workers/classification/tier-classifier.ts';
 import { pathPrefixMatches } from '../src/core/location-rules.ts';
@@ -448,6 +448,76 @@ async function call(client: Client, name: string, args: Record<string, unknown>)
 async function callRaw(client: Client, name: string, args: Record<string, unknown>): Promise<ToolResult> {
   return await client.callTool({ name, arguments: args }) as unknown as ToolResult;
 }
+
+describe('olympus_model_set through the real setup backend', () => {
+  test('a local answer model with a reserved cloud-style tag is refused: no policy write, no reload', async () => {
+    // Hermetic: the policy file, HOME and every path the backend reads live in this test's temp dir.
+    const home = join(dir, 'home');
+    mkdirSync(home, { recursive: true });
+    const policyPath = join(home, 'sovereignty.json');
+    const policy = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+    policy.modelProfiles[ANSWER_PROFILE_IDS.local] = { ...answerProfile('local'), model: 'gpt-oss:120b-cloud' };
+    const onDisk = JSON.stringify(policy);
+    writeFileSync(policyPath, onDisk);
+    let reloads = 0;
+    const workerCalls: string[] = [];
+    const realBackend = createChatGptSetupBackend({
+      workerFetch: async (request) => {
+        workerCalls.push(new URL(request.url).pathname);
+        return Response.json({ ok: true });
+      },
+      handoffs: createChatGptHandoffs(),
+      publicUrls: () => undefined,
+      sovereignty: { config: policy, source: 'file', path: policyPath },
+      credentialPresent: () => false,
+      requestReload: () => {
+        reloads += 1;
+        return true;
+      },
+      env: { HOME: home, OLYMPUS_PRIVACY_PROFILE_PATH: join(home, 'privacy.json'), OLYMPUS_TIER_RULES_PATH: join(home, 'tier-rules.json') },
+    });
+    const worker = createEmailSourceWorker({});
+    const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
+    const realServer = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: createRemoteMcpHandler({
+        connections: () => store,
+        makeOperationContext: (caller, signal) => createInProcessOperationContext({
+          config,
+          sourceIndexReadEnabled: true,
+          workerFetch: worker.fetch,
+          caller,
+          signal,
+        }),
+        chatgpt: {
+          servesRequest: () => true,
+          async privateMatchProbe() { return false; },
+          async dashboardView() { return emptyView(); },
+          setup: realBackend,
+          async evidenceSearch() { return searchResult(); },
+          answerModelAvailable: () => false,
+        },
+      }),
+    });
+    const { token } = store.create('ChatGPT');
+    const client = new Client({ name: 'chatgpt-model-set-test', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${realServer.port}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    }) as unknown as Parameters<Client['connect']>[0]);
+    try {
+      const refused = await callRaw(client, 'olympus_model_set', { answers: 'local' });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused)).not.toContain('gpt-oss:120b-cloud');
+      expect(readFileSync(policyPath, 'utf8')).toBe(onDisk);
+      expect(reloads).toBe(0);
+      expect(workerCalls).toEqual([]);
+    } finally {
+      await client.close();
+      realServer.stop(true);
+    }
+  });
+});
 
 describe('setup tools over the remote handler', () => {
   test('olympus_connect_source returns a one-time relay link; bad input and a missing relay link are refused', async () => {
