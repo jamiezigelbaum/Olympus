@@ -1,0 +1,10 @@
+Pack: rx-ingredients.txt.gz
+Source: NLM RxNorm Current Prescribable Content, release 2026-10-05,
+https://download.nlm.nih.gov/rxnorm/RxNorm_full_prescribe_10052026.zip
+(MD5 a3bfab544c6a67c127ebcd10ab914aa9, SHA-256 8ed351c29f3cb56bedeb8e2bcb8fa56931f8d7eb88e2280dc9772d7d3eb16977).
+Content: single-word names of RXNORM term types IN and PIN (ingredients). Multi-word strings, and strings with a digit, slash, bracket or the words
+strain, virus or vaccine, are skipped entirely; nothing is split into separate words. Proper nouns were removed with the exclusion list built by `proper-nouns` from the ESDB rel-2026.02.25 size-80 list (see en-esdb.LICENSE.txt), and with the dictionary's own proper-noun entries.
+Generator: scripts/build-consult-vocabulary.ts at commit GENERATOR_COMMIT of this repository
+Licence: public domain; NLM states the subset is provided "without any licensing restrictions".
+
+This product uses publicly available data courtesy of the U.S. National Library of Medicine (NLM), National Institutes of Health, Department of Health and Human Services; NLM is not responsible for the product and does not endorse or recommend this or any other product.

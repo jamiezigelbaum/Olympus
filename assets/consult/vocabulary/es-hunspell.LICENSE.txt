@@ -1,8 +1,22 @@
 Pack: es-hunspell.txt.gz
-Licence: MPL-1.1 (chosen from GPL-3.0+ OR LGPL-3.0+ OR MPL-1.1+). This pack is Covered Software under the Mozilla Public License,
-(this pack file only). No MPL-covered material is in any code file of the repository.
-Source form: the upstream package dictionary-es 4.0.0 (npm), expanded by
-scripts/build-consult-vocabulary.ts in this repository (bun scripts/build-consult-vocabulary.ts es-hunspell <out-dir> <unpacked package>).
+Licence: MPL-1.1 (chosen from GPL-3.0+ OR LGPL-3.0+ OR MPL-1.1+). This pack file is Covered Software under
+the Mozilla Public License. No MPL-covered material is in any code file of the repository.
+
+Source form (durable):
+  Upstream:  npm dictionary-es 4.0.0, https://registry.npmjs.org/dictionary-es/-/dictionary-es-4.0.0.tgz
+             SHA-256 of the tarball: b46986527b23ff1a578d601db7f1e6dc80cc36b728fdcb6044b5212e12e202d5
+  Generator: scripts/build-consult-vocabulary.ts at commit GENERATOR_COMMIT of this repository
+  Command:   bun scripts/build-consult-vocabulary.ts es-hunspell <out-dir> --exclude <proper-nouns file> <unpacked package>
+
+Description of modifications (dated, 2026-10-05; Olympus):
+  The upstream index.dic and index.aff were transformed into a sorted word list:
+  each stem without a capital letter was expanded once with its own prefix and
+  suffix rules (no compound rules); accents were removed and special letters
+  folded; words were lower-cased and split, keeping a-z words of two or more
+  letters; stems the dictionary marks KEEPCASE, FORCEUCASE, NOSUGGEST, WARN,
+  FORBIDDENWORD, ONLYINCOMPOUND or NEEDAFFIX, or as proper nouns, were dropped,
+  with nothing derived from them. Proper nouns were removed with the exclusion list built by `proper-nouns` from the ESDB rel-2026.02.25 size-80 list (see en-esdb.LICENSE.txt), and with the dictionary's own proper-noun entries.
+  No dictionary content was added.
 
 ===== Upstream licence and notices (dictionary-es 4.0.0) =====
   ****************************************************************************
@@ -81,7 +95,7 @@ creación de este diccionario. Se agradece especialmente a:
    - y a todos los integrantes de la comunidad en español que proponen mejoras
      a este diccionario.
 
-===== MPL-1.1 (chosen from GPL-3.0+ OR LGPL-3.0+ OR MPL-1.1+) licence text =====
+===== MPL-1.1 licence text =====
                           MOZILLA PUBLIC LICENSE
                                 Version 1.1
 

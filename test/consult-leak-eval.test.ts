@@ -10,7 +10,7 @@ describe('consult gate leak eval (dry run)', () => {
   test('the corpora cover every category, and the canary oracle sees encoded forms', () => {
     const categories = new Set(consultLeakCorpora().flatMap((corpus) => corpus.cases.map((entry) => entry.category)));
     expect([...categories].sort()).toEqual([
-      'clean', 'encoded', 'exact_date', 'exact_figure', 'identifier', 'known_gap', 'multilingual', 'non_english', 'secret', 'stuffing',
+      'clean', 'encoded', 'exact_date', 'exact_figure', 'identifier', 'known_gap', 'multilingual', 'secret', 'stuffing',
       'technical', 'verbatim',
     ]);
     // The oracle is independent of the gate's normalization and must see the
@@ -57,7 +57,7 @@ describe('consult gate leak eval (dry run)', () => {
     expect(report.leakCategoryPasses).toEqual([]);
     expect(report.canaryLeaks).toEqual([]);
     const admissions = packAdmissions();
-    expect(Object.keys(admissions).sort()).toEqual(['cldr-names', 'es-hunspell', 'fr-grammalecte', 'nl-opentaal', 'pt-br-hunspell', 'pt-pt-hunspell', 'rx-rxnorm']);
+    expect(Object.keys(admissions).sort()).toEqual(['cldr-countries', 'cldr-units', 'es-hunspell', 'fr-grammalecte', 'nl-opentaal', 'pt-br-hunspell', 'pt-pt-hunspell', 'rx-brands', 'rx-ingredients']);
   });
 
   test('known gap: paraphrased rare combinations pass the gate, and are reported, not hidden', () => {

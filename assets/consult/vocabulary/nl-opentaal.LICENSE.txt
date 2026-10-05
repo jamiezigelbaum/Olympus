@@ -1,6 +1,9 @@
 Pack: nl-opentaal.txt.gz
-Source: npm dictionary-nl 2.0.0 (OpenTaal), expanded by scripts/build-consult-vocabulary.ts.
-Licence chosen: Revised BSD (BSD-3-Clause), from BSD-3-Clause OR CC-BY-3.0.
+Licence: BSD-3-Clause (chosen from BSD-3-Clause OR CC-BY-3.0).
+Source: npm dictionary-nl 2.0.0, https://registry.npmjs.org/dictionary-nl/-/dictionary-nl-2.0.0.tgz
+Generator: scripts/build-consult-vocabulary.ts at commit GENERATOR_COMMIT of this repository
+Transformation: as for the hunspell packs (affix expansion one level, no compounds, accents removed,
+proper nouns removed). Proper nouns were removed with the exclusion list built by `proper-nouns` from the ESDB rel-2026.02.25 size-80 list (see en-esdb.LICENSE.txt), and with the dictionary's own proper-noun entries.
 
 _for English, please see below_
 

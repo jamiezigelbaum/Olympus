@@ -291,6 +291,7 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
     'hasTechnicalFingerprint',
     'hasUnknownWord',
     'loadConsultVocabulary',
+    'userManifestEntries',
     'hasNumberWord',
     'classifyPath',
     'isKnownProvenancePath',

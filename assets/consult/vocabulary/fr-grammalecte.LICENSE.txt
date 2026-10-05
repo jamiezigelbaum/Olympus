@@ -1,8 +1,22 @@
 Pack: fr-grammalecte.txt.gz
-Licence: MPL-2.0. This pack is Covered Software under the Mozilla Public License,
-(this pack file only). No MPL-covered material is in any code file of the repository.
-Source form: the upstream package dictionary-fr 3.0.0 (npm), expanded by
-scripts/build-consult-vocabulary.ts in this repository (bun scripts/build-consult-vocabulary.ts fr-grammalecte <out-dir> <unpacked package>).
+Licence: MPL-2.0 (chosen from MPL-2.0). This pack file is Covered Software under
+the Mozilla Public License. No MPL-covered material is in any code file of the repository.
+
+Source form (durable):
+  Upstream:  npm dictionary-fr 3.0.0, https://registry.npmjs.org/dictionary-fr/-/dictionary-fr-3.0.0.tgz
+             SHA-256 of the tarball: b20ab69249881bc36b1dcdfbfd2df226660a7cecc95f2cf122714008b491c78e
+  Generator: scripts/build-consult-vocabulary.ts at commit GENERATOR_COMMIT of this repository
+  Command:   bun scripts/build-consult-vocabulary.ts fr-grammalecte <out-dir> --exclude <proper-nouns file> <unpacked package>
+
+Description of modifications (dated, 2026-10-05; Olympus):
+  The upstream index.dic and index.aff were transformed into a sorted word list:
+  each stem without a capital letter was expanded once with its own prefix and
+  suffix rules (no compound rules); accents were removed and special letters
+  folded; words were lower-cased and split, keeping a-z words of two or more
+  letters; stems the dictionary marks KEEPCASE, FORCEUCASE, NOSUGGEST, WARN,
+  FORBIDDENWORD, ONLYINCOMPOUND or NEEDAFFIX, or as proper nouns, were dropped,
+  with nothing derived from them. Proper nouns were removed with the exclusion list built by `proper-nouns` from the ESDB rel-2026.02.25 size-80 list (see en-esdb.LICENSE.txt), and with the dictionary's own proper-noun entries.
+  No dictionary content was added.
 
 ===== Upstream licence and notices (dictionary-fr 3.0.0) =====
 _______________________________________________________________________________

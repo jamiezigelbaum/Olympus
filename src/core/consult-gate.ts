@@ -22,31 +22,38 @@
  * owner approval does not waive the writer's rules.
  *
  * Two lines of defence. First, a vocabulary allowlist: every word in the
- * request must be in a word pack (shipped: English, Dutch, French, Spanish,
- * Portuguese, unit and country names, medicine names; optional, installed by
- * the user: German, Italian; see CONSULT_VOCABULARY_PACKS and
- * docs/THIRD_PARTY_DATA.md), so names of any spelling, glued identifiers, host
- * names and most encodings are refused whether or not the snapshot holds them. Second, snapshot rules for what an allowlist cannot
- * see: copied runs of ordinary words (ordered, and as unordered spans), names
- * made of ordinary words written as a capitalized pair or as a label value,
- * known identifiers of any length, figures and dates in any form both sides
- * share.
+ * request must be in a word pack the owner has configured (ConsultGateOptions:
+ * consult languages, default English, plus domain packs for units, countries
+ * and medicines; see CONSULT_VOCABULARY_PACKS and docs/THIRD_PARTY_DATA.md).
+ * A word outside them is refused whether or not the snapshot holds it, which
+ * stops names, glued identifiers, host names and most encodings that are not
+ * dictionary words. It does NOT stop names that are dictionary words: on a
+ * fixed sample (eval/consult-leak/name-sample.ts) English alone admits 27 of
+ * 200 given names, 41 of 200 surnames, 13 of 100 cities and 18 of 50 brands,
+ * and each added language admits more. Second, snapshot rules for what an
+ * allowlist cannot see: copied runs of ordinary words (ordered, as adjacent
+ * unordered spans, and as rare words of one sentence in any order), names
+ * written capitalized (mid-sentence, at the start of a prose sentence, as a
+ * pair), label and quoted values in any case, capitalized identifier and path
+ * components, simple inflections and ROT13 of recognised names and known
+ * identifiers, known identifiers of any length, and figures and dates written
+ * with digits or as number words in the configured languages, both sides.
  *
  * Known limits, each pinned by a test (consult-gate*.test.ts):
- *   - languages with no pack are refused outright: German and Italian until
- *     the user installs their packs, and every other language, including
- *     every script without spaces (Chinese, Japanese, Thai);
+ *   - a name that is a dictionary word and appears in the evidence only in
+ *     lower-case prose ("mason reported a breach");
+ *   - dictionary entries that are also names stay in their packs: the English
+ *     list's own (John, Grace, Mason, Smith), and lower-case entries of other
+ *     languages (French "fenwick", a forklift; pt-BR "guilherme", "joao");
+ *   - a lower-case identifier component that is a dictionary word (a folder
+ *     named "tenancy") is not protected on its own;
+ *   - languages with no configured pack are refused outright; German and
+ *     Italian ship only as user-installed packs; scripts without spaces
+ *     (Chinese, Japanese, Thai) are not supported;
  *   - compounds not listed whole (common in Dutch and German) are refused;
- *   - the German pack keeps capitalised entries (German nouns), so it also
- *     admits the names its dictionary lists;
- *   - a name that is also an ordinary word (Will, May, Grace, Mark) written in
- *     running prose rather than as a capitalized pair or a label value;
- *   - every pack admits some words that are names somewhere (brand names in
- *     the medicines pack; surnames that are common nouns in French, Spanish,
- *     Portuguese or Dutch); the snapshot rules still refuse such a word when
- *     the evidence holds it as a name, label or identifier;
+ *   - number words outside the seven tables (en nl fr es pt de it), Han
+ *     numerals, a figure re-expressed by arithmetic, relative dates;
  *   - synonym paraphrase, and rare combinations of ordinary words;
- *   - a figure re-expressed by arithmetic, relative dates ("last Tuesday");
  *   - items inside one sub-question are not counted, only bounded by
  *     CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION;
  *   - acrostics, word choice, case patterns and other covert channels;
@@ -73,7 +80,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -118,6 +125,19 @@ export const CONSULT_GATE_MAX_QUESTION_TOKENS = 80;
  * them from punctuation. Three matches the per-answer consult cap.
  */
 export const CONSULT_GATE_MAX_SUB_QUESTIONS = 3;
+
+/**
+ * Unordered overlap with one snapshot sentence: a request that contains at
+ * least this many of one sentence's content words, in any order and across
+ * sub-questions, is refused, counting only words that are rare in the
+ * snapshot (at most CONSULT_GATE_RARE_WORD_OCCURRENCES occurrences), so that
+ * the ordinary topical words a question shares with its evidence do not count.
+ * Five rare words of one sentence is a copy reordered, not a topic.
+ */
+export const CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5;
+export const CONSULT_GATE_RARE_WORD_OCCURRENCES = 2;
+// Sentences longer than this many tokens are cut into pieces of this size.
+const SENTENCE_OVERLAP_SPAN_TOKENS = 40;
 
 // Per sub-question: one context sentence before the question.
 export const CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1;
@@ -490,6 +510,17 @@ export function consultWriterContextFromPack(
     }
     ancestors.delete(value);
   };
+  // The containers the Analyst renders must exist with their types; a pack
+  // without them is not an EvidencePack and is refused as malformed.
+  const shape = pack as unknown as { question?: unknown; candidates?: unknown; coverage?: Record<string, unknown> } | null;
+  if (
+    !shape || typeof shape !== 'object' || typeof shape.question !== 'string' || !Array.isArray(shape.candidates)
+    || !shape.coverage || typeof shape.coverage !== 'object'
+    || !Array.isArray(shape.coverage.searchedCorpora) || !Array.isArray(shape.coverage.skippedCorpora)
+    || !Array.isArray(shape.coverage.extractionGaps)
+  ) {
+    state.malformed = true;
+  }
   walk(pack, '', -1, 0);
   for (const text of options.writerVisibleTexts ?? []) push('text', text, 'writerVisible[]', -2);
   for (const identifier of options.connectedAccountIdentifiers ?? []) {
@@ -519,8 +550,9 @@ export function evaluateConsultQuestion(
   context: ConsultWriterContext,
   limits: Partial<ConsultGateLimits> = {},
   history: ConsultGateHistory = {},
+  options: ConsultGateOptions = {},
 ): ConsultGateVerdict {
-  return evaluateConsultRequest([question], context, limits, history);
+  return evaluateConsultRequest([question], context, limits, history, options);
 }
 
 /**
@@ -532,6 +564,7 @@ export function evaluateConsultRequest(
   context: ConsultWriterContext,
   limits: Partial<ConsultGateLimits> = {},
   history: ConsultGateHistory = {},
+  options: ConsultGateOptions = {},
 ): ConsultGateVerdict {
   const effective = clampLimits(limits);
   const recent = history.recentApprovedQuestions ?? [];
@@ -539,7 +572,7 @@ export function evaluateConsultRequest(
   // 1. Size of every input, before any other work.
   if (context.overflow || !writerContextWithinLimits(context, effective)) return refuse(['writer_context_too_large']);
   if (context.malformed) return refuse(['writer_context_malformed']);
-  const vocabulary = consultVocabulary();
+  const vocabulary = consultVocabulary(options);
   if (!vocabulary) return refuse(['vocabulary_unavailable']);
   if (
     recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS
@@ -717,6 +750,8 @@ function hasEncodedBlob(text: string): boolean {
   // Base64 padding, or a digit with letters on both sides inside one word
   // ("U1ha", "NC0w"): shapes of encoded text, not of words or model numbers.
   if (/[A-Za-z0-9]=+(?![A-Za-z0-9])/u.test(text) || /\p{L}\d+\p{L}/u.test(text)) return true;
+  // Three or more single letters in a row ("n a d i a", "N.A.D.I.A") spell a word out.
+  if (/(?:^|[^\p{L}\p{N}])\p{L}(?:[^\p{L}\p{N}]{1,2}\p{L}){2,}(?![\p{L}\p{N}])/u.test(text)) return true;
   for (const word of text.split(/[^A-Za-z0-9+/=_-]+/u)) {
     if (word.length < CONSULT_GATE_ENCODED_MIXED_RUN_CHARS) continue;
     if (/[0-9]/u.test(word) && /[A-Za-z]/u.test(word)) return true;
@@ -791,23 +826,115 @@ const CURATED_VOCABULARY: readonly string[] = [
 /**
  * Vocabulary packs shipped in assets/consult/vocabulary/, generated by
  * scripts/build-consult-vocabulary.ts. Each is a gzip-compressed, sorted word
- * list; the SHA-256 of each compressed file is pinned here and checked at
- * load, and a missing or altered shipped pack makes every request refuse
- * (vocabulary_unavailable). Sources and licences are in the pack headers and
- * in the <pack>.LICENSE.txt files beside them (see docs/THIRD_PARTY_DATA.md).
+ * list; the SHA-256 of each compressed file is pinned here and checked when it
+ * is loaded. Only the packs a configuration selects are loaded (see
+ * ConsultGateOptions); a selected shipped pack that is missing, altered or
+ * unreadable makes every request refuse (vocabulary_unavailable). Sources and
+ * licences: the pack headers, the <pack>.LICENSE.txt files beside them, and
+ * docs/THIRD_PARTY_DATA.md.
  */
 export const CONSULT_VOCABULARY_PACKS: Readonly<Record<string, string>> = {
   'en-esdb': '9d04850bf1b3c1a70ddf4c706c9d69fd99c205de11c822bb5a5f7a8360a5b4cc',
-  'nl-opentaal': '9dd250e6f950cc60a5ad3868ee5e1d728aa4a4aeb7216a2b712c59682cd6e3fb',
-  'fr-grammalecte': '1faf39778ce8547e113a3a36308ad13bb070d106444c08aceb3bc87808e6c2e8',
-  'es-hunspell': '7ec032248c6f5414b931f5cddc6204b2d0fa4b2846068e3c70292cc10989973f',
-  'pt-br-hunspell': '864b57792b37f66dc3db80eb156e34ff25fe9d7ff8679145ad40a7a27f21d281',
-  'pt-pt-hunspell': 'b90a0b9c67d387c2430ab59afbb2ac5e2400d97e3f0013adea31638fe7c964af',
-  'cldr-names': '24e89c3755eda26a3be05082953c9287974b9e23855923b876fd15354f2f5e71',
-  'rx-rxnorm': '241745ba07f2660baa98c89ff6e8967c2203c9640c5244aafb41cce6dc9333e2',
+  'nl-opentaal': 'f3868461cc6dc9b758d7d4d11fd443e9f0310f10c5c4c7626cc9c2d523fade80',
+  'fr-grammalecte': 'd4aa9fb6947d382025a28ded59bdb8fcb2406dc6dc630be57fa0bc7f72e21582',
+  'es-hunspell': '0950c5880f7c39e48a31ecb15571be88c738acfd14191e32a35743f9ac204510',
+  'pt-br-hunspell': '69411801530ac979cfa60ae1e0463a07b4e4b6c3684d0603408dfb76d4e5f868',
+  'pt-pt-hunspell': '61d7365a29d9c2f15d60dd3033b464c87b459d0b779b0979c62bb17425ebcd4c',
+  'cldr-units': '19c8502b1c09353e3011b8683dede75229984b924218d0dae31f092b89dff177',
+  'cldr-countries': '1e90b040de7bfa69ce6f134021b6adf3c5ac48f578b958fd676a2cb28b577e75',
+  'rx-ingredients': 'edaff96cb6251b73387889d1503280a81f7e59693c6f915056bae321777baae2',
+  'rx-brands': 'ea5dd90a5131aeee31e1d009b5d975bc792775361e0b9e9a1989e7b427bea2ca',
 };
 
+/**
+ * Consult languages and the pack each one loads. German and Italian are
+ * user-installed packs (their lists are GPL); the others ship.
+ */
+export const CONSULT_LANGUAGE_PACKS: Readonly<Record<ConsultLanguage, string>> = {
+  en: 'en-esdb',
+  nl: 'nl-opentaal',
+  fr: 'fr-grammalecte',
+  es: 'es-hunspell',
+  'pt-PT': 'pt-pt-hunspell',
+  'pt-BR': 'pt-br-hunspell',
+  de: 'de-hunspell',
+  it: 'it-hunspell',
+};
+
+export type ConsultLanguage = 'en' | 'nl' | 'fr' | 'es' | 'pt-PT' | 'pt-BR' | 'de' | 'it';
+
+/**
+ * Domain packs, switched separately from languages.
+ *   units           CLDR unit names in seven languages. Default on: unit words
+ *                   are what a bounded quantitative question needs, and the
+ *                   sample admits no personal name through them.
+ *   countries       CLDR country and macro-region names. Default off: a
+ *                   country name is a location disclosure and several are
+ *                   given names (Jordan, Georgia, Chad); the owner can enable it.
+ *   medicines       single-word RxNorm ingredient names. Default on: generic
+ *                   drug names are needed for questions about medicines and the
+ *                   measured sample admits none of its names through them.
+ *   medicineBrands  single-word RxNorm brand names. Default off: brand names
+ *                   are proper nouns and admit some personal names.
+ */
+export interface ConsultDomainPacks {
+  readonly units: boolean;
+  readonly countries: boolean;
+  readonly medicines: boolean;
+  readonly medicineBrands: boolean;
+}
+
+export const DEFAULT_CONSULT_DOMAIN_PACKS: ConsultDomainPacks = Object.freeze({
+  units: true,
+  countries: false,
+  medicines: true,
+  medicineBrands: false,
+});
+
+const DOMAIN_PACK_IDS: Readonly<Record<keyof ConsultDomainPacks, string>> = {
+  units: 'cldr-units',
+  countries: 'cldr-countries',
+  medicines: 'rx-ingredients',
+  medicineBrands: 'rx-brands',
+};
+
+/**
+ * The owner's consult settings. `languages` are the languages the writer may
+ * write in (default English; setup may propose the system locale's language,
+ * and the owner may add more). Only these languages' packs and the enabled
+ * domain packs are admitted; every other pack stays on disk unused.
+ */
+export interface ConsultGateOptions {
+  readonly languages?: readonly ConsultLanguage[];
+  readonly domains?: Partial<ConsultDomainPacks>;
+}
+
+export const DEFAULT_CONSULT_LANGUAGES: readonly ConsultLanguage[] = Object.freeze(['en']);
+
+// The shipped and user pack ids a configuration admits, in a stable order.
+export function consultVocabularySelection(options: ConsultGateOptions = {}): { shipped: string[]; user: string[] } {
+  const languages = [...new Set(options.languages && options.languages.length > 0 ? options.languages : DEFAULT_CONSULT_LANGUAGES)];
+  const domains = { ...DEFAULT_CONSULT_DOMAIN_PACKS, ...options.domains };
+  const shipped: string[] = [];
+  const user: string[] = [];
+  for (const language of languages) {
+    const id = CONSULT_LANGUAGE_PACKS[language];
+    if (!id) continue;
+    (id in CONSULT_VOCABULARY_PACKS ? shipped : user).push(id);
+  }
+  for (const [domain, enabled] of Object.entries(domains) as Array<[keyof ConsultDomainPacks, boolean]>) {
+    if (enabled && DOMAIN_PACK_IDS[domain]) shipped.push(DOMAIN_PACK_IDS[domain]);
+  }
+  return { shipped: shipped.sort(), user: user.sort() };
+}
+
 const VOCABULARY_DIR: readonly string[] = ['assets', 'consult', 'vocabulary'];
+
+// Bounds on any pack, shipped or user-installed.
+export const CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
+export const CONSULT_VOCABULARY_MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
+export const CONSULT_VOCABULARY_MAX_WORD_BYTES = 64;
+export const CONSULT_VOCABULARY_MAX_USER_PACKS = 8;
 
 /**
  * Optional packs a user builds locally (German and Italian, whose only lists
@@ -828,7 +955,7 @@ export interface ConsultVocabulary {
 export interface ConsultVocabularyPackStatus {
   readonly id: string;
   readonly origin: 'shipped' | 'user';
-  readonly state: 'loaded' | 'missing' | 'hash_mismatch';
+  readonly state: 'loaded' | 'missing' | 'hash_mismatch' | 'unreadable' | 'too_large';
   readonly words: number;
 }
 
@@ -842,20 +969,28 @@ interface SortedPack {
   readonly starts: Uint32Array;
 }
 
-function sortedPack(gz: Buffer): SortedPack {
-  const bytes = gunzipSync(gz);
+function sortedPack(bytes: Buffer): SortedPack | undefined {
   // Two passes: count words, then fill a typed array, so no per-word
-  // JavaScript value is ever allocated. Header lines start with "#".
+  // JavaScript value is ever allocated. Header lines start with "#". A word
+  // longer than CONSULT_VOCABULARY_MAX_WORD_BYTES rejects the pack.
+  let tooLong = false;
   const scan = (visit: (start: number) => void): void => {
     let lineStart = 0;
     for (let index = bytes.indexOf(0x0a); index !== -1; index = bytes.indexOf(0x0a, lineStart)) {
-      if (index > lineStart && bytes[lineStart] !== 0x23) visit(lineStart);
+      if (index > lineStart && bytes[lineStart] !== 0x23) {
+        if (index - lineStart > CONSULT_VOCABULARY_MAX_WORD_BYTES) tooLong = true;
+        visit(lineStart);
+      }
       lineStart = index + 1;
     }
-    if (lineStart < bytes.length && bytes[lineStart] !== 0x23) visit(lineStart);
+    if (lineStart < bytes.length && bytes[lineStart] !== 0x23) {
+      if (bytes.length - lineStart > CONSULT_VOCABULARY_MAX_WORD_BYTES) tooLong = true;
+      visit(lineStart);
+    }
   };
   let count = 0;
   scan(() => { count += 1; });
+  if (tooLong) return undefined;
   const starts = new Uint32Array(count);
   let next = 0;
   scan((start) => { starts[next] = start; next += 1; });
@@ -899,17 +1034,31 @@ interface LoadedVocabulary {
   readonly status: readonly ConsultVocabularyPackStatus[];
 }
 
-let vocabularyCache: LoadedVocabulary | undefined;
+const vocabularyCache = new Map<string, LoadedVocabulary>();
+let evaluationVocabulary: ConsultVocabulary | undefined;
 
-function consultVocabulary(): ConsultVocabulary | null {
-  vocabularyCache ??= loadConsultVocabulary();
-  return vocabularyCache.vocabulary;
+function selectionKey(options: ConsultGateOptions): string {
+  const selection = consultVocabularySelection(options);
+  return `${selection.shipped.join(',')}|${selection.user.join(',')}|${consultUserVocabularyDir()}`;
 }
 
-// Which packs are loaded, missing or rejected. For status surfaces (doctor).
-export function consultVocabularyStatus(): readonly ConsultVocabularyPackStatus[] {
-  vocabularyCache ??= loadConsultVocabulary();
-  return vocabularyCache.status;
+function consultVocabulary(options: ConsultGateOptions): ConsultVocabulary | null {
+  if (evaluationVocabulary) return evaluationVocabulary;
+  const key = selectionKey(options);
+  let loaded = vocabularyCache.get(key);
+  if (!loaded) {
+    const selection = consultVocabularySelection(options);
+    const shipped = Object.fromEntries(selection.shipped.map((id) => [id, CONSULT_VOCABULARY_PACKS[id]!]));
+    loaded = loadConsultVocabulary(shipped, consultUserVocabularyDir(), selection.user);
+    vocabularyCache.set(key, loaded);
+  }
+  return loaded.vocabulary;
+}
+
+// Which packs a configuration loads, and their state. For status surfaces (doctor).
+export function consultVocabularyStatus(options: ConsultGateOptions = {}): readonly ConsultVocabularyPackStatus[] {
+  consultVocabulary(options);
+  return vocabularyCache.get(selectionKey(options))?.status ?? [];
 }
 
 /**
@@ -918,22 +1067,41 @@ export function consultVocabularyStatus(): readonly ConsultVocabularyPackStatus[
  * product code.
  */
 export function setConsultVocabularyForEvaluation(vocabulary: ConsultVocabulary | undefined): void {
-  vocabularyCache = vocabulary ? { vocabulary, status: [] } : undefined;
+  evaluationVocabulary = vocabulary;
 }
 
-// Drop the cached vocabulary so the next request reloads it (after installing a pack).
+// Drop the cached vocabularies so the next request reloads them (after installing a pack).
 export function reloadConsultVocabulary(): void {
-  vocabularyCache = undefined;
+  vocabularyCache.clear();
+}
+
+function readPack(path: string, sha256: string): SortedPack | ConsultVocabularyPackStatus['state'] {
+  try {
+    if (!existsSync(path)) return 'missing';
+    if (statSync(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES) return 'too_large';
+    const gz = readFileSync(path);
+    if (createHash('sha256').update(gz).digest('hex') !== sha256) return 'hash_mismatch';
+    let bytes: Buffer;
+    try {
+      bytes = gunzipSync(gz, { maxOutputLength: CONSULT_VOCABULARY_MAX_EXPANDED_BYTES });
+    } catch (error) {
+      return error instanceof RangeError || (error as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE' ? 'too_large' : 'unreadable';
+    }
+    return sortedPack(bytes) ?? 'too_large';
+  } catch {
+    return 'unreadable';
+  }
 }
 
 /**
- * Load the shipped packs (all must verify, or the result is null) and any
- * user-installed packs (each verified against the local manifest; a failure
- * skips only that pack). `packs` selects shipped packs, for measurement.
+ * Load the given shipped packs (every one must verify, or the result is null)
+ * and the given user-installed packs from `userDir` (each verified against the
+ * local manifest; a failure skips only that pack). Never throws.
  */
 export function loadConsultVocabulary(
   packs: Readonly<Record<string, string>> = CONSULT_VOCABULARY_PACKS,
-  userDir: string | null = consultUserVocabularyDir(),
+  userDir: string | null = null,
+  userPacks: readonly string[] | 'all' = 'all',
 ): LoadedVocabulary {
   const here = dirname(fileURLToPath(import.meta.url));
   const root = [join(here, '..', '..'), join(here, '..')].find((candidate) => existsSync(join(candidate, ...VOCABULARY_DIR)));
@@ -941,44 +1109,29 @@ export function loadConsultVocabulary(
   const status: ConsultVocabularyPackStatus[] = [];
   let complete = root !== undefined;
   for (const [id, sha256] of Object.entries(packs)) {
-    const path = root ? join(root, ...VOCABULARY_DIR, `${id}.txt.gz`) : '';
-    if (!root || !existsSync(path)) {
-      status.push({ id, origin: 'shipped', state: 'missing', words: 0 });
+    const result = root ? readPack(join(root, ...VOCABULARY_DIR, `${id}.txt.gz`), sha256) : 'missing';
+    if (typeof result === 'string') {
+      status.push({ id, origin: 'shipped', state: result, words: 0 });
       complete = false;
       continue;
     }
-    const gz = readFileSync(path);
-    if (createHash('sha256').update(gz).digest('hex') !== sha256) {
-      status.push({ id, origin: 'shipped', state: 'hash_mismatch', words: 0 });
-      complete = false;
-      continue;
-    }
-    const pack = sortedPack(gz);
-    loaded.push(pack);
-    status.push({ id, origin: 'shipped', state: 'loaded', words: pack.starts.length });
+    loaded.push(result);
+    status.push({ id, origin: 'shipped', state: 'loaded', words: result.starts.length });
   }
-  if (userDir && existsSync(join(userDir, 'manifest.json'))) {
-    let manifest: { packs?: Record<string, { sha256?: unknown }> } = {};
-    try {
-      manifest = JSON.parse(readFileSync(join(userDir, 'manifest.json'), 'utf8')) as typeof manifest;
-    } catch {
-      manifest = {};
+  for (const [id, sha256] of userManifestEntries(userDir)) {
+    if (id in CONSULT_VOCABULARY_PACKS || (userPacks !== 'all' && !userPacks.includes(id))) continue;
+    if (status.filter((entry) => entry.origin === 'user').length >= CONSULT_VOCABULARY_MAX_USER_PACKS) break;
+    const result = sha256 === undefined ? 'hash_mismatch' : readPack(join(userDir!, `${id}.txt.gz`), sha256);
+    if (typeof result === 'string') {
+      status.push({ id, origin: 'user', state: result, words: 0 });
+      continue;
     }
-    for (const [id, entry] of Object.entries(manifest.packs ?? {})) {
-      if (!/^[a-z0-9-]+$/u.test(id) || id in packs) continue;
-      const path = join(userDir, `${id}.txt.gz`);
-      if (!existsSync(path)) {
-        status.push({ id, origin: 'user', state: 'missing', words: 0 });
-        continue;
-      }
-      const gz = readFileSync(path);
-      if (typeof entry.sha256 !== 'string' || createHash('sha256').update(gz).digest('hex') !== entry.sha256) {
-        status.push({ id, origin: 'user', state: 'hash_mismatch', words: 0 });
-        continue;
-      }
-      const pack = sortedPack(gz);
-      loaded.push(pack);
-      status.push({ id, origin: 'user', state: 'loaded', words: pack.starts.length });
+    loaded.push(result);
+    status.push({ id, origin: 'user', state: 'loaded', words: result.starts.length });
+  }
+  if (userPacks !== 'all') {
+    for (const id of userPacks) {
+      if (!status.some((entry) => entry.id === id)) status.push({ id, origin: 'user', state: 'missing', words: 0 });
     }
   }
   if (!complete) return { vocabulary: null, status };
@@ -990,18 +1143,40 @@ export function loadConsultVocabulary(
   };
 }
 
+// The manifest's well-formed entries: [id, sha256 or undefined]. Malformed manifests yield none.
+function userManifestEntries(userDir: string | null): Array<[string, string | undefined]> {
+  if (!userDir) return [];
+  try {
+    const path = join(userDir, 'manifest.json');
+    if (!existsSync(path) || statSync(path).size > 1024 * 1024) return [];
+    const manifest = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return [];
+    const packs = (manifest as { packs?: unknown }).packs;
+    if (!packs || typeof packs !== 'object' || Array.isArray(packs)) return [];
+    return Object.entries(packs as Record<string, unknown>)
+      .filter(([id]) => /^[a-z0-9-]{1,40}$/u.test(id))
+      .map(([id, entry]) => {
+        const sha256 = entry && typeof entry === 'object' ? (entry as { sha256?: unknown }).sha256 : undefined;
+        return [id, typeof sha256 === 'string' && /^[0-9a-f]{64}$/u.test(sha256) ? sha256 : undefined];
+      });
+  } catch {
+    return [];
+  }
+}
+
 // Letters the packs spell out: ligatures and special letters folded the same way as the generator.
 const VOCABULARY_LETTER_FOLDS: Readonly<Record<string, string>> = {
   '\u0153': 'oe', '\u00E6': 'ae', '\u00F8': 'o', '\u0142': 'l', '\u0111': 'd', '\u00F0': 'd', '\u00FE': 'th', '\u00DF': 'ss', '\u0131': 'i',
 };
 
 /**
- * Every run of letters in the question must be an English word: in the bundled
- * list, in the curated list, or a single letter. Accents are removed first
- * ("cafe"), case is ignored, and a token mixing letters and digits is split
- * into its letter runs ("OAuth2" is "oauth"). Anything else, including a name
- * of any spelling, a word in another language or script, a glued identifier or
- * an encoded string, is refused, whether or not the snapshot holds it.
+ * Every run of letters in the question must be a word of the configured
+ * vocabulary: a loaded pack, the curated list, or a single letter. Accents are
+ * removed first ("cafe"), special letters folded ("oe" for the ligature), case
+ * is ignored, and a token mixing letters and digits is split into its letter
+ * runs ("OAuth2" is "oauth"). Anything else is refused, whether or not the
+ * snapshot holds it. This refuses words outside the vocabulary; it says
+ * nothing about dictionary words that are also names.
  */
 function hasUnknownWord(text: string, vocabulary: ConsultVocabulary): boolean {
   let unknown = false;
@@ -1098,7 +1273,8 @@ interface Token {
   readonly initial: boolean;
   // Only whitespace, hyphens or apostrophes since the previous token.
   readonly joined: boolean;
-  // Written as a label value: right after a colon, or opened by a double quote.
+  // Written as a label value: right after a colon, or opened by a quote
+  // (double or single) that follows a space.
   readonly labelled: boolean;
 }
 
@@ -1118,7 +1294,7 @@ function forEachToken(folded: string, visit: (token: Token) => void): void {
       capitalized: firstCode < 0x80 ? firstCode >= 0x41 && firstCode <= 0x5a : /^[\p{Lu}\p{Lt}]/u.test(raw),
       initial: previousEnd < 0 || (!simpleGap && /[.!?;:]/u.test(gap)),
       joined: simpleGap || (previousEnd >= 0 && /^[\s'\u2019-]*$/u.test(gap)),
-      labelled: !simpleGap && previousEnd >= 0 && (/:\s*["\u201C\u00AB]?$|["\u201C\u00AB]$/u.test(gap)),
+      labelled: !simpleGap && previousEnd >= 0 && (/:\s*["'\u201C\u2018\u00AB]?$/u.test(gap) || /(?:^|\s)["'\u201C\u2018\u00AB]$/u.test(gap)),
     });
     previousEnd = start + raw.length;
   }
@@ -1230,7 +1406,14 @@ function questionModel(subQuestions: readonly string[]): QuestionModel {
       }
     }
   };
+  // Simple inflections of each question word (plural, possessive) are also
+  // compared against recognised names and identifiers: "masons" is "mason".
+  const uninflected = tokens.map((token) => (token.length >= 5 && token.endsWith('es') ? token.slice(0, -2) : token.length >= 4 && token.endsWith('s') ? token.slice(0, -1) : token));
   addView(tokens, 'plain');
+  addView(uninflected, 'plain');
+  // ROT13 of every question word, compared like a decoding: a known
+  // identifier whose ROT13 happens to be a dictionary word is still caught.
+  addView(tokens.map(rot13), 'decoded');
   const compactViews = [tokens.join('')];
   const decoded = decodedViews(joined.normalize('NFKC'));
   for (const view of decoded) {
@@ -1269,6 +1452,15 @@ function questionModel(subQuestions: readonly string[]): QuestionModel {
  * survives it because its letter runs are single letters. A decoding is kept
  * when it is valid UTF-8 without control characters.
  */
+function rot13(word: string): string {
+  let out = '';
+  for (const char of word) {
+    const code = char.charCodeAt(0);
+    out += code >= 0x61 && code <= 0x7a ? String.fromCharCode(((code - 0x61 + 13) % 26) + 0x61) : char;
+  }
+  return out;
+}
+
 function decodedViews(text: string): string[] {
   const views: string[] = [];
   const keep = (bytes: Buffer): void => {
@@ -1285,9 +1477,17 @@ function decodedViews(text: string): string[] {
   return views;
 }
 
-// --- Number words (English) -------------------------------------------------------
+// --- Number words (English, Dutch, French, Spanish, Portuguese, German, Italian) ----
 
+/**
+ * Cardinal and ordinal number words, accents removed (the tokens they are
+ * compared with are folded the same way). Ambiguous short words that are
+ * also ordinary words ("due", "sei", "tre", "un", "en") only take effect next
+ * to another number word, because a run needs a value to start and a lone
+ * value below 10 produces no key the figure rules use.
+ */
 const NUMBER_WORDS: ReadonlyMap<string, number> = new Map([
+  // en
   ['zero', 0], ['oh', 0], ['one', 1], ['two', 2], ['three', 3], ['four', 4], ['five', 5], ['six', 6], ['seven', 7],
   ['eight', 8], ['nine', 9], ['ten', 10], ['eleven', 11], ['twelve', 12], ['thirteen', 13], ['fourteen', 14],
   ['fifteen', 15], ['sixteen', 16], ['seventeen', 17], ['eighteen', 18], ['nineteen', 19], ['twenty', 20],
@@ -1296,18 +1496,108 @@ const NUMBER_WORDS: ReadonlyMap<string, number> = new Map([
   ['ninth', 9], ['tenth', 10], ['eleventh', 11], ['twelfth', 12], ['thirteenth', 13], ['fourteenth', 14],
   ['fifteenth', 15], ['sixteenth', 16], ['seventeenth', 17], ['eighteenth', 18], ['nineteenth', 19],
   ['twentieth', 20], ['thirtieth', 30],
-]);
-const SCALE_WORDS: ReadonlyMap<string, number> = new Map([
-  ['hundred', 100], ['thousand', 1_000], ['million', 1_000_000], ['billion', 1_000_000_000],
+  // fr
+  ['un', 1], ['une', 1], ['deux', 2], ['trois', 3], ['quatre', 4], ['cinq', 5], ['sept', 7], ['huit', 8], ['neuf', 9],
+  ['dix', 10], ['onze', 11], ['douze', 12], ['treize', 13], ['quatorze', 14], ['quinze', 15], ['seize', 16],
+  ['vingt', 20], ['vingts', 20], ['trente', 30], ['quarante', 40], ['cinquante', 50], ['soixante', 60], ['premier', 1],
+  // es
+  ['uno', 1], ['una', 1], ['dos', 2], ['tres', 3], ['cuatro', 4], ['cinco', 5], ['seis', 6], ['siete', 7], ['ocho', 8],
+  ['nueve', 9], ['diez', 10], ['once', 11], ['doce', 12], ['trece', 13], ['catorce', 14], ['quince', 15],
+  ['dieciseis', 16], ['diecisiete', 17], ['dieciocho', 18], ['diecinueve', 19], ['veinte', 20], ['veintiuno', 21],
+  ['veintidos', 22], ['veintitres', 23], ['veinticuatro', 24], ['veinticinco', 25], ['veintiseis', 26],
+  ['veintisiete', 27], ['veintiocho', 28], ['veintinueve', 29], ['treinta', 30], ['cuarenta', 40], ['cincuenta', 50],
+  ['sesenta', 60], ['setenta', 70], ['ochenta', 80], ['noventa', 90], ['doscientos', 200], ['trescientos', 300],
+  ['cuatrocientos', 400], ['quinientos', 500], ['seiscientos', 600], ['setecientos', 700], ['ochocientos', 800],
+  ['novecientos', 900], ['primero', 1],
+  // pt
+  ['um', 1], ['dois', 2], ['duas', 2], ['quatro', 4], ['sete', 7], ['oito', 8], ['nove', 9], ['dez', 10],
+  ['catorze', 14], ['dezesseis', 16], ['dezasseis', 16], ['dezessete', 17], ['dezassete', 17], ['dezoito', 18],
+  ['dezenove', 19], ['dezanove', 19], ['vinte', 20], ['trinta', 30], ['quarenta', 40], ['cinquenta', 50],
+  ['sessenta', 60], ['oitenta', 80], ['duzentos', 200], ['trezentos', 300], ['quatrocentos', 400],
+  ['quinhentos', 500], ['oitocentos', 800], ['primeiro', 1],
+  // nl
+  ['een', 1], ['twee', 2], ['drie', 3], ['vier', 4], ['vijf', 5], ['zes', 6], ['zeven', 7], ['acht', 8], ['negen', 9],
+  ['tien', 10], ['elf', 11], ['twaalf', 12], ['dertien', 13], ['veertien', 14], ['vijftien', 15], ['zestien', 16],
+  ['zeventien', 17], ['achttien', 18], ['negentien', 19], ['twintig', 20], ['dertig', 30], ['veertig', 40],
+  ['vijftig', 50], ['zestig', 60], ['zeventig', 70], ['tachtig', 80], ['negentig', 90],
+  // de
+  ['eins', 1], ['ein', 1], ['eine', 1], ['zwei', 2], ['drei', 3], ['funf', 5], ['sechs', 6], ['sieben', 7], ['neun', 9],
+  ['zehn', 10], ['zwolf', 12], ['dreizehn', 13], ['vierzehn', 14], ['funfzehn', 15], ['sechzehn', 16], ['siebzehn', 17],
+  ['achtzehn', 18], ['neunzehn', 19], ['zwanzig', 20], ['dreissig', 30], ['vierzig', 40], ['funfzig', 50],
+  ['sechzig', 60], ['siebzig', 70], ['achtzig', 80], ['neunzig', 90], ['erste', 1], ['ersten', 1],
+  // it
+  ['due', 2], ['tre', 3], ['quattro', 4], ['cinque', 5], ['sei', 6], ['sette', 7], ['otto', 8], ['dieci', 10],
+  ['undici', 11], ['dodici', 12], ['tredici', 13], ['quattordici', 14], ['quindici', 15], ['sedici', 16],
+  ['diciassette', 17], ['diciotto', 18], ['diciannove', 19], ['venti', 20], ['vent', 20], ['trenta', 30], ['trent', 30],
+  ['quaranta', 40], ['quarant', 40], ['cinquanta', 50], ['cinquant', 50], ['sessanta', 60], ['sessant', 60],
+  ['settanta', 70], ['settant', 70], ['ottanta', 80], ['ottant', 80], ['novanta', 90], ['novant', 90], ['primo', 1],
 ]);
 
+const SCALE_WORDS: ReadonlyMap<string, number> = new Map([
+  ['hundred', 100], ['thousand', 1_000], ['million', 1_000_000], ['billion', 1_000_000_000],
+  ['cent', 100], ['cents', 100], ['mille', 1_000], ['millions', 1_000_000], ['milliard', 1_000_000_000],
+  ['cien', 100], ['ciento', 100], ['mil', 1_000], ['millon', 1_000_000], ['millones', 1_000_000],
+  ['cem', 100], ['cento', 100], ['milhao', 1_000_000], ['milhoes', 1_000_000],
+  ['honderd', 100], ['duizend', 1_000], ['miljoen', 1_000_000],
+  ['hundert', 100], ['tausend', 1_000], ['millionen', 1_000_000],
+  ['mila', 1_000], ['milione', 1_000_000], ['milioni', 1_000_000],
+]);
+
+// Words that join parts of one number ("three hundred and five", "treinta y dos", "vinte e quatro").
+const NUMBER_CONNECTORS: ReadonlySet<string> = new Set(['and', 'et', 'y', 'e', 'en', 'und']);
+
+// Words that, before a scale word, mean one ("a hundred", "un millon").
+const SCALE_ARTICLES: ReadonlySet<string> = new Set(['a', 'an', 'one', 'un', 'une', 'uno', 'una', 'um', 'uma', 'een', 'ein', 'eine']);
+
+// Point words for decimals.
+const DECIMAL_WORDS: ReadonlySet<string> = new Set(['point', 'virgule', 'coma', 'virgula', 'komma']);
+
+const NUMBER_PARTS: readonly string[] = [...NUMBER_WORDS.keys(), ...SCALE_WORDS.keys(), 'en', 'und', 'e'].sort((a, b) => b.length - a.length);
+
 /**
- * Replace each run of English number words with digit tokens: its arithmetic
- * value ("two thousand three hundred seventy five point five zero" is
- * 2375.50), and, when the run has no scale word, the digits of its groups
- * written one after another ("twenty twenty four" is 2024).
+ * A token written as several number words glued together (Dutch
+ * "vierentwintig", German "zweiundsechzig", Italian "ottocentosessantadue"):
+ * its parts, or undefined. Longest-match first, backtracking, bounded by the
+ * token length.
  */
-function numberWordsToDigits(tokens: readonly string[]): string[] {
+function gluedNumberParts(token: string): string[] | undefined {
+  if (token.length < 6 || token.length > 40 || NUMBER_WORDS.has(token) || SCALE_WORDS.has(token)) return undefined;
+  const memo = new Map<number, string[] | null>();
+  const solve = (at: number): string[] | null => {
+    if (at === token.length) return [];
+    const known = memo.get(at);
+    if (known !== undefined) return known;
+    let found: string[] | null = null;
+    for (const part of NUMBER_PARTS) {
+      if (!token.startsWith(part, at)) continue;
+      const rest = solve(at + part.length);
+      if (rest) {
+        found = [part, ...rest];
+        break;
+      }
+    }
+    memo.set(at, found);
+    return found;
+  };
+  const parts = solve(0);
+  return parts && parts.length >= 2 && parts.some((part) => NUMBER_WORDS.has(part) || SCALE_WORDS.has(part)) ? parts : undefined;
+}
+
+/**
+ * Replace each run of number words with digit tokens: its arithmetic value
+ * ("two thousand three hundred seventy five point five zero" is 2375.50,
+ * "huit cent soixante-deux" is 862, "a hundred" is 100), and, when the run has
+ * no scale word, the digits of its groups written one after another ("twenty
+ * twenty four" is 2024). Glued number words are split first. French
+ * "quatre-vingt" multiplies.
+ */
+function numberWordsToDigits(input: readonly string[]): string[] {
+  const tokens: string[] = [];
+  for (const token of input) {
+    const glued = gluedNumberParts(token);
+    if (glued) tokens.push(...glued);
+    else tokens.push(token);
+  }
   const out: string[] = [];
   let index = 0;
   while (index < tokens.length) {
@@ -1317,32 +1607,45 @@ function numberWordsToDigits(tokens: readonly string[]): string[] {
     let scaled = false;
     let decimal = '';
     let inDecimal = false;
+    let previousValue: number | undefined;
     const groups: number[] = [];
     while (index < tokens.length) {
       const word = tokens[index]!;
       const value = NUMBER_WORDS.get(word);
       const scale = SCALE_WORDS.get(word);
-      if (inDecimal && value !== undefined && value < 10) {
+      const startsScale = index === start && SCALE_ARTICLES.has(word) && SCALE_WORDS.has(tokens[index + 1] ?? '');
+      if (startsScale) {
+        current = 0;
+      } else if (inDecimal && value !== undefined && value < 10) {
         decimal += String(value);
-      } else if (word === 'point' && index > start && !inDecimal) {
+      } else if (DECIMAL_WORDS.has(word) && index > start && !inDecimal) {
         inDecimal = true;
       } else if (value !== undefined && !inDecimal) {
-        const last = groups.length > 0 ? groups[groups.length - 1]! : undefined;
-        if (last !== undefined && last % 10 === 0 && last >= 20 && last < 100 && value < 10) {
-          groups[groups.length - 1] = last + value;
+        if (value === 20 && previousValue === 4 && (word === 'vingt' || word === 'vingts')) {
+          // quatre-vingt(s): 4 x 20
+          current += 76;
+          groups[groups.length - 1] = 80;
         } else {
-          groups.push(value);
+          const last = groups.length > 0 ? groups[groups.length - 1]! : undefined;
+          if (last !== undefined && last % 10 === 0 && last >= 20 && last < 100 && value < 10) {
+            groups[groups.length - 1] = last + value;
+          } else {
+            groups.push(value);
+          }
+          current += value;
         }
-        current += value;
-      } else if (scale !== undefined && !inDecimal && index > start) {
+        previousValue = value;
+      } else if (scale !== undefined && !inDecimal && (index > start || tokens.length > 0)) {
         scaled = true;
         if (scale === 100) current = (current || 1) * 100;
         else {
           total += (current || 1) * scale;
           current = 0;
         }
-      } else if (word === 'and' && index > start && !inDecimal) {
-        // "three hundred and five"
+        previousValue = undefined;
+      } else if (NUMBER_CONNECTORS.has(word) && index > start && !inDecimal
+        && (NUMBER_WORDS.has(tokens[index + 1] ?? '') || SCALE_WORDS.has(tokens[index + 1] ?? ''))) {
+        // "three hundred and five", "treinta y dos", "vinte e quatro"
       } else break;
       index += 1;
     }
@@ -1422,8 +1725,15 @@ function runMatcher(question: readonly string[], minLength: number, minContent: 
 
 interface NameStats {
   capitalized: number;
+  // Lower-case occurrences in the snapshot, not counting the owner's question.
   lower: number;
+  // Lower-case occurrences in prose or in the owner's question: evidence that
+  // the word is ordinary, used for identifier components.
+  lowerAnywhere: number;
 }
+
+// Paths whose text is running prose (sentence-initial capitals mean something there).
+const PROSE_PATHS: ReadonlySet<string> = new Set(['candidates[].chunks[]', 'candidates[].facts[].claim', 'writerVisible[]']);
 
 // Separator for joined token keys (the same character the question model uses).
 const SEP = String.fromCharCode(1);
@@ -1442,7 +1752,18 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
   };
   const stats = new Map<string, NameStats>();
   const pairCandidates = new Map<string, { left: string; right: string; midSentence: boolean }>();
-  const singleCandidates = new Map<string, { source: FormSource; labelled: boolean }>();
+  // Unordered sentence overlap (CONSULT_GATE_SENTENCE_OVERLAP_WORDS).
+  const questionContent = new Set(contentTokens);
+  const contentCounts = new Map<string, number>();
+  const overlapCandidates: string[][] = [];
+  let sentenceContent = new Set<string>();
+  let sentenceTokens = 0;
+  const closeOverlap = (): void => {
+    if (sentenceContent.size >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS) overlapCandidates.push([...sentenceContent]);
+    sentenceContent = new Set();
+    sentenceTokens = 0;
+  };
+  const singleCandidates = new Map<string, { source: FormSource; labelled: boolean; initialOnly: boolean }>();
   const componentCandidates = new Map<string, FormSource>();
   let group = Number.NaN;
   let previous: Token | undefined;
@@ -1518,7 +1839,7 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
           const source = formHit(token.norm);
           if (!source) return;
           if (entry.kind === 'person_identifier' || (/\d/u.test(token.norm) && /\p{L}/u.test(token.norm))) identifierHit(source);
-          else if (token.capitalized && !token.initial) componentCandidates.set(token.norm, source);
+          else if (token.capitalized || token.labelled) componentCandidates.set(token.norm, source);
         });
       }
     }
@@ -1538,7 +1859,16 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
     };
     let first = true;
     forEachToken(folded, (token) => {
-      if (first || token.initial) closeSentence();
+      if (first || token.initial) {
+        closeSentence();
+        closeOverlap();
+      }
+      sentenceTokens += 1;
+      if (sentenceTokens > SENTENCE_OVERLAP_SPAN_TOKENS) closeOverlap();
+      if (questionContent.has(token.norm)) {
+        sentenceContent.add(token.norm);
+        contentCounts.set(token.norm, (contentCounts.get(token.norm) ?? 0) + 1);
+      }
       if (sentence.length < CONSULT_GATE_SHARED_RUN_TOKENS) sentence.push(token.norm);
       if (fullRun.feed(token.norm)) reasons.add('shared_token_run');
       if (isContent(token.norm) && (contentRun.feed(token.norm) || contentSpan.feed(token.norm))) reasons.add('shared_token_run');
@@ -1549,9 +1879,13 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
       }
       const watched = model.forms.has(token.norm);
       if (watched) {
-        const stat = stats.get(token.norm) ?? { capitalized: 0, lower: 0 };
+        const stat = stats.get(token.norm) ?? { capitalized: 0, lower: 0, lowerAnywhere: 0 };
+        const prose = entry.kind === 'text' || entry.kind === 'user_question';
         if (token.capitalized) stat.capitalized += 1;
-        else if (entry.kind !== 'user_question') stat.lower += 1;
+        else {
+          if (entry.kind !== 'user_question') stat.lower += 1;
+          if (prose && !token.labelled) stat.lowerAnywhere += 1;
+        }
         stats.set(token.norm, stat);
       }
       const joined = first ? previous !== undefined : token.joined;
@@ -1568,22 +1902,38 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
         }
       }
       const initial = first || token.initial;
-      // Single-word names are read from prose only; capitalized words inside
-      // paths, titles and other identifiers are handled by the component rule.
-      if (watched && entry.kind === 'text' && token.capitalized && token.norm.length >= 2 && !NAME_STOPWORDS.has(token.norm)
-        && (token.labelled || (!initial && token.norm.length >= 3))) {
+      // Single-word names: capitalized words in prose (sentence-initial ones
+      // included), and label or quoted values in any entry and any case.
+      // Capitalized words inside paths and titles go through the component rule.
+      if (watched && token.norm.length >= 2 && !NAME_STOPWORDS.has(token.norm) && !FUNCTION_WORDS.has(token.norm)
+        && (token.labelled || (entry.kind === 'text' && token.capitalized && token.norm.length >= 3
+          // A first word counts only in running prose: the first word of a
+          // table cell, caption or column header is capitalized by layout.
+          && (!initial || PROSE_PATHS.has(entry.path))))) {
         const existing = singleCandidates.get(token.norm);
-        singleCandidates.set(token.norm, { source: model.forms.get(token.norm)!, labelled: token.labelled || (existing?.labelled ?? false) });
+        singleCandidates.set(token.norm, {
+          source: model.forms.get(token.norm)!,
+          labelled: token.labelled || (existing?.labelled ?? false),
+          initialOnly: (existing?.initialOnly ?? true) && initial && !token.labelled,
+        });
       }
       previous = token;
       first = false;
     });
     closeSentence();
+    closeOverlap();
   }
   if (reasons.size > 0) return reasons;
+  for (const words of overlapCandidates) {
+    const rare = words.filter((word) => (contentCounts.get(word) ?? 0) <= CONSULT_GATE_RARE_WORD_OCCURRENCES);
+    if (rare.length >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS) {
+      reasons.add('shared_token_run');
+      return reasons;
+    }
+  }
 
   // Decisions that need whole-snapshot case statistics.
-  const statOf = (token: string): NameStats => stats.get(token) ?? { capitalized: 0, lower: 0 };
+  const statOf = (token: string): NameStats => stats.get(token) ?? { capitalized: 0, lower: 0, lowerAnywhere: 0 };
   const neverLower = (token: string): boolean => statOf(token).lower === 0;
   const nameHit = (source: FormSource): void => { reasons.add(source === 'decoded' ? 'encoded_identifier' : 'snapshot_name'); };
   for (const pair of pairCandidates.values()) {
@@ -1605,13 +1955,23 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
     }
   }
   for (const [token, single] of singleCandidates) {
-    // A label value ("Reporter: Grace", a quoted name) is a name outright; a
-    // capitalized word mid-sentence is one unless it is written in lower case
-    // more often than capitalized (so one lower-case repeat does not unmake a
-    // name, while a common word capitalized once in a heading stays a word).
-    if (single.labelled || statOf(token).capitalized >= statOf(token).lower) nameHit(single.source);
+    // A label or quoted value is a name outright. A capitalized word seen
+    // mid-sentence is one unless lower-case uses clearly dominate (three or
+    // more, and at least three times the capitalized ones), so a lower-case
+    // repeat does not unmake a name while a defined term used mostly in lower
+    // case stays a word. A word seen capitalized only at the start of
+    // sentences is weaker evidence: it is a name only if never written in
+    // lower case anywhere.
+    const stat = statOf(token);
+    const dominatedByLower = stat.lower >= 3 && stat.lower >= 3 * stat.capitalized;
+    if (single.labelled || (single.initialOnly ? stat.lower === 0 && stat.lowerAnywhere === 0 : !dominatedByLower)) nameHit(single.source);
   }
-  for (const [token, source] of componentCandidates) if (neverLower(token)) identifierHit(source);
+  // Identifier and path components written capitalized (or as a label value),
+  // in any position, unless the word is shown to be ordinary by a lower-case
+  // use in prose or in the owner's question. A lower-case component that is a
+  // dictionary word (a folder named "tenancy") is not protected: it is the
+  // topic, and protecting it would refuse every question about that topic.
+  for (const [token, source] of componentCandidates) if (statOf(token).lowerAnywhere === 0) identifierHit(source);
   return reasons;
 }
 
@@ -1651,8 +2011,10 @@ function wordsOf(folded: string): string[] {
 }
 
 function hasNumberWord(normalized: string): boolean {
-  return /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|thirtieth)\b/u.test(normalized);
+  NUMBER_WORD_PREFIX ??= new RegExp(`\\b(?:${NUMBER_PARTS.filter((part) => part.length >= 3).join('|')})`, 'u');
+  return NUMBER_WORD_PREFIX.test(normalized);
 }
+let NUMBER_WORD_PREFIX: RegExp | undefined;
 
 function compareWithRecent(model: QuestionModel, subQuestions: readonly string[], recent: readonly string[]): Set<ConsultGateReason> {
   const reasons = new Set<ConsultGateReason>();
@@ -1733,7 +2095,7 @@ const ROMAN_MONTHS: ReadonlyMap<string, number> = new Map(
   ['i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x', 'xi', 'xii'].map((numeral, index) => [numeral, index + 1]),
 );
 
-const DATE_JOINERS: ReadonlySet<string> = new Set(['of', 'de', 'del', 'van', 'in', 'the', 'du', 'des']);
+const DATE_JOINERS: ReadonlySet<string> = new Set(['of', 'de', 'del', 'van', 'in', 'the', 'du', 'des', 'le', 'el', 'em', 'op', 'am', 'den', 'il', 'di', 'da', 'do']);
 
 interface DateKeys {
   readonly full: Set<string>;
@@ -1819,7 +2181,13 @@ const UNIT_WORDS: ReadonlySet<string> = new Set([
   '%', 'percent', 'mg', 'mcg', 'g', 'kg', 'lb', 'lbs', 'oz', 'ml', 'l', 'km', 'm', 'cm', 'mm', 'mi', 'ft', 'h', 'hr',
   'hrs', 'min', 'mins', 's', 'sec', 'ms', 'kb', 'mb', 'gb', 'tb', 'kwh', 'w', 'kw', 'eur', 'usd', 'gbp', 'chf', 'jpy',
   'cad', 'aud', 'euro', 'euros', 'dollars', 'pounds', 'k', 'bn', 'million', 'billion', 'mmol', 'iu', 'bpm', 'mmhg',
-  'years', 'yrs', 'months', 'weeks', 'days', 'units',
+  'years', 'yrs', 'months', 'weeks', 'days', 'units', 'hours', 'minutes',
+  // other configured languages (accents removed)
+  'anos', 'ans', 'annees', 'anni', 'jaar', 'jahre', 'jahren', 'meses', 'mois', 'maanden', 'monate', 'mesi', 'dias',
+  'jours', 'dagen', 'tage', 'giorni', 'semanas', 'semaines', 'weken', 'wochen', 'settimane', 'horas', 'heures', 'uur',
+  'stunden', 'ore', 'minutos', 'minuten', 'minuti', 'euro', 'dolares', 'reais', 'real', 'libras', 'francs', 'franken',
+  'kilos', 'gramos', 'grammes', 'gramm', 'grammi', 'metros', 'metres', 'meter', 'metri', 'litros', 'litres', 'liter',
+  'litri', 'procent', 'prozent', 'percento', 'porcento', 'pourcent',
   '$', '\u20AC', '\u00A3', '\u00A5', '\u20B9',
 ]);
 

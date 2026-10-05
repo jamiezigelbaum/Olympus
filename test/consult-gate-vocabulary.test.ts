@@ -16,6 +16,7 @@ import {
   evaluateConsultQuestion,
   loadConsultVocabulary,
   reloadConsultVocabulary,
+  type ConsultGateOptions,
 } from '../src/core/consult-gate.ts';
 import { writePack } from '../scripts/build-consult-vocabulary.ts';
 import { readManifest, writeManifest } from '../scripts/install-consult-language-pack.ts';
@@ -27,6 +28,7 @@ const PACK: EvidencePack = {
   coverage: { searchedCorpora: [], skippedCorpora: [], extractionGaps: [] },
 };
 const CONTEXT = consultWriterContextFromPack(PACK);
+const DE = { languages: ['en', 'de'] } as const satisfies ConsultGateOptions;
 const GERMAN = 'Was ist der Unterschied zwischen einem Mietvertrag und einem Untermietvertrag?';
 const dirs: string[] = [];
 const originalDir = process.env.OLYMPUS_CONSULT_VOCABULARY_DIR;
@@ -65,8 +67,8 @@ describe('shipped vocabulary packs', () => {
   });
 
   test('the sorted-buffer lookup finds every word of a pack and nothing else', () => {
-    const loaded = loadConsultVocabulary({ 'cldr-names': CONSULT_VOCABULARY_PACKS['cldr-names']! }, null).vocabulary!;
-    const words = gunzipSync(readFileSync(join(import.meta.dir, '..', 'assets', 'consult', 'vocabulary', 'cldr-names.txt.gz')))
+    const loaded = loadConsultVocabulary({ 'cldr-units': CONSULT_VOCABULARY_PACKS['cldr-units']! }, null).vocabulary!;
+    const words = gunzipSync(readFileSync(join(import.meta.dir, '..', 'assets', 'consult', 'vocabulary', 'cldr-units.txt.gz')))
       .toString('utf8').split('\n').filter((line) => line && !line.startsWith('#'));
     expect(words.length).toBeGreaterThan(1_000);
     expect(words.filter((word) => !loaded.has(word))).toEqual([]);
@@ -81,24 +83,26 @@ describe('user-installed language packs', () => {
     process.env.OLYMPUS_CONSULT_VOCABULARY_DIR = mkdtempSync(join(tmpdir(), 'olympus-consult-empty-'));
     dirs.push(process.env.OLYMPUS_CONSULT_VOCABULARY_DIR);
     reloadConsultVocabulary();
-    expect(evaluateConsultQuestion(GERMAN, CONTEXT).reasons).toContain('unknown_word');
-    expect(consultVocabularyStatus().filter((entry) => entry.origin === 'user')).toEqual([]);
+    expect(evaluateConsultQuestion(GERMAN, CONTEXT, {}, {}, DE).reasons).toContain('unknown_word');
+    expect(consultVocabularyStatus(DE).filter((entry) => entry.origin === 'user')).toEqual([{ id: 'de-hunspell', origin: 'user', state: 'missing', words: 0 }]);
   });
 
   test('an installed pack is verified against the local manifest, loaded, and its words pass', () => {
-    process.env.OLYMPUS_CONSULT_VOCABULARY_DIR = userPackDir(['ist', 'unterschied', 'zwischen', 'einem', 'mietvertrag', 'untermietvertrag']);
+    process.env.OLYMPUS_CONSULT_VOCABULARY_DIR = userPackDir(['was', 'ist', 'der', 'unterschied', 'zwischen', 'einem', 'mietvertrag', 'und', 'untermietvertrag']);
     reloadConsultVocabulary();
-    expect(consultVocabularyStatus().filter((entry) => entry.origin === 'user')).toEqual([
-      { id: 'de-hunspell', origin: 'user', state: 'loaded', words: 6 },
+    expect(consultVocabularyStatus(DE).filter((entry) => entry.origin === 'user')).toEqual([
+      { id: 'de-hunspell', origin: 'user', state: 'loaded', words: 9 },
     ]);
-    expect(evaluateConsultQuestion(GERMAN, CONTEXT)).toEqual({ decision: 'pass', reasons: [] });
+    expect(evaluateConsultQuestion(GERMAN, CONTEXT, {}, {}, DE)).toEqual({ decision: 'pass', reasons: [] });
+    // Installed but not configured: not admitted.
+    expect(evaluateConsultQuestion(GERMAN, CONTEXT).reasons).toContain('unknown_word');
   });
 
   test('a pack that does not match its manifest hash is skipped, and its words stay refused', () => {
     process.env.OLYMPUS_CONSULT_VOCABULARY_DIR = userPackDir(['ist', 'unterschied', 'zwischen', 'einem', 'mietvertrag', 'untermietvertrag'], true);
     reloadConsultVocabulary();
-    expect(consultVocabularyStatus().find((entry) => entry.origin === 'user')?.state).toBe('hash_mismatch');
-    expect(evaluateConsultQuestion(GERMAN, CONTEXT).reasons).toContain('unknown_word');
+    expect(consultVocabularyStatus(DE).find((entry) => entry.origin === 'user')?.state).toBe('hash_mismatch');
+    expect(evaluateConsultQuestion(GERMAN, CONTEXT, {}, {}, DE).reasons).toContain('unknown_word');
   });
 
   test('a user pack cannot replace a shipped pack', () => {

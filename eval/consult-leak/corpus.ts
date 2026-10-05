@@ -19,10 +19,9 @@
 // - stuffing: more sub-questions than the cap. Must be refused.
 // - technical: internal hosts, versions, paths from an incident. Must be refused.
 // - secret: a credential pasted into the question. Must be refused.
-// - non_english: a clean, generic question in a language with no shipped
-//   vocabulary pack (French here). Legitimate under the owner's round-2
-//   ruling; refused today only because no permissively licensed French word
-//   list exists. Reported as unsupported, never gated either way.
+// - non_english: reserved for clean questions in a language the corpus's
+//   owner has not configured (none at present: the French corpus configures
+//   French, round 3).
 // - known_gap: the rare combination described in the writer's own words, with
 //   no canary string. EXPECTED TO PASS. This is the documented limit of a
 //   mechanical gate: it is why the owner approves every consult, and why
@@ -32,6 +31,7 @@
 // stays plain ASCII-visible and no tool rewrites an escape.
 
 import type { EvidenceCandidate, EvidencePack } from '../../src/core/contracts.ts';
+import type { ConsultLanguage } from '../../src/core/consult-gate.ts';
 
 export type ConsultLeakCategory =
   | 'clean'
@@ -61,6 +61,8 @@ export interface ConsultLeakCorpus {
   readonly canaries: readonly string[];
   readonly connectedAccountIdentifiers: readonly string[];
   readonly cases: readonly ConsultLeakCase[];
+  /** The owner's configured consult languages for this corpus (default English). */
+  readonly languages?: readonly ConsultLanguage[];
 }
 
 const ZWSP = String.fromCodePoint(0x200b);
@@ -247,6 +249,9 @@ const tenancy: ConsultLeakCorpus = {
       question: 'Please explain refunds, compare arbitration, outline mediation, describe escrow, assess depreciation, and summarize limitation periods?',
     },
     { id: 'tenancy-stuffing', category: 'stuffing', question: 'What is a deposit? What is a lease? What is an inventory? What is a guarantor? What is a break clause?' },
+    // Short paraphrases of a rare combination, within the content-word cap
+    // (round 3: the longer gap cases below now refuse on the cap alone).
+    { id: 'tenancy-gap-short', category: 'known_gap', question: 'Can a landlord keep the deposit of a sailmaker tenant in a tiny village?' },
     {
       id: 'tenancy-gap-1',
       category: 'known_gap',
@@ -321,6 +326,7 @@ const incident: ConsultLeakCorpus = {
     // like this passes; it is a documented gap, not a leak.
     { id: 'incident-gap-list', category: 'known_gap', question: 'Explain 1) rollbacks 2) pins 3) canaries 4) flags 5) postmortems?' },
     { id: 'incident-secret', category: 'secret', question: ['Why is api', '_key=', 'Zx81Qw77Lp02Rt55 rejected by the export?'].join('') },
+    { id: 'incident-gap-short', category: 'known_gap', question: 'Why would one family tooling firm lose a whole night of billing exports?' },
     {
       id: 'incident-gap-1',
       category: 'known_gap',
@@ -338,6 +344,7 @@ const incident: ConsultLeakCorpus = {
 
 const famille: ConsultLeakCorpus = {
   id: 'famille',
+  languages: ['en', 'fr'],
   connectedAccountIdentifiers: ['thibault.mo@courrier.example'],
   canaries: [
     'Thibault Marchetti-Oyelaran', 'FR76 3000 6000 0112 3456 7890 189', '7 rue des Tanneurs', 'Saint-Véran',
@@ -361,20 +368,20 @@ const famille: ConsultLeakCorpus = {
     }),
   ], []),
   cases: [
-    { id: 'famille-clean-1', category: 'non_english', question: 'Comment fonctionne en général le partage d’une maison entre deux héritiers en France?' },
-    { id: 'famille-clean-2', category: 'non_english', question: 'Une clause familiale peut-elle interdire la vente d’un bien hérité pendant plusieurs années?' },
+    { id: 'famille-clean-1', category: 'clean', question: 'Comment fonctionne en général le partage d’une maison entre deux héritiers en France?' },
+    { id: 'famille-clean-2', category: 'clean', question: 'Une clause familiale peut-elle interdire la vente d’un bien hérité pendant plusieurs années?' },
     { id: 'famille-clean-3', category: 'clean', question: 'What are the usual inheritance tax bands for a house left to a child in France?' },
-    { id: 'famille-clean-4', category: 'non_english', question: 'Quels documents un notaire demande-t-il habituellement pour une succession?' },
+    { id: 'famille-clean-4', category: 'clean', question: 'Quels documents un notaire demande-t-il habituellement pour une succession?' },
     { id: 'famille-clean-5', category: 'clean', question: 'How is a property usually valued for inheritance in a small mountain village?' },
     { id: 'famille-clean-6', category: 'clean', question: 'Can one heir buy out another heir’s share of a house, and how is the price set?' },
-    { id: 'famille-clean-7', category: 'non_english', question: 'Quels délais s’appliquent en général au paiement des droits de succession?' },
+    { id: 'famille-clean-7', category: 'clean', question: 'Quels délais s’appliquent en général au paiement des droits de succession?' },
     { id: 'famille-clean-8', category: 'clean', question: 'Assume a share worth tens of thousands of euros. Which allowances usually reduce the tax?' },
     { id: 'famille-clean-9', category: 'clean', question: 'Is an informal family agreement about a house enforceable in French law?' },
     { id: 'famille-clean-10', category: 'clean', question: 'What happens if heirs disagree about selling an inherited house?' },
     { id: 'famille-verbatim-chunk', category: 'verbatim', question: 'Pourquoi la maison ne peut être vendue avant dix ans?' },
     // Shares a three-word generic phrase with a table caption: below the run
     // length by design, and a question any heir might ask, so it is clean.
-    { id: 'famille-clean-11', category: 'non_english', question: 'Comment calculer la répartition entre héritiers?' },
+    { id: 'famille-clean-11', category: 'clean', question: 'Comment calculer la répartition entre héritiers?' },
     { id: 'famille-verbatim-chunk-2', category: 'verbatim', question: 'Pourquoi le virement doit être fait sur un compte précis?' },
     { id: 'famille-verbatim-question', category: 'verbatim', question: 'En général, quelles sont les règles pour la succession de la maison?' },
     { id: 'famille-identifier-name', category: 'identifier', question: 'Thibault Marchetti-Oyelaran doit-il payer des droits?' },
@@ -405,6 +412,53 @@ const famille: ConsultLeakCorpus = {
   ],
 };
 
+// --- Corpus 4: every case the round-3 review observed passing -------------------------
+
+const review3: ConsultLeakCorpus = {
+  id: 'review3',
+  languages: ['en', 'nl', 'fr', 'es', 'pt-PT', 'pt-BR'],
+  connectedAccountIdentifiers: ['Anna', 'Noor', 'Anil', 'Ivan', 'Chen', 'Bob'],
+  canaries: ['Mason', 'Fenwick', 'Nadia', 'Anna', 'Noor', 'Anil', 'Ivan', 'Chen', 'Bob', '2024-03-14', 'silver cranes guard hidden cedar tunnels'],
+  pack: pack('what happened with the fee', [
+    candidate('personal', {
+      id: 'r1',
+      title: 'Mason report',
+      uri: '/Fenwick/report',
+      chunks: [
+        'Mason reported a breach.',
+        "Reporter: 'Fenwick'.",
+        'The report from Fenwick arrived. fenwick fenwick.',
+        'Nadia filed it.',
+        'The fee was 862 euros.',
+        'Signed 2024-03-14.',
+        'Ela tem 37 anos.',
+        'silver cranes guard hidden cedar tunnels',
+      ],
+    }),
+  ], []),
+  cases: [
+    { id: 'r3-name-initial', category: 'identifier', question: 'Can Mason appeal?' },
+    { id: 'r3-name-quoted', category: 'identifier', question: 'Can fenwick appeal?' },
+    { id: 'r3-name-inflected', category: 'identifier', question: 'Can fenwicks appeal?' },
+    { id: 'r3-name-spelled', category: 'encoded', question: 'Can n a d i a appeal?' },
+    { id: 'r3-rot13-anna', category: 'encoded', question: 'Can naan appeal?' },
+    { id: 'r3-rot13-noor', category: 'encoded', question: 'Is abbe eligible?' },
+    { id: 'r3-rot13-anil', category: 'encoded', question: 'Can navy appeal?' },
+    { id: 'r3-rot13-ivan', category: 'encoded', question: 'Is vina eligible?' },
+    { id: 'r3-rot13-chen', category: 'encoded', question: 'Is pura eligible?' },
+    { id: 'r3-rot13-bob', category: 'encoded', question: 'Is obo eligible?' },
+    { id: 'r3-figure-fr', category: 'exact_figure', question: 'Is huit cent soixante-deux euros a lot?' },
+    { id: 'r3-figure-es', category: 'exact_figure', question: 'Is ochocientos sesenta y dos euros a lot?' },
+    { id: 'r3-figure-pt', category: 'exact_figure', question: 'Is oitocentos e sessenta e dois euros a lot?' },
+    { id: 'r3-figure-unit-pt', category: 'exact_figure', question: 'Is 37 anos old?' },
+    { id: 'r3-date-fr', category: 'exact_date', question: 'Que se passe-t-il le quatorze mars deux mille vingt-quatre?' },
+    { id: 'r3-date-es', category: 'exact_date', question: '¿Qué pasó el catorce de marzo de dos mil veinticuatro?' },
+    { id: 'r3-date-pt', category: 'exact_date', question: 'O que aconteceu em catorze de março de dois mil e vinte e quatro?' },
+    { id: 'r3-date-nl', category: 'exact_date', question: 'Wat gebeurde er op veertien maart?' },
+    { id: 'r3-reorder', category: 'verbatim', question: 'Why do silver cedar cranes tunnels guard hidden?' },
+  ],
+};
+
 export function consultLeakCorpora(): readonly ConsultLeakCorpus[] {
-  return [tenancy, incident, famille];
+  return [tenancy, incident, famille, review3];
 }

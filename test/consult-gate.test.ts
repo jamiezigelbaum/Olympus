@@ -185,7 +185,9 @@ const PACK = packWith('what did the letting agent say about returning my deposit
     title: 'Heron Quay tenancy file',
     authorLabel: 'Desmond Achterberg',
     conversationLabel: 'Flat 4B handover',
-    uri: 'files/Personal/Housing/heron-quay-inventory.pdf',
+    // No capitalized folder named like the product's default scope word, so the
+    // near-miss below tests the account-scope exemption alone.
+    uri: 'files/Housing/heron-quay-inventory.pdf',
     chunks: [
       'Marguerite Okafor confirmed on 14 March 2024 that the deposit of 2,375.50 would be released after the final inspection at 12 Heron Quay.',
       'Reach the agent at 0161 496 0734 or desk@heronquay-lettings.example and quote reference AC-55821-Q.',
@@ -198,8 +200,12 @@ const PACK = packWith('what did the letting agent say about returning my deposit
 
 const CONTEXT = consultWriterContextFromPack(PACK);
 
+// The shipped languages, configured, so the near-miss questions in French
+// and Spanish exercise the snapshot rules rather than the language setting.
+const LANGUAGES = { languages: ['en', 'fr', 'es'] as const };
+
 function verdict(question: string, context: ConsultWriterContext = CONTEXT) {
-  return evaluateConsultQuestion(question, context);
+  return evaluateConsultQuestion(question, context, {}, {}, { languages: [...LANGUAGES.languages] });
 }
 
 function expectPass(question: string, context: ConsultWriterContext = CONTEXT): void {
@@ -362,10 +368,11 @@ describe('consult gate', () => {
     // so a title-case heading is protected as if it were a name: the price of
     // not letting "dorian fenwick" in lower case unmake "Dorian Fenwick".
     const context = consultWriterContextFromPack(packWith('q', [{
-      chunks: ['Final Inspection', 'The final inspection happens after keys are returned, and the final inspection is short.'],
+      chunks: ['Final Inspection', 'The final inspection happens after keys are returned, the final inspection is short, and every final inspection is logged.'],
     }]));
     expectRefused('When does a final inspection usually happen?', 'snapshot_name', context);
-    // Near-miss: one of the words alone.
+    // Near-miss: one of the words alone, where its lower-case uses clearly
+    // dominate (three or more, at least three times the capitalized ones).
     expectPass('When does the last inspection usually happen?', context);
   });
 

@@ -1,5 +1,6 @@
-Pack: cldr-names.txt.gz
-Source: Unicode CLDR 48.2 via npm cldr-localenames-full 48.2.0 and cldr-units-full 48.2.0.
+Pack: cldr-countries.txt.gz
+Source: Unicode CLDR 48.2 via npm cldr-localenames-full 48.2.0: country and macro-region names (territory codes of two letters or three digits; no subdivisions or cities), in en es fr de it pt nl.
+Generator: scripts/build-consult-vocabulary.ts at commit GENERATOR_COMMIT of this repository
 Licence: Unicode-3.0.
 
 UNICODE LICENSE V3

@@ -16,17 +16,37 @@
  *   bun scripts/install-consult-language-pack.ts --remove de|it remove
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { consultUserVocabularyDir } from '../src/core/consult-gate.ts';
 import { buildPack } from './build-consult-vocabulary.ts';
 
-export const OPTIONAL_LANGUAGE_PACKS: Readonly<Record<string, { id: string; npm: string; version: string; licence: string }>> = {
-  de: { id: 'de-hunspell', npm: 'dictionary-de', version: '3.0.0', licence: 'GPL-2.0 OR GPL-3.0' },
-  it: { id: 'it-hunspell', npm: 'dictionary-it', version: '2.0.0', licence: 'GPL-3.0' },
+/**
+ * Fixed upstream versions with their npm integrity hashes pinned here: the
+ * downloaded tarball must match the pin, not merely the registry's own
+ * metadata, so a changed registry entry cannot substitute different data.
+ */
+export const OPTIONAL_LANGUAGE_PACKS: Readonly<Record<string, { id: string; npm: string; version: string; licence: string; integrity: string }>> = {
+  de: {
+    id: 'de-hunspell',
+    npm: 'dictionary-de',
+    version: '3.0.0',
+    licence: 'GPL-2.0 OR GPL-3.0',
+    integrity: 'sha512-0Xbq+YpWTscAL1e18aPPaqfG4goC2o9T595L/54v2OvOPC0/TJFFlclYanxuUoK73wutM5f9EgSuWGkvQXlOXw==',
+  },
+  it: {
+    id: 'it-hunspell',
+    npm: 'dictionary-it',
+    version: '2.0.0',
+    licence: 'GPL-3.0',
+    integrity: 'sha512-klTygBjKRYKEeDmqLfDpI9eDCj334TQhbq2zExKREV4CMPiUsnXnO/0CGMTiRTRL+Wk+qXd0fKfEZbgw+gnjHw==',
+  },
 };
+
+/** Bounds on what the installer downloads and unpacks. */
+const MAX_TARBALL_BYTES = 32 * 1024 * 1024;
+const MAX_UNPACKED_BYTES = 128 * 1024 * 1024;
 
 interface Manifest {
   schema: 1;
@@ -39,14 +59,21 @@ export function readManifest(dir: string): Manifest {
   return JSON.parse(readFileSync(path, 'utf8')) as Manifest;
 }
 
+/** Write a file atomically: to a temporary name in the same directory, then rename. */
+function writeAtomic(path: string, data: string | Buffer): void {
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, data);
+  renameSync(temporary, path);
+}
+
 export function writeManifest(dir: string, manifest: Manifest): void {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  writeAtomic(join(dir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 /** Minimal tar reader for an npm tarball: returns the files under package/. */
 function untar(tgz: Buffer): Map<string, Buffer> {
-  const tar = gunzipSync(tgz);
+  const tar = gunzipSync(tgz, { maxOutputLength: MAX_UNPACKED_BYTES });
   const files = new Map<string, Buffer>();
   let offset = 0;
   while (offset + 512 <= tar.length) {
@@ -63,13 +90,18 @@ function untar(tgz: Buffer): Map<string, Buffer> {
 export async function installLanguagePack(language: string, dir = consultUserVocabularyDir()): Promise<{ id: string; words: number; sha256: string }> {
   const spec = OPTIONAL_LANGUAGE_PACKS[language];
   if (!spec) throw new Error(`unknown optional language: ${language} (choose de or it)`);
-  const meta = await (await fetch(`https://registry.npmjs.org/${spec.npm}/${spec.version}`)).json() as {
-    dist: { tarball: string; integrity: string };
-  };
-  const tgz = Buffer.from(await (await fetch(meta.dist.tarball)).arrayBuffer());
-  const [algorithm, expected] = meta.dist.integrity.split('-') as [string, string];
-  if (createHash(algorithm).update(tgz).digest('base64') !== expected) throw new Error(`${spec.npm} tarball failed its registry integrity check`);
-  const work = mkdtempSync(join(tmpdir(), 'olympus-consult-pack-'));
+  const tarball = `https://registry.npmjs.org/${spec.npm}/-/${spec.npm}-${spec.version}.tgz`;
+  const response = await fetch(tarball);
+  if (!response.ok) throw new Error(`${spec.npm} ${spec.version}: download failed (${response.status})`);
+  const declared = Number(response.headers.get('content-length') ?? '0');
+  if (declared > MAX_TARBALL_BYTES) throw new Error(`${spec.npm} tarball is larger than ${MAX_TARBALL_BYTES} bytes`);
+  const tgz = Buffer.from(await response.arrayBuffer());
+  if (tgz.length > MAX_TARBALL_BYTES) throw new Error(`${spec.npm} tarball is larger than ${MAX_TARBALL_BYTES} bytes`);
+  const [algorithm, expected] = spec.integrity.split('-') as [string, string];
+  if (createHash(algorithm).update(tgz).digest('base64') !== expected) throw new Error(`${spec.npm} tarball does not match the pinned integrity hash`);
+  // Work inside the target directory so the final rename never crosses devices.
+  mkdirSync(dir, { recursive: true });
+  const work = mkdtempSync(join(dir, '.build-'));
   try {
     const files = untar(tgz);
     mkdirSync(join(work, 'package'), { recursive: true });
@@ -79,11 +111,13 @@ export async function installLanguagePack(language: string, dir = consultUserVoc
       writeFileSync(join(work, 'package', name), file);
     }
     mkdirSync(dir, { recursive: true });
-    const result = buildPack(spec.id, dir, [join(work, 'package')]);
+    // Build into the work directory, then move into place atomically.
+    const result = buildPack(spec.id, work, [join(work, 'package')]);
+    renameSync(join(work, `${spec.id}.txt.gz`), join(dir, `${spec.id}.txt.gz`));
     const manifest = readManifest(dir);
     manifest.packs[spec.id] = {
       sha256: result.sha256,
-      source: `npm ${spec.npm} ${spec.version} (${meta.dist.integrity})`,
+      source: `npm ${spec.npm} ${spec.version} (${spec.integrity})`,
       licence: spec.licence,
       builtAt: new Date().toISOString(),
       words: result.words,

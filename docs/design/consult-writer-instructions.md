@@ -12,10 +12,9 @@
 > the consult transport, not to the writer, so they are left out. The final
 > checklist keeps the items that concern what is written.
 >
-> **Licence status.** The `ethereum/zkapi` repository has no root `LICENSE`
+> **Licence note.** The `ethereum/zkapi` repository has no root `LICENSE`
 > file; `zkapi-clientd/` is MIT and the Rust workspace is MIT OR Apache-2.0.
-> The licence of this root-level file is not stated and still needs upstream
-> confirmation before this text ships in a release (open as of 2026-10-05).
+> No licence is stated for this root-level file.
 
 Status: approved writer instructions for the frontier consult lane
 ([`frontier-consult-lane.md`](frontier-consult-lane.md), sections Z.2 and A.4).
@@ -108,11 +107,13 @@ yourself.
   too. What the gate checks, exactly, against numbers in the evidence (read the
   same way on both sides): any number of three or more digits, or two digits
   next to a unit or currency, written with digits in any digit system and any
-  separators, as English number words, or hex-encoded; digit fragments that
-  join into a number from the evidence; and exact dates in numeric, CJK,
-  month-name (eight European languages), Roman-month or English number-word
-  form. It does not catch other languages' number words, Han numerals, a
-  figure re-expressed by arithmetic, or relative dates. Bands are your job.
+  separators, as number words in English, Dutch, French, Spanish, Portuguese,
+  German or Italian (including "a hundred" and glued forms), or hex-encoded;
+  digit fragments that join into a number from the evidence; and exact dates
+  in numeric, CJK, month-name (eight European languages), Roman-month or
+  number-word form. It does not catch number words in other languages, Han
+  numerals, a figure re-expressed by arithmetic, or relative dates. Bands are
+  your job.
 - **The place can be the identifier.** A well-known city is unremarkable; a
   rare place combined with one niche attribute (a single employer, one
   specialty school, one hospital, one museum, an airport with two flights a
@@ -201,26 +202,47 @@ The value of a consult is set by how the question is framed:
 
 ## Language
 
-Write in the owner's language when the gate supports it, otherwise in English.
-Every word you use must be an ordinary dictionary word, a unit, a country name,
-a medicine name or a common standard abbreviation. The gate refuses any other
-word, whatever it is: a name, a product, a code, or a word in a language it has
-no list for.
+Write the consult in one of the owner's configured consult languages. English
+is the default, and the owner may add others. If the owner writes in a
+language that is not configured, write the consult in a configured one.
 
-- **Supported out of the box:** English, Dutch, French, Spanish and Portuguese,
-  plus unit and country names in those languages, German and Italian, and
-  medicine names.
-- **Supported after the user installs a pack:** German and Italian. Their word
-  lists are GPL-licensed, so Olympus does not ship them; the user runs
-  `bun scripts/install-consult-language-pack.ts de` (or `it`).
-- **Not supported:** every other language, including any script written
-  without spaces (Chinese, Japanese, Thai).
+Every word you use must be in the configured vocabulary:
 
-When the owner writes in a language that is not supported, write the consult in
-English. Compound words that a dictionary does not list whole (common in Dutch
-and German) are refused; split them into separate words or use a simpler term.
+- an ordinary dictionary word of a configured language;
+- a unit;
+- a medicine ingredient name, if that pack is on, which it is by default;
+- a country name, only if the owner has enabled country names;
+- a common standard abbreviation.
+
+The gate refuses any other word, whatever it is: a name, a product, a code, or
+a word in a language that is not configured.
+
+**Available languages.**
+
+- **Shipped:** English, Dutch, French, Spanish, and Portuguese (Portugal and
+  Brazil).
+- **Installable by the user:** German and Italian. Their word lists are
+  GPL-licensed, so Olympus does not ship them. The user runs
+  `bun scripts/install-consult-language-pack.ts de` (or `it`), then adds the
+  language to the consult languages.
+- **Not supported:** scripts written without spaces (Chinese, Japanese, Thai).
+
+Compound words that a dictionary does not list whole (common in Dutch and
+German) are refused; split them or use a simpler term.
 
 Name a country only when the answer depends on it. Never name a city or region.
+
+**Names that are also ordinary words.** The gate refuses such a word when the
+evidence writes it as a name, for example:
+
+- capitalised, as in "Mason reported";
+- as a label value, as in "Reporter: mason";
+- quoted;
+- in a title or path.
+
+It does not refuse such a name when the evidence writes it only in lower-case
+prose. Never use a word that is a person's name in the evidence, even if it is
+also an ordinary word.
 
 ## Form the gate requires
 
@@ -234,7 +256,10 @@ Name a country only when the answer depends on it. Never name a city or region.
   context before it, and holds at most twelve content words (words other
   than "the", "of", "is" and the like). The gate does not count list items
   inside a sub-question; keep any list short and on one topic.
-- Short: the whole request is at most 600 bytes and 80 words.
+- Short: the whole request is at most 600 bytes and 80 words (the gate's
+  token ceiling).
+- Never spell a word out letter by letter, and never write three or more
+  single letters in a row; the gate refuses both.
 
 ## Two neutral illustrations
 

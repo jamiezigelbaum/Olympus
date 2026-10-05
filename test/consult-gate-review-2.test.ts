@@ -90,11 +90,13 @@ describe('review 2: names', () => {
     ]) refused(question, context);
     refused(`Can ${cp(0x141)}ena H${cp(0xf8)}lt appeal?`, ctx([{ chunks: ['Lena Holt reported a breach.'] }]));
   });
-  test('known gap: a dictionary-word name in running prose', () => {
-    // "Grace" is an ordinary English word; outside a label or a pair it is
-    // indistinguishable from the word.
-    passed('Can grace be shown to a late payer?', ctx([{ chunks: ['Grace reported a breach.'] }]));
+  test('a dictionary-word name at the start of a sentence (closed in round 3)', () => {
+    refused('Can grace be shown to a late payer?', ctx([{ chunks: ['Grace reported a breach.'] }]));
   });
+  test('known gap: a dictionary-word name written only in lower-case prose', () => {
+    passed('Can grace be shown to a late payer?', ctx([{ chunks: ['grace reported a breach.'] }]));
+  });
+
 });
 
 describe('review 2: known identifiers', () => {
