@@ -111,3 +111,31 @@ Client-side verification of the Intel quote chain and platform status; nonce and
 ## Not verified by either reviewer
 
 Real zkAPI consult latency (no wallet was funded); OpenRouter and Open Anonymity retention settings; whether the daemon fetches per-note Merkle paths from the operator; Venice's response-signature format; whether the enclave really encrypts replies to the header key; JSON output under end-to-end encryption; whether the Phala gateway's downstream hop is attested.
+
+## D. Second round: revision 4 against the reference zkAPI practice (2026-10-05)
+
+Reviewer: Codex (gpt-6-astra), read-only, against the skill file `tor-remote-research.md` (ethereum/zkapi PR #16), the daemon's docs and source, and revision 4 of the proposal. Standard set by the owner: when a user wants privacy and turns on zkAPI, the result must be something the designer of that practice would approve.
+
+**Verdict: revision 4 does not yet meet the standard.** Three blockers.
+
+### Blockers
+
+1. **Enforce where the conclusion goes.** In the reference setup the remote model never sees the conclusion. On `main`'s OpenClaw path the Private answer is released to the calling agent by default, so an anonymous consult followed by an identified answer defeats the point. In the ChatGPT product the sealed private answer panel keeps the answer out of the hosted model (not reviewed in code by this reviewer). Required: offer the anonymous route only where the Private result stays out of the calling agent's view (the sealed panel, or a local agent with local delivery); otherwise label it payment-privacy only. `include_secure_local_content` must not override this.
+2. **"Fresh circuit per consult" is an assertion, not a protocol.** The reference builds a disposable Tor client per request. The daemon rejects SOCKS credentials and negotiates no-auth only (`internal/relay/relay.go:52-68`, `socks5.go:53-59`), so per-request isolation by SOCKS username is not available, and a new-identity signal affects only new streams and may be rate-limited. Olympus needs one of: a user-operated supervisor, a dedicated scoped Tor instance, or upstream per-request isolation. Do not copy the reference wrapper's cleanup, which restores direct mode on exit.
+3. **All three layers mandatory for the strong label.** Revision 4 says "no shortcuts" yet permits a no-Tor variant and a declared-only reuse check under the same setting. Keep no-Tor only as a separately named payment-privacy feature; refuse the strong mode when Tor, isolation or reuse 0 is absent or unverifiable.
+
+### High
+
+4. **Writer and dispatcher spec incomplete.** Missing from the adopted rules: technical fingerprints (stack combinations, literal errors, internal hostnames), security and incident abstraction, class-level locations, a runtime check of a new question against recent ones, validation of real completions (non-empty, well-formed), a smoke test of the selected model, and generation bounds. The gate's "more than one question" refusal contradicts the reference's safe batching of sub-questions. Exact figures are promised as refused but are not in the gate list.
+5. **Money guards not executable as written.** The expiry clock should be the note's on-chain expiry (computed from the deposit block), not a date the user confirms; "disappears" should read "becomes claimable by the operator". Quote, balance, expiry, Tor route and reuse window are not readable without the management credential (`funding_admin.go:12-55`, `server.go:49-55`), so the promised live fee estimate and several "verified" statuses have no permitted data path. Per-request allowances are $1 to $6 by model (`model_budget.go:13-29`), so "consults cost cents" is not enforceable; reserve a worst-case allowance before sending. Inference authentication is supported today and should be mandatory. Add caveats: deposits are ETH-valued, and activate before finality.
+6. **Acceptance tests to add:** three decomposed consults, settlement delays, Tor death mid-request, listener replacement, policy change between approval and send, empty successful responses, timing correlation with the calling agent's request.
+
+### Still open from the first round
+
+Endpoint custody (owner-asserted locality); numeric token-run length and byte bounds; daemon allowance reservation; public-surface guard treatment; verified reuse, pinned daemon identity, latency, withdrawal privacy and release integrity.
+
+### Limits to state, because today's upstream cannot fix them
+
+No guarantee against timing or content correlation; no confidentiality from the inference provider for what is sent; no recovery of what a hosted caller already saw (the original question and its timing); no end-to-end censorship or capture resistance and no guaranteed withdrawal; no trustless proof setup; no attach-only way to get isolation and status through the inference API.
+
+Not verified by this reviewer: the original post (taken from the brief), the vault's current owner and time-to-live, current fees and anonymity-set size, and the private answer panel's code.
