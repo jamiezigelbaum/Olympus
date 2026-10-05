@@ -26,6 +26,7 @@ import {
 } from './analyst.ts';
 import type { Analyst, EvidenceCandidate, EvidencePack } from './contracts.ts';
 import { OperationError } from './operation-error.ts';
+import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
 import {
   installBuiltInReasoning,
   readBuiltInReasoningStatus,
@@ -282,7 +283,9 @@ async function chatCompletion(
   const signal = request.signal ? AbortSignal.any([timeout, request.signal]) : timeout;
   let response: Response;
   try {
-    response = await fetchImpl(`${endpoint.baseUrl}/v1/chat/completions`, {
+    // Evidence and the server's bearer token ride this request: a redirect
+    // is refused, never followed.
+    response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${endpoint.token}`,
@@ -307,6 +310,13 @@ async function chatCompletion(
     });
   } catch (error) {
     if (request.signal?.aborted) throw error;
+    if (isModelEndpointRedirectError(error)) {
+      throw new OperationError(
+        'argus_unreachable',
+        'The built-in private model answered with a redirect, which is refused.',
+        error.message,
+      );
+    }
     throw new OperationError(
       'argus_unreachable',
       `The built-in private model did not answer${error instanceof Error && error.name === 'TimeoutError' ? ` within ${Math.round(timeoutMs / 1000)}s` : ''}.`,

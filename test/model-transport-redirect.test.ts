@@ -4,11 +4,12 @@
 // the Location target. Real loopback servers and the platform fetch, so the
 // proof covers `redirect: 'error'` itself rather than a test double's reading
 // of it.
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { createAnthropicAnalystModel } from '../src/core/analyst-anthropic.ts';
+import { createBuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
 import { createOpenAICompatibleAnalystModel } from '../src/core/analyst-openai.ts';
 import { connectApiKeySource, connectGeminiApiKey, connectPublicApiKeySource } from '../src/core/connect.ts';
 import { DirectHttpDelphiTransport } from '../src/core/delphi.ts';
@@ -27,6 +28,8 @@ import {
   GeminiSourceEmbeddingProvider,
   OpenAICompatibleSourceEmbeddingProvider,
 } from '../src/workers/source-index/embeddings.ts';
+import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
+import { createLlamaServerHandle } from '../src/workers/source-index/built-in-reasoning/server.ts';
 
 const EVIDENCE = 'PRIVATE-EVIDENCE-MARKER-4c1d';
 const API_KEY = 'model-credential-marker-9e2b';
@@ -182,6 +185,65 @@ describe('analyst chat transports', () => {
     expectNotFollowed();
     expectContentFree(error);
   });
+});
+
+describe('built-in private model transports', () => {
+  test('built-in analyst chat (Private answers, the ChatGPT private panel, the built-in sniffer)', async () => {
+    const model = createBuiltInAnalystModel({
+      env: { OLYMPUS_BUILT_IN_REASONING_DIR: join(scratch, 'built-in-reasoning') },
+      model: QWEN35_4B,
+      install: async () => ({ modelPath: '/m.gguf', serverPath: '/llama-server', gpu: true }),
+      createServer: () => ({
+        async ensureRunning() {
+          return { baseUrl: redirectBase(''), token: API_KEY };
+        },
+        touch() {},
+        async stop() {},
+        pid: 4242,
+      }),
+      waitForInstall: true,
+    });
+    const error = await caught(() => model.complete({ system: 'answer', prompt: EVIDENCE, localOnly: true }));
+    expect(error).toBeInstanceOf(OperationError);
+    expect((error as OperationError).code).toBe('argus_unreachable');
+    expect((error as Error).message).toContain('redirect');
+    expect(redirectorHits).toHaveLength(1);
+    expectNotFollowed();
+    expectContentFree(error);
+  });
+
+  test('built-in model server identity check never follows a redirect with its token', async () => {
+    // A stand-in llama-server that is healthy but redirects /v1/models.
+    const script = join(scratch, 'redirecting-llama-server');
+    writeFileSync(script, `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+const port = Number(args[args.indexOf('--port') + 1]);
+const server = Bun.serve({ hostname: '127.0.0.1', port, fetch(request) {
+  const url = new URL(request.url);
+  if (url.pathname === '/health') return new Response('{}');
+  return new Response('moved', { status: 307, headers: { location: 'http://127.0.0.1:${target.port}/collect?${LEAK_QUERY}=1' } });
+} });
+process.on('SIGTERM', () => { server.stop(true); process.exit(0); });
+`);
+    chmodSync(script, 0o755);
+    const handle = createLlamaServerHandle({
+      serverPath: script,
+      modelPath: '/m.gguf',
+      contextTokens: 1,
+      gpu: false,
+      threads: 1,
+      idleShutdownSeconds: 0,
+      startupTimeoutMs: 15_000,
+    });
+    try {
+      const error = await caught(() => handle.ensureRunning());
+      expect((error as Error).message).toContain('taken by another process');
+      expect(targetHits).toEqual([]);
+      expectContentFree(error);
+    } finally {
+      await handle.stop();
+    }
+  }, 30_000);
 });
 
 describe('embedding transports', () => {

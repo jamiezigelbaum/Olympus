@@ -584,8 +584,8 @@ Hard invariants remain enforced outside user control:
 - secrets are hard-denied everywhere
 - empty or exhausted fallback chains fail closed
 - model transports that carry source content or a model credential (analyst
-  chat, embeddings, vision extraction, the privacy sniffer, Delphi, and
-  credential-bearing catalog checks) refuse redirects with a typed,
+  chat, the built-in private model, embeddings, vision extraction, the privacy
+  sniffer, Delphi, and credential-bearing catalog checks) refuse redirects with a typed,
   content-free failure instead of following them
 - a local profile, local embedding model, local vision model, or Argus route
   whose model id carries an Ollama cloud tag (`:cloud`, or a tag ending in
