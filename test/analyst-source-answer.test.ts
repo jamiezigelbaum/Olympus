@@ -1652,13 +1652,20 @@ describe('analyst-backed source_answer handler', () => {
   const PRIVATE_TITLE_ID = 'Project-Nightingale-acquisition';
   const UPGRADED_ID = 'upgraded-private';
 
+  // `secureMatchedItems` absent = the adapter does not report row sensitivity.
   function withMatchCount(
     adapter: SourceIndexCorpusSearchAdapter,
     matchedItems: number,
+    secureMatchedItems?: number,
   ): SourceIndexCorpusSearchAdapter {
     return async (request) => ({
       ...(await adapter(request)),
-      matchCount: { matchedItems, contentMatchedItems: matchedItems, saturated: false },
+      matchCount: {
+        matchedItems,
+        contentMatchedItems: matchedItems,
+        saturated: false,
+        ...(secureMatchedItems !== undefined ? { secureMatchedItems } : {}),
+      },
     });
   }
 
@@ -1940,6 +1947,150 @@ describe('analyst-backed source_answer handler', () => {
         return {
           ...fixture,
           adapters: { ...fixture.adapters, [SECURE]: withMatchCount(adapterReturning([]), 3) } as SourceIndexRouterAdapterMap,
+        };
+      },
+      secureDerivativeDefault: 'approval',
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expectStrictHold(result);
+  });
+
+  // The router decides what a build met before its visibility gate, budget
+  // or trim, so a secure contribution that never reaches hydration still
+  // counts.
+  test('strict mode holds when a trimmed Personal-corpus hit leaves an unclassified count in the prompt', async () => {
+    let upgradeCalls = 0;
+    const { analyst, requests } = echoingAnalyst({});
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => {
+        const fixture = lanesFixture({ internal: ['note-1'], other: [UPGRADED_ID] });
+        return {
+          ...fixture,
+          adapters: { ...fixture.adapters, [OTHER]: withMatchCount(adapterReturning([UPGRADED_ID]), 7) } as SourceIndexRouterAdapterMap,
+          contentProviders: {
+            ...fixture.contentProviders,
+            [OTHER]: {
+              async fetchLocalContent() {
+                upgradeCalls += 1;
+                return {
+                  sensitivity: buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
+                  chunks: [SECURE_SECRET],
+                };
+              },
+            },
+          } as LocalContentProviderMap,
+        };
+      },
+      secureDerivativeDefault: 'approval',
+    }).answer({ question: 'Latest labs?', include_secure_local: true, max_results: 1 });
+
+    expect(upgradeCalls).toBe(0);
+    expect(requests[0]!.prompt).toMatch(/internal\.other\.docs \(file\) 7 items/);
+    expectStrictHold(result);
+    expect(leakedText(result)).not.toContain('7 more matches');
+  });
+
+  test('strict mode holds on a positive count from a Personal corpus whose default tier is secure', async () => {
+    const { analyst, requests } = echoingAnalyst({});
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => {
+        const fixture = lanesFixture({ internal: ['note-1'] });
+        return {
+          ...fixture,
+          registry: buildSourceIndexCorpusRegistry([
+            defineSourceIndexCorpus({ corpusId: INTERNAL, family: 'file', trustDomain: 'internal' }),
+            defineSourceIndexCorpus({
+              corpusId: OTHER,
+              family: 'file',
+              trustDomain: 'internal',
+              defaultSensitivity: { trustTier: 'S4', trustDomain: 'internal' },
+            }),
+          ]),
+          // Even a count that claims no secure rows: the corpus default rules.
+          adapters: { ...fixture.adapters, [OTHER]: withMatchCount(adapterReturning([]), 7, 0) } as SourceIndexRouterAdapterMap,
+        };
+      },
+      secureDerivativeDefault: 'approval',
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(requests[0]!.prompt).toMatch(/internal\.other\.docs \(file\) 7 items/);
+    expectStrictHold(result);
+    expect(leakedText(result)).not.toContain('7 more matches');
+  });
+
+  test('strict mode holds when the visibility gate removed the only Private hit', async () => {
+    const { analyst, requests } = echoingAnalyst({});
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => ({
+        ...lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+        visibilityGate: (hits) => hits.filter((hit) => hit.trustDomain !== 'secure_local'),
+      }),
+      secureDerivativeDefault: 'approval',
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(requests[0]!.prompt).not.toContain('trust: secure_local/');
+    expect(requests[0]!.prompt).not.toContain('lab-1');
+    expectStrictHold(result);
+  });
+
+  test('strict mode holds when only a planner expansion met a positive Private count', async () => {
+    const { analyst, requests } = echoingAnalyst({});
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => {
+        const fixture = lanesFixture({ internal: ['note-1'] });
+        const secure: SourceIndexCorpusSearchAdapter = async (request) => ({
+          ...(await adapterReturning([])(request)),
+          ...(request.query === 'acquisition plans'
+            ? { matchCount: { matchedItems: 5, contentMatchedItems: 5, saturated: false } }
+            : {}),
+        });
+        return { ...fixture, adapters: { ...fixture.adapters, [SECURE]: secure } as SourceIndexRouterAdapterMap };
+      },
+      queryPlanner: async () => ['acquisition plans'],
+      secureDerivativeDefault: 'approval',
+    }).answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(requests[0]!.prompt).not.toContain('secure_local.dropbox.files (file)');
+    expectStrictHold(result);
+  });
+
+  test('a Personal-only answer with trimmed hits the store classified non-secure still releases in strict mode', async () => {
+    const { analyst, requests } = echoingAnalyst({});
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => {
+        const fixture = lanesFixture({ internal: ['note-1', 'note-2', 'note-3'] });
+        return {
+          ...fixture,
+          adapters: {
+            ...fixture.adapters,
+            [INTERNAL]: withMatchCount(adapterReturning(['note-1', 'note-2', 'note-3']), 7, 0),
+          } as SourceIndexRouterAdapterMap,
+        };
+      },
+      secureDerivativeDefault: 'approval',
+    }).answer({ question: 'Latest labs?', include_secure_local: true, max_results: 1 });
+
+    expect(requests[0]!.prompt).toMatch(/internal\.notes\.docs \(file\) 7 items/);
+    expectStrictRelease(result);
+  });
+
+  // The accepted cost of the fail-closed count rule: an adapter that counts
+  // without reporting row sensitivity makes a positive count unknown, and
+  // unknown is secure. (The connector store reports it for every count.)
+  test('a positive Personal count with unreported row sensitivity holds in strict mode', async () => {
+    const { analyst } = scriptedAnalyst(citeInternal);
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => {
+        const fixture = lanesFixture({ internal: ['note-1'] });
+        return {
+          ...fixture,
+          adapters: { ...fixture.adapters, [INTERNAL]: withMatchCount(adapterReturning(['note-1']), 4) } as SourceIndexRouterAdapterMap,
         };
       },
       secureDerivativeDefault: 'approval',

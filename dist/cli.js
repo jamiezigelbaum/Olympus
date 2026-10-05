@@ -16926,11 +16926,13 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
 function hybridMatchCount(keyword, lexicalItemIds, vectorRows, gateArmed) {
   if (!gateArmed)
     return keyword;
-  const semanticOnly = vectorRows.filter((row) => !lexicalItemIds.has(row.sourceItem.localItemId)).length;
+  const semanticOnlyRows = vectorRows.filter((row) => !lexicalItemIds.has(row.sourceItem.localItemId));
+  const semanticOnly = semanticOnlyRows.length;
   return {
     matchedItems: keyword.matchedItems + semanticOnly,
     contentMatchedItems: keyword.contentMatchedItems + semanticOnly,
-    saturated: keyword.saturated
+    saturated: keyword.saturated,
+    ...keyword.secureMatchedItems !== undefined ? { secureMatchedItems: keyword.secureMatchedItems + semanticOnlyRows.filter(connectorStoreRowIsSecureTier).length } : {}
   };
 }
 function roundCosine(value) {
@@ -16982,7 +16984,8 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
     matchCount: {
       matchedItems: merged.length,
       contentMatchedItems: merged.filter(connectorStoreRowHasContent).length,
-      saturated: plain.saturated || content.saturated
+      saturated: plain.saturated || content.saturated,
+      secureMatchedItems: merged.filter(connectorStoreRowIsSecureTier).length
     },
     matchedItemIds: seen,
     completeItemIds: complete
@@ -16990,6 +16993,9 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
 }
 function connectorStoreRowHasContent(row) {
   return row.chunk !== undefined;
+}
+function connectorStoreRowIsSecureTier(row) {
+  return isSecureTrustTier(row.trustTier);
 }
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
@@ -27236,6 +27242,7 @@ async function routeSourceIndexSearch(options) {
   const corpusTimings = [];
   const lanes = [];
   const matchCounts = [];
+  let encounteredSecureLocal = false;
   const startedAt = Date.now();
   const searchableCorpora = [];
   for (const corpus of candidateCorpora) {
@@ -27297,6 +27304,8 @@ async function routeSourceIndexSearch(options) {
     });
     searchedCorpora.push(corpus.corpusId);
     laneAudits.push(...response.laneAudits ?? []);
+    if (corpusContributedSecure(corpus, response))
+      encounteredSecureLocal = true;
     if (response.matchCount) {
       matchCounts.push({
         corpusId: corpus.corpusId,
@@ -27304,7 +27313,8 @@ async function routeSourceIndexSearch(options) {
         trustDomain: corpus.trustDomain,
         matchedItems: response.matchCount.matchedItems,
         contentMatchedItems: response.matchCount.contentMatchedItems,
-        saturated: response.matchCount.saturated
+        saturated: response.matchCount.saturated,
+        ...response.matchCount.secureMatchedItems !== undefined ? { secureMatchedItems: response.matchCount.secureMatchedItems } : {}
       });
     }
     if (corpus.activationMode !== "lexical_only") {
@@ -27346,11 +27356,21 @@ async function routeSourceIndexSearch(options) {
     degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
     corpusTimings,
     ...matchCounts.length > 0 ? { matchCounts } : {},
+    encounteredSecureLocal,
     latencyMs: Date.now() - startedAt,
     rawExposed: false
   };
   assertSafeRoutedSearchResponse(result);
   return result;
+}
+function corpusContributedSecure(corpus, response) {
+  const count = response.matchCount;
+  const positiveCount = count !== undefined && (count.matchedItems > 0 || count.saturated);
+  if (response.hits.length === 0 && !positiveCount)
+    return false;
+  if (isSecureSensitivity(corpus.defaultSensitivity))
+    return true;
+  return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
 }
 function compareTiedRoutedCandidates(left, right, laneOrder) {
   const bestRank = bestLaneRank(left) - bestLaneRank(right);
@@ -27580,6 +27600,7 @@ function normalizeRouterResultKey(key) {
 }
 var DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 1e4, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
+  init_types();
   init_answer_latency_trace();
   FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
     "body",
@@ -27628,7 +27649,7 @@ async function buildEvidencePackDetailed(input) {
   const namesOnlyCandidateIndexes = [];
   const contentPrivateCandidateIndexes = [];
   let unreadCandidates = 0;
-  let encounteredSecureLocal = routed.hits.some((hit) => isSecureSensitivity(hit)) || (routed.matchCounts ?? []).some((count) => isSecureSensitivity(count) && (count.matchedItems > 0 || count.saturated));
+  let encounteredSecureLocal = routed.encounteredSecureLocal;
   const hydrationStartedAt = Date.now();
   const maxBytesPerCandidate = evidenceBytesPerCandidate(routedHits.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
   const maxCharsPerCandidate = maxBytesPerCandidate;
@@ -27875,7 +27896,8 @@ function selectedItemsToRoutedSlice(input) {
     searchedCorpora: [...searched],
     skippedCorpora,
     laneAudits,
-    degradations: []
+    degradations: [],
+    encounteredSecureLocal: hits.some((hit) => isSecureSensitivity(input.registry.get(hit.corpusId)?.defaultSensitivity ?? { trustDomain: "secure_local" }))
   };
 }
 async function runRoutedSearches(input) {
@@ -27913,7 +27935,8 @@ async function runRoutedSearches(input) {
     skippedCorpora: mergeRoutedSkippedCorpora(runs),
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
     degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
-    ...literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {}
+    ...literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {},
+    encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal)
   };
 }
 function mergeRoutedSkippedCorpora(runs) {

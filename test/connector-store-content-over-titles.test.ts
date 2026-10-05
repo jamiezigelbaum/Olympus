@@ -202,6 +202,35 @@ describe('connector-store ranking: content over titles', () => {
       // Fewer than the 50-row probe survived the filter, so the old
       // post-filter test would have reported this count as exact.
       expect(response.matchCount!.matchedItems).toBeLessThan(50);
+      // Rows of a secure_local store sit at its S4 default tier.
+      expect(response.matchCount!.secureMatchedItems).toBe(response.matchCount!.matchedItems);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a match count reports how many matched rows sit at a secure tier', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-count-secure-rows-'));
+    const store = new LocalConnectorStore({
+      dbPath: join(dir, 'files.sqlite'),
+      corpusId: DROPBOX_FILES_CORPUS_ID,
+      family: 'file',
+      trustDomain: 'internal',
+    });
+    try {
+      const items = Array.from({ length: 4 }, (_, index) => ({
+        id: `note-${index}`,
+        name: `garden note ${index}.md`,
+        path: `/notes/garden note ${index}.md`,
+        mimeType: 'text/markdown',
+        text: `Garden note ${index}: water the tomatoes.`,
+      }));
+      await store.syncFromConnector(fixtureConnector('dropbox', 'internal', items), { fetchContent: true });
+      const response = await search(store, 'garden tomatoes', { retrievalMode: 'keyword', maxResults: 1 });
+      expect(response.hits).toHaveLength(1);
+      expect(response.matchCount!.matchedItems).toBe(4);
+      expect(response.matchCount!.secureMatchedItems).toBe(0);
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });

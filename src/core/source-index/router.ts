@@ -7,6 +7,7 @@ import type {
   SourceItemIdentity,
   SourceTrustDomain,
 } from './types.ts';
+import { isSecureSensitivity } from './types.ts';
 import type {
   SourceIndexCorpusDefinition,
   SourceIndexCorpusRegistry,
@@ -100,6 +101,10 @@ export interface SourceIndexCorpusMatchCount {
   // Of matchedItems, those with readable content, not a bare name or path.
   contentMatchedItems: number;
   saturated: boolean;
+  // Of matchedItems, those whose own tier is secure (S4 and above). Absent
+  // when the adapter cannot tell; the router then counts a positive count as
+  // secure (see encounteredSecureLocal).
+  secureMatchedItems?: number;
 }
 
 export interface SourceIndexRoutedMatchCount extends SourceIndexCorpusMatchCount {
@@ -165,6 +170,14 @@ export interface SourceIndexRoutedSearchResponse {
   corpusTimings: readonly SourceIndexRoutedCorpusTiming[];
   // Per-corpus match breadth, for every searched corpus whose adapter counts.
   matchCounts?: readonly SourceIndexRoutedMatchCount[];
+  // Content-free, decided before the visibility gate, the per-corpus budget
+  // or any trim: true when a searched corpus contributed anything secure by
+  // isSecureSensitivity. A corpus contributes when it returned a hit or a
+  // positive match count; its contribution is secure when the corpus's
+  // default sensitivity is secure, or its count reports secure rows or does
+  // not say (unknown counts as secure). A corpus that matched nothing
+  // contributed nothing. Internal: never part of a tool or model result.
+  encounteredSecureLocal: boolean;
   latencyMs: number;
   rawExposed: false;
 }
@@ -270,6 +283,7 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
   const corpusTimings: SourceIndexRoutedCorpusTiming[] = [];
   const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[] }> = [];
   const matchCounts: SourceIndexRoutedMatchCount[] = [];
+  let encounteredSecureLocal = false;
   const startedAt = Date.now();
 
   const searchableCorpora: SourceIndexCorpusDefinition[] = [];
@@ -344,6 +358,7 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
     });
     searchedCorpora.push(corpus.corpusId);
     laneAudits.push(...(response.laneAudits ?? []));
+    if (corpusContributedSecure(corpus, response)) encounteredSecureLocal = true;
     if (response.matchCount) {
       matchCounts.push({
         corpusId: corpus.corpusId,
@@ -352,6 +367,9 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
         matchedItems: response.matchCount.matchedItems,
         contentMatchedItems: response.matchCount.contentMatchedItems,
         saturated: response.matchCount.saturated,
+        ...(response.matchCount.secureMatchedItems !== undefined
+          ? { secureMatchedItems: response.matchCount.secureMatchedItems }
+          : {}),
       });
     }
     if (corpus.activationMode !== 'lexical_only') {
@@ -417,11 +435,27 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
     degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
     corpusTimings,
     ...(matchCounts.length > 0 ? { matchCounts } : {}),
+    encounteredSecureLocal,
     latencyMs: Date.now() - startedAt,
     rawExposed: false,
   };
   assertSafeRoutedSearchResponse(result);
   return result;
+}
+
+// Whether one corpus lane's raw response (before any filter or trim) carried
+// anything secure. Hits carry no sensitivity of their own here, so a hit is
+// as secure as its corpus's default; a count is secure when its corpus is, or
+// when it reports secure rows or does not report row sensitivity at all.
+function corpusContributedSecure(
+  corpus: SourceIndexCorpusDefinition,
+  response: SourceIndexCorpusSearchResponse,
+): boolean {
+  const count = response.matchCount;
+  const positiveCount = count !== undefined && (count.matchedItems > 0 || count.saturated);
+  if (response.hits.length === 0 && !positiveCount) return false;
+  if (isSecureSensitivity(corpus.defaultSensitivity)) return true;
+  return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
 }
 
 /**

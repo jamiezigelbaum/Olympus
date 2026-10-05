@@ -18621,6 +18621,7 @@ function normalizeRouterResultKey(key) {
 }
 var FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
+  init_types();
   init_answer_latency_trace();
   FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
     "body",

@@ -248,13 +248,15 @@ export interface EvidencePackBuildDetail {
   secretLocations?: readonly SecretLocationNote[];
   classificationCoverage?: readonly ClassificationCoverageNote[];
   // True when this build met secure material anywhere (isSecureSensitivity):
-  // a routed hit, a hydrated candidate (provider upgrades included) or its
-  // cached facts, a policy-denied item (classification unknown, so counted),
-  // or a Private corpus's positive match count. Its candidates, gaps and
-  // counts reach the model through every leg's pack whatever fitting keeps,
-  // so the release gate reads this rather than tracking what a leg was shown.
-  // A Private corpus that was skipped or matched nothing contributed no text
-  // and does not set it.
+  // in any routed run of the build, before its visibility gate, budget or
+  // trim (router.ts encounteredSecureLocal: a secure corpus's hit or positive
+  // count, or a count reporting secure or unknown rows); a hydrated candidate
+  // (provider upgrades included) or its cached facts; or a policy-denied item
+  // (classification unknown, so counted). Its candidates, gaps and counts
+  // reach the model through every leg's pack whatever fitting keeps, so the
+  // release gate reads this rather than tracking what a leg was shown. A
+  // Private corpus that was skipped or matched nothing contributed no text and
+  // does not set it. Each build has its own flag: a rebuild starts clean.
   encounteredSecureLocal: boolean;
 }
 
@@ -288,11 +290,7 @@ export async function buildEvidencePackDetailed(
   const namesOnlyCandidateIndexes: number[] = [];
   const contentPrivateCandidateIndexes: number[] = [];
   let unreadCandidates = 0;
-  // Every routed hit, before the visibility gate removes any.
-  let encounteredSecureLocal = routed.hits.some((hit) => isSecureSensitivity(hit))
-    || (routed.matchCounts ?? []).some((count) => (
-      isSecureSensitivity(count) && (count.matchedItems > 0 || count.saturated)
-    ));
+  let encounteredSecureLocal = routed.encounteredSecureLocal;
 
   const hydrationStartedAt = Date.now();
   const maxBytesPerCandidate = evidenceBytesPerCandidate(
@@ -596,6 +594,7 @@ const MAX_SEARCH_QUERIES = 3;
 type RoutedSearchSlice = Pick<
   SourceIndexRoutedSearchResponse,
   'hits' | 'searchedCorpora' | 'skippedCorpora' | 'laneAudits' | 'degradations' | 'matchCounts'
+  | 'encounteredSecureLocal'
 >;
 
 function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearchSlice {
@@ -656,6 +655,9 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
     // Caller-selected items bypass retrieval entirely: no lane ran, so no lane
     // was lost. Reporting a degradation here would be a false alarm.
     degradations: [],
+    encounteredSecureLocal: hits.some((hit) => (
+      isSecureSensitivity(input.registry.get(hit.corpusId)?.defaultSensitivity ?? { trustDomain: 'secure_local' })
+    )),
   };
 }
 
@@ -731,6 +733,8 @@ async function runRoutedSearches(input: BuildEvidencePackInput): Promise<RoutedS
     // The literal question's counts, not a merge across planner rephrasings:
     // the breadth reported is for what the owner asked.
     ...(literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {}),
+    // Every run of this build, expansions included: what any of them met.
+    encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
   };
 }
 
