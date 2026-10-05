@@ -31,7 +31,8 @@ import {
   sourceIndexChunkQueryTerms,
 } from './source-index/chunk-selection.ts';
 import { assertEvidencePackModelEligible } from './source-model-policy.ts';
-import { isSecureTrustTier } from './source-index/types.ts';
+import { isSecureSensitivity } from './source-index/types.ts';
+import { OperationError } from './operation-error.ts';
 
 // --- Model seam -----------------------------------------------------------
 // Minimal completion interface. A production adapter maps this onto
@@ -67,6 +68,21 @@ export interface AnalystModelUsage {
 
 export interface AnalystModel {
   complete(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
+}
+
+/**
+ * Defense in depth for ordinary (standard-cloud) transports: a request marked
+ * localOnly carries evidence that is secure by isSecureSensitivity (domain or
+ * tier), and the routing layer must never send it here. If it does, refuse
+ * before anything leaves the machine, as a typed policy error (no fallback).
+ */
+export function refuseLocalOnlyOnOrdinaryCloud(request: AnalystModelRequest, providerLabel: string): void {
+  if (!request.localOnly) return;
+  throw new OperationError(
+    'source_index_policy_violation',
+    `${providerLabel} is a standard-cloud analyst and refuses local-only (secure) evidence.`,
+    'Route secure evidence to a local or approved Venice Private analyst.',
+  );
 }
 
 const analystAbortSignalStorage = new AsyncLocalStorage<AbortSignal>();
@@ -379,14 +395,7 @@ export function analystPromptBytes(
 }
 
 function evidencePackRequiresLocalOnly(pack: EvidencePack): boolean {
-  return pack.candidates.some((candidate) => (
-    candidate.trustDomain === 'secure_local'
-    || isSecureTrustTier(candidate.trustTier)
-    || (candidate.facts ?? []).some((fact) => (
-      fact.sensitivity.trustDomain === 'secure_local'
-      || isSecureTrustTier(fact.sensitivity.trustTier)
-    ))
-  ));
+  return pack.candidates.some((candidate) => isSecureSensitivity(candidate));
 }
 
 function hasGroundedPartialAnswer(

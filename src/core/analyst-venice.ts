@@ -49,6 +49,8 @@ export function createVeniceAnalystModel(options: VeniceAnalystModelOptions): An
     serviceTier: false,
     maxTokensField: 'max_completion_tokens',
     providerLabel: 'Venice analyst',
+    // complete() below gates local-only requests on the approved category.
+    admitsLocalOnly: true,
     apiKeyHint: 'Set OLYMPUS_SOURCE_INDEX_VENICE_API_KEY, VENICE_API_KEY, API_KEY_VENICE, or Venice-API-Key in the assistant runtime.',
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),

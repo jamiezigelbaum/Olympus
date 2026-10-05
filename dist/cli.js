@@ -7031,6 +7031,9 @@ function buildSourceSensitivity(input) {
 function isSecureTrustTier(trustTier) {
   return trustTier === "S4" || trustTier === "S4+" || trustTier === "S5";
 }
+function isSecureSensitivity(input) {
+  return input.trustDomain === "secure_local" || input.trustTier !== undefined && isSecureTrustTier(input.trustTier) || (input.facts ?? []).some((fact) => isSecureSensitivity(fact.sensitivity));
+}
 function buildSourceIndexStorageProfile(input) {
   if (input.trustDomain === "secure_local") {
     if (input.embeddingBackend === "cloud" && input.embeddingProvider !== "venice") {
@@ -16815,6 +16818,7 @@ function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPat
     provenance: provenanceFromSearchRow(store.corpusId, row),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
     score,
+    trustTier: row.trustTier,
     rawExposed: false
   };
 }
@@ -16923,11 +16927,13 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
 function hybridMatchCount(keyword, lexicalItemIds, vectorRows, gateArmed) {
   if (!gateArmed)
     return keyword;
-  const semanticOnly = vectorRows.filter((row) => !lexicalItemIds.has(row.sourceItem.localItemId)).length;
+  const semanticOnlyRows = vectorRows.filter((row) => !lexicalItemIds.has(row.sourceItem.localItemId));
+  const semanticOnly = semanticOnlyRows.length;
   return {
     matchedItems: keyword.matchedItems + semanticOnly,
     contentMatchedItems: keyword.contentMatchedItems + semanticOnly,
-    saturated: keyword.saturated
+    saturated: keyword.saturated,
+    ...keyword.secureMatchedItems !== undefined ? { secureMatchedItems: keyword.secureMatchedItems + semanticOnlyRows.filter(connectorStoreRowIsSecureTier).length } : {}
   };
 }
 function roundCosine(value) {
@@ -16979,7 +16985,8 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
     matchCount: {
       matchedItems: merged.length,
       contentMatchedItems: merged.filter(connectorStoreRowHasContent).length,
-      saturated: plain.saturated || content.saturated
+      saturated: plain.saturated || content.saturated,
+      secureMatchedItems: merged.filter(connectorStoreRowIsSecureTier).length
     },
     matchedItemIds: seen,
     completeItemIds: complete
@@ -16987,6 +16994,9 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
 }
 function connectorStoreRowHasContent(row) {
   return row.chunk !== undefined;
+}
+function connectorStoreRowIsSecureTier(row) {
+  return isSecureTrustTier(row.trustTier);
 }
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
@@ -25677,7 +25687,7 @@ function evaluateReleaseGate(input) {
     reasons.add("hostile_source_instruction_treated_as_data");
   }
   const crossingToCallingAgent = isCallingAgentDestination(input.destination);
-  const secureFacts = input.facts.filter((fact) => fact.sensitivity.trustDomain === "secure_local");
+  const secureFacts = input.facts.filter((fact) => isSecureSensitivity(fact.sensitivity));
   if (crossingToCallingAgent && secureFacts.some((fact) => fact.releaseSurface === "local_only")) {
     return {
       decision: "needs_approval",
@@ -25759,6 +25769,7 @@ function secretLabelsInText(text) {
 }
 var SECRET_PATTERNS2;
 var init_opsec = __esm(() => {
+  init_types();
   SECRET_PATTERNS2 = [
     { label: "private_key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/i },
     { label: "oauth_refresh_token", pattern: /\brefresh[_ -]?token\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{8,}/i },
@@ -25803,6 +25814,11 @@ var init_source_model_policy = __esm(() => {
 
 // src/core/analyst.ts
 import { AsyncLocalStorage } from "node:async_hooks";
+function refuseLocalOnlyOnOrdinaryCloud(request, providerLabel) {
+  if (!request.localOnly)
+    return;
+  throw new OperationError("source_index_policy_violation", `${providerLabel} is a standard-cloud analyst and refuses local-only (secure) evidence.`, "Route secure evidence to a local or approved Venice Private analyst.");
+}
 function runWithAnalystAbortSignal(signal, run) {
   return Promise.resolve(analystAbortSignalStorage.run(signal, run));
 }
@@ -25911,7 +25927,7 @@ ${buildCompactAnalystPrompt(pack)}`).length;
 ${buildAnalystPrompt(pack, localOnly)}`).length;
 }
 function evidencePackRequiresLocalOnly(pack) {
-  return pack.candidates.some((candidate) => candidate.trustDomain === "secure_local" || isSecureTrustTier(candidate.trustTier) || (candidate.facts ?? []).some((fact) => fact.sensitivity.trustDomain === "secure_local" || isSecureTrustTier(fact.sensitivity.trustTier)));
+  return pack.candidates.some((candidate) => isSecureSensitivity(candidate));
 }
 function hasGroundedPartialAnswer(draft, pack) {
   if (!draft?.answer.trim())
@@ -26475,6 +26491,7 @@ var init_analyst = __esm(() => {
   init_chunk_selection();
   init_source_model_policy();
   init_types();
+  init_operation_error();
   analystAbortSignalStorage = new AsyncLocalStorage;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
@@ -26763,6 +26780,7 @@ function createOpenClawInferAnalystModel(options = {}) {
   const runner = options.runner ?? new SpawnOpenClawRunner;
   return {
     async complete(request) {
+      refuseLocalOnlyOnOrdinaryCloud(request, "OpenClaw infer analyst");
       const prompt = `${request.system}
 
 ${request.prompt}`;
@@ -26930,6 +26948,7 @@ var DEFAULT_COMMAND = "openclaw", OPENCLAW_DEFAULT_MODEL_LABEL = "openclaw-defau
 var init_analyst_openclaw_infer = __esm(() => {
   init_operation_error();
   init_openclaw_executable();
+  init_analyst();
   OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
   OpenClawInferError = class OpenClawInferError extends OperationError {
     safeReason;
@@ -27233,6 +27252,8 @@ async function routeSourceIndexSearch(options) {
   const corpusTimings = [];
   const lanes = [];
   const matchCounts = [];
+  let encounteredSecureLocal = false;
+  const secureLaneAudits = [];
   const startedAt = Date.now();
   const searchableCorpora = [];
   for (const corpus of candidateCorpora) {
@@ -27293,15 +27314,21 @@ async function routeSourceIndexSearch(options) {
       outcome: "success"
     });
     searchedCorpora.push(corpus.corpusId);
+    const corpusLaneAuditsStart = laneAudits.length;
     laneAudits.push(...response.laneAudits ?? []);
+    const contributedSecure = corpusContributedSecure(corpus, response);
+    if (contributedSecure)
+      encounteredSecureLocal = true;
     if (response.matchCount) {
       matchCounts.push({
         corpusId: corpus.corpusId,
         family: corpus.family,
         trustDomain: corpus.trustDomain,
+        trustTier: corpus.defaultSensitivity.trustTier,
         matchedItems: response.matchCount.matchedItems,
         contentMatchedItems: response.matchCount.contentMatchedItems,
-        saturated: response.matchCount.saturated
+        saturated: response.matchCount.saturated,
+        ...response.matchCount.secureMatchedItems !== undefined ? { secureMatchedItems: response.matchCount.secureMatchedItems } : {}
       });
     }
     if (corpus.activationMode !== "lexical_only") {
@@ -27314,6 +27341,8 @@ async function routeSourceIndexSearch(options) {
       if (semanticLoss)
         degradations.push(semanticLoss);
     }
+    if (contributedSecure)
+      secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
     lanes.push({
       name: corpus.corpusId,
       items: response.hits.map((hit) => ({
@@ -27343,11 +27372,25 @@ async function routeSourceIndexSearch(options) {
     degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
     corpusTimings,
     ...matchCounts.length > 0 ? { matchCounts } : {},
+    encounteredSecureLocal,
+    secureLaneAudits,
     latencyMs: Date.now() - startedAt,
     rawExposed: false
   };
   assertSafeRoutedSearchResponse(result);
   return result;
+}
+function corpusContributedSecure(corpus, response) {
+  const count = response.matchCount;
+  const positiveCount = count !== undefined && (count.matchedItems > 0 || count.saturated);
+  if (response.hits.length === 0 && !positiveCount)
+    return false;
+  if (isSecureSensitivity(corpus.defaultSensitivity))
+    return true;
+  if (response.hits.some((hit) => hit.trustTier !== undefined && isSecureSensitivity({ trustDomain: corpus.trustDomain, trustTier: hit.trustTier }))) {
+    return true;
+  }
+  return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
 }
 function compareTiedRoutedCandidates(left, right, laneOrder) {
   const bestRank = bestLaneRank(left) - bestLaneRank(right);
@@ -27577,6 +27620,7 @@ function normalizeRouterResultKey(key) {
 }
 var DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 1e4, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
+  init_types();
   init_answer_latency_trace();
   FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
     "body",
@@ -27625,6 +27669,7 @@ async function buildEvidencePackDetailed(input) {
   const namesOnlyCandidateIndexes = [];
   const contentPrivateCandidateIndexes = [];
   let unreadCandidates = 0;
+  let encounteredSecureLocal = input.excludeSecureSensitivity ? false : routed.encounteredSecureLocal;
   const hydrationStartedAt = Date.now();
   const maxBytesPerCandidate = evidenceBytesPerCandidate(routedHits.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
   const maxCharsPerCandidate = maxBytesPerCandidate;
@@ -27650,13 +27695,14 @@ async function buildEvidencePackDetailed(input) {
   recordSourceAnswerHydration(Date.now() - hydrationStartedAt);
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
+      encounteredSecureLocal = true;
       policyDeniedCandidates += 1;
       const gap2 = `${hit.corpusId} ${SOURCE_MODEL_POLICY_GAP_SUFFIX}`;
       extractionGaps.push(gap2);
       policyDeniedCoverageGaps.push(gap2);
       continue;
     }
-    const sensitivity = content?.sensitivity ?? input.registry.get(hit.corpusId)?.defaultSensitivity ?? conservativeSensitivity(hit.trustDomain);
+    const sensitivity = content?.sensitivity ?? hitFallbackSensitivity(hit, input.registry.get(hit.corpusId)?.defaultSensitivity ?? conservativeSensitivity(hit.trustDomain));
     assertNoTrustDomainDowngrade(hit, sensitivity);
     const enrichedProvenance = content?.locatorUri && !provenance.citation?.uri ? {
       ...provenance,
@@ -27673,6 +27719,11 @@ async function buildEvidencePackDetailed(input) {
       ...hit.score !== undefined ? { score: hit.score } : {}
     };
     assertEvidenceCandidateModelEligible(candidate);
+    if (isSecureSensitivity(candidate)) {
+      if (input.excludeSecureSensitivity)
+        continue;
+      encounteredSecureLocal = true;
+    }
     if (content?.namesOnly === true)
       namesOnlyCandidateIndexes.push(candidates.length);
     else if (content?.contentPrivate === true)
@@ -27685,7 +27736,7 @@ async function buildEvidencePackDetailed(input) {
     if (gap)
       extractionGaps.push(gap);
   }
-  const matchCounts = coverageMatchCounts(routed.matchCounts, candidateCorpusIds, candidates.some((candidate) => candidate.trustDomain === "secure_local"));
+  const matchCounts = coverageMatchCounts(routed.matchCounts, candidateCorpusIds, candidates.some((candidate) => isSecureSensitivity(candidate)));
   const coverage = {
     searchedCorpora: routed.searchedCorpora,
     skippedCorpora: routed.skippedCorpora.map((skip) => ({ corpusId: skip.corpusId, reason: skip.reason })),
@@ -27696,10 +27747,14 @@ async function buildEvidencePackDetailed(input) {
   const secretLocations = input.secretLocations?.(input.searchQuery ?? input.question, routed.searchedCorpora) ?? [];
   const classificationCoverage = (input.classificationCoverage?.(routed.searchedCorpora) ?? []).filter((note) => note.pendingClassificationItems > 0);
   const builtAt = (input.now ?? (() => new Date))().toISOString();
+  const laneAudits = policyDeniedCandidates > 0 ? contentFreePolicyLaneAudits(routed.laneAudits) : routed.laneAudits;
+  const secureRouted = new Set(routed.secureLaneAudits);
+  const secureLaneAudits = laneAudits.filter((_, index) => secureRouted.has(routed.laneAudits[index]));
   return {
     pack: { question: input.question, candidates, coverage, builtAt },
     candidateCorpusIds,
-    laneAudits: policyDeniedCandidates > 0 ? contentFreePolicyLaneAudits(routed.laneAudits) : routed.laneAudits,
+    laneAudits,
+    secureLaneAudits,
     skippedCorpora: routed.skippedCorpora,
     degradations: routed.degradations,
     policyDeniedCandidates,
@@ -27708,6 +27763,7 @@ async function buildEvidencePackDetailed(input) {
     namesOnlyCandidateIndexes,
     contentPrivateCandidateIndexes,
     unreadCandidates,
+    encounteredSecureLocal,
     ...secretLocations.length > 0 ? { secretLocations } : {},
     ...classificationCoverage.length > 0 ? { classificationCoverage } : {}
   };
@@ -27750,7 +27806,7 @@ function clipChunksToUtf8Bytes(chunks, maxBytes) {
   return kept;
 }
 function coverageMatchCounts(counts, candidateCorpusIds, packHasSecureLocal) {
-  return (counts ?? []).filter((count) => packHasSecureLocal || count.trustDomain !== "secure_local").map((count) => {
+  return (counts ?? []).filter((count) => packHasSecureLocal || !countIsSecureInclusive(count)).map((count) => {
     const inEvidence = candidateCorpusIds.filter((corpusId) => corpusId === count.corpusId).length;
     return {
       corpusId: count.corpusId,
@@ -27761,6 +27817,9 @@ function coverageMatchCounts(counts, candidateCorpusIds, packHasSecureLocal) {
       inEvidence
     };
   });
+}
+function countIsSecureInclusive(count) {
+  return isSecureSensitivity(count) || count.secureMatchedItems === undefined || count.secureMatchedItems > 0;
 }
 async function corpusReadabilityGapsFor(searchedCorpora, providers) {
   const gaps = await Promise.all([...new Set(searchedCorpora)].map(async (corpusId) => {
@@ -27827,6 +27886,7 @@ function selectedItemsToRoutedSlice(input) {
   const skippedCorpora = [];
   const laneAudits = [];
   const searched = new Set;
+  let encounteredSecureLocal = false;
   for (const selected of input.selectedItems ?? []) {
     const corpus = input.registry.get(selected.corpusId);
     if (!corpus) {
@@ -27839,6 +27899,8 @@ function selectedItemsToRoutedSlice(input) {
       continue;
     }
     searched.add(corpus.corpusId);
+    if (isSecureSensitivity(corpus.defaultSensitivity))
+      encounteredSecureLocal = true;
     hits.push({
       corpusId: corpus.corpusId,
       trustDomain: corpus.trustDomain,
@@ -27851,8 +27913,9 @@ function selectedItemsToRoutedSlice(input) {
       rawExposed: false
     });
   }
+  const secureLaneAudits = [];
   for (const corpusId of searched) {
-    laneAudits.push({
+    const audit = {
       laneName: `${corpusId}:selected_evidence`,
       laneType: "metadata",
       candidateCount: hits.filter((hit) => hit.corpusId === corpusId).length,
@@ -27860,14 +27923,20 @@ function selectedItemsToRoutedSlice(input) {
       backend: "selected_evidence",
       localOnly: true,
       rawExposed: false
-    });
+    };
+    laneAudits.push(audit);
+    const corpus = input.registry.get(corpusId);
+    if (corpus && isSecureSensitivity(corpus.defaultSensitivity))
+      secureLaneAudits.push(audit);
   }
   return {
     hits,
     searchedCorpora: [...searched],
     skippedCorpora,
     laneAudits,
-    degradations: []
+    secureLaneAudits,
+    degradations: [],
+    encounteredSecureLocal
   };
 }
 async function runRoutedSearches(input) {
@@ -27904,8 +27973,10 @@ async function runRoutedSearches(input) {
     searchedCorpora: literalRun.searchedCorpora,
     skippedCorpora: mergeRoutedSkippedCorpora(runs),
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
+    secureLaneAudits: runs.flatMap((run) => [...run.secureLaneAudits]),
     degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
-    ...literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {}
+    ...literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {},
+    encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal)
   };
 }
 function mergeRoutedSkippedCorpora(runs) {
@@ -27987,6 +28058,13 @@ function locatorLabel(hit) {
 }
 function conservativeSensitivity(trustDomain) {
   return buildSourceSensitivity({ trustTier: conservativeTierForDomain2(trustDomain), trustDomain });
+}
+function hitFallbackSensitivity(hit, corpusDefault) {
+  const tier = hit.trustTier ?? "S4";
+  if (SOURCE_TRUST_TIERS.indexOf(tier) <= SOURCE_TRUST_TIERS.indexOf(corpusDefault.trustTier)) {
+    return corpusDefault;
+  }
+  return buildSourceSensitivity({ trustTier: tier, trustDomain: corpusDefault.trustDomain });
 }
 function conservativeTierForDomain2(trustDomain) {
   if (trustDomain === "public_safe")
@@ -29014,8 +29092,9 @@ function createAnalystSourceIndexAnswerHandler(options) {
       const maxResults = Math.min(MAX_EVIDENCE_CANDIDATES, request.max_results ?? (hasTemporalIntent(`${question} ${request.query ?? ""}`) ? Math.max(configuredMaxResults, TEMPORAL_INTENT_MIN_RESULTS) : configuredMaxResults));
       const evidenceByteBudget = options.evidenceByteBudget ?? DEFAULT_EVIDENCE_BYTE_BUDGET;
       const evidencePackStartedAt = Date.now();
-      const buildDetail = (activeLanes, attempt) => observeSourceAnswerRetrievalAttempt(attempt, () => buildEvidencePackDetailed({
+      const buildDetail = (activeLanes, attempt, build = {}) => observeSourceAnswerRetrievalAttempt(attempt, () => buildEvidencePackDetailed({
         question,
+        ...build,
         ...request.query?.trim() ? { searchQuery: request.query.trim() } : {},
         ...request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {},
         ...options.queryPlanner ? { queryPlanner: options.queryPlanner } : {},
@@ -29058,7 +29137,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
             ...rebuilt,
             skippedCorpora: mergeSkippedCorpora(preRebuild, rebuilt),
             degradations: mergeRetrievalDegradations(preRebuild.degradations, rebuilt.degradations),
-            laneAudits: [...preRebuild.laneAudits, ...rebuilt.laneAudits]
+            laneAudits: [...preRebuild.laneAudits, ...rebuilt.laneAudits],
+            secureLaneAudits: [...preRebuild.secureLaneAudits, ...rebuilt.secureLaneAudits]
           };
           evidencePackMs += Date.now() - rebuildStartedAt;
         }
@@ -29080,7 +29160,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
       };
       assertEvidencePackModelEligible(pack);
       const policyDeniedEmptyPack = pack.candidates.length === 0 && (detail.policyDeniedCandidates ?? 0) > 0;
-      let localOnly = pack.candidates.some((candidate) => candidate.trustDomain === "secure_local");
+      let localOnly = pack.candidates.some((candidate) => isSecureSensitivity(candidate));
       const requestedAnalystModel = request.analyst_model?.trim();
       const requestedAnalystProvider = request.analyst_provider ?? (requestedAnalystModel ? "venice" : "default");
       if (localOnly && requestedAnalystProvider === "venice" && requestedAnalystModel) {
@@ -29122,22 +29202,23 @@ function createAnalystSourceIndexAnswerHandler(options) {
           const secureIndex = allowedTrustDomains.indexOf("secure_local");
           if (secureIndex >= 0)
             allowedTrustDomains.splice(secureIndex, 1);
-          const rebuilt = await buildDetail(lanes, initialAttempt);
+          const rebuilt = await buildDetail(lanes, initialAttempt, { excludeSecureSensitivity: true });
           detail = withSecureLocalExclusionReason({
             ...rebuilt,
             skippedCorpora: mergeSkippedCorpora(detail, rebuilt),
             degradations: mergeRetrievalDegradations(detail.degradations, rebuilt.degradations),
-            laneAudits: [...detail.laneAudits, ...rebuilt.laneAudits]
+            laneAudits: [...detail.laneAudits, ...rebuilt.laneAudits],
+            secureLaneAudits: [...detail.secureLaneAudits, ...rebuilt.secureLaneAudits]
           }, "private_analyst_unavailable");
           pack = detail.pack;
           assertEvidencePackModelEligible(pack);
-          localOnly = pack.candidates.some((candidate) => candidate.trustDomain === "secure_local");
+          localOnly = pack.candidates.some((candidate) => isSecureSensitivity(candidate));
           if (localOnly)
             throw error;
           routedAnalysis = await analyze(detail, false);
         }
       }
-      const secureCandidates = pack.candidates.filter((c) => c.trustDomain === "secure_local");
+      const secureCandidates = pack.candidates.filter((c) => isSecureSensitivity(c));
       const internalCandidates = pack.candidates.filter((c) => c.trustDomain === "internal");
       const {
         result: analystResult,
@@ -29186,7 +29267,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
             trust_domain: skip.trustDomain,
             reason: skip.reason
           })),
-          lane_audits: [...detail.laneAudits],
+          lane_audits: localOnly || policyDeniedEmptyPack ? [...detail.laneAudits] : withoutSecureLaneAudits(detail.laneAudits, detail.secureLaneAudits),
           ...detail.degradations.length > 0 ? { retrieval_degradations: detail.degradations.map(answerRetrievalDegradation) } : {},
           ...(detail.corpusReadabilityGaps ?? []).length > 0 ? {
             corpus_readability: (detail.corpusReadabilityGaps ?? []).map((gap) => ({
@@ -29222,7 +29303,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
           raw_source_exposed: false,
           source_packets_exposed: false,
           internal_content_exposed: released && facts.some((fact) => fact.sensitivity.trustDomain === "internal"),
-          secure_local_content_exposed: released && facts.some((fact) => fact.sensitivity.trustDomain === "secure_local" && fact.releaseSurface === "castor_answer"),
+          secure_local_content_exposed: released && facts.some((fact) => isSecureSensitivity(fact.sensitivity) && fact.releaseSurface === "castor_answer"),
           castor_safe_bridge: true
         },
         opsec
@@ -29546,7 +29627,7 @@ async function routeAnalysis(input) {
   } = input;
   assertEvidencePackModelEligible(pack);
   const canUseCloud = !localOnly && cloud !== undefined;
-  const noSecureLocal = pack.candidates.every((candidate) => candidate.trustDomain !== "secure_local");
+  const noSecureLocal = pack.candidates.every((candidate) => !isSecureSensitivity(candidate));
   if (requestedProvider === "cloud" && (localOnly || !noSecureLocal)) {
     recordSourceAnswerRoute(0, [implicitTraceStep("cloud")]);
     recordSourceAnswerSkippedAnalystLeg({
@@ -29739,9 +29820,9 @@ function secureMetadataOnlyGapResult(error, pack) {
     return;
   if (error.code !== "config_error" || !/route for secure_local is disabled/i.test(error.message))
     return;
-  if (!pack.candidates.some((candidate) => candidate.trustDomain === "secure_local"))
+  if (!pack.candidates.some((candidate) => isSecureSensitivity(candidate)))
     return;
-  if (pack.candidates.some((candidate) => candidate.trustDomain === "secure_local" && candidate.chunks.length > 0)) {
+  if (pack.candidates.some((candidate) => isSecureSensitivity(candidate) && candidate.chunks.length > 0)) {
     return;
   }
   const extractionGaps = pack.coverage.extractionGaps.filter(Boolean);
@@ -30005,7 +30086,7 @@ function releaseAnalystAnswer(input) {
     decision: "needs_approval",
     reasons: ["uncited_non_public_answer"],
     requiredApproval: packHasSecureLocal(input.detail.pack) ? "s4_release" : "user_review"
-  } : originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision();
+  } : withSecureLocalContextGate(originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision(), facts, input.detail, input.releaseSecureContent);
   return {
     decision,
     facts,
@@ -30032,6 +30113,26 @@ function scannedUnsupportedNoContentDecision(input) {
     caller: "worker"
   });
   return releaseDecisionWithReason(safeScanned.decision === "allow" ? { ...safeScanned, allowedText: input.safeUnsupportedDraft } : safeScanned, input.reason);
+}
+function withSecureLocalContextGate(decision, facts, detail, releaseSecureContent) {
+  if (decision.decision !== "allow" && decision.decision !== "redact")
+    return decision;
+  const secureContext = detail.encounteredSecureLocal || detail.pack.candidates.some((candidate) => isSecureSensitivity(candidate));
+  if (!secureContext)
+    return decision;
+  if (!releaseSecureContent) {
+    return {
+      decision: "needs_approval",
+      reasons: [
+        "secure_local_context_uncited_requires_approval",
+        ...decision.reasons.filter((reason) => reason !== "release_gate_passed")
+      ],
+      requiredApproval: "s4_release"
+    };
+  }
+  if (facts.some((fact) => isSecureSensitivity(fact.sensitivity)))
+    return decision;
+  return releaseDecisionWithReason(decision, "secure_local_context_uncited_derivative_allowed");
 }
 function releaseDecisionWithReason(decision, reason) {
   return {
@@ -30155,7 +30256,11 @@ function isUnsupportedNoContentAnswer2(result) {
   return /\bno\b.{0,80}\b(evidence|source|sources|support|supports|supported|matching|match|answer)\b/.test(text) || /\bnothing\b.{0,80}\b(evidence|source|sources|support|supports|supported|found|matches)\b/.test(text) || /\b(evidence|source|sources)\b.{0,80}\b(does not|do not|doesn't|don't|cannot|can't|could not|doesn’t|don’t)\b.{0,80}\b(contain|support|answer)\b/.test(text) || /\b(cannot|can't|could not|unable to)\b.{0,80}\b(answer|determine|confirm)\b/.test(text) || /\b(insufficient|uncertain|not enough)\b.{0,80}\b(evidence|source|sources|text|content|context|answer|securely)\b/.test(text);
 }
 function packHasSecureLocal(pack) {
-  return pack.candidates.some((candidate) => candidate.trustDomain === "secure_local");
+  return pack.candidates.some((candidate) => isSecureSensitivity(candidate));
+}
+function withoutSecureLaneAudits(laneAudits, secureLaneAudits) {
+  const secure = new Set(secureLaneAudits);
+  return laneAudits.filter((audit) => !secure.has(audit));
 }
 function factsFromCitations(citations, detail, releaseSecureContent) {
   return citations.flatMap((citation, index) => {
@@ -30163,7 +30268,7 @@ function factsFromCitations(citations, detail, releaseSecureContent) {
     if (candidateIndex === -1)
       return [];
     const candidate = detail.pack.candidates[candidateIndex];
-    const secure = candidate.trustDomain === "secure_local";
+    const secure = isSecureSensitivity(candidate);
     return [
       createStructuredEvidenceFact({
         factId: `citation-${index + 1}`,
@@ -30254,7 +30359,7 @@ function appendUnreadableMatchedEvidence(evidence, detail, releaseSecureContent)
   const seen = new Set(evidence.map(evidenceKey));
   for (const index of unreadableMatchedCandidateIndexes(detail)) {
     const candidate = detail.pack.candidates[index];
-    if (candidate.trustDomain === "secure_local" && !releaseSecureContent)
+    if (isSecureSensitivity(candidate) && !releaseSecureContent)
       continue;
     const item = candidate.provenance.sourceItem;
     const corpusId = detail.candidateCorpusIds[index] ?? "unknown";
@@ -30353,7 +30458,7 @@ async function searchReleasedEvidence(input) {
   detail.pack.candidates.forEach((candidate, index) => {
     if (contentPrivate.has(index))
       return;
-    if (candidate.trustDomain !== "public_safe" && candidate.trustDomain !== "internal") {
+    if (isSecureSensitivity(candidate) || candidate.trustDomain !== "public_safe" && candidate.trustDomain !== "internal") {
       withheld += 1;
       return;
     }
@@ -81754,6 +81859,8 @@ function createOpenAICompatibleAnalystModel(options) {
   const fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init));
   return {
     async complete(request) {
+      if (options.admitsLocalOnly !== true)
+        refuseLocalOnlyOnOrdinaryCloud(request, providerLabel3);
       const url = `${baseUrl}/chat/completions`;
       const body = {
         ...options.extraBody ?? {},
@@ -81862,6 +81969,7 @@ var DEFAULT_MODEL = "gpt-5.5", DEFAULT_BASE_URL = "https://api.openai.com/v1", D
 var init_analyst_openai = __esm(() => {
   init_operation_error();
   init_model_transport();
+  init_analyst();
 });
 
 // src/core/venice-model-catalog.ts
@@ -82183,6 +82291,7 @@ function createVeniceAnalystModel(options) {
     serviceTier: false,
     maxTokensField: "max_completion_tokens",
     providerLabel: "Venice analyst",
+    admitsLocalOnly: true,
     apiKeyHint: "Set OLYMPUS_SOURCE_INDEX_VENICE_API_KEY, VENICE_API_KEY, API_KEY_VENICE, or Venice-API-Key in the assistant runtime.",
     ...options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {},
     ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
@@ -96122,7 +96231,7 @@ function createEmailSourceWorker(options = {}) {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
               retrieval_source: "local_index",
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
               ...secretLocations.length > 0 ? {
                 secret_locations: secretLocations.map((location) => ({
                   source: location.source,
@@ -100388,6 +100497,7 @@ function createAnthropicAnalystModel(options) {
   const fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init));
   return {
     async complete(request) {
+      refuseLocalOnlyOnOrdinaryCloud(request, "Anthropic analyst");
       const url = `${baseUrl}/v1/messages`;
       const controller = new AbortController;
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -100459,6 +100569,7 @@ var DEFAULT_MODEL2 = "claude-sonnet-4-5", DEFAULT_BASE_URL2 = "https://api.anthr
 var init_analyst_anthropic = __esm(() => {
   init_operation_error();
   init_model_transport();
+  init_analyst();
 });
 
 // src/core/query-planner.ts
@@ -115932,7 +116043,7 @@ function createTierSnifferModel(input) {
   return;
 }
 function analystRouteTrustDomain(pack, localOnly) {
-  if (localOnly || pack.candidates.some((candidate) => candidate.trustDomain === "secure_local")) {
+  if (localOnly || pack.candidates.some((candidate) => isSecureSensitivity(candidate))) {
     return "secure_local";
   }
   if (pack.candidates.some((candidate) => candidate.trustDomain === "internal")) {

@@ -168,6 +168,90 @@ describe('a private analyst outage never costs an ordinary answer', () => {
     ))).toBe(true);
   });
 
+  test('strict posture judges the rebuilt fallback pack, not the first build that held secure_local', async () => {
+    const world = answerWorld('private-cloud-only', {
+      analystOverrides: { 'venice-private': failing() },
+      secureDerivativeDefault: 'approval',
+    });
+    const result = await world.handler.answer({ question: 'What was my LDL?' });
+    expect(result.audit.answer_synthesis.analyst_backend).toBe('cloud');
+    expect(result.audit.answer_synthesis.private_context_used).toBe(false);
+    expect(result.opsec.release_decision.decision).toBe('allow');
+    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_requires_approval');
+    expect(result.answer).toContain('Your notes mention an LDL question.');
+    expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
+  });
+
+  test('the ordinary fallback rebuild leaves out an S4 item of a Personal corpus, with its gap and count, and releases in strict posture', async () => {
+    for (const posture of ['allow', 'approval'] as const) {
+    const MERGER = 'merger-plans.pdf';
+    const world = answerWorld('private-cloud-only', {
+      analystOverrides: { 'venice-private': failing() },
+      secureDerivativeDefault: posture,
+      lanes: () => {
+        const base = lanes();
+        const hit = (id: string, title: string) => {
+          const sourceItem = { family: 'file' as const, provider: 'fixture', accountScope: 'personal', providerItemId: id, localItemId: `personal:${id}` };
+          return { sourceItem, provenance: { sourceItem, citation: { title } }, score: 1, rawExposed: false as const };
+        };
+        return {
+          ...base,
+          adapters: {
+            ...base.adapters,
+            [INTERNAL]: () => ({
+              hits: [hit('note-1', 'note-1.pdf'), hit('merger', MERGER)],
+              // Two matches, one of them the S4 memo: secure-inclusive.
+              matchCount: { matchedItems: 2, contentMatchedItems: 2, saturated: false, secureMatchedItems: 1 },
+              laneAudits: [{
+                laneName: 'internal-merger-keyword',
+                laneType: 'keyword' as const,
+                candidateCount: 2,
+                returnedCount: 2,
+                localOnly: true,
+                rawExposed: false as const,
+              }],
+              latencyMs: 1,
+              rawExposed: false as const,
+            }),
+          } as SourceIndexRouterAdapterMap,
+          contentProviders: {
+            ...base.contentProviders,
+            [INTERNAL]: {
+              async fetchLocalContent(request: { provenance: { sourceItem: { providerItemId: string } } }) {
+                const merger = request.provenance.sourceItem.providerItemId === 'merger';
+                return {
+                  // The merger memo's own tier is S4 inside the Personal corpus.
+                  sensitivity: buildSourceSensitivity({ trustTier: merger ? 'S4' : 'S2', trustDomain: 'internal' }),
+                  chunks: [merger ? 'MERGER-RAW-CHUNK-TEXT' : INTERNAL_RAW],
+                  ...(merger ? { truncated: true } : {}),
+                };
+              },
+            },
+          } as LocalContentProviderMap,
+        };
+      },
+    });
+    const result = await world.handler.answer({ question: 'What was my LDL?' });
+
+    expect(result.audit.answer_synthesis.analyst_backend).toBe('cloud');
+    expect(result.audit.answer_synthesis.secure_local_items_consulted).toBe(0);
+    const ordinary = world.calls['cloud-openclaw-infer']!;
+    expect(ordinary).toHaveLength(1);
+    expect(ordinary[0]!.candidates.map((candidate) => candidate.provenance.citation?.title)).toEqual(['note-1.pdf']);
+    expect(JSON.stringify(ordinary[0]!.coverage)).not.toContain('merger');
+    // The secure-inclusive count never reaches the ordinary pack.
+    expect((ordinary[0]!.coverage.matchCounts ?? []).some((count) => count.corpusId === INTERNAL)).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('MERGER-RAW-CHUNK-TEXT');
+    // The rebuild kept nothing secure-derived, so neither posture holds it.
+    expect({ posture, decision: result.opsec.release_decision.decision }).toEqual({ posture, decision: 'allow' });
+    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_requires_approval');
+    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_derivative_allowed');
+    // Neither the original build's nor the rebuild's lane audit for the
+    // secure-contributing corpus is returned with the ordinary answer.
+    expect(result.audit.lane_audits.some((audit) => audit.laneName === 'internal-merger-keyword')).toBe(false);
+    }
+  });
+
   test('the fallback pack is fitted to the answering leg and its counts exclude secure_local', async () => {
     // local-only: the private route is the local model alone; the ordinary
     // route is cloud then local. The local model refuses secure evidence (the
@@ -324,6 +408,7 @@ function answerWorld(preset: Preset, options: {
   secureTitle?: string;
   secureAnalystPoolLastLegTimeoutMs?: number;
   lanes?: () => ReturnType<typeof lanes>;
+  secureDerivativeDefault?: 'allow' | 'approval';
 } = {}) {
   const engine = createSovereigntyEngine(presetConfig(preset));
   const calls: Record<string, EvidencePack[]> = {};
@@ -341,6 +426,7 @@ function answerWorld(preset: Preset, options: {
   const handler = createAnalystSourceIndexAnswerHandler({
     analyst: fallbackLocal,
     lanes: options.lanes ?? (() => lanes(options.secureTitle)),
+    ...(options.secureDerivativeDefault ? { secureDerivativeDefault: options.secureDerivativeDefault } : {}),
     ...(options.secureAnalystPoolLastLegTimeoutMs !== undefined
       ? { secureAnalystPool: { lastLegTimeoutMs: options.secureAnalystPoolLastLegTimeoutMs } }
       : {}),
@@ -453,7 +539,10 @@ function countedLanes(): ReturnType<typeof lanes> {
   };
   const adapter = (ids: string[]) => () => ({
     hits: ids.map(hit),
-    matchCount: { matchedItems: 40, contentMatchedItems: 40, saturated: false },
+    // Row sensitivity reported (none of these rows is secure), as the
+    // connector store reports it; an unreported count is dropped from an
+    // ordinary pack.
+    matchCount: { matchedItems: 40, contentMatchedItems: 40, saturated: false, secureMatchedItems: 0 },
     latencyMs: 1,
     rawExposed: false as const,
   });

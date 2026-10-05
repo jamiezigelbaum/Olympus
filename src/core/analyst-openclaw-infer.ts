@@ -18,7 +18,12 @@
 
 import { OperationError } from './operation-error.ts';
 import { resolveOpenClawExecutable } from './openclaw-executable.ts';
-import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from './analyst.ts';
+import {
+  refuseLocalOnlyOnOrdinaryCloud,
+  type AnalystModel,
+  type AnalystModelCompletion,
+  type AnalystModelRequest,
+} from './analyst.ts';
 
 export interface OpenClawCommandResult {
   code: number;
@@ -95,6 +100,7 @@ export function createOpenClawInferAnalystModel(
 
   return {
     async complete(request: AnalystModelRequest): Promise<AnalystModelCompletion> {
+      refuseLocalOnlyOnOrdinaryCloud(request, 'OpenClaw infer analyst');
       // The infer CLI takes a single --prompt; fold the analyst system
       // instructions in ahead of the evidence prompt.
       //

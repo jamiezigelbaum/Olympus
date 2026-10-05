@@ -1,6 +1,11 @@
 import { OperationError } from './operation-error.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
-import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from './analyst.ts';
+import {
+  refuseLocalOnlyOnOrdinaryCloud,
+  type AnalystModel,
+  type AnalystModelCompletion,
+  type AnalystModelRequest,
+} from './analyst.ts';
 
 export type AnthropicAnalystFetch = (
   url: string,
@@ -41,6 +46,7 @@ export function createAnthropicAnalystModel(
 
   return {
     async complete(request: AnalystModelRequest): Promise<AnalystModelCompletion> {
+      refuseLocalOnlyOnOrdinaryCloud(request, 'Anthropic analyst');
       const url = `${baseUrl}/v1/messages`;
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);

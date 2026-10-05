@@ -6,7 +6,9 @@ import type {
   SourceIndexProvenance,
   SourceItemIdentity,
   SourceTrustDomain,
+  SourceTrustTier,
 } from './types.ts';
+import { isSecureSensitivity } from './types.ts';
 import type {
   SourceIndexCorpusDefinition,
   SourceIndexCorpusRegistry,
@@ -62,6 +64,11 @@ export interface SourceIndexSearchHit {
   candidateId?: SourceIndexCandidateId;
   score?: number;
   laneAudits?: readonly RetrievalLaneAudit[];
+  // The item's own tier, when the adapter knows it (a connector store row's
+  // tier). Internal: the router reads it before any filter or trim to decide
+  // encounteredSecureLocal, and the evidence build uses it when no content
+  // provider answers for the item. Search routes never return it.
+  trustTier?: SourceTrustTier;
   rawExposed: false;
 }
 
@@ -100,12 +107,19 @@ export interface SourceIndexCorpusMatchCount {
   // Of matchedItems, those with readable content, not a bare name or path.
   contentMatchedItems: number;
   saturated: boolean;
+  // Of matchedItems, those whose own tier is secure (S4 and above). Absent
+  // when the adapter cannot tell; the router then counts a positive count as
+  // secure (see encounteredSecureLocal).
+  secureMatchedItems?: number;
 }
 
 export interface SourceIndexRoutedMatchCount extends SourceIndexCorpusMatchCount {
   corpusId: string;
   family: SourceFamily;
   trustDomain: SourceTrustDomain;
+  // The corpus's default tier, so a count from an ordinary-domain corpus
+  // whose default is secure (S4+) is judged secure by isSecureSensitivity.
+  trustTier: SourceTrustTier;
 }
 
 export interface SourceIndexCorpusSearchAdapter {
@@ -165,6 +179,20 @@ export interface SourceIndexRoutedSearchResponse {
   corpusTimings: readonly SourceIndexRoutedCorpusTiming[];
   // Per-corpus match breadth, for every searched corpus whose adapter counts.
   matchCounts?: readonly SourceIndexRoutedMatchCount[];
+  // Content-free, decided before the visibility gate, the per-corpus budget
+  // or any trim: true when a searched corpus contributed anything secure by
+  // isSecureSensitivity. A corpus contributes when it returned a hit or a
+  // positive match count; its contribution is secure when the corpus's
+  // default sensitivity is secure, a hit's own tier is secure, or its count
+  // reports secure rows or does not say (unknown counts as secure). A corpus
+  // that matched nothing contributed nothing. Internal: never part of a tool
+  // or model result.
+  encounteredSecureLocal: boolean;
+  // The lane audits (by object identity, members of laneAudits) of every
+  // corpus whose contribution was secure by that same rule. Their counts
+  // describe secure-inclusive matches, so an answer analyzed on an ordinary
+  // route leaves them out of what it returns. Internal.
+  secureLaneAudits: readonly RetrievalLaneAudit[];
   latencyMs: number;
   rawExposed: false;
 }
@@ -270,6 +298,8 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
   const corpusTimings: SourceIndexRoutedCorpusTiming[] = [];
   const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[] }> = [];
   const matchCounts: SourceIndexRoutedMatchCount[] = [];
+  let encounteredSecureLocal = false;
+  const secureLaneAudits: RetrievalLaneAudit[] = [];
   const startedAt = Date.now();
 
   const searchableCorpora: SourceIndexCorpusDefinition[] = [];
@@ -343,15 +373,22 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
       outcome: 'success',
     });
     searchedCorpora.push(corpus.corpusId);
+    const corpusLaneAuditsStart = laneAudits.length;
     laneAudits.push(...(response.laneAudits ?? []));
+    const contributedSecure = corpusContributedSecure(corpus, response);
+    if (contributedSecure) encounteredSecureLocal = true;
     if (response.matchCount) {
       matchCounts.push({
         corpusId: corpus.corpusId,
         family: corpus.family,
         trustDomain: corpus.trustDomain,
+        trustTier: corpus.defaultSensitivity.trustTier,
         matchedItems: response.matchCount.matchedItems,
         contentMatchedItems: response.matchCount.contentMatchedItems,
         saturated: response.matchCount.saturated,
+        ...(response.matchCount.secureMatchedItems !== undefined
+          ? { secureMatchedItems: response.matchCount.secureMatchedItems }
+          : {}),
       });
     }
     if (corpus.activationMode !== 'lexical_only') {
@@ -363,6 +400,7 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
       const semanticLoss = semanticLaneDegradation(corpus.corpusId, retrievalState, response);
       if (semanticLoss) degradations.push(semanticLoss);
     }
+    if (contributedSecure) secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
     lanes.push({
       name: corpus.corpusId,
       items: response.hits.map((hit) => ({
@@ -417,11 +455,35 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
     degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
     corpusTimings,
     ...(matchCounts.length > 0 ? { matchCounts } : {}),
+    encounteredSecureLocal,
+    secureLaneAudits,
     latencyMs: Date.now() - startedAt,
     rawExposed: false,
   };
   assertSafeRoutedSearchResponse(result);
   return result;
+}
+
+// Whether one corpus lane's raw response (before any filter or trim) carried
+// anything secure, from every lane the adapter ran (keyword, semantic,
+// recency): a hit is secure when its corpus default is, or its own tier is;
+// a count is secure when its corpus is, or when it reports secure rows or
+// does not report row sensitivity at all. A hit with no tier of its own is
+// judged by its corpus default here; the evidence build is stricter when no
+// provider answers for it.
+function corpusContributedSecure(
+  corpus: SourceIndexCorpusDefinition,
+  response: SourceIndexCorpusSearchResponse,
+): boolean {
+  const count = response.matchCount;
+  const positiveCount = count !== undefined && (count.matchedItems > 0 || count.saturated);
+  if (response.hits.length === 0 && !positiveCount) return false;
+  if (isSecureSensitivity(corpus.defaultSensitivity)) return true;
+  if (response.hits.some((hit) => hit.trustTier !== undefined
+    && isSecureSensitivity({ trustDomain: corpus.trustDomain, trustTier: hit.trustTier }))) {
+    return true;
+  }
+  return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
 }
 
 /**

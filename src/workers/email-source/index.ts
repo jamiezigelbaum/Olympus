@@ -2917,7 +2917,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               kind: 'source_index_search',
               corpus_id: connectorStore.corpusId,
               retrieval_source: 'local_index',
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, ...hit }) => (
+              // A hit's own tier is retrieval-internal (router.ts): not returned.
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, ...hit }) => (
                 addSelectedItemToSearchHit(hitCorpusId, hit)
               )),
               ...(secretLocations.length > 0

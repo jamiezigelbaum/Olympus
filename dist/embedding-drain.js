@@ -18331,7 +18331,9 @@ var init_dropbox2 = __esm(() => {
   init_approved_scope_filter();
 });
 // src/core/opsec.ts
-var init_opsec = () => {};
+var init_opsec = __esm(() => {
+  init_types();
+});
 
 // src/core/analyst.ts
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -18341,6 +18343,7 @@ var init_analyst = __esm(() => {
   init_chunk_selection();
   init_source_model_policy();
   init_types();
+  init_operation_error();
   analystAbortSignalStorage = new AsyncLocalStorage;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
@@ -18589,6 +18592,7 @@ var MAX_PROMPT_BYTES = 1e5, OPENCLAW_INFER_MAX_PROMPT_BYTES;
 var init_analyst_openclaw_infer = __esm(() => {
   init_operation_error();
   init_openclaw_executable();
+  init_analyst();
   OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 });
 
@@ -18621,6 +18625,7 @@ function normalizeRouterResultKey(key) {
 }
 var FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
+  init_types();
   init_answer_latency_trace();
   FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
     "body",
@@ -22591,6 +22596,7 @@ init_answer_ready_coverage();
 // src/core/analyst-openai.ts
 init_operation_error();
 init_model_transport();
+init_analyst();
 
 // src/core/venice-model-catalog.ts
 init_venice_models();
@@ -24359,6 +24365,7 @@ init_operation_error();
 // src/core/analyst-anthropic.ts
 init_operation_error();
 init_model_transport();
+init_analyst();
 
 // src/workers/email-source/server.ts
 init_analyst_openclaw_infer();

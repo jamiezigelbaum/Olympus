@@ -124,6 +124,7 @@ import type {
 import {
   buildSourceIndexStorageProfile,
   buildSourceSensitivity,
+  isSecureTrustTier,
   SOURCE_TRUST_TIERS,
   type RetrievalLaneAudit,
   type SourceFamily,
@@ -9462,6 +9463,8 @@ function connectorStoreHitFromRow(
     provenance: provenanceFromSearchRow(store.corpusId, row),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
     score,
+    // Every lane's hit (keyword, semantic, recency, pinned) is built here.
+    trustTier: row.trustTier,
     rawExposed: false,
   };
 }
@@ -9649,11 +9652,15 @@ function hybridMatchCount(
   gateArmed: boolean,
 ): SourceIndexCorpusMatchCount {
   if (!gateArmed) return keyword;
-  const semanticOnly = vectorRows.filter((row) => !lexicalItemIds.has(row.sourceItem.localItemId)).length;
+  const semanticOnlyRows = vectorRows.filter((row) => !lexicalItemIds.has(row.sourceItem.localItemId));
+  const semanticOnly = semanticOnlyRows.length;
   return {
     matchedItems: keyword.matchedItems + semanticOnly,
     contentMatchedItems: keyword.contentMatchedItems + semanticOnly,
     saturated: keyword.saturated,
+    ...(keyword.secureMatchedItems !== undefined
+      ? { secureMatchedItems: keyword.secureMatchedItems + semanticOnlyRows.filter(connectorStoreRowIsSecureTier).length }
+      : {}),
   };
 }
 
@@ -9738,6 +9745,7 @@ function connectorStoreKeywordLaneRows(
       matchedItems: merged.length,
       contentMatchedItems: merged.filter(connectorStoreRowHasContent).length,
       saturated: plain.saturated || content.saturated,
+      secureMatchedItems: merged.filter(connectorStoreRowIsSecureTier).length,
     },
     matchedItemIds: seen,
     completeItemIds: complete,
@@ -9750,6 +9758,12 @@ function connectorStoreKeywordLaneRows(
 // or metadata-only item.
 function connectorStoreRowHasContent(row: ConnectorStoreSearchRow): boolean {
   return row.chunk !== undefined;
+}
+
+// A row's own tier, which is the tier its content is served at; the store's
+// trust domain is the corpus default the router already judges.
+function connectorStoreRowIsSecureTier(row: ConnectorStoreSearchRow): boolean {
+  return isSecureTrustTier(row.trustTier);
 }
 
 // Which candidates earn content preference. A lexical match on a content
