@@ -90,13 +90,15 @@ export function packAdmissions(corpora: readonly ConsultLeakCorpus[] = consultLe
 export const CONSULT_LEAK_GATES = {
   canaryLeaksMax: 0,
   leakCategoryPassesMax: 0,
-  // Round 3 (configured languages; stricter name, component and sentence
-  // rules) moved the tuned corpus clean set to 9/31: three unknown words
+  // The corpus clean set is NOT a measure of usability: it has been tuned
+  // against for three rounds and is kept only as regression coverage. The
+  // held-out sets (heldOutFalseRefusalRateMax, reported as pairs and distinct
+  // questions) are the measure. Ceiling confirmed at 35% by the owner's
+  // anchor after round 3, which moved the set to 9/31: three unknown words
   // ("france" with country names off by default, "mitigations" and
   // "untrusted" outside English), a title-initial "Postmortem" component, a
   // chat-label "flat", a copied three-word caption, a content run, and the
-  // content-word cap. Each is an intended consequence; the held-out sets
-  // stay under 10%.
+  // content-word cap.
   cleanFalseRefusalRateMax: 0.35,
   heldOutFalseRefusalRateMax: 0.1,
 } as const;

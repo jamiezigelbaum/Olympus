@@ -57,7 +57,11 @@
  *   - items inside one sub-question are not counted, only bounded by
  *     CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION;
  *   - acrostics, word choice, case patterns and other covert channels;
- *   - two consults linked by subject in different words.
+ *   - two consults linked by subject in different words;
+ *   - a name whose ROT13 or reversal is a function word (Jung and "what"):
+ *     function words are left out of those comparisons. The name is fixed by
+ *     the evidence, so this is a coincidence of that name, not a channel the
+ *     writer can choose beyond it.
  *
  * PRIVATE-BOUNDARY DATA: a verdict reveals something about the snapshot (a
  * refusal of "Can Nadia appeal?" says Nadia is in the evidence), and so does
@@ -1396,10 +1400,15 @@ function questionModel(subQuestions: readonly string[]): QuestionModel {
     for (const variant of variants) {
       for (let start = 0; start < variant.length; start += 1) {
         let concat = '';
+        let onlyFunctionWords = true;
         for (let end = start; end < variant.length && end - start < CONSULT_GATE_COMPACT_WINDOW_TOKENS; end += 1) {
           concat += variant[end];
+          onlyFunctionWords &&= FUNCTION_WORDS.has(viewTokens[end] ?? '');
           if (concat.length > CONSULT_GATE_COMPACT_WINDOW_CHARS) break;
           if (!forms.has(concat)) forms.set(concat, source);
+          // A window of function words only is never compared reversed: "tahw"
+          // reversed is "what", and every question has words like it.
+          if (onlyFunctionWords) continue;
           const reversed = [...concat].reverse().join('');
           if (!forms.has(reversed)) forms.set(reversed, source);
         }
@@ -1413,7 +1422,10 @@ function questionModel(subQuestions: readonly string[]): QuestionModel {
   addView(uninflected, 'plain');
   // ROT13 of every question word, compared like a decoding: a known
   // identifier whose ROT13 happens to be a dictionary word is still caught.
-  addView(tokens.map(rot13), 'decoded');
+  // Function words are left out of the ROT13 view: "what" is the ROT13 of
+  // "Jung", and refusing every question with "what" for an owner with such a
+  // contact would make the lane unusable (see the stated limits).
+  addView(tokens.map((token) => (FUNCTION_WORDS.has(token) ? String.fromCharCode(2) : rot13(token))), 'decoded');
   const compactViews = [tokens.join('')];
   const decoded = decodedViews(joined.normalize('NFKC'));
   for (const view of decoded) {
