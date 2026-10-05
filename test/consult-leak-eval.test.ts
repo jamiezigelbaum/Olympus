@@ -4,13 +4,13 @@
 
 import { describe, expect, test } from 'bun:test';
 import { consultLeakCorpora } from '../eval/consult-leak/corpus.ts';
-import { CONSULT_LEAK_GATES, canaryPresent, runConsultLeakEval } from '../eval/consult-leak/run.ts';
+import { CONSULT_LEAK_GATES, UNSUPPORTED_LANGUAGE_SETS, canaryPresent, packAdmissions, runConsultLeakEval } from '../eval/consult-leak/run.ts';
 
 describe('consult gate leak eval (dry run)', () => {
   test('the corpora cover every category, and the canary oracle sees encoded forms', () => {
     const categories = new Set(consultLeakCorpora().flatMap((corpus) => corpus.cases.map((entry) => entry.category)));
     expect([...categories].sort()).toEqual([
-      'clean', 'encoded', 'exact_date', 'exact_figure', 'identifier', 'known_gap', 'multilingual', 'secret', 'stuffing',
+      'clean', 'encoded', 'exact_date', 'exact_figure', 'identifier', 'known_gap', 'multilingual', 'non_english', 'secret', 'stuffing',
       'technical', 'verbatim',
     ]);
     // The oracle is independent of the gate's normalization and must see the
@@ -36,16 +36,28 @@ describe('consult gate leak eval (dry run)', () => {
     expect(report.canaryLeaks).toEqual([]);
     expect(report.leakCategoryPasses).toEqual([]);
     expect(report.cleanFalseRefusalRate).toBeLessThanOrEqual(CONSULT_LEAK_GATES.cleanFalseRefusalRateMax);
-    expect(report.byCategory['clean']!.pass + report.byCategory['clean']!.refuse).toBeGreaterThanOrEqual(30);
+    expect(report.byCategory['clean']!.pass + report.byCategory['clean']!.refuse).toBeGreaterThanOrEqual(25);
     expect(report.gates).toEqual({ passed: true, failures: [] });
   });
 
-  test('held-out clean sets (never tuned against): false refusals within budget, reported per set', () => {
+  test('held-out clean sets (never tuned against): English within budget; unsupported languages reported', () => {
     const report = runConsultLeakEval();
-    expect(Object.keys(report.heldOut).sort()).toEqual(['author', 'reviewer']);
+    expect(Object.keys(report.heldOut).sort()).toEqual(['author', 'blind2', 'de', 'es', 'fr', 'reviewer', 'reviewer2Disclosed']);
     for (const [set, result] of Object.entries(report.heldOut)) {
+      if (UNSUPPORTED_LANGUAGE_SETS.has(set)) continue;
       expect({ set, rate: result.rate <= CONSULT_LEAK_GATES.heldOutFalseRefusalRateMax }).toEqual({ set, rate: true });
     }
+    // Pinned so a change is visible: with no permissive Spanish, French or
+    // German word list, every question in those languages is refused.
+    for (const set of UNSUPPORTED_LANGUAGE_SETS) expect({ set, rate: report.heldOut[set]!.rate }).toEqual({ set, rate: 1 });
+  });
+
+  test('every leak case still refuses with every vocabulary pack loaded, and pack admissions are reported', () => {
+    const report = runConsultLeakEval();
+    expect(report.leakCategoryPasses).toEqual([]);
+    expect(report.canaryLeaks).toEqual([]);
+    const admissions = packAdmissions();
+    expect(Object.keys(admissions).sort()).toEqual(['cldr-names', 'nl-opentaal']);
   });
 
   test('known gap: paraphrased rare combinations pass the gate, and are reported, not hidden', () => {

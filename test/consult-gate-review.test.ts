@@ -90,15 +90,14 @@ describe('review 1: long runs and function-word insertion', () => {
 });
 
 describe('review 2: names and known identifiers', () => {
-  test('known gap: a single-word name seen only at the start of a sentence', () => {
-    // No case signal separates it from any capitalized first word.
-    passed('Can Nadia appeal?', ctx([{ chunks: ['Nadia reported a breach.'] }]));
+  test('a single-word name seen only at the start of a sentence (closed in round 2 by the vocabulary rule)', () => {
+    refused('Can Nadia appeal?', ctx([{ chunks: ['Nadia reported a breach.'] }]));
   });
   test('a single-word name seen capitalized mid-sentence', () => {
     refused('Can Nadia appeal?', ctx([{ chunks: ['The report from Nadia arrived late.'] }]));
   });
-  test('known gap: a name written only in lower case', () => {
-    passed('Can Nadia Selwyn appeal?', ctx([{ chunks: ['nadia selwyn reported a breach.'] }]));
+  test('a name written only in lower case (closed in round 2 by the vocabulary rule)', () => {
+    refused('Can Nadia Selwyn appeal?', ctx([{ chunks: ['nadia selwyn reported a breach.'] }]));
   });
   test('one lower-case repeat does not suppress a name', () => {
     refused('Can Nadia Selwyn appeal?', ctx([{ chunks: ['Nadia Selwyn. nadia selwyn.'] }]));
@@ -212,7 +211,7 @@ describe('review 5: the snapshot as the writer saw it', () => {
     refused('Can Nadia Selwyn appeal?', context);
   });
 
-  test('every token of every rendered analyst prompt is in the snapshot', async () => {
+  test('every field of every rendered analyst request is in the snapshot, as a token sequence', async () => {
     const pack = packOf([{
       title: 'Heron Quay tenancy file',
       author: 'Desmond Achterberg',
@@ -220,31 +219,63 @@ describe('review 5: the snapshot as the writer saw it', () => {
       chunks: ['Marguerite   Okafor confirmed the deposit.', 'The boiler is shared.'],
       rows: [['Carpet', '186.40']],
     }], 'what did the agent say');
+    const blankText = (value: string): string => value.replace(/[\p{L}\p{N}]+/gu, 'zzz');
     const blank = JSON.parse(JSON.stringify(pack), (_key, value) =>
       typeof value === 'string' && !['file', 'S4', 'secure_local'].includes(value)
-        ? value.replace(/[\p{L}\p{N}]+/gu, 'zzz')
+        ? blankText(value)
         : typeof value === 'number' ? 0 : value) as EvidencePack;
-    const draft = JSON.stringify({ answer: 'Draft says the deposit is held.', citations: [], unanswered: ['inspection date'], sufficient: false });
-    const render = async (evidence: EvidencePack, format: 'full' | 'compact'): Promise<string[]> => {
-      const prompts: string[] = [];
-      const model: AnalystModel = {
+    const draftOf = (answer: string) => JSON.stringify({ answer, citations: [], unanswered: ['inspection date'], sufficient: false });
+    const render = async (evidence: EvidencePack, format: 'full' | 'compact', draft: string): Promise<AnalystModelRequest[]> => {
+      const requests: AnalystModelRequest[] = [];
+      const model = {
         id: 'double',
         async complete(request: AnalystModelRequest) {
-          prompts.push(request.prompt);
+          requests.push(request);
           return { text: draft, modelId: 'double' };
         },
       } as unknown as AnalystModel;
       await createAnalyst(model, { evidenceFormat: format, auditSuspiciousDrafts: true }).analyze(evidence, { localOnly: true });
-      return prompts;
+      return requests;
     };
-    const words = (text: string) => new Set(text.normalize('NFKD').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+    const tokensOf = (text: string): string[] => text.normalize('NFKD').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const draft = draftOf('Draft says the deposit is held.');
     const context = consultWriterContextFromPack(pack, { writerVisibleTexts: [draft] });
-    const snapshotWords = words(context.entries.map((entry) => entry.text).join(' '));
+    const snapshotSequences = context.entries.map((entry) => ` ${tokensOf(entry.text).join(' ')} `);
+    const snapshotWords = new Set(context.entries.flatMap((entry) => tokensOf(entry.text)));
+    const contains = (tokens: readonly string[]) => snapshotSequences.some((sequence) => sequence.includes(` ${tokens.join(' ')} `));
+    // Negative control: without the draft in the snapshot, the audit request's
+    // draft field is reported missing, so the check can fail.
+    const withoutDraft = consultWriterContextFromPack(pack).entries.map((entry) => ` ${tokensOf(entry.text).join(' ')} `);
+    expect(withoutDraft.some((sequence) => sequence.includes(' draft says the deposit is held '))).toBe(false);
+    expect(contains(tokensOf('Draft says the deposit is held.'))).toBe(true);
     for (const format of ['full', 'compact'] as const) {
-      const prompts = await render(pack, format);
-      const template = words((await render(blank, format)).join(' ') + ' ' + draft);
-      expect(prompts.length).toBeGreaterThan(0);
-      const missing = [...words(prompts.join(' '))].filter((word) => !snapshotWords.has(word) && !template.has(word));
+      const requests = await render(pack, format, draft);
+      // The audit pass ran: a second call that carries the draft.
+      expect({ format, calls: requests.length }).toEqual({ format, calls: 2 });
+      expect(requests[1]!.prompt).toContain('Draft says the deposit is held.');
+      const template = new Set((await render(blank, format, draftOf(blankText('Draft says the deposit is held.'))))
+        .flatMap((request) => tokensOf(`${request.system} ${request.prompt} ${JSON.stringify(request.responseSchema ?? {})}`)));
+      const missing: string[] = [];
+      for (const request of requests) {
+        const rendered = `${request.system}\n${request.prompt}\n${JSON.stringify(request.responseSchema ?? {})}`;
+        // Every JSON string value is one rendered field: its tokens must appear
+        // in order in one snapshot value.
+        for (const match of rendered.matchAll(/"((?:[^"\\]|\\.)*)"/g)) {
+          let value: string;
+          try {
+            value = JSON.parse(`"${match[1]}"`) as string;
+          } catch {
+            continue;
+          }
+          const tokens = tokensOf(value);
+          if (tokens.length === 0 || tokens.every((token) => template.has(token))) continue;
+          if (!contains(tokens)) missing.push(value);
+        }
+        // Header lines join several fields; each of their words must be in the snapshot.
+        for (const word of tokensOf(rendered.replace(/"(?:[^"\\]|\\.)*"/g, ' '))) {
+          if (!template.has(word) && !snapshotWords.has(word)) missing.push(word);
+        }
+      }
       expect({ format, missing }).toEqual({ format, missing: [] });
     }
   });
@@ -308,8 +339,8 @@ describe('review: other passes', () => {
     refused('Is nadia dot photography a good site?', context);
     refused(`Is nadia${cp(0x3002)}photography a good site?`, context);
   });
-  test('known gap: a single-label host written as an ordinary word', () => {
-    passed('Why would kelpbox stop?', ctx([{ chunks: ['Internal host kelpbox stopped.'] }]));
+  test('a single-label host written as an unknown word (closed in round 2 by the vocabulary rule)', () => {
+    refused('Why would kelpbox stop?', ctx([{ chunks: ['Internal host kelpbox stopped.'] }]));
   });
   test('a two-segment path', () => {
     refused('What belongs in src/secrets?', TENANCY);
@@ -317,8 +348,8 @@ describe('review: other passes', () => {
   test('an unlabelled secret value seen under a label in the snapshot', () => {
     refused('Is password sunburst secure?', ctx([{ chunks: ['password: sunburst'] }]));
   });
-  test('known gap: a short name in a script without spaces or case', () => {
-    passed(`${cp(0x738b, 0x82b3)}${cp(0x53ef, 0x4ee5)}${cp(0x4e0a, 0x8bc9)}${cp(0x5417)}?`, ctx([{ chunks: [`${cp(0x738b, 0x82b3)}${cp(0x63d0, 0x4ea4)}${cp(0x4e86, 0x62a5, 0x544a)}`] }]));
+  test('a short name in a script without spaces or case (closed in round 2: questions are English only)', () => {
+    refused(`${cp(0x738b, 0x82b3)}${cp(0x53ef, 0x4ee5)}${cp(0x4e0a, 0x8bc9)}${cp(0x5417)}?`, ctx([{ chunks: [`${cp(0x738b, 0x82b3)}${cp(0x63d0, 0x4ea4)}${cp(0x4e86, 0x62a5, 0x544a)}`] }]));
   });
   test('Hangul spacing changes do not hide a copy', () => {
     const korean = cp(0xae40, 0xbbfc, 0xc900, 0x20, 0xb300, 0xd45c, 0xac00, 0x20, 0xc2b9, 0xc778, 0xd588, 0xb2e4);

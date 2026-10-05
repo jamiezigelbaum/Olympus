@@ -14,8 +14,8 @@
 >
 > **Licence status.** The `ethereum/zkapi` repository has no root `LICENSE`
 > file; `zkapi-clientd/` is MIT and the Rust workspace is MIT OR Apache-2.0.
-> The licence of this root-level file is not stated and needs upstream
-> confirmation before this text ships in a release.
+> The licence of this root-level file is not stated and still needs upstream
+> confirmation before this text ships in a release (open as of 2026-10-05).
 
 Status: approved writer instructions for the frontier consult lane
 ([`frontier-consult-lane.md`](frontier-consult-lane.md), sections Z.2 and A.4).
@@ -105,13 +105,14 @@ yourself.
   and comparisons rather than exact figures: "an income in the middle band of
   the bracket", "roughly double the area median", "a commute in the 20–40
   minute range", "an order of magnitude below the rated limit". Years count
-  too. What the gate checks, exactly: a number from the evidence with three or
-  more digits, or two digits next to a unit or currency, written with digits in
-  any digit system and any separators, or as English number words; digit
-  fragments that join into a number from the evidence; and exact dates in
-  numeric, CJK, month-name (eight European languages), Roman-month or English
-  number-word form. It does not catch other languages' number words, Han
-  numerals, or a figure re-expressed by arithmetic. Bands are your job.
+  too. What the gate checks, exactly, against numbers in the evidence (read the
+  same way on both sides): any number of three or more digits, or two digits
+  next to a unit or currency, written with digits in any digit system and any
+  separators, as English number words, or hex-encoded; digit fragments that
+  join into a number from the evidence; and exact dates in numeric, CJK,
+  month-name (eight European languages), Roman-month or English number-word
+  form. It does not catch other languages' number words, Han numerals, a
+  figure re-expressed by arithmetic, or relative dates. Bands are your job.
 - **The place can be the identifier.** A well-known city is unremarkable; a
   rare place combined with one niche attribute (a single employer, one
   specialty school, one hospital, one museum, an airport with two flights a
@@ -198,6 +199,18 @@ The value of a consult is set by how the question is framed:
 7. If the answer is time-shaped, did you ask how volatile it is, and will you
    verify it locally?
 
+## Language
+
+Write in plain language: the owner's language or English. Every word you use
+must be an ordinary dictionary word, a unit, a country name or a common
+standard abbreviation; the gate refuses any other word, whatever it is (a
+name, a product, a code, a word in a language it has no list for). Today the
+gate has word lists for English and Dutch only, plus unit and country names
+in English, Spanish, French, German, Italian, Portuguese and Dutch. A question
+in any other language is refused until a list for it is licensed and shipped,
+so when the owner writes in such a language, write the consult in English.
+Name the country only when the answer depends on it; never a city or region.
+
 ## Form the gate requires
 
 - Return the request as a list of one to three sub-questions, each standing
@@ -207,8 +220,10 @@ The value of a consult is set by how the question is framed:
   strings; only ordinary spaces; ordinary letters (no look-alike or phonetic
   symbols).
 - Each ends with its single question mark, has at most one sentence of
-  context before it, and lists at most four items.
-- Short: the whole request is at most 600 bytes.
+  context before it, and holds at most twelve content words (words other
+  than "the", "of", "is" and the like). The gate does not count list items
+  inside a sub-question; keep any list short and on one topic.
+- Short: the whole request is at most 600 bytes and 80 words.
 
 ## Two neutral illustrations
 

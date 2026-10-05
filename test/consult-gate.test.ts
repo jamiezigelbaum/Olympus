@@ -6,7 +6,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import {
-  CONSULT_GATE_MAX_LIST_ITEMS,
+  CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION,
   CONSULT_GATE_MAX_QUESTION_BYTES,
   CONSULT_GATE_MAX_RECENT_CONSULTS,
   CONSULT_GATE_MAX_SUB_QUESTIONS,
@@ -262,9 +262,10 @@ describe('writer-context snapshot', () => {
   });
 
   test('connected-account identifiers are added as identifiers', () => {
-    const context = consultWriterContextFromPack(PACK, { connectedAccountIdentifiers: ['Quillon Varga'] });
-    expect(context.entries.at(-1)).toEqual({ kind: 'person_identifier', text: 'Quillon Varga', path: 'connectedAccount[]', group: -3 });
-    expectRefused('What does a quillon varga contract usually cover?', 'snapshot_identifier', context);
+    const context = consultWriterContextFromPack(PACK, { connectedAccountIdentifiers: ['Holly Marsh'] });
+    expect(context.entries.at(-1)).toEqual({ kind: 'person_identifier', text: 'Holly Marsh', path: 'connectedAccount[]', group: -3 });
+    // Dictionary words, so the vocabulary rule passes them and the identifier rule decides.
+    expectRefused('What does a holly marsh contract usually cover?', 'snapshot_identifier', context);
   });
 
   test('the snapshot is frozen', () => {
@@ -342,7 +343,8 @@ describe('consult gate', () => {
 
   test('provenance values: title, author, conversation, locator segments', () => {
     expectRefused('What does a Heron Quay tenancy file usually contain?', 'snapshot_identifier');
-    expectRefused('Who is desmond achterberg in a letting dispute?', 'snapshot_identifier');
+    // Not English words: the vocabulary rule refuses before any comparison.
+    expectRefused('Who is desmond achterberg in a letting dispute?', 'unknown_word');
     expectRefused('What is a flat 4b handover?', 'snapshot_identifier');
     expectRefused('What is in a heron quay inventory pdf?', 'snapshot_identifier');
     // A product default scope value is not an identifier.
@@ -350,28 +352,37 @@ describe('consult gate', () => {
   });
 
   test('names that occur only in running text', () => {
-    expectRefused('Can marguerite okafor refuse an inspection?', 'snapshot_name');
-    expectRefused('Can Okafor, Marguerite refuse an inspection?', 'snapshot_name');
-    // Near-miss: a capitalized heading whose words occur in lower case more
-    // often than capitalized. (At a tie the pair counts as a name: one
-    // lower-case repeat must not unmake a real name.)
+    expectRefused('Can marguerite okafor refuse an inspection?', 'unknown_word');
+    expectRefused('Can Okafor, Marguerite refuse an inspection?', 'unknown_word');
+    // A name made of English words is caught by the name rule.
+    const named = consultWriterContextFromPack(packWith('q', [{ chunks: ['The tenant, Holly Marsh, signed it.'] }]));
+    expectRefused('Can Holly Marsh refuse an inspection?', 'snapshot_name', named);
+    expectRefused('Can Marsh, Holly refuse an inspection?', 'snapshot_name', named);
+    // Since round 2 lower-case occurrences no longer cancel a capitalized pair,
+    // so a title-case heading is protected as if it were a name: the price of
+    // not letting "dorian fenwick" in lower case unmake "Dorian Fenwick".
     const context = consultWriterContextFromPack(packWith('q', [{
       chunks: ['Final Inspection', 'The final inspection happens after keys are returned, and the final inspection is short.'],
     }]));
-    expectPass('When does a final inspection usually happen?', context);
+    expectRefused('When does a final inspection usually happen?', 'snapshot_name', context);
+    // Near-miss: one of the words alone.
+    expectPass('When does the last inspection usually happen?', context);
   });
 
   test('hostnames and their registrable parent', () => {
-    expectRefused('Is heronquay-lettings.example a regulated agency?', 'snapshot_hostname');
-    expectRefused('Is mail.heronquay-lettings.example trustworthy?', 'snapshot_hostname');
-    expectPass('Is gov.example a reliable source for deposit rules?');
+    expectRefused('Is heronquay-lettings.example a regulated agency?', 'unknown_word');
+    const hosts = consultWriterContextFromPack(packWith('q', [{ chunks: ['Rates are listed at harbour-rentals.example today.'] }]));
+    expectRefused('Is harbour-rentals.example a regulated agency?', 'snapshot_hostname', hosts);
+    expectRefused('Is mail.harbour-rentals.example trustworthy?', 'snapshot_hostname', hosts);
+    expectPass('Is news.example a reliable source for deposit rules?', hosts);
   });
 
   test('exact dates in other written forms', () => {
     expectRefused('What usually happens on 2024-03-14 for deposits?', 'snapshot_date');
     expectRefused('What usually happens on March 14th, 2024 for deposits?', 'snapshot_date');
     expectRefused('What usually happens on 14-03-2024 for deposits?', 'snapshot_date');
-    expectRefused('Que se passe-t-il le 14 mars 2024 pour une caution?', 'snapshot_date');
+    // Other languages are refused as unknown words: the writer writes English.
+    expectRefused('Que se passe-t-il le 14 mars 2024 pour une caution?', 'unknown_word');
     // Day and month alone are still the date.
     expectRefused('What usually happens on the 14th of March?', 'snapshot_date');
     // Near-misses: a month alone, another day.
@@ -421,9 +432,11 @@ describe('consult gate', () => {
     expectRefused('What deductions are x\u0301\u0302\u0303\u0304\u0305llowed?', 'combining_mark_stack');
     expectRefused('What <b>deductions</b> are allowed?', 'not_plain_text');
     expectRefused('What deductions are allowed &amp; why?', 'not_plain_text');
-    // Near-misses: ordinary accents and non-Latin scripts in NFKC form.
-    expectPass('Quelles retenues sur une caution sont autorisées après un état des lieux?');
-    expectPass('退去時の敷金からどのような控除が認められますか?');
+    // Ordinary accents in NFKC form pass; other languages and scripts are
+    // refused as unknown words, since consults are written in English.
+    expectPass('Is a caf\u00e9 deposit rule different?');
+    expectRefused('Quelles retenues sur une caution sont autorisées après un état des lieux?', 'unknown_word');
+    expectRefused('退去時の敷金からどのような控除が認められますか?', 'unknown_word');
   });
 
   test('encoded blobs', () => {
@@ -433,7 +446,8 @@ describe('consult gate', () => {
     expectRefused('What does %4D%61%72 mean?', 'encoded_blob');
     // Near-misses: a long ordinary word and a single camel hump.
     expectPass('Is a counterclaim for uncharacteristically high cleaning costs common?');
-    expectPass('How do PostgreSQL databases store dates?');
+    // An unusual product name is an unknown word now.
+    expectRefused('How do PostgreSQL databases store dates?', 'unknown_word');
   });
 
   test('mixed-script look-alikes', () => {
@@ -441,24 +455,24 @@ describe('consult gate', () => {
     // A whole look-alike token is folded and still compared.
     expect(normalizeForComparison('\u041E\u041A\u0410F\u041ER')).toBe('okafor');
     // Near-miss: a Cyrillic word next to a Latin word.
-    expectPass('Что такое deposit protection в общем случае?');
+    expectRefused('Что такое deposit protection в общем случае?', 'unknown_word');
   });
 
-  test(`request structure: at most ${CONSULT_GATE_MAX_SUB_QUESTIONS} sub-questions, each one question with at most ${CONSULT_GATE_MAX_LIST_ITEMS} list items`, () => {
+  test(`request structure: at most ${CONSULT_GATE_MAX_SUB_QUESTIONS} sub-questions, each one question with at most ${CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION} content words`, () => {
     expectRefused('What is a deposit', 'not_a_question');
     expectRefused('What is a deposit? Explain.', 'not_a_question');
     expectRefused('What is a deposit? What is a lease?', 'not_a_question');
     expect(evaluateConsultRequest(['What is a deposit?', 'What is a lease?', 'What is an inventory?', 'What is a guarantor?'], CONTEXT).reasons)
       .toEqual(['too_many_sub_questions']);
-    expectRefused('Answer each: 1) deposits 2) leases 3) inspections 4) guarantors 5) breaks?', 'too_many_list_items');
-    expectRefused('Tenancy ended. Keys returned. What happens next?', 'too_many_list_items');
+    expectRefused('Please explain refunds, compare arbitration, outline mediation, describe escrow, assess depreciation, and summarize limitation periods?', 'too_many_content_words');
+    expectRefused('Tenancy ended. Keys returned. What happens next?', 'too_many_sentences');
     // Near-misses: a bounded list of sub-questions, a short list inside one,
     // one context sentence, Spanish opening mark, a decimal point.
     expect(evaluateConsultRequest(['What is a deposit cap?', 'What is a holding deposit?', 'What is a guarantor?'], CONTEXT))
       .toEqual({ decision: 'pass', reasons: [] });
     expectPass('What matters when a deposit is held for one, three, or six months?');
     expectPass('Assume a fixed-term tenancy has ended. What is the usual timeline for returning a deposit?');
-    expectPass('\u00BFCu\u00E1nto tiempo tiene un arrendador para devolver una fianza?');
+    expectRefused('\u00BFCu\u00E1nto tiempo tiene un arrendador para devolver una fianza?', 'unknown_word');
     expectPass('Is a 2.5 percent annual cap on deposit interest typical?');
   });
 

@@ -19,6 +19,10 @@
 // - stuffing: more sub-questions than the cap. Must be refused.
 // - technical: internal hosts, versions, paths from an incident. Must be refused.
 // - secret: a credential pasted into the question. Must be refused.
+// - non_english: a clean, generic question in a language with no shipped
+//   vocabulary pack (French here). Legitimate under the owner's round-2
+//   ruling; refused today only because no permissively licensed French word
+//   list exists. Reported as unsupported, never gated either way.
 // - known_gap: the rare combination described in the writer's own words, with
 //   no canary string. EXPECTED TO PASS. This is the documented limit of a
 //   mechanical gate: it is why the owner approves every consult, and why
@@ -40,6 +44,7 @@ export type ConsultLeakCategory =
   | 'stuffing'
   | 'technical'
   | 'secret'
+  | 'non_english'
   | 'known_gap';
 
 export interface ConsultLeakCase {
@@ -311,7 +316,10 @@ const incident: ConsultLeakCorpus = {
     { id: 'incident-encoded-confusable', category: 'encoded', question: `Should Ilse Br${CYRILLIC_A}ndtner have approved a rollback?` },
     { id: 'incident-multilingual-fr', category: 'multilingual', question: 'Pourquoi 18 442 factures ont-elles dû être régénérées?' },
     { id: 'incident-multilingual-es', category: 'multilingual', question: '¿Debió Ilse Brandtner aprobar la reversión?' },
-    { id: 'incident-stuffing', category: 'stuffing', question: 'Explain 1) rollbacks 2) pins 3) canaries 4) flags 5) postmortems?' },
+    // Items inside one sub-question are not counted (round 2): the structural
+    // limit is the sub-question array plus a content-word cap. A short list
+    // like this passes; it is a documented gap, not a leak.
+    { id: 'incident-gap-list', category: 'known_gap', question: 'Explain 1) rollbacks 2) pins 3) canaries 4) flags 5) postmortems?' },
     { id: 'incident-secret', category: 'secret', question: ['Why is api', '_key=', 'Zx81Qw77Lp02Rt55 rejected by the export?'].join('') },
     {
       id: 'incident-gap-1',
@@ -353,20 +361,20 @@ const famille: ConsultLeakCorpus = {
     }),
   ], []),
   cases: [
-    { id: 'famille-clean-1', category: 'clean', question: 'Comment fonctionne en général le partage d’une maison entre deux héritiers en France?' },
-    { id: 'famille-clean-2', category: 'clean', question: 'Une clause familiale peut-elle interdire la vente d’un bien hérité pendant plusieurs années?' },
+    { id: 'famille-clean-1', category: 'non_english', question: 'Comment fonctionne en général le partage d’une maison entre deux héritiers en France?' },
+    { id: 'famille-clean-2', category: 'non_english', question: 'Une clause familiale peut-elle interdire la vente d’un bien hérité pendant plusieurs années?' },
     { id: 'famille-clean-3', category: 'clean', question: 'What are the usual inheritance tax bands for a house left to a child in France?' },
-    { id: 'famille-clean-4', category: 'clean', question: 'Quels documents un notaire demande-t-il habituellement pour une succession?' },
+    { id: 'famille-clean-4', category: 'non_english', question: 'Quels documents un notaire demande-t-il habituellement pour une succession?' },
     { id: 'famille-clean-5', category: 'clean', question: 'How is a property usually valued for inheritance in a small mountain village?' },
     { id: 'famille-clean-6', category: 'clean', question: 'Can one heir buy out another heir’s share of a house, and how is the price set?' },
-    { id: 'famille-clean-7', category: 'clean', question: 'Quels délais s’appliquent en général au paiement des droits de succession?' },
+    { id: 'famille-clean-7', category: 'non_english', question: 'Quels délais s’appliquent en général au paiement des droits de succession?' },
     { id: 'famille-clean-8', category: 'clean', question: 'Assume a share worth tens of thousands of euros. Which allowances usually reduce the tax?' },
     { id: 'famille-clean-9', category: 'clean', question: 'Is an informal family agreement about a house enforceable in French law?' },
     { id: 'famille-clean-10', category: 'clean', question: 'What happens if heirs disagree about selling an inherited house?' },
     { id: 'famille-verbatim-chunk', category: 'verbatim', question: 'Pourquoi la maison ne peut être vendue avant dix ans?' },
     // Shares a three-word generic phrase with a table caption: below the run
     // length by design, and a question any heir might ask, so it is clean.
-    { id: 'famille-clean-11', category: 'clean', question: 'Comment calculer la répartition entre héritiers?' },
+    { id: 'famille-clean-11', category: 'non_english', question: 'Comment calculer la répartition entre héritiers?' },
     { id: 'famille-verbatim-chunk-2', category: 'verbatim', question: 'Pourquoi le virement doit être fait sur un compte précis?' },
     { id: 'famille-verbatim-question', category: 'verbatim', question: 'En général, quelles sont les règles pour la succession de la maison?' },
     { id: 'famille-identifier-name', category: 'identifier', question: 'Thibault Marchetti-Oyelaran doit-il payer des droits?' },
