@@ -43,6 +43,7 @@ import {
 import {
   buildSourceSensitivity,
   isSecureSensitivity,
+  SOURCE_TRUST_TIERS,
   type RetrievalDegradation,
   type RetrievalLaneAudit,
   type SourceIndexProvenance,
@@ -334,10 +335,15 @@ export async function buildEvidencePackDetailed(
       continue;
     }
 
-    const sensitivity =
-      content?.sensitivity ??
-      input.registry.get(hit.corpusId)?.defaultSensitivity ??
-      conservativeSensitivity(hit.trustDomain);
+    // No provider answered for this item: judge it by its own tier when the
+    // hit carries one, never by a lower corpus default, and count an item of
+    // unknown tier as secure for the build flag (its title still reaches the
+    // extraction gap).
+    if (!content && hit.trustTier === undefined) encounteredSecureLocal = true;
+    const sensitivity = content?.sensitivity ?? hitFallbackSensitivity(
+      hit,
+      input.registry.get(hit.corpusId)?.defaultSensitivity ?? conservativeSensitivity(hit.trustDomain),
+    );
     assertNoTrustDomainDowngrade(hit, sensitivity);
 
     const enrichedProvenance = content?.locatorUri && !provenance.citation?.uri
@@ -602,10 +608,13 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
   const skippedCorpora: SourceIndexSkippedCorpus[] = [];
   const laneAudits: RetrievalLaneAudit[] = [];
   const searched = new Set<string>();
+  let encounteredSecureLocal = false;
 
   for (const selected of input.selectedItems ?? []) {
     const corpus = input.registry.get(selected.corpusId);
     if (!corpus) {
+      // Skipped whole: no hit, no candidate, no title. Only the caller's own
+      // corpus id and a reason code reach coverage, so it sets no flag.
       skippedCorpora.push({ corpusId: selected.corpusId, trustDomain: 'secure_local', reason: 'no_adapter' });
       continue;
     }
@@ -622,6 +631,7 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
       continue;
     }
     searched.add(corpus.corpusId);
+    if (isSecureSensitivity(corpus.defaultSensitivity)) encounteredSecureLocal = true;
     hits.push({
       corpusId: corpus.corpusId,
       trustDomain: corpus.trustDomain,
@@ -655,9 +665,9 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
     // Caller-selected items bypass retrieval entirely: no lane ran, so no lane
     // was lost. Reporting a degradation here would be a false alarm.
     degradations: [],
-    encounteredSecureLocal: hits.some((hit) => (
-      isSecureSensitivity(input.registry.get(hit.corpusId)?.defaultSensitivity ?? { trustDomain: 'secure_local' })
-    )),
+    // A selected hit carries no tier of its own; hydration below judges it
+    // again (an item no provider answers for counts as secure).
+    encounteredSecureLocal,
   };
 }
 
@@ -873,6 +883,18 @@ function locatorLabel(hit: SourceIndexRoutedSearchHit): string {
 // treated as secure_local so it can never be under-classified into a cloud lane.
 function conservativeSensitivity(trustDomain: SourceTrustDomain): SourceSensitivity {
   return buildSourceSensitivity({ trustTier: conservativeTierForDomain(trustDomain), trustDomain });
+}
+
+// The corpus default, raised to the hit's own tier when that is stricter.
+function hitFallbackSensitivity(
+  hit: SourceIndexRoutedSearchHit,
+  corpusDefault: SourceSensitivity,
+): SourceSensitivity {
+  if (hit.trustTier === undefined) return corpusDefault;
+  if (SOURCE_TRUST_TIERS.indexOf(hit.trustTier) <= SOURCE_TRUST_TIERS.indexOf(corpusDefault.trustTier)) {
+    return corpusDefault;
+  }
+  return buildSourceSensitivity({ trustTier: hit.trustTier, trustDomain: corpusDefault.trustDomain });
 }
 
 function conservativeTierForDomain(trustDomain: SourceTrustDomain): SourceTrustTier {

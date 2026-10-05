@@ -16818,6 +16818,7 @@ function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPat
     provenance: provenanceFromSearchRow(store.corpusId, row),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
     score,
+    trustTier: row.trustTier,
     rawExposed: false
   };
 }
@@ -27370,6 +27371,9 @@ function corpusContributedSecure(corpus, response) {
     return false;
   if (isSecureSensitivity(corpus.defaultSensitivity))
     return true;
+  if (response.hits.some((hit) => hit.trustTier !== undefined && isSecureSensitivity({ trustDomain: corpus.trustDomain, trustTier: hit.trustTier }))) {
+    return true;
+  }
   return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
 }
 function compareTiedRoutedCandidates(left, right, laneOrder) {
@@ -27682,7 +27686,9 @@ async function buildEvidencePackDetailed(input) {
       policyDeniedCoverageGaps.push(gap2);
       continue;
     }
-    const sensitivity = content?.sensitivity ?? input.registry.get(hit.corpusId)?.defaultSensitivity ?? conservativeSensitivity(hit.trustDomain);
+    if (!content && hit.trustTier === undefined)
+      encounteredSecureLocal = true;
+    const sensitivity = content?.sensitivity ?? hitFallbackSensitivity(hit, input.registry.get(hit.corpusId)?.defaultSensitivity ?? conservativeSensitivity(hit.trustDomain));
     assertNoTrustDomainDowngrade(hit, sensitivity);
     const enrichedProvenance = content?.locatorUri && !provenance.citation?.uri ? {
       ...provenance,
@@ -27856,6 +27862,7 @@ function selectedItemsToRoutedSlice(input) {
   const skippedCorpora = [];
   const laneAudits = [];
   const searched = new Set;
+  let encounteredSecureLocal = false;
   for (const selected of input.selectedItems ?? []) {
     const corpus = input.registry.get(selected.corpusId);
     if (!corpus) {
@@ -27868,6 +27875,8 @@ function selectedItemsToRoutedSlice(input) {
       continue;
     }
     searched.add(corpus.corpusId);
+    if (isSecureSensitivity(corpus.defaultSensitivity))
+      encounteredSecureLocal = true;
     hits.push({
       corpusId: corpus.corpusId,
       trustDomain: corpus.trustDomain,
@@ -27897,7 +27906,7 @@ function selectedItemsToRoutedSlice(input) {
     skippedCorpora,
     laneAudits,
     degradations: [],
-    encounteredSecureLocal: hits.some((hit) => isSecureSensitivity(input.registry.get(hit.corpusId)?.defaultSensitivity ?? { trustDomain: "secure_local" }))
+    encounteredSecureLocal
   };
 }
 async function runRoutedSearches(input) {
@@ -28018,6 +28027,14 @@ function locatorLabel(hit) {
 }
 function conservativeSensitivity(trustDomain) {
   return buildSourceSensitivity({ trustTier: conservativeTierForDomain2(trustDomain), trustDomain });
+}
+function hitFallbackSensitivity(hit, corpusDefault) {
+  if (hit.trustTier === undefined)
+    return corpusDefault;
+  if (SOURCE_TRUST_TIERS.indexOf(hit.trustTier) <= SOURCE_TRUST_TIERS.indexOf(corpusDefault.trustTier)) {
+    return corpusDefault;
+  }
+  return buildSourceSensitivity({ trustTier: hit.trustTier, trustDomain: corpusDefault.trustDomain });
 }
 function conservativeTierForDomain2(trustDomain) {
   if (trustDomain === "public_safe")
@@ -96173,7 +96190,7 @@ function createEmailSourceWorker(options = {}) {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
               retrieval_source: "local_index",
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
               ...secretLocations.length > 0 ? {
                 secret_locations: secretLocations.map((location) => ({
                   source: location.source,

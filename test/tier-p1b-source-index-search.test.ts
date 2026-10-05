@@ -63,6 +63,9 @@ describe('P1b source_index_search', () => {
     const { worker } = await workerFixture();
     const result = await search(worker, { corpus_id: CORPORA.internal, query: 'orchard' });
     const found = result.hits.map((hit: any) => [hit.sourceItem.providerItemId, hit.selected_item.corpus_id]);
+    // A hit's own row tier is retrieval-internal: the route never returns it.
+    expect(result.hits.length).toBeGreaterThan(0);
+    expect(result.hits.every((hit: Record<string, unknown>) => !('trustTier' in hit))).toBe(true);
     // The plan is Personal; the invoice's names are Personal and its body is
     // Private, so it is found in both tiers, once per layer.
     expect(found).toEqual(expect.arrayContaining([

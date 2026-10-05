@@ -9463,6 +9463,8 @@ function connectorStoreHitFromRow(
     provenance: provenanceFromSearchRow(store.corpusId, row),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
     score,
+    // Every lane's hit (keyword, semantic, recency, pinned) is built here.
+    trustTier: row.trustTier,
     rawExposed: false,
   };
 }

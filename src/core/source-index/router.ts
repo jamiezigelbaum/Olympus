@@ -6,6 +6,7 @@ import type {
   SourceIndexProvenance,
   SourceItemIdentity,
   SourceTrustDomain,
+  SourceTrustTier,
 } from './types.ts';
 import { isSecureSensitivity } from './types.ts';
 import type {
@@ -63,6 +64,11 @@ export interface SourceIndexSearchHit {
   candidateId?: SourceIndexCandidateId;
   score?: number;
   laneAudits?: readonly RetrievalLaneAudit[];
+  // The item's own tier, when the adapter knows it (a connector store row's
+  // tier). Internal: the router reads it before any filter or trim to decide
+  // encounteredSecureLocal, and the evidence build uses it when no content
+  // provider answers for the item. Search routes never return it.
+  trustTier?: SourceTrustTier;
   rawExposed: false;
 }
 
@@ -174,9 +180,10 @@ export interface SourceIndexRoutedSearchResponse {
   // or any trim: true when a searched corpus contributed anything secure by
   // isSecureSensitivity. A corpus contributes when it returned a hit or a
   // positive match count; its contribution is secure when the corpus's
-  // default sensitivity is secure, or its count reports secure rows or does
-  // not say (unknown counts as secure). A corpus that matched nothing
-  // contributed nothing. Internal: never part of a tool or model result.
+  // default sensitivity is secure, a hit's own tier is secure, or its count
+  // reports secure rows or does not say (unknown counts as secure). A corpus
+  // that matched nothing contributed nothing. Internal: never part of a tool
+  // or model result.
   encounteredSecureLocal: boolean;
   latencyMs: number;
   rawExposed: false;
@@ -444,9 +451,12 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
 }
 
 // Whether one corpus lane's raw response (before any filter or trim) carried
-// anything secure. Hits carry no sensitivity of their own here, so a hit is
-// as secure as its corpus's default; a count is secure when its corpus is, or
-// when it reports secure rows or does not report row sensitivity at all.
+// anything secure, from every lane the adapter ran (keyword, semantic,
+// recency): a hit is secure when its corpus default is, or its own tier is;
+// a count is secure when its corpus is, or when it reports secure rows or
+// does not report row sensitivity at all. A hit with no tier of its own is
+// judged by its corpus default here; the evidence build is stricter when no
+// provider answers for it.
 function corpusContributedSecure(
   corpus: SourceIndexCorpusDefinition,
   response: SourceIndexCorpusSearchResponse,
@@ -455,6 +465,10 @@ function corpusContributedSecure(
   const positiveCount = count !== undefined && (count.matchedItems > 0 || count.saturated);
   if (response.hits.length === 0 && !positiveCount) return false;
   if (isSecureSensitivity(corpus.defaultSensitivity)) return true;
+  if (response.hits.some((hit) => hit.trustTier !== undefined
+    && isSecureSensitivity({ trustDomain: corpus.trustDomain, trustTier: hit.trustTier }))) {
+    return true;
+  }
   return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
 }
 

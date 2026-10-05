@@ -19,13 +19,16 @@ import {
   buildSourceIndexCorpusRegistry,
   defineSourceIndexCorpus,
 } from '../src/core/source-index/corpus.ts';
-import type {
-  SourceIndexCorpusSearchAdapter,
-  SourceIndexRouterAdapterMap,
+import {
+  routeSourceIndexSearch,
+  type SourceIndexCorpusSearchAdapter,
+  type SourceIndexRoutedSearchHit,
+  type SourceIndexRouterAdapterMap,
 } from '../src/core/source-index/router.ts';
 import {
   buildSourceSensitivity,
   type SourceItemIdentity,
+  type SourceTrustTier,
 } from '../src/core/source-index/types.ts';
 import { createAnalyst, type AnalystModelRequest, type CreateAnalystOptions } from '../src/core/analyst.ts';
 import { createStructuredEvidenceFact } from '../src/core/opsec.ts';
@@ -3011,3 +3014,403 @@ describe('analyst-backed source_answer handler', () => {
     await expect(handler.answer({ question: '   ' })).rejects.toThrow('non-empty question');
   });
 });
+
+// A connector store's rows carry their own tier, which can be stricter than
+// the store's default. Every lane's hit (keyword, semantic, recency) carries
+// it to the router, which decides encounteredSecureLocal before any filter or
+// trim; and an item no content provider answers for is judged by that tier,
+// never by the lower store default. Real stores, real adapters.
+describe('row tiers reach the secure_local context decision', () => {
+  const STORE = 'internal.tiered.files';
+  const CHAT = 'internal.tiered.chat';
+
+  interface TieredItem { id: string; text: string; tier: SourceTrustTier; sentAt?: string }
+
+  function tieredFileConnector(items: readonly TieredItem[]): SourceConnector {
+    const rawItems = items.map((item): RawItem => ({
+      identity: {
+        family: 'file',
+        provider: 'fixture',
+        accountScope: 'personal',
+        providerItemId: item.id,
+        providerFileId: item.id,
+        localItemId: `personal:${item.id}`,
+        sourceVersion: `${item.id}:v1`,
+      },
+      mimeType: 'text/markdown',
+      content: { kind: 'text', text: item.text },
+      metadata: Object.freeze({ name: `${item.id}.md`, locatorUri: `/files/${item.id}.md`, updatedAt: '2026-10-01T10:00:00.000Z' }),
+      fetchedAt: '2026-10-01T10:00:00.000Z',
+    }));
+    return {
+      id: 'tiered.fixture',
+      family: 'file',
+      async authenticate() {},
+      listItems(): AsyncIterable<SourceConnectorListPage> {
+        return (async function* (): AsyncGenerator<SourceConnectorListPage> {
+          yield { items: rawItems, done: true };
+        })();
+      },
+      async fetchItem(localItemId: string): Promise<RawItem> {
+        const item = rawItems.find((candidate) => candidate.identity.localItemId === localItemId);
+        if (!item) throw new Error(`missing fixture ${localItemId}`);
+        return item;
+      },
+      classificationSignals() {
+        return {};
+      },
+    };
+  }
+
+  async function tieredStore(
+    family: 'file' | 'chat',
+    items: readonly TieredItem[],
+  ): Promise<LocalConnectorStore> {
+    const store = new LocalConnectorStore({
+      dbPath: ':memory:',
+      corpusId: family === 'chat' ? CHAT : STORE,
+      family,
+      trustDomain: 'internal',
+    });
+    const connector = family === 'chat'
+      ? createWhatsAppFixtureConnector(items.map((item) => ({
+          id: item.id,
+          conversationId: 'family',
+          text: item.text,
+          sentAt: item.sentAt ?? '2026-10-01T10:00:00.000Z',
+        })))
+      : tieredFileConnector(items);
+    const tiers = new Map(items.map((item) => [
+      family === 'chat' ? `personal:family:${item.id}` : `personal:${item.id}`,
+      item.tier,
+    ] as const));
+    await store.syncFromConnector(connector, {
+      fetchContent: true,
+      placement: (item: RawItem) => buildSourceSensitivity({
+        trustTier: tiers.get(item.identity.localItemId) ?? 'S3',
+        trustDomain: 'internal',
+      }),
+    });
+    return store;
+  }
+
+  // Documents with "zebra" sit on the query's axis; anything else is
+  // orthogonal. Not the built-in model, so no calibrated bar applies.
+  const zebraProvider: SourceEmbeddingProvider = {
+    provider: 'fixture',
+    modelId: 'tiered-fixture-v1',
+    dimension: 2,
+    configHash: 'tiered-fixture',
+    epochId: 'local:tiered-fixture-v1:2',
+    backend: 'local',
+    async embed(inputs, options) {
+      return inputs.map((input) => (
+        options.taskType === 'RETRIEVAL_QUERY' || input.text.includes('zebra') ? [1, 0] : [0, 1]
+      ));
+    },
+  };
+
+  function storeCorpus(store: LocalConnectorStore) {
+    return defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: 'internal' });
+  }
+
+  async function route(
+    store: LocalConnectorStore,
+    query: string,
+    options: {
+      maxResults?: number;
+      retrievalMode?: 'keyword' | 'hybrid';
+      semanticRelevanceBar?: number;
+      visibilityGate?: (hits: readonly SourceIndexRoutedSearchHit[]) => readonly SourceIndexRoutedSearchHit[];
+      extra?: { corpusId: string; adapter: SourceIndexCorpusSearchAdapter };
+    } = {},
+  ) {
+    const adapter = createConnectorStoreCorpusAdapter({
+      store,
+      retrievalMode: options.retrievalMode ?? 'keyword',
+      ...(options.retrievalMode === 'hybrid' ? { embeddingProvider: zebraProvider } : {}),
+      ...(options.semanticRelevanceBar !== undefined ? { semanticRelevanceBar: options.semanticRelevanceBar } : {}),
+    });
+    return routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry([
+        ...(options.extra ? [defineSourceIndexCorpus({ corpusId: options.extra.corpusId, family: 'file', trustDomain: 'internal' })] : []),
+        storeCorpus(store),
+      ]),
+      adapters: {
+        ...(options.extra ? { [options.extra.corpusId]: options.extra.adapter } : {}),
+        [store.corpusId]: adapter,
+      } as SourceIndexRouterAdapterMap,
+      request: {
+        query,
+        maxResults: options.maxResults ?? 10,
+        context: { allowedTrustDomains: ['internal'] },
+      },
+      ...(options.visibilityGate ? { visibilityGate: options.visibilityGate } : {}),
+    });
+  }
+
+  const ids = (hits: readonly { sourceItem: { providerItemId: string } }[]) => hits.map((hit) => hit.sourceItem.providerItemId);
+
+  test('every keyword hit carries its own row tier', async () => {
+    const store = await tieredStore('file', [
+      { id: 'plain', text: 'garden tomatoes', tier: 'S3' },
+      { id: 'held', text: 'garden tomatoes again', tier: 'S4' },
+    ]);
+    try {
+      const routed = await route(store, 'garden tomatoes');
+      expect(Object.fromEntries(routed.hits.map((hit) => [hit.sourceItem.providerItemId, hit.trustTier]))).toEqual({ plain: 'S3', held: 'S4' });
+      expect(routed.encounteredSecureLocal).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a secure recency-lane hit sets the flag though the keyword count saw none', async () => {
+    const store = await tieredStore('chat', [
+      { id: 'match', text: 'garden tomatoes are ripe', tier: 'S3', sentAt: '2026-10-01T09:00:00.000Z' },
+      { id: 'newest', text: 'unrelated private note', tier: 'S4', sentAt: '2026-10-01T11:00:00.000Z' },
+    ]);
+    try {
+      const routed = await route(store, 'garden tomatoes');
+      expect(ids(routed.hits)).toContain('newest');
+      expect(routed.matchCounts?.[0]?.secureMatchedItems).toBe(0);
+      expect(routed.encounteredSecureLocal).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a secure semantic hit with no relevance bar sets the flag though it is not counted', async () => {
+    const store = await tieredStore('file', [
+      { id: 'plain', text: 'alpha notes', tier: 'S3' },
+      { id: 'held', text: 'zebra private memo', tier: 'S4' },
+    ]);
+    try {
+      await store.embedChunks({ provider: zebraProvider });
+      const routed = await route(store, 'alpha', { retrievalMode: 'hybrid' });
+      expect(ids(routed.hits)).toContain('held');
+      expect(routed.matchCounts?.[0]).toMatchObject({ matchedItems: 1, secureMatchedItems: 0 });
+      expect(routed.encounteredSecureLocal).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a secure hit the visibility gate removes still sets the flag', async () => {
+    const store = await tieredStore('chat', [
+      { id: 'match', text: 'garden tomatoes are ripe', tier: 'S3', sentAt: '2026-10-01T09:00:00.000Z' },
+      { id: 'newest', text: 'unrelated private note', tier: 'S4', sentAt: '2026-10-01T11:00:00.000Z' },
+    ]);
+    try {
+      const routed = await route(store, 'garden tomatoes', {
+        visibilityGate: (hits) => hits.filter((hit) => hit.sourceItem.providerItemId !== 'newest'),
+      });
+      expect(ids(routed.hits)).toEqual(['match']);
+      expect(routed.encounteredSecureLocal).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a secure hit the per-corpus budget trims still sets the flag', async () => {
+    const store = await tieredStore('file', [{ id: 'held', text: 'zebra private memo', tier: 'S4' }]);
+    try {
+      await store.embedChunks({ provider: zebraProvider });
+      const routed = await route(store, 'alpha', {
+        retrievalMode: 'hybrid',
+        maxResults: 1,
+        extra: { corpusId: INTERNAL, adapter: adapterReturning(['note-1']) },
+      });
+      expect(ids(routed.hits)).toEqual(['note-1']);
+      expect(routed.encounteredSecureLocal).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a Personal-only store answer (every row S3) leaves the flag false', async () => {
+    const store = await tieredStore('file', [
+      { id: 'one', text: 'garden tomatoes', tier: 'S3' },
+      { id: 'two', text: 'garden tomatoes again', tier: 'S3' },
+    ]);
+    try {
+      const routed = await route(store, 'garden tomatoes', { maxResults: 1 });
+      expect(routed.hits).toHaveLength(1);
+      expect(routed.matchCounts?.[0]).toMatchObject({ matchedItems: 2, secureMatchedItems: 0 });
+      expect(routed.encounteredSecureLocal).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('counts total and secure rows across lexical, overlapping and semantic-only matches', async () => {
+    const store = await tieredStore('file', [
+      { id: 'a', text: 'alpha zebra', tier: 'S3' },
+      { id: 'b', text: 'alpha zebra too', tier: 'S4' },
+      { id: 'c', text: 'zebra only', tier: 'S4' },
+      { id: 'd', text: 'beta', tier: 'S3' },
+    ]);
+    try {
+      await store.embedChunks({ provider: zebraProvider });
+      const adapter = createConnectorStoreCorpusAdapter({
+        store,
+        retrievalMode: 'hybrid',
+        embeddingProvider: zebraProvider,
+        semanticRelevanceBar: 0.45,
+      });
+      const response = await adapter({
+        query: 'alpha',
+        maxResults: 10,
+        corpus: storeCorpus(store),
+        context: { allowedTrustDomains: ['internal'] },
+      });
+      expect(response.matchCount).toMatchObject({ matchedItems: 3, secureMatchedItems: 2, saturated: false });
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a saturated count reports its secure rows as a lower bound', async () => {
+    const items: TieredItem[] = Array.from({ length: 60 }, (_, index) => ({
+      id: `held-${index}`,
+      text: `garden tomatoes ${index}`,
+      tier: index % 2 === 0 ? 'S4' : 'S3',
+    }));
+    const store = await tieredStore('file', items);
+    try {
+      const routed = await route(store, 'garden tomatoes');
+      const count = routed.matchCounts?.[0];
+      expect(count?.saturated).toBe(true);
+      expect(count?.secureMatchedItems).toBeGreaterThan(0);
+      expect(count!.secureMatchedItems!).toBeLessThanOrEqual(count!.matchedItems);
+      expect(routed.encounteredSecureLocal).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  // The store does not check a placement's tier on write; reading the row
+  // back refuses it, so a search over it fails rather than counting the row
+  // as non-secure or returning a hit with no usable tier.
+  test('a row with an invalid tier is refused when read, never counted as non-secure', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: STORE, family: 'file', trustDomain: 'internal' });
+    try {
+      await store.syncFromConnector(tieredFileConnector([{ id: 'bad', text: 'garden tomatoes', tier: 'S3' }]), {
+        fetchContent: true,
+        placement: () => ({ ...buildSourceSensitivity({ trustTier: 'S3', trustDomain: 'internal' }), trustTier: 'S9' as SourceTrustTier }),
+      });
+      await expect(route(store, 'garden tomatoes')).rejects.toThrow(/unknown trust tier/);
+    } finally {
+      store.close();
+    }
+  });
+
+  // Real createAnalyst, scripted model that repeats a secure title it sees.
+  function titleEchoAnalyst(title: string) {
+    const requests: AnalystModelRequest[] = [];
+    const analyst = createAnalyst({
+      async complete(request) {
+        requests.push(request);
+        return {
+          modelId: 'scripted',
+          text: JSON.stringify({
+            answer: `The garden note is on file.${request.prompt.includes(title) ? ` See also ${title}.` : ''}`,
+            citations: [{ evidence: 1, claim: 'The garden note is on file.' }],
+            unanswered: [],
+            sufficient: true,
+          }),
+        };
+      },
+    });
+    return { analyst, requests };
+  }
+
+  test('strict mode holds when the gate filtered a secure recency hit (repro A)', async () => {
+    const store = await tieredStore('chat', [
+      { id: 'match', text: 'garden tomatoes are ripe', tier: 'S3', sentAt: '2026-10-01T09:00:00.000Z' },
+      { id: 'newest', text: 'unrelated private note', tier: 'S4', sentAt: '2026-10-01T11:00:00.000Z' },
+    ]);
+    try {
+      const { analyst, requests } = titleEchoAnalyst('private note');
+      const result = await createAnalystSourceIndexAnswerHandler({
+        analyst,
+        lanes: () => ({
+          registry: buildSourceIndexCorpusRegistry([storeCorpus(store)]),
+          adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store, retrievalMode: 'keyword' }) },
+          contentProviders: { [store.corpusId]: createConnectorStoreContentProvider({ store }) },
+          visibilityGate: (hits) => hits.filter((hit) => hit.sourceItem.providerItemId !== 'newest'),
+        }),
+        secureDerivativeDefault: 'approval',
+      }).answer({ question: 'garden tomatoes', retrieval_mode: 'keyword' });
+
+      expect(requests[0]!.prompt).not.toContain('private note');
+      expect(requests[0]!.prompt).not.toContain('/S4');
+      expect(result.opsec.release_decision.decision).toBe('needs_approval');
+      expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_requires_approval');
+    } finally {
+      store.close();
+    }
+  });
+
+  test('strict mode holds when an S4 row\'s provider returns nothing and its title reaches the prompt (repro B)', async () => {
+    const store = await tieredStore('file', [
+      { id: 'plain', text: 'garden tomatoes', tier: 'S3' },
+      { id: 'secret-merger', text: 'garden tomatoes merger', tier: 'S4' },
+    ]);
+    try {
+      const { analyst, requests } = titleEchoAnalyst('secret-merger.md');
+      const storeProvider = createConnectorStoreContentProvider({ store });
+      const result = await createAnalystSourceIndexAnswerHandler({
+        analyst,
+        lanes: () => ({
+          registry: buildSourceIndexCorpusRegistry([storeCorpus(store)]),
+          adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store, retrievalMode: 'keyword' }) },
+          contentProviders: {
+            [store.corpusId]: {
+              async fetchLocalContent(request: LocalContentRequest) {
+                return request.provenance.sourceItem.providerItemId === 'secret-merger'
+                  ? undefined
+                  : storeProvider.fetchLocalContent(request);
+              },
+            },
+          } as LocalContentProviderMap,
+        }),
+        secureDerivativeDefault: 'approval',
+      }).answer({ question: 'garden tomatoes', retrieval_mode: 'keyword' });
+
+      expect(requests[0]!.prompt).toContain('secret-merger.md');
+      // Fail-safe hydration: the unanswered item is judged by its own S4 tier.
+      expect(requests[0]!.prompt).toContain('trust: internal/S4');
+      expect(result.opsec.release_decision.decision).toBe('needs_approval');
+      expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_requires_approval');
+      expect(JSON.stringify({ answer: result.answer, evidence: result.evidence })).not.toContain('secret-merger');
+    } finally {
+      store.close();
+    }
+  });
+
+  test('an item of unknown tier that no provider answers for makes a secure context', async () => {
+    const { analyst } = scriptedAnalyst(citeFirstInternal);
+    const result = await createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => {
+        const fixture = lanesFixture({ internal: ['note-1'], other: ['unread-1'] });
+        const { [OTHER]: _dropped, ...providers } = fixture.contentProviders as Record<string, unknown>;
+        return { ...fixture, contentProviders: providers as LocalContentProviderMap };
+      },
+      secureDerivativeDefault: 'approval',
+    }).answer({ question: 'Latest labs?' });
+
+    expect(result.opsec.release_decision.decision).toBe('needs_approval');
+    expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_requires_approval');
+  });
+});
+
+function citeFirstInternal(pack: EvidencePack): AnalystResult {
+  const internalCandidate = pack.candidates.find((candidate) => candidate.trustDomain === 'internal')!;
+  return {
+    answer: 'The cholesterol note is on file.',
+    citations: [{ provenance: internalCandidate.provenance, claim: 'Cholesterol note is on file.' }],
+    unanswered: [],
+  };
+}
