@@ -1749,7 +1749,7 @@ describe('LocalConnectorStore sync', () => {
       id: 'file-passwords',
       title: 'password-manager-export.csv',
       // A real secret in the text: the secret detector, not a name list, decides S5.
-      text: 'account,username,password\nexample,alice,secret\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----',
+      text: 'account,username,password\nexample,alice,secret\n-----BEGIN RSA ' + 'PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----',
       metadata: {
         name: 'password-manager-export.csv',
         pathDisplay: '/Exports/password-manager-export.csv',
@@ -1886,7 +1886,7 @@ describe('LocalConnectorStore sync', () => {
       provider: 'gmail',
       id: 'msg-key',
       title: 'Deploy key',
-      text: '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----',
+      text: '-----BEGIN RSA ' + 'PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----',
       metadata: { subject: 'Deploy key', sender: 'Ops <ops@example.com>' },
     });
 

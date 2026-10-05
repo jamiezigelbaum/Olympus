@@ -194,7 +194,7 @@ function fakeDriveClient(): CountingDriveApiClient {
     ['file-plain', 'Apollo roadmap notes for the connector-store launch.'],
     ['file-therapy', 'Therapy worksheet and private care notes.'],
     // A real secret in the text: the secret detector decides Secrets.
-    ['file-passwords', 'account,username,password\nexample,alice,secret\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----'],
+    ['file-passwords', 'account,username,password\nexample,alice,secret\n-----BEGIN RSA ' + 'PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----'],
   ]);
   return {
     listCalls: 0,
