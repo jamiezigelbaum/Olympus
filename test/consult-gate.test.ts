@@ -6,7 +6,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import {
-  CONSULT_GATE_LINKAGE_RUN_TOKENS,
+  CONSULT_GATE_MAX_LIST_ITEMS,
   CONSULT_GATE_MAX_QUESTION_BYTES,
   CONSULT_GATE_MAX_RECENT_CONSULTS,
   CONSULT_GATE_MAX_SUB_QUESTIONS,
@@ -14,6 +14,7 @@ import {
   CONSULT_GATE_SHARED_RUN_TOKENS,
   consultWriterContextFromPack,
   evaluateConsultQuestion,
+  evaluateConsultRequest,
   normalizeForComparison,
   type ConsultGateReason,
   type ConsultWriterContext,
@@ -225,19 +226,25 @@ describe('writer-context snapshot', () => {
     expect(context.overflow).toBe(false);
   });
 
-  test('classifies provenance as identifier, closed enumerations as vocabulary, free text as text', () => {
+  test('classifies by schema path: provenance strict, closed enumerations as vocabulary, free text as text', () => {
     const context = consultWriterContextFromPack(FULL_PACK as EvidencePack);
     const kindsOf = (text: string) => [...new Set(context.entries.filter((entry) => entry.text === text).map((entry) => entry.kind))];
-    for (const text of ['leaf-citation-title', 'leaf-author-label', 'leaf-conversation-label', 'leaf-citation-uri',
-      'leaf-provider-item-id', 'leaf-account-scope', 'leaf-provider-id-value', 'leaf-content-hash']) {
+    for (const text of ['leaf-citation-title', 'leaf-conversation-label', 'leaf-citation-uri', 'leaf-provider',
+      'leaf-provider-item-id', 'leaf-provider-id-value', 'leaf-content-hash', 'leaf-sync-run-id']) {
       expect({ text, kinds: kindsOf(text) }).toEqual({ text, kinds: ['identifier'] });
     }
+    expect(kindsOf('leaf-author-label')).toEqual(['person_identifier']);
+    expect(kindsOf('leaf-account-scope')).toEqual(['account_scope']);
+    for (const text of ['leaf-built-at', 'leaf-fact-id', '7001', '7002', '7006']) {
+      expect({ text, kinds: kindsOf(text) }).toEqual({ text, kinds: ['metadata'] });
+    }
+    expect(kindsOf('7007')).toEqual(['text']);
     expect(kindsOf('leaf-question')).toEqual(['user_question']);
     for (const text of ['leaf-chunk-text', 'leaf-table-caption', 'leaf-table-column', 'leaf-table-cell',
       'leaf-fact-claim', 'leaf-extraction-gap', 'leaf-skip-reason', 'leaf-searched-corpus']) {
       expect({ text, kinds: kindsOf(text) }).toEqual({ text, kinds: ['text'] });
     }
-    for (const text of ['secure_local', 'S4', 'high', 'quoted_fact', 'local_only', 'general_source_instruction', 'leaf-provider', 'keyword']) {
+    for (const text of ['secure_local', 'S4', 'high', 'quoted_fact', 'local_only', 'general_source_instruction', 'keyword']) {
       expect({ text, kinds: kindsOf(text) }).toEqual({ text, kinds: ['vocabulary'] });
     }
   });
@@ -256,7 +263,7 @@ describe('writer-context snapshot', () => {
 
   test('connected-account identifiers are added as identifiers', () => {
     const context = consultWriterContextFromPack(PACK, { connectedAccountIdentifiers: ['Quillon Varga'] });
-    expect(context.entries.at(-1)).toEqual({ kind: 'identifier', text: 'Quillon Varga' });
+    expect(context.entries.at(-1)).toEqual({ kind: 'person_identifier', text: 'Quillon Varga', path: 'connectedAccount[]', group: -3 });
     expectRefused('What does a quillon varga contract usually cover?', 'snapshot_identifier', context);
   });
 
@@ -276,7 +283,7 @@ describe('writer-context snapshot', () => {
   test('a hand-built context over the byte ceiling is refused on its recomputed size', () => {
     const forged: ConsultWriterContext = {
       overflow: false,
-      entries: [{ kind: 'text', text: 'y'.repeat(CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES + 1) }],
+      entries: [{ kind: 'text', text: 'y'.repeat(CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES + 1), path: 'x', group: -1 }],
     };
     expect(verdict(CLEAN, forged)).toEqual({ decision: 'refuse', reasons: ['writer_context_too_large'] });
   });
@@ -345,9 +352,11 @@ describe('consult gate', () => {
   test('names that occur only in running text', () => {
     expectRefused('Can marguerite okafor refuse an inspection?', 'snapshot_name');
     expectRefused('Can Okafor, Marguerite refuse an inspection?', 'snapshot_name');
-    // Near-miss: a capitalized heading whose words occur in lower case elsewhere.
+    // Near-miss: a capitalized heading whose words occur in lower case more
+    // often than capitalized. (At a tie the pair counts as a name: one
+    // lower-case repeat must not unmake a real name.)
     const context = consultWriterContextFromPack(packWith('q', [{
-      chunks: ['Final Inspection', 'The final inspection happens after keys are returned.'],
+      chunks: ['Final Inspection', 'The final inspection happens after keys are returned, and the final inspection is short.'],
     }]));
     expectPass('When does a final inspection usually happen?', context);
   });
@@ -361,12 +370,12 @@ describe('consult gate', () => {
   test('exact dates in other written forms', () => {
     expectRefused('What usually happens on 2024-03-14 for deposits?', 'snapshot_date');
     expectRefused('What usually happens on March 14th, 2024 for deposits?', 'snapshot_date');
-    expectRefused('What usually happens on 14/03/2024 for deposits?', 'snapshot_date');
+    expectRefused('What usually happens on 14-03-2024 for deposits?', 'snapshot_date');
     expectRefused('Que se passe-t-il le 14 mars 2024 pour une caution?', 'snapshot_date');
     // Day and month alone are still the date.
     expectRefused('What usually happens on the 14th of March?', 'snapshot_date');
-    // Near-misses: month and year, a bare year, another day.
-    expectPass('What changed for deposits in March 2024?');
+    // Near-misses: a month alone, another day.
+    expectPass('What changed for deposits in March?');
     expectPass('What usually happens on 15 March for deposits?');
   });
 
@@ -375,10 +384,11 @@ describe('consult gate', () => {
     expectRefused('Is 2.375,50 a normal deposit?', 'snapshot_figure');
     expectRefused('Is a deduction of 186.4 for carpet cleaning normal?', 'snapshot_figure');
     expectRefused('Is reference 55821 a normal format?', 'snapshot_figure');
-    // Near-misses: two significant digits, a band, a bare year.
+    // Years are numbers like any other: one present in the snapshot is refused.
+    expectRefused('Did deposit protection rules change in 2024?', 'snapshot_figure');
+    // Near-misses: another figure, a band.
     expectPass('Is a carpet cleaning charge of about 190 normal?');
     expectPass('Is a deposit between 2,000 and 2,500 normal?');
-    expectPass('Did deposit protection rules change in 2024?');
   });
 
   test('size limits', () => {
@@ -434,16 +444,19 @@ describe('consult gate', () => {
     expectPass('Что такое deposit protection в общем случае?');
   });
 
-  test(`question structure: a question, at most ${CONSULT_GATE_MAX_SUB_QUESTIONS} sub-questions, one preamble sentence`, () => {
+  test(`request structure: at most ${CONSULT_GATE_MAX_SUB_QUESTIONS} sub-questions, each one question with at most ${CONSULT_GATE_MAX_LIST_ITEMS} list items`, () => {
     expectRefused('What is a deposit', 'not_a_question');
     expectRefused('What is a deposit? Explain.', 'not_a_question');
-    expectRefused('What is a deposit? What is a lease? What is an inventory? What is a guarantor?', 'too_many_sub_questions');
-    expectRefused('Answer each: 1) deposits 2) leases 3) inspections 4) guarantors?', 'too_many_sub_questions');
-    expectRefused('Tenancy ended. Keys returned. What happens next?', 'too_many_sub_questions');
-    // Near-misses: a bounded list of independent sub-questions, one context
-    // sentence, Spanish opening mark, a decimal point.
-    expectPass('What is a deposit? What is a lease?');
-    expectPass('Answer each of these briefly: 1) what is a deposit cap, 2) what is a holding deposit, 3) what is a guarantor?');
+    expectRefused('What is a deposit? What is a lease?', 'not_a_question');
+    expect(evaluateConsultRequest(['What is a deposit?', 'What is a lease?', 'What is an inventory?', 'What is a guarantor?'], CONTEXT).reasons)
+      .toEqual(['too_many_sub_questions']);
+    expectRefused('Answer each: 1) deposits 2) leases 3) inspections 4) guarantors 5) breaks?', 'too_many_list_items');
+    expectRefused('Tenancy ended. Keys returned. What happens next?', 'too_many_list_items');
+    // Near-misses: a bounded list of sub-questions, a short list inside one,
+    // one context sentence, Spanish opening mark, a decimal point.
+    expect(evaluateConsultRequest(['What is a deposit cap?', 'What is a holding deposit?', 'What is a guarantor?'], CONTEXT))
+      .toEqual({ decision: 'pass', reasons: [] });
+    expectPass('What matters when a deposit is held for one, three, or six months?');
     expectPass('Assume a fixed-term tenancy has ended. What is the usual timeline for returning a deposit?');
     expectPass('\u00BFCu\u00E1nto tiempo tiene un arrendador para devolver una fianza?');
     expectPass('Is a 2.5 percent annual cap on deposit interest typical?');
@@ -460,21 +473,21 @@ describe('consult gate', () => {
     expectRefused('What does error 0x80070005 mean?', 'technical_fingerprint');
     // Near-misses: the error class and a two-part version.
     expectPass('What usually causes a null reference error when a module imports itself?');
-    expectPass('Did Python 3.12 change how imports are cached?');
-    expectPass('Is input/output buffering a common cause of lost log lines?');
+    expectPass('Did Python 3.11 change how imports are cached?');
+    // Any slash between letters reads as a path; words are cheaper.
+    expectRefused('Is input/output buffering a common cause of lost log lines?', 'technical_fingerprint');
   });
 
-  test(`linkage: a run of ${CONSULT_GATE_LINKAGE_RUN_TOKENS} tokens reused from a recent approved consult`, () => {
+  test('linkage: an exact repeat, or a shared run, with a recent approved consult', () => {
     const recent = ['How long does a landlord usually have to return a deposit after a tenancy ends?'];
     const check = (question: string) => evaluateConsultQuestion(question, CONTEXT, {}, { recentApprovedQuestions: recent });
     expect(check('How long does a landlord usually have to return a deposit after a tenancy ends?').reasons)
-      .toContain('links_recent_consult');
-    expect(check('In general, a landlord usually have to return a deposit after which inspections?').reasons)
+      .toEqual(expect.arrayContaining(['repeats_recent_consult', 'links_recent_consult']));
+    expect(check('In general, must a landlord usually return a deposit after inspections?').reasons)
       .toContain('links_recent_consult');
     // Near-miss: the same topic in independent wording.
     expect(check('What deductions from a rental deposit are usually allowed for normal wear versus damage?'))
       .toEqual({ decision: 'pass', reasons: [] });
-    // History is bounded and checked before any work.
     const tooMany = Array.from({ length: CONSULT_GATE_MAX_RECENT_CONSULTS + 1 }, () => 'What is a deposit?');
     expect(evaluateConsultQuestion(CLEAN, CONTEXT, {}, { recentApprovedQuestions: tooMany }))
       .toEqual({ decision: 'refuse', reasons: ['recent_consults_too_large'] });

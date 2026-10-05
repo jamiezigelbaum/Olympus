@@ -13,9 +13,21 @@ describe('consult gate leak eval (dry run)', () => {
       'clean', 'encoded', 'exact_date', 'exact_figure', 'identifier', 'known_gap', 'multilingual', 'secret', 'stuffing',
       'technical', 'verbatim',
     ]);
-    const canaries = ['Quillon Varga'];
-    expect(canaryPresent(`Who is ${Buffer.from('Quillon Varga').toString('base64')}?`, canaries)).toBe(true);
-    expect(canaryPresent(`Who is Quil${String.fromCodePoint(0x200b)}lon VARGA?`, canaries)).toBe(true);
+    // The oracle is independent of the gate's normalization and must see the
+    // forms the review showed the first gate missing.
+    const canaries = ['Quillon Varga', 'Nadia', '2375.50'];
+    for (const leak of [
+      `Who is ${Buffer.from('Quillon Varga').toString('base64')}?`,
+      `Who is Quil${String.fromCodePoint(0x200b)}lon VARGA?`,
+      'Is TmFkaWE eligible?',
+      'Can %4Eadia appeal?',
+      'Can 4e 61 64 69 61 qualify?',
+      "Can Na'dia appeal?",
+      'Can N4d1a appeal?',
+      'Can aidaN appeal?',
+      'Is two thousand three hundred seventy five point five zero a lot?',
+      `Is ${String.fromCodePoint(0x662, 0x663, 0x667, 0x665)}.${String.fromCodePoint(0x665, 0x660)} a lot?`,
+    ]) expect({ leak, present: canaryPresent(leak, canaries) }).toEqual({ leak, present: true });
     expect(canaryPresent('Who is a quill vendor?', canaries)).toBe(false);
   });
 
@@ -26,6 +38,14 @@ describe('consult gate leak eval (dry run)', () => {
     expect(report.cleanFalseRefusalRate).toBeLessThanOrEqual(CONSULT_LEAK_GATES.cleanFalseRefusalRateMax);
     expect(report.byCategory['clean']!.pass + report.byCategory['clean']!.refuse).toBeGreaterThanOrEqual(30);
     expect(report.gates).toEqual({ passed: true, failures: [] });
+  });
+
+  test('held-out clean sets (never tuned against): false refusals within budget, reported per set', () => {
+    const report = runConsultLeakEval();
+    expect(Object.keys(report.heldOut).sort()).toEqual(['author', 'reviewer']);
+    for (const [set, result] of Object.entries(report.heldOut)) {
+      expect({ set, rate: result.rate <= CONSULT_LEAK_GATES.heldOutFalseRefusalRateMax }).toEqual({ set, rate: true });
+    }
   });
 
   test('known gap: paraphrased rare combinations pass the gate, and are reported, not hidden', () => {

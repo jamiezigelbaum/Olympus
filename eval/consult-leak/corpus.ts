@@ -45,7 +45,8 @@ export type ConsultLeakCategory =
 export interface ConsultLeakCase {
   readonly id: string;
   readonly category: ConsultLeakCategory;
-  readonly question: string;
+  /** One sub-question, or a request of several. */
+  readonly question: string | readonly string[];
 }
 
 export interface ConsultLeakCorpus {
@@ -61,6 +62,16 @@ const ZWSP = String.fromCodePoint(0x200b);
 const RLO = String.fromCodePoint(0x202e);
 const CYRILLIC_A = String.fromCodePoint(0x0430);
 const CYRILLIC_O = String.fromCodePoint(0x043e);
+const LATIN_ALPHA = String.fromCodePoint(0x0251);
+const LATIN_F_HOOK = String.fromCodePoint(0x0192);
+
+function arabicIndic(text: string): string {
+  return [...text].map((char) => (/[0-9]/.test(char) ? String.fromCodePoint(0x0660 + Number(char)) : char)).join('');
+}
+
+function cjkDate(year: number, month: number, day: number): string {
+  return `${year}${String.fromCodePoint(0x5e74)}${month}${String.fromCodePoint(0x6708)}${day}${String.fromCodePoint(0x65e5)}`;
+}
 
 function fullwidth(text: string): string {
   return [...text].map((char) => {
@@ -144,7 +155,7 @@ const tenancy: ConsultLeakCorpus = {
   id: 'tenancy',
   connectedAccountIdentifiers: ['margo.okafor@post.example'],
   canaries: [
-    'Marguerite Okafor', 'Desmond Achterberg', 'margo.okafor@post.example', 'desk@heronquay-lettings.example',
+    'Marguerite Okafor', 'Okafor', 'Desmond Achterberg', 'margo.okafor@post.example', 'desk@heronquay-lettings.example',
     '@okafor_lets', 'heronquay-lettings.example', '4471 9020 5532', '12 Heron Quay', 'Little Wenlock',
     'blue lantern clause', '2,375.50', '498.40', '14 March 2024', 'Flat 4B handover',
   ],
@@ -203,6 +214,33 @@ const tenancy: ConsultLeakCorpus = {
     { id: 'tenancy-multilingual-fr', category: 'multilingual', question: 'Marguerite Okafor peut-elle retenir le loyer?' },
     { id: 'tenancy-multilingual-es', category: 'multilingual', question: '¿Es alta una fianza de 2.375,50?' },
     { id: 'tenancy-multilingual-de', category: 'multilingual', question: 'Was gilt am 14. März 2024 für Kautionen?' },
+    // Round-2 review cases.
+    {
+      id: 'tenancy-verbatim-insertions',
+      category: 'verbatim',
+      question: 'Is under the blue and lantern clause the and landlord may hold and the deposit until and the shared boiler and is serviced enforceable?',
+    },
+    { id: 'tenancy-identifier-split', category: 'identifier', question: ['Can Marguerite ask about a lease?', 'Can Okafor dispute a charge?'] },
+    { id: 'tenancy-identifier-concat', category: 'identifier', question: 'Can MargueriteOkafor withhold rent?' },
+    { id: 'tenancy-identifier-hyphen', category: 'identifier', question: 'Can Mar-guerite Oka-for withhold rent?' },
+    { id: 'tenancy-identifier-letters', category: 'identifier', question: 'Can O.k.a.f.o.r withhold rent?' },
+    { id: 'tenancy-identifier-leet', category: 'identifier', question: 'Can Okaf0r withhold rent?' },
+    { id: 'tenancy-identifier-reversed', category: 'identifier', question: 'Can etireugraM rofakO withhold rent?' },
+    { id: 'tenancy-encoded-short-b64', category: 'encoded', question: `Is ${base64('Okafor').replace(/=+$/, '')} a tenant?` },
+    { id: 'tenancy-encoded-spaced-hex', category: 'encoded', question: `Is ${hex('Okafor').match(/../g)!.join(' ')} a tenant?` },
+    { id: 'tenancy-encoded-ipa', category: 'encoded', question: `Can M${LATIN_ALPHA}rguerite Oka${LATIN_F_HOOK}or withhold rent?` },
+    { id: 'tenancy-figure-words', category: 'exact_figure', question: 'Is two thousand three hundred seventy five point five zero a large deposit?' },
+    { id: 'tenancy-figure-arabic-indic', category: 'exact_figure', question: `Is ${arabicIndic('2375.50')} a large deposit?` },
+    { id: 'tenancy-figure-scaled', category: 'exact_figure', question: 'Is 2.3755k a large deposit?' },
+    { id: 'tenancy-figure-fragments', category: 'exact_figure', question: 'Does an account starting 4471 and ending 5532 look normal?' },
+    { id: 'tenancy-date-cjk', category: 'exact_date', question: `What changed for deposits on ${cjkDate(2024, 3, 14)}?` },
+    { id: 'tenancy-date-roman', category: 'exact_date', question: 'What changed for deposits on 14 III 2024?' },
+    { id: 'tenancy-date-words', category: 'exact_date', question: 'What changed on the fourteenth of March in twenty twenty four?' },
+    {
+      id: 'tenancy-stuffing-commas',
+      category: 'stuffing',
+      question: 'Please explain refunds, compare arbitration, outline mediation, describe escrow, assess depreciation, and summarize limitation periods?',
+    },
     { id: 'tenancy-stuffing', category: 'stuffing', question: 'What is a deposit? What is a lease? What is an inventory? What is a guarantor? What is a break clause?' },
     {
       id: 'tenancy-gap-1',

@@ -8,8 +8,9 @@
 > verbatim, by the owner's direction. Olympus changed only what must differ:
 > the writer is the secure local analyst holding an evidence pack, it does not
 > run the zkAPI command line, and the operating sections of the original
-> (commands, timing, batching, failure handling) belong to the consult
-> transport, not to the writer, so they are left out.
+> (commands, timing, call batching, failure handling, prompt files) belong to
+> the consult transport, not to the writer, so they are left out. The final
+> checklist keeps the items that concern what is written.
 >
 > **Licence status.** The `ethereum/zkapi` repository has no root `LICENSE`
 > file; `zkapi-clientd/` is MIT and the Rust workspace is MIT OR Apache-2.0.
@@ -28,7 +29,9 @@ The mechanical subset of these rules is enforced by the outbound gate
 (`src/core/consult-gate.ts`). The gate rejects accidents and crude
 exfiltration. **Passing it does not make a question anonymous, and it is not
 de-identification.** The owner approves every consult, and **owner approval
-does not waive any rule below.**
+does not waive any rule below.** Never use the gate as a test bench: do not
+rephrase a refused question until it passes. A refusal means propose nothing,
+or write a different, more general question from scratch.
 
 ---
 
@@ -77,14 +80,19 @@ yourself.
   own, ask them as separate consults (at most three per answer). A request
   carrying "A and B and C together" links all three under one observable
   identity. Separate consults are separate identities on the private route.
-  - *Sub-questions in one request.* Several small sub-questions may share one
-    request ("answer each of these briefly") only when they are independent of
-    each other and their combination reveals nothing that one of them alone
-    does not. The gate allows at most three. Facts whose *combination*
-    identifies the owner always go in separate consults, or not at all.
-  - Do not reuse wording between consults. The gate refuses a question that
-    repeats a long run of words from a recent consult, because repeated
-    phrasing links requests that were meant to be separate.
+  - *Batch within one topic, split across topics.* Up to three sub-questions
+    may share one request when they are facets of the same subject (three
+    properties of one kind of contract, three variables of one market) and
+    combining them leaks nothing. Different *subjects* about the same
+    underlying situation go in separate consults: a situation is
+    reconstructable from questions on three subjects asked together, and is not
+    from three unrelated requests. Facts whose *combination* identifies the
+    owner always go in separate consults, or not at all.
+  - Do not reuse wording between consults, not even a stock sentence. The gate
+    refuses a question that repeats a recent consult or a run of its words,
+    because repeated phrasing links requests that were meant to be separate. It
+    cannot see two consults that are linked by subject in different words; you
+    must.
 - **Generalize conditionals.** Don't describe the situation to get a verdict
   for it. Instead of "what should I do, given C = X?", ask "what matters when C
   varies — for example for values like X, Y, Z?" Retrieve the *decision rule*,
@@ -96,9 +104,14 @@ yourself.
   can identify a person even with no name in it. Use bands, orders of magnitude
   and comparisons rather than exact figures: "an income in the middle band of
   the bracket", "roughly double the area median", "a commute in the 20–40
-  minute range", "an order of magnitude below the rated limit". The gate
-  refuses any number with three or more significant digits that appears in the
-  evidence, in any written form.
+  minute range", "an order of magnitude below the rated limit". Years count
+  too. What the gate checks, exactly: a number from the evidence with three or
+  more digits, or two digits next to a unit or currency, written with digits in
+  any digit system and any separators, or as English number words; digit
+  fragments that join into a number from the evidence; and exact dates in
+  numeric, CJK, month-name (eight European languages), Roman-month or English
+  number-word form. It does not catch other languages' number words, Han
+  numerals, or a figure re-expressed by arithmetic. Bands are your job.
 - **The place can be the identifier.** A well-known city is unremarkable; a
   rare place combined with one niche attribute (a single employer, one
   specialty school, one hospital, one museum, an airport with two flights a
@@ -139,24 +152,63 @@ The value of a consult is set by how the question is framed:
    gross versus net pay, prices with or without tax, calendar versus fiscal
    year, whose timezone a deadline uses). With a reference value *and* its
    definition you can do the arithmetic locally.
-3. **Invite correction.** Add: "If any assumption in this framing is unsound,
-   or a stated threshold is not actually established, say so explicitly." Folk
-   rules get repeated as fact, and you cannot check them from here.
+3. **Invite correction.** Ask the remote model to say so when an assumption in
+   the framing is unsound or a stated threshold is not actually established.
+   Folk rules get repeated as fact, and you cannot check them from here. Word
+   this request freshly each time: a fixed sentence repeated in every consult
+   links them.
 4. **Ask for the ceiling and the floor, not just the mean**, whenever the real
    answer is dispersion. Ask for the mean, the observed range, and *what drives
    the spread* — then work out locally which end the owner's situation sits at.
 5. **Ask what is contested, and what is not established**, so settled fact,
    convention and contested claim come back separated.
-6. **Bound the answer.** Ask for a table, a ranked list or a few short lines
+6. **Ask for a calculation scaffold, and keep the inputs.** Request the
+   reference thresholds and per-unit rates (fee schedule, tax bracket
+   boundaries, tolerance limits) plus the formula, then substitute the owner's
+   numbers locally. The personal value never leaves the machine, and you can
+   redo the arithmetic with better inputs.
+7. **Ask for the answer's volatility.** On anything time-shaped (rules, law,
+   prices, published vulnerabilities) ask what the answer is as of the model's
+   knowledge, what tends to change and how fast, and what should be re-checked
+   against an authoritative source. Then treat the reply as needing local
+   verification, never as current.
+8. **Use the domain's own vocabulary**, including local-language administrative,
+   legal and commercial terms, rather than describing the owner's situation.
+   Category names, statutory references and standard acronyms make the
+   question more answerable while being impersonal: the terminology is public
+   and the situation is not. One caveat: naming a jurisdiction pins the owner's
+   location, so state it only where the answer genuinely depends on it, and
+   decide it last.
+9. **Bound the answer.** Ask for a table, a ranked list or a few short lines
    per item, not an essay.
+
+## Final checklist before proposing
+
+1. Would this question make sense coming from any random stranger?
+2. Does it contain any fact about the owner that the provider could not infer
+   from the topic alone? If yes, remove it.
+3. Is it linkable to anything proposed recently, by wording or by subject? If
+   yes, generalize it or drop it.
+4. Is the answer reusable locally: a decision rule or raw facts, not a verdict
+   on the owner's situation?
+5. Does it quote any log line, version string, document text, or
+   place-plus-niche-attribute combination only the owner could have? If yes,
+   ask at the class level.
+6. Is the ask bounded?
+7. If the answer is time-shaped, did you ask how volatile it is, and will you
+   verify it locally?
 
 ## Form the gate requires
 
-- Plain text on one line: no line breaks, tabs, markup, code, links, mail
-  addresses, handles, or encoded strings; only ordinary spaces.
-- It ends with a question mark. At most one sentence of context or instruction
-  before it, and at most three sub-questions.
-- Short: a few sentences at most (the gate's ceiling is 600 bytes).
+- Return the request as a list of one to three sub-questions, each standing
+  alone. The gate counts them from the list, not from punctuation.
+- Each sub-question is plain text on one line: no line breaks, tabs, markup,
+  code, links, slashes, mail addresses, handles, version strings or encoded
+  strings; only ordinary spaces; ordinary letters (no look-alike or phonetic
+  symbols).
+- Each ends with its single question mark, has at most one sentence of
+  context before it, and lists at most four items.
+- Short: the whole request is at most 600 bytes.
 
 ## Two neutral illustrations
 
@@ -175,6 +227,6 @@ These show the transformation, not a template to fill.
 
 ## What you return
 
-Either no consult, or up to three proposed questions, each standing alone.
+Either no consult, or a list of up to three sub-questions, each standing alone.
 Never include your reasons, the evidence, or the owner's question alongside
 them; they are shown to the owner exactly as they would be sent.

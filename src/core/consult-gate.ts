@@ -1,62 +1,59 @@
 /**
  * Consult outbound gate (docs/design/frontier-consult-lane.md, section A.4).
  *
- * A consult is one question, written by a local writer model that has seen
+ * A consult is a short request, written by a local writer model that has seen
  * Private evidence, which may then leave the machine. This module is the
- * mechanical check that runs on that question before the owner is asked to
- * approve it. It is a pure function over three inputs:
+ * mechanical check that runs on it before the owner is asked to approve it. It
+ * is a pure function over:
  *
- *   - the proposed question, exactly as it would be sent;
+ *   - the proposed request: an array of at most CONSULT_GATE_MAX_SUB_QUESTIONS
+ *     sub-questions, exactly as they would be sent;
  *   - an immutable snapshot of every text the writer could see
- *     (`consultWriterContextFromPack` derives it from the EvidencePack, so no
- *     field can be forgotten); and
- *   - limits, which a caller may tighten but never loosen.
+ *     (`consultWriterContextFromPack` derives it from the EvidencePack by schema
+ *     path, plus any text the writer saw outside the pack, such as a draft
+ *     answer);
+ *   - limits, which a caller may tighten but never loosen; and
+ *   - optionally, recently approved consults (held in memory by the caller).
  *
- * It returns `pass` or `refuse` plus content-free reason codes. A reason never
- * carries the question, the matching snapshot text, or an offset into either.
+ * It returns `pass` or `refuse` plus content-free reason codes.
  *
- * WHAT THIS IS, PLAINLY: it rejects accidents and crude exfiltration — a
- * copied sentence, a name, an address, an account number, an exact figure or
- * date, an encoded blob, hidden characters, a stuffed list of questions, a technical
- * fingerprint (internal host, path, stack frame, version string), or wording
- * reused from a recent consult.
- * Passing it is NOT de-identification and does not make a question anonymous;
- * owner approval does not waive these rules either. A question that describes a rare
- * combination of facts in its own words (a paraphrase, bands instead of
- * figures, a class of place instead of its name) passes this gate and can
- * still disclose something Private, especially to a provider that already
- * knows whose account is asking. The control that decides whether a derived
- * question may leave is the owner's approval of the exact text; this gate only
- * keeps obviously unsafe text from reaching that screen.
+ * WHAT THIS IS, PLAINLY: it rejects accidents and crude exfiltration. Passing
+ * it is NOT de-identification and does not make a question anonymous, and
+ * owner approval does not waive the writer's rules. Known limits, each pinned
+ * by a test in test/consult-gate-review.test.ts or test/consult-gate.test.ts:
+ *   - a rare combination of facts described in the writer's own words passes;
+ *   - free-text name discovery is incomplete: a single-word name seen only at
+ *     the start of a sentence, a name written only in lower case, and names in
+ *     scripts without case (a short Chinese name) are not discovered unless
+ *     they are also provenance values;
+ *   - a single-label host written as an ordinary word is not recognised;
+ *   - number words are parsed in English only; other languages' number words
+ *     and Han numerals are not;
+ *   - letter-for-digit substitution is folded only for the common digits
+ *     (0 1 3 4 5 7 8); other leetspeak is not;
+ *   - acrostics, word choice, case patterns and other covert channels are not
+ *     detected;
+ *   - linkage with recent consults detects reused wording only, never two
+ *     consults about the same subject in different words.
  *
- * Generic policy only: no question, domain, or source classifiers. Every rule
- * below is a property of characters, tokens, or shapes, applied identically to
- * any corpus. The module is enrolled in test/architecture-guard.test.ts as a
- * source-agnostic shared file, and every function here that uses a regular
- * expression is listed there by name.
+ * PRIVATE-BOUNDARY DATA: a verdict reveals something about the snapshot (a
+ * refusal of "Can Nadia appeal?" says Nadia is in the evidence), and so does
+ * its timing. Verdicts, reason codes and timings must never be returned to a
+ * hosted or remote caller, where they would act as an adaptive oracle. See
+ * CONSULT_GATE_VERDICT_IS_PRIVATE.
  *
- * Normalization for comparison (applied to the question and to every snapshot
- * text identically):
- *   1. Unicode NFKC — folds fullwidth forms, mathematical alphanumerics,
- *      ligatures, superscripts, and compatibility spaces onto their plain forms.
- *   2. Upper-case cross-script look-alikes (Cyrillic and Greek capitals that
- *      render as Latin capitals) map to the Latin capital.
- *   3. Canonical decomposition, removal of every combining mark, recomposition:
- *      "café" and "cafe" compare equal. This only ever merges strings, so it can
- *      add refusals but cannot hide a copy.
- *   4. Lower-case cross-script look-alikes map to Latin. The table is a closed
- *      subset of Unicode's confusables data restricted to Cyrillic and Greek
- *      letters whose lower-case glyph is visually identical to a Latin letter in
- *      common fonts. Wider tables would also fold letters that merely resemble
- *      each other, which merges genuinely different words for no safety gain:
- *      a token that MIXES scripts is already refused outright.
- *   5. Case fold: `toLowerCase()` plus the two folds it does not perform
- *      (sharp s to "ss", final sigma to sigma).
+ * Normalization (question and snapshot alike): NFKC; every Unicode decimal
+ * digit to ASCII; canonical decomposition with every combining mark removed;
+ * Cyrillic and Greek letters that look identical to a Latin letter mapped to
+ * it, decided on the lower-case form and keeping the original case so upper-
+ * and lower-case input normalize the same way; then lower case (plus sharp s
+ * to "ss" and final sigma to sigma). Tokens are maximal runs of letters and
+ * digits; Han, kana, Hangul, Thai, Lao, Khmer and Myanmar characters are one
+ * token each, so spacing changes cannot hide a copy.
  *
- * Tokenization: maximal runs of letters and digits; every other character is a
- * separator. Characters of scripts written without spaces (Han, Hiragana,
- * Katakana, Thai, Lao, Khmer, Myanmar) are one token each, so run matching
- * still works on them.
+ * Generic policy only: no question, domain or source classifiers. The module
+ * is enrolled in test/architecture-guard.test.ts as a source-agnostic shared
+ * file, and every function here that uses a regular expression is listed there.
  */
 
 import type { EvidencePack } from './contracts.ts';
@@ -64,102 +61,90 @@ import { secretLabelsInText } from './opsec.ts';
 
 // --- Named limits -----------------------------------------------------------
 
+// Verdict details and timing are Private-boundary data (see the module doc).
+export const CONSULT_GATE_VERDICT_IS_PRIVATE = true;
+
 /**
- * A question that shares this many consecutive normalized tokens with any
- * snapshot text is refused (when the run holds at least
- * CONSULT_GATE_RUN_MIN_CONTENT_TOKENS non-function tokens).
- *
- * Why 4: three-token sequences are still dominated by stock phrases every
- * document shares ("at the end", "how does a"), so N=3 would refuse most clean
- * questions about the same topic as the evidence. At four tokens the share of
- * sequences specific to one document rises sharply, which is what a copy looks
- * like, and four is short enough to catch a distinctive four-word phrase. A
- * longer N would let such phrases through whole.
+ * Shared runs. A run of consecutive normalized tokens shared with the snapshot
+ * is refused once it is at least this long AND holds at least
+ * CONSULT_GATE_RUN_MIN_CONTENT_TOKENS content tokens anywhere in the run, so a
+ * long copied sentence of mostly function words is caught. Four, because
+ * three-token sequences are dominated by stock phrases while four-token ones
+ * are already mostly document-specific.
  */
 export const CONSULT_GATE_SHARED_RUN_TOKENS = 4;
-
-/**
- * A shared run counts only when it carries at least this many tokens that are
- * not on the closed function-word list. This is the ONLY use of that list
- * besides splitting capitalized runs, and it cannot hide a copy of content:
- * a run whose tokens are all but one function words carries at most one content
- * token, and no run length can detect a single shared content token anyway.
- * The residual is a copy whose content tokens are each separated by three or
- * more function words, which natural text almost never is.
- */
 export const CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2;
 
-// UTF-8 bytes. One to three short sentences fit; a document does not.
-export const CONSULT_GATE_MAX_QUESTION_BYTES = 600;
+/**
+ * Content runs. The same comparison over content tokens only (function words
+ * removed from both sides), so inserting or dropping function words does not
+ * break a match. Four content tokens in order.
+ */
+export const CONSULT_GATE_CONTENT_RUN_TOKENS = 4;
 
-// Normalized tokens. Bounds both the work and the covert-channel capacity.
+// Whole request, UTF-8 bytes. A few short sentences fit; a document does not.
+export const CONSULT_GATE_MAX_QUESTION_BYTES = 600;
 export const CONSULT_GATE_MAX_QUESTION_TOKENS = 80;
 
 /**
- * Snapshot ceiling, checked before any comparison work. The largest analyst
- * prompt Olympus builds is about 100 KB; the pack behind it can be larger
- * because it is trimmed for the prompt. One MiB is an order of magnitude above
- * the prompt ceiling, and comparison is linear in snapshot size, so this bounds
- * the gate's running time.
- */
-export const CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1_048_576;
-export const CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20_000;
-const MAX_WALK_DEPTH = 24;
-
-// A provenance value shorter than this (normalized letters and digits) is not compared.
-export const CONSULT_GATE_MIN_IDENTIFIER_CHARS = 3;
-
-// A number with at least this many significant digits is an exact figure.
-export const CONSULT_GATE_MIN_FIGURE_SIGNIFICANT_DIGITS = 3;
-
-// Any digit sequence (separators allowed) with more digits than this is refused outright.
-export const CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8;
-
-/**
- * Encoded runs. A word of at least CONSULT_GATE_ENCODED_MIXED_RUN_CHARS drawn
- * from the base64url alphabet that mixes letters and digits is refused: six
- * bytes of base64 or four of hex already fit in eight characters, and ordinary
- * words do not carry digits. A word of at least CONSULT_GATE_ENCODED_RUN_CHARS
- * is refused when it is all hex letters, or base64 with + / = or two inner
- * case changes.
- */
-export const CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8;
-export const CONSULT_GATE_ENCODED_RUN_CHARS = 16;
-
-// Declarative sentences allowed before the question(s): one line of context or
-// one instruction such as "Answer each of these briefly:".
-export const CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1;
-
-/**
- * Sub-questions allowed in one request. The reference practice permits several
- * safe sub-questions in one bounded request ("answer each of these"); what must
- * go in SEPARATE requests is facts whose combination identifies the owner.
- * Whether sub-questions are independent is a judgement the writer makes (the
- * gate cannot see meaning); the gate enforces only the count. Three matches the
- * per-answer consult cap on the private route, so bundling never buys more
- * questions than decomposition would.
+ * Sub-questions per request. The reference practice allows several safe
+ * sub-questions on the same topic in one bounded request; facts whose
+ * combination identifies the owner must go in separate requests. Whether
+ * sub-questions are independent is the writer's judgement; the gate enforces
+ * the count, and it takes the sub-questions as an array instead of guessing
+ * them from punctuation. Three matches the per-answer consult cap.
  */
 export const CONSULT_GATE_MAX_SUB_QUESTIONS = 3;
 
-/**
- * Linkage with recent consults: a question that repeats a run of this many
- * normalized tokens (at least CONSULT_GATE_LINKAGE_MIN_CONTENT_TOKENS of them
- * content words) from a recently approved consult is refused, because reused
- * phrasing ties two requests to one author even across fresh network
- * identities. Six, not the snapshot rule's four: consults are written by the
- * same model in the same generic register, so four-token overlaps between
- * honest, independent sub-questions on one topic are expected; six tokens with
- * three content words is a copied clause. This detects reused WORDING only;
- * two consults about the same rare subject in different words are not linked
- * by this check.
- */
-export const CONSULT_GATE_LINKAGE_RUN_TOKENS = 6;
-export const CONSULT_GATE_LINKAGE_MIN_CONTENT_TOKENS = 3;
-// Recent approved consults the check accepts; more is refused as oversized.
-export const CONSULT_GATE_MAX_RECENT_CONSULTS = 20;
+// Per sub-question: one context sentence, and a list of at most four items.
+export const CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1;
+export const CONSULT_GATE_MAX_LIST_ITEMS = 4;
 
-// Longest permitted run of combining marks on one base character.
-export const CONSULT_GATE_MAX_COMBINING_MARK_RUN = 3;
+/**
+ * Snapshot ceilings, checked before comparison. The largest analyst prompt is
+ * about 100 KB; one MiB is an order of magnitude above it. Nodes counts every
+ * value the builder visits, including empty strings, so a pack of millions of
+ * empty values overflows instead of passing.
+ */
+export const CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1_048_576;
+export const CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20_000;
+export const CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200_000;
+const MAX_WALK_DEPTH = 24;
+
+// A known identifier this short or longer is protected whole (one letter is not).
+export const CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2;
+
+/**
+ * Compacted comparison: letters and digits only, separators and case removed.
+ * Windows of up to this many question tokens and characters are compared
+ * against compacted identifiers and names, so "MargueriteOkafor",
+ * "Mar-guerite", "M.a.r.g.u.e.r.i.t.e" and "Na'dia" all match.
+ */
+export const CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32;
+export const CONSULT_GATE_COMPACT_WINDOW_CHARS = 64;
+
+/**
+ * Figures: a number in the snapshot with at least this many digits (counted
+ * as written, separators removed), or two digits next to a unit or currency,
+ * is refused in the question. Years are numbers like any other.
+ */
+export const CONSULT_GATE_MIN_FIGURE_DIGITS = 3;
+export const CONSULT_GATE_MIN_UNIT_FIGURE_DIGITS = 2;
+
+// Snapshot digit runs this long are also matched against all question digits read jointly.
+export const CONSULT_GATE_MIN_JOINT_DIGITS = 4;
+
+// Any digit sequence (separators allowed) longer than this is refused outright.
+export const CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8;
+
+// Encoded runs: see hasEncodedBlob. Shorter encodings are decoded and compared instead.
+export const CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8;
+export const CONSULT_GATE_ENCODED_RUN_CHARS = 16;
+
+// Combining marks allowed on one base character (two covers Vietnamese).
+export const CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2;
+
+export const CONSULT_GATE_MAX_RECENT_CONSULTS = 20;
 
 export interface ConsultGateLimits {
   readonly maxQuestionBytes: number;
@@ -179,7 +164,9 @@ export const DEFAULT_CONSULT_GATE_LIMITS: ConsultGateLimits = Object.freeze({
 
 export type ConsultGateReason =
   | 'writer_context_too_large'
+  | 'recent_consults_too_large'
   | 'question_empty'
+  | 'too_many_sub_questions'
   | 'question_too_many_bytes'
   | 'question_too_many_tokens'
   | 'not_nfkc_normalized'
@@ -190,25 +177,26 @@ export type ConsultGateReason =
   | 'not_plain_text'
   | 'encoded_blob'
   | 'mixed_script_token'
-  | 'too_many_sub_questions'
+  | 'unusual_letter'
   | 'not_a_question'
-  | 'technical_fingerprint'
-  | 'recent_consults_too_large'
-  | 'links_recent_consult'
+  | 'too_many_list_items'
   | 'secret_detected'
   | 'identifier_shape'
+  | 'technical_fingerprint'
   | 'shared_token_run'
   | 'snapshot_name'
   | 'snapshot_identifier'
+  | 'encoded_identifier'
   | 'snapshot_hostname'
   | 'snapshot_date'
-  | 'snapshot_figure';
+  | 'snapshot_figure'
+  | 'repeats_recent_consult'
+  | 'links_recent_consult';
 
 /**
- * Optional history. `recentApprovedQuestions` are the texts of consults the
- * owner approved recently; the caller holds them in memory only (the consult
- * record is Private data, design A.7) and passes them per call. The gate keeps
- * nothing between calls.
+ * `recentApprovedQuestions`: texts of consults the owner approved recently,
+ * held in memory by the caller (the consult record is Private data, design
+ * A.7) and passed per call. The gate keeps nothing between calls.
  */
 export interface ConsultGateHistory {
   readonly recentApprovedQuestions?: readonly string[];
@@ -222,87 +210,125 @@ export interface ConsultGateVerdict {
 // --- Writer context snapshot -------------------------------------------------
 
 /**
- * `user_question`: the owner's own question, compared as text (its wording is a
- * fingerprint). `text`: other free text the writer saw (chunks, table cells,
- * fact claims, coverage). `identifier`: provenance and any field the builder does
- * not recognise — compared as text AND as a whole value that must not appear.
- * `vocabulary`: closed enumerations (family, trust tier, confidence, ...) whose
- * values are product words, not facts about the owner; compared as text only.
+ * How a collected value is compared:
+ *   user_question      the owner's question; compared as text (its wording is a fingerprint)
+ *   text               free text the writer saw (chunks, cells, claims, coverage, a draft answer)
+ *   identifier         provenance and every unknown path: text AND a value that must not appear
+ *   person_identifier  author labels and connected accounts: every part protected
+ *   account_scope      the account scope; as identifier, except the product's own default words
+ *   vocabulary         closed product enumerations; compared as text only
+ *   metadata           values the writer never sees (offsets, scores, build time); collected, not compared
  */
-export type ConsultWriterContextKind = 'user_question' | 'text' | 'identifier' | 'vocabulary';
+export type ConsultWriterContextKind =
+  | 'user_question'
+  | 'text'
+  | 'identifier'
+  | 'person_identifier'
+  | 'account_scope'
+  | 'vocabulary'
+  | 'metadata';
 
 export interface ConsultWriterContextEntry {
   readonly kind: ConsultWriterContextKind;
   readonly text: string;
+  // Schema path with array indexes as [] and map keys as *.
+  readonly path: string;
+  // Candidate index; -1 for pack-level values; -2 for text outside the pack. Adjacent values in a group are compared as one text.
+  readonly group: number;
 }
 
 export interface ConsultWriterContext {
   readonly entries: readonly ConsultWriterContextEntry[];
-  // True when the builder stopped collecting at a ceiling; the gate refuses.
+  // True when the builder stopped at a ceiling; the gate refuses.
   readonly overflow: boolean;
 }
 
 export interface ConsultWriterContextOptions {
-  // Identifiers of the connected accounts (addresses, handles, ids). Always `identifier`.
+  // Identifiers of the connected accounts. Every part is protected.
   readonly connectedAccountIdentifiers?: readonly string[];
+  // Text the writer saw outside the pack, such as its own baseline or draft answer.
+  readonly writerVisibleTexts?: readonly string[];
 }
 
-// Keys whose subtree is provenance: every string under them is an identifier.
-const PROVENANCE_SCOPE_KEYS: ReadonlySet<string> = new Set(['provenance', 'sourceProvenance']);
-
-// Closed-enumeration keys. Their values are product vocabulary, not owner facts.
-const VOCABULARY_KEYS: ReadonlySet<string> = new Set([
-  'family',
-  'provider',
-  'trustTier',
-  'trustDomain',
-  'confidence',
-  'extractionKind',
-  'releaseSurface',
-  'sourceInstructionFlags',
-  'lane',
+const PACK_PATH_KINDS: ReadonlyMap<string, ConsultWriterContextKind> = new Map([
+  ['question', 'user_question'],
+  ['builtAt', 'metadata'],
+  ['candidates[].trustTier', 'vocabulary'],
+  ['candidates[].trustDomain', 'vocabulary'],
+  ['candidates[].chunks[]', 'text'],
+  ['candidates[].tables[].caption', 'text'],
+  ['candidates[].tables[].columns[]', 'text'],
+  ['candidates[].tables[].rows[][]', 'text'],
+  ['candidates[].facts[].claim', 'text'],
+  ['candidates[].facts[].factId', 'metadata'],
+  ['candidates[].facts[].sensitivity.trustTier', 'vocabulary'],
+  ['candidates[].facts[].sensitivity.trustDomain', 'vocabulary'],
+  ['candidates[].facts[].confidence', 'vocabulary'],
+  ['candidates[].facts[].extractionKind', 'vocabulary'],
+  ['candidates[].facts[].releaseSurface', 'vocabulary'],
+  ['candidates[].facts[].sourceInstructionFlags[]', 'vocabulary'],
+  ['candidates[].score', 'metadata'],
+  ['coverage.searchedCorpora[]', 'text'],
+  ['coverage.skippedCorpora[].corpusId', 'text'],
+  ['coverage.skippedCorpora[].reason', 'text'],
+  ['coverage.extractionGaps[]', 'text'],
+  ['coverage.matchCounts[].corpusId', 'text'],
+  ['coverage.matchCounts[].family', 'vocabulary'],
+  ['coverage.matchCounts[].matchedItems', 'text'],
+  ['coverage.matchCounts[].contentMatchedItems', 'text'],
+  ['coverage.matchCounts[].inEvidence', 'text'],
 ]);
 
+// Paths inside a provenance object (candidate provenance, or a fact's source provenance).
+const PROVENANCE_PATH_KINDS: ReadonlyMap<string, ConsultWriterContextKind> = new Map([
+  ['sourceItem.family', 'vocabulary'],
+  ['sourceItem.accountScope', 'account_scope'],
+  ['chunk.sourceItem.family', 'vocabulary'],
+  ['chunk.sourceItem.accountScope', 'account_scope'],
+  ['chunk.chunkIndex', 'metadata'],
+  ['chunk.span.charStart', 'metadata'],
+  ['chunk.span.charEnd', 'metadata'],
+  ['chunk.span.itemCharStart', 'metadata'],
+  ['chunk.span.itemCharEnd', 'metadata'],
+  ['chunk.span.chunkChars', 'metadata'],
+  ['chunk.span.lane', 'vocabulary'],
+  ['citation.authorLabel', 'person_identifier'],
+]);
+
+const PROVENANCE_ROOTS: readonly string[] = ['candidates[].provenance', 'candidates[].facts[].sourceProvenance[]'];
+const MAP_KEYS: ReadonlySet<string> = new Set(['providerIds', 'localIds']);
+
 /**
- * Free-text keys outside provenance. Any key NOT listed here or in
- * VOCABULARY_KEYS is classified `identifier`, the strictest kind, so a field
- * added to the pack later is covered before anyone remembers to list it.
+ * Words the product itself writes as an account scope when a connector has no
+ * account label. Exempt ONLY at the account-scope path; anywhere else,
+ * including a connected-account identifier, they are protected like any value.
  */
-const TEXT_KEYS: ReadonlySet<string> = new Set([
-  'question',
-  'chunks',
-  'caption',
-  'columns',
-  'rows',
-  'claim',
-  'searchedCorpora',
-  'corpusId',
-  'reason',
-  'extractionGaps',
-  'builtAt',
-  'score',
-  'matchedItems',
-  'contentMatchedItems',
-  'inEvidence',
-  'factId',
-]);
+const PRODUCT_DEFAULT_SCOPES: ReadonlySet<string> = new Set(['personal', 'default', 'primary']);
+
+function classifyPath(path: string, isNumber: boolean): ConsultWriterContextKind {
+  for (const root of PROVENANCE_ROOTS) {
+    if (path === root || path.startsWith(`${root}.`)) {
+      const relative = path.slice(root.length + 1);
+      return PROVENANCE_PATH_KINDS.get(relative) ?? (isNumber ? 'metadata' : 'identifier');
+    }
+  }
+  return PACK_PATH_KINDS.get(path) ?? (isNumber ? 'text' : 'identifier');
+}
 
 /**
- * Derive the writer-context snapshot from an EvidencePack by walking the whole
- * object generically: every string and number leaf becomes an entry, whatever
- * its field name. Classification only decides HOW a leaf is compared, never
- * WHETHER it is collected. The result is frozen.
+ * Derive the writer-context snapshot from an EvidencePack. Every string and
+ * number leaf is collected, whatever its path; the schema path only decides
+ * how it is compared, and an unknown path is compared strictly. The result is
+ * frozen.
  */
 export function consultWriterContextFromPack(
   pack: EvidencePack,
   options: ConsultWriterContextOptions = {},
 ): ConsultWriterContext {
   const entries: ConsultWriterContextEntry[] = [];
-  const state = { bytes: 0, overflow: false };
+  const state = { bytes: 0, nodes: 0, overflow: false };
   const ancestors = new Set<object>();
-  const push = (kind: ConsultWriterContextKind, text: string): void => {
-    if (state.overflow) return;
-    if (text.length === 0) return;
+  const push = (kind: ConsultWriterContextKind, text: string, path: string, group: number): void => {
     const bytes = utf8Bytes(text);
     if (
       entries.length + 1 > CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES
@@ -312,105 +338,113 @@ export function consultWriterContextFromPack(
       return;
     }
     state.bytes += bytes;
-    entries.push(Object.freeze({ kind, text }));
+    if (text.length > 0) entries.push(Object.freeze({ kind, text, path, group }));
   };
-  const walk = (value: unknown, key: string, inProvenance: boolean, depth: number): void => {
+  const walk = (value: unknown, path: string, group: number, depth: number): void => {
     if (state.overflow) return;
-    if (depth > MAX_WALK_DEPTH) {
+    state.nodes += 1;
+    if (state.nodes > CONSULT_GATE_MAX_WRITER_CONTEXT_NODES || depth > MAX_WALK_DEPTH) {
       state.overflow = true;
       return;
     }
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint') {
-      const text = String(value);
-      const kind: ConsultWriterContextKind = depth === 1 && key === 'question'
-        ? 'user_question'
-        : VOCABULARY_KEYS.has(key)
-          ? 'vocabulary'
-          : !inProvenance && TEXT_KEYS.has(key) ? 'text' : 'identifier';
-      push(kind, text);
+      push(classifyPath(path, typeof value !== 'string'), String(value), path, group);
       return;
     }
     if (value === null || typeof value !== 'object') return;
-    // Only a cycle is skipped. A shared sub-object is walked at every place it
-    // appears, because the place decides how its strings are classified.
+    // Only a cycle is skipped; a shared sub-object is walked wherever it appears.
     if (ancestors.has(value)) return;
     ancestors.add(value);
     if (Array.isArray(value)) {
-      for (const item of value) walk(item, key, inProvenance, depth + 1);
+      value.forEach((item, index) => {
+        const itemGroup = path === 'candidates' ? index : group;
+        walk(item, `${path}[]`, itemGroup, depth + 1);
+      });
     } else {
-      for (const [childKey, child] of Object.entries(value as Record<string, unknown>)) {
-        walk(child, childKey, inProvenance || PROVENANCE_SCOPE_KEYS.has(childKey), depth + 1);
+      const parentKey = path.slice(path.lastIndexOf('.') + 1);
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        const segment = MAP_KEYS.has(parentKey) ? '*' : key;
+        walk(child, path ? `${path}.${segment}` : segment, group, depth + 1);
       }
     }
     ancestors.delete(value);
   };
-  walk(pack, '', false, 0);
-  for (const identifier of options.connectedAccountIdentifiers ?? []) push('identifier', identifier);
+  walk(pack, '', -1, 0);
+  for (const text of options.writerVisibleTexts ?? []) push('text', text, 'writerVisible[]', -2);
+  for (const identifier of options.connectedAccountIdentifiers ?? []) {
+    push('person_identifier', identifier, 'connectedAccount[]', -3);
+  }
   return Object.freeze({ entries: Object.freeze(entries), overflow: state.overflow });
 }
 
 // --- Gate ---------------------------------------------------------------------
 
-/**
- * Check one proposed consult question against the writer's context.
- * Limits may only tighten the defaults; a larger value is clamped.
- */
+// One sub-question; see evaluateConsultRequest.
 export function evaluateConsultQuestion(
   question: string,
   context: ConsultWriterContext,
   limits: Partial<ConsultGateLimits> = {},
   history: ConsultGateHistory = {},
 ): ConsultGateVerdict {
+  return evaluateConsultRequest([question], context, limits, history);
+}
+
+/**
+ * Check one proposed consult request (its sub-questions) against the writer's
+ * context. Limits may only tighten the defaults; a larger value is clamped.
+ */
+export function evaluateConsultRequest(
+  subQuestions: readonly string[],
+  context: ConsultWriterContext,
+  limits: Partial<ConsultGateLimits> = {},
+  history: ConsultGateHistory = {},
+): ConsultGateVerdict {
   const effective = clampLimits(limits);
-  const reasons = new Set<ConsultGateReason>();
   const recent = history.recentApprovedQuestions ?? [];
 
-  // 1. Size of every input, before any comparison work.
-  if (context.overflow || !writerContextWithinLimits(context, effective)) {
-    return refuse(['writer_context_too_large']);
-  }
+  // 1. Size of every input, before any other work.
+  if (context.overflow || !writerContextWithinLimits(context, effective)) return refuse(['writer_context_too_large']);
   if (
     recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS
     || recent.some((text) => typeof text !== 'string' || utf8Bytes(text) > CONSULT_GATE_MAX_QUESTION_BYTES)
   ) {
     return refuse(['recent_consults_too_large']);
   }
-  if (utf8Bytes(question) > effective.maxQuestionBytes) {
+  if (subQuestions.length === 0) return refuse(['question_empty']);
+  if (subQuestions.length > CONSULT_GATE_MAX_SUB_QUESTIONS) return refuse(['too_many_sub_questions']);
+  if (subQuestions.some((question) => typeof question !== 'string')) return refuse(['not_plain_text']);
+  if (subQuestions.reduce((total, question) => total + utf8Bytes(question), 0) > effective.maxQuestionBytes) {
     return refuse(['question_too_many_bytes']);
   }
-  if (question.trim().length === 0) return refuse(['question_empty']);
 
-  // 2. Characters and shape of the question itself.
-  for (const reason of characterReasons(question)) reasons.add(reason);
-  const folded = foldPreservingCase(question.normalize('NFKC'));
-  const questionTokens = tokenize(folded);
-  if (questionTokens.length > effective.maxQuestionTokens) reasons.add('question_too_many_tokens');
-  if (questionTokens.length === 0) reasons.add('question_empty');
-  if (hasMixedScriptToken(question.normalize('NFKC'))) reasons.add('mixed_script_token');
-  if (hasEncodedBlob(question.normalize('NFKC'))) reasons.add('encoded_blob');
-  for (const reason of questionStructureReasons(question.normalize('NFKC'))) reasons.add(reason);
-  if (hasTechnicalFingerprint(question.normalize('NFKC'))) reasons.add('technical_fingerprint');
-  if (secretLabelsInText(question).length > 0 || secretLabelsInText(question.normalize('NFKC')).length > 0) {
-    reasons.add('secret_detected');
+  // 2. The request on its own. Any refusal here returns before snapshot work.
+  const reasons = new Set<ConsultGateReason>();
+  let tokenCount = 0;
+  for (const question of subQuestions) {
+    if (question.trim().length === 0) {
+      reasons.add('question_empty');
+      continue;
+    }
+    for (const reason of characterReasons(question)) reasons.add(reason);
+    const nfkc = question.normalize('NFKC');
+    for (const reason of scriptReasons(nfkc)) reasons.add(reason);
+    for (const reason of questionStructureReasons(nfkc)) reasons.add(reason);
+    if (hasEncodedBlob(nfkc)) reasons.add('encoded_blob');
+    if (secretLabelsInText(question).length > 0 || secretLabelsInText(nfkc).length > 0) reasons.add('secret_detected');
+    if (hasIdentifierShape(nfkc)) reasons.add('identifier_shape');
+    if (hasTechnicalFingerprint(nfkc)) reasons.add('technical_fingerprint');
+    let count = 0;
+    forEachToken(foldText(nfkc), () => { count += 1; });
+    if (count === 0) reasons.add('question_empty');
+    tokenCount += count;
   }
-  if (hasIdentifierShape(question.normalize('NFKC'))) reasons.add('identifier_shape');
-  if (reasons.has('question_too_many_tokens') || reasons.has('question_empty')) {
-    return refuse([...reasons]);
-  }
+  if (tokenCount > effective.maxQuestionTokens) reasons.add('question_too_many_tokens');
+  if (reasons.size > 0) return refuse([...reasons]);
 
-  // 3. Comparison against the snapshot. Every check below derives a small set
-  //    from the question and streams the snapshot once against it, so the work
-  //    is linear in snapshot size, which step 1 bounded.
-  const questionNorm = questionTokens.map((token) => token.norm);
-  const questionNormalizedText = normalizeForComparison(question);
-  if (sharesTokenRun(questionNorm, context)) reasons.add('shared_token_run');
-  if (sharesNamePair(questionNorm, context)) reasons.add('snapshot_name');
-  if (containsSnapshotIdentifier(questionNorm, context)) reasons.add('snapshot_identifier');
-  if (containsSnapshotHostname(questionNormalizedText, context)) reasons.add('snapshot_hostname');
-  if (containsSnapshotDate(questionNormalizedText, context)) reasons.add('snapshot_date');
-  if (containsSnapshotFigure(questionNormalizedText, context)) reasons.add('snapshot_figure');
-  if (linksRecentConsult(questionNorm, recent)) reasons.add('links_recent_consult');
-
+  // 3. Comparison. The question side is small; the snapshot is streamed once.
+  const model = questionModel(subQuestions);
+  for (const reason of compareWithSnapshot(model, context)) reasons.add(reason);
+  for (const reason of compareWithRecent(model, subQuestions, recent)) reasons.add(reason);
   return reasons.size > 0 ? refuse([...reasons]) : { decision: 'pass', reasons: [] };
 }
 
@@ -445,16 +479,16 @@ function utf8Bytes(text: string): number {
   return Buffer.byteLength(text, 'utf8');
 }
 
-// --- Character and shape rules ------------------------------------------------
+// --- Rules on the request alone -----------------------------------------------
 
 /**
- * Plain text means: NFKC-stable (no fullwidth or styled variants, which could
- * otherwise carry bits by choice of form); no control characters, including tab
- * and newline (a consult is one line); no format, private-use, unassigned or
- * invisible characters (zero-width, bidi controls, tags, variation selectors,
- * fillers); only the ASCII space as whitespace, never doubled or at the ends;
- * no stacked combining marks; and none of the markup characters < > { } ` \ |
- * or HTML character references.
+ * Plain text: NFKC-stable (no fullwidth or styled variants, which could carry
+ * bits by choice of form); no control characters, including tab and newline;
+ * no format, private-use, unassigned or invisible characters (zero-width, bidi
+ * controls, tags, variation selectors, fillers); only the ASCII space as
+ * whitespace, never doubled or at the ends; at most
+ * CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE combining marks on one base; none
+ * of < > { } ` \ |; no HTML character references; no percent-escapes.
  */
 function characterReasons(question: string): ConsultGateReason[] {
   const reasons: ConsultGateReason[] = [];
@@ -466,115 +500,104 @@ function characterReasons(question: string): ConsultGateReason[] {
   ) {
     reasons.push('invisible_or_format_character');
   }
-  if (/[^\S ]/u.test(question.replace(/\p{Cc}/gu, '')) || /^ | $| {2,}/u.test(question)) {
-    reasons.push('irregular_whitespace');
-  }
-  if (new RegExp(`\\p{M}{${CONSULT_GATE_MAX_COMBINING_MARK_RUN + 1},}`, 'u').test(question.normalize('NFC'))) {
-    reasons.push('combining_mark_stack');
-  }
+  if (/[^\S ]/u.test(question.replace(/\p{Cc}/gu, '')) || /^ | $| {2,}/u.test(question)) reasons.push('irregular_whitespace');
+  const marksPerBase = new RegExp(`\\p{M}{${CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE + 1},}`, 'u');
+  if (marksPerBase.test(question.normalize('NFD'))) reasons.push('combining_mark_stack');
   if (/[<>{}`\\|]/u.test(question) || /&#?[a-z0-9]+;/iu.test(question)) reasons.push('not_plain_text');
+  if (/%[0-9a-f]{2}/iu.test(question)) reasons.push('encoded_blob');
   return reasons;
 }
 
-// A single word mixing Latin, Cyrillic and Greek letters is a look-alike substitution.
-function hasMixedScriptToken(text: string): boolean {
+/**
+ * Scripts. A word whose letters come from two scripts is refused (Han, kana
+ * and Hangul count as one, as Japanese and Korean mix them). A Latin letter
+ * outside the basic alphabet and a closed set of ordinary European letters
+ * (after accents are removed) is refused as unusual: IPA and other look-alikes
+ * are refused rather than mapped, since an unknown look-alike is safer refused.
+ */
+function scriptReasons(text: string): ConsultGateReason[] {
+  const reasons = new Set<ConsultGateReason>();
   for (const word of text.split(/[^\p{L}\p{M}]+/u)) {
-    let scripts = 0;
-    if (/\p{Script=Latin}/u.test(word)) scripts += 1;
-    if (/\p{Script=Cyrillic}/u.test(word)) scripts += 1;
-    if (/\p{Script=Greek}/u.test(word)) scripts += 1;
-    if (scripts >= 2) return true;
+    if (!word) continue;
+    const scripts = new Set<string>();
+    for (const char of word) {
+      if (!/\p{L}/u.test(char)) continue;
+      const script = scriptOf(char);
+      scripts.add(script);
+      if (script === 'latin') {
+        const base = char.normalize('NFD').replace(/\p{M}+/gu, '');
+        if (!/^[A-Za-z\u00DF\u00E6\u00C6\u0153\u0152\u00F8\u00D8\u00F0\u00D0\u00FE\u00DE\u0142\u0141\u0111\u0110\u0127\u0126\u014B\u014A\u0131]$/u.test(base)) {
+          reasons.add('unusual_letter');
+        }
+      }
+    }
+    if (scripts.size > 1) reasons.add('mixed_script_token');
   }
-  return false;
+  return [...reasons];
 }
 
-// Encoded blobs; see CONSULT_GATE_ENCODED_MIXED_RUN_CHARS. Also refused: two
-// or more consecutive percent-escapes.
-function hasEncodedBlob(text: string): boolean {
-  if (/(?:%[0-9a-f]{2}){2,}/iu.test(text)) return true;
-  for (const raw of text.split(/\s+/u)) {
-    const word = raw.replace(/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/gu, '');
-    if (word.length < CONSULT_GATE_ENCODED_MIXED_RUN_CHARS) continue;
-    if (!/^[A-Za-z0-9+/=_-]+$/u.test(word)) continue;
-    if (/[0-9]/u.test(word) && /[A-Za-z]/u.test(word)) return true;
-    if (word.length < CONSULT_GATE_ENCODED_RUN_CHARS) continue;
-    if (/^[a-f]+$/iu.test(word)) return true;
-    const humps = (word.match(/[a-z][A-Z]/gu) ?? []).length;
-    if (/[0-9+/=]/u.test(word) || humps >= 2) return true;
+function scriptOf(char: string): string {
+  if (/\p{Script=Latin}/u.test(char)) return 'latin';
+  if (/\p{Script=Cyrillic}/u.test(char)) return 'cyrillic';
+  if (/\p{Script=Greek}/u.test(char)) return 'greek';
+  if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(char)) return 'cjk';
+  for (const script of ['Arabic', 'Hebrew', 'Armenian', 'Georgian', 'Devanagari', 'Bengali', 'Thai', 'Ethiopic', 'Tamil', 'Cherokee']) {
+    if (new RegExp(`\\p{Script=${script}}`, 'u').test(char)) return script;
   }
-  return false;
+  return `other:${char}`;
 }
 
 /**
- * Question structure: the request ends with a question mark (ASCII or Arabic);
- * it holds at most CONSULT_GATE_MAX_SUB_QUESTIONS sub-questions, counted as the
- * larger of the number of question marks and the number of inline list markers
- * ("1)", "2.", "a)"); and at most CONSULT_GATE_MAX_PREAMBLE_SENTENCES
- * declarative sentences (ending at . ! ; or an ideographic full stop followed by
- * a space or the end) appear in it.
+ * Structure of one sub-question: it ends with a question mark (ASCII or
+ * Arabic) and holds only that one; at most CONSULT_GATE_MAX_PREAMBLE_SENTENCES
+ * declarative sentences come before it; and it asks for a bounded list: at
+ * most CONSULT_GATE_MAX_LIST_ITEMS items, counted as commas and semicolons
+ * plus one, or as list markers. More is several asks behind one question mark.
  */
 function questionStructureReasons(text: string): ConsultGateReason[] {
   const trimmed = text.trim();
   const reasons: ConsultGateReason[] = [];
-  if (!/[?\u061F]$/u.test(trimmed)) reasons.push('not_a_question');
   const marks = (trimmed.match(/[?\u061F]/gu) ?? []).length;
-  const enumerators = (trimmed.match(/(?:^|\s)(?:\(?\d{1,2}[).]|\(?[a-h]\))(?=\s)/gu) ?? []).length;
-  if (Math.max(marks, enumerators) > CONSULT_GATE_MAX_SUB_QUESTIONS) reasons.push('too_many_sub_questions');
+  if (marks !== 1 || !/[?\u061F]$/u.test(trimmed)) reasons.push('not_a_question');
   const boundaries = (trimmed.match(/[.!;](?=\s|$)|[\u3002\uFF01]/gu) ?? []).length;
-  if (boundaries > CONSULT_GATE_MAX_PREAMBLE_SENTENCES) reasons.push('too_many_sub_questions');
+  if (boundaries > CONSULT_GATE_MAX_PREAMBLE_SENTENCES) reasons.push('too_many_list_items');
+  const separators = (trimmed.match(/[,;\u3001\u060C]/gu) ?? []).length;
+  const enumerators = (trimmed.match(/(?:^|\s)(?:\(?\d{1,2}[).]|\(?[a-h]\))(?=\s)/gu) ?? []).length;
+  if (separators + 1 > CONSULT_GATE_MAX_LIST_ITEMS || enumerators > CONSULT_GATE_MAX_LIST_ITEMS) {
+    reasons.push('too_many_list_items');
+  }
   return reasons;
 }
 
 /**
- * Technical fingerprints the reference practice names, refused whether or not
- * the snapshot holds them: internal or local host names (localhost and the
- * .local, .internal, .lan, .corp, .intranet, .home.arpa, .test, .localhost
- * suffixes, or a staging/dev/internal label), IPv4 addresses, file paths with
- * three or more segments of which one holds a letter, a file:line reference (a stack-trace frame), a version
- * string with three or more components, and a hexadecimal error code.
+ * Encoded runs refused on sight: a word (split at anything outside the
+ * base64url alphabet) of at least CONSULT_GATE_ENCODED_MIXED_RUN_CHARS that
+ * mixes letters and digits, or of at least CONSULT_GATE_ENCODED_RUN_CHARS that
+ * is all hex letters or carries + / = or two inner case changes. Shorter
+ * encodings are decoded and compared instead (see decodedViews).
  */
-function hasTechnicalFingerprint(text: string): boolean {
-  const lower = text.toLowerCase();
-  if (/\blocalhost\b/u.test(lower)) return true;
-  if (/[\p{L}\p{N}-]\.(?:local|internal|lan|corp|intranet|test|localhost|home\.arpa)\b/u.test(lower)) return true;
-  if (/\b(?:staging|stage|dev|internal|intranet|corp)[.-][\p{L}\p{N}-]+\.[\p{L}]{2,}/u.test(lower)) return true;
-  if (/\b\d{1,3}(?:\.\d{1,3}){3}\b/u.test(lower)) return true;
-  const path = lower.match(/(?:^|[\s(])(?:~|\.{1,2})?\/?[\p{L}\p{N}._-]+\/[\p{L}\p{N}._-]+\/[\p{L}\p{N}._-]+/u);
-  if (path && /\p{L}/u.test(path[0])) return true;
-  if (/\.[a-z]{1,5}:\d+\b/u.test(lower)) return true;
-  if (/\bv?\d+\.\d+\.\d+/u.test(lower)) return true;
-  return /\b0x[0-9a-f]{4,}\b/u.test(lower);
-}
-
-function linksRecentConsult(question: readonly string[], recent: readonly string[]): boolean {
-  const n = CONSULT_GATE_LINKAGE_RUN_TOKENS;
-  const wanted = new Set<string>();
-  for (let index = 0; index + n <= question.length; index += 1) {
-    const window = question.slice(index, index + n);
-    if (window.filter((token) => !FUNCTION_WORDS.has(token)).length < CONSULT_GATE_LINKAGE_MIN_CONTENT_TOKENS) continue;
-    wanted.add(window.join('\u0001'));
-  }
-  if (wanted.size === 0) return false;
-  for (const text of recent) {
-    const tokens = tokenize(foldPreservingCase(text.normalize('NFKC'))).map((token) => token.norm);
-    for (let index = 0; index + n <= tokens.length; index += 1) {
-      if (wanted.has(tokens.slice(index, index + n).join('\u0001'))) return true;
-    }
+function hasEncodedBlob(text: string): boolean {
+  for (const word of text.split(/[^A-Za-z0-9+/=_-]+/u)) {
+    if (word.length < CONSULT_GATE_ENCODED_MIXED_RUN_CHARS) continue;
+    if (/[0-9]/u.test(word) && /[A-Za-z]/u.test(word)) return true;
+    if (word.length < CONSULT_GATE_ENCODED_RUN_CHARS) continue;
+    if (/^[a-f]+$/iu.test(word)) return true;
+    const humps = (word.match(/[a-z][A-Z]/gu) ?? []).length;
+    if (/[+/=]/u.test(word) || humps >= 2) return true;
   }
   return false;
 }
 
 /**
- * Shapes no consult needs, refused whether or not the snapshot contains them:
- * any "@" (mail addresses and handles), any URL scheme or "www." prefix, and
- * any digit sequence (single separators allowed) with more than
- * CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE digits — phone and account numbers —
- * unless it is a grouped thousands figure (1,000,000).
+ * Shapes no consult needs, refused whether or not the snapshot holds them: any
+ * "@", any URL scheme or "www.", and any digit sequence (single separators
+ * allowed) of more than CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE digits unless it is
+ * a grouped thousands figure.
  */
 function hasIdentifierShape(text: string): boolean {
   if (text.includes('@')) return true;
   if (/\b[a-z][a-z0-9+.-]*:\/\//iu.test(text) || /\bwww\./iu.test(text)) return true;
-  for (const sequence of text.match(/\+?\d(?:[\d]|[\s().\-/](?=[\d(]))*\d/gu) ?? []) {
+  for (const sequence of text.match(/\+?\d(?:\d|[\s().\-/_](?=[\d(]))*\d/gu) ?? []) {
     const digits = sequence.replace(/\D/gu, '');
     if (digits.length <= CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE) continue;
     if (/^\d{1,3}(?:([,. ])\d{3})(?:\1\d{3})*$/u.test(sequence)) continue;
@@ -583,27 +606,39 @@ function hasIdentifierShape(text: string): boolean {
   return false;
 }
 
+/**
+ * Technical fingerprints, refused on sight: localhost and internal suffixes
+ * (.local .internal .lan .corp .intranet .test .localhost .home.arpa), a
+ * staging/dev/internal host label, an IPv4 address, any slash between two
+ * letters or digits (a path; "and/or" is refused too, words are cheaper), a
+ * file:line frame, a version with three or more parts, a hex error code.
+ */
+function hasTechnicalFingerprint(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (/\blocalhost\b/u.test(lower)) return true;
+  if (/[\p{L}\p{N}-]\.(?:local|internal|lan|corp|intranet|test|localhost|home\.arpa)\b/u.test(lower)) return true;
+  if (/\b(?:staging|stage|dev|internal|intranet|corp)[.-][\p{L}\p{N}-]+\.[\p{L}]{2,}/u.test(lower)) return true;
+  if (/\b\d{1,3}(?:\.\d{1,3}){3}\b/u.test(lower)) return true;
+  if (/[\p{L}\p{N}]\/[\p{L}\p{N}]/u.test(lower)) return true;
+  if (/\.[a-z]{1,5}:\d+\b/u.test(lower)) return true;
+  if (/\bv?\d+\.\d+\.\d+/u.test(lower)) return true;
+  return /\b0x[0-9a-f]{4,}\b/u.test(lower);
+}
+
 // --- Normalization and tokens ---------------------------------------------------
 
-const UPPER_CONFUSABLES: Readonly<Record<string, string>> = {
-  // Cyrillic capitals
-  '\u0410': 'A', '\u0412': 'B', '\u0415': 'E', '\u041A': 'K', '\u041C': 'M', '\u041D': 'H', '\u041E': 'O', '\u0420': 'P',
-  '\u0421': 'C', '\u0422': 'T', '\u0425': 'X', '\u0405': 'S', '\u0406': 'I', '\u0408': 'J', '\u04AE': 'Y', '\u0500': 'D',
-  // Greek capitals
-  '\u0391': 'A', '\u0392': 'B', '\u0395': 'E', '\u0396': 'Z', '\u0397': 'H', '\u0399': 'I', '\u039A': 'K', '\u039C': 'M',
-  '\u039D': 'N', '\u039F': 'O', '\u03A1': 'P', '\u03A4': 'T', '\u03A5': 'Y', '\u03A7': 'X',
-};
-
-const LOWER_CONFUSABLES: Readonly<Record<string, string>> = {
-  // Cyrillic small letters
+// Lower-case Cyrillic, Greek and Latin letters that render as a basic Latin letter.
+const LOOKALIKES: Readonly<Record<string, string>> = {
   '\u0430': 'a', '\u0435': 'e', '\u043E': 'o', '\u0440': 'p', '\u0441': 'c', '\u0443': 'y', '\u0445': 'x', '\u0455': 's',
   '\u0456': 'i', '\u0458': 'j', '\u04BB': 'h', '\u0501': 'd', '\u051B': 'q', '\u051D': 'w', '\u04CF': 'l', '\u043A': 'k',
-  // Greek small letters
+  '\u0432': 'b', '\u043C': 'm', '\u043D': 'h', '\u0442': 't', '\u04AF': 'y',
   '\u03BF': 'o', '\u03B1': 'a', '\u03BD': 'v', '\u03C1': 'p', '\u03B9': 'i', '\u03BA': 'k', '\u03C5': 'u', '\u03C7': 'x',
-  '\u03F2': 'c', '\u03F3': 'j',
-  // Latin and IPA look-alikes that NFKC leaves alone
-  '\u0131': 'i', '\u0269': 'i', '\u0261': 'g', '\u0251': 'a', '\u0280': 'r',
+  '\u03F2': 'c', '\u03F3': 'j', '\u03B2': 'b', '\u03B5': 'e', '\u03B6': 'z', '\u03B7': 'h', '\u03BC': 'm', '\u03C4': 't',
+  '\u0131': 'i', '\u0269': 'i', '\u0261': 'g', '\u0251': 'a', '\u0280': 'r', '\u0192': 'f',
 };
+
+// Digit-for-letter substitutions folded when comparing against identifiers and names.
+const LEET: Readonly<Record<string, string>> = { '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't', '8': 'b' };
 
 function mapCharacters(text: string, table: Readonly<Record<string, string>>): string {
   let out = '';
@@ -611,58 +646,82 @@ function mapCharacters(text: string, table: Readonly<Record<string, string>>): s
   return out;
 }
 
-// Steps 1-4 of the module docstring; case is kept so capitalization can be read.
-function foldPreservingCase(text: string): string {
-  const upperFolded = mapCharacters(text.normalize('NFKC'), UPPER_CONFUSABLES);
-  const unmarked = upperFolded.normalize('NFD').replace(/\p{M}+/gu, '').normalize('NFC');
-  return mapCharacters(unmarked, LOWER_CONFUSABLES);
+// Every Unicode decimal digit to its ASCII digit.
+function asciiDigits(text: string): string {
+  if (!/[^\x00-\x7F]/u.test(text)) return text;
+  let out = '';
+  for (const char of text) {
+    const code = char.codePointAt(0)!;
+    if (code < 0x80 || !/\p{Nd}/u.test(char)) {
+      out += char;
+      continue;
+    }
+    let start = code;
+    while (start > code - 100 && /\p{Nd}/u.test(String.fromCodePoint(start - 1))) start -= 1;
+    out += String((code - start) % 10);
+  }
+  return out;
+}
+
+// NFKC, ASCII digits, marks removed, look-alikes mapped; case kept.
+function foldText(text: string): string {
+  const nfkc = text.normalize('NFKC');
+  // Plain ASCII needs none of the steps below; skipping them keeps a large
+  // snapshot from allocating copies of itself.
+  if (!/[^\x00-\x7F]/u.test(nfkc)) return nfkc;
+  const unmarked = asciiDigits(nfkc).normalize('NFD').replace(/\p{M}+/gu, '').normalize('NFC');
+  let out = '';
+  for (const char of unmarked) {
+    const lower = char.toLowerCase();
+    const mapped = LOOKALIKES[lower];
+    out += mapped === undefined ? char : char === lower ? mapped : mapped.toUpperCase();
+  }
+  return out;
 }
 
 function caseFold(text: string): string {
-  return mapCharacters(text.toLowerCase(), { '\u00DF': 'ss', '\u03C2': '\u03C3' });
+  const lower = text.toLowerCase();
+  return /[\u00DF\u03C2]/u.test(lower) ? mapCharacters(lower, { '\u00DF': 'ss', '\u03C2': '\u03C3' }) : lower;
 }
 
-// The full comparison normalization (steps 1-5). Exported for the leak eval and tests.
+// The full comparison normalization. Exported for tests.
 export function normalizeForComparison(text: string): string {
-  return caseFold(foldPreservingCase(text));
+  return caseFold(foldText(text));
+}
+
+function compact(text: string): string {
+  let out = '';
+  forEachToken(foldText(text), (token) => { out += token.norm; });
+  return out;
 }
 
 interface Token {
-  // Normalized, case-folded token.
   readonly norm: string;
-  // First letter was upper or title case before folding.
   readonly capitalized: boolean;
-  // Only whitespace, hyphens or apostrophes separate it from the previous token.
-  readonly joinedToPrevious: boolean;
+  // First token of the text, or the first after . ! ? ; :
+  readonly initial: boolean;
+  // Only whitespace, hyphens or apostrophes since the previous token.
+  readonly joined: boolean;
 }
 
-function tokenize(folded: string): Token[] {
-  const tokens: Token[] = [];
-  const pattern = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]|(?:(?![\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}])[\p{L}\p{N}])+/gu;
+function forEachToken(folded: string, visit: (token: Token) => void): void {
+  const pattern = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]|(?:(?![\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}])[\p{L}\p{N}])+/gu;
   let previousEnd = -1;
   for (const match of folded.matchAll(pattern)) {
     const raw = match[0];
     const start = match.index ?? 0;
     const gap = previousEnd < 0 ? '' : folded.slice(previousEnd, start);
-    tokens.push({
+    visit({
       norm: caseFold(raw),
       capitalized: /^[\p{Lu}\p{Lt}]/u.test(raw),
-      joinedToPrevious: previousEnd >= 0 && gap.length <= 3 && /^[\s'’-]*$/u.test(gap),
+      initial: previousEnd < 0 || /[.!?;:]/u.test(gap),
+      joined: previousEnd >= 0 && /^[\s'\u2019-]*$/u.test(gap),
     });
     previousEnd = start + raw.length;
   }
-  return tokens;
 }
 
-function contextTokens(entry: ConsultWriterContextEntry): Token[] {
-  return tokenize(foldPreservingCase(entry.text));
-}
-
-/**
- * Closed English function-word list. Used only to require two content tokens
- * in a shared run and to split capitalized runs; see
- * CONSULT_GATE_RUN_MIN_CONTENT_TOKENS for why it opens no hole.
- */
+// Closed English function-word list: run content counting only.
 const FUNCTION_WORDS: ReadonlySet<string> = new Set([
   'a', 'an', 'the', 'of', 'to', 'in', 'on', 'at', 'for', 'by', 'with', 'from', 'into', 'over', 'under', 'about',
   'and', 'or', 'but', 'nor', 'if', 'then', 'than', 'so', 'as', 'not', 'no',
@@ -674,153 +733,430 @@ const FUNCTION_WORDS: ReadonlySet<string> = new Set([
   'my', 'your', 'his', 'our', 'their',
 ]);
 
-// --- Comparison rules -------------------------------------------------------------
+/**
+ * Words that cannot be part of a personal name: articles, prepositions,
+ * conjunctions, pronouns, auxiliaries, plus month and weekday names. Modal
+ * verbs ("Will", "May") are deliberately NOT here: they are also given names.
+ */
+const NAME_STOPWORDS: ReadonlySet<string> = new Set([
+  'a', 'an', 'the', 'of', 'to', 'in', 'on', 'at', 'for', 'by', 'with', 'from', 'and', 'or', 'but', 'if', 'as', 'so',
+  'than', 'then', 'not', 'no', 'is', 'are', 'was', 'were', 'be', 'been', 'do', 'does', 'did', 'has', 'have', 'had',
+  'it', 'its', 'this', 'that', 'these', 'those', 'there', 'here', 'what', 'which', 'who', 'how', 'when', 'where', 'why',
+  'i', 'you', 'he', 'she', 'we', 'they', 'my', 'your', 'our', 'their', 'his', 'her', 'dear', 'mr', 'mrs', 'ms', 'dr',
+  'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+]);
 
-function sharesTokenRun(question: readonly string[], context: ConsultWriterContext): boolean {
-  const n = CONSULT_GATE_SHARED_RUN_TOKENS;
-  const wanted = new Set<string>();
-  for (let index = 0; index + n <= question.length; index += 1) {
-    const window = question.slice(index, index + n);
-    if (window.filter((token) => !FUNCTION_WORDS.has(token)).length < CONSULT_GATE_RUN_MIN_CONTENT_TOKENS) continue;
-    wanted.add(window.join('\u0001'));
-  }
-  if (wanted.size === 0) return false;
-  for (const entry of context.entries) {
-    const tokens = contextTokens(entry).map((token) => token.norm);
-    for (let index = 0; index + n <= tokens.length; index += 1) {
-      if (wanted.has(tokens.slice(index, index + n).join('\u0001'))) return true;
+function isContent(token: string): boolean {
+  return !FUNCTION_WORDS.has(token);
+}
+
+// --- The question side ------------------------------------------------------------
+
+type FormSource = 'plain' | 'decoded';
+
+interface QuestionModel {
+  // Normalized tokens of all sub-questions, in order.
+  readonly tokens: readonly string[];
+  // Compacted windows (and their reversals, and digit-folded variants), with where they came from.
+  readonly forms: ReadonlyMap<string, FormSource>;
+  // \u0001-joined token sequences of every view, for long identifier containment.
+  readonly tokenKeys: readonly string[];
+  readonly numberKeys: ReadonlySet<string>;
+  readonly digitConcat: string;
+  readonly dates: DateKeys;
+  readonly hostKeys: ReadonlySet<string>;
+}
+
+function questionModel(subQuestions: readonly string[]): QuestionModel {
+  const joined = subQuestions.join(' ');
+  const folded = foldText(joined);
+  const tokens: string[] = [];
+  forEachToken(folded, (token) => tokens.push(token.norm));
+  const forms = new Map<string, FormSource>();
+  const tokenKeys: string[] = [];
+  const addView = (viewTokens: readonly string[], source: FormSource): void => {
+    tokenKeys.push(`\u0001${viewTokens.join('\u0001')}\u0001`);
+    const variants = [viewTokens, viewTokens.map((token) => (/\p{L}/u.test(token) ? mapCharacters(token, LEET) : token))];
+    for (const variant of variants) {
+      for (let start = 0; start < variant.length; start += 1) {
+        let concat = '';
+        for (let end = start; end < variant.length && end - start < CONSULT_GATE_COMPACT_WINDOW_TOKENS; end += 1) {
+          concat += variant[end];
+          if (concat.length > CONSULT_GATE_COMPACT_WINDOW_CHARS) break;
+          if (!forms.has(concat)) forms.set(concat, source);
+          const reversed = [...concat].reverse().join('');
+          if (!forms.has(reversed)) forms.set(reversed, source);
+        }
+      }
     }
+  };
+  addView(tokens, 'plain');
+  for (const view of decodedViews(joined.normalize('NFKC'))) {
+    const viewTokens: string[] = [];
+    forEachToken(foldText(view), (token) => viewTokens.push(token.norm));
+    addView(viewTokens, 'decoded');
   }
-  return false;
+  const normalized = caseFold(folded);
+  const wordDigits = numberWordsToDigits(tokens);
+  const numberKeys = new Set<string>();
+  for (const key of figureKeys(normalized, false).keys()) numberKeys.add(key);
+  for (const key of figureKeys(wordDigits.join(' '), false).keys()) numberKeys.add(key);
+  const digitConcat = (normalized.match(/\d/gu) ?? []).join('');
+  const dates = dateKeys(normalized, wordDigits);
+  const hostKeys = new Set<string>();
+  const spelled = normalized.replace(/\s+dot\s+/gu, '.').replace(/[\u3002\uFF0E\uFF61]/gu, '.');
+  for (const host of hostnames(spelled)) for (const key of hostKeysOf(host)) hostKeys.add(key);
+  return { tokens, forms, tokenKeys, numberKeys, digitConcat, dates, hostKeys };
 }
 
 /**
- * Names: two adjacent capitalized, non-function tokens in the snapshot (a
- * personal or place name, an organisation) where at least one of the two is
- * written capitalized more often than in lower case across the snapshot. That
- * second condition is what separates "Marguerite Okafor" from a capitalized
- * heading such as "Payment Schedule" whose words also occur in lower case in
- * running text. Counting uses prose words only (see proseWords), and
- * lower-case occurrences in the owner's own question are not counted, so an owner typing a name in lower case does not unmake it. A question that contains the pair as consecutive tokens, in
- * any case, is refused. Scripts without case have no such signal; a name in
- * them is caught only by the run and identifier rules.
+ * Bounded decodings of the request: base64 and base64url runs of four or more
+ * characters, alone and joined across punctuation without spaces; and hex
+ * runs of two or more byte pairs, with or without single separators. A
+ * decoding is kept when it is valid UTF-8 and mostly letters and spaces.
  */
-function sharesNamePair(question: readonly string[], context: ConsultWriterContext): boolean {
-  const questionPairs = new Set<string>();
-  for (let index = 0; index + 1 < question.length; index += 1) {
-    // Both orders: "Given Family" and "Family, Given" are the same name.
-    questionPairs.add(`${question[index]}\u0001${question[index + 1]}`);
-    questionPairs.add(`${question[index + 1]}\u0001${question[index]}`);
-  }
-  if (questionPairs.size === 0) return false;
-  const candidates: Array<readonly [string, string]> = [];
-  for (const entry of context.entries) {
-    if (entry.kind === 'vocabulary') continue;
-    const tokens = contextTokens(entry);
-    for (let index = 1; index < tokens.length; index += 1) {
-      const left = tokens[index - 1]!;
-      const right = tokens[index]!;
-      if (!right.joinedToPrevious || !left.capitalized || !right.capitalized) continue;
-      if (FUNCTION_WORDS.has(left.norm) || FUNCTION_WORDS.has(right.norm)) continue;
-      if (left.norm.length < 2 || right.norm.length < 2) continue;
-      if (questionPairs.has(`${left.norm}\u0001${right.norm}`)) candidates.push([left.norm, right.norm]);
+function decodedViews(text: string): string[] {
+  const views: string[] = [];
+  const keep = (bytes: Buffer): void => {
+    const decoded = bytes.toString('utf8');
+    if (decoded.length < 2 || decoded.includes('\uFFFD')) return;
+    const letters = (decoded.match(/[\p{L}\s]/gu) ?? []).length;
+    if (letters / decoded.length >= 0.7) views.push(decoded);
+  };
+  for (const chunk of text.split(/\s+/u)) {
+    const pieces = chunk.split(/[^A-Za-z0-9+/=_-]+/u).filter((piece) => piece.length >= 4);
+    const candidates = new Set(pieces);
+    if (pieces.length > 1) candidates.add(pieces.join(''));
+    for (const candidate of candidates) {
+      const standard = candidate.replace(/-/gu, '+').replace(/_/gu, '/').replace(/=+$/u, '');
+      if (standard.length % 4 === 1) continue;
+      keep(Buffer.from(standard, 'base64'));
     }
   }
-  if (candidates.length === 0) return false;
-  const watched = new Set(candidates.flat());
-  const capitalizedCount = new Map<string, number>();
-  const lowerCount = new Map<string, number>();
-  for (const entry of context.entries) {
-    if (entry.kind === 'vocabulary') continue;
-    for (const token of tokenize(foldPreservingCase(proseWords(entry.text)))) {
-      if (!watched.has(token.norm)) continue;
-      if (!token.capitalized && entry.kind === 'user_question') continue;
-      const counts = token.capitalized ? capitalizedCount : lowerCount;
-      counts.set(token.norm, (counts.get(token.norm) ?? 0) + 1);
-    }
+  for (const match of text.matchAll(/(?:[0-9a-f]{2}[\s:,.-]?){2,}/giu)) {
+    const hex = match[0].replace(/[^0-9a-f]/giu, '');
+    if (hex.length % 2 === 0) keep(Buffer.from(hex, 'hex'));
   }
-  const namelike = (token: string): boolean => (capitalizedCount.get(token) ?? 0) > (lowerCount.get(token) ?? 0);
-  return candidates.some(([left, right]) => namelike(left) || namelike(right));
+  return views;
+}
+
+// --- Number words (English) -------------------------------------------------------
+
+const NUMBER_WORDS: ReadonlyMap<string, number> = new Map([
+  ['zero', 0], ['oh', 0], ['one', 1], ['two', 2], ['three', 3], ['four', 4], ['five', 5], ['six', 6], ['seven', 7],
+  ['eight', 8], ['nine', 9], ['ten', 10], ['eleven', 11], ['twelve', 12], ['thirteen', 13], ['fourteen', 14],
+  ['fifteen', 15], ['sixteen', 16], ['seventeen', 17], ['eighteen', 18], ['nineteen', 19], ['twenty', 20],
+  ['thirty', 30], ['forty', 40], ['fifty', 50], ['sixty', 60], ['seventy', 70], ['eighty', 80], ['ninety', 90],
+  ['first', 1], ['second', 2], ['third', 3], ['fourth', 4], ['fifth', 5], ['sixth', 6], ['seventh', 7], ['eighth', 8],
+  ['ninth', 9], ['tenth', 10], ['eleventh', 11], ['twelfth', 12], ['thirteenth', 13], ['fourteenth', 14],
+  ['fifteenth', 15], ['sixteenth', 16], ['seventeenth', 17], ['eighteenth', 18], ['nineteenth', 19],
+  ['twentieth', 20], ['thirtieth', 30],
+]);
+const SCALE_WORDS: ReadonlyMap<string, number> = new Map([
+  ['hundred', 100], ['thousand', 1_000], ['million', 1_000_000], ['billion', 1_000_000_000],
+]);
+
+/**
+ * Replace each run of English number words with digit tokens: its arithmetic
+ * value ("two thousand three hundred seventy five point five zero" is
+ * 2375.50), and, when the run has no scale word, the digits of its groups
+ * written one after another ("twenty twenty four" is 2024).
+ */
+function numberWordsToDigits(tokens: readonly string[]): string[] {
+  const out: string[] = [];
+  let index = 0;
+  while (index < tokens.length) {
+    const start = index;
+    let total = 0;
+    let current = 0;
+    let scaled = false;
+    let decimal = '';
+    let inDecimal = false;
+    const groups: number[] = [];
+    while (index < tokens.length) {
+      const word = tokens[index]!;
+      const value = NUMBER_WORDS.get(word);
+      const scale = SCALE_WORDS.get(word);
+      if (inDecimal && value !== undefined && value < 10) {
+        decimal += String(value);
+      } else if (word === 'point' && index > start && !inDecimal) {
+        inDecimal = true;
+      } else if (value !== undefined && !inDecimal) {
+        const last = groups.length > 0 ? groups[groups.length - 1]! : undefined;
+        if (last !== undefined && last % 10 === 0 && last >= 20 && last < 100 && value < 10) {
+          groups[groups.length - 1] = last + value;
+        } else {
+          groups.push(value);
+        }
+        current += value;
+      } else if (scale !== undefined && !inDecimal && index > start) {
+        scaled = true;
+        if (scale === 100) current = (current || 1) * 100;
+        else {
+          total += (current || 1) * scale;
+          current = 0;
+        }
+      } else if (word === 'and' && index > start && !inDecimal) {
+        // "three hundred and five"
+      } else break;
+      index += 1;
+    }
+    if (index === start) {
+      out.push(tokens[index]!);
+      index += 1;
+      continue;
+    }
+    const integer = String(total + current);
+    out.push(decimal ? `${integer}.${decimal}` : integer);
+    if (!scaled && groups.length > 1) out.push(groups.map(String).join(''));
+  }
+  return out;
+}
+
+// --- Snapshot comparison -------------------------------------------------------------
+
+interface RunMatcher {
+  feed(token: string): boolean;
+  reset(): void;
 }
 
 /**
- * The text with every word that is part of an address, host, path or handle
- * removed (anything holding @ / \\ _ or a dot between two letters or digits).
- * Those are written in lower case by convention, so counting them would make a
- * name look like an ordinary word.
+ * Streaming longest-common-run detector against the question's tokens. For
+ * each snapshot token it extends every run ending at a matching question
+ * position; a run is a hit once it reaches `minLength` tokens with at least
+ * `minContent` content tokens anywhere in it. Work per snapshot token is the
+ * number of question positions holding that token, so the total is bounded by
+ * snapshot tokens times question tokens.
  */
-function proseWords(text: string): string {
-  return text
-    .split(/\s+/u)
-    .filter((word) => !/[@/\\_]|[\p{L}\p{N}]\.[\p{L}\p{N}]/u.test(word))
-    .join(' ');
+function runMatcher(question: readonly string[], minLength: number, minContent: number): RunMatcher {
+  const positions = new Map<string, number[]>();
+  question.forEach((token, index) => {
+    const list = positions.get(token) ?? [];
+    list.push(index);
+    positions.set(token, list);
+  });
+  let active = new Map<number, { length: number; content: number }>();
+  return {
+    feed(token: string): boolean {
+      const next = new Map<number, { length: number; content: number }>();
+      let hit = false;
+      for (const position of positions.get(token) ?? []) {
+        const previous = active.get(position - 1);
+        const run = {
+          length: (previous?.length ?? 0) + 1,
+          content: (previous?.content ?? 0) + (isContent(token) ? 1 : 0),
+        };
+        next.set(position, run);
+        if (run.length >= minLength && run.content >= minContent) hit = true;
+      }
+      active = next;
+      return hit;
+    },
+    reset(): void {
+      active = new Map();
+    },
+  };
 }
 
-/**
- * Scope values the product itself writes when a connector has no account
- * label. They name no one, and treating them as identifiers would refuse every
- * question containing an ordinary word such as "personal".
- */
-const PRODUCT_DEFAULT_IDENTIFIER_VALUES: ReadonlySet<string> = new Set(['personal', 'default', 'primary']);
+interface NameStats {
+  capitalized: number;
+  lower: number;
+}
 
-/**
- * Provenance values and other identifier entries: the whole value, and each
- * segment of a path or locator, as a token sequence. A value or segment of at
- * least CONSULT_GATE_MIN_IDENTIFIER_CHARS normalized letters and digits that
- * appears in the question as consecutive tokens is refused. A segment that is a
- * single plain word (no digit) is skipped: folder names and title prefixes are
- * mostly topic words, and refusing them refused one generic question in five
- * in the leak eval. The whole value is never skipped.
- */
-function containsSnapshotIdentifier(question: readonly string[], context: ConsultWriterContext): boolean {
-  const questionKey = `\u0001${question.join('\u0001')}\u0001`;
-  let found = false;
+function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext): Set<ConsultGateReason> {
+  const reasons = new Set<ConsultGateReason>();
+  const fullRun = runMatcher(model.tokens, CONSULT_GATE_SHARED_RUN_TOKENS, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
+  const contentRun = runMatcher(model.tokens.filter(isContent), CONSULT_GATE_CONTENT_RUN_TOKENS, 0);
+  const formHit = (form: string): FormSource | undefined =>
+    form.length >= CONSULT_GATE_MIN_IDENTIFIER_CHARS ? model.forms.get(form) : undefined;
+  const identifierHit = (source: FormSource | undefined): void => {
+    if (source) reasons.add(source === 'decoded' ? 'encoded_identifier' : 'snapshot_identifier');
+  };
+  const stats = new Map<string, NameStats>();
+  const pairCandidates: Array<{ left: string; right: string; midSentence: boolean }> = [];
+  const singleCandidates: Array<{ token: string; source: FormSource }> = [];
+  const componentCandidates: Array<{ token: string; source: FormSource }> = [];
+  let group = Number.NaN;
+  let previous: Token | undefined;
+
   for (const entry of context.entries) {
-    if (entry.kind !== 'identifier') continue;
-    identifierValues(entry.text).forEach((value, index) => {
-      const tokens = tokenize(foldPreservingCase(value)).map((token) => token.norm);
-      if (tokens.join('').length < CONSULT_GATE_MIN_IDENTIFIER_CHARS) return;
-      if (tokens.length === 1 && PRODUCT_DEFAULT_IDENTIFIER_VALUES.has(tokens[0]!)) return;
-      // A segment (index > 0) that is one plain word is a folder or a topic
-      // ("billing", "export"), not an identifier; whole values are always kept.
-      if (index > 0 && tokens.length === 1 && !/\d/u.test(tokens[0]!)) return;
-      if (questionKey.includes(`\u0001${tokens.join('\u0001')}\u0001`)) found = true;
+    if (entry.kind === 'metadata') continue;
+    if (entry.group !== group) {
+      group = entry.group;
+      fullRun.reset();
+      contentRun.reset();
+      previous = undefined;
+    }
+    const folded = foldText(entry.text);
+    const normalized = caseFold(folded);
+
+    // Values: figures, digits read jointly, dates, hosts, labelled secrets.
+    for (const [key, unit] of figureKeys(normalized, true)) {
+      if (model.numberKeys.has(key) && (key.replace(/\D/gu, '').length >= CONSULT_GATE_MIN_FIGURE_DIGITS || unit)) {
+        reasons.add('snapshot_figure');
+      }
+    }
+    for (const run of normalized.match(/\d(?:[\d]|[\s.\-/_](?=\d))*/gu) ?? []) {
+      const digits = run.replace(/\D/gu, '');
+      if (digits.length >= CONSULT_GATE_MIN_JOINT_DIGITS && model.digitConcat.includes(digits)) reasons.add('snapshot_figure');
+    }
+    if (model.dates.full.size > 0 || model.dates.monthDay.size > 0) {
+      const snapshotDates = dateKeys(normalized, undefined);
+      for (const key of model.dates.full) if (snapshotDates.full.has(key)) reasons.add('snapshot_date');
+      for (const key of model.dates.monthDay) if (snapshotDates.monthDay.has(key)) reasons.add('snapshot_date');
+    }
+    if (model.hostKeys.size > 0) {
+      for (const host of hostnames(normalized)) {
+        for (const key of hostKeysOf(host)) if (model.hostKeys.has(key)) reasons.add('snapshot_hostname');
+      }
+    }
+    for (const value of labelledSecretValues(normalized)) {
+      if (formHit(compact(value))) reasons.add('secret_detected');
+    }
+
+    // Identifier values: whole, long token sequences, and their parts.
+    const isIdentifier = entry.kind === 'identifier' || entry.kind === 'person_identifier' || entry.kind === 'account_scope';
+    if (isIdentifier) {
+      const whole = compact(entry.text);
+      const exempt = entry.kind === 'account_scope' && PRODUCT_DEFAULT_SCOPES.has(whole);
+      if (!exempt) {
+        identifierHit(formHit(whole));
+        // Each segment of a path, locator, address or "label: value" title is
+        // protected whole when it is more than one word or carries a digit.
+        for (const segment of entry.text.split(/[/\\?#&=:@]+/u)) {
+          const segmentForm = compact(segment);
+          let words = 0;
+          forEachToken(foldText(segment), () => { words += 1; });
+          if (segmentForm !== whole && (words > 1 || /\d/u.test(segmentForm))) identifierHit(formHit(segmentForm));
+        }
+        const valueTokens: string[] = [];
+        forEachToken(folded, (token) => valueTokens.push(token.norm));
+        if (valueTokens.length > 1 && model.tokenKeys.some((key) => key.includes(`\u0001${valueTokens.join('\u0001')}\u0001`))) {
+          reasons.add('snapshot_identifier');
+        }
+        forEachToken(folded, (token) => {
+          if (token.norm.length < 3 || NAME_STOPWORDS.has(token.norm)) return;
+          const source = formHit(token.norm);
+          if (!source) return;
+          if (entry.kind === 'person_identifier' || (/\d/u.test(token.norm) && /\p{L}/u.test(token.norm))) identifierHit(source);
+          else if (token.capitalized && !token.initial) componentCandidates.push({ token: token.norm, source });
+        });
+      }
+    }
+
+    // Token stream: shared runs, name pairs and single names, case statistics.
+    let first = true;
+    forEachToken(folded, (token) => {
+      if (fullRun.feed(token.norm)) reasons.add('shared_token_run');
+      if (isContent(token.norm) && contentRun.feed(token.norm)) reasons.add('shared_token_run');
+      if (entry.kind === 'vocabulary') {
+        previous = token;
+        first = false;
+        return;
+      }
+      const watched = model.forms.has(token.norm);
+      if (watched) {
+        const stat = stats.get(token.norm) ?? { capitalized: 0, lower: 0 };
+        if (token.capitalized) stat.capitalized += 1;
+        else if (entry.kind !== 'user_question') stat.lower += 1;
+        stats.set(token.norm, stat);
+      }
+      const joined = first ? previous !== undefined : token.joined;
+      if (previous && joined && previous.capitalized && token.capitalized
+        && !NAME_STOPWORDS.has(previous.norm) && !NAME_STOPWORDS.has(token.norm)
+        && previous.norm.length >= 2 && token.norm.length >= 2) {
+        const source = model.forms.get(previous.norm + token.norm) ?? model.forms.get(token.norm + previous.norm)
+          ?? model.forms.get(previous.norm) ?? model.forms.get(token.norm);
+        if (source) {
+          const midSentence = !(first || token.initial) || !previous.initial;
+          pairCandidates.push({ left: previous.norm, right: token.norm, midSentence });
+        }
+      }
+      const initial = first || token.initial;
+      if (watched && token.capitalized && !initial && token.norm.length >= 3 && !NAME_STOPWORDS.has(token.norm)) {
+        singleCandidates.push({ token: token.norm, source: model.forms.get(token.norm)! });
+      }
+      previous = token;
+      first = false;
     });
-    if (found) return true;
   }
-  return false;
-}
 
-// The whole value, plus each segment of a path, locator or address (split at / \ ? # & = : @).
-function identifierValues(text: string): string[] {
-  const values = [text];
-  if (/[/\\?#&=:@]/u.test(text)) values.push(...text.split(/[/\\?#&=:@]+/u));
-  return values.filter((value) => value.trim().length > 0);
-}
-
-// Hostnames in the snapshot, matched with their registrable parent in the question.
-function containsSnapshotHostname(questionText: string, context: ConsultWriterContext): boolean {
-  const wanted = new Set<string>();
-  for (const host of hostnames(questionText)) for (const key of hostKeys(host)) wanted.add(key);
-  if (wanted.size === 0) return false;
-  for (const entry of context.entries) {
-    for (const host of hostnames(normalizeForComparison(entry.text))) {
-      for (const key of hostKeys(host)) if (wanted.has(key)) return true;
+  // Decisions that need whole-snapshot case statistics.
+  const statOf = (token: string): NameStats => stats.get(token) ?? { capitalized: 0, lower: 0 };
+  const neverLower = (token: string): boolean => statOf(token).lower === 0;
+  const namelike = (token: string): boolean => statOf(token).capitalized >= statOf(token).lower;
+  const nameHit = (source: FormSource): void => { reasons.add(source === 'decoded' ? 'encoded_identifier' : 'snapshot_name'); };
+  for (const pair of pairCandidates) {
+    if (!namelike(pair.left) && !namelike(pair.right)) continue;
+    const pairSource = model.forms.get(pair.left + pair.right) ?? model.forms.get(pair.right + pair.left);
+    if (pairSource) nameHit(pairSource);
+    // A part alone is protected only when the pair was written mid-sentence
+    // (not two first words, such as a column header next to a cell) and the
+    // part never appears in lower case.
+    if (!pair.midSentence) continue;
+    for (const part of [pair.left, pair.right]) {
+      const partSource = model.forms.get(part);
+      if (partSource && part.length >= 3 && neverLower(part)) nameHit(partSource);
     }
   }
-  return false;
+  for (const single of singleCandidates) if (neverLower(single.token)) nameHit(single.source);
+  for (const component of componentCandidates) if (neverLower(component.token)) identifierHit(component.source);
+  return reasons;
 }
 
+function compareWithRecent(model: QuestionModel, subQuestions: readonly string[], recent: readonly string[]): Set<ConsultGateReason> {
+  const reasons = new Set<ConsultGateReason>();
+  if (recent.length === 0) return reasons;
+  const asked = new Set([...subQuestions, subQuestions.join(' ')].map(compact));
+  const fullRun = runMatcher(model.tokens, CONSULT_GATE_SHARED_RUN_TOKENS, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
+  const contentRun = runMatcher(model.tokens.filter(isContent), CONSULT_GATE_CONTENT_RUN_TOKENS, 0);
+  for (const text of recent) {
+    if (asked.has(compact(text))) reasons.add('repeats_recent_consult');
+    fullRun.reset();
+    contentRun.reset();
+    forEachToken(foldText(text), (token) => {
+      if (fullRun.feed(token.norm)) reasons.add('links_recent_consult');
+      if (isContent(token.norm) && contentRun.feed(token.norm)) reasons.add('links_recent_consult');
+    });
+  }
+  return reasons;
+}
+
+// Values written right after a secret-like label ("password: x", "pin = x").
+function labelledSecretValues(normalized: string): string[] {
+  const values: string[] = [];
+  for (const match of normalized.matchAll(/\b(?:password|passcode|passphrase|pin|secret|token|api key|apikey|key)\s*[:=]\s*(\S{3,64})/gu)) {
+    values.push(match[1]!);
+  }
+  return values;
+}
+
+// --- Hosts ----------------------------------------------------------------------
+
+/**
+ * Host names, found by one linear pass: split at every character that cannot
+ * appear in a host, trim dots and hyphens, and keep pieces of two or more
+ * non-empty labels whose last label is two or more letters.
+ */
 function hostnames(normalized: string): string[] {
-  return normalized.match(/(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.)+\p{L}{2,63}/gu) ?? [];
+  const hosts: string[] = [];
+  for (const raw of normalized.split(/[^\p{L}\p{N}.-]+/u)) {
+    if (!raw.includes('.')) continue;
+    const piece = raw.replace(/^[.-]+|[.-]+$/gu, '');
+    if (piece.length > 253) continue;
+    const labels = piece.split('.');
+    if (labels.length < 2 || labels.some((label) => label.length === 0 || label.length > 63)) continue;
+    if (!/^\p{L}{2,}$/u.test(labels[labels.length - 1]!)) continue;
+    hosts.push(piece);
+  }
+  return hosts;
 }
 
 // The host itself and its last two labels, so a subdomain and its parent compare equal.
-function hostKeys(host: string): string[] {
+function hostKeysOf(host: string): string[] {
   const labels = host.split('.');
-  const keys = [host];
-  if (labels.length > 2) keys.push(labels.slice(-2).join('.'));
-  return keys;
+  return labels.length > 2 ? [host, labels.slice(-2).join('.')] : [host];
 }
 
 // --- Dates ----------------------------------------------------------------------
@@ -844,30 +1180,25 @@ function buildMonthNames(): Map<string, number> {
   return names;
 }
 
+const ROMAN_MONTHS: ReadonlyMap<string, number> = new Map(
+  ['i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x', 'xi', 'xii'].map((numeral, index) => [numeral, index + 1]),
+);
+
+const DATE_JOINERS: ReadonlySet<string> = new Set(['of', 'de', 'del', 'van', 'in', 'the', 'du', 'des']);
+
 interface DateKeys {
   readonly full: Set<string>;
   readonly monthDay: Set<string>;
 }
 
-function containsSnapshotDate(questionText: string, context: ConsultWriterContext): boolean {
-  const question = dateKeys(questionText);
-  if (question.full.size === 0 && question.monthDay.size === 0) return false;
-  for (const entry of context.entries) {
-    const snapshot = dateKeys(normalizeForComparison(entry.text));
-    for (const key of question.full) if (snapshot.full.has(key)) return true;
-    for (const key of question.monthDay) if (snapshot.monthDay.has(key)) return true;
-  }
-  return false;
-}
-
 /**
- * Exact dates in common written forms: ISO (2024-03-14, with or without a
- * time), numeric day/month/year in either order (both readings kept), and a day
- * next to a month name in English, French, Spanish, German, Italian,
- * Portuguese or Dutch, with or without a year. A month with no day ("March
- * 2024") or a bare year is not an exact date.
+ * Exact dates: ISO and numeric day/month/year in either order (both readings
+ * kept); Chinese, Japanese and Korean year-month-day forms; a day next to a
+ * month name in eight European languages or a Roman-numeral month between day
+ * and year; days and years written as English number words when `words` is
+ * given. A month with no day, or a bare year, is not an exact date.
  */
-function dateKeys(normalized: string): DateKeys {
+function dateKeys(normalized: string, words: readonly string[] | undefined): DateKeys {
   const keys: DateKeys = { full: new Set(), monthDay: new Set() };
   const add = (year: number | undefined, month: number, day: number): void => {
     if (month < 1 || month > 12 || day < 1 || day > 31) return;
@@ -882,19 +1213,35 @@ function dateKeys(normalized: string): DateKeys {
     add(year, Number(match[2]), Number(match[1]));
     add(year, Number(match[1]), Number(match[2]));
   }
-  const words = normalized.match(/[\p{L}\p{N}]+/gu) ?? [];
-  for (let index = 0; index < words.length; index += 1) {
-    const month = MONTH_NAMES.get(words[index]!);
-    if (month === undefined) continue;
-    const before = dayNumber(words[index - 1]) ?? (isDateJoiner(words[index - 1]) ? dayNumber(words[index - 2]) : undefined);
-    const after = dayNumber(words[index + 1]);
-    const yearAfter = (offset: number): number | undefined => {
-      const direct = yearNumber(words[index + offset]);
-      if (direct !== undefined) return direct;
-      return isDateJoiner(words[index + offset]) ? yearNumber(words[index + offset + 1]) : undefined;
-    };
-    if (before !== undefined) add(yearAfter(1), month, before);
-    if (after !== undefined) add(yearAfter(2), month, after);
+  for (const match of normalized.matchAll(/(?:(\d{2,4})\s*[\u5E74\uB144]\s*)?(\d{1,2})\s*[\u6708\uC6D4]\s*(\d{1,2})\s*[\u65E5\uC77C]?/gu)) {
+    add(match[1] ? expandYear(match[1]) : undefined, Number(match[2]), Number(match[3]));
+  }
+  const tokens = words ?? (normalized.match(/[\p{L}\p{N}]+/gu) ?? []);
+  const at = (index: number): string | undefined => tokens[index];
+  const skipJoiners = (index: number): number => {
+    let cursor = index;
+    while (cursor < tokens.length && DATE_JOINERS.has(tokens[cursor]!)) cursor += 1;
+    return cursor;
+  };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const word = tokens[index]!;
+    const month = MONTH_NAMES.get(word);
+    if (month !== undefined) {
+      let back = index - 1;
+      while (back >= 0 && DATE_JOINERS.has(tokens[back]!)) back -= 1;
+      const before = dayNumber(at(back));
+      const afterIndex = skipJoiners(index + 1);
+      const after = dayNumber(at(afterIndex));
+      if (before !== undefined) add(yearNumber(at(skipJoiners(index + 1))), month, before);
+      if (after !== undefined) add(yearNumber(at(skipJoiners(afterIndex + 1))), month, after);
+      continue;
+    }
+    const roman = ROMAN_MONTHS.get(word);
+    if (roman !== undefined) {
+      const day = dayNumber(at(index - 1));
+      const year = yearNumber(at(index + 1));
+      if (day !== undefined && year !== undefined) add(year, roman, day);
+    }
   }
   return keys;
 }
@@ -911,10 +1258,6 @@ function yearNumber(word: string | undefined): number | undefined {
   return Number(word);
 }
 
-function isDateJoiner(word: string | undefined): boolean {
-  return word === 'of' || word === 'de' || word === 'del' || word === 'van';
-}
-
 function expandYear(text: string): number {
   const value = Number(text);
   if (text.length === 4) return value;
@@ -923,65 +1266,37 @@ function expandYear(text: string): number {
 
 // --- Figures --------------------------------------------------------------------
 
-function containsSnapshotFigure(questionText: string, context: ConsultWriterContext): boolean {
-  const wanted = figureKeys(questionText);
-  if (wanted.size === 0) return false;
-  for (const entry of context.entries) {
-    for (const key of figureKeys(normalizeForComparison(entry.text))) if (wanted.has(key)) return true;
-  }
-  return false;
-}
+const UNIT_WORDS: ReadonlySet<string> = new Set([
+  '%', 'percent', 'mg', 'mcg', 'g', 'kg', 'lb', 'lbs', 'oz', 'ml', 'l', 'km', 'm', 'cm', 'mm', 'mi', 'ft', 'h', 'hr',
+  'hrs', 'min', 'mins', 's', 'sec', 'ms', 'kb', 'mb', 'gb', 'tb', 'kwh', 'w', 'kw', 'eur', 'usd', 'gbp', 'chf', 'jpy',
+  'cad', 'aud', 'euro', 'euros', 'dollars', 'pounds', 'k', 'bn', 'million', 'billion', 'mmol', 'iu', 'bpm', 'mmhg',
+  'years', 'yrs', 'months', 'weeks', 'days', 'units',
+  '$', '\u20AC', '\u00A3', '\u00A5', '\u20B9',
+]);
 
 /**
- * Exact figures: every number with at least
- * CONSULT_GATE_MIN_FIGURE_SIGNIFICANT_DIGITS significant digits, keyed by its
- * value so "48,750", "48750", "48.750" (decimal comma locales) and "48 750"
- * compare equal. Ambiguous separators yield every reading. Bare years from
- * 1900 to 2099 are exempt: a year alone identifies little, and the date rule
- * covers exact dates.
+ * Numbers in normalized text, keyed by their digits as written with every
+ * separator (. , ' _ and grouping spaces) removed, plus the same with trailing
+ * zeros dropped, so "2,375.50", "237550", "2375.5" and "2.3755k" share a key.
+ * Leading zeros are kept in one key and dropped in another. The value is true
+ * when a unit or currency sits next to the number. Keys shorter than two
+ * digits are not produced.
  */
-function figureKeys(normalized: string): Set<string> {
-  const keys = new Set<string>();
-  for (const match of normalized.matchAll(/\d(?:\d|[.,'’ ](?=\d))*/gu)) {
-    const raw = match[0];
-    const readings = new Set<string>([raw]);
-    if (raw.includes(' ')) for (const part of raw.split(' ')) readings.add(part);
-    for (const reading of readings) {
-      for (const value of numericReadings(reading)) {
-        if (/^(?:19|20)\d\d$/u.test(value)) continue;
-        if (significantDigits(value) >= CONSULT_GATE_MIN_FIGURE_SIGNIFICANT_DIGITS) keys.add(value);
+function figureKeys(normalized: string, needUnits: boolean): Map<string, boolean> {
+  const keys = new Map<string, boolean>();
+  for (const match of normalized.matchAll(/([^\s\d]?)\s?(\d+(?:[.,'\u2019_ ]\d+)*)\s?(%|[\p{L}$\u20AC\u00A3\u00A5\u20B9]{1,8})?/gu)) {
+    const before = match[1] ?? '';
+    const written = match[2]!;
+    const after = match[3] ?? '';
+    const unit = needUnits && (UNIT_WORDS.has(before) || UNIT_WORDS.has(after));
+    const parts = new Set<string>([written]);
+    if (written.includes(' ')) for (const part of written.split(' ')) parts.add(part);
+    for (const part of parts) {
+      const digits = part.replace(/\D/gu, '');
+      for (const key of [digits, digits.replace(/^0+(?=\d)/u, ''), digits.replace(/0+$/u, '')]) {
+        if (key.length >= 2) keys.set(key, (keys.get(key) ?? false) || unit);
       }
     }
   }
   return keys;
-}
-
-/**
- * Every valid reading of a written number: "." decimal with "," or "'" or
- * space grouping, "," decimal with "." grouping, or every separator grouping.
- * A grouping reading is valid only when each group after the first has exactly
- * three digits, so "12.5" reads only as twelve and a half while "48.750" reads
- * both ways.
- */
-function numericReadings(raw: string): string[] {
-  const readings = new Set<string>();
-  for (const [decimal, grouping] of [['.', /[,'’ ]/u], [',', /[.'’ ]/u], ['', /[.,'’ ]/u]] as const) {
-    const parts = decimal === '' ? [raw] : raw.split(decimal);
-    if (parts.length > 2) continue;
-    const groups = (parts[0] ?? '').split(grouping);
-    if (groups.slice(1).some((group) => group.length !== 3)) continue;
-    const fraction = parts[1] ?? '';
-    if (fraction !== '' && !/^\d+$/u.test(fraction)) continue;
-    const integer = groups.join('');
-    if (!/^\d+$/u.test(integer)) continue;
-    const canonicalInteger = integer.replace(/^0+(?=\d)/u, '');
-    const canonicalFraction = fraction.replace(/0+$/u, '');
-    readings.add(canonicalFraction ? `${canonicalInteger}.${canonicalFraction}` : canonicalInteger);
-  }
-  return [...readings];
-}
-
-function significantDigits(value: string): number {
-  const digits = value.replace(/\./gu, '').replace(/^0+/u, '');
-  return value.includes('.') ? digits.length : digits.replace(/0+$/u, '').length;
 }
