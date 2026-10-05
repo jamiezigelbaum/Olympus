@@ -1458,7 +1458,7 @@ export const DASHBOARD_PRIVACY_QUESTIONS_COPY = {
         bills: 'Invoices, bills and receipts',
         loans: 'Loans and proof of funds',
         articles: 'Articles and guides about money',
-        projects: 'Crypto or company project docs',
+        projects: 'Crypto project whitepapers and research',
         prices: 'Prices and quotes I am researching',
       },
     },
