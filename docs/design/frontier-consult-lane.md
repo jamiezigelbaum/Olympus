@@ -1,7 +1,7 @@
 # Design: frontier consult lane for Private questions
 
 Status: **proposal, not approved.** Written for adversarial review before any build. Nothing here changes shipped behavior or the release plan until the owner rules.
-Date: 2026-10-04
+Date: 2026-10-04, revised 2026-10-05 after owner direction (§1.1)
 Risk class: **Critical**. It changes trust routing, relaxes an advertised non-configurable rule, and touches the `Analyst` contract.
 Authority requested: an owner ruling on §9. [`V0_4_RELEASE.md`](../V0_4_RELEASE.md) says any proposed contract change stops for owner review; this is that stop.
 
@@ -18,6 +18,15 @@ Proof, in order of weight:
 1. A held-out leak eval (§7) shows zero planted identifiers in outbound consults and a re-identification rate no better than chance.
 2. The same eval shows a measurable answer-quality lift over the no-consult baseline. If there is no lift, the lane does not ship.
 3. Security tests prove every failure path answers without a consult and never falls back to sending evidence.
+
+### 1.1 Owner direction already given (2026-10-04/05)
+
+These are settled and are not review questions:
+
+- **Tiers are the product.** Users decide what may go to cloud models. Personal content reaching frontier models and cloud embeddings is by design, not a defect. Olympus is not trying to make everything private.
+- **Olympus is not trying to be fully decentralized.** The relay and publisher apps are accepted central points.
+- **zkAPI users are expected to have a crypto wallet** and to make one transaction to activate it. No wallet-abstraction service and no card checkout (§6).
+- **Venice end-to-end encrypted models become a first-class option** (§6A). This is its own track and does not wait for the consult lane.
 
 ## 2. Position against the release plan
 
@@ -131,12 +140,19 @@ Two honest options; the owner picks in §9.
 
 **What it adds for us.** It removes the payment link, and with Tor the network link, for consults. It adds nothing on content: the provider still reads the prompt, which is why §5.3 is the load-bearing control and this is only a transport.
 
-**How Olympus would support it.**
+**How Olympus would support it (owner direction: the user has a wallet).**
 
-- A consult profile with `transport: "zkapi"` and a loopback `baseUrl`. Olympus speaks the OpenAI API to the daemon and nothing else.
-- The user installs, funds and runs the daemon. Olympus holds no wallet, key, deposit or proof, and ships no daemon and no Tor.
-- Readiness check: endpoint reachable, model list non-empty, one synthetic request succeeds. Tor use is the daemon's configuration; Olympus reports only what the user declared.
-- Advanced setting only. It needs a crypto wallet, which conflicts with the "no accounts beyond Venice" product direction, so it is never part of default onboarding.
+The wallet is needed for one deposit. After that the balance is a private note held on the user's machine, so no wallet service is involved.
+
+1. The user turns on "Anonymous consult (zkAPI)" in the dashboard's advanced model settings.
+2. Olympus starts the zkAPI daemon, which creates the note and a local deposit address. The note secret stays in the daemon's own local storage; Olympus does not copy it.
+3. The dashboard shows the address, the amount and a QR code. The user sends ETH or USDC from their own wallet.
+4. Olympus watches for the deposit, runs one synthetic request, and marks the consult transport ready.
+5. The same page shows the remaining balance, a top-up address, and "withdraw to address".
+
+Olympus speaks the OpenAI API to the daemon on loopback and nothing else. It holds no key that can move funds beyond what the daemon itself holds, ships no Tor, and makes no on-chain call of its own. Tor is the daemon's setting; Olympus reports only what is configured.
+
+Open build question: whether Olympus installs a pinned, checksum-verified daemon release or only detects one the user installed. Installing is the one-toggle experience; detecting keeps a wallet-holding binary out of our supply chain. Recommendation: detect first, install only after the upstream review closes.
 
 **Risks specific to this option (for the reviewer to attack).**
 
@@ -144,10 +160,36 @@ Two honest options; the owner picks in §9.
 2. **Maturity.** Upstream labels the protocol experimental, with a single-party trusted setup and an open note-binding review. Mainnet for three days at the time of writing.
 3. **Small anonymity set.** Early on, few users share the pool. Deposit size, timing and refund-ticket behavior may narrow it further. Unverified; needs a read of the protocol, not the announcement.
 4. **Without Tor the IP still identifies the user.** With Tor, upstream raised its own timeouts to minutes. Our interactive budget is 60 seconds per non-final leg and a 200-second remote hand-off, so a Tor consult will often arrive too late and be dropped.
-5. **A new binary holding funds on the user's machine.** Supply-chain and key-custody risk that Olympus would be recommending, even if it does not ship it.
+5. **A new binary holding funds on the user's machine.** Supply-chain and key-custody risk that Olympus would be recommending or, if it installs the daemon, carrying. Losing the daemon's local storage loses the balance; the dashboard must say so and offer withdrawal.
 6. **Provider choice.** Which models are reachable, and through which intermediary, is set by the zkAPI operator. The intermediary sees prompts too.
 
 **Gate to ship this option:** the upstream review is closed, risk 1 is fixed and tested, and a timed trial shows consults complete inside our budgets often enough to be worth offering.
+
+## 6A. Venice end-to-end encryption as a first-class Private option (separate track)
+
+**Why.** Today Venice Private rests on a no-retention promise. With an end-to-end encrypted model the client encrypts the prompt, Venice relays ciphertext, and only a hardware enclave decrypts it. That replaces most of the promise with cryptography, and it weakens the "Venice writes the consult question" concern in §5.2.
+
+**Current state.** Olympus recognises the `e2ee` category and refuses every `e2ee-*` model with a typed policy error "until Olympus has local key handling" (`CONTRACTS.md`, Venice S4 policy; `SOVEREIGNTY_CONFIG.md` hard invariants; `src/core/venice-models.ts`). `olympus doctor` says E2EE is not provided out of the box.
+
+**What the client must do** (from Venice's privacy docs and an independent open implementation):
+
+1. Fetch the enclave's attestation for the model with a fresh nonce.
+2. Verify it: the nonce is bound, the enclave's key is in the attested report, debug mode is off, the model matches.
+3. Make a one-time key pair, agree a key with the enclave (ECDH on secp256k1, HKDF-SHA256), encrypt each message with AES-256-GCM, and send the public keys in `X-Venice-TEE-*` headers.
+4. Read the streamed reply and decrypt each chunk.
+
+**Build shape.** A Venice E2EE adapter beside the existing Venice analyst adapter, on the same `Analyst` contract with no shape change. The `e2ee-*` refusal is replaced by "refuse unless attestation verified for this request". It becomes a selectable Private posture and a secure-pool member like any other.
+
+**Limits to state honestly in the product.**
+
+- **Attestation is only as strong as what we verify.** A basic check proves the key is bound to *an* enclave report. Full verification of the Intel quote chain is a second step. Venice does not currently publish a stable list of expected code measurements, so the client cannot prove *which* code is running. GPU attestation is separate again. The setting must say which level was verified and must not call the basic level proof.
+- **The reply's origin is weaker than the request's.** The independent implementation notes the streamed reply format does not itself prove the replying key belongs to the attested enclave.
+- **Metadata still leaks to Venice:** account, model, timing, sizes, billing, IP.
+- **Text models only.** No end-to-end encrypted embeddings, so Private search stays keyword or local-embedding. No server-side features (web search, memory, some tool flows); the Analyst uses none of them.
+- **Enclaves are run by Venice's partners** (reported as NEAR AI Cloud and Phala). Trust moves from Venice's promise to the chip maker and those operators.
+- **Licence.** The independent library is GPL-3.0 and cannot be bundled in an MIT plugin. Implement from Venice's published guide on MIT-licensed primitives (`@noble/secp256k1`, `@noble/hashes`, Web Crypto).
+
+**Done when.** A fresh install can pick an end-to-end encrypted Venice model for Private answers from setup; a tampered or debug attestation refuses before dispatch; the held-out eval is green on that lane; and the dashboard states the verified attestation level. Critical change: trust routing and a hard invariant.
 
 ## 7. Eval (done = held-out, not a demo)
 
@@ -170,7 +212,9 @@ The first build phase runs this with **dry-run** consults: questions are generat
 | P1 | Writer instruction, outbound gate, audit record, dry-run only | Leak, re-identification and injection evals pass; no network code exists |
 | P2 | `ask` mode with the default transport | Quality lift shown; fail-closed tests pass; dashboard approval works on a fresh install |
 | P3 | `auto` mode | Separate owner ruling on P2 evidence |
-| P4 | zkAPI transport | §6 ship gate met |
+| P4 | zkAPI transport, dashboard activation flow | §6 ship gate met |
+| E1 (independent) | Venice end-to-end encrypted analyst adapter with basic attestation | §6A "done when" |
+| E2 (independent) | Full Intel quote-chain verification; measurement pinning if Venice publishes it | Verified level shown in the dashboard |
 
 Each phase is a critical change with an independent review receipt.
 
@@ -180,8 +224,9 @@ Each phase is a critical change with an independent review receipt.
 2. Contract route: A (additive field) or B (reuse `escalation`).
 3. Is consult permitted in `private-cloud-only`, where Venice writes the question?
 4. Is `auto` ever allowed, or is `ask` the ceiling?
-5. Is the zkAPI option worth carrying given the wallet requirement?
+5. zkAPI daemon: detect only, or install a pinned release (§6)?
 6. Should the loopback-trust fix (§6 risk 1) ship on its own now, independent of this proposal?
+7. Venice end-to-end encryption: ship with basic attestation and an honest label (E1), or hold until full quote verification (E2)?
 
 ## 10. Attack list for the adversarial review
 
@@ -201,11 +246,13 @@ Each item is a claim this proposal makes or depends on. The review should try to
 12. **Venice as writer.** Does consult in `private-cloud-only` add a meaningful new exposure?
 13. **zkAPI protocol claims.** Unlinkability, refund tickets, trusted setup, anonymity-set size: verified against the protocol, not the launch post.
 14. **Latency and cost.** Two extra model legs inside the interactive budget. Does consult ever complete in time on a local model at 20–30 tokens per second?
-15. **Product trust.** One publicised leak through this lane costs more than the quality it buys. Is `off` by default plus `ask` enough, or should this stay unbuilt?
+15. **End-to-end encryption claims.** Does basic attestation justify the words "end-to-end encrypted" in the product? What does an attacker who controls Venice's relay, but not the enclave, still get? Does the unauthenticated reply stream allow a relay to substitute answers?
+16. **zkAPI activation flow.** Deposit watching, balance display and withdrawal add an on-chain surface to the dashboard. Can a remote agent, hostile page or hostile source content trigger a withdrawal or redirect a top-up address?
+17. **Product trust.** One publicised leak through this lane costs more than the quality it buys. Is `off` by default plus `ask` enough, or should this stay unbuilt?
 
 ## 11. Not proposed
 
-A local model as the user's main agent, sandboxing of the host agent, Olympus-managed Tor, Olympus-managed wallets, sending any redacted `EvidencePack` to a frontier model, and any change to how Secrets are handled.
+A local model as the user's main agent, sandboxing of the host agent, Olympus-managed Tor, wallet-abstraction services or card checkout for zkAPI, any key held by Olympus itself, sending any redacted `EvidencePack` to a frontier model, and any change to how Secrets are handled.
 
 ## Prior art
 
@@ -214,3 +261,5 @@ A local model as the user's main agent, sandboxing of the host agent, Olympus-ma
 - Introducing zkAPI, 2026-10-01: <https://blog.ethereum.org/2026/10/01/introducing-zkapi>
 - ZK API Usage Credits proposal: <https://ethresear.ch/t/zk-api-usage-credits-llms-and-beyond/24104>
 - zkAPI repository and Tor client mode: <https://github.com/ethereum/zkapi>, <https://github.com/ethereum/zkapi/pull/16>
+- Venice privacy modes: <https://docs.venice.ai/overview/privacy>
+- Independent Venice E2EE client library (protocol reference only, GPL-3.0): <https://github.com/jooray/venice-e2ee>
