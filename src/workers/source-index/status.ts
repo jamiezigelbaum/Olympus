@@ -372,7 +372,7 @@ export function createSourceIndexStatusHandler(
           : configuredCorpusStatus(corpus);
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId
-          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability)
+          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope)
           : enforced;
         const resolved = store && corpus.family === 'file'
           ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true
@@ -661,6 +661,7 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
   store: LocalConnectorStore,
   modelId: string,
   availability: SourceIndexHybridAvailability,
+  scope: ConnectorStoreStatusScope | undefined,
 ): T {
   const parity = status.embedding_parity;
   if (!parity?.required) return status;
@@ -669,8 +670,9 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
   const embedder = availability.backend !== undefined && availability.provider !== undefined
     ? { modelId, provider: availability.provider, backend: availability.backend as SourceEmbeddingBackend }
     : undefined;
-  const backlog = store.embeddingBacklogEstimate(modelId, embedder);
-  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder) : undefined;
+  // The same scoped population as the parity counts above (store.status(scope)).
+  const backlog = store.embeddingBacklogEstimate(modelId, embedder, scope);
+  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder, scope) : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {
     ...status,

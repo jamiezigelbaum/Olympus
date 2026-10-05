@@ -443,6 +443,9 @@ function renderProgress(
     notes.push(`${dashboardCount(backlog.missing_chunks)} chunks are waiting to be embedded`
       + ` (${embeddingCostPhrase(backlog.estimate)}). Keyword search answers from them meanwhile.`);
   }
+  if (source.embedding_required !== false && (backlog?.private_withheld_chunks ?? 0) > 0) {
+    notes.push(`${dashboardCount(backlog!.private_withheld_chunks!)} chunks are kept out of cloud embedding because they are Private. Keyword search still finds them.`);
+  }
   if (progress.phases.some((phase) => phase.unmeasured === true)) {
     notes.push('This store does not yet publish a per-item embedding count, so the embedding row states no share rather than deriving one from chunk totals.');
   }

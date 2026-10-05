@@ -28,16 +28,17 @@ const S4_TEXT = 'orchid ledger body that is private by its own tier';
 const INVALID_TITLE = 'quartz-unknown-title';
 const INVALID_TEXT = 'quartz body whose stored tier is not one the store knows';
 
-interface Fixture { id: string; text: string; tier: string }
+interface Fixture { id: string; text: string; tier: string; account?: string }
 
 function rawItem(fixture: Fixture): RawItem {
+  const account = fixture.account ?? ACCOUNT;
   return {
     identity: {
       family: 'file',
       provider: 'fixture',
-      accountScope: ACCOUNT,
+      accountScope: account,
       providerItemId: fixture.id,
-      localItemId: `${ACCOUNT}:${fixture.id}`,
+      localItemId: `${account}:${fixture.id}`,
       sourceVersion: `${fixture.id}:v1`,
     },
     mimeType: 'text/markdown',
@@ -76,7 +77,7 @@ const FIXTURES: Fixture[] = [
 ];
 
 function placementFor(fixtures: readonly Fixture[]) {
-  const tiers = new Map(fixtures.map((fixture) => [`${ACCOUNT}:${fixture.id}`, fixture.tier]));
+  const tiers = new Map(fixtures.map((fixture) => [`${fixture.account ?? ACCOUNT}:${fixture.id}`, fixture.tier]));
   // A placement's tier is not checked on write (see analyst-source-answer's
   // invalid-tier test), which is how an unknown tier can reach a row.
   return (item: RawItem) => ({
@@ -101,9 +102,12 @@ function capturingProvider(
   backend: SourceEmbeddingBackend,
   provider: string,
   modelId = `${provider}-${backend}-model`,
-): SourceEmbeddingProvider & { captured: SourceEmbeddingInput[] } {
+  onCall?: (call: number) => Promise<void>,
+): SourceEmbeddingProvider & { captured: SourceEmbeddingInput[]; calls: SourceEmbeddingInput[][] } {
   const captured: SourceEmbeddingInput[] = [];
+  const calls: SourceEmbeddingInput[][] = [];
   return {
+    calls,
     captured,
     provider,
     modelId,
@@ -113,6 +117,9 @@ function capturingProvider(
     backend,
     async embed(inputs: SourceEmbeddingInput[]): Promise<number[][]> {
       captured.push(...inputs);
+      calls.push([...inputs]);
+      // The round trip is the window: another lane writes while a batch is out.
+      await onCall?.(calls.length);
       return inputs.map(() => [1, 0]);
     },
   };
@@ -232,7 +239,9 @@ describe('a row Private by its own tier is withheld from an embedder not approve
       expect(summary.chunksEmbedded).toBe(0);
       expect(embeddedChunks(store, cloud.modelId)).toBe(3);
       expect(store.hasEmbeddings(cloud.modelId)).toBe(true);
-      // Its current vector means it is not counted as withheld either.
+      // Its current vector means it is not counted as withheld either, by the
+      // run summary or by the status method.
+      expect(summary.privateTierWithheld).toBeUndefined();
       expect(store.privateTierEmbeddingWithheld(cloud)).toMatchObject({ items: 0, chunks: 0 });
     } finally {
       store.close();
@@ -273,6 +282,116 @@ describe('a row Private by its own tier is withheld from an embedder not approve
         backlog_estimate: { missing_chunks: 0 },
       });
       expect(JSON.stringify(result)).not.toContain('orchid');
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a row that turns Private while an earlier batch is out is not sent in a later batch', async () => {
+    // 33 rows: the store embeds in batches of 32, so row 33 is in the second.
+    const rows: Fixture[] = Array.from({ length: 33 }, (_, index) => ({
+      id: `row-${String(index + 1).padStart(2, '0')}`,
+      text: index === 32 ? 'lilac late row that turns private' : `meadow row number ${index + 1}`,
+      tier: 'S3',
+    }));
+    const store = await internalStore(rows);
+    const turned = rows.map((row, index) => (index === 32 ? { ...row, tier: 'S4' } : row));
+    const cloud = capturingProvider('cloud', 'gemini', 'gemini-cloud-model', async (call) => {
+      if (call !== 1) return;
+      // Re-placed at S4 (same content) during the first provider call.
+      await store.syncFromConnector(connector([turned[32]!]), { fetchContent: true, placement: placementFor(turned) });
+    });
+    try {
+      const summary = await store.embedChunks({ provider: cloud });
+      expect(cloud.calls.map((call) => call.length)).toEqual([32]);
+      expect(capturedText(cloud)).not.toContain('lilac');
+      expect(summary.chunksEmbedded).toBe(32);
+      expect(summary.privateTierWithheld).toEqual({ chunks: 1, reason: 'private_tier_requires_private_embedder' });
+      expect(summary.chunksSeen).toBe(summary.chunksEmbedded + summary.chunksSkipped);
+      expect(store.privateTierEmbeddingWithheld(cloud)).toMatchObject({ items: 1, chunks: 1 });
+    } finally {
+      store.close();
+    }
+  });
+
+  test('journals: a run whose input changed fails closed, and a fresh journal completes without re-embedding', async () => {
+    const rows: Fixture[] = Array.from({ length: 33 }, (_, index) => ({
+      id: `row-${String(index + 1).padStart(2, '0')}`,
+      text: `meadow row number ${index + 1}`,
+      tier: 'S3',
+    }));
+    const store = await internalStore(rows);
+    // The provider fails its second batch, leaving the first journal running.
+    const failing = capturingProvider('cloud', 'gemini', 'gemini-cloud-model', async (call) => {
+      if (call === 2) throw new Error('provider refused the batch');
+    });
+    try {
+      await expect(store.embedChunks({ provider: failing, journalId: 'embedding-journal-one', journalLeaseGeneration: 1 }))
+        .rejects.toThrow('provider refused the batch');
+      expect(embeddedChunks(store, failing.modelId)).toBe(32);
+
+      // An already-embedded row turns Private: the running journal's input
+      // changed, so it refuses to resume.
+      const turned = rows.map((row, index) => (index === 0 ? { ...row, tier: 'S4' } : row));
+      await store.syncFromConnector(connector([turned[0]!]), { fetchContent: true, placement: placementFor(turned) });
+      const cloud = capturingProvider('cloud', 'gemini', 'gemini-cloud-model');
+      await expect(store.embedChunks({ provider: cloud, journalId: 'embedding-journal-one', journalLeaseGeneration: 2 }))
+        .rejects.toThrow('journal input changed');
+      expect(cloud.captured).toEqual([]);
+
+      // A fresh journal finishes the remainder and nothing already done is sent again.
+      const fresh = await store.embedChunks({ provider: cloud, journalId: 'embedding-journal-two', journalLeaseGeneration: 1 });
+      expect(cloud.captured).toHaveLength(1);
+      expect(capturedText(cloud)).toContain('meadow row number 33');
+      expect(fresh.chunksEmbedded).toBe(1);
+      expect(fresh.privateTierWithheld).toBeUndefined();
+      // The Private row's earlier vector is kept.
+      expect(embeddedChunks(store, cloud.modelId)).toBe(33);
+
+      // Input is validated before a completed journal's result is replayed,
+      // so the guard holds for completed journals too.
+      const retiered = turned.map((row, index) => (index === 1 ? { ...row, tier: 'S4' } : row));
+      await store.syncFromConnector(connector([retiered[1]!]), { fetchContent: true, placement: placementFor(retiered) });
+      await expect(store.embedChunks({ provider: cloud, journalId: 'embedding-journal-two', journalLeaseGeneration: 2 }))
+        .rejects.toThrow('journal input changed');
+      expect(embeddedChunks(store, cloud.modelId)).toBe(33);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('status counts withheld chunks in the same scope as its parity', async () => {
+    // One unembedded S3 row inside the selected account, one S4 row outside it.
+    const store = await internalStore([
+      { id: 'inside', text: 'garden row inside the scope', tier: 'S3', account: 'selected' },
+      { id: 'outside', text: 'orchid row outside the scope', tier: 'S4', account: 'other' },
+    ]);
+    const cloud = capturingProvider('cloud', 'gemini');
+    try {
+      const status = createSourceIndexStatusHandler({
+        corpusDefinitions: [defineConnectorCorpus({
+          corpusId: store.corpusId,
+          family: 'file',
+          trustDomain: 'internal',
+          activationMode: 'hybrid_primary',
+        })],
+        connectorStores: [store],
+        connectorStoreStatusScope: () => ({ accountScope: 'selected' }),
+        retrievalAvailability: {
+          [store.corpusId]: {
+            servable: false,
+            reason: 'no_current_embedding_artifacts',
+            modelId: cloud.modelId,
+            embeddingEpoch: cloud.epochId,
+            backend: cloud.backend,
+            provider: cloud.provider,
+          },
+        },
+      });
+      const parity = (await status.status({ corpus_id: store.corpusId })).corpora[0]!.embedding_parity!;
+      expect(parity).toMatchObject({ chunks: 1, missing_chunks: 1, refresh_needed: true });
+      expect(parity.private_tier_withheld).toBeUndefined();
+      expect(parity.backlog_estimate?.missing_chunks).toBe(1);
     } finally {
       store.close();
     }

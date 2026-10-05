@@ -414,9 +414,13 @@ function embeddingsLaneView(
   const facts: string[] = [];
   if (fraction !== undefined) facts.push(`${Math.round(fraction * 100)}% embedded`);
   if (backlog) {
+    const withheld = backlog.private_withheld_chunks ?? 0;
     facts.push(backlog.missing_chunks > 0
       ? `${compactCount(backlog.missing_chunks)} of ${compactCount(backlog.chunks)} chunks left`
-      : `all ${compactCount(backlog.chunks)} chunks embedded`);
+      : withheld > 0
+        ? `${compactCount(backlog.embedded_chunks)} of ${compactCount(backlog.chunks)} chunks embedded`
+        : `all ${compactCount(backlog.chunks)} chunks embedded`);
+    if (withheld > 0) facts.push(`${compactCount(withheld)} kept out of cloud embedding because they are Private`);
     if (backlog.refresh_needed) facts.push('re-embed needed');
   }
   const status = deriveLaneState({

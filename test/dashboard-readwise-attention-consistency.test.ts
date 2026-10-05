@@ -31,12 +31,15 @@ interface TaskState {
   degradedReason?: string;
 }
 
-function readwiseView(pull: TaskState, options: { embeddingRequired?: boolean } = {}): SourceDashboardViewModel {
+function readwiseView(
+  pull: TaskState,
+  options: { embeddingRequired?: boolean; privateWithheldOnly?: boolean } = {},
+): SourceDashboardViewModel {
   const required = options.embeddingRequired === true;
   const corpus = (
     corpusId: string,
     trustDomain: 'internal' | 'secure_local',
-    counts: { items: number; text: number; chunks: number; embedded: number; itemsEmbedded: number },
+    counts: { items: number; text: number; chunks: number; embedded: number; itemsEmbedded: number; withheld?: number },
   ) => ({
     corpus_id: corpusId,
     family: 'readwise',
@@ -71,6 +74,21 @@ function readwiseView(pull: TaskState, options: { embeddingRequired?: boolean } 
             },
           }
         : {}),
+      // What status reports when the remainder is only Private-tier chunks
+      // the cloud embedder may not receive.
+      ...(counts.withheld
+        ? {
+            refresh_needed: false,
+            private_tier_withheld: { chunks: counts.withheld, reason: 'private_tier_requires_private_embedder' },
+            backlog_estimate: {
+              model_id: 'fixture-model',
+              missing_chunks: 0,
+              estimated_tokens: 0,
+              estimated_cost_usd: 0,
+              price_source: 'default_unverified',
+            },
+          }
+        : {}),
     },
     last_refresh: {
       sync_run_id: `run-${trustDomain}`,
@@ -87,8 +105,12 @@ function readwiseView(pull: TaskState, options: { embeddingRequired?: boolean } 
     kind: 'source_index_status',
     generated_at: NOW.toISOString(),
     corpora: [
-      corpus('internal.readwise.library', 'internal', { items: 2040, text: 900, chunks: 1527, embedded: 1527, itemsEmbedded: 900 }),
-      corpus('secure_local.readwise.library', 'secure_local', { items: 751, text: 751, chunks: 5704, embedded: 1664, itemsEmbedded: 107 }),
+      options.privateWithheldOnly
+        ? corpus('internal.readwise.library', 'internal', { items: 2040, text: 900, chunks: 1527, embedded: 1500, itemsEmbedded: 880, withheld: 27 })
+        : corpus('internal.readwise.library', 'internal', { items: 2040, text: 900, chunks: 1527, embedded: 1527, itemsEmbedded: 900 }),
+      options.privateWithheldOnly
+        ? corpus('secure_local.readwise.library', 'secure_local', { items: 751, text: 751, chunks: 5704, embedded: 5704, itemsEmbedded: 751 })
+        : corpus('secure_local.readwise.library', 'secure_local', { items: 751, text: 751, chunks: 5704, embedded: 1664, itemsEmbedded: 107 }),
     ],
   } as unknown as SourceIndexStatusResult;
   const scheduler: SourceSchedulerStatus = {
@@ -294,6 +316,29 @@ describe('the Readwise page states one embedding fact and counts in its own noun
       price_source: 'default_unverified',
     });
     expect(html).toContain('4,040 chunks are waiting to be embedded (about 2.0M tokens, ~$0.03 estimated at unverified list price)');
+  });
+
+  test('chunks kept out of cloud embedding because they are Private are not shown as work left', () => {
+    const view = readwiseView({ failures: 0 }, { embeddingRequired: true, privateWithheldOnly: true });
+    const card = readwiseCard(view);
+
+    // Total coverage stays honest: 27 chunks are not embedded, none is waiting.
+    expect(card.embedding_backlog).toMatchObject({
+      chunks: 7231,
+      embedded_chunks: 7204,
+      missing_chunks: 0,
+      private_withheld_chunks: 27,
+      refresh_needed: false,
+    });
+    expect(view.background_work?.embedding_backlog?.private_withheld_chunks).toBe(27);
+    const detail = renderDashboardDetailBody(card, { now: NOW });
+    expect(detail).toContain('27 chunks are kept out of cloud embedding because they are Private. Keyword search still finds them.');
+    expect(detail).not.toContain('waiting to be embedded');
+    const background = renderDashboardBackgroundBody(view, NOW);
+    expect(background).toContain('27 kept out of cloud embedding because they are Private');
+    expect(background).not.toContain('chunks left');
+    expect(background).not.toContain('chunks not yet embedded');
+    expect(background).not.toMatch(/all [0-9.,K]+ chunks embedded/);
   });
 
   test('Readwise counts in items — it holds documents and highlights — never files', () => {

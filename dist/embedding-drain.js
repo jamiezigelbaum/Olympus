@@ -12091,6 +12091,18 @@ function connectorStoreEmbeddingInputSha256(rows) {
 `);
   return digest.digest("hex");
 }
+function statusScopeContentFilter(scope) {
+  if (!scope)
+    return { filter: "", params: [] };
+  const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+  const contentFilters = connectorStoreFilterSql(scope.contentFilters);
+  return {
+    filter: `${scope.contentAllowed === false ? "AND 0" : ""}
+      ${accountScope ? "AND i.account_scope = ?" : ""}
+      ${contentFilters.sql}`,
+    params: [...accountScope ? [accountScope] : [], ...contentFilters.params]
+  };
+}
 function connectorStoreEmbedSummary(corpusId, trustDomain, provider, chunksSeen, chunksEmbedded, chunksSkipped) {
   return {
     corpusId,
@@ -16673,11 +16685,12 @@ var init_local_index = __esm(() => {
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
       return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
     }
-    embeddingBacklogEstimate(modelId, embedder) {
+    embeddingBacklogEstimate(modelId, embedder, scope) {
       const tierExclusion = this.embeddingTierExclusionFilter();
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
-      const filter = `${tierExclusion.filter} ${privateTier.filter}`;
-      const params = [...tierExclusion.params, ...privateTier.params];
+      const scoped = statusScopeContentFilter(scope);
+      const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
+      const params = [...tierExclusion.params, ...privateTier.params, ...scoped.params];
       const row = this.db.query(`
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
@@ -16712,16 +16725,42 @@ var init_local_index = __esm(() => {
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
+    embeddingBatchRecheck(batch, embeddableTiers) {
+      const itemPks = [...new Set(batch.map((row) => row.item_pk))];
+      const current = new Map(this.db.query(`
+      SELECT item_pk, trust_tier, tombstoned FROM items
+      WHERE item_pk IN (SELECT value FROM json_each(?))
+    `).all(JSON.stringify(itemPks)).map((row) => [row.item_pk, row]));
+      const tierHidden = this.tierHiddenItemPks();
+      const hidden = new Set([...tierHidden.hidden, ...tierHidden.held, ...tierHidden.metadataLayer]);
+      const kept = [];
+      let privateTier = 0;
+      let notVisible = 0;
+      for (const row of batch) {
+        const item = current.get(row.item_pk);
+        if (!item || item.tombstoned !== 0 || hidden.has(row.item_pk)) {
+          notVisible += 1;
+        } else if (!embeddableTiers.includes(item.trust_tier)) {
+          privateTier += 1;
+        } else {
+          kept.push(row);
+        }
+      }
+      return { kept, privateTier, notVisible };
+    }
     privateTierEmbeddingFilter(embedder) {
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
       return tiers === undefined ? { filter: "", params: [] } : { filter: "AND i.trust_tier IN (SELECT value FROM json_each(?))", params: [JSON.stringify(tiers)] };
     }
-    privateTierEmbeddingWithheld(embedder) {
+    privateTierEmbeddingWithheld(embedder, scope) {
       const reason = CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
       if (tiers === undefined)
         return { items: 0, chunks: 0, reason };
-      const { filter, params } = this.embeddingTierExclusionFilter();
+      const tierExclusion = this.embeddingTierExclusionFilter();
+      const scoped = statusScopeContentFilter(scope);
+      const filter = `${tierExclusion.filter} ${scoped.filter}`;
+      const params = [...tierExclusion.params, ...scoped.params];
       const row = this.db.query(`
       SELECT COUNT(*) AS chunks, COUNT(DISTINCT c.item_pk) AS items
       FROM chunks c
@@ -16783,7 +16822,18 @@ var init_local_index = __esm(() => {
       const selectedRows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters);
       const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
       const rows = embeddableTiers === undefined ? selectedRows : selectedRows.filter((row) => embeddableTiers.includes(row.trust_tier));
-      const privateTierWithheldChunks = selectedRows.length - rows.length;
+      let privateTierWithheldChunks = 0;
+      if (rows.length !== selectedRows.length) {
+        const kept = new Set(rows);
+        const currentVector = this.db.query("SELECT content_hash FROM chunk_embeddings WHERE chunk_pk = ? AND model_id = ?");
+        for (const row of selectedRows) {
+          if (kept.has(row))
+            continue;
+          const existing = currentVector.get(row.chunk_pk, provider.modelId);
+          if (existing?.content_hash !== row.content_hash)
+            privateTierWithheldChunks += 1;
+        }
+      }
       const selectionSha256 = connectorStoreEmbeddingSelectionSha256(options.localItemIds);
       const inputSha256 = connectorStoreEmbeddingInputSha256(rows);
       if (priorCounts && (priorCounts.chunksSeen !== rows.length || priorCounts.selectionSha256 !== selectionSha256 || priorCounts.inputSha256 !== inputSha256 || priorCounts.invalidateCurrentModelEmbeddings !== invalidateCurrentModelEmbeddings)) {
@@ -16858,8 +16908,16 @@ var init_local_index = __esm(() => {
       let embedded = priorCounts?.chunksEmbedded ?? 0;
       let staleSkipped = 0;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-        const batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+        let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
+        if (embeddableTiers !== undefined) {
+          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers);
+          privateTierWithheldChunks += recheck.privateTier;
+          staleSkipped += recheck.notVisible + recheck.privateTier;
+          batch = recheck.kept;
+          if (batch.length === 0)
+            continue;
+        }
         const vectors = await provider.embed(batch.map((row) => ({
           ...row.title ? { title: row.title } : {},
           text: buildConnectorStoreEmbeddingText(row)

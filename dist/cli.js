@@ -17911,6 +17911,18 @@ function connectorStoreEmbeddingInputSha256(rows) {
 `);
   return digest2.digest("hex");
 }
+function statusScopeContentFilter(scope) {
+  if (!scope)
+    return { filter: "", params: [] };
+  const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+  const contentFilters = connectorStoreFilterSql(scope.contentFilters);
+  return {
+    filter: `${scope.contentAllowed === false ? "AND 0" : ""}
+      ${accountScope ? "AND i.account_scope = ?" : ""}
+      ${contentFilters.sql}`,
+    params: [...accountScope ? [accountScope] : [], ...contentFilters.params]
+  };
+}
 function mergedPrivateTierWithheld(a, b) {
   const chunks = (a.privateTierWithheld?.chunks ?? 0) + (b.privateTierWithheld?.chunks ?? 0);
   return chunks > 0 ? { privateTierWithheld: { chunks, reason: CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON } } : {};
@@ -22500,11 +22512,12 @@ var init_local_index = __esm(() => {
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
       return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
     }
-    embeddingBacklogEstimate(modelId, embedder) {
+    embeddingBacklogEstimate(modelId, embedder, scope) {
       const tierExclusion = this.embeddingTierExclusionFilter();
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
-      const filter = `${tierExclusion.filter} ${privateTier.filter}`;
-      const params = [...tierExclusion.params, ...privateTier.params];
+      const scoped = statusScopeContentFilter(scope);
+      const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
+      const params = [...tierExclusion.params, ...privateTier.params, ...scoped.params];
       const row = this.db.query(`
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
@@ -22539,16 +22552,42 @@ var init_local_index = __esm(() => {
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
+    embeddingBatchRecheck(batch, embeddableTiers) {
+      const itemPks = [...new Set(batch.map((row) => row.item_pk))];
+      const current = new Map(this.db.query(`
+      SELECT item_pk, trust_tier, tombstoned FROM items
+      WHERE item_pk IN (SELECT value FROM json_each(?))
+    `).all(JSON.stringify(itemPks)).map((row) => [row.item_pk, row]));
+      const tierHidden = this.tierHiddenItemPks();
+      const hidden = new Set([...tierHidden.hidden, ...tierHidden.held, ...tierHidden.metadataLayer]);
+      const kept = [];
+      let privateTier = 0;
+      let notVisible = 0;
+      for (const row of batch) {
+        const item = current.get(row.item_pk);
+        if (!item || item.tombstoned !== 0 || hidden.has(row.item_pk)) {
+          notVisible += 1;
+        } else if (!embeddableTiers.includes(item.trust_tier)) {
+          privateTier += 1;
+        } else {
+          kept.push(row);
+        }
+      }
+      return { kept, privateTier, notVisible };
+    }
     privateTierEmbeddingFilter(embedder) {
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
       return tiers === undefined ? { filter: "", params: [] } : { filter: "AND i.trust_tier IN (SELECT value FROM json_each(?))", params: [JSON.stringify(tiers)] };
     }
-    privateTierEmbeddingWithheld(embedder) {
+    privateTierEmbeddingWithheld(embedder, scope) {
       const reason = CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
       if (tiers === undefined)
         return { items: 0, chunks: 0, reason };
-      const { filter, params } = this.embeddingTierExclusionFilter();
+      const tierExclusion = this.embeddingTierExclusionFilter();
+      const scoped = statusScopeContentFilter(scope);
+      const filter = `${tierExclusion.filter} ${scoped.filter}`;
+      const params = [...tierExclusion.params, ...scoped.params];
       const row = this.db.query(`
       SELECT COUNT(*) AS chunks, COUNT(DISTINCT c.item_pk) AS items
       FROM chunks c
@@ -22610,7 +22649,18 @@ var init_local_index = __esm(() => {
       const selectedRows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters);
       const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
       const rows = embeddableTiers === undefined ? selectedRows : selectedRows.filter((row) => embeddableTiers.includes(row.trust_tier));
-      const privateTierWithheldChunks = selectedRows.length - rows.length;
+      let privateTierWithheldChunks = 0;
+      if (rows.length !== selectedRows.length) {
+        const kept = new Set(rows);
+        const currentVector = this.db.query("SELECT content_hash FROM chunk_embeddings WHERE chunk_pk = ? AND model_id = ?");
+        for (const row of selectedRows) {
+          if (kept.has(row))
+            continue;
+          const existing = currentVector.get(row.chunk_pk, provider.modelId);
+          if (existing?.content_hash !== row.content_hash)
+            privateTierWithheldChunks += 1;
+        }
+      }
       const selectionSha256 = connectorStoreEmbeddingSelectionSha256(options.localItemIds);
       const inputSha256 = connectorStoreEmbeddingInputSha256(rows);
       if (priorCounts && (priorCounts.chunksSeen !== rows.length || priorCounts.selectionSha256 !== selectionSha256 || priorCounts.inputSha256 !== inputSha256 || priorCounts.invalidateCurrentModelEmbeddings !== invalidateCurrentModelEmbeddings)) {
@@ -22685,8 +22735,16 @@ var init_local_index = __esm(() => {
       let embedded = priorCounts?.chunksEmbedded ?? 0;
       let staleSkipped = 0;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-        const batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+        let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
+        if (embeddableTiers !== undefined) {
+          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers);
+          privateTierWithheldChunks += recheck.privateTier;
+          staleSkipped += recheck.notVisible + recheck.privateTier;
+          batch = recheck.kept;
+          if (batch.length === 0)
+            continue;
+        }
         const vectors = await provider.embed(batch.map((row) => ({
           ...row.title ? { title: row.title } : {},
           text: buildConnectorStoreEmbeddingText(row)
@@ -49686,7 +49744,7 @@ function createSourceIndexStatusHandler(options = {}) {
         const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId) : undefined;
         const status = store ? connectorStoreStatus(corpus, store.status(statusScope), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store)) : configuredCorpusStatus(corpus);
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
-        const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability) : enforced;
+        const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope) : enforced;
         const resolved = store && corpus.family === "file" ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true ? availability?.modelId : undefined) : withBacklog;
         if (maxAgeMs > 0)
           cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
@@ -49897,13 +49955,13 @@ function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
     }
   };
 }
-function withEmbeddingBacklogEstimate(status, store, modelId, availability) {
+function withEmbeddingBacklogEstimate(status, store, modelId, availability, scope) {
   const parity = status.embedding_parity;
   if (!parity?.required)
     return status;
   const embedder = availability.backend !== undefined && availability.provider !== undefined ? { modelId, provider: availability.provider, backend: availability.backend } : undefined;
-  const backlog = store.embeddingBacklogEstimate(modelId, embedder);
-  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder) : undefined;
+  const backlog = store.embeddingBacklogEstimate(modelId, embedder, scope);
+  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder, scope) : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {
     ...status,
@@ -50620,10 +50678,12 @@ function embeddingBacklogFromCorpora(corpora) {
   if (chunks <= 0)
     return;
   const estimates = parities.map((parity) => parity.backlog_estimate).filter((estimate) => estimate !== undefined);
+  const withheld = parities.reduce((sum2, parity) => sum2 + (parity.private_tier_withheld?.chunks ?? 0), 0);
   return {
     chunks,
     embedded_chunks: parities.reduce((sum2, parity) => sum2 + parity.embedded_chunks, 0),
-    missing_chunks: parities.reduce((sum2, parity) => sum2 + parity.missing_chunks, 0),
+    missing_chunks: parities.reduce((sum2, parity) => sum2 + Math.max(0, parity.missing_chunks - (parity.private_tier_withheld?.chunks ?? 0)), 0),
+    ...withheld > 0 ? { private_withheld_chunks: withheld } : {},
     refresh_needed: parities.some((parity) => parity.refresh_needed),
     ...estimates.length > 0 ? {
       estimate: {
@@ -89528,7 +89588,10 @@ function embeddingsLaneView(view, options, now) {
   if (fraction !== undefined)
     facts.push(`${Math.round(fraction * 100)}% embedded`);
   if (backlog) {
-    facts.push(backlog.missing_chunks > 0 ? `${compactCount(backlog.missing_chunks)} of ${compactCount(backlog.chunks)} chunks left` : `all ${compactCount(backlog.chunks)} chunks embedded`);
+    const withheld = backlog.private_withheld_chunks ?? 0;
+    facts.push(backlog.missing_chunks > 0 ? `${compactCount(backlog.missing_chunks)} of ${compactCount(backlog.chunks)} chunks left` : withheld > 0 ? `${compactCount(backlog.embedded_chunks)} of ${compactCount(backlog.chunks)} chunks embedded` : `all ${compactCount(backlog.chunks)} chunks embedded`);
+    if (withheld > 0)
+      facts.push(`${compactCount(withheld)} kept out of cloud embedding because they are Private`);
     if (backlog.refresh_needed)
       facts.push("re-embed needed");
   }
@@ -92079,6 +92142,9 @@ function renderProgress2(source, progress, now) {
   const backlog = source.embedding_backlog;
   if (source.embedding_required !== false && backlog?.estimate && backlog.missing_chunks > 0) {
     notes.push(`${dashboardCount(backlog.missing_chunks)} chunks are waiting to be embedded` + ` (${embeddingCostPhrase(backlog.estimate)}). Keyword search answers from them meanwhile.`);
+  }
+  if (source.embedding_required !== false && (backlog?.private_withheld_chunks ?? 0) > 0) {
+    notes.push(`${dashboardCount(backlog.private_withheld_chunks)} chunks are kept out of cloud embedding because they are Private. Keyword search still finds them.`);
   }
   if (progress.phases.some((phase) => phase.unmeasured === true)) {
     notes.push("This store does not yet publish a per-item embedding count, so the embedding row states no share rather than deriving one from chunk totals.");

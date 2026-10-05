@@ -340,7 +340,14 @@ export interface DashboardPhaseMovement {
 export interface DashboardEmbeddingBacklog {
   chunks: number;
   embedded_chunks: number;
+  /** Chunks still waiting for the embedding drain: work it will do. */
   missing_chunks: number;
+  /**
+   * Chunks never sent to the cloud embedder because their item is Private.
+   * Not waiting for anything, so not in missing_chunks; still not embedded,
+   * so chunks = embedded_chunks + missing_chunks + this. Absent when zero.
+   */
+  private_withheld_chunks?: number;
   refresh_needed: boolean;
   /**
    * An ESTIMATE of embedding what is still missing, summed over the card's
@@ -2567,10 +2574,15 @@ function embeddingBacklogFromCorpora(
   const estimates = parities
     .map((parity) => parity.backlog_estimate)
     .filter((estimate): estimate is NonNullable<typeof estimate> => estimate !== undefined);
+  const withheld = parities.reduce((sum, parity) => sum + (parity.private_tier_withheld?.chunks ?? 0), 0);
   return {
     chunks,
     embedded_chunks: parities.reduce((sum, parity) => sum + parity.embedded_chunks, 0),
-    missing_chunks: parities.reduce((sum, parity) => sum + parity.missing_chunks, 0),
+    missing_chunks: parities.reduce(
+      (sum, parity) => sum + Math.max(0, parity.missing_chunks - (parity.private_tier_withheld?.chunks ?? 0)),
+      0,
+    ),
+    ...(withheld > 0 ? { private_withheld_chunks: withheld } : {}),
     refresh_needed: parities.some((parity) => parity.refresh_needed),
     ...(estimates.length > 0
       ? {
