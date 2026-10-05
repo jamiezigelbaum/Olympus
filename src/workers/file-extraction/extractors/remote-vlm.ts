@@ -47,6 +47,7 @@ import {
   renderPdfFirstPageForVision,
 } from './pdf-render.ts';
 import { missingBytesFailure } from './text.ts';
+import { assertNotZkapiDaemonEndpoint } from '../../../core/zkapi-consult-settings.ts';
 
 export const REMOTE_VLM_EXTRACTOR_VERSION = 'venice-v1';
 export const APPROVED_REMOTE_EXTRACTION_HOST = 'api.venice.ai';
@@ -197,7 +198,17 @@ export function requireLocalHttpBaseUrl(value: string | undefined, label: string
   if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !isLoopback) {
     throw new Error(`${label} must use a loopback HTTP(S) endpoint for secure-local vision extraction.`);
   }
+  assertNotZkapiVisionEndpoint(raw, label);
   return raw;
+}
+
+/**
+ * A zkAPI daemon port (the default or any configured zkapi profile's) forwards
+ * to cloud providers, so it is never a local vision backend. Checked when the
+ * client is built and again on every request.
+ */
+function assertNotZkapiVisionEndpoint(url: string, label: string): void {
+  assertNotZkapiDaemonEndpoint(url, label);
 }
 
 /**

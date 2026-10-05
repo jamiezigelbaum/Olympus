@@ -2,6 +2,7 @@ import type { ArgusLane, ArgusModelProfile, OlympusConfig } from './config.ts';
 import { OperationError } from './operation-error.ts';
 import { assertLocalModelIdNotCloudForwarding } from './local-model-policy.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
+import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
 import { resolveSecretRefValue } from './secret-store.ts';
 
 export type DelphiFetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -277,6 +278,8 @@ export class DirectHttpDelphiTransport implements DelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      // A zkAPI daemon port is refused before anything is sent: not an outage.
+      if (isZkapiDaemonEndpointRefusal(firstError)) throw firstError;
       // A redirect is the endpoint's answer, not a stale socket: no retry,
       // and nothing from the request or the Location header in the error.
       if (isModelEndpointRedirectError(firstError)) throw argusRedirectError(lane, firstError);

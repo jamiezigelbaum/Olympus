@@ -5,6 +5,7 @@
 // every check returns statuses and counts only — never tokens, source text,
 // or packets. Each check is isolated, and runDoctor itself never throws.
 
+import { fetchModelEndpoint } from './model-transport.ts';
 import {
   configWithEnvironmentOverrides,
   parseOptionalBooleanEnv,
@@ -55,6 +56,12 @@ import {
   publicSourceDoctorLanes,
 } from './public-source-capabilities.ts';
 import { createSourceCorpusRegistry } from './source-corpus-registry.ts';
+import { createDefaultSecretStore, normalizeSecretRef } from './secret-store.ts';
+import {
+  defaultZkapiStatePath,
+  zkapiConsultReadiness,
+  type ZkapiConsultReadiness,
+} from './consult-transport-zkapi.ts';
 
 export interface DoctorCheck {
   name: string;
@@ -84,6 +91,8 @@ export interface DoctorDeps {
    * never reads the developer's own install.
    */
   workerEnvPath?: string;
+  /** The persistent zkAPI consult ledger; defaults beside sovereignty.json. */
+  zkapiStatePath?: string;
   /**
    * What hosts the engine on this machine. Optional so a test never inspects
    * the developer's own launchd; the `olympus doctor` operation passes
@@ -174,6 +183,7 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
     await safeCheck('credential_reauthorization_backlog', () => credentialReauthorizationBacklogCheck(deps)),
     await safeCheck('argus_model_pool', () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck('sovereignty_model_lanes', () => sovereigntyModelLaneCheck(deps)),
+    await safeCheck('zkapi_consult_transport', () => zkapiConsultTransportCheck(deps)),
     await safeCheck('email_worker', () => emailWorkerCheck(deps)),
     await safeCheck('worker_credential_lanes', () => workerCredentialLanesCheck(deps)),
     await safeCheck('dropbox_content_extraction_throughput', () => dropboxContentExtractionThroughputCheck(deps)),
@@ -515,7 +525,7 @@ async function sovereigntyModelLaneCheck(deps: DoctorDeps): Promise<DoctorCheck>
     const baseUrl = profile.baseUrl!;
     const modelsUrl = `${baseUrl.replace(/\/$/, '')}/models`;
     try {
-      const response = await fetchImpl(modelsUrl, { method: 'GET' });
+      const response = await fetchModelEndpoint(fetchImpl, modelsUrl, { method: 'GET' });
       if (!response.ok) problems.push(`${profileId} at ${modelsUrl} returned HTTP ${response.status}`);
     } catch (error) {
       problems.push(`${profileId} at ${modelsUrl} failed: ${errorDetail(error)}`);
@@ -534,6 +544,116 @@ async function sovereigntyModelLaneCheck(deps: DoctorDeps): Promise<DoctorCheck>
     ok: true,
     detail: `Configured local sovereignty model lanes are reachable (${profiles.length} profile${profiles.length === 1 ? '' : 's'} checked).`,
   };
+}
+
+/**
+ * The experimental zkAPI consult transport, content-free. Doctor starts no Tor,
+ * no daemon and no inference: it reports the executables and the daemon's
+ * self-reported version, whether the daemon and Tor ports are free (Olympus
+ * runs its own of each per consult), the risk acknowledgements, the estimated
+ * note expiry, today's request count and worst-case spend, and what the last
+ * consult verified. It never presents the daemon's API key.
+ */
+async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const name = 'zkapi_consult_transport';
+  const engine = doctorSovereigntyEngine(deps);
+  const profiles = engine
+    ? Object.entries(engine.config.modelProfiles).filter(([, profile]) => profile.provider === 'zkapi')
+    : [];
+  if (profiles.length === 0) {
+    return { name, ok: true, detail: 'Not configured: the experimental zkAPI consult transport is off.' };
+  }
+  const env = deps.env ?? process.env;
+  const home = env.HOME?.trim();
+  const statePath = deps.zkapiStatePath ?? (home ? defaultZkapiStatePath(home) : defaultZkapiStatePath());
+  const lines: string[] = [];
+  let ok = true;
+  for (const [profileId, profile] of profiles) {
+    const readiness = await zkapiConsultReadiness({
+      baseUrl: profile.baseUrl!,
+      model: 'model' in profile && profile.model ? profile.model : '',
+      settings: profile.zkapi!,
+      statePath,
+      env,
+      apiKeyPresent: secretRefPresent(profile.secretRef, env, deps),
+      ...(deps.now ? { now: deps.now } : {}),
+    });
+    if (readiness.blockers.length > 0) ok = false;
+    lines.push(`${profileId}: ${describeZkapiReadiness(readiness)}`);
+  }
+  return {
+    name,
+    ok,
+    detail: `zkAPI consult transport (experimental, consults only; no consult is sent until the consult lane lands): ${lines.join(' | ')}`,
+    ...(ok
+      ? {}
+      : {
+        hint: [
+          lines.some((line) => line.includes('UNRESOLVED SESSION'))
+            ? 'A recovery-only zkAPI session is needed before another consult, run against the wallet directory that holds the fence. Until the consult lane offers it, run the developer harness from the Olympus checkout: bun scripts/zkapi-consult-recover.ts --yes (one content-free request, counted at $6). A fence whose wallet can no longer run can only be abandoned explicitly with that script\'s --abandon option; an unsettled lease may then settle under another session\'s identity.'
+            : undefined,
+          lines.some((line) => line.includes('STRANDED PROCESSES'))
+            ? 'An earlier session left processes Olympus could not prove its own. Find the listed process groups (ps -o pid,pgid,command -g <pgid>), stop them yourself, or reboot; the next session then sees them gone. Never delete the zkAPI ledger to clear this.'
+            : undefined,
+          'Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon.',
+        ].filter((part): part is string => part !== undefined).join(' '),
+      }),
+  };
+}
+
+function describeZkapiReadiness(readiness: ZkapiConsultReadiness): string {
+  const daemon = readiness.daemonExecutable
+    ? `zkapi-clientd ${readiness.daemonVersion ?? 'version unknown'}`
+    : 'zkapi-clientd not found';
+  const tor = readiness.tor === 'off'
+    ? 'Tor off'
+    : readiness.torExecutable ? 'tor found (a fresh client per consult)' : 'tor not found';
+  const confinement = `confinement on this platform: ${readiness.confinement.limit}`;
+  const ports = `daemon port ${readiness.daemonPort === 'free' ? 'free' : 'IN USE'}${readiness.torPort === 'not_used' ? '' : `, Tor port ${readiness.torPort === 'free' ? 'free' : 'IN USE'}`}`;
+  const key = readiness.apiKeyConfigured ? 'local API key configured' : 'local API key NOT configured';
+  const money = readiness.money;
+  const acks = `acknowledgements ${money.acknowledgements.complete ? 'complete' : 'incomplete'} (${money.acknowledgements.accepted}/${money.acknowledgements.required})`;
+  const expiry = money.expiryEstimate;
+  const expiryText = expiry.state === 'active'
+    ? `estimated expiry ${expiry.expiryDate} from the confirmed funding date (${expiry.daysLeft} day${expiry.daysLeft === 1 ? '' : 's'} left, notice ${expiry.notice})`
+    : expiry.state === 'expired'
+      ? `estimated expiry PASSED on ${expiry.expiryDate}; an unwithdrawn note becomes claimable by the operator`
+      : expiry.state === 'invalid'
+        ? 'funding date invalid'
+        : 'funding date not recorded';
+  const deposit = money.depositAboveSuggestedCeiling ? '; deposit is above the suggested ceiling' : '';
+  const requestLimit = readiness.requestsToday.cap !== undefined ? `limit ${readiness.requestsToday.cap}` : 'no limit set';
+  const spendLimit = readiness.spendToday.capUsd !== undefined ? `limit $${readiness.spendToday.capUsd.toFixed(2)}` : 'no limit set';
+  const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts up to $6.00)`;
+  const fence = readiness.fences.length > 0
+    ? `UNRESOLVED SESSION: ${readiness.fences.map((entry) => `fence since ${entry.at} for wallet directory ${entry.configDir}${entry.daemonExecutable ? ` (daemon ${entry.daemonExecutable}${entry.daemonPort ? `, port ${entry.daemonPort}` : ''})` : ''}${entry.thisWallet ? ', this wallet' : ', another wallet'}`).join('; ')}; run a recovery-only session before another consult`
+    : 'no unresolved session';
+  const stranded = readiness.stranded
+    ? readiness.stranded.supervisorRunning
+      ? `; a session is in progress (supervisor pid ${readiness.stranded.supervisorPid})`
+      : `; STRANDED PROCESSES from an earlier session: ${readiness.stranded.groups.map((group) => `${group.role} process group ${group.pgid}`).join(', ') || 'no group recorded'}`
+    : '';
+  const last = readiness.lastSession
+    ? `last ${readiness.lastSession.recovery ? 'recovery session' : 'consult'} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}`
+    : 'no consult run yet';
+  const blockers = readiness.blockers.length > 0 ? `; not ready: ${readiness.blockers.join(', ')}` : '; ready';
+  return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}${stranded}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
+}
+
+function secretRefPresent(
+  secretRef: string | undefined,
+  env: Record<string, string | undefined>,
+  deps: DoctorDeps,
+): boolean {
+  const ref = normalizeSecretRef(secretRef ?? '');
+  if (!ref) return false;
+  if (ref.kind === 'env') return Boolean(env[ref.key]?.trim());
+  const store = deps.secretStore ?? createDefaultSecretStore({ env });
+  try {
+    return Boolean(store.getSync?.(ref.key)?.trim());
+  } catch {
+    return false;
+  }
 }
 
 async function sovereigntyPrerequisiteCheck(deps: DoctorDeps): Promise<DoctorCheck> {

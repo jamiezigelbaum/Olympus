@@ -1,3 +1,4 @@
+import { modelEndpointFetch } from './model-transport.ts';
 import { fetchBoundedText } from './http-timeout.ts';
 import type {
   SovereigntyConfig,
@@ -409,7 +410,7 @@ export class ModelSetupService {
   private async requestJson(url: string, init: RequestInit, apiKey?: string): Promise<unknown> {
     const headers = new Headers(init.headers);
     if (apiKey) headers.set('Authorization', `Bearer ${apiKey}`);
-    const { response, text } = await fetchBoundedText(this.fetchImpl, url, {
+    const { response, text } = await fetchBoundedText(modelEndpointFetch(this.fetchImpl), url, {
       ...init,
       headers,
       redirect: 'error',

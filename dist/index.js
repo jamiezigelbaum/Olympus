@@ -3124,23 +3124,378 @@ var init_config = __esm(() => {
   ];
 });
 
-// src/core/local-model-policy.ts
-function isCloudForwardingModelId(modelId) {
-  const trimmed = modelId.trim().toLowerCase();
-  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
-  const colon = lastSegment.lastIndexOf(":");
-  if (colon < 0)
-    return false;
-  const tag = lastSegment.slice(colon + 1);
-  return tag === "cloud" || tag.endsWith("-cloud");
+// src/core/zkapi-consult-settings.ts
+import { readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import { homedir as homedir2 } from "node:os";
+import { join as join3 } from "node:path";
+function parseZkapiConsultSettings(value, label) {
+  const record = value === undefined ? {} : value;
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    throw new OperationError("config_error", `${label} must be an object.`);
+  }
+  const input = record;
+  for (const key of Object.keys(input)) {
+    if (!SETTINGS_KEYS.has(key)) {
+      throw new OperationError("config_error", `${label}.${key} is not a zkAPI consult setting.`);
+    }
+  }
+  const settings = {
+    tor: DEFAULTS.tor,
+    torSocksPort: DEFAULTS.torSocksPort,
+    acknowledgements: parseAcknowledgements(input.acknowledgements, `${label}.acknowledgements`),
+    timeoutMs: DEFAULTS.timeoutMs,
+    torBootstrapTimeoutMs: DEFAULTS.torBootstrapTimeoutMs,
+    daemonReadyTimeoutMs: DEFAULTS.daemonReadyTimeoutMs,
+    policyWarmTimeoutMs: DEFAULTS.policyWarmTimeoutMs,
+    settleTimeoutMs: DEFAULTS.settleTimeoutMs,
+    maxResponseBytes: DEFAULTS.maxResponseBytes
+  };
+  for (const [key, [min, max]] of Object.entries(INTEGER_BOUNDS)) {
+    const raw = input[key];
+    if (raw === undefined)
+      continue;
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < min || raw > max) {
+      throw new OperationError("config_error", `${label}.${key} must be an integer from ${min} to ${max}.`);
+    }
+    settings[key] = raw;
+  }
+  if (input.tor !== undefined) {
+    if (input.tor !== "per_consult" && input.tor !== "off") {
+      throw new OperationError("config_error", `${label}.tor must be "per_consult" or "off".`);
+    }
+    settings.tor = input.tor;
+  }
+  if (input.fundingDate !== undefined) {
+    if (typeof input.fundingDate !== "string" || parseIsoDate(input.fundingDate) === undefined) {
+      throw new OperationError("config_error", `${label}.fundingDate must be a calendar date in YYYY-MM-DD form.`);
+    }
+    settings.fundingDate = input.fundingDate;
+  }
+  for (const key of ["depositUsd", "dailySpendCapUsd"]) {
+    const raw = input[key];
+    if (raw === undefined)
+      continue;
+    if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0 || raw > 1e4) {
+      throw new OperationError("config_error", `${label}.${key} must be a positive number of US dollars.`);
+    }
+    settings[key] = raw;
+  }
+  for (const key of ["daemonExecutable", "torExecutable"]) {
+    const raw = input[key];
+    if (raw === undefined)
+      continue;
+    if (typeof raw !== "string" || !raw.startsWith("/")) {
+      throw new OperationError("config_error", `${label}.${key} must be an absolute path.`);
+    }
+    settings[key] = raw;
+  }
+  return settings;
 }
-function assertLocalModelIdNotCloudForwarding(label, modelId) {
-  if (!isCloudForwardingModelId(modelId))
+function assertZkapiDaemonBaseUrl(id, baseUrl) {
+  let url;
+  try {
+    url = new URL(baseUrl ?? "");
+  } catch {
+    throw new OperationError("config_error", `Sovereignty zkapi profile "${id}" requires a loopback baseUrl such as ${ZKAPI_DAEMON_DEFAULT_BASE_URL}.`);
+  }
+  if (url.protocol !== "http:" || !isLoopbackHost(url.hostname) || url.username || url.password || url.search || url.hash || url.pathname.replace(/\/+$/, "") !== "/v1") {
+    throw new OperationError("config_error", `Sovereignty zkapi profile "${id}" baseUrl must be the daemon's loopback API, such as ${ZKAPI_DAEMON_DEFAULT_BASE_URL}.`, "zkapi-clientd serves only on a numeric loopback address; Olympus never reaches it over a network.");
+  }
+}
+function registerZkapiDaemonPorts(ports) {
+  for (const port of ports)
+    zkapiDaemonPorts.add(port);
+}
+function sovereigntyPolicyPath(env = process.env) {
+  return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim() || join3(env.HOME?.trim() || homedir2(), ".olympus", "sovereignty.json");
+}
+function refreshZkapiPortsFromPolicyFile(env = process.env) {
+  const path = sovereigntyPolicyPath(env);
+  let stamp;
+  try {
+    const stat2 = statSync2(path);
+    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      policyFile.seen = `${path}:absent`;
+      policyFile.unreadable = undefined;
+    } else {
+      policyFile.seen = undefined;
+      policyFile.unreadable = path;
+    }
     return;
-  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
+  }
+  if (policyFile.seen === stamp && policyFile.unreadable === undefined)
+    return;
+  try {
+    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync4(path, "utf8")));
+    for (const port of ports)
+      zkapiDaemonPorts.add(port);
+    policyFile.seen = stamp;
+    policyFile.unreadable = undefined;
+  } catch {
+    policyFile.seen = undefined;
+    policyFile.unreadable = path;
+  }
 }
-var init_local_model_policy = __esm(() => {
+function zkapiPortsInPolicy(parsed) {
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  if (!record)
+    throw new Error("not a policy object");
+  const inner = record.sovereignty && typeof record.sovereignty === "object" ? record.sovereignty : record;
+  const profiles = inner.modelProfiles;
+  if (!profiles || typeof profiles !== "object" || Array.isArray(profiles))
+    throw new Error("policy has no modelProfiles");
+  const ports = [];
+  for (const profile of Object.values(profiles)) {
+    if (!profile || typeof profile !== "object")
+      throw new Error("malformed profile");
+    const entry = profile;
+    if (entry.provider !== "zkapi")
+      continue;
+    const port = loopbackPort(typeof entry.baseUrl === "string" ? entry.baseUrl : undefined);
+    if (port === undefined)
+      throw new Error("zkapi profile without a loopback baseUrl");
+    ports.push(port);
+  }
+  return ports;
+}
+function endpointPort(parsed) {
+  return parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+}
+function assertNotZkapiDaemonEndpoint(url, label) {
+  refreshZkapiPortsFromPolicyFile();
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    return;
+  const port = endpointPort(parsed);
+  const local = loopbackPort(url) !== undefined;
+  if (local && policyFile.unreadable) {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} is a local endpoint, and the sovereignty policy at ${policyFile.unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, policyFile.unreadable);
+  }
+  if (!zkapiDaemonPorts.has(port))
+    return;
+  if (local) {
+    throw new ZkapiDaemonEndpointRefusal("daemon_port", `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
+  }
+  if (!isIP(parsed.hostname.replace(/^\[|\]$/g, ""))) {
+    throw new ZkapiDaemonEndpointRefusal("hostname_on_daemon_port", `${label} names a host on port ${port}, a zkAPI daemon port; a host name could point at this machine.`);
+  }
+}
+async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defaultLookupAll) {
+  assertNotZkapiDaemonEndpoint(url, label);
+  const unreadable = policyFile.unreadable;
+  if (!unreadable)
+    return;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    return;
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (isIP(host))
+    return;
+  const port = endpointPort(parsed);
+  const refuse = () => {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} may be a local endpoint, and the sovereignty policy at ${unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, unreadable);
+  };
+  let addresses;
+  try {
+    addresses = await Promise.race([
+      lookupAll(host),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("lookup timed out")), 2000).unref?.())
+    ]);
+  } catch {
+    return refuse();
+  }
+  if (addresses.some((address) => loopbackPort(`http://${address.includes(":") ? `[${address}]` : address}:${port}`) !== undefined))
+    refuse();
+}
+async function defaultLookupAll(hostname) {
+  return (await lookup(hostname, { all: true })).map((entry) => entry.address);
+}
+function refusalSuggestion(reason, policyPath) {
+  if (reason === "policy_unreadable") {
+    return `Fix or remove the sovereignty policy file at ${policyPath ?? "its configured path"}; until it can be read, Olympus refuses every local model endpoint.`;
+  }
+  if (reason === "hostname_on_daemon_port") {
+    return "Use a numeric address: a cloud endpoint on its own port, or 127.0.0.1 for a local model, which must then not share a zkAPI daemon port.";
+  }
+  return "This address is the zkAPI daemon, which only carries consults. Point this model at a local model server on another port.";
+}
+function isZkapiDaemonEndpointRefusal(error) {
+  return error instanceof ZkapiDaemonEndpointRefusal;
+}
+function loopbackPort(baseUrl) {
+  if (!baseUrl)
+    return;
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:" || !isLoopbackHost(url.hostname))
+    return;
+  if (url.port)
+    return Number(url.port);
+  return url.protocol === "https:" ? 443 : 80;
+}
+function isLoopbackHost(hostname) {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost"))
+    return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4)
+    return Number(v4[1]) === 127 || host === "0.0.0.0";
+  if (!host.startsWith("[") || !host.endsWith("]"))
+    return false;
+  const words = ipv6Words(host.slice(1, -1));
+  if (!words)
+    return false;
+  if (words.slice(0, 7).every((word) => word === 0) && (words[7] === 1 || words[7] === 0))
+    return true;
+  const mapped = words.slice(0, 5).every((word) => word === 0) && (words[5] === 65535 || words[5] === 0);
+  return mapped && (words[6] >> 8 === 127 || words[6] === 0 && words[7] === 0);
+}
+function ipv6Words(text) {
+  let body = text;
+  const tail = [];
+  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(body);
+  if (dotted) {
+    const bytes = dotted.slice(1).map(Number);
+    if (bytes.some((byte) => byte > 255))
+      return;
+    tail.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
+    body = text.slice(0, dotted.index);
+    if (!body.endsWith("::"))
+      body = body.replace(/:$/, "");
+  }
+  const halves = body.split("::");
+  if (halves.length > 2)
+    return;
+  const parse = (part) => part ? part.split(":").map((word) => parseInt(word, 16)) : [];
+  const head = parse(halves[0] ?? "");
+  const rest = halves.length === 2 ? parse(halves[1] ?? "") : [];
+  if ([...head, ...rest].some((word) => Number.isNaN(word) || word < 0 || word > 65535))
+    return;
+  const fill = 8 - head.length - rest.length - tail.length;
+  if (fill < 0 || halves.length === 1 && fill !== 0)
+    return;
+  return [...head, ...Array(fill).fill(0), ...rest, ...tail];
+}
+function parseIsoDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value))
+    return;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value)
+    return;
+  return date;
+}
+function parseAcknowledgements(value, label) {
+  if (value === undefined)
+    return { version: 0, accepted: [] };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new OperationError("config_error", `${label} must be an object with version and accepted.`);
+  }
+  const record = value;
+  if (typeof record.version !== "number" || !Number.isInteger(record.version) || record.version < 0) {
+    throw new OperationError("config_error", `${label}.version must be a non-negative integer.`);
+  }
+  if (!Array.isArray(record.accepted) || !record.accepted.every((item) => typeof item === "string")) {
+    throw new OperationError("config_error", `${label}.accepted must be a string array.`);
+  }
+  return { version: record.version, accepted: [...new Set(record.accepted)] };
+}
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, ZKAPI_NOTE_TTL_DAYS = 30, ZKAPI_EXPIRY_NOTICE_DAYS, ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD = 50, DEFAULTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 3, ZKAPI_RISK_ACKNOWLEDGEMENTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
+var init_zkapi_consult_settings = __esm(() => {
   init_operation_error();
+  ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
+  ZKAPI_EXPIRY_NOTICE_DAYS = [10, 5, 2];
+  DEFAULTS = {
+    tor: "per_consult",
+    torSocksPort: ZKAPI_DEFAULT_TOR_SOCKS_PORT,
+    timeoutMs: 6 * 60 * 1000,
+    torBootstrapTimeoutMs: 210 * 1000,
+    daemonReadyTimeoutMs: 120 * 1000,
+    policyWarmTimeoutMs: 180 * 1000,
+    settleTimeoutMs: 300 * 1000,
+    maxResponseBytes: 256 * 1024
+  };
+  ZKAPI_RISK_ACKNOWLEDGEMENTS = [
+    {
+      id: "per_consult_cost",
+      statement: "Each consult authorizes up to the chosen model's per-request allowance, currently $1 to $6 depending on the model. Olympus counts every consult at $6, the worst case."
+    },
+    {
+      id: "no_default_limit",
+      statement: "There is no limit on the number of consults or on daily spending unless you set one (dailyRequestCap, dailySpendCapUsd)."
+    },
+    {
+      id: "deposit_fee",
+      statement: "Depositing is an expensive on-chain transaction, paid separately from consults. Its fee can be larger than a small deposit."
+    },
+    {
+      id: "withdrawal_fee",
+      statement: "Getting unspent money back is a second expensive on-chain transaction, paid separately, and may require sending additional ETH for its fee."
+    },
+    {
+      id: "note_expiry_30_days",
+      statement: "Unused balance that is not withdrawn within about 30 days becomes claimable in full by the operator. Olympus only estimates that date from the funding date you confirm; the real one is set on-chain by the deposit block."
+    },
+    {
+      id: "no_top_up",
+      statement: "There is no top-up. Each deposit is a new note with its own fee and its own 30-day clock."
+    },
+    {
+      id: "operator_risk",
+      statement: "One operator account can pause deposits and withdrawals while the expiry clock keeps running, and one party ran the proof setup. Funds could be frozen or lost."
+    },
+    {
+      id: "local_files_risk",
+      statement: "The balance is controlled by files on this computer. Losing them loses the money."
+    }
+  ];
+  INTEGER_BOUNDS = {
+    torSocksPort: [1024, 65535],
+    dailyRequestCap: [1, 1e6],
+    timeoutMs: [30000, 30 * 60000],
+    torBootstrapTimeoutMs: [1e4, 10 * 60000],
+    daemonReadyTimeoutMs: [5000, 10 * 60000],
+    policyWarmTimeoutMs: [5000, 10 * 60000],
+    settleTimeoutMs: [5000, 30 * 60000],
+    maxResponseBytes: [1024, 4 * 1024 * 1024]
+  };
+  SETTINGS_KEYS = new Set([
+    ...Object.keys(INTEGER_BOUNDS),
+    "tor",
+    "fundingDate",
+    "depositUsd",
+    "acknowledgements",
+    "dailySpendCapUsd",
+    "daemonExecutable",
+    "torExecutable"
+  ]);
+  zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
+  policyFile = { seen: undefined, unreadable: undefined };
+  ZkapiDaemonEndpointRefusal = class ZkapiDaemonEndpointRefusal extends OperationError {
+    reason;
+    constructor(reason, message, policyPath) {
+      super("config_error", message, refusalSuggestion(reason, policyPath));
+      this.name = "ZkapiDaemonEndpointRefusal";
+      this.reason = reason;
+    }
+  };
 });
 
 // src/core/model-transport.ts
@@ -3148,6 +3503,7 @@ function isModelEndpointRedirectError(error) {
   return error instanceof ModelEndpointRedirectError;
 }
 async function fetchModelEndpoint(fetchImpl, url, init) {
+  await assertNotZkapiDaemonEndpointResolved(url, "Model endpoint");
   let response;
   try {
     response = await fetchImpl(url, { ...init, redirect: "error" });
@@ -3188,6 +3544,7 @@ function isFetchRedirectRefusal(error) {
 }
 var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus refuses redirects on model transports and did not use the answer.", ModelEndpointRedirectError;
 var init_model_transport = __esm(() => {
+  init_zkapi_consult_settings();
   ModelEndpointRedirectError = class ModelEndpointRedirectError extends Error {
     code = "model_endpoint_redirect";
     status;
@@ -3197,6 +3554,25 @@ var init_model_transport = __esm(() => {
       this.status = status;
     }
   };
+});
+
+// src/core/local-model-policy.ts
+function isCloudForwardingModelId(modelId) {
+  const trimmed = modelId.trim().toLowerCase();
+  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+  const colon = lastSegment.lastIndexOf(":");
+  if (colon < 0)
+    return false;
+  const tag = lastSegment.slice(colon + 1);
+  return tag === "cloud" || tag.endsWith("-cloud");
+}
+function assertLocalModelIdNotCloudForwarding(label, modelId) {
+  if (!isCloudForwardingModelId(modelId))
+    return;
+  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
+}
+var init_local_model_policy = __esm(() => {
+  init_operation_error();
 });
 
 // src/core/http-timeout.ts
@@ -3348,9 +3724,9 @@ var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
 // src/core/openclaw-executable.ts
-import { accessSync as accessSync2, constants as fsConstants, statSync as statSync7 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { delimiter as delimiter3, isAbsolute as isAbsolute8, join as join9 } from "node:path";
+import { accessSync as accessSync2, constants as fsConstants, statSync as statSync8 } from "node:fs";
+import { homedir as homedir6 } from "node:os";
+import { delimiter as delimiter3, isAbsolute as isAbsolute8, join as join10 } from "node:path";
 function resolveOpenClawExecutable(options = {}) {
   const env = options.env ?? process.env;
   const explicit = env.OPENCLAW_BIN?.trim();
@@ -3360,7 +3736,7 @@ function resolveOpenClawExecutable(options = {}) {
     const directory = entry.trim();
     if (!directory || !isAbsolute8(directory))
       continue;
-    const candidate = join9(directory, "openclaw");
+    const candidate = join10(directory, "openclaw");
     if (isExecutableFile(candidate))
       return candidate;
   }
@@ -3368,7 +3744,7 @@ function resolveOpenClawExecutable(options = {}) {
   const found = which("openclaw");
   if (found && isAbsolute8(found))
     return found;
-  const home = options.homeDir?.trim() || env.HOME?.trim() || homedir5();
+  const home = options.homeDir?.trim() || env.HOME?.trim() || homedir6();
   for (const candidate of openClawWellKnownPaths(home)) {
     if (isExecutableFile(candidate))
       return candidate;
@@ -3379,15 +3755,15 @@ function openClawWellKnownPaths(home) {
   return [
     "/opt/homebrew/bin/openclaw",
     "/usr/local/bin/openclaw",
-    join9(home, ".local", "bin", "openclaw"),
-    join9(home, ".npm-global", "bin", "openclaw"),
-    join9(home, ".openclaw", "bin", "openclaw"),
-    join9(home, ".bun", "bin", "openclaw")
+    join10(home, ".local", "bin", "openclaw"),
+    join10(home, ".npm-global", "bin", "openclaw"),
+    join10(home, ".openclaw", "bin", "openclaw"),
+    join10(home, ".bun", "bin", "openclaw")
   ];
 }
 function isExecutableFile(path) {
   try {
-    if (!statSync7(path).isFile())
+    if (!statSync8(path).isFile())
       return false;
     accessSync2(path, fsConstants.X_OK);
     return true;
@@ -3615,11 +3991,11 @@ var init_manifest = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync9, writeFileSync as writeFileSync3 } from "node:fs";
-import { homedir as homedir6 } from "node:os";
-import { dirname as dirname8, join as join11 } from "node:path";
+import { chmodSync, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync10, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir as homedir7 } from "node:os";
+import { dirname as dirname8, join as join12 } from "node:path";
 function defaultSovereigntyConfigPath() {
-  return join11(homedir6(), ".olympus", "sovereignty.json");
+  return join12(homedir7(), ".olympus", "sovereignty.json");
 }
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
@@ -3631,7 +4007,7 @@ function loadSovereigntyEngine(options = {}) {
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath();
   if (existsSync5(configPath)) {
-    const parsed = JSON.parse(readFileSync9(configPath, "utf8"));
+    const parsed = JSON.parse(readFileSync10(configPath, "utf8"));
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -3691,8 +4067,10 @@ function createSovereigntyEngine(rawConfig, metadata = { source: "inline_config"
 }
 function validateSovereigntyConfig(rawConfig) {
   const config = parseSovereigntyConfig(rawConfig, "sovereignty config");
+  const daemonPorts = zkapiDaemonPorts2(config);
+  registerZkapiDaemonPorts(daemonPorts);
   for (const [id, profile] of Object.entries(config.modelProfiles)) {
-    validateProfile(id, profile);
+    validateProfile(id, profile, daemonPorts);
   }
   const publicRetired = isPublicTierRetired(config);
   for (const domain of BUILTIN_DOMAINS) {
@@ -3713,6 +4091,7 @@ function validateSovereigntyConfig(rawConfig) {
     validateAnalystPoolShape(pool, domain);
     for (const profileId of pool.members) {
       const resolved = resolveProfile(config, profileId, `route ${domain}`);
+      assertNotConsultOnly(resolved, `the ${domain} analyst route`);
       if (resolved.profile.provider === "built-in") {
         throw new OperationError("config_error", `sovereignty.routes.${domain} cannot use the built-in embedding profile "${profileId}" as an analyst.`);
       }
@@ -3927,6 +4306,11 @@ function parseProfiles(value, label) {
     if (typeof profile.purpose === "string") {
       parsedProfile.purpose = profile.purpose;
     }
+    if (provider === "zkapi") {
+      parsedProfile.zkapi = parseZkapiConsultSettings(profile.zkapi, `${label}.modelProfiles.${id}.zkapi`);
+    } else if (profile.zkapi !== undefined) {
+      throw new OperationError("config_error", `${label}.modelProfiles.${id}.zkapi is only valid on a provider "zkapi" profile.`);
+    }
     profiles[id] = parsedProfile;
   }
   return profiles;
@@ -3991,15 +4375,17 @@ function parseTrustDomainPolicy(record, label) {
   }
   return policy;
 }
-function validateProfile(id, profile) {
+function validateProfile(id, profile, daemonPorts) {
   if (!id.trim())
     throw new OperationError("config_error", "Sovereignty model profile ids must not be empty.");
-  if (!["local-openai-compatible", "openclaw-infer", "google-gemini", "venice", "anthropic", "openai-compatible", "built-in"].includes(profile.provider)) {
+  if (!SUPPORTED_PROVIDERS.includes(profile.provider)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" has unsupported provider "${profile.provider}".`);
   }
   if (!["local", "encrypted_cloud", "standard_cloud"].includes(profile.trust)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
   }
+  if (profile.provider === "zkapi")
+    validateZkapiProfile(id, profile);
   if (profile.provider === "built-in") {
     validateBuiltInProfile(id, profile);
     return;
@@ -4017,9 +4403,13 @@ function validateProfile(id, profile) {
   if (profile.baseUrl !== undefined && !/^https?:\/\//.test(profile.baseUrl)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" baseUrl must be an HTTP(S) URL.`);
   }
-  if (profile.trust === "local" || profile.provider === "local-openai-compatible") {
+  if (profile.provider !== "zkapi" && (profile.trust === "local" || profile.provider === "local-openai-compatible")) {
     assertLocalProfileBaseUrl(id, profile.baseUrl);
     assertLocalModelIdNotCloudForwarding(`Sovereignty local profile "${id}"`, profile.model ?? "");
+  }
+  const daemonPort = profile.provider === "zkapi" ? undefined : loopbackPort(profile.baseUrl);
+  if (daemonPort !== undefined && daemonPorts.has(daemonPort)) {
+    throw new OperationError("config_error", `Sovereignty profile "${id}" points at port ${daemonPort}, where the zkAPI daemon serves.`, "zkapi-clientd forwards every request to cloud providers through OpenRouter, so a loopback address there is not a local model or a direct provider. Move that server to another port.");
   }
   const rawProfile = profile;
   if (rawProfile.apiKey !== undefined || rawProfile.secret !== undefined) {
@@ -4057,6 +4447,34 @@ function assertLocalProfileBaseUrl(id, baseUrl) {
     throw new OperationError("config_error", `Sovereignty local profile "${id}" baseUrl must stay on loopback.`, "Use 127.0.0.1, ::1, or localhost for local analyst profiles.");
   }
 }
+function validateZkapiProfile(id, profile) {
+  if (profile.trust !== "standard_cloud") {
+    throw new OperationError("config_error", `Sovereignty zkapi profile "${id}" must declare trust "standard_cloud".`, "zkAPI hides who paid, not what was asked: the cloud provider reads the request, whatever the loopback address.");
+  }
+  if (profile.purpose !== "consult") {
+    throw new OperationError("config_error", `Sovereignty zkapi profile "${id}" must declare purpose "consult".`, "zkAPI is a consult-only transport; it may never serve an analyst, embedding, vision or classification role.");
+  }
+  assertZkapiDaemonBaseUrl(id, profile.baseUrl);
+}
+function zkapiDaemonPorts2(config) {
+  const ports = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
+  for (const profile of Object.values(config.modelProfiles)) {
+    if (profile.provider !== "zkapi")
+      continue;
+    const port = loopbackPort(profile.baseUrl);
+    if (port !== undefined)
+      ports.add(port);
+  }
+  return ports;
+}
+function isConsultOnlyProfile(profile) {
+  return profile.provider === "zkapi" || profile.purpose === "consult";
+}
+function assertNotConsultOnly(resolved, role) {
+  if (!isConsultOnlyProfile(resolved.profile))
+    return;
+  throw new OperationError("config_error", `Consult-only profile "${resolved.id}" cannot serve ${role}.`, "A consult profile (provider zkapi or purpose consult) carries one approved question and never evidence; choose an analyst or embedding profile for this role.");
+}
 function isLoopbackHostname(hostname) {
   const normalized = hostname.toLowerCase();
   return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "[::1]" || normalized === "::1";
@@ -4077,6 +4495,7 @@ function validateRetrievalPolicy(config, domain, policy) {
   }
   if (policy.embeddingProfile) {
     const resolved = resolveProfile(config, policy.embeddingProfile, `retrieval policy ${domain}`);
+    assertNotConsultOnly(resolved, `the ${domain} embedding policy`);
     if (!policy.allowedEmbeddingTrust.includes(resolved.profile.trust)) {
       throw new OperationError("config_error", `${domain} embedding profile "${policy.embeddingProfile}" is outside allowedEmbeddingTrust.`);
     }
@@ -4093,6 +4512,8 @@ function resolveProfile(config, id, context) {
   return { id, profile };
 }
 function profileAllowedForDomain(profile, domain) {
+  if (isConsultOnlyProfile(profile))
+    return false;
   if (domain === "secure_local") {
     return profile.trust === "local" && profile.provider === "local-openai-compatible" || profile.trust === "encrypted_cloud" && profile.provider === "venice";
   }
@@ -4202,7 +4623,7 @@ function stringArrayField(value, label) {
   }
   return value.map((item) => item.trim()).filter(Boolean);
 }
-var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
+var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SUPPORTED_PROVIDERS, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
 var init_sovereignty = __esm(() => {
   init_operation_error();
   init_local_model_policy();
@@ -4211,8 +4632,19 @@ var init_sovereignty = __esm(() => {
   init_source_model_policy();
   init_venice_models();
   init_manifest();
+  init_zkapi_consult_settings();
   init_source_model_policy();
   BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_MODEL.modelId;
+  SUPPORTED_PROVIDERS = [
+    "local-openai-compatible",
+    "openclaw-infer",
+    "google-gemini",
+    "venice",
+    "anthropic",
+    "openai-compatible",
+    "built-in",
+    "zkapi"
+  ];
   SecureAnalystPoolE2EEGateError = class SecureAnalystPoolE2EEGateError extends OperationError {
     profileId;
     modelId;
@@ -6067,11 +6499,11 @@ var init_credential_broker = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync11 } from "node:fs";
-import { homedir as homedir8 } from "node:os";
-import { dirname as dirname12, join as join14 } from "node:path";
+import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync12 } from "node:fs";
+import { homedir as homedir9 } from "node:os";
+import { dirname as dirname12, join as join15 } from "node:path";
 function defaultHandleRegistryPath() {
-  return join14(homedir8(), ".config", "olympus", "handles.json");
+  return join15(homedir9(), ".config", "olympus", "handles.json");
 }
 function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
@@ -6080,7 +6512,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   if (!existsSync8(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
-  const parsed = JSON.parse(readFileSync11(path, "utf8"));
+  const parsed = JSON.parse(readFileSync12(path, "utf8"));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Olympus handle registry must be a JSON object.");
   }
@@ -8759,6 +9191,7 @@ var init_embeddings = __esm(() => {
   init_operation_error();
   init_local_model_policy();
   init_model_transport();
+  init_zkapi_consult_settings();
   init_embedding_identity();
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
@@ -9659,7 +10092,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -9705,7 +10138,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join16(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join17(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -10042,11 +10475,11 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-import { homedir as homedir10 } from "node:os";
-import { dirname as dirname14, join as join17 } from "node:path";
+import { homedir as homedir11 } from "node:os";
+import { dirname as dirname14, join as join18 } from "node:path";
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir10(), ".local", "share");
-  return join17(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir11(), ".local", "share");
+  return join18(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
 var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
@@ -11322,8 +11755,9 @@ init_config();
 import { isAbsolute as isAbsolute3 } from "node:path";
 
 // src/core/provider-credit-status.ts
+init_model_transport();
 init_atomic_file();
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync4, unlinkSync as unlinkSync2 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync5, unlinkSync as unlinkSync2 } from "node:fs";
 import { dirname as dirname4 } from "node:path";
 var VENICE_BILLING_BASE_URL = "https://api.venice.ai/api/v1";
 var DEFAULT_BASE_URL = VENICE_BILLING_BASE_URL;
@@ -11366,7 +11800,7 @@ async function fetchVeniceCreditStatus(options = {}) {
       redirect: "error",
       signal: controller.signal
     };
-    const response = await fetchImpl(`${baseUrl}/billing/balance`, requestInit);
+    const response = await fetchModelEndpoint(fetchImpl, `${baseUrl}/billing/balance`, requestInit);
     if (!response.ok)
       return buildHttpErrorReport(generatedAt, response.status, "balance");
     const body = await response.json();
@@ -11403,7 +11837,7 @@ async function fetchBundledCreditUsage(input) {
       url.searchParams.set("limit", String(USAGE_PAGE_LIMIT));
       url.searchParams.set("page", String(page));
       url.searchParams.set("sortOrder", "desc");
-      const response = await input.fetchImpl(url.toString(), input.requestInit);
+      const response = await fetchModelEndpoint(input.fetchImpl, url.toString(), input.requestInit);
       if (!response.ok) {
         return {
           entries: [],
@@ -11710,7 +12144,7 @@ function isVeniceProviderPauseFile(path) {
   if (!existsSync4(path))
     return false;
   try {
-    const raw = JSON.parse(readFileSync4(path, "utf8"));
+    const raw = JSON.parse(readFileSync5(path, "utf8"));
     return raw.kind === "venice";
   } catch {
     return false;
@@ -11882,12 +12316,13 @@ function asRecord6(value) {
 
 // src/native-plugin.ts
 init_config();
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
 init_local_model_policy();
 init_model_transport();
+init_zkapi_consult_settings();
 init_secret_store();
 
 class DelphiClient {
@@ -12046,6 +12481,8 @@ class DirectHttpDelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      if (isZkapiDaemonEndpointRefusal(firstError))
+        throw firstError;
       if (isModelEndpointRedirectError(firstError))
         throw argusRedirectError(lane, firstError);
       const cancelled = callerCancellation(init.signal);
@@ -12242,9 +12679,9 @@ var SYSTEM_CLOCK = Object.freeze({
 });
 
 // src/core/worker-auth.ts
-import { readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join3 } from "node:path";
+import { readFileSync as readFileSync6, statSync as statSync3 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join4 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
   if (config.worker.authTokenSecretRefUnresolved)
     return;
@@ -12285,14 +12722,14 @@ function applyWorkerSetupEnv(options = {}) {
 function readWorkerSetupEnv(options = {}) {
   const path = workerSetupEnvPath(options);
   try {
-    const stat2 = statSync2(path, { bigint: true });
+    const stat2 = statSync3(path, { bigint: true });
     if (!stat2.isFile() || (stat2.mode & 0o077n) !== 0n)
       return;
     const key = `${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeNs}:${stat2.ctimeNs}:${stat2.mode}`;
     const cached = setupEnvCache.get(path);
     if (cached?.key === key)
       return { ...cached.env };
-    const env = parseWorkerSetupEnv(readFileSync5(path, "utf8"));
+    const env = parseWorkerSetupEnv(readFileSync6(path, "utf8"));
     setupEnvCache.set(path, { key, env });
     return { ...env };
   } catch {
@@ -12318,7 +12755,7 @@ function environmentWithWorkerSetupEnv(options = {}) {
 }
 function workerSetupEnvPath(options = {}) {
   const env = options.env ?? process.env;
-  return options.workerEnvPath ?? join3(options.homeDir ?? optionalToken(env.HOME) ?? homedir2(), ".config", "olympus", "worker.env");
+  return options.workerEnvPath ?? join4(options.homeDir ?? optionalToken(env.HOME) ?? homedir3(), ".config", "olympus", "worker.env");
 }
 function isWorkerAuthTokenPlaceholder(value) {
   const normalized = value?.trim().toLowerCase();
@@ -13329,8 +13766,8 @@ function shouldExposeOperation(operation, context) {
 // src/core/native-worker-service.ts
 init_config();
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { statSync as statSync3 } from "node:fs";
-import { basename, delimiter, isAbsolute as isAbsolute4, join as join4 } from "node:path";
+import { statSync as statSync4 } from "node:fs";
+import { basename, delimiter, isAbsolute as isAbsolute4, join as join5 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 var SERVICE_ID3 = "olympus-worker";
 var SERVICE_LABEL = "worker";
@@ -13512,14 +13949,14 @@ function resolveBunRuntimePath(configured, env) {
     return assertExecutableFile(configured, "Bun runtime");
   const candidates = [
     process.execPath,
-    ...env.BUN_INSTALL ? [join4(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
-    ...(env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join4(directory, process.platform === "win32" ? "bun.exe" : "bun"))
+    ...env.BUN_INSTALL ? [join5(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
+    ...(env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join5(directory, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
     if (!isAbsolute4(candidate) || !isBunExecutableName(candidate))
       continue;
     try {
-      if (statSync3(candidate).isFile())
+      if (statSync4(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -13533,7 +13970,7 @@ function assertExecutableFile(path, label) {
   if (!isAbsolute4(path))
     throw new Error(`Olympus ${label} path must be absolute.`);
   try {
-    if (statSync3(path).isFile())
+    if (statSync4(path).isFile())
       return path;
   } catch {}
   throw new Error(`Olympus ${label} is unavailable.`);
@@ -13627,9 +14064,9 @@ async function waitForNativeWorkerOwnership(isReady, timeoutMs = 15000) {
 // src/core/native-telegram-service.ts
 init_config();
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync6, statSync as statSync4 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { isAbsolute as isAbsolute5, join as join5 } from "node:path";
+import { readFileSync as readFileSync7, statSync as statSync5 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { isAbsolute as isAbsolute5, join as join6 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 var SERVICE_ID4 = "olympus-telegram-capture";
 var SERVICE_LABEL2 = "Telegram capture service";
@@ -13718,7 +14155,7 @@ async function prepareTelegramStart(input, options) {
   if (approvedChatCount === 0) {
     throw new NativeProcessConfigurationError("Olympus Telegram capture service requires at least one approved chat scope.");
   }
-  const stateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR ?? join5(env.HOME ?? homedir3(), ".local/state/olympus/telegram-capture-gateway");
+  const stateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR ?? join6(env.HOME ?? homedir4(), ".local/state/olympus/telegram-capture-gateway");
   const instanceId = randomUUID4();
   env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
   return {
@@ -13775,7 +14212,7 @@ function assertUsableFile(path, label) {
     throw new NativeProcessConfigurationError(`Olympus Telegram capture service ${label} path must be absolute.`);
   }
   try {
-    if (!statSync4(path).isFile())
+    if (!statSync5(path).isFile())
       throw new Error("not_file");
   } catch {
     throw new NativeProcessConfigurationError(`Olympus Telegram capture service ${label} file is missing.`);
@@ -13783,11 +14220,11 @@ function assertUsableFile(path, label) {
 }
 async function telegramReadinessProbe(stateDir, instanceId, approvedChatCount, child) {
   try {
-    const path = join5(stateDir, READINESS_FILE);
-    const stat2 = statSync4(path);
+    const path = join6(stateDir, READINESS_FILE);
+    const stat2 = statSync5(path);
     if (!stat2.isFile() || stat2.size > 16 * 1024)
       return false;
-    const receipt = JSON.parse(readFileSync6(path, "utf8"));
+    const receipt = JSON.parse(readFileSync7(path, "utf8"));
     return receipt.kind === "telegram_capture_service_readiness" && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.authenticated === true && typeof receipt.approved_chats === "number" && Number.isInteger(receipt.approved_chats) && receipt.approved_chats === approvedChatCount;
   } catch {
     return false;
@@ -13803,9 +14240,9 @@ function asRecord9(value) {
 // src/core/native-whatsapp-service.ts
 init_config();
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { accessSync, constants, readFileSync as readFileSync7, statSync as statSync5 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { isAbsolute as isAbsolute6, join as join6 } from "node:path";
+import { accessSync, constants, readFileSync as readFileSync8, statSync as statSync6 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { isAbsolute as isAbsolute6, join as join7 } from "node:path";
 var SERVICE_ID5 = "olympus-whatsapp-capture";
 var SERVICE_LABEL3 = "WhatsApp capture service";
 var DEFAULT_STARTUP_TIMEOUT_MS2 = Number.POSITIVE_INFINITY;
@@ -13846,8 +14283,8 @@ async function prepareWhatsAppStart(input, options) {
   }
   assertExecutableFile2(capture.binaryPath);
   const env = baseEnvironment2();
-  const stateDir = capture.stateDir ?? join6(env.HOME ?? homedir4(), DEFAULT_STATE_RELATIVE_PATH);
-  assertUsableSession(join6(stateDir, SESSION_FILE));
+  const stateDir = capture.stateDir ?? join7(env.HOME ?? homedir5(), DEFAULT_STATE_RELATIVE_PATH);
+  assertUsableSession(join7(stateDir, SESSION_FILE));
   const instanceId = randomUUID5();
   env.OLYMPUS_WHATSAPP_STATE_DIR = stateDir;
   env.OLYMPUS_WHATSAPP_QR_STDOUT = "false";
@@ -13884,7 +14321,7 @@ function assertExecutableFile2(path) {
     throw new NativeProcessConfigurationError("Olympus WhatsApp capture service binary path must be absolute.");
   }
   try {
-    if (!statSync5(path).isFile())
+    if (!statSync6(path).isFile())
       throw new Error("not_file");
     accessSync(path, constants.X_OK);
   } catch {
@@ -13893,7 +14330,7 @@ function assertExecutableFile2(path) {
 }
 function assertUsableSession(path) {
   try {
-    if (!statSync5(path).isFile())
+    if (!statSync6(path).isFile())
       throw new Error("not_file");
   } catch {
     throw new NativeProcessConfigurationError("Olympus WhatsApp capture service requires an existing session.db; pair it manually first.");
@@ -13901,11 +14338,11 @@ function assertUsableSession(path) {
 }
 async function whatsappReadinessProbe(stateDir, instanceId, child) {
   try {
-    const path = join6(stateDir, READINESS_FILE2);
-    const stat2 = statSync5(path);
+    const path = join7(stateDir, READINESS_FILE2);
+    const stat2 = statSync6(path);
     if (!stat2.isFile() || stat2.size > 16 * 1024)
       return false;
-    const receipt = JSON.parse(readFileSync7(path, "utf8"));
+    const receipt = JSON.parse(readFileSync8(path, "utf8"));
     return receipt.kind === "whatsapp_capture_service_readiness" && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.paired === true && receipt.connected === true;
   } catch {
     return false;
@@ -13918,12 +14355,13 @@ function asRecord10(value) {
 // src/core/native-embedding-drain-service.ts
 init_config();
 import { randomUUID as randomUUID6 } from "node:crypto";
-import { readFileSync as readFileSync8, statSync as statSync6 } from "node:fs";
-import { delimiter as delimiter2, dirname as dirname6, isAbsolute as isAbsolute7, join as join8 } from "node:path";
+import { readFileSync as readFileSync9, statSync as statSync7 } from "node:fs";
+import { delimiter as delimiter2, dirname as dirname6, isAbsolute as isAbsolute7, join as join9 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 
 // src/workers/dashboard/embedding-runtime.ts
-import { dirname as dirname5, join as join7 } from "node:path";
+init_model_transport();
+import { dirname as dirname5, join as join8 } from "node:path";
 var EMBEDDING_DRAIN_REPORT_PATH_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_PATH";
 var EMBEDDING_DRAIN_REPORT_DIR_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_DIR";
 var EMBEDDING_DRAIN_REPORT_DIR_DEFAULT = "/tmp/olympus-source-processing-supervisor";
@@ -13935,7 +14373,7 @@ function resolveEmbeddingDrainReportPath(env = process.env) {
   if (explicit)
     return explicit;
   const dir = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim() || EMBEDDING_DRAIN_REPORT_DIR_DEFAULT;
-  return join7(dir, "source-embedding-drain-current.json");
+  return join8(dir, "source-embedding-drain-current.json");
 }
 
 // src/core/native-embedding-drain-service.ts
@@ -14068,7 +14506,7 @@ async function prepareEmbeddingDrainStart(input, options) {
   if (!isAbsolute7(reportPath)) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
-  const readinessPath = join8(dirname6(reportPath), READINESS_FILE3);
+  const readinessPath = join9(dirname6(reportPath), READINESS_FILE3);
   const instanceId = randomUUID6();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
@@ -14112,7 +14550,7 @@ function resolveBunRuntimePath2(configured, env) {
     return assertUsableFile2(configured, "Bun runtime");
   const candidates = [
     process.execPath,
-    ...(env.PATH ?? "").split(delimiter2).filter(Boolean).map((dir) => join8(dir, process.platform === "win32" ? "bun.exe" : "bun"))
+    ...(env.PATH ?? "").split(delimiter2).filter(Boolean).map((dir) => join9(dir, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute7(candidate))
@@ -14120,7 +14558,7 @@ function resolveBunRuntimePath2(configured, env) {
     if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
       continue;
     try {
-      if (statSync6(candidate).isFile())
+      if (statSync7(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -14131,17 +14569,17 @@ function assertUsableFile2(path, label) {
     throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} path must be absolute.`);
   }
   try {
-    if (statSync6(path).isFile())
+    if (statSync7(path).isFile())
       return path;
   } catch {}
   throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} file is missing.`);
 }
 async function embeddingDrainReadinessProbe(readinessPath, instanceId, child) {
   try {
-    const stat2 = statSync6(readinessPath);
+    const stat2 = statSync7(readinessPath);
     if (!stat2.isFile() || stat2.size > 16 * 1024)
       return false;
-    const receipt = JSON.parse(readFileSync8(readinessPath, "utf8"));
+    const receipt = JSON.parse(readFileSync9(readinessPath, "utf8"));
     return receipt.kind === "source_embedding_drain_service_readiness" && receipt.schema_version === 1 && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.options_validated === true && receipt.content_free === true;
   } catch {
     return false;
@@ -14743,24 +15181,25 @@ function constantTimeStringEqual(actual, expected) {
 }
 
 // src/core/doctor.ts
+init_model_transport();
 init_config();
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync13, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname15, join as join18 } from "node:path";
-import { homedir as homedir11 } from "node:os";
+import { existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync15, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname16, join as join20 } from "node:path";
+import { homedir as homedir13 } from "node:os";
 
 // src/core/engine-service.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
 init_atomic_file();
-import { existsSync as existsSync6, lstatSync as lstatSync2, readdirSync, readFileSync as readFileSync10, renameSync as renameSync2, statSync as statSync8 } from "node:fs";
-import { homedir as homedir7, platform as osPlatform } from "node:os";
-import { basename as basename3, dirname as dirname10, isAbsolute as isAbsolute10, join as join13, resolve as resolvePath } from "node:path";
+import { existsSync as existsSync6, lstatSync as lstatSync2, readdirSync, readFileSync as readFileSync11, renameSync as renameSync2, statSync as statSync9 } from "node:fs";
+import { homedir as homedir8, platform as osPlatform } from "node:os";
+import { basename as basename3, dirname as dirname10, isAbsolute as isAbsolute10, join as join14, resolve as resolvePath } from "node:path";
 
 // src/core/engine-children.ts
 init_atomic_file();
-import { dirname as dirname7, join as join10 } from "node:path";
+import { dirname as dirname7, join as join11 } from "node:path";
 function engineChildrenPath(env = process.env) {
-  return join10(olympusDataDir(env), "engine", "children.json");
+  return join11(olympusDataDir(env), "engine", "children.json");
 }
 var LSTART = String.raw`[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}`;
 var TABLE_LINE = new RegExp(String.raw`^\s*(\d+)\s+(\d+)\s+(${LSTART})\s+(.*)$`);
@@ -14771,7 +15210,7 @@ init_operation_error();
 init_sovereignty();
 
 // src/core/worker-service.ts
-import { basename as basename2, dirname as dirname9, isAbsolute as isAbsolute9, join as join12, relative as relative2, sep as sep2 } from "node:path";
+import { basename as basename2, dirname as dirname9, isAbsolute as isAbsolute9, join as join13, relative as relative2, sep as sep2 } from "node:path";
 init_atomic_file();
 init_openclaw_executable();
 init_operation_error();
@@ -14779,22 +15218,22 @@ var WORKER_LOG_TAIL_BYTES = 64 * 1024;
 function workerServicePaths(platform2, homeDir) {
   homeDir = validatedAbsolutePath(homeDir, "home directory");
   if (platform2 === "darwin") {
-    const logDir = join12(homeDir, "Library", "Logs", "Olympus");
+    const logDir = join13(homeDir, "Library", "Logs", "Olympus");
     return {
       label: "com.openclaw.olympus.worker",
-      unitPath: join12(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
-      envPath: join12(homeDir, ".config", "olympus", "worker.env"),
-      logPath: join12(logDir, "worker.log"),
-      errorLogPath: join12(logDir, "worker.err")
+      unitPath: join13(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
+      envPath: join13(homeDir, ".config", "olympus", "worker.env"),
+      logPath: join13(logDir, "worker.log"),
+      errorLogPath: join13(logDir, "worker.err")
     };
   }
-  const stateDir = join12(homeDir, ".local", "state", "olympus", "worker");
+  const stateDir = join13(homeDir, ".local", "state", "olympus", "worker");
   return {
     label: "olympus-worker",
-    unitPath: join12(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
-    envPath: join12(homeDir, ".config", "olympus", "worker.env"),
-    logPath: join12(stateDir, "worker.log"),
-    errorLogPath: join12(stateDir, "worker.err")
+    unitPath: join13(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
+    envPath: join13(homeDir, ".config", "olympus", "worker.env"),
+    logPath: join13(stateDir, "worker.log"),
+    errorLogPath: join13(stateDir, "worker.err")
   };
 }
 function validatedAbsolutePath(value, label) {
@@ -14809,33 +15248,33 @@ var ENGINE_LABEL = "ai.olympusplugin.engine";
 var PACKAGE_NAMES = new Set(["olympus", "olympus-source-checkout"]);
 function enginePaths(homeDir) {
   const home = absolute(homeDir, "home directory");
-  const logDir = join13(home, "Library", "Logs", "Olympus");
-  const appSupportDir = join13(home, "Library", "Application Support", "Olympus");
+  const logDir = join14(home, "Library", "Logs", "Olympus");
+  const appSupportDir = join14(home, "Library", "Application Support", "Olympus");
   const dataEnv = { HOME: home };
   return {
     label: ENGINE_LABEL,
-    plistPath: join13(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
+    plistPath: join14(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
     logDir,
-    logPath: join13(logDir, "engine.log"),
-    errorLogPath: join13(logDir, "engine.err"),
-    configPath: join13(home, ".olympus", "engine.json"),
-    sovereigntyPath: join13(home, ".olympus", "sovereignty.json"),
+    logPath: join14(logDir, "engine.log"),
+    errorLogPath: join14(logDir, "engine.err"),
+    configPath: join14(home, ".olympus", "engine.json"),
+    sovereigntyPath: join14(home, ".olympus", "sovereignty.json"),
     appSupportDir,
-    appDir: join13(appSupportDir, "app"),
-    previousAppDir: join13(appSupportDir, "app.previous"),
-    runtimeDir: join13(appSupportDir, "runtime"),
-    workerEnvPath: join13(home, ".config", "olympus", "worker.env"),
+    appDir: join14(appSupportDir, "app"),
+    previousAppDir: join14(appSupportDir, "app.previous"),
+    runtimeDir: join14(appSupportDir, "runtime"),
+    workerEnvPath: join14(home, ".config", "olympus", "worker.env"),
     statusPath: engineStatusPath(dataEnv),
     childrenPath: engineChildrenPath(dataEnv),
-    modelsDir: join13(olympusDataDir(dataEnv), "models"),
+    modelsDir: join14(olympusDataDir(dataEnv), "models"),
     remoteAccessDir: remoteAccessDir(dataEnv)
   };
 }
 function engineStatusPath(env = process.env) {
-  return join13(olympusDataDir(env), "engine", "status.json");
+  return join14(olympusDataDir(env), "engine", "status.json");
 }
 function inspectEngine(options = {}) {
-  const homeDir = absolute(options.homeDir ?? homedir7(), "home directory");
+  const homeDir = absolute(options.homeDir ?? homedir8(), "home directory");
   const paths = enginePaths(homeDir);
   const installed = existsSync6(paths.plistPath);
   const base = {
@@ -15231,9 +15670,11 @@ function unique(values) {
 init_connected_handles();
 
 // src/core/connect.ts
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync12, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
-import { homedir as homedir9 } from "node:os";
-import { dirname as dirname13, join as join15 } from "node:path";
+init_model_transport();
+init_zkapi_consult_settings();
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { homedir as homedir10 } from "node:os";
+import { dirname as dirname13, join as join16 } from "node:path";
 init_secret_store();
 init_http_timeout();
 init_oauth_relay();
@@ -15265,11 +15706,11 @@ var KNOWN_OAUTH_ERROR_CODES = new Set([
   "redirect_uri_mismatch"
 ]);
 function defaultDetachedOAuthStateDir() {
-  return join15(homedir9(), ".olympus", "pending-oauth");
+  return join16(homedir10(), ".olympus", "pending-oauth");
 }
 function readDetachedOAuthState(path) {
   try {
-    return sanitizeDetachedOAuthState(JSON.parse(readFileSync12(path, "utf8")));
+    return sanitizeDetachedOAuthState(JSON.parse(readFileSync13(path, "utf8")));
   } catch {
     return;
   }
@@ -15333,11 +15774,449 @@ init_source_dashboard();
 init_ingestion_throughput();
 init_public_source_capabilities();
 init_source_corpus_registry();
+init_secret_store();
+
+// src/core/consult-transport-zkapi.ts
+init_atomic_file();
+init_file_lease();
+init_zkapi_consult_settings();
+import { spawn, execFileSync as execFileSync2 } from "node:child_process";
+import { createHash as createHash6, randomUUID as randomUUID7 } from "node:crypto";
+import { accessSync as accessSync3, chmodSync as chmodSync2, constants as constants2, existsSync as existsSync10, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync2, readFileSync as readFileSync14, readlinkSync, realpathSync, rmSync as rmSync3, statSync as statSync10, writeFileSync as writeFileSync5 } from "node:fs";
+import { createConnection } from "node:net";
+import { homedir as homedir12, tmpdir as tmpdir2 } from "node:os";
+import { delimiter as delimiter4, dirname as dirname15, join as join19, resolve as resolvePath2 } from "node:path";
+var DAY_MS = 24 * 60 * 60 * 1000;
+var PROBE_MAX_BYTES = 64 * 1024;
+var MAX_QUESTION_BYTES = 8 * 1024;
+var ZKAPI_SUPPORTED_DAEMON_VERSIONS = ["0.1.5", "0.1.6"];
+var ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000;
+var CHILD_ENV_KEYS = [
+  "HOME",
+  "PATH",
+  "USER",
+  "LOGNAME",
+  "LANG",
+  "TMPDIR",
+  "XDG_CONFIG_HOME",
+  "ZKAPI_CLIENTD_CONFIG_DIR",
+  "OA_CHAT_CONFIG_DIR"
+];
+function zkapiRouteLabel(receipt) {
+  if (receipt.keyReuse !== "verified_off" || receipt.inferenceAuth !== "verified") {
+    return "not anonymous: key isolation or local authentication not confirmed";
+  }
+  if (receipt.tor === "off")
+    return "payment privacy only (network address visible)";
+  if (receipt.postStopProbe === "still_reachable") {
+    return "payment privacy only: the daemon still reached the network after Tor stopped (Tor bypass observed)";
+  }
+  const confined = receipt.confinementSelfTest === "passed" ? receipt.confinement : "none";
+  if (confined === "loopback_filtered" && receipt.freshTorClient && receipt.settlement !== "not_confirmed") {
+    return "anonymous route (payment, key and network identity hidden)";
+  }
+  const unsettled = receipt.settlement === "not_confirmed" ? "; lease settlement not confirmed" : "";
+  return `payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; ${confinementStatement(confined)}${unsettled}`;
+}
+function zkapiMoneyStatus(settings, now) {
+  const required = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((item) => item.id);
+  const currentVersion = settings.acknowledgements.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION;
+  const accepted = currentVersion ? required.filter((id) => settings.acknowledgements.accepted.includes(id)).length : 0;
+  return {
+    acknowledgements: { complete: accepted === required.length, accepted, required: required.length },
+    expiryEstimate: expiryEstimate(settings.fundingDate, now),
+    depositAboveSuggestedCeiling: (settings.depositUsd ?? 0) > ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD
+  };
+}
+function expiryEstimate(fundingDate, now) {
+  if (!fundingDate)
+    return { state: "unknown", notice: "unknown" };
+  const funded = parseIsoDate(fundingDate);
+  const today = parseIsoDate(now.toISOString().slice(0, 10));
+  if (!funded || !today || funded.getTime() > today.getTime()) {
+    return { state: "invalid", fundingDate, notice: "unknown" };
+  }
+  const expiry = new Date(funded.getTime() + ZKAPI_NOTE_TTL_DAYS * DAY_MS);
+  const daysLeft = Math.round((expiry.getTime() - today.getTime()) / DAY_MS);
+  const expiryDate = expiry.toISOString().slice(0, 10);
+  if (daysLeft <= 0)
+    return { state: "expired", fundingDate, expiryDate, daysLeft: 0, notice: "expired" };
+  const [ten, five, two] = ZKAPI_EXPIRY_NOTICE_DAYS;
+  const notice = daysLeft <= two ? "two_days" : daysLeft <= five ? "five_days" : daysLeft <= ten ? "ten_days" : "none";
+  return { state: "active", fundingDate, expiryDate, daysLeft, notice };
+}
+function settingsBlockers(money) {
+  const blockers = [];
+  if (!money.acknowledgements.complete)
+    blockers.push("acknowledgements_incomplete");
+  if (money.expiryEstimate.state === "unknown")
+    blockers.push("funding_date_missing");
+  if (money.expiryEstimate.state === "invalid")
+    blockers.push("funding_date_invalid");
+  if (money.expiryEstimate.state === "expired")
+    blockers.push("note_expired");
+  return blockers;
+}
+function versionSupported(version) {
+  const normalized = version?.replace(/^v/, "");
+  return ZKAPI_SUPPORTED_DAEMON_VERSIONS.includes(normalized ?? "");
+}
+function confinementLevel(policy) {
+  if (policy.nonLoopback !== "denied" || policy.unixSockets !== "denied")
+    return "none";
+  return policy.loopbackOutbound === "session_ports_only" ? "loopback_filtered" : "non_loopback_blocked";
+}
+function confinementStatement(level) {
+  if (level === "loopback_filtered") {
+    return "network confinement allowed only this session's Tor and daemon ports";
+  }
+  if (level === "non_loopback_blocked") {
+    return "in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered";
+  }
+  return "no network confinement";
+}
+function darwinSandboxProfile(policy, ports) {
+  const rules = ["(version 1)", "(allow default)"];
+  if (policy.nonLoopback === "denied" || policy.unixSockets === "denied") {
+    rules.push("(deny network*)");
+    rules.push('(allow network-bind (local ip "localhost:*"))');
+    rules.push('(allow network-inbound (local ip "localhost:*"))');
+    if (policy.loopbackOutbound === "any") {
+      rules.push('(allow network-outbound (remote ip "localhost:*"))');
+    } else {
+      rules.push(`(allow network-outbound (remote ip "localhost:${ports.tor}"))`);
+      rules.push(`(allow network-outbound (remote ip "localhost:${ports.daemon}"))`);
+    }
+  }
+  return rules.join("");
+}
+var DARWIN_POLICY = { nonLoopback: "denied", unixSockets: "denied", loopbackOutbound: "any" };
+var SELF_TEST_SCRIPT = `
+const net = require('node:net');
+const dgram = require('node:dgram');
+const loopback = () => new Promise((resolve) => {
+  const server = net.createServer((c) => c.end());
+  server.listen(0, '127.0.0.1', () => {
+    const s = net.createConnection({ host: '127.0.0.1', port: server.address().port });
+    s.once('connect', () => { s.destroy(); server.close(); resolve('connected'); });
+    s.once('error', () => { server.close(); resolve('failed'); });
+  });
+});
+const tcp = () => new Promise((resolve) => {
+  const started = Date.now();
+  const s = net.createConnection({ host: '192.0.2.1', port: 9 });
+  s.setTimeout(3000, () => { s.destroy(); resolve('timeout'); });
+  s.once('connect', () => { s.destroy(); resolve('connected'); });
+  s.once('error', () => resolve(Date.now() - started < 1000 ? 'failed_fast' : 'failed_slow'));
+});
+const udp = () => new Promise((resolve) => {
+  const s = dgram.createSocket('udp4');
+  s.send(Buffer.from([0]), 53, '192.0.2.1', (e) => { s.close(); resolve(e ? 'failed' : 'sent'); });
+});
+const resolver = () => new Promise((resolve) => {
+  const s = net.createConnection({ path: '/private/var/run/mDNSResponder' });
+  s.once('connect', () => { s.destroy(); resolve('connected'); });
+  s.once('error', () => resolve('failed'));
+});
+(async () => {
+  const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver(), tcp: await tcp() };
+  process.stdout.write(JSON.stringify(result));
+})();
+`;
+function runSelfTestProbe(argv, env) {
+  try {
+    return JSON.parse(execFileSync2(argv[0], argv.slice(1), {
+      encoding: "utf8",
+      timeout: 1e4,
+      env,
+      stdio: ["ignore", "pipe", "ignore"]
+    }));
+  } catch {
+    return;
+  }
+}
+function defaultZkapiConfinement() {
+  if (process.platform === "darwin" && existsSync10("/usr/bin/sandbox-exec")) {
+    const level = confinementLevel(DARWIN_POLICY);
+    return {
+      level,
+      limit: `macOS sandbox available; each session self-tests it, and when that passes: ${confinementStatement(level)}`,
+      wrap: (argv, ports) => ["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
+      selfTest: async (workDir, env) => {
+        const script = join19(workDir, "confinement-self-test.cjs");
+        writeFileSync5(script, SELF_TEST_SCRIPT, { mode: 384 });
+        const outside = runSelfTestProbe([process.execPath, script], env);
+        const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script], env);
+        return outside?.loopback === "connected" && outside.udp === "sent" && outside.resolver === "connected" && (outside.tcp === "timeout" || outside.tcp === "failed_slow") && inside?.loopback === "connected" && inside.udp === "failed" && inside.resolver === "failed" && inside.tcp === "failed_fast";
+      }
+    };
+  }
+  return {
+    level: "none",
+    limit: "no network confinement is implemented on this platform",
+    wrap: (argv) => [...argv],
+    selfTest: async () => false
+  };
+}
+function defaultZkapiStatePath(home = homedir12()) {
+  return join19(home, ".olympus", "zkapi-consult-state.json");
+}
+function utcDay(now) {
+  return now.toISOString().slice(0, 10);
+}
+function readState(path) {
+  if (!existsSync10(path))
+    return;
+  const parsed = JSON.parse(readFileSync14(path, "utf8"));
+  if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
+    throw new Error("zkAPI state record is malformed");
+  }
+  return parsed;
+}
+function zkapiUsageToday(path, now) {
+  const state = readState(path);
+  return state && state.day === utcDay(now) ? { count: state.count, reservedMicroUsd: state.reservedMicroUsd } : { count: 0, reservedMicroUsd: 0 };
+}
+function zkapiLastSession(path) {
+  return readState(path)?.lastSession;
+}
+function zkapiWalletDirectory(env) {
+  const home = env.HOME?.trim() || homedir12();
+  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join19(home, "Library", "Application Support", "zkapi-clientd") : join19(env.XDG_CONFIG_HOME?.trim() || join19(home, ".config"), "zkapi-clientd"));
+  const absolute2 = resolvePath2(configured);
+  try {
+    return realpathSync(absolute2);
+  } catch {
+    return absolute2;
+  }
+}
+function zkapiFenceScope(input) {
+  return createHash6("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
+}
+function ownerLimits(settings) {
+  return {
+    ...settings.dailyRequestCap !== undefined ? { requestCap: settings.dailyRequestCap } : {},
+    ...settings.dailySpendCapUsd !== undefined ? { spendCapMicroUsd: Math.round(settings.dailySpendCapUsd * 1e6) } : {}
+  };
+}
+var WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED";
+var WATCHDOG_SCRIPT = `
+const { spawn, execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const [, , expectedParentText, ...argv] = process.argv;
+const expectedParent = Number(expectedParentText);
+const self = process.pid;
+if (process.ppid !== expectedParent) process.exit(70);
+let child;
+let cleaning = false;
+let exitCode = 0;
+const othersInGroup = () => {
+  if (process.platform === 'linux') {
+    let count = 0;
+    for (const name of fs.readdirSync('/proc')) {
+      if (!/^\\d+$/.test(name) || Number(name) === self) continue;
+      try {
+        const stat = fs.readFileSync('/proc/' + name + '/stat', 'utf8');
+        const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\\s+/);
+        if (Number(fields[2]) === self && fields[0] !== 'Z') count += 1;
+      } catch {}
+    }
+    return count;
+  }
+  try {
+    const out = execFileSync('/usr/bin/pgrep', ['-g', String(self)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return out.split('\\n').filter((line) => line.trim() && Number(line) !== self).length;
+  } catch (error) {
+    return error && error.status === 1 ? 0 : Infinity;
+  }
+};
+const cleanup = () => {
+  if (cleaning) return;
+  cleaning = true;
+  try { process.kill(-self, 'SIGTERM'); } catch {}
+  const deadline = Date.now() + 5000;
+  const tick = () => {
+    if (othersInGroup() === 0) process.exit(exitCode);
+    if (Date.now() >= deadline) { try { process.kill(-self, 'SIGKILL'); } catch {} return; }
+    setTimeout(tick, 100);
+  };
+  setTimeout(tick, 50);
+};
+process.on('SIGTERM', cleanup);
+process.on('SIGINT', cleanup);
+// With the supervisor gone its pipes are broken: a failed write must never
+// take the watchdog down before the group is clean.
+process.on('SIGPIPE', () => {});
+process.stdout.on('error', () => {});
+process.stderr.on('error', () => {});
+process.on('uncaughtException', () => cleanup());
+const start = () => {
+  child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'inherit', 'inherit'] });
+  const report = () => { try { process.stdout.write('\\n${WATCHDOG_CHILD_EXITED}\\n'); } catch {} };
+  child.on('exit', (code) => { exitCode = code === null ? 1 : code; report(); cleanup(); });
+  child.on('error', () => { exitCode = 127; report(); cleanup(); });
+};
+let received = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { received += chunk; if (!child && !cleaning && received.includes('go\\n')) start(); });
+process.stdin.on('end', () => { if (!child) process.exit(71); });
+setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
+`;
+function currentBootId() {
+  return processInstanceIdentity(process.pid)?.bootId;
+}
+function supervisorAlive(supervisor) {
+  if (supervisor.pid === process.pid)
+    return false;
+  const boot = currentBootId();
+  if (supervisor.instance?.bootId && boot && supervisor.instance.bootId !== boot)
+    return false;
+  try {
+    process.kill(supervisor.pid, 0);
+  } catch (error) {
+    if (error.code !== "EPERM")
+      return false;
+  }
+  const current = processInstanceIdentity(supervisor.pid);
+  if (!supervisor.instance || !current)
+    return true;
+  return supervisor.instance.mechanism !== current.mechanism || supervisor.instance.startTime === current.startTime;
+}
+function childEnvironment(env) {
+  const out = {};
+  for (const key of CHILD_ENV_KEYS) {
+    const value = env[key];
+    if (value)
+      out[key] = value;
+  }
+  return out;
+}
+function resolveExecutable(name, explicit, env) {
+  const candidates = explicit ? [explicit] : (env.PATH ?? "").split(delimiter4).filter(Boolean).map((dir) => join19(dir, name));
+  for (const candidate of candidates) {
+    try {
+      accessSync3(candidate, constants2.X_OK);
+      if (statSync10(candidate).isFile())
+        return candidate;
+    } catch {}
+  }
+  return;
+}
+function portAnswers(port) {
+  return new Promise((resolve3) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const done = (value) => {
+      socket.destroy();
+      resolve3(value);
+    };
+    socket.setTimeout(1000, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+async function zkapiConsultReadiness(options) {
+  const now = (options.now ?? (() => new Date))();
+  const env = options.env ?? process.env;
+  const settings = options.settings;
+  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const money = zkapiMoneyStatus(settings, now);
+  const blockers = settingsBlockers(money);
+  const apiKeyConfigured = Boolean(options.apiKey) || options.apiKeyPresent === true;
+  if (!apiKeyConfigured)
+    blockers.push("daemon_api_key_missing");
+  const daemonExecutable = resolveExecutable("zkapi-clientd", settings.daemonExecutable, env);
+  let daemonVersion;
+  if (!daemonExecutable) {
+    blockers.push("daemon_not_found");
+  } else {
+    try {
+      const out = execFileSync2(daemonExecutable, ["--version"], {
+        encoding: "utf8",
+        timeout: 5000,
+        env: childEnvironment(env),
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+      daemonVersion = /^zkapi-clientd (\S+)/.exec(out.trim())?.[1];
+    } catch {
+      daemonVersion = undefined;
+    }
+    if (!versionSupported(daemonVersion))
+      blockers.push("daemon_version_unsupported");
+  }
+  const torExecutable = settings.tor === "per_consult" ? resolveExecutable("tor", settings.torExecutable, env) : undefined;
+  if (settings.tor === "per_consult" && !torExecutable)
+    blockers.push("tor_not_found");
+  const daemonPort = await portAnswers(Number(new URL(options.baseUrl).port || 80)) ? "in_use" : "free";
+  if (daemonPort === "in_use")
+    blockers.push("daemon_already_running");
+  const torPort = settings.tor === "per_consult" ? await portAnswers(settings.torSocksPort) ? "in_use" : "free" : "not_used";
+  if (torPort === "in_use")
+    blockers.push("tor_port_busy");
+  const statePath = options.statePath ?? defaultZkapiStatePath();
+  let usage = { count: 0, reservedMicroUsd: 0 };
+  let lastSession;
+  let unresolvedSession = false;
+  const currentScope = zkapiFenceScope({ env });
+  let fences = [];
+  let stranded;
+  try {
+    const state = readState(statePath);
+    usage = zkapiUsageToday(statePath, now);
+    lastSession = zkapiLastSession(statePath);
+    fences = Object.entries(state?.fences ?? {}).map(([scope, fence]) => ({ ...fence, thisWallet: scope === currentScope }));
+    unresolvedSession = fences.length > 0;
+    if (state?.running) {
+      stranded = {
+        supervisorPid: state.running.supervisor.pid,
+        supervisorRunning: supervisorAlive(state.running.supervisor),
+        groups: state.running.groups.map((group) => ({ role: group.role, pgid: group.pgid }))
+      };
+    }
+  } catch {
+    blockers.push("state_unavailable");
+  }
+  if (fences.some((fence) => fence.thisWallet))
+    blockers.push("unresolved_session");
+  if (fences.some((fence) => !fence.thisWallet))
+    blockers.push("unresolved_session_other_wallet");
+  if (stranded && !stranded.supervisorRunning)
+    blockers.push("stranded_processes");
+  const limit = ownerLimits(settings);
+  if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
+    blockers.push("daily_cap_reached");
+  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limit.spendCapMicroUsd) {
+    blockers.push("spend_cap_reached");
+  }
+  return {
+    ...daemonExecutable ? { daemonExecutable } : {},
+    ...daemonVersion ? { daemonVersion } : {},
+    ...torExecutable ? { torExecutable } : {},
+    tor: settings.tor,
+    confinement: { level: confinement.level, limit: confinement.limit },
+    daemonPort,
+    torPort,
+    apiKeyConfigured,
+    money,
+    requestsToday: { count: usage.count, ...settings.dailyRequestCap !== undefined ? { cap: settings.dailyRequestCap } : {} },
+    spendToday: {
+      reservedUsd: usage.reservedMicroUsd / 1e6,
+      ...settings.dailySpendCapUsd !== undefined ? { capUsd: settings.dailySpendCapUsd } : {}
+    },
+    unresolvedSession,
+    fences,
+    ...stranded ? { stranded } : {},
+    ...lastSession ? { lastSession } : {},
+    routeLabel: lastSession ? zkapiRouteLabel(lastSession) : settings.tor === "off" ? "payment privacy only (network address visible); not yet verified by a consult" : `not yet verified by a consult; on this platform: ${confinement.limit}`,
+    blockers
+  };
+}
+
+// src/core/doctor.ts
 function defaultDoctorHostProbe(env = process.env, options = {}) {
-  const home = env.HOME?.trim() || homedir11();
+  const home = env.HOME?.trim() || homedir13();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" ? inspectEngine({ homeDir: home }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync10(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync11(workerServicePaths(process.platform, home).unitPath) : false;
   return {
     ...openclawPath ? { openclawPath } : {},
     engine: { installed: engine.installed, state: engine.state },
@@ -15374,6 +16253,7 @@ async function runDoctor(input) {
     await safeCheck("credential_reauthorization_backlog", () => credentialReauthorizationBacklogCheck(deps)),
     await safeCheck("argus_model_pool", () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck("sovereignty_model_lanes", () => sovereigntyModelLaneCheck(deps)),
+    await safeCheck("zkapi_consult_transport", () => zkapiConsultTransportCheck(deps)),
     await safeCheck("email_worker", () => emailWorkerCheck(deps)),
     await safeCheck("worker_credential_lanes", () => workerCredentialLanesCheck(deps)),
     await safeCheck("dropbox_content_extraction_throughput", () => dropboxContentExtractionThroughputCheck(deps)),
@@ -15417,7 +16297,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync10(configPath))
+  if (configPath === undefined || !existsSync11(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -15429,7 +16309,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join18(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join20(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -15611,7 +16491,7 @@ async function sovereigntyModelLaneCheck(deps) {
     const baseUrl = profile.baseUrl;
     const modelsUrl = `${baseUrl.replace(/\/$/, "")}/models`;
     try {
-      const response = await fetchImpl(modelsUrl, { method: "GET" });
+      const response = await fetchModelEndpoint(fetchImpl, modelsUrl, { method: "GET" });
       if (!response.ok)
         problems.push(`${profileId} at ${modelsUrl} returned HTTP ${response.status}`);
     } catch (error) {
@@ -15631,6 +16511,78 @@ async function sovereigntyModelLaneCheck(deps) {
     ok: true,
     detail: `Configured local sovereignty model lanes are reachable (${profiles.length} profile${profiles.length === 1 ? "" : "s"} checked).`
   };
+}
+async function zkapiConsultTransportCheck(deps) {
+  const name = "zkapi_consult_transport";
+  const engine = doctorSovereigntyEngine(deps);
+  const profiles = engine ? Object.entries(engine.config.modelProfiles).filter(([, profile]) => profile.provider === "zkapi") : [];
+  if (profiles.length === 0) {
+    return { name, ok: true, detail: "Not configured: the experimental zkAPI consult transport is off." };
+  }
+  const env = deps.env ?? process.env;
+  const home = env.HOME?.trim();
+  const statePath = deps.zkapiStatePath ?? (home ? defaultZkapiStatePath(home) : defaultZkapiStatePath());
+  const lines = [];
+  let ok = true;
+  for (const [profileId, profile] of profiles) {
+    const readiness = await zkapiConsultReadiness({
+      baseUrl: profile.baseUrl,
+      model: "model" in profile && profile.model ? profile.model : "",
+      settings: profile.zkapi,
+      statePath,
+      env,
+      apiKeyPresent: secretRefPresent(profile.secretRef, env, deps),
+      ...deps.now ? { now: deps.now } : {}
+    });
+    if (readiness.blockers.length > 0)
+      ok = false;
+    lines.push(`${profileId}: ${describeZkapiReadiness(readiness)}`);
+  }
+  return {
+    name,
+    ok,
+    detail: `zkAPI consult transport (experimental, consults only; no consult is sent until the consult lane lands): ${lines.join(" | ")}`,
+    ...ok ? {} : {
+      hint: [
+        lines.some((line) => line.includes("UNRESOLVED SESSION")) ? "A recovery-only zkAPI session is needed before another consult, run against the wallet directory that holds the fence. Until the consult lane offers it, run the developer harness from the Olympus checkout: bun scripts/zkapi-consult-recover.ts --yes (one content-free request, counted at $6). A fence whose wallet can no longer run can only be abandoned explicitly with that script's --abandon option; an unsettled lease may then settle under another session's identity." : undefined,
+        lines.some((line) => line.includes("STRANDED PROCESSES")) ? "An earlier session left processes Olympus could not prove its own. Find the listed process groups (ps -o pid,pgid,command -g <pgid>), stop them yourself, or reboot; the next session then sees them gone. Never delete the zkAPI ledger to clear this." : undefined,
+        "Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon."
+      ].filter((part) => part !== undefined).join(" ")
+    }
+  };
+}
+function describeZkapiReadiness(readiness) {
+  const daemon = readiness.daemonExecutable ? `zkapi-clientd ${readiness.daemonVersion ?? "version unknown"}` : "zkapi-clientd not found";
+  const tor = readiness.tor === "off" ? "Tor off" : readiness.torExecutable ? "tor found (a fresh client per consult)" : "tor not found";
+  const confinement = `confinement on this platform: ${readiness.confinement.limit}`;
+  const ports = `daemon port ${readiness.daemonPort === "free" ? "free" : "IN USE"}${readiness.torPort === "not_used" ? "" : `, Tor port ${readiness.torPort === "free" ? "free" : "IN USE"}`}`;
+  const key = readiness.apiKeyConfigured ? "local API key configured" : "local API key NOT configured";
+  const money = readiness.money;
+  const acks = `acknowledgements ${money.acknowledgements.complete ? "complete" : "incomplete"} (${money.acknowledgements.accepted}/${money.acknowledgements.required})`;
+  const expiry = money.expiryEstimate;
+  const expiryText = expiry.state === "active" ? `estimated expiry ${expiry.expiryDate} from the confirmed funding date (${expiry.daysLeft} day${expiry.daysLeft === 1 ? "" : "s"} left, notice ${expiry.notice})` : expiry.state === "expired" ? `estimated expiry PASSED on ${expiry.expiryDate}; an unwithdrawn note becomes claimable by the operator` : expiry.state === "invalid" ? "funding date invalid" : "funding date not recorded";
+  const deposit = money.depositAboveSuggestedCeiling ? "; deposit is above the suggested ceiling" : "";
+  const requestLimit = readiness.requestsToday.cap !== undefined ? `limit ${readiness.requestsToday.cap}` : "no limit set";
+  const spendLimit = readiness.spendToday.capUsd !== undefined ? `limit $${readiness.spendToday.capUsd.toFixed(2)}` : "no limit set";
+  const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts up to $6.00)`;
+  const fence = readiness.fences.length > 0 ? `UNRESOLVED SESSION: ${readiness.fences.map((entry) => `fence since ${entry.at} for wallet directory ${entry.configDir}${entry.daemonExecutable ? ` (daemon ${entry.daemonExecutable}${entry.daemonPort ? `, port ${entry.daemonPort}` : ""})` : ""}${entry.thisWallet ? ", this wallet" : ", another wallet"}`).join("; ")}; run a recovery-only session before another consult` : "no unresolved session";
+  const stranded = readiness.stranded ? readiness.stranded.supervisorRunning ? `; a session is in progress (supervisor pid ${readiness.stranded.supervisorPid})` : `; STRANDED PROCESSES from an earlier session: ${readiness.stranded.groups.map((group) => `${group.role} process group ${group.pgid}`).join(", ") || "no group recorded"}` : "";
+  const last = readiness.lastSession ? `last ${readiness.lastSession.recovery ? "recovery session" : "consult"} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}` : "no consult run yet";
+  const blockers = readiness.blockers.length > 0 ? `; not ready: ${readiness.blockers.join(", ")}` : "; ready";
+  return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}${stranded}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
+}
+function secretRefPresent(secretRef, env, deps) {
+  const ref = normalizeSecretRef(secretRef ?? "");
+  if (!ref)
+    return false;
+  if (ref.kind === "env")
+    return Boolean(env[ref.key]?.trim());
+  const store = deps.secretStore ?? createDefaultSecretStore({ env });
+  try {
+    return Boolean(store.getSync?.(ref.key)?.trim());
+  } catch {
+    return false;
+  }
 }
 async function sovereigntyPrerequisiteCheck(deps) {
   const engine = doctorSovereigntyEngine(deps);
@@ -15860,7 +16812,7 @@ function tierMigrationStoppedGraceDays(env) {
   const value = Number(raw);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS;
 }
-var DAY_MS = 24 * 60 * 60 * 1000;
+var DAY_MS2 = 24 * 60 * 60 * 1000;
 function approvedTierMigrationInProgress(value, now, graceDays) {
   const migration = asRecord15(value);
   if (migration.in_progress !== true)
@@ -15880,8 +16832,8 @@ function approvedTierMigrationInProgress(value, now, graceDays) {
   if (state === "stopped") {
     const stoppedAt = typeof migration.stopped_at === "string" ? Date.parse(migration.stopped_at) : Number.NaN;
     const ageMs = Number.isFinite(stoppedAt) ? Math.max(0, now.getTime() - stoppedAt) : Number.POSITIVE_INFINITY;
-    if (ageMs > graceDays * DAY_MS) {
-      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS)} days ago` : "migration stopped at an unknown time";
+    if (ageMs > graceDays * DAY_MS2) {
+      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS2)} days ago` : "migration stopped at an unknown time";
       return {
         state,
         approvalEntryId,
@@ -16311,7 +17263,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join18(dirname15(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join20(dirname16(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -16332,9 +17284,9 @@ function ingestionHealthStateFromLedger(ledger) {
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync10(path))
+    if (!existsSync11(path))
       return;
-    const parsed = JSON.parse(readFileSync13(path, "utf8"));
+    const parsed = JSON.parse(readFileSync15(path, "utf8"));
     const record = asRecord15(parsed);
     const sources = asRecord15(record.sources);
     const normalized = {};
@@ -16355,8 +17307,8 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync8(dirname15(path), { recursive: true });
-  writeFileSync5(path, `${JSON.stringify(state, null, 2)}
+  mkdirSync9(dirname16(path), { recursive: true });
+  writeFileSync6(path, `${JSON.stringify(state, null, 2)}
 `);
 }
 function ingestionHealthHint(ledger) {
@@ -16569,7 +17521,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync10(join18(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync11(join20(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync3(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -19020,7 +19972,7 @@ function sourceWatchRouteFromToolContext(context) {
   const ownerSeed = context.requesterSenderId?.trim() || context.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId = `owner:${createHash6("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId = `owner:${createHash7("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context.deliveryContext?.channel || context.messageChannel)?.trim().toLowerCase();
   const target = context.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {

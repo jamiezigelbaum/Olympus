@@ -12,6 +12,14 @@ import type { SourceTrustDomain, SourceTrustTier } from './source-index/types.ts
 import { BUILT_IN_EMBEDDING_MODEL } from '../workers/source-index/built-in-embedding/manifest.ts';
 
 const BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_MODEL.modelId;
+import {
+  assertZkapiDaemonBaseUrl,
+  loopbackPort,
+  parseZkapiConsultSettings,
+  registerZkapiDaemonPorts,
+  ZKAPI_DAEMON_DEFAULT_PORT,
+  type ZkapiConsultSettings,
+} from './zkapi-consult-settings.ts';
 
 export {
   assertEvidenceCandidateModelEligible,
@@ -35,13 +43,32 @@ export type SovereigntyProfileProvider =
   | 'openai-compatible'
   // The in-process embedding model: embedding only, always local trust, no
   // endpoint and no credential.
-  | 'built-in';
+  | 'built-in'
+  // Experimental anonymous transport for consults only (design track Z). Its
+  // trust is fixed at standard_cloud and it never serves an evidence role.
+  | 'zkapi';
+
+const SUPPORTED_PROVIDERS: readonly SovereigntyProfileProvider[] = [
+  'local-openai-compatible',
+  'openclaw-infer',
+  'google-gemini',
+  'venice',
+  'anthropic',
+  'openai-compatible',
+  'built-in',
+  'zkapi',
+];
 
 interface SovereigntyModelProfileBase {
   trust: SovereigntyProfileTrust;
   baseUrl?: string;
   secretRef?: string;
-  purpose?: 'analyst' | 'embedding' | 'vision' | 'classification';
+  // `consult` carries one approved question and never raw evidence: a consult
+  // profile is refused for every analyst route, embedding, vision and
+  // classification role.
+  purpose?: 'analyst' | 'embedding' | 'vision' | 'classification' | 'consult';
+  /** Settings of a `zkapi` profile; refused on any other provider. */
+  zkapi?: ZkapiConsultSettings;
 }
 
 export interface SovereigntyOpenClawInferModelProfile extends SovereigntyModelProfileBase {
@@ -267,8 +294,10 @@ export function createSovereigntyEngine(
 
 export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): SovereigntyConfig {
   const config = parseSovereigntyConfig(rawConfig, 'sovereignty config');
+  const daemonPorts = zkapiDaemonPorts(config);
+  registerZkapiDaemonPorts(daemonPorts);
   for (const [id, profile] of Object.entries(config.modelProfiles)) {
-    validateProfile(id, profile);
+    validateProfile(id, profile, daemonPorts);
   }
   const publicRetired = isPublicTierRetired(config);
   for (const domain of BUILTIN_DOMAINS) {
@@ -295,6 +324,7 @@ export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): Soverei
     validateAnalystPoolShape(pool, domain);
     for (const profileId of pool.members) {
       const resolved = resolveProfile(config, profileId, `route ${domain}`);
+      assertNotConsultOnly(resolved, `the ${domain} analyst route`);
       if (resolved.profile.provider === 'built-in') {
         throw new OperationError(
           'config_error',
@@ -632,6 +662,14 @@ function parseProfiles(value: unknown, label: string): Record<string, Sovereignt
     if (typeof profile.purpose === 'string') {
       parsedProfile.purpose = profile.purpose as NonNullable<SovereigntyModelProfile['purpose']>;
     }
+    if (provider === 'zkapi') {
+      parsedProfile.zkapi = parseZkapiConsultSettings(profile.zkapi, `${label}.modelProfiles.${id}.zkapi`);
+    } else if (profile.zkapi !== undefined) {
+      throw new OperationError(
+        'config_error',
+        `${label}.modelProfiles.${id}.zkapi is only valid on a provider "zkapi" profile.`,
+      );
+    }
     profiles[id] = parsedProfile;
   }
   return profiles;
@@ -710,14 +748,15 @@ function parseTrustDomainPolicy(record: Record<string, unknown>, label: string):
   return policy;
 }
 
-function validateProfile(id: string, profile: SovereigntyModelProfile): void {
+function validateProfile(id: string, profile: SovereigntyModelProfile, daemonPorts: ReadonlySet<number>): void {
   if (!id.trim()) throw new OperationError('config_error', 'Sovereignty model profile ids must not be empty.');
-  if (!['local-openai-compatible', 'openclaw-infer', 'google-gemini', 'venice', 'anthropic', 'openai-compatible', 'built-in'].includes(profile.provider)) {
+  if (!SUPPORTED_PROVIDERS.includes(profile.provider)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" has unsupported provider "${profile.provider}".`);
   }
   if (!['local', 'encrypted_cloud', 'standard_cloud'].includes(profile.trust)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
   }
+  if (profile.provider === 'zkapi') validateZkapiProfile(id, profile);
   if (profile.provider === 'built-in') {
     validateBuiltInProfile(id, profile);
     return;
@@ -743,9 +782,19 @@ function validateProfile(id: string, profile: SovereigntyModelProfile): void {
   if (profile.baseUrl !== undefined && !/^https?:\/\//.test(profile.baseUrl)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" baseUrl must be an HTTP(S) URL.`);
   }
-  if (profile.trust === 'local' || profile.provider === 'local-openai-compatible') {
+  if (profile.provider !== 'zkapi' && (profile.trust === 'local' || profile.provider === 'local-openai-compatible')) {
     assertLocalProfileBaseUrl(id, profile.baseUrl);
     assertLocalModelIdNotCloudForwarding(`Sovereignty local profile "${id}"`, profile.model ?? '');
+  }
+  // Any provider, any declared trust: a profile whose endpoint is a zkAPI
+  // daemon would send its content through the consult transport's daemon.
+  const daemonPort = profile.provider === 'zkapi' ? undefined : loopbackPort(profile.baseUrl);
+  if (daemonPort !== undefined && daemonPorts.has(daemonPort)) {
+    throw new OperationError(
+      'config_error',
+      `Sovereignty profile "${id}" points at port ${daemonPort}, where the zkAPI daemon serves.`,
+      'zkapi-clientd forwards every request to cloud providers through OpenRouter, so a loopback address there is not a local model or a direct provider. Move that server to another port.',
+    );
   }
   const rawProfile = profile as unknown as Record<string, unknown>;
   if (rawProfile.apiKey !== undefined || rawProfile.secret !== undefined) {
@@ -803,6 +852,50 @@ function assertLocalProfileBaseUrl(id: string, baseUrl: string | undefined): voi
   }
 }
 
+function validateZkapiProfile(id: string, profile: SovereigntyModelProfile): void {
+  // A loopback address proves nothing here: the daemon forwards to OpenRouter
+  // and the upstream model, which read every prompt.
+  if (profile.trust !== 'standard_cloud') {
+    throw new OperationError(
+      'config_error',
+      `Sovereignty zkapi profile "${id}" must declare trust "standard_cloud".`,
+      'zkAPI hides who paid, not what was asked: the cloud provider reads the request, whatever the loopback address.',
+    );
+  }
+  if (profile.purpose !== 'consult') {
+    throw new OperationError(
+      'config_error',
+      `Sovereignty zkapi profile "${id}" must declare purpose "consult".`,
+      'zkAPI is a consult-only transport; it may never serve an analyst, embedding, vision or classification role.',
+    );
+  }
+  assertZkapiDaemonBaseUrl(id, profile.baseUrl);
+}
+
+function zkapiDaemonPorts(config: SovereigntyConfig): Set<number> {
+  const ports = new Set<number>([ZKAPI_DAEMON_DEFAULT_PORT]);
+  for (const profile of Object.values(config.modelProfiles)) {
+    if (profile.provider !== 'zkapi') continue;
+    const port = loopbackPort(profile.baseUrl);
+    if (port !== undefined) ports.add(port);
+  }
+  return ports;
+}
+
+/** A consult profile carries one approved question, never evidence. */
+export function isConsultOnlyProfile(profile: SovereigntyModelProfile): boolean {
+  return profile.provider === 'zkapi' || profile.purpose === 'consult';
+}
+
+function assertNotConsultOnly(resolved: SovereigntyResolvedProfile, role: string): void {
+  if (!isConsultOnlyProfile(resolved.profile)) return;
+  throw new OperationError(
+    'config_error',
+    `Consult-only profile "${resolved.id}" cannot serve ${role}.`,
+    'A consult profile (provider zkapi or purpose consult) carries one approved question and never evidence; choose an analyst or embedding profile for this role.',
+  );
+}
+
 function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase();
   return normalized === 'localhost'
@@ -835,6 +928,7 @@ function validateRetrievalPolicy(
   }
   if (policy.embeddingProfile) {
     const resolved = resolveProfile(config, policy.embeddingProfile, `retrieval policy ${domain}`);
+    assertNotConsultOnly(resolved, `the ${domain} embedding policy`);
     if (!policy.allowedEmbeddingTrust.includes(resolved.profile.trust)) {
       throw new OperationError('config_error', `${domain} embedding profile "${policy.embeddingProfile}" is outside allowedEmbeddingTrust.`);
     }
@@ -862,6 +956,7 @@ function profileAllowedForDomain(
   profile: SovereigntyModelProfile,
   domain: (typeof BUILTIN_DOMAINS)[number],
 ): boolean {
+  if (isConsultOnlyProfile(profile)) return false;
   // The secure pool is an approved set, not a generic encrypted-cloud class:
   // this deployment permits loopback local analysts and Venice at its
   // separately enforced Private+ catalog floor. Other providers and ordinary

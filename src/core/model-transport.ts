@@ -13,7 +13,14 @@
 // any part of the request or response body. Callers map it onto the same
 // failure class they use for any other transport failure.
 
+import { assertNotZkapiDaemonEndpointResolved } from './zkapi-consult-settings.ts';
+
 export type ModelTransportFetch = (url: string, init: RequestInit) => Promise<Response>;
+
+/** The same fetch, through fetchModelEndpoint: zkAPI port refusal and no redirects. */
+export function modelEndpointFetch(fetchImpl: ModelTransportFetch): ModelTransportFetch {
+  return (url, init) => fetchModelEndpoint(fetchImpl, url, init);
+}
 
 export const MODEL_ENDPOINT_REDIRECT_MESSAGE =
   'The model endpoint answered with a redirect. Olympus refuses redirects on model transports and did not use the answer.';
@@ -50,6 +57,10 @@ export async function fetchModelEndpoint(
   url: string,
   init: RequestInit,
 ): Promise<Response> {
+  // The one zkAPI endpoint guard: a zkAPI daemon forwards to cloud providers,
+  // so no model transport may send content or a credential to its port,
+  // whatever trust the caller's profile declared.
+  await assertNotZkapiDaemonEndpointResolved(url, 'Model endpoint');
   let response: Response;
   try {
     response = await fetchImpl(url, { ...init, redirect: 'error' });

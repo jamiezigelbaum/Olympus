@@ -4617,6 +4617,8 @@ function providerLabel(provider: SovereigntyProfileProvider): string {
       return 'OpenAI-compatible';
     case 'built-in':
       return 'Built into Olympus';
+    case 'zkapi':
+      return 'zkAPI (experimental, consults only)';
   }
 }
 

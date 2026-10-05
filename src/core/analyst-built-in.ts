@@ -27,6 +27,7 @@ import {
 import type { Analyst, EvidenceCandidate, EvidencePack } from './contracts.ts';
 import { OperationError } from './operation-error.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
+import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
 import {
   installBuiltInReasoning,
   readBuiltInReasoningStatus,
@@ -324,6 +325,8 @@ async function chatCompletion(
     });
   } catch (error) {
     if (request.signal?.aborted) throw error;
+    // A zkAPI-daemon refusal is a configuration problem, not a slow machine.
+    if (isZkapiDaemonEndpointRefusal(error)) throw error;
     if (isModelEndpointRedirectError(error)) {
       throw new OperationError(
         'argus_unreachable',

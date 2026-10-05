@@ -7,6 +7,7 @@ import { isIP } from 'node:net';
 import { OperationError } from '../../core/operation-error.ts';
 import { assertLocalModelIdNotCloudForwarding } from '../../core/local-model-policy.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from '../../core/model-transport.ts';
+import { isZkapiDaemonEndpointRefusal } from '../../core/zkapi-consult-settings.ts';
 import { resolveEmbeddingEpoch } from './embedding-identity.ts';
 
 export type SourceEmbeddingBackend = 'cloud' | 'local';
@@ -251,6 +252,7 @@ async function fetchEmbeddingResponse(
       }
     } catch (error) {
       if (error instanceof TransientSourceEmbeddingError) throw error;
+      if (isZkapiDaemonEndpointRefusal(error)) throw error;
       // A redirect is a property of the endpoint, not a passing outage:
       // retrying would only send the same body to be redirected again.
       if (isModelEndpointRedirectError(error)) {
