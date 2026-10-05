@@ -169,6 +169,12 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   // the seam, in the family's own module, where this guard does not reach.
   'src/core/file-extraction-source.ts',
   'src/core/evidence-pack.ts',
+  // The consult outbound gate (docs/design/frontier-consult-lane.md, A.4). It
+  // judges a question that may leave the machine against everything the writer
+  // saw. A rule that learned one provider's or one domain's shapes would be a
+  // rule every other corpus silently does not get, so it is held to the same
+  // neutrality as the answer spine, and its regexes are inventoried below.
+  'src/core/consult-gate.ts',
   // The folder-exclusion gate. Every file-storage family needs the identical
   // capability, and a gate that learned one provider's idioms would be a gate
   // the next provider silently does not get. Enrolling it here is what makes
@@ -271,6 +277,29 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
   ])],
   ['src/core/query-planner.ts', new Set([
     'stripCodeFences',
+  ])],
+  // The consult outbound gate. Every pattern is a character class, a written
+  // shape (date, number, host, path, version, encoded run), or the question's
+  // own punctuation. None reads meaning, routes on a topic, or names a source.
+  ['src/core/consult-gate.ts', new Set([
+    'characterReasons',
+    'hasMixedScriptToken',
+    'hasEncodedBlob',
+    'questionStructureReasons',
+    'hasIdentifierShape',
+    'hasTechnicalFingerprint',
+    'foldPreservingCase',
+    'tokenize',
+    'proseWords',
+    'containsSnapshotIdentifier',
+    'identifierValues',
+    'hostnames',
+    'dateKeys',
+    'dayNumber',
+    'yearNumber',
+    'figureKeys',
+    'numericReadings',
+    'significantDigits',
   ])],
   ['src/core/source-index/selected-item-safety.ts', new Set([
     'normalizeSelectedItemField',
