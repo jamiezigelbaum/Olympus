@@ -98,10 +98,17 @@ export function consultSettingsPath(env: Readonly<Record<string, string | undefi
 }
 
 /**
- * Test seam: called with the open descriptor's path after the file is opened
- * and before it is examined, so a test can swap or grow the file in between.
+ * Test seams: `afterOpen` runs after the file is opened and before it is
+ * examined; `afterStat` runs after the size check and before the read. A test
+ * uses them to swap or grow the file in between.
  */
-export const __consultSettingsTestHooks: { afterOpen: ((path: string) => void) | undefined } = { afterOpen: undefined };
+export const __consultSettingsTestHooks: {
+  afterOpen: ((path: string) => void) | undefined;
+  /** Called after the descriptor's size check, before the bounded read. */
+  afterStat: ((path: string) => void) | undefined;
+  /** Called with the total number of bytes the bounded read took. */
+  afterRead: ((bytes: number) => void) | undefined;
+} = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 
 /**
  * Strict schema check of a parsed settings document. Returns undefined for
@@ -179,6 +186,7 @@ export function readConsultSettings(location: ConsultSettingsLocation = {}): Con
       if ((stats.mode & 0o022) !== 0) return invalid('insecure_permissions');
       if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) return invalid('insecure_permissions');
       if (stats.size > CONSULT_SETTINGS_MAX_BYTES) return invalid('too_large');
+      __consultSettingsTestHooks.afterStat?.(path);
       // Read to EOF but never past the limit plus one byte, so a file that
       // grows after the size check is still caught.
       const buffer = Buffer.alloc(CONSULT_SETTINGS_MAX_BYTES + 1);
@@ -188,6 +196,7 @@ export function readConsultSettings(location: ConsultSettingsLocation = {}): Con
         if (read === 0) break;
         length += read;
       }
+      __consultSettingsTestHooks.afterRead?.(length);
       if (length > CONSULT_SETTINGS_MAX_BYTES) return invalid('too_large');
       let text: string;
       try {
@@ -254,8 +263,8 @@ export function recheckConsultJobPolicy(policy: ConsultJobPolicy, current: Consu
   if (!policy.outsideHelp) return { ok: false, reason: 'bound_off' };
   if (current.state === 'absent') return { ok: false, reason: 'settings_absent' };
   if (current.state === 'invalid') return { ok: false, reason: 'settings_invalid' };
-  if (!current.settings.enabled) return { ok: false, reason: 'settings_off' };
   if (current.settings.revision !== policy.settingsRevision) return { ok: false, reason: 'settings_stale' };
+  if (!current.settings.enabled) return { ok: false, reason: 'settings_off' };
   return { ok: true };
 }
 

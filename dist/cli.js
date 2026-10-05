@@ -54881,6 +54881,7 @@ function readConsultSettings(location = {}) {
         return invalid("insecure_permissions");
       if (stats.size > CONSULT_SETTINGS_MAX_BYTES)
         return invalid("too_large");
+      __consultSettingsTestHooks.afterStat?.(path);
       const buffer = Buffer.alloc(CONSULT_SETTINGS_MAX_BYTES + 1);
       let length = 0;
       while (length < buffer.length) {
@@ -54889,6 +54890,7 @@ function readConsultSettings(location = {}) {
           break;
         length += read;
       }
+      __consultSettingsTestHooks.afterRead?.(length);
       if (length > CONSULT_SETTINGS_MAX_BYTES)
         return invalid("too_large");
       let text;
@@ -54970,7 +54972,7 @@ var init_consult_settings = __esm(() => {
   TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
   DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
   LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
-  __consultSettingsTestHooks = { afterOpen: undefined };
+  __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 });
 
 // src/core/doctor.ts

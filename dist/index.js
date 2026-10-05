@@ -17466,7 +17466,7 @@ function consultSettingsPath(env = process.env) {
   const home = env.HOME?.trim();
   return home ? join21(home, ".olympus", "consult.json") : undefined;
 }
-var __consultSettingsTestHooks = { afterOpen: undefined };
+var __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 function parseConsultSettings(value) {
   if (!isPlainObject(value))
     return;
@@ -17537,6 +17537,7 @@ function readConsultSettings(location = {}) {
         return invalid("insecure_permissions");
       if (stats.size > CONSULT_SETTINGS_MAX_BYTES)
         return invalid("too_large");
+      __consultSettingsTestHooks.afterStat?.(path);
       const buffer = Buffer.alloc(CONSULT_SETTINGS_MAX_BYTES + 1);
       let length = 0;
       while (length < buffer.length) {
@@ -17545,6 +17546,7 @@ function readConsultSettings(location = {}) {
           break;
         length += read;
       }
+      __consultSettingsTestHooks.afterRead?.(length);
       if (length > CONSULT_SETTINGS_MAX_BYTES)
         return invalid("too_large");
       let text;

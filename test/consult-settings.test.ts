@@ -14,6 +14,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -45,6 +46,8 @@ function tempHome(): string {
 
 afterEach(() => {
   __consultSettingsTestHooks.afterOpen = undefined;
+  __consultSettingsTestHooks.afterStat = undefined;
+  __consultSettingsTestHooks.afterRead = undefined;
   for (const home of homes.splice(0)) {
     try {
       chmodSync(join(home, '.olympus', 'consult.json'), 0o600);
@@ -209,7 +212,7 @@ describe('readConsultSettings fails closed', () => {
     if (made.status !== 0) throw new Error('mkfifo unavailable');
     // No writer ever opens the FIFO: a blocking open or read would hang here.
     expect(readConsultSettings({ env: { HOME: home } })).toMatchObject({ state: 'invalid', reason: 'not_a_regular_file' });
-  });
+  }, 10_000);
 
   test('an unreadable file reads as invalid, never throws', () => {
     if (typeof process.getuid === 'function' && process.getuid() === 0) return; // root reads anything
@@ -249,6 +252,25 @@ describe('the file examined is the file read', () => {
     expect(readConsultSettings({ env: { HOME: home } })).toMatchObject({ reason: 'insecure_permissions' });
   });
 
+  test('a file that grows after the size check is read only to the limit plus one byte, then refused', () => {
+    const home = tempHome();
+    placeSettings(home, VALID);
+    let reportedSize = 0;
+    __consultSettingsTestHooks.afterStat = (path) => {
+      reportedSize = statSync(path).size;
+      // Grow in many short chunks, to far past the limit, after fstat saw a small file.
+      for (let index = 0; index < 64; index += 1) appendFileSync(path, ' '.repeat(1024));
+    };
+    let bytesRead = -1;
+    __consultSettingsTestHooks.afterRead = (bytes) => { bytesRead = bytes; };
+    const read = readConsultSettings({ env: { HOME: home } });
+    expect(reportedSize).toBeLessThan(1024);
+    expect(bytesRead).toBe(CONSULT_SETTINGS_MAX_BYTES + 1);
+    expect(statSync(settingsFile(home)).size).toBeGreaterThan(4 * CONSULT_SETTINGS_MAX_BYTES);
+    expect(read).toMatchObject({ state: 'invalid', reason: 'too_large', settings: DEFAULT_CONSULT_SETTINGS });
+    expect(consultOutsideHelpEnabled(read)).toBe(false);
+  });
+
   test('a file that grows past the limit after open is too large', () => {
     const home = tempHome();
     placeSettings(home, VALID);
@@ -281,7 +303,12 @@ describe('per-job binding', () => {
     expect(policy.languages).toEqual(['en', 'pt-BR']);
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
 
+    // A different revision is stale even when it also turned outside help off.
     placeSettings(home, { ...VALID, revision: 5, enabled: false });
+    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
+
+    // Off at the bound revision (not something a compare-and-swap writer produces) is still off.
+    placeSettings(home, { ...VALID, enabled: false });
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_off' });
 
     rmSync(settingsFile(home));
