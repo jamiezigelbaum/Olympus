@@ -1594,6 +1594,82 @@ describe('analyst-backed source_answer handler', () => {
     expect(released.evidence).toHaveLength(1);
   });
 
+  // A model shown a mixed pack can state a Private fact while citing only a
+  // Personal candidate. Gate facts come from citations, so without a pack-level
+  // check every fact looks non-secure and strict mode would release it.
+  test('strict mode gates an answer from a secure_local context even when it cites only non-secure evidence', async () => {
+    const privateDetail = 'Total testosterone was 612 ng/dL';
+    const { analyst, calls } = scriptedAnalyst((pack) => {
+      const internalCandidate = pack.candidates.find((candidate) => candidate.trustDomain === 'internal')!;
+      return {
+        answer: `${privateDetail}, and the cholesterol note is on file.`,
+        citations: [{ provenance: internalCandidate.provenance, claim: 'Cholesterol note is on file.' }],
+        unanswered: [],
+      };
+    });
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+      secureDerivativeDefault: 'approval',
+    });
+
+    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(calls[0]!.pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local')).toBe(true);
+    expect(result.opsec.release_decision.decision).toBe('needs_approval');
+    expect(result.opsec.release_decision.required_approval).toBe('s4_release');
+    expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_requires_approval');
+    expect(result.evidence).toEqual([]);
+    expect(result.policy.secure_local_content_exposed).toBe(false);
+    expect(result.answer).not.toContain('612');
+    expect(JSON.stringify(result)).not.toContain(privateDetail);
+    expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
+  });
+
+  test('strict mode still releases the content-free unsupported answer from a secure_local context', async () => {
+    const { analyst } = scriptedAnalyst(() => ({
+      answer: 'No evidence in the sources answers this.',
+      citations: [],
+      unanswered: [],
+    }));
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+      secureDerivativeDefault: 'approval',
+    });
+
+    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(result.opsec.release_decision.decision).toBe('allow');
+    expect(result.opsec.release_decision.reasons).toContain('unsupported_answer_released_without_source_content');
+    expect(result.answer).toContain('could not extract a cited bounded answer');
+  });
+
+  test('default mode releases an uncited-secure answer but the audit records the secure_local context', async () => {
+    const { analyst } = scriptedAnalyst((pack) => {
+      const internalCandidate = pack.candidates.find((candidate) => candidate.trustDomain === 'internal')!;
+      return {
+        answer: 'Total testosterone was 612 ng/dL, and the cholesterol note is on file.',
+        citations: [{ provenance: internalCandidate.provenance, claim: 'Cholesterol note is on file.' }],
+        unanswered: [],
+      };
+    });
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+    });
+
+    const result = await handler.answer({ question: 'Latest labs?', include_secure_local: true });
+
+    expect(result.opsec.release_decision.decision).toBe('allow');
+    expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_derivative_allowed');
+    expect(result.opsec.structured_evidence.every((item) => item.trust_domain !== 'secure_local')).toBe(true);
+    expect(result.audit.answer_synthesis.private_context_used).toBe(true);
+    expect(result.answer).toContain('612');
+    expect(JSON.stringify(result.opsec)).not.toContain('612');
+    expect(JSON.stringify(result.audit)).not.toContain('612');
+  });
+
   test('selected secure-local item answers from the pinned evidence instead of neighboring search hits', async () => {
     let searchCalls = 0;
     const { analyst, calls } = scriptedAnalyst((pack) => {

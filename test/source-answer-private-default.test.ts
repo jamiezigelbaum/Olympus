@@ -168,6 +168,20 @@ describe('a private analyst outage never costs an ordinary answer', () => {
     ))).toBe(true);
   });
 
+  test('strict posture judges the rebuilt fallback pack, not the first build that held secure_local', async () => {
+    const world = answerWorld('private-cloud-only', {
+      analystOverrides: { 'venice-private': failing() },
+      secureDerivativeDefault: 'approval',
+    });
+    const result = await world.handler.answer({ question: 'What was my LDL?' });
+    expect(result.audit.answer_synthesis.analyst_backend).toBe('cloud');
+    expect(result.audit.answer_synthesis.private_context_used).toBe(false);
+    expect(result.opsec.release_decision.decision).toBe('allow');
+    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_requires_approval');
+    expect(result.answer).toContain('Your notes mention an LDL question.');
+    expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
+  });
+
   test('the fallback pack is fitted to the answering leg and its counts exclude secure_local', async () => {
     // local-only: the private route is the local model alone; the ordinary
     // route is cloud then local. The local model refuses secure evidence (the
@@ -324,6 +338,7 @@ function answerWorld(preset: Preset, options: {
   secureTitle?: string;
   secureAnalystPoolLastLegTimeoutMs?: number;
   lanes?: () => ReturnType<typeof lanes>;
+  secureDerivativeDefault?: 'allow' | 'approval';
 } = {}) {
   const engine = createSovereigntyEngine(presetConfig(preset));
   const calls: Record<string, EvidencePack[]> = {};
@@ -341,6 +356,7 @@ function answerWorld(preset: Preset, options: {
   const handler = createAnalystSourceIndexAnswerHandler({
     analyst: fallbackLocal,
     lanes: options.lanes ?? (() => lanes(options.secureTitle)),
+    ...(options.secureDerivativeDefault ? { secureDerivativeDefault: options.secureDerivativeDefault } : {}),
     ...(options.secureAnalystPoolLastLegTimeoutMs !== undefined
       ? { secureAnalystPool: { lastLegTimeoutMs: options.secureAnalystPoolLastLegTimeoutMs } }
       : {}),

@@ -1948,9 +1948,14 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
           reasons: ['uncited_non_public_answer'],
           requiredApproval: packHasSecureLocal(input.detail.pack) ? 's4_release' : 'user_review',
         }
-    : originalScanDecision && originalScanDecision.decision !== 'allow'
-      ? originalScanDecision
-    : finalScanDecision();
+    : withSecureLocalContextGate(
+        originalScanDecision && originalScanDecision.decision !== 'allow'
+          ? originalScanDecision
+          : finalScanDecision(),
+        facts,
+        input.detail.pack,
+        input.releaseSecureContent,
+      );
   return {
     decision,
     facts,
@@ -1988,6 +1993,35 @@ function scannedUnsupportedNoContentDecision(input: {
       : safeScanned,
     input.reason,
   );
+}
+
+// Gate facts come from citations, but the model read the whole pack: an answer
+// can state a secure_local detail while citing only a non-secure candidate.
+// `pack` is the pack actually analyzed (the handler passes the rebuilt detail
+// when the private route fell back without secure_local). Strict posture sends
+// a releasable answer from a secure_local context to the same s4_release
+// approval a secure-cited answer gets; the default posture releases it and
+// records the uncited secure context in the content-free decision reasons.
+function withSecureLocalContextGate(
+  decision: ReleaseDecision,
+  facts: readonly StructuredEvidenceFact[],
+  pack: EvidencePack,
+  releaseSecureContent: boolean,
+): ReleaseDecision {
+  if (decision.decision !== 'allow' && decision.decision !== 'redact') return decision;
+  if (!packHasSecureLocal(pack)) return decision;
+  if (!releaseSecureContent) {
+    return {
+      decision: 'needs_approval',
+      reasons: [
+        'secure_local_context_uncited_requires_approval',
+        ...decision.reasons.filter((reason) => reason !== 'release_gate_passed'),
+      ],
+      requiredApproval: 's4_release',
+    };
+  }
+  if (facts.some((fact) => fact.sensitivity.trustDomain === 'secure_local')) return decision;
+  return releaseDecisionWithReason(decision, 'secure_local_context_uncited_derivative_allowed');
 }
 
 function releaseDecisionWithReason(decision: ReleaseDecision, reason: string): ReleaseDecision {
