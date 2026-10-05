@@ -9,7 +9,11 @@
 // owner's privacy words and folder rules are read (never written) so the
 // classifier sees what the live one sees.
 //
-//   bun eval/calibration/score.ts [--dir DIR] [--split dev|test] [--gguf PATH --server PATH] [--no-gpu] [--limit N]
+//   bun eval/calibration/score.ts [--dir DIR] [--split dev|test] [--model MODEL_ID] [--gguf PATH --server PATH] [--no-gpu] [--limit N]
+//
+// --model picks another manifest model (e.g. the 9B). Its file is read where
+// Olympus installed it, or from <calibration dir>/models/<model id>/ for a
+// model downloaded only to calibrate.
 //
 // --split scores one fixed half of the labels (by a hash of each item's id):
 // tune on `dev`, judge the result on `test`, so a change is not fitted to the
@@ -46,15 +50,27 @@ const dir = flag('--dir') ?? CALIBRATION_DIR_DEFAULT;
 
 /** The manifest model whose files Olympus installed here (the first manifest entry when none is). */
 function installedSpec(base: string) {
+  const wanted = flag('--model');
+  if (wanted) {
+    const spec = BUILT_IN_REASONING_MODELS.find((model) => model.modelId === wanted);
+    if (!spec) throw new Error(`--model must be one of: ${BUILT_IN_REASONING_MODELS.map((model) => model.modelId).join(', ')}`);
+    return spec;
+  }
   return BUILT_IN_REASONING_MODELS.find((model) => existsSync(join(base, model.modelId, model.file.name)))
     ?? BUILT_IN_REASONING_MODELS[0]!;
+}
+
+/** Where a model Olympus never installed is kept for calibration only: inside the calibration directory. */
+function calibrationModelPath(spec: ReturnType<typeof installedSpec>): string {
+  return join(dir, 'models', spec.modelId, spec.file.name);
 }
 
 /** The built-in model Olympus installed on this Mac, read in place. */
 function installedModel(): { gguf: string; server: string } {
   const base = join(homedir(), '.local', 'share', 'openclaw', 'olympus', 'models', 'built-in-reasoning');
   const spec = installedSpec(base);
-  const gguf = flag('--gguf') ?? join(base, spec.modelId, spec.file.name);
+  const installed = join(base, spec.modelId, spec.file.name);
+  const gguf = flag('--gguf') ?? (existsSync(installed) ? installed : calibrationModelPath(spec));
   const runtime = existsSync(base) ? readdirSync(base).find((name) => name.startsWith('llama.cpp-')) : undefined;
   const server = flag('--server') ?? (runtime
     ? join(base, runtime, readdirSync(join(base, runtime)).find((name) => name.startsWith('llama-')) ?? '', 'llama-server')
@@ -169,7 +185,7 @@ async function main(): Promise<void> {
       `${split ? `Split: ${split}. ` : ''}Labeled: ${labeled.length} (${rows.filter((row) => row.owner === 'private').length} Private, ${rows.filter((row) => row.owner === 'personal').length} Personal; ${unsure} not sure, left out).`,
       `Private precision: ${pct(precision)} (target 95%) — ${fp.length} Personal file(s) made Private.`,
       `Private recall:    ${pct(recall)} (target 99%) — ${fn.length} Private file(s) left Personal.`,
-      `Still held when the model was done: ${held}. Model calls: ${calls}. Time: ${Math.round((Date.now() - startedAt) / 1000)} s.`,
+      `Model: ${spec.modelId}. Still held when the model was done: ${held}. Model calls: ${calls}. Time: ${Math.round((Date.now() - startedAt) / 1000)} s.`,
     ];
     const misses = [
       ...fp.map((row) => `  made Private, owner says Personal: ${row.file}  [${row.olympus}; model: ${row.modelSaid}; ${row.why.join(' ')}]`),
@@ -177,7 +193,7 @@ async function main(): Promise<void> {
     ];
     process.stdout.write(`\n${summary.join('\n')}\n${misses.length ? `\nMisses:\n${misses.join('\n')}\n` : '\nNo misses.\n'}`);
     const resultPath = join(dir, `score-${split ?? 'all'}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-    writeFileSync(resultPath, JSON.stringify({ at: new Date().toISOString(), split: split ?? 'all', precision, recall, held, calls, rows }, null, 1), { mode: 0o600 });
+    writeFileSync(resultPath, JSON.stringify({ at: new Date().toISOString(), split: split ?? 'all', model: spec.modelId, precision, recall, held, calls, rows }, null, 1), { mode: 0o600 });
     process.stdout.write(`\nFull result: ${resultPath}\n`);
   } finally {
     store.close();
