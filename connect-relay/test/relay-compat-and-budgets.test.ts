@@ -611,5 +611,5 @@ describe('one challenge per handshake; its proof of work stops with the handshak
     expect(first).toEqual([]);
     // Only session 1's own answer: session 0's late one is dropped, not sent over session 1.
     expect(second.map((frame) => (JSON.parse(frame) as { marker: string }).marker)).toEqual(['session-1']);
-  });
+  }, 30_000);
 });

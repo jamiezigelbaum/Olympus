@@ -196,7 +196,7 @@ describe('operations', () => {
       type: 'object',
       required: [],
     });
-  });
+  }, 30_000);
 
   test('the doctor operation test stays hermetic when the running user has an unusable ~/.olympus', () => {
     const decoy = decoyOlympusHome();

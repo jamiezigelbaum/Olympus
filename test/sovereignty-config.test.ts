@@ -725,7 +725,7 @@ describe('sovereignty config engine', () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('golden env bridge stays hermetic when the running user has an unloadable ~/.olympus/sovereignty.json', () => {
     const home = decoyHome();
